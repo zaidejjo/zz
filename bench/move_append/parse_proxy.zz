@@ -1,0 +1,105 @@
+// parse_proxy.zz — TOML-corpus append benchmark driver.
+//
+// Line-based proxy for the toml package's arena pattern: each key,
+// table header and AoT header appends through `doc = push_*(doc, …)`
+// calls on an 11-array struct, so every insertion pays the same
+// by-value struct + per-array dup costs as the real parser.
+import std.env
+import std.fs
+
+struct Doc {
+    kinds: [str],
+    keys: [str],
+    vals: [str],
+    t_tbl: [int],
+    t_keys: [str],
+    t_kids: [int],
+    a_tbl: [int],
+    a_kids: [int],
+    strs: [str],
+    ints: [int],
+    flags: [int],
+}
+
+func new_doc() -> Doc {
+    Doc{
+        kinds: [],
+        keys: [],
+        vals: [],
+        t_tbl: [],
+        t_keys: [],
+        t_kids: [],
+        a_tbl: [],
+        a_kids: [],
+        strs: [],
+        ints: [],
+        flags: [],
+    }
+}
+
+func push_key(doc: Doc, k: str, v: str) -> Doc {
+    doc.kinds = vec.push(doc.kinds, "I")
+    doc.keys = vec.push(doc.keys, k)
+    doc.vals = vec.push(doc.vals, v)
+    doc.t_tbl = vec.push(doc.t_tbl, 0)
+    doc.t_keys = vec.push(doc.t_keys, k)
+    doc
+}
+
+func push_table(doc: Doc, name: str) -> Doc {
+    doc.kinds = vec.push(doc.kinds, "T")
+    doc.keys = vec.push(doc.keys, name)
+    doc.vals = vec.push(doc.vals, "")
+    doc.t_tbl = vec.push(doc.t_tbl, 0)
+    doc.t_keys = vec.push(doc.t_keys, name)
+    doc.t_kids = vec.push(doc.t_kids, len(doc.kinds))
+    doc.flags = vec.push(doc.flags, 1)
+    doc
+}
+
+func push_aot(doc: Doc, name: str) -> Doc {
+    doc.kinds = vec.push(doc.kinds, "A")
+    doc.keys = vec.push(doc.keys, name)
+    doc.vals = vec.push(doc.vals, "")
+    doc.a_tbl = vec.push(doc.a_tbl, 0)
+    doc.a_kids = vec.push(doc.a_kids, len(doc.kinds))
+    doc.flags = vec.push(doc.flags, 8)
+    doc
+}
+
+func run(path: str) -> int {
+    t := fs.read_to_string(path)
+    match t {
+        .ok(text) => {
+            lines := str.split(text, "\n")
+            doc := new_doc()
+            for line in lines {
+                if str.starts_with(line, "[[") {
+                    doc = push_aot(doc, line)
+                } else {
+                    if str.starts_with(line, "[") {
+                        doc = push_table(doc, line)
+                    } else {
+                        if str.contains(line, "=") {
+                            doc = push_key(doc, line, line)
+                        }
+                    }
+                }
+            }
+            len(doc.kinds)
+        },
+        .err(_) => 0 - 1,
+    }
+}
+
+args := env.args()
+path := "bench/move_append/corpus/flat_1k.toml"
+for a in args {
+    if a != "--" {
+        path = a
+        break
+    }
+}
+n := run(path)
+println(n)
+println("PARSE_PROXY_DONE")

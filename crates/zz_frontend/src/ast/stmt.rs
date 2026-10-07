@@ -1,7 +1,7 @@
 //! Statement AST nodes.
 
 use crate::ast::expr::{Expr, Ident, Pattern};
-use crate::ast::types::Ty;
+use crate::ast::types::{BinOp, Ty};
 use crate::span::Span;
 
 /// A parameter in a function signature or closure.
@@ -14,7 +14,7 @@ pub struct Param {
 }
 
 /// A trait/type bound applicable to a generic parameter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TraitBound {
     Num,
     Ord,
@@ -149,17 +149,51 @@ pub enum Stmt {
     },
     /// `struct Point { x: int, y: int }` — a named record type.
     /// For cross-module: `struct shapes.Point { ... }` stores ["shapes", "Point"].
+    /// `generics` holds plain type parameters (`struct Box[T] { v: T }`);
+    /// bounds are rejected by the parser (storage needs no constraints).
     Struct {
         name: Vec<String>,
+        generics: Vec<Ident>,
         fields: Vec<(Ident, Ty)>,
         span: Span,
         pub_: bool,
     },
     /// `impl Point { func dist(self) -> int { ... } }` — method block.
     /// Methods inside are registered as `TypeName.method_name` functions.
+    /// `impl Box[T]` scopes `T` over every method (prepended to each
+    /// method's own generics at registration, so call-site instantiation
+    /// unifies struct arguments from the receiver automatically).
     Impl {
         name: Vec<String>,
+        generics: Vec<Ident>,
         methods: Vec<Stmt>,
+        span: Span,
+        pub_: bool,
+    },
+    /// `type Tokens = [Token]` — a named type alias. Generic aliases
+    /// take plain parameters (`type Pair[T] = (T, T)`); use sites name
+    /// their arguments (`Pair[int]`), exactly like generic structs.
+    /// Aliases erase at check time (uses resolve to the target type),
+    /// so the runtime, VM, and native codegen never see them.
+    TypeAlias {
+        name: Vec<String>,
+        generics: Vec<Ident>,
+        target: Ty,
+        span: Span,
+        pub_: bool,
+    },
+    /// `enum Token { IntLit(int), Eof }` — a user-defined tagged union.
+    /// Each variant holds an optional single payload type (any type,
+    /// including tuples for multi-value payloads). Generic enums take
+    /// plain parameters (`enum Box[T] { V(T) }`); use sites name their
+    /// arguments (`Box[int]`), exactly like generic structs. Values are
+    /// constructed qualified (`Token.IntLit(1)`), matched by short name
+    /// (`.IntLit(v)`), and erase to qualified `Object` values
+    /// (`Token.IntLit`) so all engines share struct machinery.
+    Enum {
+        name: Vec<String>,
+        generics: Vec<Ident>,
+        variants: Vec<(Ident, Option<Ty>)>,
         span: Span,
         pub_: bool,
     },
@@ -185,6 +219,15 @@ pub enum Stmt {
     /// `target = value` — assignment to a variable or struct field.
     Assign {
         target: Expr,
+        value: Expr,
+        span: Span,
+    },
+    /// `target OP= value` (`x += 1`, `arr[i] *= 2`) — compound
+    /// assignment. Semantically `target = target OP value` with the
+    /// receiver evaluated exactly once; never an alias or reference.
+    CompoundAssign {
+        target: Expr,
+        op: BinOp,
         value: Expr,
         span: Span,
     },
@@ -216,11 +259,14 @@ impl Stmt {
             | Stmt::Return { span, .. }
             | Stmt::Import { span, .. }
             | Stmt::Struct { span, .. }
+            | Stmt::TypeAlias { span, .. }
+            | Stmt::Enum { span, .. }
             | Stmt::For { span, .. }
             | Stmt::Break { span }
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
             | Stmt::Assign { span, .. } => *span,
+            Stmt::CompoundAssign { span, .. } => *span,
             Stmt::ExternBlock { span, .. } | Stmt::Link { span, .. } => *span,
             Stmt::Impl { span, .. } => *span,
             Stmt::Destructure { span, .. } => *span,

@@ -1,0 +1,17 @@
+// features: arrays, assert, comparison, for-loop, indexing, locals, print, ranges, string-literal, vec-push
+// VM + native: assign-form `vec.append` returns the new array on both
+// engines (`vec.append` is documented as an alias for `vec.push`; native
+// maps it to the value form, with statement position still mutating in
+// place via the void-context swap).
+d := []
+for i in 0..5 {
+    d = vec.append(d, i)
+}
+assert(len(d) == 5)
+assert(d[4] == 4)
+// Method spelling agrees.
+e := [1]
+e.append(2)
+assert(len(e) == 2)
+assert(e[1] == 2)
+println("move_append_append_ok")

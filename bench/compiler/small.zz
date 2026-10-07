@@ -1,0 +1,9 @@
+// P0 compiler bench: small file — parses + checks in milliseconds.
+func main() -> int {
+    x := 1
+    y := 2
+    return x + y
+}
+
+a := main()
+println("{a}")

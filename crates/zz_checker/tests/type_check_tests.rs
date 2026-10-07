@@ -77,7 +77,7 @@ fn func_wrong_return_type_errors() {
 fn wrong_arg_count_errors() {
     errors_contain(
         "func f(a: int) -> int { a }\nf(1, 2)",
-        "expected 1 to 1 arguments, found 2",
+        "takes 1 argument (a: int), found 2",
     );
 }
 
@@ -222,7 +222,7 @@ fn recursion_works() {
 fn struct_def_and_init() {
     let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
-    assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
+    assert_eq!(r.bindings["p"], Type::Struct("Point".into(), vec![]));
     assert_eq!(r.structs["Point"].fields.len(), 2);
 }
 
@@ -356,7 +356,7 @@ fn struct_embedding_flat_init() {
         "struct Base { id: int, name: str }\nstruct User { Base, age: int }\nu := User{ id: 1, name: \"Zaid\", age: 19 }",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
-    assert_eq!(r.bindings["u"], Type::Struct("User".into()));
+    assert_eq!(r.bindings["u"], Type::Struct("User".into(), vec![]));
 }
 
 #[test]
@@ -431,7 +431,7 @@ fn struct_duplicate_definition_errors() {
 fn struct_type_annotation_resolves() {
     let r = check_src("struct Point { x: int, y: int }\np: Point = Point{ x: 1, y: 2 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
-    assert_eq!(r.bindings["p"], Type::Struct("Point".into()));
+    assert_eq!(r.bindings["p"], Type::Struct("Point".into(), vec![]));
 }
 
 // --- for loops ---------------------------------------------------------
@@ -964,7 +964,7 @@ fn method_funcs() -> HashMap<String, FuncSig> {
             generics: Vec::new(),
             bounds: Vec::new(),
             params: vec![
-                ("p".to_string(), Type::Struct("Point".to_string())),
+                ("p".to_string(), Type::Struct("Point".to_string(), vec![])),
                 ("scale".to_string(), Type::Int),
             ],
             has_default: vec![],
@@ -1035,7 +1035,10 @@ fn method_call_namespaced_by_struct_type() {
             extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
-            params: vec![("p".to_string(), Type::Struct("shapes.Point".to_string()))],
+            params: vec![(
+                "p".to_string(),
+                Type::Struct("shapes.Point".to_string(), vec![]),
+            )],
             has_default: vec![],
             ret: Type::Int,
         },
@@ -1044,6 +1047,7 @@ fn method_call_namespaced_by_struct_type() {
     structs.insert(
         "shapes.Point".to_string(),
         StructSig {
+            generics: Vec::new(),
             fields: vec![("x".to_string(), Type::Int)],
         },
     );
@@ -1177,7 +1181,14 @@ fn typo_suggestion_variable() {
         "parse errors: {:?}",
         parsed.errors
     );
-    let r = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+    let r = check_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
     let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
     let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
@@ -1200,6 +1211,7 @@ fn typo_suggestion_struct_field() {
             s.insert(
                 "Point".to_string(),
                 StructSig {
+                    generics: Vec::new(),
                     fields: vec![("x".to_string(), Type::Int), ("y".to_string(), Type::Int)],
                 },
             );
@@ -1267,6 +1279,8 @@ fn print_bare_function_is_call_hint() {
         HashMap::new(),
         print_test_funcs(),
         HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
@@ -1293,6 +1307,8 @@ fn typo_suggestion_dotted_path() {
         &parsed.program,
         HashMap::new(),
         print_test_funcs(),
+        HashMap::new(),
+        HashMap::new(),
         HashMap::new(),
     );
     let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
@@ -1337,6 +1353,7 @@ fn struct_init_marks_import_used() {
             s.insert(
                 "ml.Circle".to_string(),
                 StructSig {
+                    generics: Vec::new(),
                     fields: vec![("rad".to_string(), Type::Int)],
                 },
             );
@@ -1811,5 +1828,549 @@ fn unused_warnings_emit_in_source_order() {
     assert!(
         warns[1].contains("aaa"),
         "second warning should name `aaa`: {warns:?}"
+    );
+}
+
+#[test]
+fn bitwise_ops_require_int_operands() {
+    for src in [
+        "x := 6 & 3",
+        "x := 6 | 3",
+        "x := 6 ^ 3",
+        "x := 1 << 4",
+        "x := 16 >> 2",
+        "x := ~6",
+    ] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src} errors: {:?}", r.errors);
+        assert_eq!(r.bindings["x"], Type::Int, "{src}");
+    }
+}
+
+#[test]
+fn bitwise_float_operand_errors() {
+    errors_contain("x := 1.5 & 2", "bitwise `&` requires `int` operands");
+    errors_contain("x := 1 | 2.5", "bitwise `|` requires `int` operands");
+    errors_contain("x := 1.0 ^ 2.0", "bitwise `^` requires `int` operands");
+    errors_contain("x := 1.5 << 2", "bitwise `<<` requires `int` operands");
+}
+
+#[test]
+fn bitwise_bool_operand_errors() {
+    errors_contain("x := true & false", "bitwise `&` requires `int` operands");
+    errors_contain("x := true | false", "bitwise `|` requires `int` operands");
+    errors_contain("x := ~true", "bitwise `~` requires an `int` operand");
+}
+
+#[test]
+fn bitwise_result_flows_into_int_context() {
+    let r = check_src("x := (6 & 3) + (1 << 4)\ny: int = x");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn tuple_index_reads_element_types() {
+    let r = check_src("t := (1, \"two\", 3.5)\na := t[0]\nb := t[1]\nc := t[2]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["b"], Type::Str);
+    assert_eq!(r.bindings["c"], Type::Float);
+}
+
+#[test]
+fn tuple_negative_index_counts_from_end() {
+    let r = check_src("t := (1, \"two\")\na := t[-1]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Str);
+}
+
+#[test]
+fn tuple_index_out_of_bounds_errors() {
+    errors_contain("t := (1, 2)\nx := t[5]", "out of bounds");
+    errors_contain("t := (1, 2)\nx := t[-3]", "out of bounds");
+}
+
+#[test]
+fn tuple_dynamic_index_errors_with_hint() {
+    errors_contain(
+        "t := (1, 2)\ni := 0\nx := t[i]",
+        "must be an integer literal",
+    );
+}
+
+#[test]
+fn tuple_index_write_checks_element_type() {
+    let r = check_src("t := (1, \"two\")\nt[0] = 99");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain("t := (1, \"two\")\nt[0] = \"s\"", "type mismatch");
+}
+
+#[test]
+fn bare_destructure_binds_names() {
+    let r = check_src("a, b := (1, \"two\")");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["b"], Type::Str);
+}
+
+#[test]
+fn compound_assign_valid_combinations() {
+    for src in [
+        "x := 1\nx += 2",
+        "x := 1\nx -= 2",
+        "x := 1\nx *= 2",
+        "x := 8\nx /= 2",
+        "x := 8\nx %= 3",
+        "x := 2\nx **= 10",
+        "x := 1.5\nx += 2.5",
+        "x := 6\nx &= 3",
+        "x := 6\nx |= 3",
+        "x := 1\nx <<= 4",
+        "s := \"a\"\ns += \"b\"",
+    ] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src} errors: {:?}", r.errors);
+    }
+}
+
+#[test]
+fn compound_assign_matches_binary_op_rules() {
+    // Whatever `x = x OP y` rejects, `x OP= y` rejects identically.
+    errors_contain("x := 1\nx += 1.5", "type mismatch");
+    errors_contain("x := 1\nx &= 1.5", "requires `int` operands");
+    errors_contain("x := true\nx |= false", "requires `int` operands");
+    errors_contain("x := \"a\"\nx -= \"b\"", "cannot apply");
+    errors_contain("nope += 1", "undefined variable");
+}
+
+#[test]
+fn compound_assign_rejects_const() {
+    errors_contain("const x = 1\nx += 2", "immutable variable");
+}
+
+#[test]
+fn compound_assign_field_and_index() {
+    let r = check_src("struct P { x: int }\np := P{ x: 1 }\np.x += 2");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let r = check_src("a := [1, 2]\na[0] *= 3");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain("a := [1]\na[0] += \"s\"", "cannot apply");
+}
+
+#[test]
+fn generic_struct_infers_from_literal() {
+    let r = check_src("struct Box<T> { v: T }\nb := Box{ v: 42 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["b"], Type::Struct("Box".into(), vec![Type::Int]));
+    let r = check_src("struct Box<T> { v: T }\ns := Box{ v: \"hi\" }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["s"], Type::Struct("Box".into(), vec![Type::Str]));
+}
+
+#[test]
+fn generic_struct_annotation_checked() {
+    let r = check_src("struct Box<T> { v: T }\nx: Box<int> = Box{ v: 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain(
+        "struct Box<T> { v: T }\ns: Box<str> = Box{ v: 1 }",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_struct_field_access_substitutes() {
+    let r = check_src("struct Box<T> { v: T }\nb := Box{ v: 42 }\nx: int = b.v");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain(
+        "struct Box<T> { v: T }\nb := Box{ v: 42 }\nx: str = b.v",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_struct_multi_param() {
+    let r = check_src("struct Pair<A, B> { a: A, b: B }\np := Pair{ a: 1, b: \"s\" }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["p"],
+        Type::Struct("Pair".into(), vec![Type::Int, Type::Str])
+    );
+}
+
+#[test]
+fn generic_struct_nested() {
+    let r = check_src("struct Box<T> { v: T }\nn := Box{ v: Box{ v: 1 } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["n"],
+        Type::Struct(
+            "Box".into(),
+            vec![Type::Struct("Box".into(), vec![Type::Int])]
+        )
+    );
+}
+
+#[test]
+fn generic_struct_methods() {
+    let r = check_src(
+        "struct Box<T> { v: T }\nimpl Box<T> { func get(self) -> T { self.v } }\nb := Box{ v: 42 }\nx: int = b.get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain(
+        "struct Box<T> { v: T }\nimpl Box<T> { func get(self) -> T { self.v } }\nb := Box{ v: 42 }\nx: str = b.get()",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_struct_arity_errors() {
+    errors_contain(
+        "struct P { x: int }\np: P<int> = P{ x: 1 }",
+        "takes 0 type arguments",
+    );
+    errors_contain(
+        "struct Box<T> { v: T }\nb: Box = Box{ v: 1 }",
+        "takes 1 type argument",
+    );
+    errors_contain(
+        "struct Pair<A, B> { a: A, b: B }\np: Pair<int> = Pair{ a: 1, b: 2 }",
+        "takes 2 type arguments",
+    );
+}
+
+#[test]
+fn generic_struct_impl_mismatch() {
+    errors_contain(
+        "struct Box<T> { v: T }\nimpl Box { func get(self) -> int { self.v } }",
+        "expected `impl",
+    );
+    errors_contain(
+        "struct Box<T> { v: T }\nstruct Box<T> { w: T }",
+        "duplicate definition of struct",
+    );
+    errors_contain("struct Box<T, T> { v: T }", "duplicate type parameter");
+}
+
+#[test]
+fn plain_struct_unaffected_by_generics() {
+    let r = check_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["p"], Type::Struct("Point".into(), vec![]));
+}
+
+#[test]
+fn cross_module_inferred_ret_resolves_on_export() {
+    // Regression: `pub func ping()` with no return annotation exported its
+    // return type as a bare `Var(0)`. The importing module's fresh unifier
+    // then reused id 0 for an unrelated local (e.g. an empty `[]` element
+    // var), unifying `unit` with `str` and rejecting a valid program.
+    // Export now deep-resolves (ret becomes `unit`) and the importer
+    // offsets fresh ids above seeded ones.
+    let dep = check_src("pub func ping() {}");
+    assert!(!has_errors(&dep), "errors: {:?}", dep.errors);
+    let ping = dep.pub_funcs.get("ping").expect("pub ping").clone();
+    assert_eq!(ping.ret, Type::Unit, "exported ret must resolve to unit");
+    let mut seed = HashMap::new();
+    seed.insert("n.ping".to_string(), ping);
+    let main = "func main() -> [str] {\n    stop := false\n    if stop {\n        n.ping()\n    }\n    []\n}";
+    let r = check_src_with_funcs(main, seed);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn cross_module_nonunit_block_still_rejected() {
+    // A single-branch `if` whose body yields a non-unit value is still an
+    // error — including for cross-module calls. Only the spurious
+    // var-collision failure above was fixed.
+    let dep = check_src("pub func zstr() -> str { \"s\" }");
+    assert!(!has_errors(&dep), "errors: {:?}", dep.errors);
+    let zstr = dep.pub_funcs.get("zstr").expect("pub zstr").clone();
+    let mut seed = HashMap::new();
+    seed.insert("o.zstr".to_string(), zstr);
+    let main = "func main() -> [str] {\n    out: [str] = []\n    stop := false\n    if stop {\n        o.zstr()\n    }\n    out\n}";
+    let r = check_src_with_funcs(main, seed);
+    let errs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        errs.iter().any(|e| e.contains("type mismatch")),
+        "expected a type-mismatch error, got: {errs:?}"
+    );
+}
+
+fn db_exec_seed() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    let exec = FuncSig {
+        generics: vec![],
+        bounds: vec![],
+        params: vec![("db".to_string(), Type::Db), ("sql".to_string(), Type::Str)],
+        has_default: vec![false, false],
+        ret: Type::Int,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    funcs.insert("sqlz.exec".to_string(), exec.clone());
+    funcs.insert("db.exec".to_string(), exec);
+    funcs.insert(
+        "sqlz.open".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("path".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Db,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    funcs.insert(
+        "println".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("v".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Unit,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn local_db_method_call_reads_as_method() {
+    // `db.exec(sql)` with a *local* `db` is a method call even though
+    // `db.exec` also names a seeded free function: the free-function
+    // reading (full arity) is already impossible, and the method reading
+    // fits with a matching receiver. A top-level `db` keeps working,
+    // as does the explicit static form.
+    let seed = db_exec_seed();
+    let local = "func main.main() {\n    db := sqlz.open(\":memory:\")\n    n := db.exec(\"CREATE TABLE t(v INTEGER)\")\n    println(\"exec={n}\")\n}";
+    let r = check_src_with_funcs(local, seed.clone());
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let explicit = "func main.main() {\n    db := sqlz.open(\":memory:\")\n    n := db.exec(db, \"SELECT 1\")\n    println(\"exec={n}\")\n}";
+    let r = check_src_with_funcs(explicit, seed);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_construction_and_match() {
+    let r = check_src_with_funcs(
+        "enum Token { Eof, IntLit(int) }\nfunc f(t: Token) -> str {\n    match t {\n        .Eof => \"eof\",\n        .IntLit(_v) => \"int\",\n    }\n}\nfunc main() {\n    t := Token.IntLit(1)\n    println(f(t))\n    println(f(Token.Eof))\n}\n",
+        print_test_funcs(),
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_nonexhaustive_reports() {
+    errors_contain(
+        "enum Token { Eof, IntLit(int) }\nfunc f(t: Token) -> str {\n    match t {\n        .Eof => \"eof\",\n    }\n}\n",
+        "non-exhaustive match",
+    );
+}
+
+#[test]
+fn enum_unknown_variant_reports() {
+    errors_contain(
+        "enum Token { Eof }\nfunc main() {\n    t := Token.Num\n    println(t)\n}\n",
+        "unknown variant `Num`",
+    );
+}
+
+#[test]
+fn enum_payload_arity_reports() {
+    errors_contain(
+        "enum Token { Eof, IntLit(int) }\nfunc main() {\n    t := Token.Eof(1)\n    println(t)\n}\n",
+        "takes no arguments",
+    );
+    errors_contain(
+        "enum Token { Eof, IntLit(int) }\nfunc main() {\n    t: Token = Token.IntLit\n    println(t)\n}\n",
+        "holds a value",
+    );
+}
+
+#[test]
+fn enum_payload_type_mismatch_reports() {
+    errors_contain(
+        "enum Token { IntLit(int) }\nfunc main() {\n    t := Token.IntLit(\"s\")\n    println(t)\n}\n",
+        "mismatch",
+    );
+}
+
+#[test]
+fn enum_duplicate_reports() {
+    errors_contain(
+        "enum Token { Eof }\nenum Token { Eof }\nfunc main() {\n    println(\"x\")\n}\n",
+        "duplicate definition of enum",
+    );
+}
+
+#[test]
+fn enum_impl_method_resolves() {
+    let r = check_src_with_funcs(
+        "enum Token { Eof, IntLit(int) }\nimpl Token {\n    func is_eof(self) -> bool {\n        match self {\n            .Eof => true,\n            _ => false,\n        }\n    }\n}\nfunc main() {\n    _b := Token.Eof.is_eof()\n}\n",
+        print_test_funcs(),
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_generic_inference() {
+    let r = check_src_with_funcs(
+        "enum Box<T> { V(T), E }\nfunc main() {\n    a := Box.V(42)\n    b: Box<int> = Box.E\n    _c := (a == Box.V(42))\n    println(\"ok\")\n}\n",
+        print_test_funcs(),
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_generic_pattern_binds_payload() {
+    let r = check_src(
+        "enum Box<T> { V(T), E }\nfunc f<T>(b: Box<T>) -> T {\n    match b {\n        .V(v) => v,\n        .E => f(Box.E),\n    }\n}\n",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_generic_mismatch_reports() {
+    errors_contain(
+        "enum Box<T> { V(T) }\nfunc main() {\n    a := Box.V(1)\n    s := Box.V(\"hi\")\n    _c := (a == s)\n}\n",
+        "mismatch",
+    );
+}
+
+#[test]
+fn enum_generic_arity_reports() {
+    errors_contain(
+        "enum Box<T> { V(T) }\nfunc main() {\n    b: Box<int, str> = Box.V(1)\n}\n",
+        "takes 1 type argument",
+    );
+}
+
+#[test]
+fn option_matched_with_ok_suggests_some() {
+    let r = check_src(
+        "func main() {\n    x := .some(1)\n    match x {\n        .ok(v) => v\n        .err(e) => e\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("use `.some(x)`")),
+        "expected `.some` hint, got: {notes:?}"
+    );
+}
+
+#[test]
+fn result_matched_with_some_suggests_ok() {
+    let r = check_src(
+        "func f() -> Result<int, str> { .ok(1) }\nfunc main() {\n    r := f()\n    match r {\n        .some(v) => v\n        .none => 0\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("use `.ok(x)`")),
+        "expected `.ok` hint, got: {notes:?}"
+    );
+}
+
+#[test]
+fn unwrapped_result_at_return_suggests_fixes() {
+    let r = check_src(
+        "func f() -> Result<int, str> { .ok(1) }\nfunc g() -> int {\n    t := f()\n    t\n}",
+    );
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("unwrapped `Result<int, str>`")),
+        "expected unwrap error, got: {msgs:?}"
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains('?')),
+        "expected `?` suggestion, got: {notes:?}"
+    );
+}
+
+#[test]
+fn match_mismatch_binds_no_cascade() {
+    // Root mismatch errors only: payload names bind as Error so their uses
+    // stay silent (#246).
+    let r = check_src(
+        "func div(a: int, b: int) -> int { a / b }\nfunc main() {\n    r := div(1, 1)\n    match r {\n        .ok(v) => v\n        .err(e) => e\n    }\n}",
+    );
+    let errs: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Error)
+        .map(|e| e.message.clone())
+        .collect();
+    assert_eq!(
+        errs.len(),
+        2,
+        "expected only the two mismatch errors, got: {errs:?}"
+    );
+}
+
+#[test]
+fn enum_variant_typo_suggests() {
+    let r = check_src(
+        "enum Color { Red, Green, Blue }\nfunc main() {\n    c := Color.Red\n    match c {\n        .Gren(v) => v\n        .Red => 1\n        .Blue => 2\n    }\n}",
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains(".Green")),
+        "expected `.Green` suggestion, got: {notes:?}",
+    );
+}
+
+#[test]
+fn literal_zero_divisor_is_check_error() {
+    let r = check_src_with_funcs(
+        "func main() {\n    x := 1 / 0\n    println(x)\n}",
+        print_test_funcs(),
+    );
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("division by zero")),
+        "expected div-zero error, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn literal_zero_remainder_is_check_error() {
+    let r = check_src_with_funcs("func main() {\n    println(5 % 0)\n}", print_test_funcs());
+    let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("remainder by zero")),
+        "expected rem-zero error, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn float_division_by_zero_stays_legal() {
+    // No println: the point is float division itself stays legal.
+    let r = check_src("func main() {\n    _x := 1.0 / 0.0\n}");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("zero")),
+        "float div-zero must stay legal, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unreachable_after_return_warns() {
+    let r = check_src_with_funcs(
+        "func main() {\n    return\n    println(\"hi\")\n}",
+        print_test_funcs(),
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unreachable code")),
+        "expected unreachable warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(
+        !has_errors(&r),
+        "unreachable must be a warning, not an error"
     );
 }

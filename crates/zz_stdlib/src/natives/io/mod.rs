@@ -3,6 +3,51 @@ use std::io::Write;
 use crate::natives::expect_str;
 use zz_runtime::{EvalError, Interp, Span, Value};
 
+// Per-test stdout capture for `zz test` (thread-local: parallel tests
+// each capture on their own worker thread).
+//
+// While active, `print`/`println` append to the buffer instead of the
+// real stdout; the runner shows it only for failed tests (or live with
+// `--nocapture`, which never activates capture). Outside tests the
+// buffer is absent and output flows straight through, so `zz run` and
+// the REPL are unaffected.
+thread_local! {
+    static TEST_CAPTURE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start capturing stdout on this thread (idempotent overwrite).
+pub fn test_capture_start() {
+    TEST_CAPTURE.with(|c| *c.borrow_mut() = Some(String::new()));
+}
+
+/// Stop capture and return everything buffered since [`test_capture_start`].
+/// Empty when capture was never started.
+pub fn test_capture_take() -> String {
+    TEST_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+fn emit_stdout(text: &str) {
+    TEST_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push_str(text);
+        } else {
+            print!("{text}");
+        }
+    });
+}
+
+fn emit_stdout_line(text: &str) {
+    TEST_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push_str(text);
+            buf.push('\n');
+        } else {
+            println!("{text}");
+        }
+    });
+}
+
 /// Unwrap consecutive `Result::Ok` / `Option::Some` layers for stdout
 /// presentation.
 ///
@@ -121,7 +166,7 @@ pub(crate) fn print(
         .ok_or_else(|| EvalError::new("missing argument for print", span))?;
     // A printed `.err` throws (readable + hinted); see `for_stdout`.
     // Display form unwraps nested Options as well (not just top-level).
-    print!("{}", for_stdout(v, span)?.to_display_string());
+    emit_stdout(&for_stdout(v, span)?.to_display_string());
     Ok(Value::Unit)
 }
 
@@ -136,7 +181,7 @@ pub(crate) fn println(
         .ok_or_else(|| EvalError::new("missing argument for println", span))?;
     // A printed `.err` throws (readable + hinted); see `for_stdout`.
     // Display form unwraps nested Options as well (not just top-level).
-    println!("{}", for_stdout(v, span)?.to_display_string());
+    emit_stdout_line(&for_stdout(v, span)?.to_display_string());
     Ok(Value::Unit)
 }
 
@@ -148,10 +193,17 @@ pub(crate) fn read_line(
     // Optional prompt argument
     if !args.is_empty() {
         let prompt = expect_str(args, 0, "input")?;
-        print!("{prompt}");
-        std::io::stdout()
-            .flush()
-            .map_err(|e| EvalError::new(format!("failed to flush stdout: {e}"), span))?;
+        // Under test capture the prompt joins the buffer (nothing is
+        // really flushed); otherwise behave exactly as before.
+        let capturing = TEST_CAPTURE.with(|c| c.borrow().is_some());
+        if capturing {
+            emit_stdout(&prompt);
+        } else {
+            print!("{prompt}");
+            std::io::stdout()
+                .flush()
+                .map_err(|e| EvalError::new(format!("failed to flush stdout: {e}"), span))?;
+        }
     }
     let mut line = String::new();
     std::io::stdin()

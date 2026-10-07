@@ -191,6 +191,7 @@ e2e_success_test!(
 e2e_success_test!(e2e_syntax_pipelines, "syntax", "pipelines.zz");
 e2e_success_test!(e2e_syntax_hof, "syntax", "hof.zz");
 e2e_success_test!(e2e_syntax_match, "syntax", "match.zz");
+e2e_success_test!(e2e_syntax_match_assign, "syntax", "match_assign.zz");
 e2e_success_test!(
     e2e_syntax_match_bare_return,
     "syntax",
@@ -198,7 +199,14 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_frame_slots, "syntax", "frame_slots.zz");
 e2e_success_test!(e2e_syntax_operators, "syntax", "operators.zz");
+e2e_success_test!(e2e_syntax_short_circuit, "syntax", "short_circuit.zz");
 e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
+e2e_success_test!(e2e_syntax_brace_escapes, "syntax", "brace_escapes.zz");
+e2e_success_test!(
+    e2e_syntax_brace_escapes_multiline,
+    "syntax",
+    "brace_escapes_multiline.zz"
+);
 e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
 e2e_success_test!(e2e_syntax_defer, "syntax", "defer.zz");
@@ -263,6 +271,71 @@ e2e_success_test!(
     "neg_after_loop.zz"
 );
 e2e_success_test!(
+    e2e_regression_branch_call_returns,
+    "regression",
+    "branch_call_returns.zz"
+);
+e2e_success_test!(
+    e2e_regression_branch_call_tails,
+    "regression",
+    "branch_call_tails.zz"
+);
+e2e_success_test!(
+    e2e_regression_branch_early_return_calls,
+    "regression",
+    "branch_early_return_calls.zz"
+);
+e2e_success_test!(
+    e2e_regression_string_accum_loop,
+    "regression",
+    "string_accum_loop.zz"
+);
+e2e_success_test!(
+    e2e_regression_string_store_across_iter,
+    "regression",
+    "string_store_across_iter.zz"
+);
+e2e_success_test!(
+    e2e_regression_string_index_set_binop,
+    "regression",
+    "string_index_set_binop.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_shapes,
+    "regression",
+    "move_append_shapes.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_field,
+    "regression",
+    "move_append_field.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_append,
+    "regression",
+    "move_append_append.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_alias,
+    "regression",
+    "move_append_alias.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_early_exit,
+    "regression",
+    "move_append_early_exit.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_spawn,
+    "regression",
+    "move_append_spawn.zz"
+);
+e2e_success_test!(
+    e2e_regression_move_append_struct_copy,
+    "regression",
+    "move_append_struct_copy.zz"
+);
+e2e_success_test!(
     e2e_regression_fuzz_smoke_00,
     "regression",
     "fuzz_smoke_00.zz"
@@ -322,6 +395,130 @@ e2e_success_test!(
     "regression",
     "fuzz_smoke_11.zz"
 );
+// v4 fuzzer shapes (fixed seeds; all strict on both engines).
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_12,
+    "regression",
+    "fuzz_smoke_12.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_13,
+    "regression",
+    "fuzz_smoke_13.zz"
+);
+e2e_success_test!(
+    e2e_regression_fuzz_smoke_14,
+    "regression",
+    "fuzz_smoke_14.zz"
+);
+// M0 edge corpus: strict-parity probes (both engines agree today).
+e2e_success_test!(
+    e2e_regression_edge_shift_mask,
+    "regression",
+    "edge_shift_mask.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_cast_float_int,
+    "regression",
+    "edge_cast_float_int.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_cast_str_int,
+    "regression",
+    "edge_cast_str_int.zz"
+);
+// M0 edge corpus: known-divergence probes (VM vs native differ; the
+// parity harness tracks them as known failures, see M0 report).
+e2e_success_test!(
+    e2e_regression_edge_chained_store,
+    "regression",
+    "edge_chained_store.zz"
+);
+e2e_success_test!(
+    e2e_regression_eval_order_store,
+    "regression",
+    "eval_order_store.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_float_nan_display,
+    "regression",
+    "edge_float_nan_display.zz"
+);
+// Canonical float formatting (spec §4): exact-string pins on both legs.
+e2e_success_test!(
+    e2e_regression_edge_float_format,
+    "regression",
+    "edge_float_format.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_slice_clamp,
+    "regression",
+    "edge_slice_clamp.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_cast_float_nan,
+    "regression",
+    "edge_cast_float_nan.zz"
+);
+// Wrap-spec PR: overflow now wraps on all legs (was VM-trap errors).
+e2e_success_test!(
+    e2e_regression_edge_overflow_add,
+    "regression",
+    "edge_int_overflow_add.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_overflow_mul,
+    "regression",
+    "edge_int_overflow_mul.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_neg_min,
+    "regression",
+    "edge_int_neg_min.zz"
+);
+// Write-through family (value semantics for stores through clones,
+// nested bases, temps, and struct paths).
+e2e_success_test!(
+    e2e_regression_edge_array_alias,
+    "regression",
+    "edge_array_alias.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_dict_alias,
+    "regression",
+    "edge_dict_alias.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_temp_index_drop,
+    "regression",
+    "edge_temp_index_drop.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_field_index_store,
+    "regression",
+    "edge_field_index_store.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_struct_path_store,
+    "regression",
+    "edge_struct_path_store.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_negative_index,
+    "regression",
+    "edge_negative_index.zz"
+);
+// Evaluation order probes (call-order audit close-out).
+e2e_success_test!(
+    e2e_regression_edge_eval_order,
+    "regression",
+    "edge_eval_order.zz"
+);
+e2e_success_test!(
+    e2e_regression_edge_compound_index_eval,
+    "regression",
+    "edge_compound_index_eval.zz"
+);
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
 e2e_success_test!(
@@ -335,6 +532,12 @@ e2e_success_test!(
     "struct_array_push.zz"
 );
 e2e_success_test!(e2e_syntax_struct_impl, "syntax", "struct_impl.zz");
+e2e_success_test!(e2e_syntax_method_free_fn, "syntax", "method_free_fn.zz");
+e2e_success_test!(
+    e2e_syntax_method_chain_recv,
+    "syntax",
+    "method_chain_recv.zz"
+);
 e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
 e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
 e2e_success_test!(
@@ -343,9 +546,23 @@ e2e_success_test!(
     "extension_methods.zz"
 );
 e2e_success_test!(e2e_syntax_main_result, "syntax", "main_result.zz");
+e2e_success_test!(e2e_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
+e2e_success_test!(e2e_syntax_tuple_ops, "syntax", "tuple_ops.zz");
+e2e_success_test!(
+    e2e_syntax_tuple_unboxed_struct,
+    "syntax",
+    "tuple_unboxed_struct.zz"
+);
+e2e_success_test!(e2e_syntax_compound_assign, "syntax", "compound_assign.zz");
+e2e_success_test!(e2e_syntax_generic_structs, "syntax", "generic_structs.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
+e2e_success_test!(e2e_types_aliases, "types", "aliases.zz");
+e2e_success_test!(e2e_types_alias_import, "types", "alias_import.zz");
+e2e_success_test!(e2e_types_enums, "types", "enums.zz");
+e2e_success_test!(e2e_types_enum_import, "types", "enum_import.zz");
+e2e_success_test!(e2e_types_enum_generics, "types", "enum_generics.zz");
 e2e_success_test!(e2e_types_struct_embedding, "types", "struct_embedding.zz");
 e2e_success_test!(e2e_types_generics, "types", "generics.zz");
 e2e_success_test!(e2e_types_generic_bounds, "types", "generic_bounds.zz");
@@ -357,10 +574,21 @@ e2e_success_test!(e2e_types_smart_try_convert, "types", "smart_try_convert.zz");
 // Stdlib fixtures
 e2e_success_test!(e2e_stdlib_strings, "stdlib", "strings.zz");
 e2e_success_test!(e2e_stdlib_vectors, "stdlib", "vectors.zz");
+e2e_success_test!(e2e_stdlib_str_utf8_parity, "stdlib", "str_utf8_parity.zz");
+e2e_success_test!(
+    e2e_stdlib_vec_nested_str_parity,
+    "stdlib",
+    "vec_nested_str_parity.zz"
+);
 e2e_success_test!(e2e_stdlib_math_ops, "stdlib", "math_ops.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
 e2e_success_test!(e2e_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");
 e2e_success_test!(e2e_stdlib_path_join, "stdlib", "path_join.zz");
+e2e_success_test!(e2e_stdlib_map_set, "stdlib", "map_set.zz");
+e2e_success_test!(e2e_stdlib_dec_ops, "stdlib", "dec_ops.zz");
+e2e_success_test!(e2e_stdlib_csv_test, "stdlib", "csv_test.zz");
+e2e_success_test!(e2e_stdlib_builders, "stdlib", "builders.zz");
+e2e_success_test!(e2e_stdlib_time_date, "stdlib", "time_date.zz");
 e2e_success_test!(e2e_stdlib_jsonmod, "stdlib", "jsonmod.zz");
 e2e_success_test!(e2e_stdlib_filesystem, "stdlib", "filesystem.zz");
 e2e_success_test!(e2e_stdlib_console, "stdlib", "console.zz");
@@ -383,6 +611,13 @@ e2e_success_test!(
     e2e_stdlib_str_extended_test,
     "stdlib",
     "str_extended_test.zz"
+);
+e2e_success_test!(e2e_stdlib_str_find_test, "stdlib", "str_find_test.zz");
+e2e_success_test!(e2e_stdlib_str_bytes_test, "stdlib", "str_bytes_test.zz");
+e2e_success_test!(
+    e2e_stdlib_str_classify_test,
+    "stdlib",
+    "str_classify_test.zz"
 );
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 e2e_success_test!(e2e_stdlib_input_chained, "stdlib", "input_chained.zz");
@@ -498,6 +733,7 @@ e2e_success_test!(e2e_stdlib_crypto_jwt_test, "stdlib", "crypto_jwt_test.zz");
 e2e_success_test!(e2e_stdlib_time_ext_test, "stdlib", "time_ext_test.zz");
 e2e_success_test!(e2e_stdlib_log_test, "stdlib", "log_test.zz");
 e2e_success_test!(e2e_stdlib_sys_test, "stdlib", "sys_test.zz");
+e2e_success_test!(e2e_stdlib_term_test, "stdlib", "term_test.zz");
 e2e_success_test!(e2e_stdlib_args_test, "stdlib", "args_test.zz");
 e2e_success_test!(e2e_stdlib_process_test, "stdlib", "process_test.zz");
 e2e_success_test!(e2e_stdlib_uuid_test, "stdlib", "uuid_test.zz");
@@ -512,6 +748,12 @@ e2e_success_test!(
     "json_extended_test.zz"
 );
 e2e_success_test!(e2e_stdlib_selective_import, "stdlib", "selective_import.zz");
+e2e_success_test!(e2e_stdlib_selective_calls, "stdlib", "selective_calls.zz");
+e2e_success_test!(
+    e2e_stdlib_alias_module_calls,
+    "stdlib",
+    "alias_module_calls.zz"
+);
 e2e_success_test!(
     e2e_stdlib_str_selective_methods,
     "stdlib",
@@ -566,6 +808,15 @@ macro_rules! e2e_error_test {
 }
 
 e2e_error_test!(e2e_err_type_mismatch, "type_mismatch.zz");
+e2e_error_test!(e2e_err_alias_cycle, "alias_cycle.zz");
+e2e_error_test!(e2e_err_alias_dup, "alias_dup.zz");
+e2e_error_test!(e2e_err_alias_arity, "alias_arity.zz");
+e2e_error_test!(e2e_err_enum_nonexhaustive, "enum_nonexhaustive.zz");
+e2e_error_test!(e2e_err_enum_unknown_variant, "enum_unknown_variant.zz");
+e2e_error_test!(e2e_err_enum_missing_payload, "enum_missing_payload.zz");
+e2e_error_test!(e2e_err_enum_extra_arg, "enum_extra_arg.zz");
+e2e_error_test!(e2e_err_enum_dup, "enum_dup.zz");
+e2e_error_test!(e2e_err_enum_generic_mismatch, "enum_generic_mismatch.zz");
 e2e_error_test!(
     e2e_err_return_fallthrough_mismatch,
     "return_fallthrough_mismatch.zz"
@@ -593,6 +844,21 @@ e2e_error_test!(e2e_err_div_by_zero, "div_by_zero.zz");
 e2e_error_test!(e2e_err_unknown_field, "unknown_field.zz");
 e2e_error_test!(e2e_err_struct_init_assign, "struct_init_assign_error.zz");
 e2e_error_test!(e2e_err_int_float_cmp, "int_float_cmp.zz");
+e2e_error_test!(e2e_err_bare_import_std, "bare_import_std.zz");
+e2e_error_test!(e2e_err_assign_in_condition, "assign_in_condition.zz");
+e2e_error_test!(e2e_err_generic_bracket_params, "generic_bracket_params.zz");
+e2e_error_test!(e2e_err_bitwise_float, "bitwise_float.zz");
+e2e_error_test!(e2e_err_bitwise_neg_shift, "bitwise_neg_shift.zz");
+e2e_error_test!(e2e_err_tuple_index_oob, "tuple_index_oob.zz");
+e2e_error_test!(e2e_err_tuple_index_dynamic, "tuple_index_dynamic.zz");
+e2e_error_test!(e2e_err_compound_type_mismatch, "compound_type_mismatch.zz");
+e2e_error_test!(e2e_err_compound_const, "compound_const.zz");
+e2e_error_test!(e2e_err_compound_chain, "compound_chain.zz");
+e2e_error_test!(
+    e2e_err_generic_struct_mismatch,
+    "generic_struct_mismatch.zz"
+);
+e2e_error_test!(e2e_err_generic_struct_arity, "generic_struct_arity.zz");
 e2e_error_test!(e2e_err_generic_unbound, "generic_unbound.zz");
 e2e_error_test!(e2e_err_pg_connect_refused, "pg_connect_refused.zz");
 e2e_error_test!(e2e_err_mysql_connect_refused, "mysql_connect_refused.zz");
@@ -607,6 +873,15 @@ e2e_error_test!(e2e_err_main_result_err, "main_result_err.zz");
 e2e_error_test!(e2e_err_try_double_unwrap, "try_double_unwrap.zz");
 e2e_error_test!(e2e_err_spawn_non_closure, "spawn_non_closure.zz");
 e2e_error_test!(e2e_err_chan_send_non_chan, "chan_send_non_chan.zz");
+// M0 edge corpus: both engines fail (messages differ; error parity only
+// requires failure on both sides).
+e2e_error_test!(e2e_err_edge_neg_shift, "edge_neg_shift_err.zz");
+e2e_error_test!(e2e_err_edge_rem_zero, "edge_rem_zero_err.zz");
+// Edge error probes whose fixes land in later PRs (still VM-fail).
+e2e_error_test!(e2e_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
+e2e_error_test!(e2e_err_edge_min_rem_neg1, "edge_int_min_rem_neg1.zz");
+e2e_error_test!(e2e_err_edge_pow_neg, "edge_int_pow_neg.zz");
+e2e_error_test!(e2e_err_edge_index_oob, "edge_index_oob.zz");
 
 // ---------------------------------------------------------------------------
 // Eval tests: inline code via `zz eval`

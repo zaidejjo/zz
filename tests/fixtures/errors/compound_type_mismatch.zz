@@ -1,0 +1,4 @@
+// features: error-case, float-arith, locals
+// E2E: Compound assignment follows binary-op type rules.
+x := 1
+x += 1.5

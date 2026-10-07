@@ -1,8 +1,9 @@
+// features: arrays, bool-logic, comparison, dicts, elvis, imports, locals, match, option-result, print, std-json, string-literal
 // tests/fixtures/stdlib/json_test.zz — json E2E test
 import std.json
 
 // ── parse valid JSON ──
-j := json.parse("{\"a\": 1, \"b\": [2, 3], \"c\": {\"nested\": true}}") ?? json.null()
+j := json.parse("{\"a\": 1, \"b\": [2, 3], \"c\": {\"nested\": true}}}}") ?? json.null()
 
 // ── get object keys ──
 a := json.get(j, "a") ?? json.null()

@@ -15,7 +15,7 @@ Available without imports:
 | `str` | `str(v: T) -> str` | Convert to string |
 | `int` | `int(v: T)` | Parse/convert to int (`.none` on failure) |
 | `float` | `float(v: T)` | Parse/convert to float (`.none` on failure) |
-| `len` | `len(v: T) -> int` | Length of array, bytes, string, dict, or range |
+| `len` | `len(v: T) -> int` | Length of array, tuple, bytes, string, dict, or range |
 | `range` | `range(start: int, stop: int, step: int)` | Create integer range |
 | `map` | `map(arr: [T] \| T.., f: func(T) -> U) -> [U]` | Apply function to each element |
 | `filter` | `filter(arr: [T] \| T.., f: func(T) -> bool) -> [T]` | Keep elements where predicate is true |
@@ -34,7 +34,13 @@ Available without imports:
 | `std.fs` | Filesystem operations |
 | `std.env` | Environment variables, CLI args |
 | `std.math` | Math functions |
-| `std.time` | Time and sleep |
+| `std.time` | Time, sleep, calendar dates |
+| `std.term` | Raw mode, single-key reads, terminal size |
+| `std.map` | Dict helpers (safe lookup, merge) |
+| `std.set` | Set helpers over arrays |
+| `std.dec` | Exact decimal math on strings |
+| `std.bytes` | Linear string/byte builders |
+| `std.csv` | CSV parsing/serialization |
 
 ---
 
@@ -67,12 +73,33 @@ import std.str
 | `str.length` | `str.length(s: str) -> int` | String length |
 | `str.split` | `str.split(s: str, sep: str) -> [str]` | Split by separator |
 | `str.contains` | `str.contains(s: str, sub: str) -> bool` | Check substring |
+| `str.count` | `str.count(s: str, sub: str) -> int` | Non-overlapping occurrences (empty `sub` counts chars+1) |
 | `str.trim` | `str.trim(s: str) -> str` | Trim whitespace |
 | `str.to_upper` | `str.to_upper(s: str) -> str` | Uppercase |
 | `str.to_lower` | `str.to_lower(s: str) -> str` | Lowercase |
 | `str.replace` | `str.replace(s: str, old: str, new: str) -> str` | Replace substring |
 | `str.starts_with` | `str.starts_with(s: str, prefix: str) -> bool` | Check prefix |
 | `str.ends_with` | `str.ends_with(s: str, suffix: str) -> bool` | Check suffix |
+| `str.find` | `str.find(s: str, sub: str, from: int) -> int` | First match at/after byte offset `from` (-1 on miss) |
+| `str.rfind` | `str.rfind(s: str, sub: str, from: int) -> int` | Last match starting at/before `from` (-1 on miss) |
+| `str.starts_with_at` | `str.starts_with_at(s: str, sub: str, pos: int) -> bool` | Match at byte offset (empty never matches) |
+| `str.ends_with_at` | `str.ends_with_at(s: str, sub: str, pos: int) -> bool` | Match ending at byte offset `pos` |
+| `str.trim_span` | `str.trim_span(s: str, start: int, end: int) -> [int]` | Trimmed `[lo, hi]` byte offsets (Unicode ws, both backends) |
+| `str.find_in` | `str.find_in(s: str, sub: str, start: int, end: int) -> int` | First match in `[start, end)` (-1 on miss) |
+| `str.rfind_in` | `str.rfind_in(s: str, sub: str, start: int, end: int) -> int` | Last match in `[start, end)` (-1 on miss) |
+| `str.count_in` | `str.count_in(s: str, sub: str, start: int, end: int) -> int` | Non-overlapping matches in `[start, end)` |
+| `str.bytes` | `str.bytes(s: str) -> [int]` | UTF-8 bytes as plain ints (one copy) |
+| `bytes.to_str` | `bytes.to_str(vs: [int]) -> Result<str>` | Strict UTF-8 decode; range/invalid input is `.err` on both backends |
+| `bytes.to_ints` | `bytes.to_ints(b: bytes) -> [int]` | Opaque byte buffer as plain ints |
+| `str.classify` | `str.classify(text, markers, bstart, bend, nested, whole) -> [int]` | Comment-aware line counts `[lines, code, comments, blanks]`; `markers` line list, `bstart`/`bend` block pair (`""` = none), `nested` Rust-style depth, `whole` whole-line blocks |
+
+Offsets are bytes (O(1) per call, O(n) streaming total; matches Rust
+`str::find` semantics). Empty `sub`: `find`/`rfind` return the clamped
+`from`, `find_in` the clamped start, `rfind_in` the clamped end,
+`count_in` returns 0; `_at` never matches empty. `length`/slicing stay char-oriented — convert
+explicitly when mixing. Negative inputs clamp to 0; empty `sub` returns
+the clamped position for `find`/`rfind` and never matches for `_at`.
+`trim_span` strips Unicode White_Space identically on VM and AOT.
 
 ```zz
 import std.str
@@ -85,6 +112,15 @@ str.split("a,b,c", ",")   // ["a", "b", "c"]
 str.replace("foo bar", "bar", "baz")  // "foo baz"
 str.starts_with("hello", "he")  // true
 str.ends_with("hello", "lo")    // true
+str.find("hello world", "o", 0) // 4
+str.find("hello world", "o", 5) // 7
+str.rfind("hello world", "o", 10) // 7
+str.starts_with_at("hello", "ell", 1) // true
+str.ends_with_at("hello", "ell", 4)   // true
+str.trim_span("  hi  ", 0, 6)          // [2, 4]
+str.bytes("AB")                    // [65, 66]
+bytes.to_str([104, 105])           // .ok("hi")
+bytes.to_ints(b)[0]                // first byte as int
 ```
 
 ### Method Call Syntax
@@ -116,6 +152,7 @@ import std.vec
 |----------|-----------|-------------|
 | `vec.len` | `vec.len(v: [T]) -> int` | Array length |
 | `vec.push` | `vec.push(v: [T], x: T) -> [T]` | New array with `x` appended |
+| `vec.append` | `vec.append(v: [T], x: T) -> [T]` | Alias for `vec.push`: new array with `x` appended |
 | `vec.pop` | `vec.pop(v: [T]) -> [T]` | New array with last element removed |
 | `vec.reverse` | `vec.reverse(v: [T]) -> [T]` | Reversed copy |
 | `vec.join` | `vec.join(v: [T], sep: str) -> str` | Join as string |
@@ -655,6 +692,217 @@ start := time.now_ms()
 time.sleep_ms(1000)
 elapsed := time.now_ms() - start
 println("Slept for {elapsed}ms")
+```
+
+### Calendar dates (dict-based `Date`)
+
+Dates are `{str: int}` dicts (`year`, `month`, `day`, `hour`, `min`, `sec`).
+Parse/format are UTC RFC3339 (`...Z`) only; invalid input falls back to
+the epoch so callers stay total.
+
+```zz
+import std.time
+
+d := time.parse_rfc3339("2024-02-29T12:30:45Z")
+println(time.format_rfc3339(d))   // 2024-02-29T12:30:45Z
+println(time.add_days(d, 1)["day"])
+println(time.diff_days(d, time.make_date(2024, 2, 28, 0, 0, 0)))  // 1
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `time.make_date` | `time.make_date(y, mo, d, h, mi, se) -> {str: int}` | Build a date dict |
+| `time.parse_rfc3339` | `time.parse_rfc3339(s: str) -> {str: int}` | Parse UTC RFC3339 (epoch on invalid) |
+| `time.format_rfc3339` | `time.format_rfc3339(d) -> str` | Format as UTC RFC3339 |
+| `time.add_days` | `time.add_days(d, n: int) -> {str: int}` | Shift by N days (leap-correct) |
+| `time.diff_days` | `time.diff_days(a, b) -> int` | `a - b` in days |
+| `time.to_epoch_days` | `time.to_epoch_days(d) -> int` | Days since 1970-01-01 |
+| `time.from_epoch_days` | `time.from_epoch_days(z: int) -> {str: int}` | Inverse of above |
+| `time.is_leap` | `time.is_leap(y: int) -> bool` | Gregorian leap year |
+| `time.days_in_month` | `time.days_in_month(y, m: int) -> int` | Month length |
+| `time.date_valid` | `time.date_valid(y, m, d: int) -> bool` | Range check |
+
+---
+
+## `std.map` -- Dict Helpers
+
+Pure-ZZ helpers over `{K: V}` dicts: safe lookup, projections, merge.
+
+```zz
+import std.map
+
+d := {"a": 1, "b": 2}
+println(map.get_or(d, "z", 99))  // 99, no runtime error
+println(map.keys(d))             // ["a", "b"]
+println(map.merge(d, {"c": 3}))
+```
+
+| Function | Description |
+|----------|-------------|
+| `map.has(d, key)` | Membership test (no error on missing) |
+| `map.get_or(d, key, default)` | Value or default (`{str: int}`) |
+| `map.get_str(d, key, default)` | Value or default (`{str: str}`) |
+| `map.keys / keys_str` | Key arrays |
+| `map.values / values_str` | Value arrays |
+| `map.len / is_empty` | Size predicates |
+| `map.merge / merge_str` | Right-wins union |
+| `map.remove(d, key)` | Copy without key |
+
+`Dict` stays insertion-ordered with O(n) lookup; the API is stable so a
+future hashed implementation drops in without breaking callers.
+
+---
+
+## `std.set` -- Set Helpers
+
+Sets are `[T]` arrays with uniqueness enforced by helpers.
+
+```zz
+import std.set
+
+s := set.insert(["a"], "b")      // ["a", "b"]
+println(set.union(["a"], ["b"])) // ["a", "b"]
+println(set.intersect(["a", "b"], ["b", "c"]))  // ["b"]
+```
+
+| Function | Description |
+|----------|-------------|
+| `set.has / has_int` | Membership |
+| `set.insert / insert_int` | Append if absent (returns same array otherwise) |
+| `set.remove / remove_int` | Copy without element |
+| `set.union / union_int` | Deduplicated concatenation |
+| `set.intersect / intersect_int` | Common elements |
+| `set.diff` | Elements of `a` not in `b` |
+| `set.len / is_empty` | Size predicates |
+
+---
+
+## `std.dec` -- Exact Decimals
+
+Decimals are `str` (`[-]digits[.digits]`). No float drift:
+`dec.add("0.1", "0.2") == "0.3"`. Scale capped at 18 places.
+
+```zz
+import std.dec
+
+println(dec.add("0.1", "0.2"))  // 0.3
+println(dec.mul("1.5", "2"))    // 3
+println(dec.format("3.14159", 2))  // 3.14
+```
+
+| Function | Description |
+|----------|-------------|
+| `dec.is_valid(s)` | Shape check |
+| `dec.add / sub / mul(a, b)` | Exact arithmetic as strings |
+| `dec.cmp(a, b)` | `-1` / `0` / `1` |
+| `dec.eq / lt / gt(a, b)` | Boolean comparisons |
+| `dec.format(s, places)` | Round/truncate to N places |
+| `dec.scale_of / pow10 / to_scaled / from_scaled / trim_zeros` | Building blocks |
+
+---
+
+## `std.bytes` + String Builders
+
+Strings are immutable; `s = s + part` in a loop is O(n²). Builders
+collect parts and join once. Handles are plain arrays (no definitions
+needed).
+
+```zz
+import std.bytes
+
+b := str.builder()
+b = str.push_part(b, "hello ")
+b = str.push_part(b, name)
+println(str.finish(b))
+
+nums := bytes.builder()
+nums = bytes.push_byte(nums, 300)  // wraps to 44
+println(bytes.len_of(nums))
+```
+
+| Function | Description |
+|----------|-------------|
+| `str.builder()` | Empty `[str]` handle |
+| `str.push_part(b, s)` | Append part |
+| `str.finish(b)` | Join to `str` |
+| `str.builder_len(b)` | Total chars without joining |
+| `bytes.builder()` | Empty `[int]` handle |
+| `bytes.push_byte(b, v)` | Append byte (`mod 256`, negatives wrap) |
+| `bytes.extend(b, vs)` | Append many |
+| `bytes.len_of / from_ints` | Size / normalize array |
+
+---
+
+## `std.csv` -- CSV Parsing
+
+RFC4180 subset: quoted fields, `""` escapes, embedded newlines, CRLF.
+Rows are `[[str]]` (first row = header when present). Unterminated
+trailing quotes are treated as end-of-field.
+
+```zz
+import std.csv
+
+rows := csv.parse("a,b\n1,2\n")
+println(csv.header(rows))          // ["a", "b"]
+println(csv.get_cell(rows, 1, 0, "?"))  // "1"
+println(csv.stringify(rows))       // round-trips
+println(csv.to_json(rows))         // JSON array of objects
+```
+
+| Function | Description |
+|----------|-------------|
+| `csv.parse(src)` | Parse with `,` |
+| `csv.parse_delim(src, d)` | Parse with one-char delimiter |
+| `csv.stringify(rows)` | Serialize with `,` (quotes when needed) |
+| `csv.stringify_delim(rows, d)` | Serialize with delimiter |
+| `csv.header(rows)` | First row (`[]` when empty) |
+| `csv.records(rows)` | All rows after the first |
+| `csv.len(rows)` | Row count |
+| `csv.get_cell(rows, r, c, default)` | Bounds-checked cell |
+| `csv.validate(src)` | Non-empty parse |
+| `csv.to_json(rows)` | Header-keyed JSON array |
+
+TOML is intentionally **not** in the stdlib: use the external `toml`
+package (`~/Projects/toml`, pure-ZZ, versioned separately).
+
+---
+
+## `std.term` -- Terminal Control
+
+```zz
+import std.term
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `term.enable_raw` | `term.enable_raw() -> Result<unit, str>` | Save termios, switch stdin to raw (byte-at-a-time, no echo) |
+| `term.disable_raw` | `term.disable_raw() -> Result<unit, str>` | Restore saved terminal state (idempotent) |
+| `term.read_key` | `term.read_key() -> Result<int, str>` | Block for one stdin byte (`0–255`) |
+| `term.get_size` | `term.get_size() -> Result<[int, int], str>` | Terminal `[cols, rows]` via `TIOCGWINSZ` |
+| `term.is_tty` | `term.is_tty() -> bool` | Total predicate for graceful degradation |
+| `term.flush` | `term.flush()` | Flush stdout now (interactive renders without trailing newline) |
+
+Raw mode clears `ICANON`/`ECHO` (plus `ISIG`, so Ctrl+C arrives as
+byte `3` and ZZ code can restore the terminal via `defer` instead of
+dying with a raw TTY). Arrow keys arrive as three reads
+(`27, 91, 68/67/65/66`) — decode them with successive `read_key`
+calls. Non-TTY stdin (pipes, CI) fails soft with
+`.err("std.term.<op>: not a tty")`, so always pair with `is_tty`:
+
+```zz
+import std.term
+
+func main() {
+    match term.enable_raw() {
+        .ok(_) => println("raw on"),
+        .err(e) => println("no tty: {e}"),
+    }
+    defer term.disable_raw()
+    match term.read_key() {
+        .ok(k) => println("key: {k}"),
+        .err(e) => println("read failed: {e}"),
+    }
+}
 ```
 
 ---

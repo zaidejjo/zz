@@ -1,0 +1,31 @@
+// features: comparison, func-call, int-arith, locals, methods, print, string-literal, string-ops, structs
+// Free-function method syntax: `p.bump()` must lower exactly like
+// `bump(p)` (Bug 8 regression: the AOT backend used to drop the receiver,
+// so the callee read `args[0]` out of bounds — garbage output, hangs,
+// or segfaults — while the VM resolved the bare-name fallback).
+struct Pt { x: int, y: int }
+struct User { name: str, age: int }
+
+func bump(p: Pt) -> Pt {
+    p.x = p.x + 1
+    p
+}
+
+func greet(u: User) -> str {
+    "hi " + u.name
+}
+
+func main() {
+    // Unboxed struct (all-scalar fields lower to a raw C struct).
+    p := Pt{ x: 1, y: 2 }
+    println(p.x)
+    q := bump(p)
+    println(q.x)
+    r := p.bump()
+    println(r.x)
+    // Boxed struct (string field flows through runtime objects).
+    u := User{ name: "bob", age: 30 }
+    println(u.greet())
+    println(greet(u))
+    println("method_free_fn_ok")
+}

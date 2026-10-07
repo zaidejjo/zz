@@ -1,0 +1,11 @@
+// features: enums, error-case, func-call, locals, print
+// ERROR: unit variant constructed with arguments must report.
+enum Token {
+    Eof,
+    IntLit(int),
+}
+
+func main() {
+    t := Token.Eof(1)
+    println(t)
+}

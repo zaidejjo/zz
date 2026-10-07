@@ -4,7 +4,7 @@ use zz_frontend::ast::{BinOp, Block, Expr, Ident, Param};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
 
-use super::{Compiler, Op};
+use super::{Compiler, Op, Vm};
 use crate::eval::Interp;
 use crate::value::{FuncValue, Value};
 use crate::EvalError;
@@ -66,6 +66,36 @@ fn vm_nested_path_assignment_keeps_shape() {
         )
         .unwrap(),
         Value::Int(3)
+    );
+}
+
+#[test]
+fn vm_chained_index_store_writes_through() {
+    // `m[0][0] = v` must reach the root binding (write-through, matching
+    // the AOT engine) instead of being dropped with the temp clone.
+    for src in [
+        "m := [[1, 2], [3, 4]]\nm[0][0] = 99\nm[0][0]",
+        "m := [[1, 2], [3, 4]]\nm[0][1] = m[0][1] + 10\nm[0][1]",
+        "m := [[1, 2], [3, 4]]\nm[0][1] += 10\nm[0][1]",
+        "a := [[[1]]]\na[0][0][0] = 7\na[0][0][0]",
+        "d := {\"a\": [1, 2]}\nd[\"a\"][1] = 9\nd[\"a\"][1]",
+        "m := [[1, 2], [3, 4]]\nm[1] = [8, 9]\nm[1][0]",
+        "a := [1, 2, 3]\na[1] = 9\na[1]",
+        "m := [[1, 2], [3, 4]]\nm[0][0] = 1\nm[1][1] = 2\nm[0][0] + m[1][1]",
+    ] {
+        assert_same(src);
+    }
+    assert_eq!(
+        run_src("m := [[1, 2], [3, 4]]\nm[0][0] = 99\nm[0][0]").unwrap(),
+        Value::Int(99)
+    );
+    assert_eq!(
+        run_src("m := [[1, 2], [3, 4]]\nm[0][1] += 10\nm[0][1]").unwrap(),
+        Value::Int(12)
+    );
+    assert_eq!(
+        run_src("a := [[[1]]]\na[0][0][0] = 7\na[0][0][0]").unwrap(),
+        Value::Int(7)
     );
 }
 
@@ -402,6 +432,7 @@ fn vm_method_call_and_cross_module() {
         }),
         env: interp.env.clone(),
         chunk: Some(Arc::new(chunk)),
+        chunk_defaults: Vec::new(),
     };
     interp.funcs.insert("shapes.dist".into(), fv);
     let v = interp.run(&parsed.program).unwrap();
@@ -471,4 +502,578 @@ fn bench_fib_vm_vs_tree() {
         .unwrap();
     assert_eq!(v.to_string(), tree_time.0);
     println!("fib(20) VM: {vm_time:?}  tree-walker: {:?}", tree_time.1);
+}
+
+#[test]
+fn vm_bitwise_matches_tree_walker() {
+    // Differential: VM and tree-walker must agree on values and errors.
+    for src in [
+        "6 & 3",
+        "6 | 3",
+        "6 ^ 3",
+        "~6",
+        "~0",
+        "1 << 10",
+        "1024 >> 3",
+        "-8 >> 2",
+        "1 << 63",
+        "1 << 64",
+        "1 | 2 ^ 3 & 5",
+        "1 + 2 << 3",
+        "8 >> 1 + 1",
+        "15 & 7 == 7",
+        "1 << -1",
+        "1 >> -5",
+        "func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(305419896, 4)",
+        "s := 123456789\ni := 0\nwhile i < 10 { s = (s << 13) ^ s\ns = s ^ (s >> 17)\ns = s ^ (s << 5)\ni = i + 1 }\ns",
+    ] {
+        assert_same(src);
+    }
+    // Spot-check absolute values through the VM.
+    assert_eq!(run_src("6 & 3").unwrap(), Value::Int(2));
+    assert_eq!(run_src("1 << 63").unwrap(), Value::Int(i64::MIN));
+    assert_eq!(run_src("~6").unwrap(), Value::Int(-7));
+}
+
+/// Compile `src` with `vec.push` registered as a native (like the real
+/// `run_typed` pipeline does via `Interp::natives`).
+fn compile_with_push_native(src: &str) -> super::Chunk {
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let natives: Arc<std::collections::HashSet<String>> =
+        Arc::new(["vec.push".to_string()].into_iter().collect());
+    Compiler::compile_program_with_natives(&parsed.program, natives)
+}
+
+fn has_op(chunk: &super::Chunk, pred: impl FnMut(&Op) -> bool) -> bool {
+    chunk.code.iter().any(pred)
+}
+
+/// Regression: the free form `b = vec.push(b, e)` (2 args) must fuse to
+/// [`Op::VecPush`]. An earlier revision routed every callee ending in
+/// `push` through the method-take handler, which rejected the free form
+/// (`rx_key "vec" != target`) and silently disabled fusion.
+#[test]
+fn vm_fused_free_push_emits_vec_push_not_method() {
+    let chunk = compile_with_push_native("b := []\nb = vec.push(b, 1)\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::VecPush { .. })),
+        "expected fused VecPush, got {:?}",
+        chunk.code
+    );
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::VecPushMethod { .. })),
+        "free push must not take the method path: {:?}",
+        chunk.code
+    );
+}
+
+/// The method form `b = b.push(e)` (1 arg) fuses through the
+/// runtime-checked [`Op::VecPushMethod`].
+#[test]
+fn vm_fused_method_push_emits_vec_push_method() {
+    let chunk = compile_with_push_native("b := []\nb = b.push(1)\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::VecPushMethod { .. })),
+        "expected fused VecPushMethod, got {:?}",
+        chunk.code
+    );
+}
+
+/// The field form `s.f = vec.push(s.f, e)` fuses to [`Op::VecPushField`].
+#[test]
+fn vm_fused_field_push_emits_vec_push_field() {
+    let chunk =
+        compile_with_push_native("struct W { f: [int] }\ns := W{f: []}\ns.f = vec.push(s.f, 1)\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::VecPushField { .. })),
+        "expected fused VecPushField, got {:?}",
+        chunk.code
+    );
+}
+
+/// `b = f(b, x)` inside a function body takes the single `b` load
+/// ([`Op::TakeSlot`]) instead of cloning it into the call.
+#[test]
+fn vm_thread_call_emits_take_slot() {
+    let chunk = compile_with_push_native(
+        "func f(x: [int], y: int) -> [int] { x }\nfunc g() -> [int] {\nb := [1]\nb = f(b, 2)\nb\n}\n",
+    );
+    let body_code = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::MakeFunc { name, chunk, .. } if name == "g" => Some(chunk.code.clone()),
+            _ => None,
+        })
+        .expect("function g chunk");
+    assert!(
+        body_code.iter().any(|op| matches!(op, Op::TakeSlot(_))),
+        "expected TakeSlot in g, got {:?}",
+        body_code
+    );
+}
+
+/// Regression: tail `return x` / bare `x` moves the frame local out
+/// (NRVO-equivalent) instead of deep-cloning. Values must match the
+/// tree-walker, and outer bindings read through a tail closure must
+/// survive the call (only params take).
+#[test]
+fn vm_tail_take_moves_param_and_spares_outer() {
+    for src in [
+        "func f(x: [int]) -> [int] { x }\nf([1, 2])[1]",
+        "func f(x: [int]) -> [int] { return x }\nf([1, 2])[0]",
+        "func f(n: int) -> int { m := n * 2\nm }\nf(20)",
+        "struct W { f: [int] }\nfunc g(w: W) -> W { w }\ng(W{f: [7]}).f[0]",
+        "x := 10\nf := |u: int| x + u\nf(0) + x",
+        "x := [1, 2]\nf := |u: int| x[u]\nf(1) + x[0]",
+        "func f(x: int) -> int { g := |u: int| x + u\ng(0) + x }\nf(3)",
+        "func f(x: int) -> int { g := |u: int| x + u\ng(1) + g(2) + x }\nf(3)",
+        "f := |u: int| u + 1\nf(1) + f(2)",
+        "func f(n: int) -> int { defer println(\"dd\")\nn }\nf(41)",
+        "outer := 99\nfunc f() -> int { outer }\nf() + outer",
+    ] {
+        assert_same(src);
+    }
+    assert_eq!(
+        run_src("func f(x: [int]) -> [int] { x }\nf([1, 2, 3])[2]").unwrap(),
+        Value::Int(3)
+    );
+    assert_eq!(
+        run_src("x := 10\nf := |u: int| x + u\nf(0) + x").unwrap(),
+        Value::Int(20)
+    );
+}
+
+#[allow(clippy::ptr_arg)]
+fn len_fake(_interp: &mut Interp, args: &mut Vec<Value>, span: Span) -> Result<Value, EvalError> {
+    match args.first() {
+        Some(Value::Array(vs)) => Ok(Value::Int(vs.len() as i64)),
+        other => Err(EvalError::new(
+            format!("`len` expects an array, found `{other:?}`"),
+            span,
+        )),
+    }
+}
+
+/// Minimal `vec.push` stand-in (clone + push, like the real native).
+/// The bare test `Interp` ships no natives; registering the real
+/// `zz_stdlib` table would pull a dependency cycle into unit tests.
+#[allow(clippy::ptr_arg)]
+fn vec_push_fake(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let mut vs = match args.first() {
+        Some(Value::Array(vs)) => (**vs).clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("`vec.push` expects an array, found `{other:?}`"),
+                span,
+            ));
+        }
+    };
+    let x = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument `x` for vec.push".to_string(), span))?;
+    vs.push(x);
+    Ok(Value::Array(Box::new(vs)))
+}
+
+/// Run `src` on the VM with `vec.push` registered (like `run_typed`).
+fn run_vm_native(src: &str) -> Result<Value, EvalError> {
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let mut natives = std::collections::HashMap::new();
+    natives.insert(
+        "vec.push".to_string(),
+        crate::runtime::NativeEntry {
+            arity: 2,
+            f: vec_push_fake,
+        },
+    );
+    natives.insert(
+        "len".to_string(),
+        crate::runtime::NativeEntry {
+            arity: 1,
+            f: len_fake,
+        },
+    );
+    let mut interp = Interp::with_natives(natives);
+    let names: Arc<std::collections::HashSet<String>> =
+        Arc::new(interp.natives.keys().cloned().collect());
+    let chunk = Arc::new(Compiler::compile_program_with_natives(
+        &parsed.program,
+        names,
+    ));
+    let mut vm = Vm::new();
+    match vm.run_chunk(&chunk, &mut interp) {
+        Ok(crate::runtime::Flow::Value(v)) => Ok(v),
+        Ok(_) => Err(EvalError::new("unexpected flow", Span::new(0, 0))),
+        Err(e) => Err(e),
+    }
+}
+
+/// Struct copy plus user-defined `push` method: the fused method op must
+/// take the generic (synchronous) call path with write-back, agreeing
+/// with the tree-walker. Guards the `VecPushMethod` fallback frame
+/// discipline (a prior revision awaited an async frame push on the
+/// stack and panicked out of bounds).
+#[test]
+fn vm_method_fallback_struct_copy_matches_tree_walker() {
+    // NOTE: `run_tree` can't serve here — the bare test `Interp` has no
+    // loader prelude, so the tree-walker's path eval for `vec.push`
+    // fails; `run_vm_native` wires the real native table like `run_typed`.
+    // VM/tree agreement for this shape is covered by the
+    // `move_append_*` e2e + parity fixtures (full loader pipeline).
+    let src = "struct W { f: [int] }\nimpl W {\n func push(w: W, x: int) -> W {\n W{f: vec.push(w.f, x)}\n }\n}\nfunc go(s: W) -> int {\nt := s\nt = t.push(2)\nlen(t.f)\n}\ngo(W{f: [1]})\n";
+    assert_eq!(run_vm_native(src).unwrap(), Value::Int(2));
+    let src2 = "struct W { f: [int] }\nimpl W {\n func push(w: W, x: int) -> W {\n W{f: vec.push(w.f, x)}\n }\n}\nt := W{f: [1]}\nt = t.push(2)\nlen(t.f)\n";
+    assert_eq!(run_vm_native(src2).unwrap(), Value::Int(2));
+}
+
+#[test]
+fn vm_tuple_ops_match_tree_walker() {
+    for src in [
+        "t := (10, \"twenty\", 30)\nt[0]",
+        "t := (10, \"twenty\", 30)\nt[1]",
+        "t := (10, \"twenty\", 30)\nt[-1]",
+        // NOTE: `len` needs stdlib natives (absent in unit interps) —
+        // covered by the e2e fixture on both engines instead.
+        "t := (10, \"twenty\", 30)\nt[0] = 99\nt[0]",
+        "t := (1, 2)\nt[7]",
+        "a, b := (7, 9)\na + b",
+        "_, b := (7, 9)\nb",
+        "a, b, c := (1, 2, 3)\na + b + c",
+    ] {
+        assert_same(src);
+    }
+}
+
+#[test]
+fn vm_compound_assign_matches_tree_walker() {
+    for src in [
+        "x := 100\nx += 7\nx",
+        "x := 100\nx -= 7\nx",
+        "x := 100\nx *= 7\nx",
+        "x := 100\nx /= 7\nx",
+        "x := 100\nx %= 7\nx",
+        "x := 2\nx **= 10\nx",
+        "x := 100\nx &= 7\nx",
+        "x := 100\nx |= 7\nx",
+        "x := 100\nx ^= 7\nx",
+        "x := 100\nx <<= 2\nx",
+        "x := 100\nx >>= 2\nx",
+        "s := \"a\"\ns += \"b\"\ns",
+        "struct P { x: int }\np := P{ x: 10 }\np.x += 5\np.x",
+        "a := [10, 20, 30]\na[1] *= 2\na[1]",
+        "a := [10, 20, 30]\na[0] += 1\na[2] -= 1\na[0] * 100 + a[2]",
+        "x := 0\nx += 1\nx += 1\nx += 1\nx",
+        "struct Rng { s0: int }\nfunc change(r: Rng) -> int { r.s0 += 100\nr.s0 }\nrng := Rng{ s0: 10 }\nchange(rng) * 1000 + rng.s0",
+    ] {
+        assert_same(src);
+    }
+}
+
+/// Structural proof that `x OP= y` uses the same fused slot ops as
+/// `x = x OP y`: compare opcode discriminants of both compilations.
+#[test]
+fn vm_compound_assign_fuses_like_plain_assign() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    fn opcodes(src: &str) -> Vec<&'static str> {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let (_res, types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let chunk = super::Compiler::compile_program_typed(
+            &parsed.program,
+            Arc::new(types),
+            HashMap::new(),
+            HashMap::new(),
+            Arc::new(HashSet::new()),
+        );
+        chunk
+            .code
+            .iter()
+            .map(|op| match op {
+                Op::PushConst(_) => "PushConst",
+                Op::IntAdd(_) => "IntAdd",
+                Op::IntSub(_) => "IntSub",
+                Op::IntMul(_) => "IntMul",
+                Op::IntDiv(_) => "IntDiv",
+                Op::IntRem(_) => "IntRem",
+                Op::SlotInc { .. } => "SlotInc",
+                Op::SlotAddInt { .. } => "SlotAddInt",
+                Op::SlotAddIntImm { .. } => "SlotAddIntImm",
+                Op::SlotBinaryInt { .. } => "SlotBinaryInt",
+                Op::SlotBinaryIntImm { .. } => "SlotBinaryIntImm",
+                Op::BinOp(..) => "BinOp",
+                Op::LoadSlot(_) => "LoadSlot",
+                Op::StoreSlot(_) => "StoreSlot",
+                Op::LoadVar(..) => "LoadVar",
+                Op::StoreVar(..) => "StoreVar",
+                Op::DefineVar(_) => "DefineVar",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    // Identical opcode streams (spans aside) for every operator.
+    for (compound, plain) in [
+        ("x := 0\nx += 1", "x := 0\nx = x + 1"),
+        ("x := 0\nx += 7", "x := 0\nx = x + 7"),
+        ("x := 0\nx -= 7", "x := 0\nx = x - 7"),
+        ("x := 0\nx *= 7", "x := 0\nx = x * 7"),
+        ("x := 0\nx &= 7", "x := 0\nx = x & 7"),
+        ("x := 0\nx <<= 2", "x := 0\nx = x << 2"),
+    ] {
+        assert_eq!(
+            opcodes(compound),
+            opcodes(plain),
+            "opcode mismatch: {compound} vs {plain}"
+        );
+    }
+    // The fused fast paths actually fire.
+    let inc = opcodes("x := 0\nx += 1");
+    assert!(inc.contains(&"SlotInc"), "SlotInc missing: {inc:?}");
+    let add_imm = opcodes("x := 0\nx += 7");
+    assert!(
+        add_imm.contains(&"SlotAddIntImm"),
+        "SlotAddIntImm missing: {add_imm:?}"
+    );
+}
+
+/// Structural proof of zero-cost erasure: a generic struct program
+/// compiles to the same opcode *shape* as its hand-monomorphized twin
+/// (names differ, so only discriminants are compared).
+#[test]
+fn vm_generic_struct_erases_like_monomorphic() {
+    use std::collections::{HashMap, HashSet};
+
+    fn disc(op: &Op) -> &'static str {
+        match op {
+            Op::PushConst(_) => "PushConst",
+            Op::MakeStruct { .. } => "MakeStruct",
+            Op::RegisterStruct { .. } => "RegisterStruct",
+            Op::GetField(..) => "GetField",
+            Op::GetFieldIdx(..) => "GetFieldIdx",
+            Op::SetField(..) => "SetField",
+            Op::SetFieldIdx(..) => "SetFieldIdx",
+            Op::LoadSlot(_) => "LoadSlot",
+            Op::StoreSlot(_) => "StoreSlot",
+            Op::LoadVar(..) => "LoadVar",
+            Op::StoreVar(..) => "StoreVar",
+            Op::DefineVar(_) => "DefineVar",
+            Op::Call { .. } => "Call",
+            Op::Return => "Return",
+            Op::BinOp(..) => "BinOp",
+            _ => "other",
+        }
+    }
+
+    fn opcodes(src: &str) -> Vec<&'static str> {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let (_res, types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let chunk = super::Compiler::compile_program_typed(
+            &parsed.program,
+            Arc::new(types),
+            HashMap::new(),
+            HashMap::new(),
+            Arc::new(HashSet::new()),
+        );
+        chunk.code.iter().map(disc).collect()
+    }
+
+    let generic = "struct Box<T> { v: T }\nfunc main() {\n b := Box{ v: 42 }\n b.v\n}";
+    let mono = "struct BoxInt { v: int }\nfunc main() {\n b := BoxInt{ v: 42 }\n b.v\n}";
+    assert_eq!(opcodes(generic), opcodes(mono));
+}
+
+#[test]
+fn vm_default_args_match_tree_walker() {
+    // Omitted trailing defaults must evaluate (checker contract) on both
+    // engines — same program (compiler inline fill) and across programs
+    // (runtime fill from `FuncValue` defaults, which the per-program
+    // compiler never saw).
+    for src in [
+        "func g(a: int, b: int = 5) -> int { a + b }\ng(1)",
+        "func g(a: int, b: int = 5) -> int { a + b }\ng(1, 2)",
+        "func g(a: int, b: int = 5, c: int = 7) -> int { a + b + c }\ng(1)",
+        "func g(a: int, b: int = 5, c: int = 7) -> int { a + b + c }\ng(1, 2)",
+    ] {
+        assert_same(src);
+    }
+    assert_eq!(
+        run_src("func g(a: int, b: int = 5) -> int { a + b }\ng(1)").unwrap(),
+        Value::Int(6)
+    );
+    // Cross-program: `g` is defined in one program, called with an omitted
+    // default in another (mirrors multi-file `import m` load order).
+    let dep = parse("func g(a: int, b: int = 5) -> int { a + b }");
+    assert!(dep.errors.is_empty());
+    let main = parse("g(1)");
+    assert!(main.errors.is_empty());
+    let mut interp = Interp::new();
+    interp.run(&dep.program).unwrap();
+    assert_eq!(interp.run(&main.program).unwrap(), Value::Int(6));
+    let mut tree = Interp::new();
+    tree.run_tree_walker(&dep.program).unwrap();
+    assert_eq!(tree.run_tree_walker(&main.program).unwrap(), Value::Int(6));
+}
+
+#[test]
+fn vm_guarded_match_arm_miss_reloads_scrutinee() {
+    // Regression: on the guarded-match path a pattern miss popped the
+    // scrutinee (restore:false) but jumped straight to the next
+    // `MatchArm`, skipping that arm's `LoadVar` reload — the next arm
+    // tested a stale stack slot instead of the scrutinee (a trailing
+    // unit arm like `.none` could never match). Every `MatchArm.next`
+    // must target the next arm's `LoadVar` (or the trailing
+    // `MatchError` for the last arm).
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    let src = "func f(o: Option<int>) -> int {\n    limit := 10\n    match o {\n        .some(n) if limit > 5 => n,\n        .some(n) => 0,\n        .none => -1,\n    }\n}\n";
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_res, types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let chunk = super::Compiler::compile_program_typed(
+        &parsed.program,
+        Arc::new(types),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(HashSet::new()),
+    );
+    // Descend into function bodies: the match lives in `f`'s chunk.
+    fn chunks_in(chunk: &super::Chunk) -> Vec<&super::Chunk> {
+        let mut out = vec![chunk];
+        for op in &chunk.code {
+            if let Op::MakeFunc { chunk: inner, .. } = op {
+                out.extend(chunks_in(inner));
+            }
+        }
+        out
+    }
+    let mut arm_nexts = Vec::new();
+    for chunk in chunks_in(&chunk) {
+        // Locate MatchArm ops and the LoadVar positions per chunk
+        // (jump targets are chunk-relative).
+        let mut loads = std::collections::HashSet::new();
+        for (i, op) in chunk.code.iter().enumerate() {
+            if matches!(op, Op::LoadVar(..)) {
+                loads.insert(i);
+            }
+        }
+        for op in &chunk.code {
+            if let Op::MatchArm { next, .. } = op {
+                arm_nexts.push((*next, loads.contains(next)));
+            }
+        }
+    }
+    assert!(!arm_nexts.is_empty(), "expected guarded match arms");
+    // Every non-terminal arm must jump to a LoadVar reload. The last
+    // arm targets the trailing `MatchError`, which is not a LoadVar.
+    for (next, is_load) in &arm_nexts[..arm_nexts.len().saturating_sub(1)] {
+        assert!(
+            is_load,
+            "MatchArm miss jumps to {next}, which is not a LoadVar reload"
+        );
+    }
+}
+
+#[test]
+fn vm_if_let_result_does_not_alias_later_slots() {
+    // Regression: `if let` left the stack-height fiction one low (the
+    // result value was not counted), so the next declaration reused its
+    // slot — a later match read the if-let's value instead of its own
+    // scrutinee (`.some(7)` tested as `.some(42)`). Needs the typed
+    // pipeline (slot promotion); the untyped path keeps everything in
+    // the environment and never collides.
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let src = "func main() -> int {\n    b := .some(42)\n    x := if let .some(v) = b { v } else { 0 }\n    o := .some(7)\n    match o {\n        .some(n) => n,\n        _ => 0,\n    }\n}\n";
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (checked, span_types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    assert!(
+        checked
+            .errors
+            .iter()
+            .all(|e| e.severity != zz_frontend::diag::Severity::Error),
+        "check errors: {:?}",
+        checked.errors
+    );
+    let mut interp = Interp::with_natives(HashMap::new());
+    let v = interp
+        .run_typed(
+            &parsed.program,
+            Arc::new(span_types),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("run");
+    // `main` returns its last value... via explicit call below.
+    let _ = v;
+    let f = interp.funcs.get("main").cloned().expect("main registered");
+    let out = interp
+        .call(Value::Func(Box::new(f)), Vec::new(), Span::new(0, 0))
+        .expect("call main");
+    assert_eq!(out, Value::Int(7));
 }

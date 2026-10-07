@@ -1,19 +1,19 @@
 //! Error recovery and helper functions.
 
-use crate::diag::error_at;
+use crate::diag::{error_at, FixIt};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
 use super::Parser;
 
-impl Parser {
+impl<'a> Parser<'a> {
     // --- helpers ----------------------------------------------------------
 
     pub(crate) fn expect_ident(&mut self) -> Option<crate::ast::Ident> {
         if self.at(TokenKind::Ident) {
             let tok = self.advance();
             Some(crate::ast::Ident {
-                name: tok.text,
+                name: tok.text.into_owned(),
                 span: tok.span,
             })
         } else {
@@ -31,6 +31,46 @@ impl Parser {
         span
     }
 
+    /// Missing-closer error with an insert fix at the current token
+    /// ("expected `)` to close call — add it here"). The message stays
+    /// byte-identical to the plain form; only the fix is added.
+    pub(crate) fn error_missing_close(&mut self, close: &str, msg: impl Into<String>) -> Span {
+        let span = self.peek().span;
+        let at = Span::new(span.start, span.start);
+        self.errors.push(error_at(msg, span).with_fixit(FixIt::safe(
+            at,
+            close,
+            format!("add `{close}` here"),
+        )));
+        span
+    }
+
+    /// Stray-closer error with a delete fix ("unexpected `}` ... — remove
+    /// it"). Consumes the bracket so parsing continues after it.
+    pub(crate) fn error_stray_close(&mut self, close: TokenKind) -> Span {
+        let span = self.peek().span;
+        self.errors.push(
+            error_at(
+                format!(
+                    "unexpected `{}` with no matching opening — remove it",
+                    close.describe()
+                ),
+                span,
+            )
+            .with_fixit(FixIt::safe(span, "", "remove this bracket")),
+        );
+        self.advance();
+        span
+    }
+
+    /// True when the current token is a closing bracket.
+    pub(crate) fn at_close(&self) -> bool {
+        matches!(
+            self.peek_kind(),
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket
+        )
+    }
+
     pub(crate) fn skip_stmt_ends(&mut self) {
         while self.at(TokenKind::StmtEnd) {
             self.advance();
@@ -38,7 +78,11 @@ impl Parser {
     }
 
     pub(crate) fn skip_to_stmt_end(&mut self) {
-        while !self.at(TokenKind::StmtEnd) && !self.at(TokenKind::Eof) {
+        // Stop at closing brackets as well as statement ends: a `}` may
+        // close the enclosing block (swallowing it here orphans the block
+        // and cascades into a bogus "unclosed" error), and stray `)`/`]`
+        // get their own "remove it" diagnostic from the statement loop.
+        while !self.at(TokenKind::StmtEnd) && !self.at(TokenKind::Eof) && !self.at_close() {
             self.advance();
         }
     }
@@ -49,7 +93,7 @@ impl Parser {
         }
     }
 
-    pub(crate) fn peek(&self) -> &Token {
+    pub(crate) fn peek(&self) -> &Token<'a> {
         &self.toks[self.pos]
     }
 
@@ -72,15 +116,25 @@ impl Parser {
         self.peek_kind() == kind
     }
 
-    pub(crate) fn advance(&mut self) -> Token {
-        let tok = self.toks[self.pos].clone();
+    pub(crate) fn advance(&mut self) -> Token<'a> {
+        // Clone without allocating: `text` is usually a borrowed source
+        // slice (`Cow::Borrowed` clones as a pointer copy) and the parser
+        // never reads `leading` trivia, so it is dropped instead of cloned
+        // (saves one Vec allocation per consumed token).
+        let src = &self.toks[self.pos];
+        let tok = Token {
+            kind: src.kind,
+            text: src.text.clone(),
+            span: src.span,
+            leading: Vec::new(),
+        };
         if self.pos + 1 < self.toks.len() {
             self.pos += 1;
         }
         tok
     }
 
-    pub(crate) fn previous(&self) -> &Token {
+    pub(crate) fn previous(&self) -> &Token<'a> {
         &self.toks[self.pos.saturating_sub(1)]
     }
 
@@ -91,6 +145,26 @@ impl Parser {
         } else {
             false
         }
+    }
+
+    /// Consume a `>` closing a `<...>` type-argument list, splitting a
+    /// `>>` (`Shr`) token when nested generics close together:
+    /// `Option<Option<int>>` lexes the end as one `Shr`, which closes
+    /// the inner list and banks one owed `>` (via `pending_gt`) for the
+    /// outer list. Arbitrary depth works: each split banks one close.
+    pub(crate) fn eat_gt_close(&mut self) -> bool {
+        if self.pending_gt > 0 {
+            self.pending_gt -= 1;
+            return true;
+        }
+        if self.eat(TokenKind::Gt) {
+            return true;
+        }
+        if self.eat(TokenKind::Shr) {
+            self.pending_gt += 1;
+            return true;
+        }
+        false
     }
 
     /// Consume a closing delimiter, skipping statement terminators first so

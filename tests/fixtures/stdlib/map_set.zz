@@ -1,0 +1,38 @@
+// features: arrays, dicts, func-call, imports, locals, print, std-map, string-literal
+// E2E: std.map + std.set pure-ZZ helpers.
+import std.map
+import std.set
+
+func main() {
+    d := {"a": 1, "b": 2}
+    println(map.has(d, "a"))
+    println(map.has(d, "z"))
+    println(map.get_or(d, "b", 0))
+    println(map.get_or(d, "z", 99))
+    println(map.get_str({"k": "v"}, "k", "?"))
+    println(map.keys(d))
+    println(map.values(d))
+    println(map.len(d))
+    println(map.is_empty(d))
+    m2 := map.merge(d, {"c": 3})
+    println(map.len(m2))
+    println(map.get_or(m2, "c", 0))
+    m3 := map.remove(m2, "a")
+    println(map.has(m3, "a"))
+    println(map.len(m3))
+    println(map.merge_str({"x": "1"}, {"y": "2"}))
+
+    s := set.insert(["a"], "b")
+    println(s)
+    println(set.has(s, "a"))
+    println(set.has(s, "z"))
+    println(set.union(["a"], ["b", "c"]))
+    println(set.intersect(["a", "b"], ["b", "c"]))
+    println(set.diff(["a", "b"], ["b"]))
+    println(set.remove(["a", "b"], "a"))
+    println(set.len(["a", "b"]))
+    println(set.is_empty([]))
+    println(set.union_int([1], [2, 3]))
+    println(set.intersect_int([1, 2], [2, 3]))
+    println("map_set_ok")
+}

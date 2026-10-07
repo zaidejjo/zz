@@ -1,0 +1,66 @@
+// Pure-ZZ builders — linear string assembly.
+// Module: std.bytes + str.builder
+//
+// Strings are immutable; naive `s = s + part` in a loop is O(n^2).
+// Builders collect parts then join once: O(n).
+//
+// Handles are plain arrays (no custom structs) so callers never
+// need a struct definition: `b := str.builder()` is `[str]`.
+
+func str.builder() -> [str] {
+    []
+}
+
+func str.push_part(b: [str], s: str) -> [str] {
+    vec.push(b, s)
+}
+
+func str.finish(b: [str]) -> str {
+    vec.join(b, "")
+}
+
+func str.builder_len(b: [str]) -> int {
+    n := 0
+    for p in b {
+        n = n + str.length(p)
+    }
+    n
+}
+
+func str.join_parts(parts: [str], sep: str) -> str {
+    vec.join(parts, sep)
+}
+
+// Byte assembly collects ints 0-255; callers convert at the
+// boundary via existing `fs`/`net` byte natives.
+func bytes.builder() -> [int] {
+    []
+}
+
+func bytes.push_byte(b: [int], v: int) -> [int] {
+    x := v % 256
+    if x < 0 {
+        x = x + 256
+    }
+    vec.push(b, x)
+}
+
+func bytes.extend(b: [int], vs: [int]) -> [int] {
+    out := b
+    for v in vs {
+        out = bytes.push_byte(out, v)
+    }
+    out
+}
+
+func bytes.len_of(vs: [int]) -> int {
+    vec.len(vs)
+}
+
+func bytes.from_ints(vs: [int]) -> [int] {
+    out: [int] = []
+    for v in vs {
+        out = bytes.push_byte(out, v)
+    }
+    out
+}

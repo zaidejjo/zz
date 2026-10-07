@@ -1,3 +1,4 @@
+// features: comparison, imports, indexing, locals, print, std-str, string-literal
 // E2E: std.str — string operations
 import std.str
 

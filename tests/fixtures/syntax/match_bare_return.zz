@@ -1,3 +1,4 @@
+// features: comparison, func-call, match, print, return, string-literal
 // E2E: bare `return` as a match arm body (parsed as a block arm).
 // NOTE: bare `return` inside *closures* type-checks and runs on the VM,
 // but AOT codegen drops closure returns today (same for the braced form

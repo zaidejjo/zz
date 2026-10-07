@@ -1,3 +1,4 @@
+// features: comparison, imports, indexing, int-arith, locals, match, option-result, print, std-crypto, string-literal, string-ops
 // E2E: std.crypto asymmetric + JWT — ed25519, RSA, HS256, EdDSA
 import std.crypto
 

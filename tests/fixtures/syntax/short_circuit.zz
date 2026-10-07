@@ -1,0 +1,13 @@
+// features: bool-logic, comparison, func-call, locals, print, string-literal
+// E2E: && and || short-circuit (right side must not evaluate when decided)
+func main() {
+    a := [1, 2]
+    // len < 8, so a[5] must never be read (would trap OOB on native).
+    println(len(a) >= 8 && a[5] == 99)
+    // len == 2, so a[5] must never be read here either.
+    println(len(a) == 2 || a[5] == 99)
+    // Decided-true/false sides still evaluate the right side.
+    println(len(a) >= 1 && a[0] == 1)
+    println(len(a) >= 8 || a[1] == 2)
+    println("short_circuit_ok")
+}

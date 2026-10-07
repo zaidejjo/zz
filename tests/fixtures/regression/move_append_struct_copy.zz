@@ -1,0 +1,22 @@
+// features: arrays, locals, print, string-literal, structs, vec-push
+// Struct copies under move-append takes: `t := s` copies (value
+// semantics), so mutating the copy's field leaves the source intact.
+// Fixed: struct clones used to share field buffers without bumping
+// them, and field writes landed in place (native printed s_len=2).
+// The runtime now detaches shared headers on field write
+// (copy-on-write) and gates in-place takes on full unique ownership.
+struct W2 { f: [int] }
+s := W2{f: [1]}
+t := s
+t.f = vec.push(t.f, 2)
+println("s_len={len(s.f)}")
+println("t_len={len(t.f)}")
+
+// Getter-extracted share stays intact on both engines.
+u := W2{f: [1]}
+a := u.f
+u.f = vec.push(u.f, 9)
+println("a_len={len(a)}")
+println("u_len={len(u.f)}")
+
+println("move_append_struct_copy_ok")

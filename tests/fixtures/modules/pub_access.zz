@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, print, pub-visibility, structs
 // Test: pub keyword on all declaration types.
 // Single-file — no imports needed.
 pub PI := 314
@@ -16,4 +17,5 @@ struct Box {val: int}
 func main() {
     p := Point{x: 1, y: 2}
     println(PI + add(p.x, p.y))
+    println("pub_access_ok")
 }

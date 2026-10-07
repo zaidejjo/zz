@@ -1,0 +1,4 @@
+// features: error-case, indexing
+// E2E: edge — out-of-bounds index traps on all legs.
+a := [1, 2, 3]
+println(a[10])

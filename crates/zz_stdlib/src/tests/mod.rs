@@ -15,10 +15,18 @@ pub(super) fn run(src: &str) -> Result<Value, String> {
     let mut funcs = stdlib_funcs();
     let mut natives = stdlib_natives();
     for module in ["str", "vec", "json", "fs", "env", "math", "time"] {
-        register_module_namespace(module, module, &mut funcs, &mut natives).expect("known module");
+        let _ = register_module_namespace(module, module, &mut funcs, &mut natives)
+            .expect("known module");
     }
 
-    let checked = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+    let checked = check_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
     let has_errors = checked
         .errors
         .iter()

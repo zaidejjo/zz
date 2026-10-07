@@ -1,0 +1,34 @@
+// features: arrays, closures, comparison, func-call, if-else, int-arith, locals, match, option-result, print, return, string-literal, vec-push
+// Move-append early exit: `?` unwraps before any take, so a failing
+// lookup leaves no moved-from slot behind and the error propagates.
+func pick(i: int) -> Result<int, str> {
+    if i == 0 {
+        return .ok(42)
+    }
+    return .err("bad")
+}
+
+func build(i: int) -> Result<[int], str> {
+    out := [7]
+    out = vec.push(out, pick(i)?)
+    .ok(out)
+}
+
+r := build(1)
+match r {
+    .ok(v) => println("r_len={len(v)}"),
+    .err(e) => println("early:{e}"),
+}
+r2 := build(0)
+match r2 {
+    .ok(v) => println("r2_len={len(v)}"),
+    .err(e) => println("early:{e}"),
+}
+
+// Closure observing the array across a push sees the stored value.
+a := [1, 2]
+f := |d: int| len(a) + d
+a = vec.push(a, 3)
+println("c0={f(0)}")
+
+println("move_append_early_exit_ok")

@@ -1,0 +1,67 @@
+// features: imports, locals, print, std-str, string-literal
+// E2E: std.str.find/rfind — char offsets, clamps, empty patterns, unicode.
+import std.str
+
+
+func main() {
+    hay := "hello world, hello moon"
+    hello_pat := "hello"
+    moon_pat := "moon"
+    zzz_pat := "zzz"
+    empty_pat := ""
+    uni := "café constaté"
+    constat_pat := "constat"
+    caf_pat := "caf"
+    aa_pat := "aa"
+    aaa_str := "aaa"
+    abc3 := "abc"
+    aaaa4 := "aaaa"
+    println("find0={str.find(hay, hello_pat, 0)}")
+    println("find6={str.find(hay, hello_pat, 6)}")
+    println("findmiss={str.find(hay, zzz_pat, 0)}")
+    println("findpast={str.find(hay, moon_pat, 100)}")
+    println("findneg={str.find(hay, hello_pat, -5)}")
+    println("findempty={str.find(hay, empty_pat, 7)}")
+    println("findemptybig={str.find(hay, empty_pat, 999)}")
+    println("rfind0={str.rfind(hay, hello_pat, 24)}")
+    println("rfind6={str.rfind(hay, hello_pat, 6)}")
+    println("rfindmiss={str.rfind(hay, zzz_pat, 24)}")
+    println("rfindempty={str.rfind(hay, empty_pat, 7)}")
+    println("unifind={str.find(uni, constat_pat, 0)}")
+    println("unirfind={str.rfind(uni, caf_pat, 14)}")
+    println("swat0={str.starts_with_at(hay, hello_pat, 0)}")
+    println("swat1={str.starts_with_at(hay, hello_pat, 1)}")
+    println("swat13={str.starts_with_at(hay, hello_pat, 13)}")
+    println("swatmid={str.starts_with_at(uni, caf_pat, 1)}")
+    println("ewat5={str.ends_with_at(hay, hello_pat, 5)}")
+    println("ewat4={str.ends_with_at(hay, hello_pat, 4)}")
+    println("ewat18={str.ends_with_at(hay, hello_pat, 18)}")
+    tsp := str.trim_span("  hi  ", 0, 6)
+    println("trimspan={tsp[0]},{tsp[1]}")
+    nbsp_str := "  X  "
+    nsp := str.trim_span(nbsp_str, 0, 99)
+    println("nbspan={nsp[0]},{nsp[1]}")
+    nb1 := str.trim_span(nbsp_str, 0, 1)
+    println("nb1={nb1[0]},{nb1[1]}")
+    println("overlap={str.find(aaa_str, aa_pat, 0)}")
+    println("stdspell={std.str.find(hay, moon_pat, 0)}")
+    println("in0={str.find_in(hay, hello_pat, 0, 24)}")
+    println("in13={str.find_in(hay, hello_pat, 1, 12)}")
+    println("inmiss={str.find_in(hay, hello_pat, 14, 24)}")
+    println("inempty={str.find_in(hay, empty_pat, 3, 9)}")
+    println("rinemptyin={str.rfind_in(hay, empty_pat, 3, 9)}")
+    println("rin0={str.rfind_in(hay, hello_pat, 0, 24)}")
+    println("rin13={str.rfind_in(hay, hello_pat, 0, 12)}")
+    println("rinmiss={str.rfind_in(hay, hello_pat, 14, 24)}")
+    println("cin0={str.count_in(hay, hello_pat, 0, 24)}")
+    println("cin13={str.count_in(hay, hello_pat, 0, 12)}")
+    println("cinstar={str.count_in(aaa_str, aa_pat, 0, 3)}")
+    println("cinempty={str.count_in(hay, empty_pat, 0, 24)}")
+    aaa3 := "aaa"
+    println("count1={str.count(aaa3, aa_pat)}")
+    println("countempty={str.count(abc3, empty_pat)}")
+    println("countboth={str.count(empty_pat, empty_pat)}")
+    println("countnohay={str.count(empty_pat, moon_pat)}")
+    println("countfour={str.count(aaaa4, aa_pat)}")
+    println("str_find_ok")
+}

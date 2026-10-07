@@ -10,7 +10,7 @@
 //   - str.repeat uses doubling strategy: O(n log n) instead of O(n^2).
 //   - str.pad_left/right build padding once, concat once: O(k) not O(k^2).
 
-// ── Repetition & counting ────────────────────────────────────────────────────
+// ── Repetition ───────────────────────────────────────────────────────────
 
 func str.repeat(s: str, n: int) -> str {
     // Doubling strategy: build result in O(log n) concatenations.
@@ -31,11 +31,6 @@ func str.repeat(s: str, n: int) -> str {
     result
 }
 
-func str.count(s: str, sub: str) -> int {
-    parts := str.split(s, sub)
-    n := vec.len(parts) - 1
-    n
-}
 
 // ── Queries ──────────────────────────────────────────────────────────────────
 

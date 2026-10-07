@@ -1,0 +1,7 @@
+// features: casts, imports, print, std-math, string-literal
+// E2E: edge — int(NaN) saturates to 0 on all legs (explicit isnan
+// guard; no -ffast-math to fold it).
+import std.math
+
+println(int(math.NAN))
+println("edge_cast_float_nan_ok")

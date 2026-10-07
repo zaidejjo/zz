@@ -5,6 +5,14 @@ use zz_frontend::span::Span;
 
 use super::chunk::Chunk;
 
+/// A move-take home shared by the fused push/take ops: a frame slot or an
+/// env binding name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TakeHome {
+    Slot(u16),
+    Env(String),
+}
+
 /// Bytecode instructions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -13,6 +21,11 @@ pub enum Op {
     PushConst(u32),
     /// Discard the top of the stack.
     Pop,
+    /// Swap the top two stack values. Lets left-to-right evaluation
+    /// (base, then value) feed value-below op layouts (`SetField` pops
+    /// object-then-value): `obj, value, Swap, SetField`. Stack-neutral
+    /// and side-effect-free.
+    Swap,
     /// Replace the top of the stack with `Bool(v.is_truthy())`.
     Truthy,
 
@@ -34,6 +47,40 @@ pub enum Op {
     LoadSlot(u16),
     /// Pop a value and write it to a compile-time-resolved local slot.
     StoreSlot(u16),
+    /// Take the slot's value out (leaving `Unit`), pushing it: the
+    /// single-occurrence load in `x = f(x, ...)` / `x = vec.push(x, e)`.
+    /// The final store completes before any user code can re-read the
+    /// slot (see `zz_frontend::move_elide`), and slots are never
+    /// scope-shared, so the transient is unobservable.
+    TakeSlot(u16),
+    /// Take the env binding's value out (leaving `Unit`), pushing it:
+    /// like `TakeSlot` for names that live in the environment. Falls back
+    /// to the `LoadVar` resolution chain (funcs, natives, plugins) with a
+    /// clone when the name is not an env binding, and errors identically
+    /// when unbound.
+    TakeVar(String, Span),
+    /// Pop an element; take the array home, push the element in (reusing
+    /// the owned `Vec`), store it back. Fused `x = vec.push(x, e)`:
+    /// zero clones on the steady path. Restores the home on a type error
+    /// (same error as `vec.push`).
+    VecPush { home: TakeHome, span: Span },
+    /// Pop an element; take the named field out of the home object
+    /// (leaving `Unit` in the field), push the element in, store the field
+    /// back. Fused `s.f = vec.push(s.f, e)`.
+    VecPushField {
+        home: TakeHome,
+        field: String,
+        span: Span,
+    },
+    /// Pop an element; take the home, and when it holds an array push in
+    /// place and store back (fused `x.push(e)` / `x.append(e)`). Otherwise
+    /// restore the home and run the generic method call with write-back,
+    /// so user-defined methods behave exactly as before.
+    VecPushMethod {
+        home: TakeHome,
+        method: String,
+        span: Span,
+    },
     /// In-place integer add: `slot[dst] = Int(slot[dst] + slot[src])`.
     ///
     /// Fused fast path for `x = x + y` inside hot loops: no stack traffic,
@@ -80,9 +127,31 @@ pub enum Op {
         name: String,
         params: Vec<Param>,
         chunk: Arc<Chunk>,
+        /// Pre-compiled default-argument bodies, parallel to `params`.
+        /// Empty on the normal compile path (AST defaults apply); populated
+        /// by `.zzc` loads, which carry no AST.
+        defaults: Vec<Option<Arc<Chunk>>>,
     },
     /// Register a struct definition (name -> ordered field names).
     RegisterStruct { name: String, fields: Vec<String> },
+    /// Register a user enum (name -> variant names). Values are plain
+    /// `Object`s; this table lets the VM resolve qualified construction
+    /// (`Token.IntLit(1)`) without type information.
+    RegisterEnum {
+        name: String,
+        variants: Vec<(String, bool)>,
+    },
+    /// Build a user-enum variant value: pops `argc` payload values
+    /// (0 or 1 after checking) and pushes the qualified `Object`
+    /// (`Token.IntLit`). The head resolves at runtime (direct hit or
+    /// selective-import alias, mirroring `MakeStruct`), so untyped
+    /// compiles need no seed tables.
+    MakeEnum {
+        enum_name: String,
+        variant: String,
+        argc: u16,
+        span: Span,
+    },
 
     // ---- typed arithmetic (unboxed, int-only) ----
     /// Pop two ints, push `a + b` (wrapping in release, checked in debug).
@@ -169,6 +238,13 @@ pub enum Op {
     /// Pop a value, an index, and an object; write `object[index] = value`;
     /// push the mutated object back (for write-back).
     StoreIndexOp(Span),
+    /// Pop a value, an index, and an object; push the mutated object
+    /// back with `object[index] OP value` stored (for write-back).
+    /// Single evaluation: the object/index were compiled once.
+    CompoundIndexOp {
+        op: zz_frontend::ast::BinOp,
+        span: Span,
+    },
     /// Pop an end bound, a start bound (either `int` or `Unit` for absent),
     /// and an object; push the slice.
     SliceOp(Span),
@@ -190,6 +266,14 @@ pub enum Op {
     /// Pop a value and an object; write `object.field = value`; push the
     /// mutated object back (for write-back).
     SetField(String, Span),
+    /// Pop a value and an object; write `object.field OP value`; push
+    /// the mutated object back (for write-back). Single evaluation:
+    /// the object was compiled once.
+    CompoundFieldOp {
+        name: String,
+        op: zz_frontend::ast::BinOp,
+        span: Span,
+    },
     /// Pop a value and an object; write `object.fields[idx] = value`; push
     /// the mutated object back (O(1) for known struct types).
     SetFieldIdx(u16, Span),
@@ -200,6 +284,8 @@ pub enum Op {
     MakeClosure {
         params: Vec<Param>,
         chunk: Arc<Chunk>,
+        /// Pre-compiled default-argument bodies (see `MakeFunc`).
+        defaults: Vec<Option<Arc<Chunk>>>,
     },
     /// Fused `task.spawn(closure-literal)`: build the task directly from
     /// the pre-compiled body chunk, skipping the `FuncValue` box + native
@@ -210,6 +296,8 @@ pub enum Op {
         params: Vec<Param>,
         chunk: Arc<Chunk>,
         span: Span,
+        /// Pre-compiled default-argument bodies (see `MakeFunc`).
+        defaults: Vec<Option<Arc<Chunk>>>,
     },
     /// Pop an optional argument and push an Option/Result variant.
     MakeVariant {
@@ -261,6 +349,9 @@ pub enum Op {
     /// (`p.dist()`) with receiver-first semantics.
     CallPath {
         parts: Vec<String>,
+        /// `parts` pre-joined (`a.b.c`): computed once at compile time so
+        /// the hot dispatch loop never allocates a lookup string per call.
+        joined: String,
         argc: u16,
         span: Span,
         pspan: Span,

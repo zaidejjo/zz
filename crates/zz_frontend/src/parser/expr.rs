@@ -1,13 +1,13 @@
 //! Expression parsing.
 
-use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, UnOp};
-use crate::diag::error_at;
+use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Stmt, UnOp};
+use crate::diag::{error_at, warning_at, FixIt};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
 use super::Parser;
 
-impl Parser {
+impl<'a> Parser<'a> {
     // --- expressions ------------------------------------------------------
 
     pub(crate) fn parse_expr(&mut self) -> Expr {
@@ -156,13 +156,92 @@ impl Parser {
     }
 
     pub(crate) fn parse_relational(&mut self) -> Expr {
-        let mut left = self.parse_additive();
+        let mut left = self.parse_bitor();
         loop {
             let op = match self.peek_kind() {
                 TokenKind::Lt => BinOp::Lt,
                 TokenKind::Gt => BinOp::Gt,
                 TokenKind::Le => BinOp::Le,
                 TokenKind::Ge => BinOp::Ge,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_bitor();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a | b` — bitwise OR. Binds tighter than comparisons and
+    /// `&&`/`||`, but looser than `^`, `&`, shifts and arithmetic, so
+    /// `flags & mask == expected` parses as `(flags & mask) == expected`.
+    /// The single-`|` token doubles as the closure delimiter and pattern
+    /// `|` in their own parse contexts — no ambiguity here.
+    pub(crate) fn parse_bitor(&mut self) -> Expr {
+        let mut left = self.parse_bitxor();
+        while self.at(TokenKind::Pipe) {
+            self.advance();
+            let right = self.parse_bitxor();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitOr,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a ^ b` — bitwise XOR. Between `|` and `&`.
+    pub(crate) fn parse_bitxor(&mut self) -> Expr {
+        let mut left = self.parse_bitand();
+        while self.at(TokenKind::Caret) {
+            self.advance();
+            let right = self.parse_bitand();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitXor,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a & b` — bitwise AND. Between `^` and shifts.
+    pub(crate) fn parse_bitand(&mut self) -> Expr {
+        let mut left = self.parse_shift();
+        while self.at(TokenKind::Amp) {
+            self.advance();
+            let right = self.parse_shift();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitAnd,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a << b` / `a >> b` — shifts. Tighter than `&` (so
+    /// `x & 0xFF << 8` is `x & (0xFF << 8)`), looser than additive
+    /// (so `a + b << c` is `(a + b) << c`).
+    pub(crate) fn parse_shift(&mut self) -> Expr {
+        let mut left = self.parse_additive();
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::Shl => BinOp::Shl,
+                TokenKind::Shr => BinOp::Shr,
                 _ => break,
             };
             self.advance();
@@ -226,7 +305,7 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_unary();
+            let right = self.parse_power();
             let span = left.span().join(right.span());
             left = Expr::Binary {
                 op,
@@ -257,9 +336,26 @@ impl Parser {
             TokenKind::Minus => UnOp::Neg,
             TokenKind::Plus => UnOp::Pos,
             TokenKind::Bang => UnOp::Not,
+            TokenKind::Tilde => UnOp::BitNot,
             _ => return self.parse_postfix(),
         };
         let op_tok = self.advance();
+        // Fold `-9223372036854775808` (i64::MIN): the positive counterpart
+        // is out of range as a literal, but negated it is exactly MIN.
+        // Only the exact boundary value folds; anything larger still errors
+        // at the literal below. Underscores are ignored, like elsewhere.
+        if matches!(op, UnOp::Neg) && self.peek_kind() == TokenKind::Int {
+            let lit = self.peek().clone();
+            let cleaned = lit.text.replace('_', "");
+            if cleaned.parse::<u64>().ok() == Some(i64::MAX as u64 + 1) {
+                self.advance();
+                let span = op_tok.span.join(lit.span);
+                return Expr::Int {
+                    value: i64::MIN,
+                    span,
+                };
+            }
+        }
         let expr = self.parse_unary();
         let span = op_tok.span.join(expr.span());
         Expr::Unary {
@@ -279,7 +375,7 @@ impl Parser {
                     let end = if self.eat_close(TokenKind::RParen) {
                         self.previous().span
                     } else {
-                        self.error_here("expected `)` to close call");
+                        self.error_missing_close(")", "expected `)` to close call");
                         expr.span()
                     };
                     let span = expr.span().join(end);
@@ -306,7 +402,7 @@ impl Parser {
                     let span = expr.span().join(member.span);
                     expr = Expr::Field {
                         obj: Box::new(expr),
-                        name: member.text,
+                        name: member.text.into_owned(),
                         span,
                     };
                 }
@@ -340,7 +436,7 @@ impl Parser {
                     let close = if self.eat_close(TokenKind::RBracket) {
                         self.previous().span
                     } else {
-                        self.error_here("expected `]` to close index");
+                        self.error_missing_close("]", "expected `]` to close index");
                         expr.span()
                     };
                     let span = expr.span().join(close);
@@ -411,7 +507,7 @@ impl Parser {
             let is_named = self.at(TokenKind::Ident)
                 && matches!(self.peek_kind_at(1), TokenKind::Colon | TokenKind::Assign);
             if is_named {
-                let name = self.advance().text;
+                let name = self.advance().text.into_owned();
                 self.advance(); // consume `:` or `=`
                 let value = self.parse_expr();
                 named.push((name, value));
@@ -419,6 +515,13 @@ impl Parser {
                 args.push(self.parse_expr());
             }
             if self.eat(TokenKind::Comma) {
+                // Trailing comma: `f(a, b,)` ends the list here, matching
+                // array/tuple/dict literals. Newlines inside parens are
+                // lexer trivia, so multi-line trailing commas just work.
+                // (No StmtEnd skipping: an explicit `;` must still error.)
+                if self.at(TokenKind::RParen) {
+                    break;
+                }
                 continue;
             }
             break;
@@ -429,7 +532,11 @@ impl Parser {
     /// Assemble an interpolated string from the token sequence produced by
     /// the lexer: `StrFmt (LBrace expr [: fmt_spec] RBrace StrFmt)* [Str]`.
     pub(crate) fn parse_fmt_string(&mut self, first: Token) -> Expr {
-        let mut parts = vec![FmtPart::Text(first.text)];
+        let first_text = first.text.into_owned();
+        let mut parts = vec![FmtPart::Text(first_text.clone())];
+        // Raw text chunks with their token spans, for the literal-brace
+        // lint below (FmtPart::Text carries no span).
+        let mut chunks = vec![(first_text, first.span)];
         let mut end = first.span;
         loop {
             if !self.at(TokenKind::LBrace) {
@@ -469,7 +576,7 @@ impl Parser {
                 None
             };
             if !self.eat(TokenKind::RBrace) {
-                self.error_here("expected `}` to close interpolation");
+                self.error_missing_close("}", "expected `}` to close interpolation");
             }
             parts.push(FmtPart::Expr(Box::new(expr), fmt_spec));
             // After `}`, the next token is either StrFmt (more interpolation
@@ -477,12 +584,16 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::StrFmt => {
                     let t = self.advance();
-                    parts.push(FmtPart::Text(t.text));
+                    let text = t.text.into_owned();
+                    parts.push(FmtPart::Text(text.clone()));
+                    chunks.push((text, t.span));
                     end = t.span;
                 }
                 TokenKind::Str => {
                     let t = self.advance();
-                    parts.push(FmtPart::Text(t.text));
+                    let text = t.text.into_owned();
+                    parts.push(FmtPart::Text(text.clone()));
+                    chunks.push((text, t.span));
                     end = t.span;
                     break;
                 }
@@ -492,9 +603,65 @@ impl Parser {
                 }
             }
         }
+        let string_span = first.span.join(end);
+        self.check_literal_braces(&chunks, &parts, string_span);
         Expr::Fmt {
             parts,
-            span: first.span.join(end),
+            span: string_span,
+        }
+    }
+
+    /// Sherlock for #249: `{ident`, `{1`, and `{(…` open interpolations —
+    /// every other `{...}` stays literal text. Inside a string that DOES
+    /// interpolate elsewhere (template mode), a bare `{` that cannot expand
+    /// is almost certainly a mistake: warn once with the exact rule.
+    /// Mirrors the triple-quoted rule: `{{`, `{}`, and JSON-like `{"key"`
+    /// stay silent.
+    pub(crate) fn check_literal_braces(
+        &mut self,
+        chunks: &[(String, Span)],
+        parts: &[FmtPart],
+        string_span: Span,
+    ) {
+        use crate::lexer::is_interp_start;
+        if !parts.iter().any(|p| matches!(p, FmtPart::Expr(..))) {
+            return; // No interpolation: presumably intentional literals.
+        }
+        for (text, _span) in chunks {
+            let mut chars = text.char_indices().peekable();
+            while let Some((idx, c)) = chars.next() {
+                if c != '{' {
+                    continue;
+                }
+                match chars.peek() {
+                    // `{{` escape, or `{` at chunk end (escape boundary).
+                    Some((_, '{')) | None => {
+                        chars.next();
+                        continue;
+                    }
+                    // Expands, or is a deliberate literal (`{}`, `{"key"`).
+                    Some((_, next))
+                        if is_interp_start(Some(*next)) || *next == '"' || *next == '}' =>
+                    {
+                        continue;
+                    }
+                    _ => {
+                        let snippet: String = text[idx..].chars().take(14).collect();
+                        self.errors.push(
+                            warning_at(
+                                format!(
+                                    "this string also contains `{snippet}`, which will NOT interpolate"
+                                ),
+                                string_span,
+                            )
+                            .with_note(
+                                "single-line strings expand `{name}`, `{1 + 2}`, `{(x)}` — `{{`, `{}`, and `{\"key\"` stay literal; use `{{` for a literal `{`",
+                            ),
+                        );
+                        return; // One warning per string.
+                    }
+                }
+            }
         }
     }
 
@@ -539,7 +706,7 @@ impl Parser {
             TokenKind::Str => {
                 self.advance();
                 Expr::Str {
-                    value: tok.text,
+                    value: tok.text.into_owned(),
                     span: tok.span,
                 }
             }
@@ -569,14 +736,14 @@ impl Parser {
             }
             TokenKind::Ident => {
                 self.advance();
-                let mut parts = vec![tok.text];
+                let mut parts = vec![tok.text.into_owned()];
                 let mut end = tok.span;
                 // Member access: `a.b.c` becomes a dotted path. Only chains
                 // of identifiers are supported (no arbitrary member access).
                 while self.at(TokenKind::Dot) && self.peek_kind_at(1) == TokenKind::Ident {
                     self.advance(); // `.`
                     let member = self.advance(); // identifier
-                    parts.push(member.text);
+                    parts.push(member.text.into_owned());
                     end = member.span;
                 }
                 // sqlz! macro: `sqlz!{db, """SELECT ... {x}"""}` desugars
@@ -592,19 +759,24 @@ impl Parser {
                 // because `if x == y{ ... }` would be misparsed as struct init.
                 // Nor is `{ Ident :` alone: a block opening with an annotated
                 // declaration (`for x in xs {\n r: int = ... }`, `if c {
-                // x: int = ... }`) looks identical through the colon (the
-                // newline after `{` is not a StmtEnd token). But `=` never
-                // continues an expression, so `{ Ident : Ident =` is always
-                // a block with a declaration, never a struct field.
+                // x: int = ... }`, `while r < nrows { row: [str] = ... }`)
+                // looks identical through the colon (the newline after `{`
+                // is not a StmtEnd token). But `=` never continues an
+                // expression, so `{ Ident : <type> =` is always a block
+                // with a declaration, never a struct field. The type may
+                // be any shape (`int`, `[str]`, `{str: int}`,
+                // `Map<str, int>`, ...), so disambiguate by speculatively
+                // parsing one type after the colon and checking for `=`.
                 if self.at(TokenKind::LBrace)
                     && self.peek_kind_at(1) == TokenKind::Ident
                     && (self.peek_kind_at(2) == TokenKind::Colon
                         || self.peek_kind_at(2) == TokenKind::LBrace)
-                    && !(self.peek_kind_at(2) == TokenKind::Colon
-                        && self.peek_kind_at(3) == TokenKind::Ident
-                        && self.peek_kind_at(4) == TokenKind::Assign)
                 {
-                    return self.parse_struct_init(parts, tok.span.join(end));
+                    let is_decl_block = self.peek_kind_at(2) == TokenKind::Colon
+                        && self.brace_starts_typed_decl_block();
+                    if !is_decl_block {
+                        return self.parse_struct_init(parts, tok.span.join(end));
+                    }
                 }
                 // Recover from common mistake: `User{ id = 1 }` instead of
                 // `User{ id: 1 }`.  Detect `{ Ident =` and route to struct
@@ -662,7 +834,7 @@ impl Parser {
                         self.pop_delim(TokenKind::RParen, rparen);
                         rparen
                     } else {
-                        self.error_here("expected `)` to close tuple expression");
+                        self.error_missing_close(")", "expected `)` to close tuple expression");
                         items.last().map(|e| e.span()).unwrap_or(first_span)
                     };
                     return Expr::Tuple {
@@ -676,7 +848,7 @@ impl Parser {
                     self.pop_delim(TokenKind::RParen, rparen);
                     rparen
                 } else {
-                    self.error_here("expected `)` to close parenthesized expression");
+                    self.error_missing_close(")", "expected `)` to close parenthesized expression");
                     first.span()
                 };
                 let span = tok.span.join(end);
@@ -692,6 +864,7 @@ impl Parser {
             TokenKind::While => {
                 let w = self.advance();
                 let cond = self.parse_expr();
+                self.check_assign_in_condition();
                 let body = self.parse_block();
                 let span = w.span.join(body.span);
                 Expr::While {
@@ -703,6 +876,15 @@ impl Parser {
             TokenKind::Match => self.parse_match(),
             TokenKind::Dot => self.parse_variant(),
             _ => {
+                // A stray closing bracket in expression position (e.g. the
+                // second `]` in `[1, 2]]`): remove it and continue.
+                if matches!(
+                    tok.kind,
+                    TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket
+                ) {
+                    self.error_stray_close(tok.kind);
+                    return dummy_expr(tok.span);
+                }
                 self.error_here(format!(
                     "expected expression, found {}",
                     tok.kind.describe()
@@ -770,7 +952,7 @@ impl Parser {
         let end = if self.eat(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close struct literal");
+            self.error_missing_close("}", "expected `}` to close struct literal");
             self.peek().span
         };
         Expr::StructInit {
@@ -806,13 +988,13 @@ impl Parser {
             if self.eat_close(TokenKind::RBrace) {
                 self.previous().span
             } else {
-                self.error_here("expected `}` to close `sqlz!{...}`");
+                self.error_missing_close("}", "expected `}` to close `sqlz!{...}`");
                 sql_expr.span()
             }
         } else if self.eat_close(TokenKind::RParen) {
             self.previous().span
         } else {
-            self.error_here("expected `)` to close `sqlz!(...)`");
+            self.error_missing_close(")", "expected `)` to close `sqlz!(...)`");
             sql_expr.span()
         };
         let span = start.join(end);
@@ -869,6 +1051,10 @@ impl Parser {
                 });
 
                 if self.eat(TokenKind::Comma) {
+                    // Trailing comma: `|x, y,| body` ends the list here.
+                    if self.at(TokenKind::Pipe) {
+                        break;
+                    }
                     continue;
                 }
                 break;
@@ -903,6 +1089,34 @@ impl Parser {
         self.errors.truncate(save_errs);
         let block = self.parse_block();
         Expr::Block(block)
+    }
+
+    /// True when `{` at the cursor opens a block whose first statement is
+    /// a typed declaration (`{ name: <type> = ... }`) rather than a struct
+    /// literal (`Point{ x: 1 }`). The caller must have verified the
+    /// `{ Ident :` prefix. Disambiguates by speculatively parsing one
+    /// type after the colon: a trailing `=` proves a declaration
+    /// (`row: [str] = []`, `r: int = 0`, `m: {str: int} = ...`,
+    /// `v: Map<str, int> = ...`), since `=` never continues an
+    /// expression. All speculative state (position, diagnostics,
+    /// delimiter tracking) is restored.
+    pub(crate) fn brace_starts_typed_decl_block(&mut self) -> bool {
+        let save_pos = self.pos;
+        let save_errs = self.errors.len();
+        let save_delims = self.delim_stack.len();
+        let save_gt = self.pending_gt;
+        // Skip `{`, field/block name, and `:`.
+        self.advance();
+        self.advance();
+        self.advance();
+        self.skip_stmt_ends();
+        let _ = self.parse_type();
+        let is_decl = self.at(TokenKind::Assign);
+        self.pos = save_pos;
+        self.errors.truncate(save_errs);
+        self.delim_stack.truncate(save_delims);
+        self.pending_gt = save_gt;
+        is_decl
     }
 
     /// Parse a dict literal `{ key: value, ... }`. Returns `None` (leaving
@@ -946,7 +1160,7 @@ impl Parser {
         let end = if self.eat_close(TokenKind::RBrace) {
             self.previous().span
         } else {
-            self.error_here("expected `}` to close dict literal");
+            self.error_missing_close("}", "expected `}` to close dict literal");
             lbrace.span
         };
         Some(Expr::Dict {
@@ -987,7 +1201,7 @@ impl Parser {
             self.pop_delim(TokenKind::RBracket, rbracket);
             rbracket
         } else {
-            self.error_here("expected `]` to close array literal");
+            self.error_missing_close("]", "expected `]` to close array literal");
             lbracket.span
         };
         Expr::Array {
@@ -1018,7 +1232,7 @@ impl Parser {
             self.pop_delim(TokenKind::RBracket, rbracket);
             rbracket
         } else {
-            self.error_here("expected `]` to close list comprehension");
+            self.error_missing_close("]", "expected `]` to close list comprehension");
             lbracket.span
         };
         Expr::ListComp {
@@ -1036,6 +1250,7 @@ impl Parser {
             return self.parse_if_let(if_tok);
         }
         let cond = self.parse_expr();
+        self.check_assign_in_condition();
         let then = self.parse_block();
         let els = self.parse_else();
         let span = if_tok
@@ -1082,6 +1297,26 @@ impl Parser {
         }
     }
 
+    /// `=` in `if`/`while` condition position is almost always a typo for
+    /// `==`. Emit one targeted error with a fix, consume `= RHS` for
+    /// recovery, and let checking continue so independent errors (e.g. a
+    /// typoed variable earlier in the file) are still reported (#244).
+    pub(crate) fn check_assign_in_condition(&mut self) {
+        if !self.at(TokenKind::Assign) {
+            return;
+        }
+        let span = self.peek().span;
+        self.errors.push(
+            error_at(
+                "`=` in condition does assignment; use `==` to compare",
+                span,
+            )
+            .with_fixit(FixIt::safe(span, "==", "replace with `==`")),
+        );
+        self.advance(); // consume `=`
+        let _ = self.parse_expr(); // RHS for recovery; condition keeps LHS
+    }
+
     pub(crate) fn parse_match(&mut self) -> Expr {
         let match_tok = self.advance();
         let scrutinee = self.parse_expr();
@@ -1106,24 +1341,33 @@ impl Parser {
             if !self.eat(TokenKind::Arrow) {
                 self.error_here("expected `=>` after match pattern");
             }
-            // A bare `return` reads naturally as an arm body but is a
-            // statement, not an expression. Recover by wrapping the
-            // single statement in a block — identical AST to the braced
-            // form, so the checker and both runtimes need no changes.
+            // Arm bodies accept any statement (`y = v`, `x := 1`,
+            // `return`, `defer f()`) as well as expressions. A bare
+            // `return` reads naturally as an arm body but is a
+            // statement, not an expression — and so is assignment
+            // (`whole = v`), which previously died with a confusing
+            // "expected `,` or `}` after match arm". Recover by
+            // wrapping the single statement in a block — identical AST
+            // to the braced form, so the checker and both runtimes
+            // need no changes.
             // (`break`/`continue` are already expressions via
             // `parse_primary`, with diverge handling in `check_match` —
-            // they must keep parsing as expressions, not blocks.)
+            // they must keep parsing as expressions, not blocks, so
+            // convert the statement forms back.)
             // Anything else parses as an expression as before.
             let start_span = pat.span();
-            let body = if self.peek_kind() == TokenKind::Return {
-                let stmt = self.parse_stmt();
-                let span = start_span.join(stmt.span());
-                Expr::Block(Block {
-                    stmts: vec![stmt],
-                    span,
-                })
-            } else {
-                self.parse_expr()
+            let stmt = self.parse_stmt();
+            let body = match stmt {
+                Stmt::Expr(e) => e,
+                Stmt::Break { span } => Expr::Break { span },
+                Stmt::Continue { span } => Expr::Continue { span },
+                other => {
+                    let span = start_span.join(other.span());
+                    Expr::Block(Block {
+                        stmts: vec![other],
+                        span,
+                    })
+                }
             };
             let end_span = body.span();
             let span = start_span.join(end_span);
@@ -1172,7 +1416,7 @@ impl Parser {
             let end = if self.eat_close(TokenKind::RParen) {
                 self.previous().span
             } else {
-                self.error_here("expected `)` to close variant argument");
+                self.error_missing_close(")", "expected `)` to close variant argument");
                 e.span()
             };
             Some((Box::new(e), end))
@@ -1183,7 +1427,7 @@ impl Parser {
             .span
             .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
         Expr::Variant {
-            name: name_tok.text,
+            name: name_tok.text.into_owned(),
             arg: arg.map(|(e, _)| e),
             span,
         }
@@ -1219,7 +1463,7 @@ impl Parser {
                 self.advance();
                 Pattern::Binding {
                     name: Ident {
-                        name: tok.text,
+                        name: tok.text.into_owned(),
                         span: tok.span,
                     },
                 }
@@ -1245,7 +1489,7 @@ impl Parser {
             TokenKind::Str => {
                 self.advance();
                 Pattern::Literal {
-                    value: Lit::Str(tok.text),
+                    value: Lit::Str(tok.text.into_owned()),
                     span: tok.span,
                 }
             }
@@ -1276,7 +1520,7 @@ impl Parser {
                     let end = if self.eat_close(TokenKind::RParen) {
                         self.previous().span
                     } else {
-                        self.error_here("expected `)` to close pattern");
+                        self.error_missing_close(")", "expected `)` to close pattern");
                         p.span()
                     };
                     Some((Box::new(p), end))
@@ -1287,7 +1531,7 @@ impl Parser {
                     .span
                     .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
                 Pattern::Variant {
-                    name: name_tok.text,
+                    name: name_tok.text.into_owned(),
                     arg: arg.map(|(p, _)| p),
                     span,
                 }
@@ -1307,7 +1551,7 @@ impl Parser {
                 let end = if self.eat(TokenKind::RParen) {
                     self.previous().span
                 } else {
-                    self.error_here("expected `)` to close tuple pattern");
+                    self.error_missing_close(")", "expected `)` to close tuple pattern");
                     self.peek().span
                 };
                 let span = tok.span.join(end);

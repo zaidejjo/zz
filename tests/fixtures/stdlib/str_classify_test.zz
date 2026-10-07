@@ -1,0 +1,31 @@
+// features: imports, locals, match, print, std-str, string-literal
+// E2E: str.classify — comment-aware line classification, rule families.
+import std.str
+
+func show(tag: str, r: [int]) {
+    println("{tag}={r[0]},{r[1]},{r[2]},{r[3]}")
+}
+
+func main() {
+    nest := str.classify("/* a /* b */\nx;\n", ["//"], "/*", "*/", true, false)
+    show("nested", nest)
+    inl := str.classify("int x; /* s */ y;\n", ["//"], "/*", "*/", false, false)
+    show("inline", inl)
+    py := str.classify("# c\nx = 1\n", ["#"], "\"\"\"", "\"\"\"", false, false)
+    show("python", py)
+    fast := str.classify("a\n\nb\n", [], "", "", false, false)
+    show("fast", fast)
+    whole := str.classify("=begin\ndoc\n=end\nx=1\n", ["#"], "=begin", "=end", false, true)
+    show("whole", whole)
+    strq := str.classify("let x = 1;\n", ["//"], "/*", "*/", false, false)
+    show("plain", strq)
+    tail := str.classify("/* o\nend */ x;\n", ["//"], "/*", "*/", false, false)
+    show("tail", tail)
+    unterm := str.classify("/* x\ny;\n", ["//"], "/*", "*/", false, false)
+    show("unterm", unterm)
+    empty := str.classify("", ["//"], "/*", "*/", false, false)
+    show("empty", empty)
+    nomark := "x;\n".classify([], "", "", false, false)
+    show("method", nomark)
+    println("str_classify_ok")
+}

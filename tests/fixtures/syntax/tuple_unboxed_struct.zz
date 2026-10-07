@@ -1,0 +1,35 @@
+// features: arrays, comparison, func-call, indexing, int-arith, locals, print, return, string-literal, structs, tuples
+// E2E: Tuples/arrays holding unboxed structs (all-scalar fields lower
+// to raw C structs) must box into zz_value containers; boxed field
+// reads of rvalues must hoist to a temp (no &rvalue).
+struct Rng { s0: int, s1: int }
+
+func next(r: Rng) -> (int, Rng) {
+    return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1 })
+}
+
+// Reassignment from a boxed source (index) leaves the local holding a
+// boxed object under an unboxed static type; re-boxing it into a tuple
+// must still compile.
+func bump(rs: [Rng], r: Rng) -> (int, Rng) {
+    r = rs[0]
+    return (0, r)
+}
+
+func main() {
+    r := Rng{ s0: 41, s1: 0 }
+    v, r := next(r)
+    println(v)
+    println(r.s0)
+    // Raw-arithmetic tuple items box too.
+    t := (r.s0 + 10, r.s1 + 20)
+    println(t[0])
+    println(t[1])
+    // Arrays of unboxed structs.
+    a := [Rng{ s0: 1, s1: 2 }]
+    println(a[0].s0)
+    b, r := bump(a, r)
+    println(b)
+    println(r.s0)
+    println("tuple_unboxed_ok")
+}

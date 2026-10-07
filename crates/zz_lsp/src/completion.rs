@@ -1,14 +1,21 @@
 //! Context-aware autocompletion for ZZ.
 //!
-//! Three completion modes:
+//! Four completion modes:
 //! 1. **Dot access** (`obj.`) — resolves the object's type and returns its fields.
 //! 2. **Scope completion** (bare identifier) — returns visible locals, globals,
 //!    functions, structs, and keywords filtered by prefix.
+//! 3. **Std root** (`std.`) — lists stdlib modules from the static table, no
+//!    import or check result needed.
+//! 4. **Import path** (`import std.ma|`) — completes `std.*` module paths
+//!    inside import statements.
+
+use std::collections::HashMap;
 
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse};
 use zz_checker::{CheckResult, FuncSig, StructSig, Type};
 use zz_frontend::ast::{Expr, Program, Stmt};
 
+use crate::convert::LineIndex;
 use crate::lookup::resolve_type_of_expr;
 
 // ── ZZ keywords ──────────────────────────────────────────────────────────
@@ -21,8 +28,23 @@ const KEYWORDS: &[&str] = &[
 // ── Stdlib module names ──────────────────────────────────────────────────
 
 const STDLIB_MODULES: &[&str] = &[
-    "io", "str", "vec", "json", "http", "fs", "env", "math", "time", "sqlz", "db",
+    "io", "str", "vec", "json", "http", "fs", "cenv", "math", "time", "sqlz", "db",
 ];
+
+// ── Completion environment ─────────────────────────────────────────────────
+
+/// Filesystem context for path-aware completion. Built per request from
+/// the document URI (see the `textDocument/completion` handler); tests
+/// pass `None` when the filesystem is irrelevant.
+#[derive(Debug, Clone, Default)]
+pub struct CompletionEnv {
+    /// Directory of the document being completed (for relative imports).
+    pub doc_dir: Option<std::path::PathBuf>,
+    /// Seed bindings visible to the last check (dep + workspace globals).
+    /// `CheckResult.bindings` holds only the file's own lets, so seeded
+    /// globals (`lib.pi`) complete from here.
+    pub seed_bindings: HashMap<String, Type>,
+}
 
 // ── Public API ───────────────────────────────────────────────────────────
 
@@ -32,18 +54,68 @@ pub fn completions_for_position(
     source: &str,
     offset: u32,
     check_result: Option<&CheckResult>,
+    cenv: Option<&CompletionEnv>,
 ) -> Option<CompletionResponse> {
-    let ctx = detect_context(source, offset)?;
+    let ctx = detect_context(source, offset, cenv)?;
+    // Plain-text guarantee: no item ever snippet-expands or carries
+    // parens — what you see is exactly what gets inserted. (Stray `()`
+    // some users see comes from client-side autopairs confirm hooks, not
+    // from these items.)
+    fn plain(mut items: Vec<CompletionItem>) -> Vec<CompletionItem> {
+        for item in &mut items {
+            item.insert_text_format = Some(tower_lsp::lsp_types::InsertTextFormat::PLAIN_TEXT);
+        }
+        items
+    }
     let items = match ctx {
         CompletionContext::DotAccess {
             obj_name,
             partial_prefix,
-        } => dot_access_completions(program, check_result, &obj_name, &partial_prefix),
+        } => dot_access_completions(program, check_result, &obj_name, &partial_prefix, cenv),
         CompletionContext::Scope { partial_prefix } => {
-            scope_completions(program, check_result, &partial_prefix)
+            scope_completions(program, check_result, &partial_prefix, cenv)
+        }
+        CompletionContext::ImportPath {
+            partial_prefix,
+            replace_start,
+        } => import_path_completions(
+            source,
+            &partial_prefix,
+            replace_start,
+            offset,
+            cenv.and_then(|e| e.doc_dir.clone()),
+        ),
+        CompletionContext::ImportSelective {
+            path,
+            partial_prefix,
+            replace_start,
+        } => selective_member_completions(
+            program,
+            source,
+            &path,
+            &partial_prefix,
+            replace_start,
+            offset,
+            check_result,
+            cenv,
+        ),
+        CompletionContext::StructLiteral {
+            struct_name,
+            partial_prefix,
+        } => {
+            // Unknown or ambiguous struct (an ordinary block, a call):
+            // fall back to scope so blocks never go dark.
+            match check_result.and_then(|cr| resolve_struct_key(cr, &struct_name)) {
+                Some(key) => struct_items(
+                    check_result.expect("key resolved from check_result"),
+                    &key,
+                    &partial_prefix,
+                ),
+                None => scope_completions(program, check_result, &partial_prefix, cenv),
+            }
         }
     };
-    Some(CompletionResponse::Array(items))
+    Some(CompletionResponse::Array(plain(items)))
 }
 
 /// Resolve extra detail for a completion item.
@@ -73,13 +145,68 @@ enum CompletionContext {
     Scope {
         partial_prefix: String,
     },
+    ImportPath {
+        partial_prefix: String,
+        replace_start: usize,
+    },
+    ImportSelective {
+        path: String,
+        partial_prefix: String,
+        replace_start: usize,
+    },
+    StructLiteral {
+        struct_name: String,
+        partial_prefix: String,
+    },
 }
 
-fn detect_context(source: &str, offset: u32) -> Option<CompletionContext> {
-    let before = &source[..offset as usize];
+fn detect_context(
+    source: &str,
+    offset: u32,
+    cenv: Option<&CompletionEnv>,
+) -> Option<CompletionContext> {
+    // Defensive: clamp out-of-range offsets and floor to a char boundary
+    // so a stale client position can never panic the handler.
+    let mut offset = (offset as usize).min(source.len());
+    while offset > 0 && !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &source[..offset];
+
+    // Import contexts first: `import std.ma|` must not read as dot-access
+    // on `std`, and `import std.math(P|` must not read as scope `P`.
+    if let Some(kind) = import_completion_at(before, cenv) {
+        return Some(match kind {
+            ImportCompletionKind::Path {
+                partial,
+                replace_start,
+            } => CompletionContext::ImportPath {
+                partial_prefix: partial,
+                replace_start,
+            },
+            ImportCompletionKind::Selective {
+                path,
+                partial,
+                replace_start,
+            } => CompletionContext::ImportSelective {
+                path,
+                partial_prefix: partial,
+                replace_start,
+            },
+        });
+    }
 
     let partial = extract_partial_identifier(before);
     let partial_prefix = partial.clone().unwrap_or_default();
+
+    // String/comment guards come before dot-access: `"math.|"` is text,
+    // not a receiver (completion inside a literal is always noise).
+    if inside_string_literal(before) {
+        return None;
+    }
+    if inside_line_comment(before) {
+        return None;
+    }
 
     let dot_check_offset = before.len() - partial_prefix.len();
     if dot_check_offset > 0 {
@@ -95,11 +222,14 @@ fn detect_context(source: &str, offset: u32) -> Option<CompletionContext> {
         }
     }
 
-    if inside_string_literal(before) {
-        return None;
-    }
-    if inside_line_comment(before) {
-        return None;
+    // Struct literals (`User{na`, `User{id: 12, na`): field names with
+    // types. Ordinary blocks fall through to scope via the unknown-struct
+    // fallback in the match arm.
+    if let Some((struct_name, field_prefix)) = struct_literal_at(before) {
+        return Some(CompletionContext::StructLiteral {
+            struct_name,
+            partial_prefix: field_prefix,
+        });
     }
 
     Some(CompletionContext::Scope { partial_prefix })
@@ -127,6 +257,170 @@ fn extract_partial_identifier(text: &str) -> Option<String> {
     }
 }
 
+/// Which import-list context the cursor sits in.
+#[derive(Debug, Clone, PartialEq)]
+enum ImportCompletionKind {
+    /// Inside the module path: `import std.ma|`, `import |`.
+    Path {
+        partial: String,
+        replace_start: usize,
+    },
+    /// Inside the selective list: `import std.math(P|`, `import std.math(PI, s|`.
+    Selective {
+        path: String,
+        partial: String,
+        replace_start: usize,
+    },
+}
+
+/// Detect import-list completion contexts from the text before the cursor.
+///
+/// Only fires on the statement's first line (`import ...` with no newline
+/// after it) and never inside the closed parens — `import std.math(PI)|`
+/// is plain scope again. Returns the byte offset where the replacement
+/// should start so items can carry an exact `textEdit`.
+fn import_completion_at(
+    before: &str,
+    cenv: Option<&CompletionEnv>,
+) -> Option<ImportCompletionKind> {
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line = &before[line_start..];
+    let trimmed = line.trim_start();
+    let after_import = trimmed.strip_prefix("import")?;
+    // Require a real `import` keyword: `imports`, `importx` must not match.
+    if !after_import.is_empty()
+        && !after_import.starts_with(char::is_whitespace)
+        && !after_import.starts_with('(')
+    {
+        return None;
+    }
+    let after = after_import.trim_start();
+    let base = line_start + (line.len() - trimmed.len()) + "import".len();
+    let after_start = base + (after_import.len() - after.len());
+
+    // Selective list: `import <path>(a, b|`.
+    if let Some(paren) = after.find('(') {
+        let tail = &after[paren + 1..];
+        // Closed or nested parens: the list is over.
+        if tail.contains(')') || tail.contains('(') {
+            return None;
+        }
+        // Path token = last whitespace-separated word before `(` —
+        // covers `std.math(`, `std.math as m(`, and local `utils(`.
+        let path = after[..paren]
+            .split_whitespace()
+            .last()
+            .unwrap_or("")
+            .to_string();
+        if path.is_empty() {
+            return None;
+        }
+        // Partial = trailing identifier run after the last comma.
+        let after_comma = tail.rsplit(',').next().unwrap_or("");
+        let segment = after_comma.trim_start();
+        let seg_start_in_tail =
+            tail.len() - after_comma.len() + (after_comma.len() - segment.len());
+        let ident_len = segment
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+            .map(|(i, c)| i + c.len_utf8())
+            .last()
+            .unwrap_or(0);
+        // Trailing junk that is not an identifier prefix (e.g. `as ` with a
+        // space, stray quotes) ends the completion context.
+        if segment[ident_len..].trim_start().is_empty() {
+            let partial = segment[..ident_len].to_string();
+            let replace_start = after_start + paren + 1 + seg_start_in_tail;
+            return Some(ImportCompletionKind::Selective {
+                path,
+                partial,
+                replace_start,
+            });
+        }
+        return None;
+    }
+
+    // Module path: identifier/dot/slash characters only.
+    // `std` roots always complete; local paths complete when their first
+    // segment resolves beside the document (otherwise `import foo` stays
+    // plain scope — nothing to offer yet).
+    // An empty path (`import |`) offers `std` plus local top-level modules.
+    let path_ok = after
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '/');
+    if path_ok
+        && (after.is_empty() || after == "std" || after.starts_with("std.") || {
+            let first = after.split(['.', '/']).next().unwrap_or("");
+            cenv.and_then(|e| e.doc_dir.clone()).is_some_and(|dir| {
+                !first.is_empty()
+                    && (dir.join(first).with_extension("zz").is_file() || dir.join(first).is_dir())
+            })
+        })
+    {
+        return Some(ImportCompletionKind::Path {
+            partial: after.to_string(),
+            replace_start: after_start,
+        });
+    }
+    None
+}
+
+/// Detect struct-literal field context: `User{`, `User{id: 12, na`,
+/// `lib.Point{x:` — an identifier glued to `{` with no braces after.
+/// Returns (struct name, field partial). Value positions (`name:` done,
+/// digit-led values) and closed literals return None so scope applies.
+fn struct_literal_at(before: &str) -> Option<(String, String)> {
+    let open = before.rfind('{')?;
+    // A closed brace after it means the literal is over.
+    if before[open..].contains('}') {
+        return None;
+    }
+    let head = before[..open].trim_end();
+    // Identifier (possibly dotted) glued to the brace.
+    let mut start = head.len();
+    let bytes = head.as_bytes();
+    while start > 0 {
+        let ch = bytes[start - 1];
+        if ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    let name = &head[start..];
+    if name.is_empty()
+        || !name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || name.contains("..")
+    {
+        return None;
+    }
+    let segment = before[open + 1..].trim_start();
+    let after_comma = segment.rsplit(',').next().unwrap_or("");
+    let field_part = after_comma.trim_start();
+    // Digit-led values (`id: 12`) are not field names.
+    if field_part
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let partial: String = field_part
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    // Trailing junk past the identifier (`name:`) means value position.
+    if !field_part[partial.len()..].trim_start().is_empty() {
+        return None;
+    }
+    Some((name.to_string(), partial))
+}
+
 fn inside_string_literal(text: &str) -> bool {
     let mut in_string = false;
     for ch in text.chars() {
@@ -149,6 +443,416 @@ fn inside_line_comment(text: &str) -> bool {
     false
 }
 
+// ── Import path + selective member completions ───────────────────────────
+
+/// Range covering `replace_start..cursor` as an LSP range (for `textEdit`).
+fn replace_range(source: &str, replace_start: usize, cursor: u32) -> tower_lsp::lsp_types::Range {
+    let index = LineIndex::new(source);
+    tower_lsp::lsp_types::Range {
+        start: index.offset_to_position(source, replace_start.min(source.len()) as u32),
+        end: index.offset_to_position(source, cursor.min(source.len() as u32)),
+    }
+}
+
+/// Complete `std.*` module paths inside `import` statements.
+///
+/// Labels are full dotted paths (`std.math`) with a `textEdit` that replaces
+/// exactly the typed path, so clients never double the prefix (`std.std.x`).
+fn import_path_completions(
+    source: &str,
+    partial_prefix: &str,
+    replace_start: usize,
+    cursor: u32,
+    doc_dir: Option<std::path::PathBuf>,
+) -> Vec<CompletionItem> {
+    let range = replace_range(source, replace_start, cursor);
+    let text_edit = |new_text: String| {
+        Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+            tower_lsp::lsp_types::TextEdit { range, new_text },
+        ))
+    };
+    let mut items = Vec::new();
+    if partial_prefix.is_empty() {
+        items.push(CompletionItem {
+            label: "std".to_string(),
+            kind: Some(CompletionItemKind::MODULE),
+            detail: Some("stdlib root".to_string()),
+            text_edit: text_edit("std".to_string()),
+            ..Default::default()
+        });
+        // Local top-level modules beside the document (`utils.zz` → `utils`).
+        if let Some(dir) = doc_dir {
+            let mut tops = local_tops(&dir);
+            tops.sort();
+            for top in tops {
+                items.push(CompletionItem {
+                    label: top.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("local module".to_string()),
+                    text_edit: text_edit(top),
+                    ..Default::default()
+                });
+            }
+        }
+        return items;
+    }
+    if partial_prefix == "std" || partial_prefix.starts_with("std.") {
+        let mut seen = std::collections::HashSet::new();
+        for module in zz_stdlib::STDLIB_MODULES {
+            let full = format!("std.{module}");
+            if full.starts_with(partial_prefix) && seen.insert(full.clone()) {
+                items.push(CompletionItem {
+                    label: full.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("stdlib module".to_string()),
+                    text_edit: text_edit(full),
+                    ..Default::default()
+                });
+            }
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        return items;
+    }
+    // Local path: complete the last segment against the parent directory
+    // (`import math_utils.l|` → `math_utils.lib`). Labels are full dotted
+    // paths; the textEdit swaps the whole typed path so prefixes never
+    // double. Only resolvable files are offered — the loader accepts
+    // nothing else.
+    if let Some(dir) = doc_dir {
+        let (parent, last) = match partial_prefix.rsplit_once('.') {
+            Some((p, l)) => (p, l),
+            None => ("", partial_prefix),
+        };
+        let parent_dir = if parent.is_empty() {
+            dir
+        } else {
+            dir.join(parent.replace('.', "/"))
+        };
+        if parent_dir.is_dir() {
+            let mut names: Vec<String> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&parent_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().is_some_and(|e| e == "zz") {
+                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                            if stem.starts_with(last) {
+                                let full = if parent.is_empty() {
+                                    stem.to_string()
+                                } else {
+                                    format!("{parent}.{stem}")
+                                };
+                                names.push(full);
+                            }
+                        }
+                    }
+                    // Descend into matching subdirectories so
+                    // `import math_utils|` discovers `math_utils.lib`
+                    // (the loader only opens files — dirs alone are
+                    // never offered, only their contents).
+                    if p.is_dir() {
+                        if let Some(sub) = p.file_name().and_then(|s| s.to_str()) {
+                            if sub.starts_with(last) {
+                                if let Ok(subs) = std::fs::read_dir(&p) {
+                                    for sub_entry in subs.flatten() {
+                                        let sp = sub_entry.path();
+                                        if sp.extension().is_some_and(|e| e == "zz") {
+                                            if let Some(stem) =
+                                                sp.file_stem().and_then(|s| s.to_str())
+                                            {
+                                                let full = if parent.is_empty() {
+                                                    format!("{sub}.{stem}")
+                                                } else {
+                                                    format!("{parent}.{sub}.{stem}")
+                                                };
+                                                names.push(full);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            names.sort();
+            names.dedup();
+            for full in names {
+                items.push(CompletionItem {
+                    label: full.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("local module".to_string()),
+                    text_edit: text_edit(full),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    items
+}
+
+/// Top-level module stems beside `dir` (`utils.zz` → `utils`).
+fn local_tops(dir: &std::path::Path) -> Vec<String> {
+    let mut tops = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().is_some_and(|e| e == "zz") {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    tops.push(stem.to_string());
+                }
+            }
+        }
+    }
+    tops
+}
+
+/// Complete member names inside a selective import list:
+/// `import std.math(P|` → `PI`, `sin`, …
+///
+/// Reads the static stdlib tables (same source the loader seeds from), so
+/// answers never depend on check state. Non-`std` paths resolve through the
+/// program's import aliases (`m` from `import std.math as m`); anything else
+/// yields nothing rather than guessing.
+#[allow(clippy::too_many_arguments)]
+fn selective_member_completions(
+    _program: &Program,
+    source: &str,
+    path: &str,
+    partial_prefix: &str,
+    replace_start: usize,
+    cursor: u32,
+    check_result: Option<&CheckResult>,
+    cenv: Option<&CompletionEnv>,
+) -> Vec<CompletionItem> {
+    // Workspace / dependency namespace: members live in the seeded check
+    // result under the import namespace (alias or last segment). The seed
+    // is file-based, so it serves even while the current import statement
+    // is still being typed — and when the program has no usable import
+    // yet, the typed path is harvested on demand (generics included: they
+    // deliberately skip bare value seeding, loader parity).
+    if path != "std" && !path.starts_with("std.") {
+        let ns = path.rsplit('.').next().unwrap_or(path);
+        let prefix = format!("{ns}.");
+        let range = replace_range(source, replace_start, cursor);
+        let edit = |name: &str| {
+            Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                tower_lsp::lsp_types::TextEdit {
+                    range,
+                    new_text: name.to_string(),
+                },
+            ))
+        };
+        // (label, kind, detail) merged from the check seed and, when the
+        // program cannot provide it, a fresh harvest of the typed file.
+        let mut members: std::collections::HashMap<String, (CompletionItemKind, String)> =
+            std::collections::HashMap::new();
+        if let Some(cr) = check_result {
+            for key in cr.funcs.keys() {
+                if let Some(name) = key.strip_prefix(&prefix) {
+                    if !name.contains('.') && name.starts_with(partial_prefix) {
+                        members
+                            .entry(name.to_string())
+                            .or_insert((CompletionItemKind::FUNCTION, format!("{ns}.{name}")));
+                    }
+                }
+            }
+            for key in cr.structs.keys() {
+                if let Some(name) = key.strip_prefix(&prefix) {
+                    if !name.contains('.') && name.starts_with(partial_prefix) {
+                        members
+                            .entry(name.to_string())
+                            .or_insert((CompletionItemKind::STRUCT, format!("{ns}.{name}")));
+                    }
+                }
+            }
+            for (key, ty) in cr.bindings.iter().chain(env_bindings(cenv)) {
+                if let Some(name) = key.strip_prefix(&prefix) {
+                    if !name.contains('.') && name.starts_with(partial_prefix) {
+                        members
+                            .entry(name.to_string())
+                            .or_insert((CompletionItemKind::VARIABLE, format!("{name}: {ty}")));
+                    }
+                }
+            }
+        }
+        // On-demand harvest: mid-typing the first import, the program has
+        // no import statement to seed from — read the file beside the
+        // document directly (cached per keystroke nowhere; target files
+        // are small and this path only runs inside import parens).
+        if members.is_empty() {
+            if let Some(dir) = cenv.and_then(|e| e.doc_dir.clone()) {
+                let segs: Vec<String> = path.split('.').map(|s| s.to_string()).collect();
+                if let Some(file) = crate::deps::resolve_local_import(&dir, &segs) {
+                    let file_ns = segs.last().cloned().unwrap_or_default();
+                    let harvested = crate::deps::harvest_workspace_file(
+                        &file,
+                        &file_ns,
+                        None,
+                        &zz_stdlib::stdlib_funcs(),
+                        0,
+                    );
+                    let hp = format!("{file_ns}.");
+                    for key in harvested.funcs.keys() {
+                        if let Some(name) = key.strip_prefix(&hp) {
+                            if !name.contains('.') && name.starts_with(partial_prefix) {
+                                members.entry(name.to_string()).or_insert((
+                                    CompletionItemKind::FUNCTION,
+                                    format!("{file_ns}.{name}"),
+                                ));
+                            }
+                        }
+                    }
+                    for key in harvested.structs.keys() {
+                        if let Some(name) = key.strip_prefix(&hp) {
+                            if !name.contains('.') && name.starts_with(partial_prefix) {
+                                members.entry(name.to_string()).or_insert((
+                                    CompletionItemKind::STRUCT,
+                                    format!("{file_ns}.{name}"),
+                                ));
+                            }
+                        }
+                    }
+                    for (key, ty) in &harvested.bindings {
+                        if let Some(name) = key.strip_prefix(&hp) {
+                            if !name.contains('.') && name.starts_with(partial_prefix) {
+                                members.entry(name.to_string()).or_insert((
+                                    CompletionItemKind::VARIABLE,
+                                    format!("{name}: {ty}"),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut items: Vec<CompletionItem> = members
+            .into_iter()
+            .map(|(name, (kind, detail))| CompletionItem {
+                label: name.clone(),
+                kind: Some(kind),
+                detail: Some(detail),
+                text_edit: edit(&name),
+                ..Default::default()
+            })
+            .collect();
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        return items;
+    }
+    if path == "std" {
+        return Vec::new();
+    }
+    let module = match path.strip_prefix("std.") {
+        Some(rest) => rest.to_string(),
+        None => return Vec::new(),
+    };
+    let prefix = format!("std.{module}.");
+    let range = replace_range(source, replace_start, cursor);
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (key, sig) in zz_stdlib::stdlib_funcs_cached() {
+        if let Some(name) = key.strip_prefix(&prefix) {
+            if !name.contains('.')
+                && name.starts_with(partial_prefix)
+                && seen.insert(name.to_string())
+            {
+                let is_const = zz_stdlib::stdlib_consts_cached().contains_key(key);
+                items.push(CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(if is_const {
+                        CompletionItemKind::CONSTANT
+                    } else {
+                        CompletionItemKind::FUNCTION
+                    }),
+                    detail: Some(format!("std.{module}.{name}")),
+                    text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                        tower_lsp::lsp_types::TextEdit {
+                            range,
+                            new_text: name.to_string(),
+                        },
+                    )),
+                    ..Default::default()
+                });
+                let _ = sig;
+            }
+        }
+    }
+    // Constants that have no func entry (defensive: the tables overlap today).
+    for key in zz_stdlib::stdlib_consts_cached().keys() {
+        if let Some(name) = key.strip_prefix(&prefix) {
+            if !name.contains('.')
+                && name.starts_with(partial_prefix)
+                && seen.insert(name.to_string())
+            {
+                items.push(CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(CompletionItemKind::CONSTANT),
+                    detail: Some(format!("std.{module}.{name}")),
+                    text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                        tower_lsp::lsp_types::TextEdit {
+                            range,
+                            new_text: name.to_string(),
+                        },
+                    )),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Complete top-level stdlib module names after a bare `std.`.
+///
+/// Static table, no check result needed — `std.` can never resolve through
+/// imports (no import statement names the `std` namespace itself).
+fn std_root_completions(partial_prefix: &str) -> Vec<CompletionItem> {
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    for module in zz_stdlib::STDLIB_MODULES {
+        let top = module.split('.').next().unwrap_or(module);
+        if top.starts_with(partial_prefix) && seen.insert(top.to_string()) {
+            items.push(CompletionItem {
+                label: top.to_string(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some(format!("stdlib module std.{top}")),
+                insert_text: Some(top.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Seeded globals snapshot (`lib.pi` from deps/workspace).
+/// `CheckResult.bindings` holds only the file's own lets by checker
+/// design, so completion unions both sources.
+fn env_bindings(cenv: Option<&CompletionEnv>) -> &HashMap<String, Type> {
+    static EMPTY: std::sync::LazyLock<HashMap<String, Type>> =
+        std::sync::LazyLock::new(HashMap::new);
+    cenv.map(|e| &e.seed_bindings).unwrap_or(&EMPTY)
+}
+
+/// Resolve a struct name as written at a literal site (`User`,
+/// `lib.Point`) to its seed key: exact match first, then any
+/// `something.User` suffix (imported namespaces).
+fn resolve_struct_key(cr: &CheckResult, name: &str) -> Option<String> {
+    if cr.structs.contains_key(name) {
+        return Some(name.to_string());
+    }
+    let mut hit: Option<String> = None;
+    for key in cr.structs.keys() {
+        if key != name && key.rsplit('.').next() == Some(name) {
+            if hit.is_some() {
+                return None; // ambiguous — let scope handle it
+            }
+            hit = Some(key.clone());
+        }
+    }
+    hit
+}
+
 // ── Dot access completions ───────────────────────────────────────────────
 
 fn dot_access_completions(
@@ -156,7 +860,13 @@ fn dot_access_completions(
     check_result: Option<&CheckResult>,
     obj_name: &str,
     partial_prefix: &str,
+    cenv: Option<&CompletionEnv>,
 ) -> Vec<CompletionItem> {
+    // `std.` lists modules from the static table: no import statement ever
+    // binds the `std` namespace, so the alias lookup below cannot serve it.
+    if obj_name == "std" {
+        return std_root_completions(partial_prefix);
+    }
     let cr = match check_result {
         Some(cr) => cr,
         None => return Vec::new(),
@@ -165,7 +875,7 @@ fn dot_access_completions(
     // 1. Try struct field access (existing logic).
     let obj_type = resolve_obj_type(program, cr, obj_name);
     let struct_name = match obj_type.clone() {
-        Some(Type::Struct(name)) => name,
+        Some(Type::Struct(name, _)) => name,
         Some(other) => {
             // Receiver-typed method completions (`str.`, `vec.`, scalar ext
             // methods, ...): list `ns.method` entries from the merged funcs
@@ -209,16 +919,22 @@ fn dot_access_completions(
             }
             // 2. Not a struct — check if obj_name is an imported stdlib module
             //    alias (e.g. `math` after `import std.math as math`).
-            return stdlib_module_completions(program, cr, obj_name, partial_prefix);
+            return stdlib_module_completions(program, cr, obj_name, partial_prefix, cenv);
         }
         _ => {
             // 2. Not a struct — check if obj_name is an imported stdlib module
             //    alias (e.g. `math` after `import std.math as math`).
-            return stdlib_module_completions(program, cr, obj_name, partial_prefix);
+            return stdlib_module_completions(program, cr, obj_name, partial_prefix, cenv);
         }
     };
 
-    let sig = match cr.structs.get(&struct_name) {
+    struct_items(cr, &struct_name, partial_prefix)
+}
+
+/// Field + method items for a resolved struct name. Shared by dot-access
+/// (`p.` on a struct value) and struct literals (`User{na|`).
+fn struct_items(cr: &CheckResult, struct_name: &str, partial_prefix: &str) -> Vec<CompletionItem> {
+    let sig = match cr.structs.get(struct_name) {
         Some(s) => s,
         None => return Vec::new(),
     };
@@ -254,15 +970,17 @@ fn dot_access_completions(
     items
 }
 
-/// Provide completions for stdlib module access (`math.`, `str.`, etc.).
+/// Provide completions for module access (`math.`, `table.`, …).
 ///
 /// When the user types `math.`, look up the import alias in the AST and
-/// provide all functions from the corresponding stdlib module.
+/// provide all functions from the corresponding module — stdlib namespaces
+/// and harvested dependency namespaces alike.
 fn stdlib_module_completions(
     program: &Program,
     cr: &CheckResult,
     obj_name: &str,
     partial_prefix: &str,
+    cenv: Option<&CompletionEnv>,
 ) -> Vec<CompletionItem> {
     // Find the stdlib module for this alias.
     let module = find_stdlib_module_for_alias(program, obj_name);
@@ -303,14 +1021,76 @@ fn stdlib_module_completions(
         .filter(|item| item.label.starts_with(partial_prefix))
         .collect();
 
+    // Structs, type aliases, enums and globals under the same namespace
+    // (`lib.Point`, `lib.VERSION`, …): `lib.` must serve everything `pub`.
+    for (key, sig) in &cr.structs {
+        if let Some(name) = prefixes.iter().find_map(|p| key.strip_prefix(p.as_str())) {
+            if !name.contains('.') && name.starts_with(partial_prefix) {
+                items.push(CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(CompletionItemKind::STRUCT),
+                    detail: Some(format_struct_sig(name, sig)),
+                    insert_text: Some(name.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    for (key, sig) in &cr.aliases {
+        if let Some(name) = prefixes.iter().find_map(|p| key.strip_prefix(p.as_str())) {
+            if !name.contains('.') && name.starts_with(partial_prefix) {
+                items.push(CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(CompletionItemKind::STRUCT),
+                    detail: Some(format!("type {name} = {}", sig.target)),
+                    insert_text: Some(name.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    for (key, sig) in &cr.enums {
+        if let Some(name) = prefixes.iter().find_map(|p| key.strip_prefix(p.as_str())) {
+            if !name.contains('.') && name.starts_with(partial_prefix) {
+                items.push(CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(CompletionItemKind::ENUM),
+                    detail: Some(format!("enum {name} ({} variants)", sig.variants.len())),
+                    insert_text: Some(name.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    for (name, ty) in cr.bindings.iter().chain(env_bindings(cenv)) {
+        if let Some(short) = prefixes.iter().find_map(|p| name.strip_prefix(p.as_str())) {
+            if !short.contains('.') && short.starts_with(partial_prefix) {
+                items.push(CompletionItem {
+                    label: short.to_string(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some(format!("{short}: {ty}")),
+                    insert_text: Some(short.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
     items.sort_by(|a, b| a.label.cmp(&b.label));
+    items.dedup_by(|a, b| a.label == b.label);
     items
 }
 
 /// Walk the AST import statements to find which stdlib module an alias
 /// maps to.  For example, `import std.math as math` maps alias `math`
 /// to module `math`.
+///
+/// Falls back to the alias itself when some import statement binds it
+/// (`import table` → `table`): dependency and local namespaces carry
+/// their members under that prefix in the check seed, so `table.`
+/// completes even though no `std.*` path is involved.
 fn find_stdlib_module_for_alias(program: &Program, alias: &str) -> Option<String> {
+    let mut fallback: Option<String> = None;
     for stmt in &program.stmts {
         if let Stmt::Import {
             path,
@@ -336,10 +1116,11 @@ fn find_stdlib_module_for_alias(program: &Program, alias: &str) -> Option<String
                 if path.len() == 1 && STDLIB_MODULES.contains(&path[0].as_str()) {
                     return Some(path[0].clone());
                 }
+                fallback = Some(ns);
             }
         }
     }
-    None
+    fallback
 }
 
 fn resolve_obj_type(program: &Program, cr: &CheckResult, name: &str) -> Option<Type> {
@@ -352,8 +1133,14 @@ fn resolve_obj_type(program: &Program, cr: &CheckResult, name: &str) -> Option<T
         return Some(func_sig_to_type(sig));
     }
     // 3. Check struct name.
-    if cr.structs.contains_key(name) {
-        return Some(Type::Struct(name.to_string()));
+    if let Some(sig) = cr.structs.get(name) {
+        // Generic parameters stay symbolic in hovers (`Box[T]`).
+        let args = sig
+            .generics
+            .iter()
+            .map(|g| Type::Named(g.clone()))
+            .collect();
+        return Some(Type::Struct(name.to_string(), args));
     }
     // 4. Walk AST for Decl.
     for stmt in &program.stmts {
@@ -452,6 +1239,7 @@ fn scope_completions(
     program: &Program,
     check_result: Option<&CheckResult>,
     partial_prefix: &str,
+    cenv: Option<&CompletionEnv>,
 ) -> Vec<CompletionItem> {
     let mut items = Vec::new();
 
@@ -490,8 +1278,8 @@ fn scope_completions(
                 });
             }
         }
-        // Global bindings.
-        for (name, ty) in &cr.bindings {
+        // Global bindings: own-file lets plus seeded dep/workspace globals.
+        for (name, ty) in cr.bindings.iter().chain(env_bindings(cenv)) {
             if name.starts_with(partial_prefix) {
                 items.push(CompletionItem {
                     label: name.clone(),
@@ -499,6 +1287,63 @@ fn scope_completions(
                     detail: Some(format!("{name}: {ty}")),
                     ..Default::default()
                 });
+            }
+        }
+    }
+
+    // Selectively-imported generics (`import utils.lib(area)`): no bare
+    // value binding exists by loader design, yet bare CALLS typecheck via
+    // the checker's import-alias maps — so the bare name must complete in
+    // scope too. Non-generics already seed bare names; only fill the gap
+    // where the qualified signature exists but no bare item does.
+    if let Some(cr) = check_result {
+        for stmt in &program.stmts {
+            let Stmt::Import {
+                path,
+                alias,
+                items: import_items,
+                ..
+            } = stmt
+            else {
+                continue;
+            };
+            if import_items.is_empty() {
+                continue;
+            }
+            if path.first().map(String::as_str) == Some("std") {
+                continue;
+            }
+            let ns = alias
+                .as_ref()
+                .cloned()
+                .or_else(|| path.last().cloned())
+                .unwrap_or_default();
+            if ns.is_empty() {
+                continue;
+            }
+            for item in import_items {
+                let zz_frontend::ast::ImportItem::Named {
+                    name, alias: ia, ..
+                } = item
+                else {
+                    continue;
+                };
+                let target = ia.clone().unwrap_or_else(|| name.clone());
+                if !target.starts_with(partial_prefix) {
+                    continue;
+                }
+                if items.iter().any(|i| i.label == target) {
+                    continue;
+                }
+                let qualified = format!("{ns}.{name}");
+                if cr.funcs.contains_key(&qualified) {
+                    items.push(CompletionItem {
+                        label: target.clone(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some(format!("{qualified} (selective)")),
+                        ..Default::default()
+                    });
+                }
             }
         }
     }
@@ -525,6 +1370,17 @@ fn scope_completions(
                 });
             }
         }
+    }
+
+    // The `std` root itself: typing `st` should discover the stdlib
+    // (`std.` then lists modules). Needs no import.
+    if "std".starts_with(partial_prefix) {
+        items.push(CompletionItem {
+            label: "std".to_string(),
+            kind: Some(CompletionItemKind::MODULE),
+            detail: Some("stdlib root — `std.<module>`".to_string()),
+            ..Default::default()
+        });
     }
 
     // Local names from AST.
@@ -678,7 +1534,7 @@ fn type_from_annotation(ty: &zz_frontend::ast::Ty) -> Type {
                 "bool" => Type::Bool,
                 "str" => Type::Str,
                 "void" | "unit" => Type::Unit,
-                _ => Type::Struct(name),
+                _ => Type::Struct(name, Vec::new()),
             }
         }
         TyKind::Int => Type::Int,
@@ -707,6 +1563,8 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
         );
         (parsed.program, Some(cr))
     }
@@ -724,7 +1582,14 @@ mod tests {
                 &mut std::collections::HashMap::new(),
             );
         }
-        let cr = check_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
         (parsed.program, Some(cr))
     }
 
@@ -733,7 +1598,7 @@ mod tests {
     #[test]
     fn detect_scope_empty_prefix() {
         let src = "x := 1\n";
-        let ctx = detect_context(src, src.len() as u32);
+        let ctx = detect_context(src, src.len() as u32, None);
         assert_eq!(
             ctx,
             Some(CompletionContext::Scope {
@@ -745,7 +1610,7 @@ mod tests {
     #[test]
     fn detect_scope_partial() {
         let src = "xy := 1\nxz := 2\n";
-        let ctx = detect_context(src, 2);
+        let ctx = detect_context(src, 2, None);
         assert_eq!(
             ctx,
             Some(CompletionContext::Scope {
@@ -757,7 +1622,7 @@ mod tests {
     #[test]
     fn detect_dot_access() {
         let src = "struct Point { x: int }\np := Point{ x: 1 }\np.";
-        let ctx = detect_context(src, src.len() as u32);
+        let ctx = detect_context(src, src.len() as u32, None);
         assert_eq!(
             ctx,
             Some(CompletionContext::DotAccess {
@@ -770,7 +1635,7 @@ mod tests {
     #[test]
     fn detect_dot_access_with_partial() {
         let src = "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x";
-        let ctx = detect_context(src, src.len() as u32);
+        let ctx = detect_context(src, src.len() as u32, None);
         assert_eq!(
             ctx,
             Some(CompletionContext::DotAccess {
@@ -783,7 +1648,7 @@ mod tests {
     #[test]
     fn detect_inside_string_returns_none() {
         let src = r#"x := "hello world""#;
-        let ctx = detect_context(src, 12);
+        let ctx = detect_context(src, 12, None);
         assert_eq!(ctx, None);
     }
 
@@ -793,7 +1658,7 @@ mod tests {
     fn scope_keywords() {
         let src = "x := 1\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "ret");
+        let items = scope_completions(&program, cr.as_ref(), "ret", None);
         assert!(items.iter().any(|i| i.label == "return"));
         assert!(!items.iter().any(|i| i.label == "func"));
     }
@@ -802,7 +1667,7 @@ mod tests {
     fn scope_globals() {
         let src = "func add(a: int, b: int) -> int { return a + b }\nx := 1\nxy := 2\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "x");
+        let items = scope_completions(&program, cr.as_ref(), "x", None);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"x"));
         assert!(labels.contains(&"xy"));
@@ -813,7 +1678,7 @@ mod tests {
     fn scope_local_params() {
         let src = "func f(param_a: int) -> int {\n  let local_b = param_a\n  return local_b\n}\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "par");
+        let items = scope_completions(&program, cr.as_ref(), "par", None);
         assert!(items.iter().any(|i| i.label == "param_a"));
     }
 
@@ -821,7 +1686,7 @@ mod tests {
     fn scope_local_let() {
         let src = "alpha := 1\nbeta := 2\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "al");
+        let items = scope_completions(&program, cr.as_ref(), "al", None);
         assert!(items.iter().any(|i| i.label == "alpha"));
         assert!(!items.iter().any(|i| i.label == "beta"));
     }
@@ -832,7 +1697,7 @@ mod tests {
     fn dot_access_struct_fields() {
         let src = "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.";
         let (program, cr) = check(src);
-        let items = dot_access_completions(&program, cr.as_ref(), "p", "");
+        let items = dot_access_completions(&program, cr.as_ref(), "p", "", None);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"x"));
         assert!(labels.contains(&"y"));
@@ -845,7 +1710,7 @@ mod tests {
     fn dot_access_partial_filter() {
         let src = "struct Point { x: int, y: int, z: int }\np := Point{ x: 1, y: 2, z: 3 }\np.x";
         let (program, cr) = check(src);
-        let items = dot_access_completions(&program, cr.as_ref(), "p", "x");
+        let items = dot_access_completions(&program, cr.as_ref(), "p", "x", None);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "x");
     }
@@ -854,7 +1719,7 @@ mod tests {
     fn dot_access_non_struct_returns_empty() {
         let src = "x := 42\nx.";
         let (program, cr) = check(src);
-        let items = dot_access_completions(&program, cr.as_ref(), "x", "");
+        let items = dot_access_completions(&program, cr.as_ref(), "x", "", None);
         assert!(items.is_empty());
     }
 
@@ -864,7 +1729,7 @@ mod tests {
     fn completions_for_position_scope() {
         let src = "myvar := 1\n";
         let (program, cr) = check(src);
-        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref(), None);
         let items = match resp {
             Some(CompletionResponse::Array(v)) => v,
             _ => panic!("expected array response"),
@@ -876,7 +1741,7 @@ mod tests {
     fn completions_for_position_dot() {
         let src = "struct Foo { bar: int }\nf := Foo{ bar: 1 }\nf.";
         let (program, cr) = check(src);
-        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref(), None);
         let items = match resp {
             Some(CompletionResponse::Array(v)) => v,
             _ => panic!("expected array response"),
@@ -891,7 +1756,7 @@ mod tests {
         let src =
             "struct Abc { a1: int, b1: int, a2: int }\nobj := Abc{ a1: 1, b1: 2, a2: 3 }\nobj.a";
         let (program, cr) = check(src);
-        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref(), None);
         let items = match resp {
             Some(CompletionResponse::Array(v)) => v,
             _ => panic!("expected array response"),
@@ -908,7 +1773,7 @@ mod tests {
     fn stdlib_module_dot_access() {
         let src = "import std.math\nmath.";
         let (program, cr) = check_with_stdlib(src);
-        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref(), None);
         let items = match resp {
             Some(CompletionResponse::Array(v)) => v,
             _ => panic!("expected array response"),
@@ -925,7 +1790,7 @@ mod tests {
     fn stdlib_module_dot_access_partial() {
         let src = "import std.math\nmath.f";
         let (program, cr) = check_with_stdlib(src);
-        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref(), None);
         let items = match resp {
             Some(CompletionResponse::Array(v)) => v,
             _ => panic!("expected array response"),
@@ -939,7 +1804,7 @@ mod tests {
     fn stdlib_module_aliased_dot_access() {
         let src = "import std.math as m\nm.";
         let (program, cr) = check_with_stdlib(src);
-        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref(), None);
         let items = match resp {
             Some(CompletionResponse::Array(v)) => v,
             _ => panic!("expected array response"),
@@ -953,12 +1818,872 @@ mod tests {
     fn stdlib_module_name_in_scope() {
         let src = "import std.math as math\nmath";
         let (program, cr) = check_with_stdlib(src);
-        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref());
+        let resp = completions_for_position(&program, src, src.len() as u32, cr.as_ref(), None);
         let items = match resp {
             Some(CompletionResponse::Array(v)) => v,
             _ => panic!("expected array response"),
         };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"math"), "expected 'math' in {labels:?}");
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    //! Full completion audit: every documented trigger must serve.
+    //! Each case resolves through `completions_for_position` (the exact
+    //! function the `textDocument/completion` handler calls).
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    fn test_state() -> crate::state::GlobalState {
+        crate::state::GlobalState::new()
+    }
+
+    /// Seeded check like the live recheck pipeline (imports applied).
+    fn seeded(source: &str) -> (Program, Option<CheckResult>) {
+        let state = test_state();
+        let parsed = parse(source);
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
+        (parsed.program, Some(cr))
+    }
+
+    fn labels(resp: Option<CompletionResponse>) -> Vec<String> {
+        match resp.expect("completion must return Some") {
+            CompletionResponse::Array(v) => v.into_iter().map(|i| i.label).collect(),
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    fn items_at(src: &str) -> Vec<CompletionItem> {
+        let (program, cr) = seeded(src);
+        let offset = src.len() as u32;
+        match completions_for_position(&program, src, offset, cr.as_ref(), None).expect("some") {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    // ── 1. scope ──────────────────────────────────────────────────────
+    #[test]
+    fn audit_scope_keywords() {
+        let src = "x := 1\nret";
+        let (p, cr) = seeded(src);
+        let l = labels(completions_for_position(
+            &p,
+            src,
+            src.len() as u32,
+            cr.as_ref(),
+            None,
+        ));
+        assert!(l.contains(&"return".to_string()), "keywords serve: {l:?}");
+    }
+
+    #[test]
+    fn audit_scope_locals() {
+        let src = "myvar := 1\nmyv";
+        let (p, cr) = seeded(src);
+        let l = labels(completions_for_position(
+            &p,
+            src,
+            src.len() as u32,
+            cr.as_ref(),
+            None,
+        ));
+        assert!(l.contains(&"myvar".to_string()), "locals serve: {l:?}");
+    }
+
+    #[test]
+    fn audit_scope_std_root() {
+        let src = "import std.math\ns";
+        let l: Vec<String> = items_at(src).into_iter().map(|i| i.label).collect();
+        assert!(l.contains(&"std".to_string()), "`std` discoverable: {l:?}");
+    }
+
+    #[test]
+    fn audit_scope_import_ns() {
+        let src = "import std.math\nm";
+        let l: Vec<String> = items_at(src).into_iter().map(|i| i.label).collect();
+        assert!(l.contains(&"math".to_string()), "import ns serves: {l:?}");
+    }
+
+    // ── 2. dot access ─────────────────────────────────────────────────
+    #[test]
+    fn audit_dot_std_modules() {
+        let l: Vec<String> = items_at("x := std.").into_iter().map(|i| i.label).collect();
+        for m in ["math", "str", "vec", "json", "http", "fs"] {
+            assert!(l.contains(&m.to_string()), "std. lists {m}: {l:?}");
+        }
+    }
+
+    #[test]
+    fn audit_dot_std_partial() {
+        let l: Vec<String> = items_at("x := std.ma")
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(l.contains(&"math".to_string()), "std.ma filters: {l:?}");
+        assert!(
+            !l.contains(&"str".to_string()),
+            "std.ma excludes str: {l:?}"
+        );
+    }
+
+    #[test]
+    fn audit_dot_math_members() {
+        let src = "import std.math\nx := math.";
+        let all: Vec<CompletionItem> = items_at(src);
+        let l: Vec<&str> = all.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            l.contains(&"abs") && l.contains(&"sin"),
+            "math. members: {l:?}"
+        );
+        assert!(all
+            .iter()
+            .all(|i| i.kind == Some(CompletionItemKind::FUNCTION)));
+        assert!(all
+            .iter()
+            .all(|i| i.detail.as_deref().is_some_and(|d| d.starts_with("math."))));
+    }
+
+    #[test]
+    fn audit_dot_math_partial() {
+        let src = "import std.math\nx := math.s";
+        let l: Vec<String> = items_at(src).into_iter().map(|i| i.label).collect();
+        assert!(l.contains(&"sin".to_string()), "math.s filters: {l:?}");
+        assert!(
+            !l.contains(&"abs".to_string()),
+            "math.s excludes abs: {l:?}"
+        );
+    }
+
+    #[test]
+    fn audit_dot_aliased_ns() {
+        let src = "import std.math as m\nx := m.";
+        let l: Vec<String> = items_at(src).into_iter().map(|i| i.label).collect();
+        assert!(l.contains(&"abs".to_string()), "aliased ns serves: {l:?}");
+    }
+
+    #[test]
+    fn audit_dot_struct_fields() {
+        let src = "struct P { x: int, y: int }\np := P{ x: 1, y: 2 }\nv := p.";
+        let l: Vec<String> = items_at(src).into_iter().map(|i| i.label).collect();
+        assert!(
+            l.contains(&"x".to_string()) && l.contains(&"y".to_string()),
+            "fields: {l:?}"
+        );
+    }
+
+    // ── 3. import paths ───────────────────────────────────────────────
+    #[test]
+    fn audit_import_bare_offers_std() {
+        let l: Vec<String> = items_at("import ").into_iter().map(|i| i.label).collect();
+        assert!(
+            l.contains(&"std".to_string()),
+            "`import ` offers std: {l:?}"
+        );
+    }
+
+    #[test]
+    fn audit_import_std_dot_lists_modules() {
+        let l: Vec<String> = items_at("import std.")
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(l.contains(&"std.math".to_string()), "modules: {l:?}");
+        assert!(
+            l.contains(&"std.sqlz.postgres".to_string()),
+            "nested: {l:?}"
+        );
+    }
+
+    #[test]
+    fn audit_import_partial_path() {
+        let all = items_at("import std.ma");
+        let l: Vec<&str> = all.iter().map(|i| i.label.as_str()).collect();
+        assert!(l.contains(&"std.math"), "partial path: {l:?}");
+        assert!(!l.iter().any(|s| s.starts_with("std.st")), "no str: {l:?}");
+        // textEdit must replace the whole typed path (no std.std.math).
+        let item = all.iter().find(|i| i.label == "std.math").unwrap();
+        assert!(item.text_edit.is_some(), "import items carry textEdit");
+    }
+
+    #[test]
+    fn audit_import_nested_partial() {
+        let l: Vec<String> = items_at("import std.sqlz.post")
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(
+            l.contains(&"std.sqlz.postgres".to_string()),
+            "nested partial: {l:?}"
+        );
+    }
+
+    #[test]
+    fn audit_import_local_not_hijacked() {
+        // `import foo` is a local module: scope context, not import-path.
+        let src = "import foo";
+        let ctx = detect_context(src, src.len() as u32, None).expect("some ctx");
+        assert!(
+            matches!(ctx, CompletionContext::Scope { .. }),
+            "local import stays scope: {ctx:?}"
+        );
+    }
+
+    // ── 4. selective lists ────────────────────────────────────────────
+    #[test]
+    fn audit_selective_open_paren() {
+        let l: Vec<String> = items_at("import std.math(")
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(l.contains(&"PI".to_string()), "consts: {l:?}");
+        assert!(l.contains(&"abs".to_string()), "fns: {l:?}");
+    }
+
+    #[test]
+    fn audit_selective_partial() {
+        let l: Vec<String> = items_at("import std.math(P")
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(l.contains(&"PI".to_string()), "PI: {l:?}");
+        assert!(!l.contains(&"abs".to_string()), "excludes abs: {l:?}");
+    }
+
+    #[test]
+    fn audit_selective_after_comma() {
+        let l: Vec<String> = items_at("import std.math(PI, s")
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(l.contains(&"sin".to_string()), "after comma: {l:?}");
+    }
+
+    #[test]
+    fn audit_selective_fs() {
+        let l: Vec<String> = items_at("import std.fs(read_")
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(l.contains(&"read_dir".to_string()), "fs members: {l:?}");
+    }
+
+    #[test]
+    fn audit_selective_closed_not_context() {
+        // Cursor past `)` is ordinary scope again.
+        let src = "import std.math(PI)\nx := 1";
+        let off = "import std.math(PI)".len() as u32;
+        let ctx = detect_context(src, off, None).expect("some ctx");
+        assert!(
+            !matches!(ctx, CompletionContext::ImportSelective { .. }),
+            "closed list is not selective: {ctx:?}"
+        );
+    }
+
+    // ── 5. negatives ──────────────────────────────────────────────────
+    #[test]
+    fn audit_inside_string_no_completion() {
+        let src = "x := \"math.\"";
+        let ctx = detect_context(src, (src.len() - 1) as u32, None);
+        assert!(ctx.is_none(), "string literal serves nothing: {ctx:?}");
+    }
+}
+
+#[cfg(test)]
+mod workspace_audit_tests {
+    //! Workspace audit: the user's exact layout —
+    //! `main.zz` + `math_utils/lib.zz` with `pub` items, plus a vendored
+    //! registry-style dep. Diagnostics, member completion, selective
+    //! lists and import paths must all agree with `zz check`.
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    fn write(path: &std::path::Path, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    const LIB_SRC: &str = "pub pi := 3.14159\npub e := 2.71828\npub func circle(r: float) -> float {\n    pi * r * r\n}\npub func twice<T: Num>(x: T) -> T {\n    x * x\n}\npub struct Point {\n    x: float,\n    y: float,\n}\n";
+
+    /// Build <tmp>/proj with main_full.zz, main_sel.zz, math_utils/lib.zz.
+    fn ws_project(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("zz-lsp-ws-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write(&root.join("math_utils/lib.zz"), LIB_SRC);
+        write(
+            &root.join("main_full.zz"),
+            "import math_utils.lib\nfunc main() {\n    println(lib.circle(1.0))\n    println(lib.pi)\n    p := lib.Point{ x: 1.0, y: 2.0 }\n    println(p.x)\n}\n",
+        );
+        write(
+            &root.join("main_sel.zz"),
+            "import math_utils.lib(pi, e)\nfunc main() {\n    println(pi)\n    println(e)\n}\n",
+        );
+        root
+    }
+
+    fn ws_state() -> crate::state::GlobalState {
+        crate::state::GlobalState::new()
+    }
+
+    fn ws_errors(state: &crate::state::GlobalState, file: &std::path::Path) -> Vec<String> {
+        let src = std::fs::read_to_string(file).unwrap();
+        let parsed = parse(&src);
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for_path(&parsed.program, Some(file));
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
+        cr.errors.into_iter().map(|e| e.message).collect()
+    }
+
+    fn ws_env(root: &std::path::Path) -> CompletionEnv {
+        CompletionEnv {
+            doc_dir: Some(root.to_path_buf()),
+            seed_bindings: HashMap::new(),
+        }
+    }
+
+    /// Check `src` as if it were `file` and return the program, result,
+    /// and an env carrying the exact seed bindings the check saw.
+    fn ws_check(
+        state: &crate::state::GlobalState,
+        file: &std::path::Path,
+        src: &str,
+    ) -> (Program, CheckResult, CompletionEnv) {
+        let parsed = parse(src);
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for_path(&parsed.program, Some(file));
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
+        let env = CompletionEnv {
+            doc_dir: file.parent().map(|d| d.to_path_buf()),
+            seed_bindings: ib,
+        };
+        (parsed.program, cr, env)
+    }
+
+    // ── diagnostics ───────────────────────────────────────────────────
+    #[test]
+    fn audit_ws_full_import_clean() {
+        let root = ws_project("full");
+        let state = ws_state();
+        let messages = ws_errors(&state, &root.join("main_full.zz"));
+        assert!(
+            messages.is_empty(),
+            "full workspace import clean: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn audit_ws_selective_clean() {
+        let root = ws_project("sel");
+        let state = ws_state();
+        let messages = ws_errors(&state, &root.join("main_sel.zz"));
+        assert!(
+            messages.is_empty(),
+            "selective workspace import clean: {messages:?}"
+        );
+    }
+
+    // ── member completion ─────────────────────────────────────────────
+    #[test]
+    fn audit_ws_dot_members_everything_pub() {
+        let root = ws_project("dot");
+        let state = ws_state();
+        let file = root.join("main_full.zz");
+        let src = std::fs::read_to_string(&file).unwrap();
+        let probe = format!("{src}\nprobe := lib.");
+        let (program, cr, cenv) = ws_check(&state, &file, &probe);
+        let items = match completions_for_position(
+            &program,
+            &probe,
+            probe.len() as u32,
+            Some(&cr),
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let find = |l: &str| items.iter().find(|i| i.label == l);
+        assert_eq!(
+            find("circle").and_then(|i| i.kind),
+            Some(CompletionItemKind::FUNCTION),
+            "funcs serve"
+        );
+        assert_eq!(
+            find("pi").and_then(|i| i.kind),
+            Some(CompletionItemKind::VARIABLE),
+            "globals serve"
+        );
+        assert_eq!(
+            find("Point").and_then(|i| i.kind),
+            Some(CompletionItemKind::STRUCT),
+            "structs serve"
+        );
+    }
+
+    // ── selective lists ───────────────────────────────────────────────
+    #[test]
+    fn audit_ws_selective_list() {
+        let root = ws_project("sellist");
+        let state = ws_state();
+        let file = root.join("main_sel.zz");
+        // Simulate typing: file on disk is complete, but completion runs
+        // on the buffer text with a partial selective list.
+        let src = "import math_utils.lib(p\nfunc main() {\n    println(pi)\n}\n";
+        let (program, cr, cenv) = ws_check(&state, &file, src);
+        // Cursor sits right after the partial `p`, not at end of buffer.
+        let offset = "import math_utils.lib(p".len() as u32;
+        let items = match completions_for_position(&program, src, offset, Some(&cr), Some(&cenv))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"pi"),
+            "selective ws list serves pi: {labels:?}"
+        );
+        assert!(!labels.contains(&"circle"), "filters by prefix: {labels:?}");
+    }
+
+    // ── import paths ──────────────────────────────────────────────────
+    #[test]
+    fn audit_ws_import_path_lists_lib() {
+        let root = ws_project("path");
+        let src = "import math_utils.";
+        let parsed = parse(src);
+        let cenv = ws_env(&root);
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"math_utils.lib"),
+            "path lists lib: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn audit_ws_import_bare_discovers_nested() {
+        let root = ws_project("nested");
+        let src = "import math_utils";
+        let parsed = parse(src);
+        let cenv = ws_env(&root);
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"math_utils.lib"),
+            "bare discovers nested: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn audit_ws_import_empty_offers_std_and_local() {
+        let root = ws_project("empty");
+        let src = "import ";
+        let parsed = parse(src);
+        let cenv = ws_env(&root);
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"std"), "empty offers std: {labels:?}");
+        assert!(
+            labels.iter().any(|l| !l.ends_with(".zz") && *l != "std"),
+            "empty offers locals: {labels:?}"
+        );
+    }
+
+    // ── generics (selective skips bare seeding by design) ───────────────
+    #[test]
+    fn audit_ws_selective_list_midtyping_generic() {
+        // Buffer holds ONLY the half-typed import: the program offers no
+        // import to seed from, so the typed path harvests on demand.
+        let root = ws_project("genmid");
+        let state = ws_state();
+        let file = root.join("main_sel.zz");
+        let src = "import math_utils.lib(tw";
+        let (program, cr, _) = ws_check(&state, &file, src);
+        let env = CompletionEnv {
+            doc_dir: Some(root.clone()),
+            seed_bindings: HashMap::new(),
+        };
+        let offset = src.len() as u32;
+        let items = match completions_for_position(&program, src, offset, Some(&cr), Some(&env))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"twice"),
+            "generic mid-typing serves: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn audit_ws_bare_scope_generic_selective() {
+        // Complete import line; cursor on a bare call prefix in the body.
+        let root = ws_project("genbare");
+        let state = ws_state();
+        let file = root.join("main_sel.zz");
+        let src2 = "import math_utils.lib(twice)\nfunc main() {\n    y := tw";
+        let (program, cr, env) = ws_check(&state, &file, src2);
+        let offset = src2.len() as u32;
+        let items = match completions_for_position(&program, src2, offset, Some(&cr), Some(&env))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"twice"), "bare generic serves: {labels:?}");
+    }
+
+    #[test]
+    fn audit_ws_dot_member_generic() {
+        let root = ws_project("gendot");
+        let state = ws_state();
+        let file = root.join("main_full.zz");
+        let src = std::fs::read_to_string(&file).unwrap();
+        let probe = format!("{src}\nprobe := lib.tw");
+        let (program, cr, env) = ws_check(&state, &file, &probe);
+        let offset = probe.len() as u32;
+        let items = match completions_for_position(&program, &probe, offset, Some(&cr), Some(&env))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        assert!(
+            items.iter().any(|i| i.label == "twice"),
+            "dot generic serves"
+        );
+    }
+
+    // ── vendored dep ──────────────────────────────────────────────────
+    #[test]
+    fn audit_dep_full_cycle() {
+        // Registry-style dep via vendor/: diagnostics + members + selective.
+        let root = std::env::temp_dir().join(format!("zz-lsp-depws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write(&root.join("zz.toml"), "[package]\nname = \"proj\"\nversion = \"0.1.0\"\n\n[dependencies]\ntable2 = \"^0.1.0\"\n");
+        write(
+            &root.join("vendor/table2/zz.toml"),
+            "[package]\nname = \"table2\"\nversion = \"0.1.0\"\n",
+        );
+        write(
+            &root.join("vendor/table2/src/table2.zz"),
+            "pub func render(rows: [[str]]) -> str {\n    rows[0][0]\n}\n",
+        );
+        let main = root.join("main.zz");
+        write(
+            &main,
+            "import table2\nfunc main() {\n    println(table2.render([[\"a\"]]))\n}\n",
+        );
+        let state = ws_state();
+        let messages = ws_errors(&state, &main);
+        assert!(messages.is_empty(), "dep import clean: {messages:?}");
+
+        // member completion through the seeded check
+        let src = std::fs::read_to_string(&main).unwrap();
+        let probe = format!("{src}\nprobe := table2.");
+        let (program, cr, cenv) = ws_check(&state, &main, &probe);
+        let items = match completions_for_position(
+            &program,
+            &probe,
+            probe.len() as u32,
+            Some(&cr),
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        assert!(
+            items.iter().any(|i| i.label == "render"),
+            "dep members serve"
+        );
+    }
+}
+
+#[cfg(test)]
+mod paren_free_tests {
+    //! No completion item may insert parens: what you see is what you get.
+    //! (Stray `()` in editors comes from client autopairs hooks.)
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    fn all_items(src: &str, offset: u32) -> Vec<CompletionItem> {
+        let parsed = parse(src);
+        let state = crate::state::GlobalState::new();
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
+        let cenv = CompletionEnv::default();
+        match completions_for_position(&parsed.program, src, offset, Some(&cr), Some(&cenv))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    fn assert_bare(items: &[CompletionItem], ctx: &str) {
+        for item in items {
+            assert_eq!(
+                item.insert_text_format,
+                Some(tower_lsp::lsp_types::InsertTextFormat::PLAIN_TEXT),
+                "{ctx}: {} must be plain text",
+                item.label
+            );
+            let texts: Vec<&str> = [
+                Some(item.label.as_str()),
+                item.insert_text.as_deref(),
+                item.filter_text.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            for t in texts {
+                assert!(
+                    !t.contains('(') && !t.contains(')'),
+                    "{ctx}: {} inserts parens via {t:?}",
+                    item.label
+                );
+            }
+            if let Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(e)) = &item.text_edit {
+                assert!(
+                    !e.new_text.contains('(') && !e.new_text.contains(')'),
+                    "{ctx}: {} inserts parens via textEdit {:?}",
+                    item.label,
+                    e.new_text
+                );
+            }
+        }
+        assert!(!items.is_empty(), "{ctx}: expected items to check");
+    }
+
+    #[test]
+    fn scope_items_bare() {
+        let src = "import std.math\nx := ma";
+        assert_bare(&all_items(src, src.len() as u32), "scope");
+    }
+
+    #[test]
+    fn member_items_bare() {
+        let src = "import std.math\nx := math.s";
+        assert_bare(&all_items(src, src.len() as u32), "member");
+    }
+
+    #[test]
+    fn import_path_items_bare() {
+        let src = "import std.ma";
+        assert_bare(&all_items(src, src.len() as u32), "import-path");
+    }
+
+    #[test]
+    fn selective_items_bare() {
+        let src = "import std.math(s";
+        assert_bare(&all_items(src, src.len() as u32), "selective");
+    }
+
+    #[test]
+    fn snippet_triggers_unaffected() {
+        // Snippet-source bodies legitimately contain parens (println("…"));
+        // this only guards the LSP path, which must stay bare.
+        let src = "import std.math\nprintln";
+        let items = all_items(src, src.len() as u32);
+        assert!(items.iter().any(|i| i.label == "println"));
+    }
+}
+
+#[cfg(test)]
+mod struct_literal_audit_tests {
+    //! Struct literals: `User{na`, `User{id: 12, na`, `lib.Point{x`.
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    const STRUCT_SRC: &str = "struct User {\n    id: int,\n    name: str,\n    age: int,\n}\n";
+
+    fn setup(src: &str) -> (Program, CheckResult, CompletionEnv) {
+        let state = crate::state::GlobalState::new();
+        let parsed = parse(src);
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
+        let env = CompletionEnv {
+            doc_dir: None,
+            seed_bindings: ib,
+        };
+        (parsed.program, cr, env)
+    }
+
+    fn complete_at(
+        program: &Program,
+        src: &str,
+        offset: u32,
+        cr: &CheckResult,
+        env: &CompletionEnv,
+    ) -> Vec<CompletionItem> {
+        match completions_for_position(program, src, offset, Some(cr), Some(env)).expect("some") {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn audit_struct_literal_partial() {
+        let src = format!("{STRUCT_SRC}u := User{{na");
+        let (program, cr, env) = setup(&src);
+        let items = complete_at(&program, &src, src.len() as u32, &cr, &env);
+        assert_eq!(items.len(), 1, "only name matches: {items:?}");
+        assert_eq!(items[0].label, "name");
+        assert_eq!(items[0].kind, Some(CompletionItemKind::FIELD));
+        assert!(items[0].detail.as_deref().unwrap().contains("str"));
+    }
+
+    #[test]
+    fn audit_struct_literal_all_fields() {
+        let src = format!("{STRUCT_SRC}u := User{{");
+        let (program, cr, env) = setup(&src);
+        let items = complete_at(&program, &src, src.len() as u32, &cr, &env);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"id") && labels.contains(&"name") && labels.contains(&"age"));
+    }
+
+    #[test]
+    fn audit_struct_literal_after_comma() {
+        let src = format!("{STRUCT_SRC}u := User{{id: 12, na");
+        let (program, cr, env) = setup(&src);
+        let items = complete_at(&program, &src, src.len() as u32, &cr, &env);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "name");
+    }
+
+    #[test]
+    fn audit_struct_literal_value_position_falls_back() {
+        // `User{name:` — past the field name: must not offer fields.
+        let src = format!("{STRUCT_SRC}u := User{{name:");
+        let (program, cr, env) = setup(&src);
+        let items = complete_at(&program, &src, src.len() as u32, &cr, &env);
+        assert!(!items
+            .iter()
+            .any(|i| i.kind == Some(CompletionItemKind::FIELD)));
+    }
+
+    #[test]
+    fn audit_block_brace_falls_back_to_scope() {
+        // Ordinary blocks keep scope completion (keywords survive).
+        let src = "func main() {\n    x := 1\n    y := ";
+        let (program, cr, env) = setup(src);
+        let items = complete_at(&program, src, src.len() as u32, &cr, &env);
+        assert!(
+            items.iter().any(|i| i.label == "return"),
+            "scope intact: {items:?}"
+        );
+    }
+
+    #[test]
+    fn audit_unknown_brace_name_falls_back() {
+        // `if cond {` style: not a struct → scope, never empty.
+        let src = "func main() {\n    if x {";
+        let (program, cr, env) = setup(src);
+        let items = complete_at(&program, src, src.len() as u32, &cr, &env);
+        assert!(!items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod struct_literal_dep_tests {
+    //! Dotted struct literals (`lib.Point{x`) resolve through the seed.
+    use super::*;
+    use zz_checker::check_program;
+    use zz_frontend::parse;
+
+    #[test]
+    fn audit_struct_literal_dep_member() {
+        let root = std::env::temp_dir().join(format!("zz-lsp-ws-depstruct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let lib = root.join("math_utils/lib.zz");
+        std::fs::create_dir_all(lib.parent().unwrap()).unwrap();
+        std::fs::write(
+            &lib,
+            "pub struct Point {\n    x: float,\n    y: float,\n}\n",
+        )
+        .unwrap();
+        let main = root.join("main.zz");
+        std::fs::write(&main, "import math_utils.lib\nfunc main() {\n}\n").unwrap();
+
+        let state = crate::state::GlobalState::new();
+        let src = "import math_utils.lib\nfunc main() {\n    p := lib.Point{";
+        let parsed = parse(src);
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for_path(&parsed.program, Some(&main));
+        let cr = check_program(&parsed.program, ib.clone(), ifunc, is, ia, ie);
+        assert!(
+            cr.funcs.keys().any(|k| k == "lib.Point")
+                || cr.structs.keys().any(|k| k == "lib.Point"),
+            "seed carries lib.Point"
+        );
+        let env = CompletionEnv {
+            doc_dir: Some(root.clone()),
+            seed_bindings: ib,
+        };
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            Some(&cr),
+            Some(&env),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"x") && labels.contains(&"y"),
+            "dep struct fields serve: {labels:?}"
+        );
+        assert!(items
+            .iter()
+            .all(|i| i.kind == Some(CompletionItemKind::FIELD)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

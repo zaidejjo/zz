@@ -12,16 +12,18 @@
 
 pub mod cursor;
 
-use crate::diag::{error_at, RawDiag};
+use std::borrow::Cow;
+
+use crate::diag::{error_at, FixIt, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind, Trivia, TriviaKind};
 
-pub struct Lexed {
-    pub tokens: Vec<Token>,
+pub struct Lexed<'a> {
+    pub tokens: Vec<Token<'a>>,
     pub errors: Vec<RawDiag>,
 }
 
-pub fn lex(source: &str) -> Lexed {
+pub fn lex(source: &str) -> Lexed<'_> {
     Lexer::new(source).run()
 }
 
@@ -52,6 +54,12 @@ enum LexContext {
         /// current triple-quoted string. On close, all segments are dedented
         /// together based on the closing delimiter's indentation.
         segs: Vec<usize>,
+        /// True when the accumulated `value` is byte-identical to the source
+        /// slice (no escapes processed, no interpolation split). Clean
+        /// single-line segments borrow the source instead of allocating.
+        /// Set at context creation; any escape clears it. Triple-quoted
+        /// strings are never clean (post-hoc dedent rewrites them).
+        clean: bool,
     },
     /// Inside an interpolation `{ expr }`. `depth` counts nested braces
     /// beyond the interpolation's own opening brace (dicts, blocks, ...).
@@ -63,8 +71,8 @@ struct Lexer<'a> {
     src: &'a str,
     pos: usize,
     prev_sig: Option<TokenKind>,
-    pending: Vec<Trivia>,
-    tokens: Vec<Token>,
+    pending: Vec<Trivia<'a>>,
+    tokens: Vec<Token<'a>>,
     errors: Vec<RawDiag>,
     contexts: Vec<LexContext>,
     /// True when the previous string segment ended right before an
@@ -74,19 +82,58 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(src: &'a str) -> Self {
+        // Pre-size from source length (Q1 arena-next): ~1 significant token
+        // per ~4 bytes measured on the bench corpus, so the token Vec never
+        // reallocs on the way up; pending trivia drains per token (small).
+        // Over-reserve is bounded and transient (freed with `Lexed`).
         Lexer {
             src,
             pos: 0,
             prev_sig: None,
-            pending: Vec::new(),
-            tokens: Vec::new(),
+            pending: Vec::with_capacity(src.len() / 64 + 8),
+            tokens: Vec::with_capacity(src.len() / 4 + 16),
             errors: Vec::new(),
             contexts: Vec::new(),
             pending_interp: false,
         }
     }
 
-    fn run(mut self) -> Lexed {
+    /// Unterminated string/comment error with an add-the-closer fix.
+    /// `start` is the opening quote offset (the error points there, so the
+    /// user sees where the string began swallowing code).
+    /// Single-line strings close at end of their first line (the classic
+    /// forgotten-quote typo); triple-quoted strings and block comments
+    /// close at end of file.
+    fn unterminated(&mut self, start: usize, closer: &str, first_line: bool) {
+        let end = self.src.len() as u32;
+        let span = Span::new(start as u32, end);
+        let at = if first_line {
+            self.src[start..]
+                .find('\n')
+                .map(|i| start as u32 + i as u32)
+                .unwrap_or(end)
+        } else {
+            end
+        };
+        let place = if first_line {
+            "at end of line"
+        } else {
+            "at end of file"
+        };
+        self.errors.push(
+            error_at(
+                format!("unterminated string literal — add closing `{closer}` {place}"),
+                span,
+            )
+            .with_fixit(FixIt::safe(
+                Span::new(at, at),
+                closer,
+                format!("add closing `{closer}`"),
+            )),
+        );
+    }
+
+    fn run(mut self) -> Lexed<'a> {
         while self.pos < self.src.len() {
             let c = self.peek_char().unwrap();
             // Inside a string literal (including a continuation segment after
@@ -122,6 +169,9 @@ impl<'a> Lexer<'a> {
                 ';' => self.emit_significant(TokenKind::StmtEnd, self.pos, self.pos + 1),
                 '/' if self.peek_char_at(1) == Some('/') => self.lex_line_comment(),
                 '/' if self.peek_char_at(1) == Some('*') => self.lex_block_comment(),
+                '/' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::SlashEq, self.pos, self.pos + 2)
+                }
                 '/' => self.emit_significant(TokenKind::Slash, self.pos, self.pos + 1),
                 '#' => self.lex_line_comment(),
                 '(' => self.emit_significant(TokenKind::LParen, self.pos, self.pos + 1),
@@ -165,15 +215,30 @@ impl<'a> Lexer<'a> {
                 }
                 '[' => self.emit_significant(TokenKind::LBracket, self.pos, self.pos + 1),
                 ']' => self.emit_significant(TokenKind::RBracket, self.pos, self.pos + 1),
+                '+' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::PlusEq, self.pos, self.pos + 2)
+                }
                 '+' => self.emit_significant(TokenKind::Plus, self.pos, self.pos + 1),
                 '-' if self.peek_char_at(1) == Some('>') => {
                     self.emit_significant(TokenKind::Arrow, self.pos, self.pos + 2)
                 }
+                '-' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::MinusEq, self.pos, self.pos + 2)
+                }
                 '-' => self.emit_significant(TokenKind::Minus, self.pos, self.pos + 1),
+                '*' if self.peek_char_at(1) == Some('*') && self.peek_char_at(2) == Some('=') => {
+                    self.emit_significant(TokenKind::StarStarEq, self.pos, self.pos + 3)
+                }
                 '*' if self.peek_char_at(1) == Some('*') => {
                     self.emit_significant(TokenKind::StarStar, self.pos, self.pos + 2)
                 }
+                '*' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::StarEq, self.pos, self.pos + 2)
+                }
                 '*' => self.emit_significant(TokenKind::Star, self.pos, self.pos + 1),
+                '%' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::PercentEq, self.pos, self.pos + 2)
+                }
                 '%' => self.emit_significant(TokenKind::Percent, self.pos, self.pos + 1),
                 '=' if self.peek_char_at(1) == Some('=') => {
                     self.emit_significant(TokenKind::Eq, self.pos, self.pos + 2)
@@ -186,10 +251,22 @@ impl<'a> Lexer<'a> {
                     self.emit_significant(TokenKind::Ne, self.pos, self.pos + 2)
                 }
                 '!' => self.emit_significant(TokenKind::Bang, self.pos, self.pos + 1),
+                '<' if self.peek_char_at(1) == Some('<') && self.peek_char_at(2) == Some('=') => {
+                    self.emit_significant(TokenKind::ShlEq, self.pos, self.pos + 3)
+                }
+                '<' if self.peek_char_at(1) == Some('<') => {
+                    self.emit_significant(TokenKind::Shl, self.pos, self.pos + 2)
+                }
                 '<' if self.peek_char_at(1) == Some('=') => {
                     self.emit_significant(TokenKind::Le, self.pos, self.pos + 2)
                 }
                 '<' => self.emit_significant(TokenKind::Lt, self.pos, self.pos + 1),
+                '>' if self.peek_char_at(1) == Some('>') && self.peek_char_at(2) == Some('=') => {
+                    self.emit_significant(TokenKind::ShrEq, self.pos, self.pos + 3)
+                }
+                '>' if self.peek_char_at(1) == Some('>') => {
+                    self.emit_significant(TokenKind::Shr, self.pos, self.pos + 2)
+                }
                 '>' if self.peek_char_at(1) == Some('=') => {
                     self.emit_significant(TokenKind::Ge, self.pos, self.pos + 2)
                 }
@@ -197,11 +274,23 @@ impl<'a> Lexer<'a> {
                 '&' if self.peek_char_at(1) == Some('&') => {
                     self.emit_significant(TokenKind::AndAnd, self.pos, self.pos + 2)
                 }
+                '&' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::AmpEq, self.pos, self.pos + 2)
+                }
+                '&' => self.emit_significant(TokenKind::Amp, self.pos, self.pos + 1),
+                '^' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::CaretEq, self.pos, self.pos + 2)
+                }
+                '^' => self.emit_significant(TokenKind::Caret, self.pos, self.pos + 1),
+                '~' => self.emit_significant(TokenKind::Tilde, self.pos, self.pos + 1),
                 '|' if self.peek_char_at(1) == Some('|') => {
                     self.emit_significant(TokenKind::OrOr, self.pos, self.pos + 2)
                 }
                 '|' if self.peek_char_at(1) == Some('>') => {
                     self.emit_significant(TokenKind::PipeGt, self.pos, self.pos + 2)
+                }
+                '|' if self.peek_char_at(1) == Some('=') => {
+                    self.emit_significant(TokenKind::PipeEq, self.pos, self.pos + 2)
                 }
                 '|' => self.emit_significant(TokenKind::Pipe, self.pos, self.pos + 1),
                 '?' if self.peek_char_at(1) == Some('?') => {
@@ -232,13 +321,34 @@ impl<'a> Lexer<'a> {
         }
         if !self.contexts.is_empty() {
             // A string (or interpolation) was left open at end of input.
-            let span = Span::new(self.pos as u32, self.src.len() as u32);
-            self.errors
-                .push(error_at("unterminated string literal", span));
+            match self.contexts.last() {
+                Some(LexContext::Str { start, triple, .. }) => {
+                    let (closer, first_line) = if *triple {
+                        ("\"\"\"", false)
+                    } else {
+                        ("\"", true)
+                    };
+                    self.unterminated(*start, closer, first_line);
+                }
+                _ => {
+                    let end = self.src.len() as u32;
+                    self.errors.push(
+                        error_at(
+                            "unterminated string interpolation — add closing `}` at end of file",
+                            Span::new(self.pos as u32, end),
+                        )
+                        .with_fixit(FixIt::safe(
+                            Span::new(end, end),
+                            "}",
+                            "add closing `}`",
+                        )),
+                    );
+                }
+            }
         }
         self.tokens.push(Token {
             kind: TokenKind::Eof,
-            text: String::new(),
+            text: Cow::Borrowed(""),
             span: Span::new(self.src.len() as u32, self.src.len() as u32),
             leading: Vec::new(),
         });
@@ -252,11 +362,13 @@ impl<'a> Lexer<'a> {
 
     fn push_trivia(&mut self, kind: TriviaKind) {
         let start = self.pos;
-        let c = self.bump_char();
+        self.bump_char();
         let span = Span::new(start as u32, self.pos as u32);
+        // Borrow the source slice — trivia is never rewritten.
+        let src = self.src;
         self.pending.push(Trivia {
             kind,
-            text: c.to_string(),
+            text: &src[span.to_range()],
             span,
         });
     }
@@ -270,9 +382,10 @@ impl<'a> Lexer<'a> {
             self.bump_char();
         }
         let span = Span::new(start as u32, self.pos as u32);
+        let src = self.src;
         self.pending.push(Trivia {
             kind: TriviaKind::Comment,
-            text: self.src[span.to_range()].to_string(),
+            text: &src[span.to_range()],
             span,
         });
     }
@@ -299,17 +412,28 @@ impl<'a> Lexer<'a> {
                     self.bump_char();
                 }
                 (None, _) => {
-                    let span = Span::new(start as u32, self.src.len() as u32);
-                    self.errors
-                        .push(error_at("unterminated block comment", span));
+                    let start = start as u32;
+                    let end = self.src.len() as u32;
+                    self.errors.push(
+                        error_at(
+                            "unterminated block comment — add closing `*/` at end of file",
+                            Span::new(start, end),
+                        )
+                        .with_fixit(FixIt::safe(
+                            Span::new(end, end),
+                            "*/",
+                            "add closing `*/`",
+                        )),
+                    );
                     return;
                 }
             }
         }
         let span = Span::new(start as u32, self.pos as u32);
+        let src = self.src;
         self.pending.push(Trivia {
             kind: TriviaKind::Comment,
-            text: self.src[span.to_range()].to_string(),
+            text: &src[span.to_range()],
             span,
         });
     }
@@ -338,6 +462,22 @@ impl<'a> Lexer<'a> {
                     | TokenKind::AndAnd
                     | TokenKind::OrOr
                     | TokenKind::Bang
+                    | TokenKind::Amp
+                    | TokenKind::Caret
+                    | TokenKind::Tilde
+                    | TokenKind::Shl
+                    | TokenKind::Shr
+                    | TokenKind::PlusEq
+                    | TokenKind::MinusEq
+                    | TokenKind::StarEq
+                    | TokenKind::SlashEq
+                    | TokenKind::PercentEq
+                    | TokenKind::StarStarEq
+                    | TokenKind::AmpEq
+                    | TokenKind::PipeEq
+                    | TokenKind::CaretEq
+                    | TokenKind::ShlEq
+                    | TokenKind::ShrEq
                     | TokenKind::QuestionQuestion
                     | TokenKind::Colon
                     | TokenKind::Comma
@@ -377,12 +517,13 @@ impl<'a> Lexer<'a> {
 
     fn emit_significant(&mut self, kind: TokenKind, start: usize, end: usize) {
         let span = Span::new(start as u32, end as u32);
-        let text = self.src[span.to_range()].to_string();
+        let src = self.src;
+        let text = Cow::Borrowed(&src[span.to_range()]);
         self.pos = end;
         self.push_token(kind, span, text);
     }
 
-    fn push_token(&mut self, kind: TokenKind, span: Span, text: String) {
+    fn push_token(&mut self, kind: TokenKind, span: Span, text: Cow<'a, str>) {
         self.prev_sig = Some(kind);
         self.tokens.push(Token {
             kind,
@@ -402,8 +543,9 @@ impl<'a> Lexer<'a> {
             }
         }
         let span = Span::new(start as u32, self.pos as u32);
-        let text = self.src[span.to_range()].to_string();
-        let kind = match text.as_str() {
+        let src = self.src;
+        let text = Cow::Borrowed(&src[span.to_range()]);
+        let kind = match &*text {
             "import" => TokenKind::Import,
             "as" => TokenKind::As,
             "func" => TokenKind::Func,
@@ -479,7 +621,8 @@ impl<'a> Lexer<'a> {
             return;
         }
         let span = Span::new(start as u32, self.pos as u32);
-        let text = self.src[span.to_range()].to_string();
+        let src = self.src;
+        let text = Cow::Borrowed(&src[span.to_range()]);
         let kind = if is_float {
             TokenKind::Float
         } else {
@@ -508,6 +651,10 @@ impl<'a> Lexer<'a> {
             is_nested,
             triple,
             segs: Vec::new(),
+            // Fresh strings are clean until an escape proves otherwise.
+            // Triple-quoted strings are never clean: post-hoc dedent
+            // rewrites their text, so they always take the owned path.
+            clean: !triple,
         });
     }
 
@@ -516,16 +663,17 @@ impl<'a> Lexer<'a> {
     fn lex_string_cont(&mut self) {
         // Pop the current string context; continuation arms re-push it with
         // the updated value.
-        let (start, value, is_nested) = match self.contexts.pop() {
+        let (start, value, is_nested, clean) = match self.contexts.pop() {
             Some(LexContext::Str {
                 start,
                 value,
                 is_nested,
                 triple: false,
                 segs,
+                clean,
             }) => {
                 debug_assert!(segs.is_empty());
-                (start, value, is_nested)
+                (start, value, is_nested, clean)
             }
             Some(LexContext::Str { triple: true, .. }) => {
                 unreachable!("triple-quoted string dispatched to lex_string_cont")
@@ -545,39 +693,104 @@ impl<'a> Lexer<'a> {
                 // a continuation segment — emit StrFmt and keep the Str
                 // context alive for text after `}`.
                 if is_nested {
-                    self.push_token(TokenKind::Str, span, value);
+                    self.push_token(
+                        TokenKind::Str,
+                        span,
+                        clean_str_token(self.src, start, end, value, clean),
+                    );
                 } else if self
                     .contexts
                     .iter()
                     .any(|c| matches!(c, LexContext::Interp { .. }))
                 {
-                    self.push_token(TokenKind::StrFmt, span, value);
+                    self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
                     self.contexts.push(LexContext::Str {
                         start: self.pos,
                         value: String::new(),
                         is_nested: false,
                         triple: false,
                         segs: Vec::new(),
+                        // Continuation segment (no opening quote at `start`).
+                        clean: false,
                     });
                 } else {
                     // Final closing quote — emit Str (complete string).
-                    self.push_token(TokenKind::Str, span, value);
+                    self.push_token(
+                        TokenKind::Str,
+                        span,
+                        clean_str_token(self.src, start, end, value, clean),
+                    );
                 }
             }
-            // String interpolation: `{ident...` starts an embedded expression.
+            // Doubled-brace escapes: `{{` / `}}` emit a single literal
+            // brace and never open an interpolation. Checked before the
+            // interpolation arm so `{{name}}` stays literal text while
+            // `{{{name}}}` is literal `{` + interpolation + literal `}`.
+            // Uses byte-prefix checks (`starts_with`) for exact two-byte
+            // consumes; `peek_char_at` is byte-offset based and would be
+            // wrong for multi-byte lookahead.
+            Some('{') if self.src[self.pos..].starts_with("{{") => {
+                let mut value = value;
+                value.push('{');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: false,
+                    segs: Vec::new(),
+                    // Rewritten text: never borrow afterwards.
+                    clean: false,
+                });
+            }
+            Some('}') if self.src[self.pos..].starts_with("}}") => {
+                let mut value = value;
+                value.push('}');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: false,
+                    segs: Vec::new(),
+                    // Rewritten text: never borrow afterwards.
+                    clean: false,
+                });
+            }
+            // String interpolation: `{ident...`, `{1...`, `{(...` start an
+            // embedded expression — the same trigger set as triple-quoted
+            // strings, so `{1 + 2}` prints `3`. `{{`, `{}`, and JSON-like
+            // `{"key"...` stay literal text (checked above/below).
             // Emit the accumulated text as StrFmt and enter interpolation
             // mode (leaving the string context underneath); the main loop
             // lexes `{` as LBrace, the expression, and `}` as RBrace, popping
             // back into string mode for the continuation.
-            Some('{') if self.peek_char_at(1).is_some_and(is_ident_start) => {
+            Some('{') if is_interp_start(self.peek_char_at(1)) => {
                 let span = Span::new(start as u32, self.pos as u32);
-                self.push_token(TokenKind::StrFmt, span, value);
+                // Clean prefix (unbroken from the opening quote, no escapes)
+                // borrows `src[start+1..pos]`; anything else keeps the
+                // accumulated owned text.
+                let src = self.src;
+                if clean {
+                    debug_assert_eq!(value, src[start + 1..self.pos]);
+                    self.push_token(
+                        TokenKind::StrFmt,
+                        span,
+                        Cow::Borrowed(&src[start + 1..self.pos]),
+                    );
+                } else {
+                    self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
+                }
                 self.contexts.push(LexContext::Str {
                     start: self.pos,
                     value: String::new(),
                     is_nested,
                     triple: false,
                     segs: Vec::new(),
+                    // Post-`{` continuation: no opening quote at `start`.
+                    clean: false,
                 });
                 self.pending_interp = true;
             }
@@ -654,9 +867,7 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                     }
                     None => {
-                        let span = Span::new(start as u32, self.src.len() as u32);
-                        self.errors
-                            .push(error_at("unterminated string literal", span));
+                        self.unterminated(start, "\"", true);
                         return;
                     }
                 }
@@ -666,6 +877,8 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: false,
                     segs: Vec::new(),
+                    // Any `\` escape rewrites text: never borrow afterwards.
+                    clean: false,
                 });
             }
             Some(c) => {
@@ -678,12 +891,12 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: false,
                     segs: Vec::new(),
+                    // Verbatim char: cleanliness unchanged.
+                    clean,
                 });
             }
             None => {
-                let span = Span::new(start as u32, self.src.len() as u32);
-                self.errors
-                    .push(error_at("unterminated string literal", span));
+                self.unterminated(start, "\"", true);
             }
         }
     }
@@ -706,6 +919,8 @@ impl<'a> Lexer<'a> {
                 is_nested,
                 triple: true,
                 segs,
+                // Triple strings never borrow (dedent rewrites); ignored.
+                clean: _,
             }) => (start, value, is_nested, segs),
             Some(LexContext::Str { triple: false, .. }) => {
                 unreachable!("single-line string dispatched to lex_triple_cont")
@@ -719,7 +934,7 @@ impl<'a> Lexer<'a> {
             let span = Span::new(start as u32, self.pos as u32);
             if is_nested {
                 let idx = self.tokens.len();
-                self.push_token(TokenKind::Str, span, value);
+                self.push_token(TokenKind::Str, span, Cow::Owned(value));
                 self.dedent_triple_segments(&segs, idx, indent);
             } else if self
                 .contexts
@@ -727,7 +942,7 @@ impl<'a> Lexer<'a> {
                 .any(|c| matches!(c, LexContext::Interp { .. }))
             {
                 let idx = self.tokens.len();
-                self.push_token(TokenKind::StrFmt, span, value);
+                self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
                 let mut next_segs = segs;
                 next_segs.push(idx);
                 // Dedent will run when the final `"""` closes; segments stay
@@ -739,21 +954,56 @@ impl<'a> Lexer<'a> {
                     is_nested: false,
                     triple: true,
                     segs: next_segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
                 });
             } else {
                 let idx = self.tokens.len();
-                self.push_token(TokenKind::Str, span, value);
+                self.push_token(TokenKind::Str, span, Cow::Owned(value));
                 self.dedent_triple_segments(&segs, idx, indent);
             }
             return;
         }
         match self.peek_char() {
+            // Doubled-brace escapes: `{{` / `}}` emit a single literal
+            // brace and never open an interpolation. Same semantics as
+            // single-line strings; dedent sees only the collapsed value.
+            Some('{') if self.src[self.pos..].starts_with("{{") => {
+                let mut value = value;
+                value.push('{');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: true,
+                    segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
+                });
+            }
+            Some('}') if self.src[self.pos..].starts_with("}}") => {
+                let mut value = value;
+                value.push('}');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: true,
+                    segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
+                });
+            }
             // Interpolation: `{ident...`, `{1...`, `{(...` start an embedded
             // expression. `{{`, `{}` and `{"...` (JSON-like) stay literal.
-            Some('{') if is_triple_interp_start(self.peek_char_at(1)) => {
+            Some('{') if is_interp_start(self.peek_char_at(1)) => {
                 let span = Span::new(start as u32, self.pos as u32);
                 let idx = self.tokens.len();
-                self.push_token(TokenKind::StrFmt, span, value);
+                self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
                 let mut next_segs = segs;
                 next_segs.push(idx);
                 self.contexts.push(LexContext::Str {
@@ -762,6 +1012,8 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: true,
                     segs: next_segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
                 });
                 self.pending_interp = true;
             }
@@ -838,9 +1090,7 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                     }
                     None => {
-                        let span = Span::new(start as u32, self.src.len() as u32);
-                        self.errors
-                            .push(error_at("unterminated string literal", span));
+                        self.unterminated(start, "\"\"\"", false);
                         return;
                     }
                 }
@@ -850,6 +1100,8 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: true,
                     segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
                 });
             }
             Some(c) => {
@@ -862,12 +1114,12 @@ impl<'a> Lexer<'a> {
                     is_nested,
                     triple: true,
                     segs,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
                 });
             }
             None => {
-                let span = Span::new(start as u32, self.src.len() as u32);
-                self.errors
-                    .push(error_at("unterminated string literal", span));
+                self.unterminated(start, "\"\"\"", false);
             }
         }
     }
@@ -906,7 +1158,10 @@ impl<'a> Lexer<'a> {
         }
         let mut idxs: Vec<usize> = segs.to_vec();
         idxs.push(final_idx);
-        let mut texts: Vec<String> = idxs.iter().map(|&i| self.tokens[i].text.clone()).collect();
+        let mut texts: Vec<String> = idxs
+            .iter()
+            .map(|&i| self.tokens[i].text.clone().into_owned())
+            .collect();
         if texts.is_empty() {
             return;
         }
@@ -964,7 +1219,7 @@ impl<'a> Lexer<'a> {
             *text = out;
         }
         for (tok_idx, new_text) in idxs.iter().zip(texts) {
-            self.tokens[*tok_idx].text = new_text;
+            self.tokens[*tok_idx].text = Cow::Owned(new_text);
         }
     }
 
@@ -1036,14 +1291,14 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn is_ident_start(c: char) -> bool {
+pub(crate) fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-/// Interpolation trigger inside triple-quoted strings: `{` opens an embedded
-/// expression when followed by an identifier start, a digit, or `(`.
-/// `{{`, `{}` and JSON-like `{"key"...` stay literal text.
-fn is_triple_interp_start(c: Option<char>) -> bool {
+/// Interpolation trigger for both single-line and triple-quoted strings:
+/// `{` opens an embedded expression when followed by an identifier start,
+/// a digit, or `(`. `{{`, `{}` and JSON-like `{"key"...` stay literal text.
+pub(crate) fn is_interp_start(c: Option<char>) -> bool {
     match c {
         Some(ch) if is_ident_start(ch) => true,
         Some(ch) if ch.is_ascii_digit() => true,
@@ -1074,6 +1329,28 @@ fn strip_up_to_indent(line: &str, n: usize) -> String {
 
 fn is_ident_continue(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Token text for a closed single-line string segment `[start, end)`.
+///
+/// When `clean` (unbroken from the opening quote, zero escapes), the value
+/// is byte-identical to `src[start+1..end-1]` (quotes stripped) and borrows
+/// it — one fewer allocation per plain string literal. Otherwise the
+/// accumulated owned text is used. The debug assert self-verifies the
+/// cleanliness invariant wherever tests exercise strings.
+fn clean_str_token<'a>(
+    src: &'a str,
+    start: usize,
+    end: usize,
+    value: String,
+    clean: bool,
+) -> std::borrow::Cow<'a, str> {
+    if clean {
+        debug_assert_eq!(value, src[start + 1..end - 1]);
+        std::borrow::Cow::Borrowed(&src[start + 1..end - 1])
+    } else {
+        std::borrow::Cow::Owned(value)
+    }
 }
 
 #[cfg(test)]
@@ -1156,7 +1433,7 @@ mod tests {
             .tokens
             .into_iter()
             .filter(|t| !matches!(t.kind, TokenKind::StmtEnd | TokenKind::Eof))
-            .map(|t| (t.kind, t.text))
+            .map(|t| (t.kind, t.text.into_owned()))
             .collect()
     }
 
@@ -1234,8 +1511,54 @@ mod tests {
 
     #[test]
     fn triple_double_brace_stays_literal() {
+        // `{{` collapses to a single literal `{` (escape, not two chars).
         let toks = sig("\"\"\"a {{ b\"\"\"");
-        assert_eq!(toks, vec![(TokenKind::Str, "a {{ b".to_string())]);
+        assert_eq!(toks, vec![(TokenKind::Str, "a { b".to_string())]);
+    }
+
+    #[test]
+    fn double_brace_escapes() {
+        // Single-line `{{` / `}}` collapse to single braces.
+        let toks = sig("\"a{{b}}c\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "a{b}c".to_string())]);
+        // `{{name}}` stays literal (no interpolation).
+        let toks = sig("\"{{name}}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{name}".to_string())]);
+        // `{{{x}}}` is literal `{` + interpolation + literal `}`.
+        let toks = sig("\"{{{x}}}\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "{".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "x".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, "}".to_string()),
+            ]
+        );
+        // Quadruple braces collapse pairwise.
+        let toks = sig("\"{{{{}}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{{}".to_string())]);
+        // Lone braces stay literal.
+        let toks = sig("\"a}b\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "a}b".to_string())]);
+    }
+
+    #[test]
+    fn triple_double_brace_escapes() {
+        let toks = sig("\"\"\"a{{b}}c\"\"\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "a{b}c".to_string())]);
+        let toks = sig("\"\"\"{{{x}}}\"\"\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "{".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "x".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, "}".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -1248,6 +1571,44 @@ mod tests {
     fn single_line_escaped_braces() {
         let toks = sig("\"\\{x\\}\"");
         assert_eq!(toks, vec![(TokenKind::Str, "{x}".to_string())]);
+    }
+
+    #[test]
+    fn single_line_digit_led_interpolation() {
+        // `{1 + 2}` interpolates in single-line strings, like triple-quoted.
+        let toks = sig("\"{1 + 2}\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, String::new()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Int, "1".to_string()),
+                (TokenKind::Plus, "+".to_string()),
+                (TokenKind::Int, "2".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, String::new()),
+            ]
+        );
+        // `{{7}}` stays literal (escape precedence over digit trigger).
+        let toks = sig("\"{{7}}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{7}".to_string())]);
+    }
+
+    #[test]
+    fn single_line_paren_led_interpolation() {
+        let toks = sig("\"{(a)}\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, String::new()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::LParen, "(".to_string()),
+                (TokenKind::Ident, "a".to_string()),
+                (TokenKind::RParen, ")".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, String::new()),
+            ]
+        );
     }
 
     #[test]

@@ -1,0 +1,33 @@
+// features: comparison, destructuring, func-call, indexing, locals, print, string-literal
+// E2E: Tuples — bare destructuring, indexing (incl. negative), len, writes
+func pair() -> (int, str) {
+    (7, "seven")
+}
+
+// bare destructuring (no parens)
+a, b := pair()
+println(a)
+println(b)
+
+// parens form still works
+(c, d) := pair()
+println(c)
+println(d)
+
+// wildcard
+_, e := pair()
+println(e)
+
+// indexing, including heterogeneous element types and negatives
+t := pair()
+println(t[0])
+println(t[1])
+println(t[-1])
+println(t[-2])
+println(len(t))
+
+// index write
+t[0] = 99
+println(t[0])
+
+println("tuple_ops_ok")

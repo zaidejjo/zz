@@ -1,3 +1,4 @@
+// features: closures, comparison, error-case, func-call, imports, locals, option-result, print, std-http, string-literal
 // E2E: unknown method in std.http.route is a compile error
 import std.http
 

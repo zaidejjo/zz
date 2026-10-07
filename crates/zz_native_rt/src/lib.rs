@@ -32,6 +32,10 @@ pub mod crypto_core;
 pub mod crypto_pw;
 /// `std.encoding` text codecs (base64-bytes preserving binary payloads).
 pub mod encoding;
+/// Canonical float formatting (IR spec §4): shortest round-trip `Display`
+/// semantics produced by the Rust core; the C backend calls it via the
+/// C ABI instead of reimplementing float printing.
+pub mod float_fmt;
 /// `std.log` logging + tracing (levels, sinks, JSON, spans).
 pub mod log;
 /// PostgreSQL wire-protocol driver for AOT (`zz_pg_*_raw` FFI over the
@@ -52,6 +56,8 @@ pub mod process;
 pub mod regexp;
 /// `std.sys` system information (os, arch, cpu, hostname, memory).
 pub mod sys;
+/// `std.term` terminal control (raw mode, single-key reads, size).
+pub mod term;
 /// `std.time` high-resolution extension (ns/µs clocks, micro sleeps).
 pub mod time_ext;
 /// `std.uuid` identifier generation (v4 random, v7 time-ordered).

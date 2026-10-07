@@ -83,6 +83,65 @@ pi: float = 3.14
 scores: [int] = [1, 2, 3]
 ```
 
+### Type Aliases
+
+```zz
+type Tokens = [Token]
+type Pair<T> = (T, T)
+
+toks: Tokens = ["a"]
+p: Pair<int> = (1, 2)
+```
+
+Aliases erase at check time: uses resolve to the target type, so there
+is no runtime cost and both engines behave identically. Generic aliases
+take plain parameters and name their arguments at use sites
+(`Pair<int>`), exactly like generic structs. `type` is contextual —
+`json.type(x)` and variables named `type` keep working. Aliases export
+across modules with `pub type` and import qualified
+(`shapes.Tokens`) or selective (`import shapes(Tokens)`).
+
+### User Enums
+
+```zz
+enum Token {
+    Eof,
+    IntLit(int),
+    Name(str),
+}
+
+t := Token.IntLit(42)   // construction is qualified
+match t {
+    .Eof => "eof",      // patterns name the variant short
+    .IntLit(v) => "int",
+    .Name(s) => s,
+}
+```
+
+Enums erase to qualified objects at runtime, so construction, matching,
+equality, and `impl` methods behave identically on both engines. Matches
+are exhaustiveness-checked (missing variants report, or add a `_` arm).
+Variants hold at most one payload — use a tuple for more
+(`Pair((int, int))`). `enum` is contextual, like `type`. Enums export
+across modules with `pub enum` and chain methods inline, including off
+payload construction (`Token.IntLit(1).add(2)` fills the payload with
+`1`, calls `add` with `2`).
+
+Generic enums take plain parameters and name their arguments at use
+sites (`Box[int]`), exactly like generic structs:
+
+```zz
+enum Box<T> {
+    V(T),
+    E,
+}
+
+b: Box<int> = Box.E
+```
+
+Known V1 limits: match guards in native builds only see scalar
+payloads and outer bindings (the VM is fully general).
+
 ## Functions
 
 ### Basic Function
@@ -244,6 +303,14 @@ func process() {
 2 ** 10     // 1024 (power, right-associative)
 ```
 
+Signed integer overflow on `+`, `-`, `*` wraps two's-complement
+(`9223372036854775807 + 1` is `-9223372036854775808`) on both engines —
+it never traps. Guard manually at the boundary when wrapping would
+corrupt the result (counters, timestamps, money math); the `toml`
+package's exact `i64::MIN`/`MAX` checks are the reference pattern.
+Integer division by zero (including literal `1 / 0`, which fails at
+check time) and `INT64_MIN / -1` are runtime errors, not wraps.
+
 ### Comparison and Logic
 
 ```zz
@@ -254,6 +321,27 @@ true && false   // false
 true || false   // true
 !true           // false
 ```
+
+### Bitwise (int-only)
+
+```zz
+6 & 3           // 2 (AND)
+6 | 3           // 7 (OR)
+6 ^ 3           // 5 (XOR)
+~6              // -7 (NOT)
+1 << 10         // 1024 (shift left)
+1024 >> 3        // 128 (shift right, arithmetic)
+```
+
+Precedence (tightest first): `~` > `+ -` > `<< >>` > `&` >
+`^` > `|` > comparison (`<`, `==`, …) > `&&` > `||`. So
+`flags & mask == expected` parses as `(flags & mask) == expected`,
+and `a + b << c` as `(a + b) << c`.
+
+Both operands (and `~`'s operand) must be `int` — floats, bools,
+and strings are type errors. Shifts mask the count to `& 63`
+(`1 << 64` is `1`); a negative shift count is a runtime error.
+`>>` on negative values shifts arithmetically (sign-extending).
 
 ### String Interpolation
 
@@ -273,6 +361,51 @@ println("bin = {n:b}")      // 11111111
 println("dec = {n:d}")      // 255
 ```
 
+Literal braces use doubled escapes — `{{` renders `{`, `}}`
+renders `}` — in both `"..."` and `"""..."""` strings. This is the
+preferred way to emit JSON, CSS, or template syntax:
+
+```zz
+println("{{name}}")        // {name} (no interpolation)
+println("{{{name}}}")     // {World} (literal braces + value)
+println(".a{{color:red}}") // .a{color:red}
+
+// Multiline works the same way:
+css := """
+    .a{{color:red}}
+    """
+```
+
+`\{` / `\}` remain accepted for backwards compatibility and mean
+the same as `{{` / `}}`, but prefer the doubled form.
+
+#### What `{...}` expands
+
+Both `"..."` and `"""..."""` strings open an interpolation when `{` is
+followed by an identifier, a digit, or `(`:
+
+```zz
+println("{1 + 2}")   // 3
+println("{(a)}")     // value of (a)
+```
+
+`{{`, `{}`, and JSON-like `{"key"` stay literal text in both forms —
+double the braces for a literal `{`:
+
+```zz
+println("{{1 + 2}}") // {1 + 2} (no interpolation)
+```
+
+The same rule covers regular-expression quantifiers, which must be
+doubled like in Python f-strings or Rust `format!`:
+
+```zz
+pat := "^[0-9a-f]{{8}}$"   // matches 8 hex digits
+```
+
+When a string DOES interpolate elsewhere, a bare `{` that cannot expand
+(e.g. `"{x} of {!done}"`) warns at check time naming the exact rule.
+
 ### Array Literals
 
 ```zz
@@ -287,6 +420,26 @@ empty := []
 ages := {"Alice": 30, "Bob": 25}
 empty := {}
 ```
+
+### Tuple Literals and Destructuring
+
+```zz
+t := (7, "seven")
+t[0]            // 7 (integer-literal index, checked at compile time)
+t[1]            // "seven"
+t[-1]           // "seven" (negative counts from the end, like arrays)
+len(t)          // 2
+
+// Destructuring — parens or bare form (identical meaning):
+(a, b) := t     // a = 7, b = "seven"
+c, d := t       // same; `_` skips: `_, e := t`
+```
+
+Dynamic indices (`t[i]`) are a compile error — destructure instead.
+Out-of-range literal indices are also caught at compile time.
+
+Tuples share the array representation: `t[0] = 99` writes in
+place, and behavior is identical on the VM and native backends.
 
 ### Indexing and Slicing
 
@@ -317,6 +470,63 @@ struct Box { items: [int] }
 b := Box{ items: [1, 2, 3] }
 b.items[1] = 99  // b.items == [1, 99, 3]
 ```
+
+### Compound Assignment
+
+`x OP= y` is equivalent to `x = x OP y` with the receiver evaluated
+exactly once (so `arr[i()] += f()` calls `i()` then `f()`, once each —
+unlike textual expansion, which would evaluate `i()` twice):
+
+```zz
+x := 10
+x += 1    // 11, like x = x + 1
+x -= 2    // 9
+x *= 3    // 27
+x /= 4    // 6 (integer division)
+x %= 4    // 2
+n := 2
+n **= 10  // 1024
+
+p.x += 5        // struct fields (same targets as `=`)
+arr[0] *= 2     // indices
+
+// Bitwise forms work too:
+flags := 0
+flags |= 4
+flags &= 7
+flags ^= 1
+flags <<= 2
+flags >>= 1
+```
+
+Type rules are exactly the binary operator's: `x += 1.5` is accepted
+precisely when `x = x + 1.5` is. Cannot be chained (`x += y += z`
+is an error — split it into two statements).
+
+### Value Semantics
+
+Function parameters are values (copies) from the programmer's
+perspective — a function can never mutate its caller's variables:
+
+```zz
+struct Counter { n: int }
+
+func bump(c: Counter) -> int {
+    c.n += 100   // mutates only the local copy
+    c.n
+}
+
+c := Counter{ n: 10 }
+bump(c)     // 110
+c.n         // still 10
+```
+
+There are no reference parameters, no borrows, and no borrow checker.
+`value semantics != mandatory physical memcpy`: the compiler and
+runtime may eliminate physical copies and reuse storage internally
+(copy-on-write, in-place slot operations) whenever provably safe, but
+such optimizations are never observable — no alias can witness an
+intermediate mutation. Correctness always wins over optimization.
 
 ### Ranges
 
@@ -429,6 +639,44 @@ Explicit (`User{ Base: Base{ id: 1, name: "Z" }, age: 19 }`) and shorthand
 Mixing an explicit embedded value with flattened leaves of the same subtree
 is rejected as ambiguous.
 
+### Generic Structs
+
+Structs take type parameters (`struct Box<T> { v: T }`). Construction
+infers the arguments (`Box{ v: 1 }` is `Box<int>`), exactly like generic
+function calls — no turbofish needed. Annotate when you want to pin it
+(`x: Box<int> = Box{ v: 1 }`):
+
+```zz
+struct Box<T> { v: T }
+
+impl Box<T> {
+    func get(self) -> T {
+        self.v
+    }
+}
+
+b := Box{ v: 42 }      // Box[int]
+println(b.get())       // 42
+s := Box{ v: "hi" }    // Box[str]
+
+struct Pair<A, B> { a: A, b: B }
+p := Pair{ a: 1, b: "s" }   // Pair[int, str]
+```
+
+Rules:
+- Use sites name their arguments (`Box<int>`); a bare `Box` for a generic
+  struct is an error, as is the wrong count (`Pair<int>`).
+- `Box<int>` and `Box<str>` are distinct types — assigning one to the
+  other is a type mismatch.
+- `impl Box<T>` scopes `T` over every method; the receiver unifies the
+  arguments at each call. A plain `impl Box` for a generic struct is an
+  error, and a method parameter may not shadow an impl parameter.
+- Type arguments erase at runtime: values store field data only, so
+  generic code runs identically to hand-monomorphized code (same
+  opcodes, same generated C — verified by test, not just claimed).
+  Value semantics hold unchanged: functions receive copies regardless
+  of type arguments.
+
 ### Method Call Syntax
 
 Method calls desugar to function calls with the receiver as the first argument:
@@ -517,6 +765,21 @@ match .some(.ok(2)) {
 match x {
     .some(_) => println("has value"),
     _        => println("nothing"),
+}
+```
+
+### Statement Arms
+
+Arms accept statements as well as expressions — assignment, `:=`
+declarations, `return`, `defer` — wrapped as if braced. `break` and
+`continue` keep their expression form so divergence checking is
+unchanged.
+
+```zz
+y := 0
+match x {
+    .some(v) => y = v,
+    .none    => y = 0 - 1,
 }
 ```
 

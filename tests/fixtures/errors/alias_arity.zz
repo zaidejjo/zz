@@ -1,0 +1,8 @@
+// features: comparison, error-case, func-call, generics, print, string-literal
+// ERROR: generic alias used with the wrong argument count.
+type Pair<T> = (T, T)
+
+func main() {
+    p: Pair<int, str> = (1, "a")
+    println(p)
+}

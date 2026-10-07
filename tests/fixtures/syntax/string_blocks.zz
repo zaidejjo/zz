@@ -1,3 +1,4 @@
+// features: comparison, if-else, int-arith, locals, print, string-literal, while-loop
 // E2E: String comparison before block statements (regression: parser ambiguity)
 // Ensures "zaid"{ } is NOT treated as string interpolation.
 // Now tests actual string == comparisons (VM supports string equality).

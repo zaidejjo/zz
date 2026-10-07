@@ -50,6 +50,15 @@ zz_value zz_str_owned(char *s);            // takes ownership
 zz_value zz_str_static(const char *s);     // copy of a C literal
 zz_value zz_str_new_arena(const char *s, size_t len, zz_arena *arena);
 zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena); // arena str cast
+// Heal an arena-owned string (refs==0 sentinel) into an independent
+// heap-owned copy (refs==1). All other values pass through unchanged.
+// Every boundary that retains a value beyond the current loop iteration
+// (variable assignment, array/dict/object stores) must heal: the
+// per-iteration `zz_arena_reset` reuses the buffer, so aliasing it past
+// the reset reads back garbage (NUL bytes), and aliasing it past
+// `zz_arena_destroy` is use-after-free. Mirrors the string path of
+// `zz_value_dup` used at thread crossings.
+zz_value zz_str_heal_arena(zz_value v);
 
 // ---- string concatenation shims ----------------------------------------
 zz_value zz_binop_cat(zz_value a, zz_value b);       // str concat
@@ -59,34 +68,130 @@ zz_value zz_binop_cat_str(zz_value a, zz_value b);   // str + Display(b)
 // Returns void; *a is mutated. Generated for hot `s = s + literal` loops.
 void zz_str_append_str(zz_value *a, zz_value b);
 
-// Index a string by byte offset: `s[i]` → 1-char string, negative counts
-// from the end. Out of bounds (or non-int index) → unit + *err, mirroring
-// zz_bytes_get. Byte-based like zz_slice_value ("ASCII-compatible");
-// the VM counts Unicode chars instead — established engine difference
-// for non-ASCII, same as slicing.
+// ---- UTF-8 character helpers -------------------------------------------
+// `str` is UTF-8; `len` / `str.length` / indexing / slicing all count
+// Unicode scalar values (chars), matching the VM (`s.chars().count()`).
+// Byte length stays in `s->len` for storage/concat/compare/print/hash.
+//
+// Invalid bytes (lone continuation, truncated sequence, bad continuation)
+// count as one single-byte char each: never crash, never loop forever,
+// always terminate. Pure ASCII is unaffected (bytes == chars).
+static inline size_t zz_utf8_seq_len(const unsigned char *p, size_t remain) {
+    unsigned char c = p[0];
+    size_t want;
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) want = 2;
+    else if ((c & 0xF0) == 0xE0) want = 3;
+    else if ((c & 0xF8) == 0xF0) want = 4;
+    else return 1; // lone continuation or 0xF8+ : one byte char
+    if (want > remain) return 1; // truncated: one byte char
+    for (size_t k = 1; k < want; k++) {
+        if ((p[k] & 0xC0) != 0x80) return 1; // bad continuation: resync
+    }
+    return want;
+}
+
+// Number of Unicode scalar values in `s` (chars, not bytes).
+static inline size_t zz_str_char_len(const zz_str *s) {
+    if (!s) return 0;
+    const unsigned char *p = (const unsigned char *)zz_str_cptr(s);
+    size_t n = s->len;
+    // ASCII fast path: bytes without the high bit are single-byte
+    // chars, so a pure-ASCII string's char count is its byte length.
+    // Word-at-a-time high-bit test (~n/8 steps); only strings with
+    // actual multibyte sequences pay for the precise UTF-8 walk.
+    size_t i = 0;
+    const size_t WS = sizeof(size_t);
+    const size_t LO = ((size_t)-1) / (size_t)0xFF;
+    const size_t HI = LO * (size_t)0x80;
+    int ascii = 1;
+    while (i < n && (((uintptr_t)(p + i)) & (WS - 1)) != 0) {
+        if (p[i] >= 0x80) {
+            ascii = 0;
+            break;
+        }
+        i++;
+    }
+    if (ascii) {
+        for (; i + WS <= n; i += WS) {
+            size_t w;
+            memcpy(&w, p + i, WS);
+            if ((w & HI) != 0) {
+                ascii = 0;
+                break;
+            }
+        }
+    }
+    if (ascii) {
+        for (; i < n; i++) {
+            if (p[i] >= 0x80) {
+                ascii = 0;
+                break;
+            }
+        }
+    }
+    if (ascii) {
+        return n;
+    }
+    size_t count = 0;
+    i = 0;
+    while (i < n) {
+        i += zz_utf8_seq_len(p + i, n - i);
+        count++;
+    }
+    return count;
+}
+
+// Byte offset of the `char_idx`-th char (0-based) plus its byte length in
+// `*out_clen`. Returns `(size_t)-1` when out of range. Caller normalizes
+// negatives against `zz_str_char_len` first.
+static inline size_t zz_str_char_byte_off(const zz_str *s, size_t char_idx, size_t *out_clen) {
+    const unsigned char *p = (const unsigned char *)zz_str_cptr(s);
+    size_t n = s->len, i = 0;
+    for (size_t c = 0; i < n; c++) {
+        size_t l = zz_utf8_seq_len(p + i, n - i);
+        if (c == char_idx) {
+            if (out_clen) *out_clen = l;
+            return i;
+        }
+        i += l;
+    }
+    return (size_t)-1;
+}
+
+// Index a string by char: `s[i]` → 1-char string, negative counts
+// from the end (in chars). Out of bounds (or non-int index) → unit + *err,
+// mirroring zz_bytes_get. Char-based like the VM; slicing below agrees.
 static inline zz_value zz_str_get(const zz_str *s, zz_value idx, int *err) {
     *err = 0;
     if (idx.tag != ZZ_INT || !s) {
         *err = 1;
         return zz_unit();
     }
+    int64_t n = (int64_t)zz_str_char_len(s);
     int64_t i = idx.i;
-    int64_t n = (int64_t)s->len;
     if (i < 0)
         i += n;
     if (i < 0 || i >= n) {
         *err = 1;
         return zz_unit();
     }
-    return zz_str_new(zz_str_cptr(s) + (size_t)i, 1);
+    size_t clen = 1;
+    size_t off = zz_str_char_byte_off(s, (size_t)i, &clen);
+    return zz_str_new(zz_str_cptr(s) + off, clen);
 }
 void zz_str_append_lit(zz_value *a, const char *lit, size_t len);
+// Append a formatted int / bool directly (no temp, no release).
+// Fast path for `str(i)` terms in `s = s + ...` append chains.
+void zz_str_append_int(zz_value *a, int64_t n);
+void zz_str_append_bool(zz_value *a, bool b);
 
 // ---- str natives -------------------------------------------------------
 zz_value zz_str_length(zz_value s, int *err);
 zz_value zz_str_lower(zz_value s, int *err);
 zz_value zz_str_upper(zz_value s, int *err);
 zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err);
+zz_value zz_str_count(zz_value s, zz_value sub, int *err);
 zz_value zz_str_contains(zz_value s, zz_value sub, int *err);
 zz_value zz_str_startswith(zz_value s, zz_value prefix, int *err);
 zz_value zz_str_endswith(zz_value s, zz_value suffix, int *err);
@@ -95,6 +200,18 @@ zz_value zz_str_trim_start(zz_value s, int *err);
 zz_value zz_str_trim_end(zz_value s, int *err);
 zz_value zz_str_join(zz_value items, zz_value sep, int *err);
 zz_value zz_str_split(zz_value s, zz_value sep, int *err);
+zz_value zz_str_find(zz_value s, zz_value sub, zz_value from, int *err);
+zz_value zz_str_rfind(zz_value s, zz_value sub, zz_value from, int *err);
+zz_value zz_str_starts_with_at(zz_value s, zz_value sub, zz_value pos, int *err);
+zz_value zz_str_ends_with_at(zz_value s, zz_value sub, zz_value pos, int *err);
+zz_value zz_str_classify(zz_value text, zz_value markers, zz_value bstart, zz_value bend, zz_value nested, zz_value whole, int *err);
+zz_value zz_str_bytes(zz_value s, int *err);
+zz_value zz_bytes_to_str(zz_value vs, int *err);
+zz_value zz_bytes_to_ints(zz_value b, int *err);
+zz_value zz_str_trim_span(zz_value s, zz_value start, zz_value end, int *err);
+zz_value zz_str_find_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err);
+zz_value zz_str_rfind_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err);
+zz_value zz_str_count_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err);
 
 // ---- string casts ------------------------------------------------------
 zz_value zz_str_from_int(int64_t n);

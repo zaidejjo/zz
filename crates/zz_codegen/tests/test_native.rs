@@ -41,7 +41,14 @@ fn native_run(src: &str) -> (i32, String) {
         parsed.errors
     );
     let funcs = zz_stdlib::stdlib_funcs();
-    let res = zz_hir::build_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+    let res = zz_hir::build_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
     let tp = res.program;
     let (pruned, reach) = zz_hir::dce(&tp, "main");
     use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,3 +1,4 @@
+// features: closures, comparison, error-case, func-call, imports, locals, option-result, print, std-http, string-literal
 // E2E: bad std.http route paths are compile errors
 import std.http
 

@@ -1,3 +1,4 @@
+// features: arrays, closures, comparison, func-call, imports, int-arith, locals, print, std-task, string-literal
 // E2E: tasks — 4 threads, distinct results, join fan-in.
 // Deterministic: min/max ordering, no timing dependence.
 import std.task

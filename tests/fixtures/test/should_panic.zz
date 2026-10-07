@@ -1,3 +1,4 @@
+// features: assert, bool-logic, comparison, func-call, if-else, print, string-literal, zz-test
 // E2E: should_panic catches expected failures
 
 func risky(n: int) -> int {

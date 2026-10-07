@@ -181,7 +181,15 @@ impl Checker {
         // and missing-return paths (`if c { return 1 }` with no else,
         // which falls through with unit).
         if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
-            self.report_mismatch(e, body.span);
+            // Sherlock: unwrapped Result at the tail value gets a
+            // value-site error with fixes instead of the generic
+            // return-type-span mismatch (#245).
+            let tail_span = body.stmts.last().map(|s| s.span()).unwrap_or(body.span);
+            let resolved_body = self.unifier.resolve(&body_t);
+            let resolved_ret = self.unifier.resolve(&sig.ret);
+            if !self.report_result_return_hint(&resolved_body, &resolved_ret, tail_span) {
+                self.report_mismatch(e, body.span);
+            }
         }
     }
 

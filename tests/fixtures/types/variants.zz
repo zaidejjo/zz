@@ -1,3 +1,4 @@
+// features: comparison, elvis, if-else, if-let, locals, match, option-result, print, string-literal
 // E2E: Option/Result variants — .some, .none, .ok, .err, match, if-let
 
 // option basics

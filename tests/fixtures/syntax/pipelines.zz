@@ -1,3 +1,4 @@
+// features: comparison, func-call, imports, int-arith, locals, pipe, print, std-str, string-literal
 // E2E: Pipeline operator |>
 
 // basic pipeline

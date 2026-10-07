@@ -3,7 +3,132 @@
 // extraction helpers, and higher-order iterators.
 #include "runtime.h"
 
-// ---- arrays ------------------------------------------------------------
+// ---- arena healing -------------------------------------------------------
+// Retaining stores (array/dict/object slots, `zz_assign`) must never alias
+// arena-owned values: the per-iteration `zz_arena_reset` reuses the buffer,
+// so a stored alias reads back garbage on the next iteration — the nested
+// `[[str]]` first-element corruption + SIGSEGV class (loop-built inner
+// arrays stored into an outer array, then the arena reset overwrote them).
+// Strings already heal via `zz_str_heal_arena`; arrays and dicts need the
+// same treatment (deep: nested arena values copied recursively, heap
+// elements shared via `zz_clone`).
+//
+// Two flavors, mirroring the string path:
+//   - `zz_clone_for_store` (share convention, callers pass borrowed):
+//     arena → fresh heap copy, heap → `zz_clone` (bump).
+//   - `zz_heal_for_move` (move convention, callers transfer ownership —
+//     `zz_array_push`, `zz_assign`): arena → fresh heap copy, heap →
+//     unchanged (adopted, no bump).
+//
+// Depth-capped at 32 (like ZZ_EMBED_MAX_DEPTH / ZZ_PRINT_MAX_DEPTH):
+// pathological nesting falls back to sharing. Arena-fresh values cannot
+// be cyclic without an escaping store (which heals), so the cap is a
+// backstop, never a behavior.
+#define ZZ_HEAL_MAX_DEPTH 32
+
+int zz_array_is_arena(const zz_array *a) {
+    if (!a) return 0;
+    return a->refs == 0 || a->refs == ZZ_ARRAY_STACK_MAGIC ||
+           a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_ARENA_MAGIC;
+}
+
+int zz_dict_is_arena(const zz_dict *d) {
+    if (!d) return 0;
+    return d->refs == 0 || d->refs == ZZ_DICT_ARENA_MAGIC;
+}
+
+// True when storing `v` must copy instead of share: top-level arena
+// ownership, or a variant/tuple wrapper around a value that does.
+// Heap-rooted arrays/dicts are guaranteed clean (every ingress path
+// heals), so no deep element walk is needed — O(1) for containers,
+// O(wrapper depth) otherwise.
+static int value_needs_heal(zz_value v, int depth) {
+    if (depth > ZZ_HEAL_MAX_DEPTH) return 0;
+    switch (v.tag) {
+    case ZZ_STR:
+        return v.s && !v.s->interned && v.s->refs == 0;
+    case ZZ_ARRAY:
+        return v.arr && zz_array_is_arena(v.arr);
+    case ZZ_DICT:
+        return v.dict && zz_dict_is_arena(v.dict);
+    case ZZ_TUPLE:
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        return v.payload && value_needs_heal(*v.payload, depth + 1);
+    default:
+        return 0;
+    }
+}
+
+static zz_value heal_deep_copy(zz_value v, int depth) {
+    if (depth > ZZ_HEAL_MAX_DEPTH) return zz_clone(v);
+    switch (v.tag) {
+    case ZZ_STR:
+        if (v.s && !v.s->interned && v.s->refs == 0) return zz_str_heal_arena(v);
+        return zz_clone(v);
+    case ZZ_ARRAY: {
+        if (!v.arr || !zz_array_is_arena(v.arr)) return zz_clone(v);
+        zz_value out = zz_array_new();
+        for (size_t i = 0; i < v.arr->len; i++) {
+            // Elements arrive owned (fresh copy or bumped clone) and
+            // `zz_array_push` adopts (move convention) — exactly one
+            // share lands in the slot. Push also re-heals, which is a
+            // no-op here (outputs are heap-owned), doubling only a few
+            // tag branches, never correctness.
+            zz_array_push(out.arr, heal_deep_copy(v.arr->items[i], depth + 1));
+        }
+        return out;
+    }
+    case ZZ_DICT: {
+        if (!v.dict || !zz_dict_is_arena(v.dict)) return zz_clone(v);
+        zz_value out = zz_dict_new();
+        for (size_t i = 0; i < v.dict->len; i++) {
+            zz_value k = heal_deep_copy((zz_value){ZZ_STR, {.s = v.dict->entries[i].key}}, depth + 1);
+            zz_value val = heal_deep_copy(v.dict->entries[i].val, depth + 1);
+            // `zz_dict_set` adopts the value as-is (move convention) but
+            // shares the key (`refs++`), so drop our key temp only: the
+            // dict keeps exactly one share of each.
+            zz_dict_set(out.dict, k, val);
+            zz_release(&k);
+        }
+        return out;
+    }
+    case ZZ_TUPLE:
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON: {
+        if (!v.payload) return v;
+        // Clean payloads stay shared (no rebuild churn); only
+        // arena-containing payloads get a fresh wrapper + healed inner.
+        if (!value_needs_heal(*v.payload, depth + 1)) return zz_clone(v);
+        zz_value *slot = (zz_value *)malloc(sizeof(zz_value));
+        if (!slot) return zz_clone(v);
+        *slot = heal_deep_copy(*v.payload, depth + 1);
+        zz_value out = v;
+        out.payload = slot;
+        return out;
+    }
+    default:
+        return zz_clone(v);
+    }
+}
+
+zz_value zz_heal_for_move(zz_value v) {
+    if (value_needs_heal(v, 0)) return heal_deep_copy(v, 0);
+    return v;
+}
+
+// Ownership-sharing store of a value into a container slot: arena-owned
+// values (strings, arrays, dicts, wrappers around them) are healed to
+// independent heap copies (else the loop-arena reset corrupts the stored
+// element); every other value is shared via zz_clone.
+static zz_value zz_clone_for_store(zz_value v) {
+    if (value_needs_heal(v, 0)) return heal_deep_copy(v, 0);
+    return zz_clone(v);
+}
 zz_value zz_array_new(void) {
     zz_array *a = (zz_array *)calloc(1, sizeof(zz_array));
     a->refs = 1;  // ARC: initial reference count
@@ -105,18 +230,28 @@ void zz_array_push_lit(zz_array *a, zz_value item) {
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
         size_t nc = a->cap == 0 ? 4 : a->cap * 2;
-        // Stack/lit/arena arrays need migration to malloc before realloc.
-        if (a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC || a->items == NULL) {
+        // Stack/lit/arena arrays need migration to malloc before realloc
+        // (realloc on arena/stack memory corrupts the heap — SIGSEGV
+        // class; ARENA_MAGIC was missing here while zz_vec_append
+        // handled it).
+        if (a->refs == ZZ_ARRAY_STACK_MAGIC || a->refs == ZZ_ARRAY_LIT_MAGIC
+            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(nc * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++) new_items[i] = a->items[i];
             a->items = new_items;
-            a->refs = 0;
+            // Preserve an accurate `refs == 1` (fresh heap array claiming
+            // its first buffer): it proves single ownership, which the
+            // move-aware push relies on. Anything else becomes 0.
+            if (a->refs != 1) a->refs = 0;
         } else {
             a->items = (zz_value *)realloc(a->items, nc * sizeof(zz_value));
         }
         a->cap = nc;
     }
-    a->items[a->len++] = item;
+    // Move convention (callers transfer ownership): arena-owned values
+    // heal to heap copies so the stored element survives the loop-arena
+    // reset; heap values are adopted as-is.
+    a->items[a->len++] = zz_heal_for_move(item);
 }
 
 size_t zz_array_len(const zz_array *a) {
@@ -340,8 +475,8 @@ zz_value zz_dict_new_sized(size_t hint) {
 // (zz_index_get lives inline in collections.h; only the setter, which is
 // never loop-hot, stays out-of-line here.)
 
-// Slice a value by byte indices (array elements or ASCII-compatible strings).
-// Missing bounds (unit) mean "from 0" / "to end". Matches the VM for ASCII.
+// Slice a value by char/element indices (arrays count elements, strings
+// count chars like the VM). Missing bounds (unit) mean "from 0" / "to end".
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
     int64_t n;
     switch (obj.tag) {
@@ -363,37 +498,108 @@ zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
         int64_t e = end.tag == ZZ_INT ? end.i : n;
         return zz_bytes_slice(obj.bytes, s, e);
     }
-    case ZZ_STR:
-        n = (int64_t)obj.s->len;
-        {
-            int64_t si = 0, ei = n;
-            if (start.tag == ZZ_INT) si = start.i;
-            if (end.tag == ZZ_INT) ei = end.i;
-            if (si < 0) si += n;
-            if (ei < 0) ei += n;
-            if (si < 0) si = 0;
-            if (ei > n) ei = n;
-            if (si > ei) si = ei;
-            zz_value out = zz_str_new(zz_str_cptr(obj.s) + si, (size_t)(ei - si));
-            return out;
+    case ZZ_STR: {
+        int64_t nchars = (int64_t)zz_str_char_len(obj.s);
+        int64_t si = 0, ei = nchars;
+        if (start.tag == ZZ_INT) si = start.i;
+        if (end.tag == ZZ_INT) ei = end.i;
+        if (si < 0) si += nchars;
+        if (ei < 0) ei += nchars;
+        if (si < 0) si = 0;
+        if (ei > nchars) ei = nchars;
+        if (si > ei) si = ei;
+        size_t byte_lo, byte_hi;
+        if (si >= nchars) {
+            byte_lo = obj.s->len;
+        } else {
+            size_t cl = 1;
+            byte_lo = zz_str_char_byte_off(obj.s, (size_t)si, &cl);
         }
+        if (ei >= nchars) {
+            byte_hi = obj.s->len;
+        } else if (ei <= si) {
+            byte_hi = byte_lo;
+        } else {
+            size_t cl = 1;
+            byte_hi = zz_str_char_byte_off(obj.s, (size_t)ei, &cl);
+        }
+        zz_value out = zz_str_new(zz_str_cptr(obj.s) + byte_lo, byte_hi - byte_lo);
+        return out;
+    }
     default:
         if (err) *err = 1;
         return zz_unit();
     }
 }
 
-void zz_index_set(zz_value obj, zz_value idx, zz_value item, int *err) {
-    switch (obj.tag) {
+// Duplicate a dict with an INDEPENDENT entries buffer (shallow value
+// clone, like `zz_array_dup`): callers may mutate the result without
+// affecting the original. Arena-owned keys/values heal to heap via
+// `zz_dict_set`'s own conventions (keys bumped-or-healed, values
+// adopted from a prior `zz_clone`), so each side owns exactly one
+// share of everything stored.
+zz_value zz_dict_dup_value(const zz_dict *d) {
+    if (!d) return zz_unit();
+    zz_value out = zz_dict_new_sized(d->len);
+    if (!out.dict) return zz_unit();
+    for (size_t i = 0; i < d->len; i++) {
+        if (!d->entries[i].key) continue; // corrupt entry: skip, never crash
+        zz_value k;
+        k.tag = ZZ_STR;
+        k.s = d->entries[i].key;
+        zz_value v = zz_clone(d->entries[i].val);
+        zz_dict_set(out.dict, k, v);
+    }
+    return out;
+}
+
+void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
+    if (!obj) {
+        if (err) *err = 1;
+        return;
+    }
+    // Detach shared/sentinel buffers so the write below cannot leak
+    // into co-owners (`a2 := a; a2[0] = x` leaves `a` untouched),
+    // literals, or arenas. Uniquely-owned heap buffers (`refs == 1`,
+    // the only exact state) write in place with zero copies;
+    // arena/sentinel buffers heal to heap; shared heap buffers dup.
+    if (obj->tag == ZZ_ARRAY && obj->arr && obj->arr->refs != 1) {
+        zz_value fresh;
+        if (zz_array_is_arena(obj->arr)) {
+            fresh = zz_heal_for_move((zz_value){ZZ_ARRAY, {.arr = obj->arr}});
+        } else {
+            fresh = zz_array_dup(obj->arr);
+        }
+        if (!fresh.arr) {
+            if (err) *err = 1;
+            return;
+        }
+        zz_release_array(obj->arr);
+        obj->arr = fresh.arr;
+    } else if (obj->tag == ZZ_DICT && obj->dict && obj->dict->refs != 1) {
+        zz_value fresh;
+        if (zz_dict_is_arena(obj->dict)) {
+            fresh = zz_heal_for_move((zz_value){ZZ_DICT, {.dict = obj->dict}});
+        } else {
+            fresh = zz_dict_dup_value(obj->dict);
+        }
+        if (!fresh.dict) {
+            if (err) *err = 1;
+            return;
+        }
+        zz_release_dict(obj->dict);
+        obj->dict = fresh.dict;
+    }
+    switch (obj->tag) {
     case ZZ_ARRAY:
-        zz_array_set(obj.arr, idx, item, err);
+        zz_array_set(obj->arr, idx, item, err);
         return;
     case ZZ_DICT:
-        zz_dict_set(obj.dict, idx, item);
-        *err = 0;
+        zz_dict_set(obj->dict, idx, item);
+        if (err) *err = 0;
         return;
     default:
-        *err = 1;
+        if (err) *err = 1;
     }
 }
 
@@ -419,9 +625,23 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
         d->cap = nc;
     }
     zz_dict_entry *e = &d->entries[d->len++];
-    e->key = key.s;
-    key.s->refs++;
-    e->val = val;
+    if (key.s && !key.s->interned && key.s->refs == 0) {
+        // Arena-owned key: duplicate to heap. The `refs++` adoption below
+        // would claim arena memory as heap-owned (reset corruption, then a
+        // wild free when the entry releases).
+        zz_str *k = str_alloc(key.s->len);
+        memcpy(zz_str_ptr(k), zz_str_cptr(key.s), key.s->len);
+        zz_str_ptr(k)[key.s->len] = '\0';
+        e->key = k;
+    } else {
+        e->key = key.s;
+        key.s->refs++;
+    }
+    // Move convention (callers transfer ownership): arena-owned values
+    // heal to heap copies so the stored element survives the loop-arena
+    // reset; heap values are adopted as-is (no bump — same as the old
+    // `zz_str_heal_arena` passthrough, extended to containers).
+    e->val = zz_heal_for_move(val);
 }
 
 size_t zz_dict_len(const zz_dict *d) {
@@ -615,15 +835,46 @@ static int zz_embedded_match(const char *fname, const zz_value *slot) {
     return strcmp(base, fname) == 0;
 }
 
+// Detach one owner's interest from a shared struct header: when
+// `o->refs > 1`, move this value onto a private header whose slots hold
+// fresh shares (`zz_clone` bumps each field buffer exactly once, making
+// the previously undercounted clone-shares exact). The old header keeps
+// its remaining owners untouched. Uniquely-owned headers (refs == 1)
+// are returned as-is; non-objects are ignored.
+static void zz_object_detach(zz_value *obj) {
+    if (!obj || obj->tag != ZZ_OBJECT || !obj->obj) return;
+    zz_object *o = obj->obj;
+    if (o->refs <= 1) return;
+    zz_object *fresh =
+        (zz_object *)malloc(sizeof(zz_object) + o->len * 2 * sizeof(zz_value));
+    if (!fresh) return; // OOM: keep sharing (old behavior) rather than crash
+    fresh->refs = 1;
+    fresh->type_name = o->type_name;
+    fresh->len = o->len;
+    for (size_t i = 0; i < o->len * 2; i++) {
+        fresh->fields[i] = zz_clone(o->fields[i]);
+    }
+    o->refs--;
+    obj->obj = fresh;
+}
+
 static int zz_object_set_depth(zz_value *obj, const char *name, zz_value val, int depth) {
     if (obj->tag != ZZ_OBJECT || !obj->obj) return 0;
+    // Value semantics: a field write through a shared header must not
+    // leak into co-owners (`t := s; t.f = v` leaves `s` untouched).
+    // Clones bump only the header, so detach first: transfer this
+    // owner's interest into a private header (fresh per-field shares),
+    // leaving co-owners with their own intact view. Descends after
+    // detaching, so embedded children detach level by level too.
+    zz_object_detach(obj);
     zz_object *o = obj->obj;
     for (size_t i = 0; i < o->len; i++) {
         zz_value *fname = &o->fields[i * 2];
         if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
             zz_value *slot = &o->fields[i * 2 + 1];
             zz_release(slot);
-            *slot = zz_clone(val);
+            // Share convention (was zz_clone): heal arena-owned values to heap.
+            *slot = zz_clone_for_store(val);
             return 1;
         }
     }
@@ -719,6 +970,27 @@ zz_value zz_match_some(zz_value v) {
     if (v.tag == ZZ_OPTION_SOME && v.payload) return zz_clone(*v.payload);
     return zz_unit();
 }
+
+// User-enum tag test for generated `match` guards: true only for boxed
+// objects whose qualified type name matches exactly (`Token.IntLit`).
+// Everything else (scalars, options, results, other objects) is false.
+int zz_enum_is(const zz_value *v, const char *qualified) {
+    if (!v || !qualified || v->tag != ZZ_OBJECT || !v->obj || !v->obj->type_name) return 0;
+    return strcmp(v->obj->type_name, qualified) == 0;
+}
+
+// Display shape test for user-enum variant values: a dotted type name
+// with no fields (unit variant) or exactly one `value` field (payload
+// variant). Mirrors the VM's Display rule so `println` agrees on both
+// engines. (A single-field-`value` struct shares the payload shape and
+// prints in constructor form — cosmetic only.)
+int zz_object_is_enum_shape(const zz_object *o) {
+    if (!o || !o->type_name || !strchr(o->type_name, '.')) return 0;
+    if (o->len == 0) return 1;
+    if (o->len != 1) return 0;
+    const zz_value *fname = &o->fields[0];
+    return fname->tag == ZZ_STR && fname->s && strcmp(zz_str_cptr(fname->s), "value") == 0;
+}
 zz_value zz_range_build(zz_value start, zz_value end) {
     (void)end;
     // Represent a range inline; used in `for`. Return an int start marker
@@ -729,27 +1001,65 @@ zz_value zz_range_build(zz_value start, zz_value end) {
     return v;
 }
 
+// Release an owned temporary WITHOUT freeing variant/JSON payload boxes.
+//
+// Background: `zz_clone` on Option/Result/JSON wrappers is a shallow share
+// — it bumps the refcounted leaves but shares the payload BOX (boxes carry
+// no refcount; they are immortal while any owner lives). `zz_release` /
+// `zz_release_variant` frees the box, so clone-then-release use-after-frees
+// anyone else sharing it (e.g. `zz_elvis` cloning the winner out of `left`
+// and then releasing `left` freed the box the winner still points to).
+//
+// This helper balances the leaf refcounts (so 1MB `read_to_string`
+// payloads don't accumulate per `??`) while leaking the 16-byte boxes
+// exactly as the old never-release behavior did — strictly less leaking,
+// no new frees, no UAF.
+static void zz_release_shared(zz_value *v) {
+    switch (v->tag) {
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        if (v->payload) zz_release_shared(v->payload);
+        break;
+    default:
+        zz_release(v);
+        break;
+    }
+}
+
 // zz_elvis(left, right) — unwrap Option/Result on the left, else return right.
 // Mirrors the VM's `??` operator which unwraps .some(v) and .ok(v).
+// Consume semantics (mirrors zz_binop_cat): both inputs are owned
+// temporaries. Inputs are released via zz_release_shared (leaf-balanced,
+// box-preserving — see above), so `fs.read_to_string(p) ?? ""` no longer
+// retains the whole Result payload per evaluation (~1.5MB/pass growth).
 zz_value zz_elvis(zz_value left, zz_value right) {
+    zz_value out;
     if (left.tag == ZZ_OPTION_SOME && left.payload)
-        return zz_clone(*left.payload);
-    if (left.tag == ZZ_OPTION_NONE)
-        return zz_clone(right);
-    if (left.tag == ZZ_RESULT_OK && left.payload)
-        return zz_clone(*left.payload);
-    if (left.tag == ZZ_RESULT_ERR)
-        return zz_clone(right);
+        out = zz_clone(*left.payload);
+    else if (left.tag == ZZ_OPTION_NONE)
+        out = zz_clone(right);
+    else if (left.tag == ZZ_RESULT_OK && left.payload)
+        out = zz_clone(*left.payload);
+    else if (left.tag == ZZ_RESULT_ERR)
+        out = zz_clone(right);
     // For non-optional/result types, fall back to truthiness check.
-    if (zz_truthy(left))
-        return zz_clone(left);
-    return zz_clone(right);
+    else if (zz_truthy(left))
+        out = zz_clone(left);
+    else
+        out = zz_clone(right);
+    zz_release_shared(&left);
+    zz_release_shared(&right);
+    return out;
 }
 // =====================================================================
 //  Missing stdlib natives — bare builtins and module functions
 // =====================================================================
 
-// len(v) — array length, string length, byte length, or 0 for other types.
+// len(v) — array/element length, bytes length, string char length
+// (Unicode scalar values, matching the VM), dict entry count, or 0
+// for other types.
 zz_value zz_len(zz_value v, int *err) {
     (void)err;
     if (v.tag == ZZ_ARRAY) {
@@ -759,9 +1069,45 @@ zz_value zz_len(zz_value v, int *err) {
         return (zz_value){ZZ_INT, {.i = v.bytes ? (int64_t)v.bytes->len : 0}};
     }
     if (v.tag == ZZ_STR) {
-        return (zz_value){ZZ_INT, {.i = (int64_t)v.s->len}};
+        return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(v.s)}};
+    }
+    if (v.tag == ZZ_DICT) {
+        return (zz_value){ZZ_INT, {.i = v.dict ? (int64_t)v.dict->len : 0}};
     }
     return (zz_value){ZZ_INT, {.i = 0}};
+}
+
+// len(s.f) without the getter's retain: reading a field only to measure it
+// must not bump the array's refcount (each leaked share defeats the next
+// move-aware push). Direct fields answer inline; anything else takes the
+// exact old path (get + len + release of the getter's share).
+zz_value zz_len_field(zz_value *obj, const char *field, int *err) {
+    if (obj && obj->tag == ZZ_OBJECT && obj->obj) {
+        zz_object *o = obj->obj;
+        for (size_t i = 0; i < o->len; i++) {
+            zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), field) == 0) {
+                zz_value *slot = &o->fields[i * 2 + 1];
+                if (slot->tag == ZZ_ARRAY && slot->arr) {
+                    return (zz_value){ZZ_INT, {.i = (int64_t)slot->arr->len}};
+                }
+                if (slot->tag == ZZ_BYTES && slot->bytes) {
+                    return (zz_value){ZZ_INT, {.i = (int64_t)slot->bytes->len}};
+                }
+                if (slot->tag == ZZ_STR && slot->s) {
+                    return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(slot->s)}};
+                }
+                if (slot->tag == ZZ_DICT) {
+                    return (zz_value){ZZ_INT, {.i = slot->dict ? (int64_t)slot->dict->len : 0}};
+                }
+                return (zz_value){ZZ_INT, {.i = 0}};
+            }
+        }
+    }
+    zz_value cur = zz_object_get_field(obj, field);
+    zz_value r = zz_len(cur, err);
+    zz_release(&cur);
+    return r;
 }
 
 // vec.len(v) — same as len for arrays.
@@ -791,13 +1137,17 @@ zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
                 new_items[i] = a->items[i];
             }
             a->items = new_items;
-            a->refs = 0;  // Arena-allocated header, malloc'd items
+            // Preserve `refs == 1` (see `zz_array_push`): only untracked
+            // shares (sentinels) collapse to 0.
+            if (a->refs != 1) a->refs = 0;  // Arena-allocated header, malloc'd items
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
         }
         a->cap = new_cap;
     }
-    a->items[a->len++] = zz_clone(item);
+    // Share convention (was zz_clone): heal arena-owned values to heap so the
+    // element survives the loop-arena reset.
+    a->items[a->len++] = zz_clone_for_store(item);
     return zz_unit();
 }
 
@@ -816,14 +1166,94 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
                 new_items[i] = a->items[i];
             }
             a->items = new_items;
-            a->refs = 0;
+            // Preserve `refs == 1` (see `zz_array_push`): dup results stay
+            // provably single-owner, so a later move-aware push can go
+            // in place instead of copying again.
+            if (a->refs != 1) a->refs = 0;
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
         }
         a->cap = new_cap;
     }
-    a->items[a->len++] = zz_clone(item);
+    // Share convention (was zz_clone): heal arena-owned values to heap so the
+    // element survives the loop-arena reset.
+    a->items[a->len++] = zz_clone_for_store(item);
     return out;
+}
+
+// Move-aware push for `x = vec.push(x, e)` (see collections.h).
+// The fast path moves the element in (no bump, no copy); the fallback
+// heals the counter (dup preserves `refs == 1`, the taken share is
+// released, the result adopted without a bump), so at most one copy ever
+// precedes in-place pushes.
+zz_value zz_vec_push_take(zz_value taken, zz_value item, int *err) {
+    if (taken.tag == ZZ_ARRAY && taken.arr && taken.arr->refs == 1) {
+        // Uniquely owned: refs==1 excludes every sentinel (arena 0,
+        // STACK/LIT/ARENA magics) and any live borrow, so the items
+        // buffer is malloc'd (or NULL when empty) and growth is sound.
+        // `zz_array_push` takes element ownership (move convention: the
+        // emitted element temp's share transfers into the array).
+        zz_array_push(taken.arr, item);
+        return taken;
+    }
+    zz_value out = zz_vec_push(taken, item, err);
+    // Balance the take: the old codegen's assign-release freed the slot's
+    // old share here (and additionally leaked the argument-clone share,
+    // which no longer exists).
+    zz_release(&taken);
+    return out;
+}
+
+// Move-aware field push for `s.f = vec.push(s.f, e)` (see collections.h).
+// Same in-place rule for the field array; the fallback heals like above
+// (drops the getter's share the old lowering leaked, adopts the dup
+// without a bump), so a field pays at most one copy, ever.
+void zz_object_push_field_take(zz_value *obj, const char *field, zz_value item, int *err) {
+    if (obj && obj->tag == ZZ_OBJECT && obj->obj) {
+        zz_object *o = obj->obj;
+        for (size_t i = 0; i < o->len; i++) {
+            zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), field) == 0) {
+                // In place only when uniquely owned end to end: the field
+                // buffer counter alone is NOT exact (struct clones share
+                // field buffers without bumping them), so the header must
+                // be unshared too. Otherwise the generic get+push+set path
+                // below runs, and the set detaches (copy-on-write header).
+                zz_value *slot = &o->fields[i * 2 + 1];
+                if (o->refs == 1 && slot->tag == ZZ_ARRAY && slot->arr
+                    && slot->arr->refs == 1) {
+                    zz_array_push(slot->arr, item);
+                    return;
+                }
+                zz_value cur = zz_object_get_field(obj, field);
+                zz_value n = zz_vec_push(cur, item, err);
+                zz_release(&cur);
+                // The slot may sit in a shared header: detach first (this
+                // reseats obj->obj), then re-lookup, release, and adopt.
+                zz_object_detach(obj);
+                zz_object *fresh = obj->obj;
+                for (size_t j = 0; j < fresh->len; j++) {
+                    zz_value *fname2 = &fresh->fields[j * 2];
+                    if (fname2->tag == ZZ_STR
+                        && strcmp(zz_str_cptr(fname2->s), field) == 0) {
+                        zz_value *slot2 = &fresh->fields[j * 2 + 1];
+                        zz_release(slot2);
+                        *slot2 = n;
+                        return;
+                    }
+                }
+                // Unreachable: detach preserves shape. Generic set as the
+                // backstop (detaches again, harmlessly).
+                zz_object_set_field(obj, field, n);
+                return;
+            }
+        }
+    }
+    // Non-object base or absent/promoted field: same get+push+set shape
+    // (getters return unit, setters no-op, matching old lowering).
+    zz_value cur = zz_object_get_field(obj, field);
+    zz_value n = zz_vec_push(cur, item, err);
+    zz_object_set_field(obj, field, n);
 }
 
 // vec.pop(arr) — remove and return a NEW array without the last element
@@ -876,11 +1306,13 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     zz_array *o = out.arr;
     if (o->len >= o->cap) {
         size_t new_cap = o->cap ? o->cap * 2 : 8;
-        if (o->refs == ZZ_ARRAY_STACK_MAGIC || o->refs == ZZ_ARRAY_LIT_MAGIC || o->items == NULL) {
+        if (o->refs == ZZ_ARRAY_STACK_MAGIC || o->refs == ZZ_ARRAY_LIT_MAGIC
+            || o->refs == ZZ_ARRAY_ARENA_MAGIC || o->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             for (size_t j = 0; j < o->len; j++) new_items[j] = o->items[j];
             o->items = new_items;
-            o->refs = 0;
+            // Preserve `refs == 1` (see `zz_array_push`).
+            if (o->refs != 1) o->refs = 0;
         } else {
             o->items = (zz_value *)realloc(o->items, new_cap * sizeof(zz_value));
         }
@@ -889,7 +1321,9 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     for (size_t j = o->len; j > (size_t)i; j--) {
         o->items[j] = o->items[j - 1];
     }
-    o->items[i] = zz_clone(item);
+    // Share convention: heal arena-owned values to heap (fresh heap array may
+    // still outlive the loop-arena reset via the caller's store).
+    o->items[i] = zz_clone_for_store(item);
     o->len++;
     return out;
 }
@@ -996,6 +1430,40 @@ zz_value zz_result_expect(zz_value res, zz_value msg, int *err) {
         fprintf(stderr, "error: %s\n",
                 (msg.tag == ZZ_STR) ? zz_str_cptr(msg.s) : "expect failed");
     }
+    exit(1);
+}
+
+// Index-trap with operands and function name (#251): called from lowered
+// bounds-check failures instead of a bare "index out of bounds". Mirrors
+// the VM wording (`index {i} out of bounds for length {len}`) plus the
+// enclosing function, so native failures locate themselves without a
+// VM bisection run. `func` is a ZZ identifier (safe for %s).
+void zz_index_trap(zz_value obj, zz_value idx, const char *func) {
+    if (idx.tag == ZZ_INT) {
+        long long i = (long long)idx.i;
+        long long n = -1;
+        if (obj.tag == ZZ_ARRAY && obj.arr)
+            n = (long long)obj.arr->len;
+        else if (obj.tag == ZZ_BYTES && obj.bytes)
+            n = (long long)obj.bytes->len;
+        else if (obj.tag == ZZ_STR && obj.s)
+            n = (long long)obj.s->len;
+        if (n >= 0) {
+            fprintf(stderr, "zz error: index %lld out of bounds for length %lld in %s\n",
+                    i, n, func);
+            exit(1);
+        }
+        fprintf(stderr, "zz error: index %lld out of bounds in %s\n", i, func);
+        exit(1);
+    }
+    if (idx.tag == ZZ_STR && obj.tag == ZZ_DICT && idx.s) {
+        fprintf(stderr, "zz error: key `");
+        size_t klen = idx.s->len < 64 ? idx.s->len : 64;
+        fwrite(zz_str_cptr(idx.s), 1, klen, stderr);
+        fprintf(stderr, "` not found in dict in %s\n", func);
+        exit(1);
+    }
+    fprintf(stderr, "zz error: index out of bounds in %s\n", func);
     exit(1);
 }
 

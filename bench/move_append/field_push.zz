@@ -1,0 +1,24 @@
+// field_push.zz — `s.f = vec.push(s.f, x)` on a struct field.
+import std.env
+
+struct Wrap {
+    f: [int],
+    tag: str,
+}
+
+func first_arg(args: [str], fallback: str) -> str {
+    for a in args {
+        if a != "--" {
+            return a
+        }
+    }
+    fallback
+}
+
+n := int(first_arg(env.args(), "10000")) ?? 10000
+s := Wrap{f: [], tag: "w"}
+for i in 0..n {
+    s.f = vec.push(s.f, i)
+}
+println(len(s.f))
+println("FIELD_PUSH_DONE")

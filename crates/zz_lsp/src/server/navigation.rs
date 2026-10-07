@@ -41,6 +41,7 @@ pub(crate) async fn handle_goto_definition(
                             parse_errors: vec![],
                             program: entry.program.clone(),
                             check_result: None,
+                            seed_bindings: None,
                             file_defs: None,
                             line_index: LineIndex::new(&entry.source),
                         };
@@ -76,7 +77,7 @@ pub(crate) async fn handle_goto_definition(
                 name: field, obj, ..
             }) = node.expr
             {
-                if let Some(zz_checker::Type::Struct(ref struct_name)) =
+                if let Some(zz_checker::Type::Struct(ref struct_name, _)) =
                     crate::lookup::resolve_type_of_expr(program, check_result, obj)
                 {
                     if let Some(resp) = find_struct_field_location(
@@ -96,7 +97,7 @@ pub(crate) async fn handle_goto_definition(
                 if parts.len() >= 2 {
                     let obj_name = &parts[0];
                     let field = parts.last().unwrap();
-                    if let Some(zz_checker::Type::Struct(ref struct_name)) =
+                    if let Some(zz_checker::Type::Struct(ref struct_name, _)) =
                         check_result.bindings.get(obj_name)
                     {
                         if let Some(resp) = find_struct_field_location(

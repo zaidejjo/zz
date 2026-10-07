@@ -188,7 +188,7 @@ pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, 
 fn is_toplevel_def(stmt: &Stmt) -> bool {
     matches!(
         stmt,
-        Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. }
+        Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Impl { .. }
     )
 }
 
@@ -408,6 +408,15 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.space();
                 self.emit_expr(value);
             }
+            Stmt::CompoundAssign {
+                target, op, value, ..
+            } => {
+                self.emit_expr(target);
+                self.space();
+                self.text(format!("{}=", op.symbol()));
+                self.space();
+                self.emit_expr(value);
+            }
             Stmt::Import {
                 path,
                 alias,
@@ -426,6 +435,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(p);
+                }
+                if let Some(a) = alias {
+                    self.space();
+                    self.text("as");
+                    self.space();
+                    self.text(a.clone());
                 }
                 if !items.is_empty() {
                     self.text("(");
@@ -447,12 +462,6 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         }
                     }
                     self.text(")");
-                }
-                if let Some(a) = alias {
-                    self.space();
-                    self.text("as");
-                    self.space();
-                    self.text(a.clone());
                 }
             }
             Stmt::Func {
@@ -562,7 +571,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.emit_expr(v);
                 }
             }
-            Stmt::Struct { name, fields, .. } => {
+            Stmt::Struct {
+                name,
+                generics,
+                fields,
+                ..
+            } => {
                 if stmt_is_pub(stmt) {
                     self.text("pub");
                     self.space();
@@ -574,6 +588,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
                 }
                 self.space();
                 if fields.is_empty() {
@@ -611,8 +635,92 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.text("}");
                 }
             }
+            Stmt::TypeAlias {
+                name,
+                generics,
+                target,
+                ..
+            } => {
+                if stmt_is_pub(stmt) {
+                    self.text("pub");
+                    self.space();
+                }
+                self.text("type");
+                self.space();
+                for (i, n) in name.iter().enumerate() {
+                    if i > 0 {
+                        self.text(".");
+                    }
+                    self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
+                }
+                self.space();
+                self.text("=");
+                self.space();
+                self.emit_ty(target);
+            }
+            Stmt::Enum {
+                name,
+                generics,
+                variants,
+                ..
+            } => {
+                if stmt_is_pub(stmt) {
+                    self.text("pub");
+                    self.space();
+                }
+                self.text("enum");
+                self.space();
+                for (i, n) in name.iter().enumerate() {
+                    if i > 0 {
+                        self.text(".");
+                    }
+                    self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
+                }
+                self.space();
+                self.text("{");
+                let saved = std::mem::take(&mut self.out);
+                for (vname, payload) in variants.iter() {
+                    self.out.push(Doc::hard_line());
+                    self.consecutive_nls = 1;
+                    self.text(vname.name.clone());
+                    if let Some(pty) = payload {
+                        self.text("(");
+                        self.emit_ty(pty);
+                        self.text(")");
+                    }
+                    self.text(",");
+                }
+                let body = std::mem::replace(&mut self.out, saved);
+                self.out.push(Doc::Indent {
+                    contents: Box::new(Doc::Concat(body)),
+                });
+                self.out.push(Doc::hard_line());
+                self.consecutive_nls = 1;
+                self.text("}");
+            }
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 span,
                 ..
@@ -628,6 +736,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(".");
                     }
                     self.text(n);
+                }
+                if !generics.is_empty() {
+                    self.text("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.text(", ");
+                        }
+                        self.text(g.name.clone());
+                    }
+                    self.text(">");
                 }
                 self.space();
                 self.text("{");
@@ -927,15 +1045,22 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.text(")");
                 }
             }
-            Pattern::Tuple { pats, .. } => {
-                self.text("(");
+            Pattern::Tuple { pats, span } => {
+                // Same form-preservation rule as the legacy formatter:
+                // bare `a, b := ...` must not gain parens.
+                let paren = self.source.as_bytes().get(span.start as usize) == Some(&b'(');
+                if paren {
+                    self.text("(");
+                }
                 for (i, p) in pats.iter().enumerate() {
                     if i > 0 {
                         self.text(", ");
                     }
                     self.emit_pattern(p);
                 }
-                self.text(")");
+                if paren {
+                    self.text(")");
+                }
             }
             Pattern::Or { pats, .. } => {
                 for (i, p) in pats.iter().enumerate() {
@@ -1468,6 +1593,8 @@ fn stmt_is_pub(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Func { pub_, .. }
         | Stmt::Struct { pub_, .. }
+        | Stmt::TypeAlias { pub_, .. }
+        | Stmt::Enum { pub_, .. }
         | Stmt::Impl { pub_, .. }
         | Stmt::Import { pub_, .. } => *pub_,
         _ => false,

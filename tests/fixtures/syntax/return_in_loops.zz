@@ -1,3 +1,4 @@
+// features: comparison, for-loop, func-call, if-else, int-arith, locals, print, ranges, return, string-literal, while-loop
 // E2E: return inside for/while loops should compile and work correctly
 
 func find_in_for() -> int {

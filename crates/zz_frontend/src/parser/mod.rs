@@ -57,7 +57,7 @@ pub mod recovery;
 pub mod stmt;
 
 use crate::ast::Program;
-use crate::diag::{error_at, RawDiag};
+use crate::diag::{error_at, FixIt, RawDiag};
 use crate::lexer::lex;
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
@@ -73,13 +73,30 @@ pub fn parse(source: &str) -> Parsed {
         toks: lexed.tokens,
         pos: 0,
         errors: lexed.errors,
+        block_depth: 0,
         delim_stack: Vec::new(),
+        pending_gt: 0,
     };
     let program = parser.parse_program();
-    Parsed {
-        program,
-        errors: parser.errors,
+    let mut errors = parser.errors;
+    // An unterminated string/comment swallows the rest of the file, so every
+    // later diagnostic is fallout of the same root cause. Keep the root
+    // cause plus anything before it (one bad quote never hides earlier real
+    // errors); drop the cascade, including orphaned "unclosed" delimiters
+    // whose closers became string content.
+    if let Some(cut) = errors
+        .iter()
+        .filter(|e| e.message.contains("unterminated"))
+        .filter_map(|e| e.span.map(|s| s.start))
+        .min()
+    {
+        errors.retain(|e| {
+            e.message.contains("unterminated")
+                || (!e.message.starts_with("unclosed")
+                    && e.span.map(|s| s.start < cut).unwrap_or(true))
+        });
     }
+    Parsed { program, errors }
 }
 
 /// A tracked open delimiter for mismatched-delimiter diagnostics.
@@ -89,15 +106,32 @@ struct DelimEntry {
     span: Span,
 }
 
-struct Parser {
-    toks: Vec<Token>,
-    pos: usize,
-    errors: Vec<RawDiag>,
-    /// Stack of open delimiters for mismatched-delimiter diagnostics.
-    delim_stack: Vec<DelimEntry>,
+/// The closing bracket matching an opener (`(` → `)`), for missing-closer
+/// hints and insert fixes.
+fn closer_for(open: TokenKind) -> &'static str {
+    match open {
+        TokenKind::LParen => ")",
+        TokenKind::LBracket => "]",
+        _ => "}",
+    }
 }
 
-impl Parser {
+struct Parser<'a> {
+    toks: Vec<Token<'a>>,
+    pos: usize,
+    errors: Vec<RawDiag>,
+    /// Block nesting depth: only the top-level statement list pre-sizes
+    /// from the token stream (see `parse_stmt_list`).
+    block_depth: usize,
+    /// Stack of open delimiters for mismatched-delimiter diagnostics.
+    delim_stack: Vec<DelimEntry>,
+    /// Owed `>` closes from split `>>` tokens. Nested generic type args
+    /// (`Option<Option<int>>`) lex the adjacent closes as one `Shr`;
+    /// each split banks one `>` for the enclosing argument list.
+    pending_gt: u32,
+}
+
+impl<'a> Parser<'a> {
     fn parse_program(&mut self) -> Program {
         let stmts = self.parse_stmt_list(TokenKind::Eof);
         self.check_unclosed_delims();
@@ -132,35 +166,64 @@ impl Parser {
             Some(idx) => {
                 // Pop everything above the match (mismatched delimiters).
                 for entry in self.delim_stack.drain(idx + 1..) {
-                    self.errors.push(error_at(
-                        format!("unclosed `{}` (opened here)", entry.open.describe()),
-                        entry.span,
-                    ));
+                    let want = closer_for(entry.open);
+                    let at = Span::new(close_span.start, close_span.start);
+                    self.errors.push(
+                        error_at(
+                            format!(
+                                "unclosed `{}` (opened here) — add `{want}` before `{}`",
+                                entry.open.describe(),
+                                close.describe()
+                            ),
+                            entry.span,
+                        )
+                        .with_fixit(FixIt::safe(
+                            at,
+                            want,
+                            format!("add missing `{want}`"),
+                        )),
+                    );
                 }
                 self.delim_stack.pop(); // Remove the matching opener.
             }
             None => {
-                self.errors.push(error_at(
-                    format!(
-                        "unexpected `{}` with no matching opening `{}`",
-                        close.describe(),
-                        expected.describe()
-                    ),
-                    close_span,
-                ));
+                self.errors.push(
+                    error_at(
+                        format!(
+                            "unexpected `{}` with no matching opening `{}` — remove it",
+                            close.describe(),
+                            expected.describe()
+                        ),
+                        close_span,
+                    )
+                    .with_fixit(FixIt::safe(
+                        close_span,
+                        "",
+                        "remove this bracket",
+                    )),
+                );
             }
         }
     }
 
     fn check_unclosed_delims(&mut self) {
+        let at = Span::new(self.src_len(), self.src_len());
         for entry in self.delim_stack.drain(..) {
-            self.errors.push(error_at(
-                format!(
-                    "unclosed `{}` at end of file (opened here)",
-                    entry.open.describe()
-                ),
-                entry.span,
-            ));
+            let want = closer_for(entry.open);
+            self.errors.push(
+                error_at(
+                    format!(
+                        "unclosed `{}` at end of file (opened here) — add `{want}` at end of file",
+                        entry.open.describe()
+                    ),
+                    entry.span,
+                )
+                .with_fixit(FixIt::safe(
+                    at,
+                    want,
+                    format!("add `{want}` at end of file"),
+                )),
+            );
         }
     }
 }

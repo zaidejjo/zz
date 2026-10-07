@@ -71,12 +71,23 @@ requires `clang` (18+) or `zig` on PATH. (`zz run` without `--native` is
 the only VM path.)
 
 ```bash
-# Debug (default): fast native build -O0 -g, no LTO
+# Static (default): self-contained -O3 -flto=thin, stripped, DCE.
+# System libs link conditionally: programs that never fetch skip
+# libcurl, programs that never query skip libsqlite3 (no phantom
+# DT_NEEDED). A program needing neither links fully static with no
+# static syslibs required; fetch/query programs need libcurl.a /
+# libsqlite3.a for explicit `--static`, otherwise the default build
+# downgrades to dynamic with a note.
 zz build main.zz
 
-# Release: native Clang -O3 -flto=thin, stripped, cached under ~/.zz/cache
+# Release: native Clang -O3 -flto=thin, stripped, dynamic, cached under ~/.zz/cache
 zz build -p main.zz
-zz build --static main.zz        # self-contained (not on macOS)
+# Max optimization: full LTO (-O3, DCE, stripped); with `-- <args>` adds a PGO training run
+zz build -p --full main.zz
+zz build -p --full main.zz -- fast representative workload
+zz build --static main.zz        # self-contained, explicit (not on macOS)
+zz build --dynamic main.zz       # fast dynamic debug build -O0 -g
+zz build -o server main.zz       # name the output binary (bin/server)
 zz build --pgo main.zz           # profile-guided, native host only
 zz build --target aarch64-unknown-linux-gnu main.zz   # cross (implies -p)
 zz build -p --cc zig main.zz     # use `zig cc` as the provider
@@ -107,19 +118,23 @@ manual builds include the same tables.
 All artifacts live in `bin/` next to the source: `bin/app`,
 `bin/app.exe` (Windows), or `bin/app-<triple>[.exe]` for `--target`
 builds, plus `bin/app.c`, `bin/build.sh`, `bin/build.bat` (reproducible
-manual build with a single clang line).
+manual build with a single clang line). `-o <name>` renames the binary
+(a bare name stays in `bin/`, a path is used as-is, go-like).
 
 Cross-compilation rules:
 
 | Rule | Behavior |
 |------|----------|
-| `--target` | Drops `-march=native`; Clang uses the triple's safe baseline CPU |
+| `--target` | Clang uses the triple's safe baseline CPU (no host-specific flags anywhere) |
 | `--pgo --target <foreign>` | Rejected: `Error: --pgo requires a native build target` |
 | `--static` on `apple-darwin` | Rejected: `Error: Static binaries are not supported on macOS targets` |
 | Cross link | Adds `-fuse-ld=lld`; Windows triples also link `-lws2_32` |
 
-Release builds apply `-ffast-math` (relaxed FP reassociation) for
-performance; `-p` implies consent. If no Clang provider is installed,
+All builds compile with `-fwrapv` (defined wrapping integer arithmetic)
+and `-fno-strict-aliasing`, and without `-ffast-math` or
+`-march=native`: VM and native binaries must agree bit-for-bit on
+integers and floats (see the IR spec). If no Clang provider is
+installed,
 the build (debug or release) fails after still emitting `bin/app.c` +
 build scripts so the program can be built manually on a machine with
 Clang.
@@ -128,6 +143,32 @@ Clang.
 
 Transient release compile → execute → cleanup (uses the same Clang
 release pipeline as `zz build -p`).
+
+### `zz toolchain <install|use|uninstall|status>`
+
+Manage the Zig C backend. `zz build` needs a C backend (system `clang`
+or `zig cc`); `toolchain install` downloads a pinned Zig release into
+`~/.zz/toolchain` so builds work with no system toolchain and stay
+reproducible across machines:
+
+```bash
+zz toolchain install                  # latest stable Zig, verified + pinned
+zz toolchain install --version 0.17.0 # pin an exact release instead
+zz toolchain status                   # installed versions, pin, active backend
+zz toolchain use 0.17.0               # switch the pin among installed versions
+zz toolchain uninstall 0.17.0         # remove an installed version
+```
+
+Details:
+
+- Sources are official `ziglang.org` releases via `download/index.json`
+  (URLs are never constructed — asset naming changed between eras);
+  every download is sha256-checked against the index.
+- A pin is explicit opt-in: once present, provider probing prefers the
+  managed `zig` over everything on PATH (`--cc=clang` / `--cc=zig`
+  still force their provider), and the precompiled-runtime cache key
+  includes the pin so switching toolchains rebuilds instead of reusing.
+- Set `ZZ_TOOLCHAIN_ROOT` to relocate the toolchain dir (hermetic CI).
 
 ### `zz check [FLAGS] [PATH]`
 
@@ -152,6 +193,24 @@ zz check src/
 | `--hard` | Apply all fixes including ambiguous (no prompts) |
 | `--interactive` / `-i` | Prompt for ambiguous fixes |
 | `--check` / `-c` | Check formatting without writing |
+| `--stats` | Print per-file and total check stats (modules, cache hits/misses, seed size, wall time) |
+
+#### Check Performance Budget
+
+`zz check` stays fast by construction (per-module seed key-set restore
+instead of O(seed) clones, plus the S1 content-addressed check cache):
+
+- Cold `zz check` on a single file: well under 0.5s (measured ~40ms).
+- Warm (no edits): served from cache — `0 checked` in `--stats` output.
+- Budget: p50 ≤ 0.5s on a 10k-line project cold, ≤ 50ms warm per file.
+  Verify with `zz check --stats <path>` (run twice: the second run
+  should show `cached` instead of `checked`).
+
+```bash
+$ zz check --stats src/main.zz
+stats: src/main.zz: 1 modules (0 cached, 1 checked), seed 878 funcs, 38.1ms
+stats: 1 files, 1 modules (0 cached, 1 checked), seed 878 funcs, 39.0ms total
+```
 
 ### `zz fix [FLAGS] [PATH]`
 
@@ -260,6 +319,28 @@ project/
 - `import std.*` loads from the built-in standard library
 - `import .name` loads from the current directory
 - `import utils.helper` loads `utils/helper.zz` relative to the source file
+
+### Circular imports
+
+Circular imports are rejected (`a` imports `b`, `b` imports `a`):
+
+```text
+circular import: `a.zz` imports `b.zz`, which (transitively) imports `a.zz`
+hint: circular imports are not allowed; consider restructuring your code to break the cycle
+```
+
+Restructure by extracting shared types into `c.zz`, then both `a` and `b`
+import `c` with no cycle. Tracking full cycle support in #232.
+
+### One file, one namespace
+
+One file cannot be imported under two different aliases in the same
+program (`import a as x` in one file, `import a as y` in another is an
+error). Struct identity is namespace-qualified (`x.T` vs `y.T` would
+diverge), so the loader keeps a single canonical namespace per file.
+Workaround: have both importers use the same name (or no alias), and
+import the shared file directly. Tracking per-importer alias copies
+in #228.
 
 ## REPL Commands
 

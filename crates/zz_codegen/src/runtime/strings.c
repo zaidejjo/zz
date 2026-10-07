@@ -289,6 +289,21 @@ zz_value zz_str_static(const char *src) {
     return v;
 }
 
+// Heal an arena-owned string into an independent heap-owned copy.
+// See strings.h for the full contract (retaining stores must heal).
+zz_value zz_str_heal_arena(zz_value v) {
+    if (v.tag != ZZ_STR || !v.s || v.s->interned || v.s->refs != 0) {
+        return v;
+    }
+    zz_str *s = str_alloc(v.s->len);
+    memcpy(zz_str_ptr(s), zz_str_cptr(v.s), v.s->len);
+    zz_str_ptr(s)[v.s->len] = '\0';
+    zz_value out;
+    out.tag = ZZ_STR;
+    out.s = s;
+    return out;
+}
+
 // Arena-aware string constructor. The zz_str header is bump-allocated
 // when arena is non-NULL. The data payload still uses malloc (strings
 // are often used with slice operations that need stable memory).
@@ -324,27 +339,59 @@ zz_value zz_str_new_arena(const char *src, size_t len, zz_arena *arena) {
 
 // ---- io natives -----------------------------------------------------------
 
-/// Format a double to the shortest decimal string that round-trips back to
-/// the same f64.  This matches Rust's `Display for f64` which uses the
-/// Ryu/grisu shortest-representation algorithm.
-static void zz_print_double(FILE *out, double x) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.17g", x);
-    // Strip trailing zeros after the decimal point to find the shortest
-    // representation that round-trips.
-    size_t len = strlen(buf);
-    while (len > 1) {
-        char saved = buf[len - 1];
-        buf[len - 1] = '\0';
-        char *endptr;
-        double parsed = strtod(buf, &endptr);
-        if (parsed != x || *endptr != '\0') {
-            buf[len - 1] = saved; // restore — this digit is needed
-            break;
-        }
-        len--;
+/// Format a double per the canonical rule (IR spec §4): shortest
+/// decimal string that round-trips, Rust `Display` semantics, never
+/// exponent notation. Produced by the Rust core (`zz_native_rt`
+/// `float_fmt`), never formatted in C — this TU must not contain its
+/// own float printer. Weak import: programs that can never hold a
+/// float-typed value link without the staticlib (the gate scans the
+/// typed program for `Float`); the guard below fails closed so a missed
+/// gate aborts loudly instead of diverging.
+#if defined(__APPLE__)
+#define ZZ_WEAK_IMPORT_FLOAT __attribute__((weak_import))
+#else
+#define ZZ_WEAK_IMPORT_FLOAT __attribute__((weak))
+#endif
+size_t zz_float_format_raw(double x, char *buf, size_t cap) ZZ_WEAK_IMPORT_FLOAT;
+
+// Stack covers every f64 Display rendering (longest observed: 5e-324
+// at 326 bytes); the heap spill below is paranoia, never hot.
+#define ZZ_FLOAT_STACK 1024
+
+// Render `x` canonically: `*out_len` bytes at the returned pointer
+// (`stack`, or malloc'd `*heap` when the core reports more than fits).
+// Callers `free(*heap)` (`free(NULL)` is a no-op).
+static const char *zz_canonical_double(double x, char *stack, char **heap, size_t *out_len) {
+    if (!zz_float_format_raw) {
+        fprintf(stderr,
+                "zz error: float formatting needs the Rust core "
+                "(float-typed program linked without libzz_native_rt; "
+                "rebuild without --static)\n");
+        exit(1);
     }
-    fputs(buf, out);
+    size_t n = zz_float_format_raw(x, stack, ZZ_FLOAT_STACK);
+    if (n < ZZ_FLOAT_STACK) {
+        *heap = NULL;
+        *out_len = n;
+        return stack;
+    }
+    *heap = (char *)malloc(n + 1);
+    if (!*heap) {
+        fprintf(stderr, "zz: out of memory (float formatting)\n");
+        exit(1);
+    }
+    *out_len = zz_float_format_raw(x, *heap, n + 1);
+    return *heap;
+}
+
+/// Print a double canonically (see above).
+static void zz_print_double(FILE *out, double x) {
+    char stack[ZZ_FLOAT_STACK];
+    char *heap = NULL;
+    size_t n = 0;
+    const char *s = zz_canonical_double(x, stack, &heap, &n);
+    fwrite(s, 1, n, out);
+    free(heap);
 }
 
 // Maximum nesting for printed values. Values are finite trees, so this is
@@ -352,6 +399,29 @@ static void zz_print_double(FILE *out, double x) {
 #define ZZ_PRINT_MAX_DEPTH 32
 static void zz_print_value_depth(FILE *out, const zz_value *v, int depth);
 static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth);
+
+// User-enum constructor form: qualified name minus the module
+// namespace + `(payload, ...)` (`Token.IntLit(5)`, `Token.Eof`),
+// matching the VM's Display. `display_inner` selects the Display vs
+// Debug recursion for payload values, matching the caller.
+static void zz_print_enum_shape(FILE *out, const zz_object *o, int depth, int display_inner) {
+    // Namespace strips only when really present (3+ segments), matching
+    // the VM: bare `Token.Eof` prints whole, `ns.Token.Eof` shortens.
+    const char *t = o->type_name;
+    const char *dot = strchr(t, '.');
+    const char *shown = (dot && strchr(dot + 1, '.')) ? dot + 1 : t;
+    fputs(shown, out);
+    fputc('(', out);
+    for (size_t i = 0; i < o->len; i++) {
+        if (i > 0) fputs(", ", out);
+        if (display_inner) {
+            zz_print_value_display_depth(out, &o->fields[i * 2 + 1], depth + 1);
+        } else {
+            zz_print_value_depth(out, &o->fields[i * 2 + 1], depth + 1);
+        }
+    }
+    fputc(')', out);
+}
 
 void zz_print_value(FILE *out, const zz_value *v) {
     zz_print_value_depth(out, v, 0);
@@ -372,18 +442,11 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
     case ZZ_INT:
         fprintf(out, "%lld", (long long)v->i);
         break;
-    case ZZ_FLOAT: {
-        double x = v->f;
-        if (x != x) { fputs("nan", out); break; }
-        if (x == 1.0/0.0) { fputs("inf", out); break; }
-        if (x == -1.0/0.0) { fputs("-inf", out); break; }
-        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
-            fprintf(out, "%.1f", x);
-        } else {
-            zz_print_double(out, x);
-        }
+    case ZZ_FLOAT:
+        // Canonical rendering comes from the Rust core (spec §4):
+        // NaN/inf/-0/integrals all handled there, never in C.
+        zz_print_double(out, v->f);
         break;
-    }
     case ZZ_BOOL:
         fputs(v->b ? "true" : "false", out);
         break;
@@ -476,6 +539,10 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
             break;
         }
         const zz_object *o = v->obj;
+        if (zz_object_is_enum_shape(o)) {
+            zz_print_enum_shape(out, o, depth, 0);
+            break;
+        }
         fputs(zz_object_display_name(o), out);
         fputc('{', out);
         for (size_t i = 0; i < o->len; i++) {
@@ -533,18 +600,11 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
     case ZZ_INT:
         fprintf(out, "%lld", (long long)v->i);
         break;
-    case ZZ_FLOAT: {
-        double x = v->f;
-        if (x != x) { fputs("nan", out); break; }
-        if (x == 1.0/0.0) { fputs("inf", out); break; }
-        if (x == -1.0/0.0) { fputs("-inf", out); break; }
-        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
-            fprintf(out, "%.1f", x);
-        } else {
-            zz_print_double(out, x);
-        }
+    case ZZ_FLOAT:
+        // Canonical rendering comes from the Rust core (spec §4):
+        // NaN/inf/-0/integrals all handled there, never in C.
+        zz_print_double(out, v->f);
         break;
-    }
     case ZZ_BOOL:
         fputs(v->b ? "true" : "false", out);
         break;
@@ -626,6 +686,10 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
             break;
         }
         const zz_object *o = v->obj;
+        if (zz_object_is_enum_shape(o)) {
+            zz_print_enum_shape(out, o, depth, 1);
+            break;
+        }
         fputs(zz_object_display_name(o), out);
         fputc('{', out);
         for (size_t i = 0; i < o->len; i++) {
@@ -703,27 +767,40 @@ static void sb_append_c(strbuf *sb, char c) {
     sb_append(sb, &c, 1);
 }
 
-/// Format a double to the shortest decimal string that round-trips back to
-/// the same f64, appending the result to a strbuf.
+/// Append a double canonically (see `zz_canonical_double`).
 static void zz_append_double(strbuf *sb, double x) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.17g", x);
-    size_t len = strlen(buf);
-    while (len > 1) {
-        char saved = buf[len - 1];
-        buf[len - 1] = '\0';
-        char *endptr;
-        double parsed = strtod(buf, &endptr);
-        if (parsed != x || *endptr != '\0') {
-            buf[len - 1] = saved;
-            break;
-        }
-        len--;
-    }
-    sb_append_str(sb, buf);
+    char stack[ZZ_FLOAT_STACK];
+    char *heap = NULL;
+    size_t n = 0;
+    const char *s = zz_canonical_double(x, stack, &heap, &n);
+    sb_append(sb, s, n);
+    free(heap);
 }
 
 static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth);
+static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int depth);
+
+// `strbuf` twin of `zz_print_enum_shape` for `str()` and interpolation.
+static void zz_print_enum_shape_sb(
+    strbuf *sb,
+    const zz_object *o,
+    int depth,
+    int display_inner
+) {
+    const char *t = o->type_name;
+    const char *dot = strchr(t, '.');
+    sb_append_str(sb, (dot && strchr(dot + 1, '.')) ? dot + 1 : t);
+    sb_append_c(sb, '(');
+    for (size_t i = 0; i < o->len; i++) {
+        if (i > 0) sb_append_str(sb, ", ");
+        if (display_inner) {
+            zz_value_to_display_strbuf_depth(sb, &o->fields[i * 2 + 1], depth + 1);
+        } else {
+            zz_value_to_strbuf_depth(sb, &o->fields[i * 2 + 1], depth + 1);
+        }
+    }
+    sb_append_c(sb, ')');
+}
 
 static void zz_value_to_strbuf(strbuf *sb, const zz_value *v) {
     zz_value_to_strbuf_depth(sb, v, 0);
@@ -738,20 +815,10 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
         snprintf(buf, sizeof buf, "%lld", (long long)v->i);
         sb_append_str(sb, buf);
         break;
-    case ZZ_FLOAT: {
-        double x = v->f;
-        if (x != x) { sb_append_str(sb, "nan"); break; }
-        if (x == 1.0/0.0) { sb_append_str(sb, "inf"); break; }
-        if (x == -1.0/0.0) { sb_append_str(sb, "-inf"); break; }
-        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
-            char buf[32];
-            snprintf(buf, sizeof buf, "%.1f", x);
-            sb_append_str(sb, buf);
-        } else {
-            zz_append_double(sb, x);
-        }
+    case ZZ_FLOAT:
+        // Canonical rendering comes from the Rust core (spec §4).
+        zz_append_double(sb, v->f);
         break;
-    }
     case ZZ_BOOL:
         sb_append_str(sb, v->b ? "true" : "false");
         break;
@@ -847,6 +914,10 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
             break;
         }
         const zz_object *o = v->obj;
+        if (zz_object_is_enum_shape(o)) {
+            zz_print_enum_shape_sb(sb, o, depth, 0);
+            break;
+        }
         sb_append_str(sb, zz_object_display_name(o));
         sb_append_c(sb, '{');
         for (size_t i = 0; i < o->len; i++) {
@@ -922,20 +993,10 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
         snprintf(buf, sizeof buf, "%lld", (long long)v->i);
         sb_append_str(sb, buf);
         break;
-    case ZZ_FLOAT: {
-        double x = v->f;
-        if (x != x) { sb_append_str(sb, "nan"); break; }
-        if (x == 1.0/0.0) { sb_append_str(sb, "inf"); break; }
-        if (x == -1.0/0.0) { sb_append_str(sb, "-inf"); break; }
-        if (x == (int64_t)x && x < 1e15 && x > -1e15) {
-            char fbuf[32];
-            snprintf(fbuf, sizeof fbuf, "%.1f", x);
-            sb_append_str(sb, fbuf);
-        } else {
-            zz_append_double(sb, x);
-        }
+    case ZZ_FLOAT:
+        // Canonical rendering comes from the Rust core (spec §4).
+        zz_append_double(sb, v->f);
         break;
-    }
     case ZZ_BOOL:
         sb_append_str(sb, v->b ? "true" : "false");
         break;
@@ -1021,6 +1082,10 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
             break;
         }
         const zz_object *o = v->obj;
+        if (zz_object_is_enum_shape(o)) {
+            zz_print_enum_shape_sb(sb, o, depth, 1);
+            break;
+        }
         sb_append_str(sb, zz_object_display_name(o));
         sb_append_c(sb, '{');
         for (size_t i = 0; i < o->len; i++) {
@@ -1136,12 +1201,18 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
         // interned (we must never mutate an interned singleton) and has
         // capacity for the result. SSO strings (cap==0) are reusable when
         // the result still fits inline.
+        // Consume semantics: the caller transfers ownership of both inputs.
+        // Generated code only ever passes owned temporaries (zz_clone bumps,
+        // call results, literals) that are never read again, so releasing
+        // what we don't reuse keeps `s = s + x` chains leak-free. Releases
+        // are no-ops for interned singletons and arena strings (refs==0).
         if (a.s->refs == 1 && !a.s->interned
             && (a.s->cap >= need || (a.s->cap == 0 && need <= ZZ_SSO_MAX))) {
             out = a.s;
             memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
             out->len = need;
             zz_str_ptr(out)[need] = '\0';
+            zz_release(&b);
             zz_value v;
             v.tag = ZZ_STR;
             v.s = out;
@@ -1150,6 +1221,8 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
         out = str_alloc(need);
         memcpy(zz_str_ptr(out), zz_str_ptr(a.s), la);
         memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
+        zz_release(&a);
+        zz_release(&b);
         zz_value v;
         v.tag = ZZ_STR;
         v.s = out;
@@ -1162,26 +1235,39 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
 // given arena (refs=0 sentinel), so zz_release skips it and the bulk
 // arena reset reclaims everything at scope exit. Zero heap malloc for
 // the string header+data.
+// Consume semantics (mirrors zz_binop_cat): both inputs are owned
+// temporaries and are released when heap-owned. Arena/interned inputs
+// are no-ops under zz_release, so chains like
+// cat_arena(cat_arena(clone(s), lit), call) stay leak-free.
 zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
     if (a.tag == ZZ_STR && b.tag == ZZ_STR && arena) {
         size_t la = a.s->len, lb = b.s->len;
         size_t need = la + lb;
+        // Copy the payload bytes first: `a` may live in this same arena
+        // block, and the header alloc below can overflow-adopt that block.
+        // Reading la/lb bytes off the adopted (but still mapped) chunk
+        // stays valid, but copying up front keeps the logic independent
+        // of the allocator's growth strategy.
+        const char *pa = zz_str_cptr(a.s);
+        const char *pb = zz_str_cptr(b.s);
         zz_str *out = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str), 8);
         out->refs = 0;      // arena sentinel
         out->interned = 0;
         out->len = need;
         if (need <= ZZ_SSO_MAX) {
             out->cap = 0;
-            memcpy(out->sso, zz_str_ptr(a.s), la);
-            memcpy(out->sso + la, zz_str_ptr(b.s), lb);
+            memcpy(out->sso, pa, la);
+            memcpy(out->sso + la, pb, lb);
             out->sso[need] = '\0';
         } else {
             out->cap = need;
             out->heap = (char *)zz_arena_alloc(arena, need + 1, 1);
-            memcpy(out->heap, zz_str_ptr(a.s), la);
-            memcpy(out->heap + la, zz_str_ptr(b.s), lb);
+            memcpy(out->heap, pa, la);
+            memcpy(out->heap + la, pb, lb);
             out->heap[need] = '\0';
         }
+        zz_release(&a);
+        zz_release(&b);
         zz_value v;
         v.tag = ZZ_STR;
         v.s = out;
@@ -1195,9 +1281,9 @@ zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
 zz_value zz_binop_cat_str(zz_value a, zz_value b) {
     char *sv = zz_value_to_display_string(&b);
     zz_value sb = zz_str_owned(sv);
-    zz_value r = zz_binop_cat(a, sb);
-    zz_release(&sb);
-    return r;
+    // zz_binop_cat consumes both inputs, so `sb` ownership transfers —
+    // no extra release here (it would double-free sb's heap buffer).
+    return zz_binop_cat(a, sb);
 }
 
 // In-place append used by loop lowerings (`s = s + literal`). Mutates *a
@@ -1219,10 +1305,12 @@ void zz_str_append_str(zz_value *a, zz_value b) {
     // Buffer not reusable: replace with a fresh allocation. Release the
     // old ref first so we don't leak (and don't double-free if the old
     // buffer happened to be interned — refs==1 interned strings stay put).
+    // Arena-owned source (refs==0 sentinel) is abandoned, never released
+    // or mutated: the arena reclaims it at reset.
     zz_str *fresh = str_alloc(need);
     memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
     memcpy(zz_str_ptr(fresh) + la, zz_str_ptr(b.s), lb);
-    if (!a->s->interned && --a->s->refs == 0) {
+    if (!a->s->interned && a->s->refs != 0 && --a->s->refs == 0) {
         if (a->s->cap > 0) free(a->s->heap);
         zz_str_header_free(a->s);
     }
@@ -1247,17 +1335,20 @@ void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
     zz_str *fresh = str_alloc(need);
     memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
     memcpy(zz_str_ptr(fresh) + la, lit, lit_len);
-    if (!a->s->interned && --a->s->refs == 0) {
+    // Arena-owned source (refs==0 sentinel): abandon, never release.
+    if (!a->s->interned && a->s->refs != 0 && --a->s->refs == 0) {
         if (a->s->cap > 0) free(a->s->heap);
         zz_str_header_free(a->s);
     }
     a->s = fresh;
 }
-// str.length(s) — string length in bytes.
+// str.length(s) — string length in chars (Unicode scalar values),
+// matching the VM (`s.chars().count()`). Byte length stays in `s->len`
+// for storage; only this user-visible measure counts chars.
 zz_value zz_str_length(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return (zz_value){ZZ_INT, {.i = 0}};
-    return (zz_value){ZZ_INT, {.i = (int64_t)s.s->len}};
+    return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(s.s)}};
 }
 
 // str.lower(s) — lowercase copy.
@@ -1323,6 +1414,46 @@ zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err) {
     return (zz_value){ZZ_STR, {.s = out}};
 }
 
+// memchr-skip search core: jump to the next first-needle-byte, then
+// verify with memcmp. Portable C89 + memchr, near-memmem speed for
+// short needles (the common case).
+static const char *scan_skip(const char *h, const char *hend, char first) {
+    const char *p = h;
+    while (p < hend) {
+        const char *hit = (const char *)memchr(p, first, (size_t)(hend - p));
+        if (!hit) return hend;
+        p = hit;
+        return p;
+    }
+    return hend;
+}
+
+// str.count(s, sub) — non-overlapping occurrences, no allocation.
+// Empty sub counts chars+1 (matches the split-based version it replaces).
+zz_value zz_str_count(zz_value s, zz_value sub, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR) return (zz_value){ZZ_INT, {.i = 0}};
+    const char *src = zz_str_ptr(s.s);
+    size_t src_len = s.s->len;
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(s.s) + 1}};
+    int64_t n = 0;
+    const char *p = src;
+    const char *end = src + src_len;
+    while (p + needle_len <= end) {
+        p = scan_skip(p, end, needle[0]);
+        if (p + needle_len > end) break;
+        if (memcmp(p, needle, needle_len) == 0) {
+            n++;
+            p += needle_len;
+        } else {
+            p++;
+        }
+    }
+    return (zz_value){ZZ_INT, {.i = n}};
+}
+
 // str.contains(s, sub) — check if s contains sub.
 zz_value zz_str_contains(zz_value s, zz_value sub, int *err) {
     (void)err;
@@ -1332,13 +1463,715 @@ zz_value zz_str_contains(zz_value s, zz_value sub, int *err) {
     const char *needle = zz_str_ptr(sub.s);
     size_t needle_len = sub.s->len;
     if (needle_len == 0) return (zz_value){ZZ_BOOL, {.b = true}};
-    for (size_t i = 0; i + needle_len <= src_len; i++) {
-        if (memcmp(src + i, needle, needle_len) == 0) return (zz_value){ZZ_BOOL, {.b = true}};
+    const char *end = src + src_len;
+    const char *p = src;
+    while (p + needle_len <= end) {
+        p = scan_skip(p, end, needle[0]);
+        if (p + needle_len > end) break;
+        if (memcmp(p, needle, needle_len) == 0) return (zz_value){ZZ_BOOL, {.b = true}};
+        p++;
     }
     return (zz_value){ZZ_BOOL, {.b = false}};
 }
 
-// str.startswith(s, prefix)
+// Byte-offset search helpers. Contract is byte offsets (O(1) per call,
+// backend-identical on every input); matches can only start at char
+// boundaries, so non-boundary positions snap (ceil for find, floor for
+// rfind/tail checks) and empty patterns return the clamped position.
+static size_t snap_fwd(const char *p, size_t len, size_t pos) {
+    while (pos < len && ((unsigned char)p[pos] & 0xC0) == 0x80) pos++;
+    return pos;
+}
+
+static size_t snap_bwd(const char *p, size_t pos) {
+    while (pos > 0 && ((unsigned char)p[pos] & 0xC0) == 0x80) pos--;
+    return pos;
+}
+
+static int64_t find_from(zz_value s, zz_value sub, int64_t from) {
+    const char *src = zz_str_ptr(s.s);
+    size_t src_len = s.s->len;
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    int64_t start = from < 0 ? 0 : from;
+    if ((uint64_t)start > src_len) start = (int64_t)src_len;
+    size_t base = snap_fwd(src, src_len, (size_t)start);
+    if (needle_len == 0) return (int64_t)base;
+    if (base >= src_len) return -1;
+    const char *end = src + src_len;
+    const char *p = src + base;
+    while (p + needle_len <= end) {
+        p = scan_skip(p, end, needle[0]);
+        if (p + needle_len > end) break;
+        if (memcmp(p, needle, needle_len) == 0) return (int64_t)(p - src);
+        p++;
+    }
+    return -1;
+}
+
+static int64_t rfind_from(zz_value s, zz_value sub, int64_t from) {
+    const char *src = zz_str_ptr(s.s);
+    size_t src_len = s.s->len;
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    int64_t end_c = from < 0 ? 0 : from;
+    if ((uint64_t)end_c > src_len) end_c = (int64_t)src_len;
+    size_t end = snap_bwd(src, (size_t)end_c);
+    if (needle_len == 0) return (int64_t)end;
+    int64_t best = -1;
+    const char *fin = src + src_len;
+    const char *p = src;
+    while (p + needle_len <= fin) {
+        p = scan_skip(p, fin, needle[0]);
+        if (p + needle_len > fin) break;
+        if ((size_t)(p - src) > end) break;
+        if (memcmp(p, needle, needle_len) == 0) best = (int64_t)(p - src);
+        p++;
+    }
+    return best;
+}
+
+// str.find(s, sub, from) — first match at/after byte offset `from`.
+zz_value zz_str_find(zz_value s, zz_value sub, zz_value from, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR) return (zz_value){ZZ_INT, {.i = -1}};
+    int64_t f = from.tag == ZZ_INT ? from.i : 0;
+    return (zz_value){ZZ_INT, {.i = find_from(s, sub, f)}};
+}
+
+// str.rfind(s, sub, from) — last match starting at/before `from`.
+zz_value zz_str_rfind(zz_value s, zz_value sub, zz_value from, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR) return (zz_value){ZZ_INT, {.i = -1}};
+    int64_t f = from.tag == ZZ_INT ? from.i : 0;
+    return (zz_value){ZZ_INT, {.i = rfind_from(s, sub, f)}};
+}
+
+// Bounded scans: never read past `end`, so per-line use stays O(line).
+// Empty patterns: find/rfind return the clamped start, count returns 0.
+static void clamp_span_c(int64_t len, int64_t start, int64_t end, size_t *s, size_t *e) {
+    int64_t a = start < 0 ? 0 : start;
+    int64_t b = end < 0 ? 0 : end;
+    if (a > len) a = len;
+    if (b > len) b = len;
+    if (b < a) b = a;
+    *s = (size_t)a;
+    *e = (size_t)b;
+}
+
+zz_value zz_str_find_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || start.tag != ZZ_INT || end.tag != ZZ_INT)
+        return (zz_value){ZZ_INT, {.i = -1}};
+    const char *src = zz_str_ptr(s.s);
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    size_t lo, hi;
+    clamp_span_c((int64_t)s.s->len, start.i, end.i, &lo, &hi);
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = (int64_t)lo}};
+    const char *fin = src + hi;
+    const char *p = src + lo;
+    while (p + needle_len <= fin) {
+        p = scan_skip(p, fin, needle[0]);
+        if (p + needle_len > fin) break;
+        if (memcmp(p, needle, needle_len) == 0) return (zz_value){ZZ_INT, {.i = (int64_t)(p - src)}};
+        p++;
+    }
+    return (zz_value){ZZ_INT, {.i = -1}};
+}
+
+zz_value zz_str_rfind_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || start.tag != ZZ_INT || end.tag != ZZ_INT)
+        return (zz_value){ZZ_INT, {.i = -1}};
+    const char *src = zz_str_ptr(s.s);
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    size_t lo, hi;
+    clamp_span_c((int64_t)s.s->len, start.i, end.i, &lo, &hi);
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = (int64_t)hi}};
+    const char *fin = src + hi;
+    const char *p = src + lo;
+    int64_t best = -1;
+    while (p + needle_len <= fin) {
+        p = scan_skip(p, fin, needle[0]);
+        if (p + needle_len > fin) break;
+        if (memcmp(p, needle, needle_len) == 0) best = (int64_t)(p - src);
+        p++;
+    }
+    return (zz_value){ZZ_INT, {.i = best}};
+}
+
+zz_value zz_str_count_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || start.tag != ZZ_INT || end.tag != ZZ_INT)
+        return (zz_value){ZZ_INT, {.i = 0}};
+    const char *src = zz_str_ptr(s.s);
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    size_t lo, hi;
+    clamp_span_c((int64_t)s.s->len, start.i, end.i, &lo, &hi);
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = 0}};
+    const char *fin = src + hi;
+    const char *p = src + lo;
+    int64_t n = 0;
+    while (p + needle_len <= fin) {
+        p = scan_skip(p, fin, needle[0]);
+        if (p + needle_len > fin) break;
+        if (memcmp(p, needle, needle_len) == 0) {
+            n++;
+            p += needle_len;
+        } else {
+            p++;
+        }
+    }
+    return (zz_value){ZZ_INT, {.i = n}};
+}
+
+// str.starts_with_at(s, sub, pos)// str.starts_with_at(s, sub, pos) — match at byte offset, else false.
+// Both window edges must sit on char boundaries (a partial char can
+// never equal a valid pattern's bytes).
+zz_value zz_str_starts_with_at(zz_value s, zz_value sub, zz_value pos, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || pos.tag != ZZ_INT) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t n = sub.s->len;
+    if (n == 0) return (zz_value){ZZ_BOOL, {.b = false}};
+    if (pos.i < 0 || (uint64_t)pos.i + n > s.s->len) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t base = (size_t)pos.i;
+    const char *src = zz_str_ptr(s.s);
+    if (snap_bwd(src, base) != base || snap_bwd(src, base + n) != base + n)
+        return (zz_value){ZZ_BOOL, {.b = false}};
+    return (zz_value){ZZ_BOOL, {.b = memcmp(src + base, zz_str_ptr(sub.s), n) == 0}};
+}
+
+// str.ends_with_at(s, sub, pos) — match ending at byte offset `pos`.
+zz_value zz_str_ends_with_at(zz_value s, zz_value sub, zz_value pos, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || pos.tag != ZZ_INT) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t n = sub.s->len;
+    if (n == 0) return (zz_value){ZZ_BOOL, {.b = false}};
+    if (pos.i < 0 || (uint64_t)pos.i > s.s->len || (uint64_t)pos.i < n) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t base = (size_t)pos.i - n;
+    const char *src = zz_str_ptr(s.s);
+    if (snap_bwd(src, base) != base || snap_bwd(src, (size_t)pos.i) != (size_t)pos.i)
+        return (zz_value){ZZ_BOOL, {.b = false}};
+    return (zz_value){ZZ_BOOL, {.b = memcmp(src + base, zz_str_ptr(sub.s), n) == 0}};
+}
+
+// Width of whitespace at d[pos] (0 if none): ASCII ws plus the
+// Unicode White_Space sequences. Explicit table so both backends agree
+// (never the host trim).
+static size_t ws_width_fwd(const unsigned char *d, size_t pos, size_t end) {
+    if (pos >= end) return 0;
+    unsigned char c = d[pos];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\x0b' || c == '\x0c' || c == '\r') return 1;
+    if (c == 0xC2 && pos + 1 < end && (d[pos + 1] == 0x85 || d[pos + 1] == 0xA0)) return 2;
+    if (c == 0xE1 && pos + 2 < end && d[pos + 1] == 0x9A && d[pos + 2] == 0x80) return 3;
+    if (c == 0xE2 && pos + 2 < end && d[pos + 1] == 0x80) {
+        unsigned char e = d[pos + 2];
+        if ((e >= 0x80 && e <= 0x8A) || e == 0xA8 || e == 0xA9 || e == 0xAF) return 3;
+    }
+    if (c == 0xE2 && pos + 2 < end && d[pos + 1] == 0x81 && d[pos + 2] == 0x9F) return 3;
+    if (c == 0xE3 && pos + 2 < end && d[pos + 1] == 0x80 && d[pos + 2] == 0x80) return 3;
+    return 0;
+}
+
+static size_t ws_width_bwd(const unsigned char *d, size_t s, size_t end) {
+    if (end <= s) return 0;
+    unsigned char c = d[end - 1];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\x0b' || c == '\x0c' || c == '\r') return 1;
+    if (end - s >= 2 && d[end - 2] == 0xC2 && (c == 0x85 || c == 0xA0)) return 2;
+    if (end - s >= 3 && d[end - 3] == 0xE1 && d[end - 2] == 0x9A && c == 0x80) return 3;
+    if (end - s >= 3 && d[end - 3] == 0xE2 && d[end - 2] == 0x80) {
+        if ((c >= 0x80 && c <= 0x8A) || c == 0xA8 || c == 0xA9 || c == 0xAF) return 3;
+    }
+    if (end - s >= 3 && d[end - 3] == 0xE2 && d[end - 2] == 0x81 && c == 0x9F) return 3;
+    if (end - s >= 3 && d[end - 3] == 0xE3 && d[end - 2] == 0x80 && c == 0x80) return 3;
+    return 0;
+}
+
+// str.bytes(s) — UTF-8 bytes as plain ints (one copy).
+zz_value zz_str_bytes(zz_value s, int *err) {
+    (void)err;
+    zz_value arr = zz_array_new();
+    if (s.tag != ZZ_STR) return arr;
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
+    int sub_err = 0;
+    for (size_t i = 0; i < s.s->len; i++) {
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = (int64_t)d[i]}}, &sub_err);
+    }
+    return arr;
+}
+
+// bytes.to_str(vs) — strict UTF-8 decode; out-of-range values and
+// invalid sequences are .err, identically on VM and AOT.
+zz_value zz_bytes_to_str(zz_value vs, int *err) {
+    if (vs.tag != ZZ_ARRAY) {
+        if (err) *err = 1;
+        return zz_unit();
+    }
+    size_t n = vs.arr->len;
+    unsigned char *buf = (unsigned char *)malloc(n > 0 ? n : 1);
+    if (!buf) {
+        return zz_variant_err(zz_str_static("bytes.to_str: out of memory"));
+    }
+    for (size_t i = 0; i < n; i++) {
+        zz_value v = vs.arr->items[i];
+        if (v.tag != ZZ_INT) {
+            free(buf);
+            if (err) *err = 1;
+            return zz_unit();
+        }
+        if (v.i < 0 || v.i > 255) {
+            free(buf);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "bytes.to_str: value %lld out of range 0-255", (long long)v.i);
+            return zz_variant_err(zz_str_new(msg, strlen(msg)));
+        }
+        buf[i] = (unsigned char)v.i;
+    }
+    // Strict validation: reject overlongs, surrogates, > U+10FFFF.
+    size_t i = 0;
+    int ok = 1;
+    while (i < n) {
+        unsigned char c = buf[i];
+        size_t want = 1;
+        if (c < 0x80) want = 1;
+        else if (c >= 0xC2 && c <= 0xDF) want = 2;
+        else if (c >= 0xE0 && c <= 0xEF) want = 3;
+        else if (c >= 0xF0 && c <= 0xF4) want = 4;
+        else { ok = 0; break; }
+        if (i + want > n) { ok = 0; break; }
+        for (size_t k = 1; k < want; k++) {
+            if ((buf[i + k] & 0xC0) != 0x80) { ok = 0; break; }
+        }
+        if (!ok) break;
+        if (want == 3) {
+            if (c == 0xE0 && buf[i + 1] < 0xA0) { ok = 0; break; }
+            if (c == 0xED && buf[i + 1] > 0x9F) { ok = 0; break; }
+        }
+        if (want == 4) {
+            if (c == 0xF0 && buf[i + 1] < 0x90) { ok = 0; break; }
+            if (c == 0xF4 && buf[i + 1] > 0x8F) { ok = 0; break; }
+        }
+        i += want;
+    }
+    if (!ok) {
+        free(buf);
+        return zz_variant_err(zz_str_static("bytes.to_str: invalid UTF-8"));
+    }
+    zz_value out = zz_str_new((const char *)buf, n);
+    free(buf);
+    return zz_variant_ok(out);
+}
+
+// bytes.to_ints(b) — opaque byte buffer as plain ints.
+zz_value zz_bytes_to_ints(zz_value b, int *err) {
+    (void)err;
+    zz_value arr = zz_array_new();
+    if (b.tag != ZZ_BYTES) return arr;
+    const unsigned char *d;
+    size_t n;
+    zz_bytes_view(b, &d, &n);
+    int sub_err = 0;
+    for (size_t i = 0; i < n; i++) {
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = (int64_t)d[i]}}, &sub_err);
+    }
+    return arr;
+}
+
+// ---- comment-aware line classifier (str.classify) --------------------
+// Byte-oriented with ASCII-4 trim ({space, \t, \n, \r}), mirroring the
+// split/trim/starts_with native semantics exactly. The ZZ-level reference
+// implementation lives in zcc's counter; differential fixtures pin them.
+static int cl_is_ws(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+// Blank string spans for quote q (blank_quote semantics).
+static void cl_blank_q(unsigned char *buf, size_t s, size_t e, unsigned char q) {
+    size_t i = s;
+    int inside = 0;
+    while (i < e) {
+        unsigned char c = buf[i];
+        if (c == '\\' && i + 1 < e && (buf[i + 1] == '\\' || buf[i + 1] == q)) {
+            buf[i] = ' ';
+            buf[i + 1] = ' ';
+            i += 2;
+            continue;
+        }
+        if (c == q) {
+            inside = !inside;
+            i++;
+            continue;
+        }
+        if (inside) buf[i] = ' ';
+        i++;
+    }
+}
+
+zz_value zz_str_classify(zz_value text, zz_value markers, zz_value bstart, zz_value bend, zz_value nested, zz_value whole, int *err) {
+    (void)err;
+    int64_t lines = 0, code = 0, comments = 0, blanks = 0;
+    zz_value arr = zz_array_new();
+    int sub_err = 0;
+    if (text.tag != ZZ_STR) goto done;
+    {
+        const unsigned char *d = (const unsigned char *)zz_str_ptr(text.s);
+        size_t n = text.s->len;
+        // Collect marker strings.
+        size_t nm = 0;
+        const char *mbuf[32];
+        size_t mlen[32];
+        if (markers.tag == ZZ_ARRAY) {
+            for (size_t i = 0; i < markers.arr->len && nm < 32; i++) {
+                zz_value v = markers.arr->items[i];
+                if (v.tag == ZZ_STR) {
+                    mbuf[nm] = zz_str_ptr(v.s);
+                    mlen[nm] = v.s->len;
+                    nm++;
+                }
+            }
+        }
+        const char *bs = "";
+        size_t bsl = 0;
+        const char *be = "";
+        size_t bel = 0;
+        if (bstart.tag == ZZ_STR) {
+            bs = zz_str_ptr(bstart.s);
+            bsl = bstart.s->len;
+        }
+        if (bend.tag == ZZ_STR) {
+            be = zz_str_ptr(bend.s);
+            bel = bend.s->len;
+        }
+        int isnested = (nested.tag == ZZ_INT && nested.i != 0) || (nested.tag == ZZ_BOOL && nested.b);
+        int iswhole = (whole.tag == ZZ_INT && whole.i != 0) || (whole.tag == ZZ_BOOL && whole.b);
+        // Line starts.
+        // Fast path: no comment syntax at all.
+        int nocomment = (bsl == 0);
+        for (size_t k = 0; k < nm && nocomment; k++) {
+            if (mlen[k] > 0) nocomment = 0;
+        }
+        size_t pos = 0;
+        int in_block = 0;
+        int64_t depth = 0;
+        // Scratch line buffer, grown as needed.
+        unsigned char *scratch = NULL;
+        size_t scratch_cap = 0;
+        while (pos <= n) {
+            if (pos >= n && pos > 0) break;
+            size_t le = n;
+            for (size_t i = pos; i < n; i++) {
+                if (d[i] == '\n') {
+                    le = i;
+                    break;
+                }
+            }
+            // Empty span only when pos == n (handled above) — count it
+            // only as the trailing artifact drop: break, don't count.
+            if (pos >= n) break;
+            lines++;
+            size_t tls = pos;
+            while (tls < le && cl_is_ws(d[tls])) tls++;
+            size_t the = le;
+            while (the > tls && cl_is_ws(d[the - 1])) the--;
+            if (tls >= the) {
+                blanks++;
+            } else if (nocomment) {
+                code++;
+            } else if (iswhole) {
+                int is_bs = (the - tls == bsl && bsl > 0 && memcmp(d + tls, bs, bsl) == 0);
+                int is_be = (the - tls == bel && bel > 0 && memcmp(d + tls, be, bel) == 0);
+                if (is_bs) {
+                    in_block = 1;
+                    comments++;
+                } else if (is_be) {
+                    in_block = 0;
+                    comments++;
+                } else if (in_block) {
+                    comments++;
+                } else {
+                    int sw = 0;
+                    for (size_t k = 0; k < nm && !sw; k++) {
+                        if (mlen[k] > 0 && the - tls >= mlen[k] && memcmp(d + tls, mbuf[k], mlen[k]) == 0) sw = 1;
+                    }
+                    if (sw) comments++;
+                    else code++;
+                }
+            } else if (in_block) {
+                // Build cleaned window (blank strings when gated).
+                int has_open = (bsl > 0);
+                if (has_open) {
+                    has_open = 0;
+                    for (size_t i = pos; i + bsl <= le; i++) {
+                        if (memcmp(d + i, bs, bsl) == 0) {
+                            has_open = 1;
+                            break;
+                        }
+                    }
+                }
+                int need = 0;
+                if (has_open) {
+                    for (size_t i = pos; i < le && !need; i++) {
+                        unsigned char c = d[i];
+                        if (c == '"' || c == '\'' || c == '`') need = 1;
+                    }
+                } else {
+                    for (size_t k = 0; k < nm && !need; k++) {
+                        if (mlen[k] == 0) continue;
+                        for (size_t i = pos; i + mlen[k] <= le; i++) {
+                            if (memcmp(d + i, mbuf[k], mlen[k]) == 0) {
+                                need = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (need) {
+                        need = 0;
+                        for (size_t i = pos; i < le; i++) {
+                            unsigned char c = d[i];
+                            if (c == '"' || c == '\'' || c == '`') {
+                                need = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                const unsigned char *cb = d;
+                size_t cs = pos, ce = le;
+                if (need) {
+                    size_t ln = le > pos ? le - pos : 0;
+                    if (ln + 1 > scratch_cap) {
+                        scratch_cap = ln + 1;
+                        scratch = (unsigned char *)realloc(scratch, scratch_cap);
+                    }
+                    if (!scratch) break;
+                    memcpy(scratch, d + pos, ln);
+                    cl_blank_q(scratch, 0, ln, '"');
+                    cl_blank_q(scratch, 0, ln, '`');
+                    cl_blank_q(scratch, 0, ln, '\'');
+                    cb = scratch;
+                    cs = 0;
+                    ce = ln;
+                }
+                if (isnested) {
+                    int64_t si = 0, ei = 0;
+                    if (bsl > 0) {
+                        for (size_t i = cs; i + bsl <= ce; i++) {
+                            if (memcmp(cb + i, bs, bsl) == 0) {
+                                si++;
+                                i += bsl - 1;
+                            }
+                        }
+                    }
+                    if (bel > 0) {
+                        for (size_t i = cs; i + bel <= ce; i++) {
+                            if (memcmp(cb + i, be, bel) == 0) {
+                                ei++;
+                                i += bel - 1;
+                            }
+                        }
+                    }
+                    depth += si - ei;
+                    if (depth <= 0) {
+                        in_block = 0;
+                        depth = 0;
+                    }
+                } else if (bel > 0) {
+                    int found = 0;
+                    size_t last = 0;
+                    for (size_t i = cs; i + bel <= ce; i++) {
+                        if (memcmp(cb + i, be, bel) == 0) {
+                            found = 1;
+                            last = i;
+                        }
+                    }
+                    if (found) {
+                        in_block = 0;
+                        size_t t = last + bel;
+                        while (t < ce && cl_is_ws(cb[t])) t++;
+                        if (t < ce) {
+                            int tsw = 0;
+                            for (size_t k = 0; k < nm && !tsw; k++) {
+                                if (mlen[k] > 0 && the - tls >= mlen[k]) {
+                                    // t-check runs on the RAW line,
+                                    // bounded by the trimmed end (never
+                                    // reads into the next line).
+                                    size_t r = tls;
+                                    if (r + mlen[k] <= the && memcmp(d + r, mbuf[k], mlen[k]) == 0) tsw = 1;
+                                }
+                            }
+                            if (!tsw) {
+                                code++;
+                                goto nextline;
+                            }
+                        }
+                    }
+                }
+                comments++;
+            } else {
+                int sw = 0;
+                for (size_t k = 0; k < nm && !sw; k++) {
+                    if (mlen[k] > 0 && the - tls >= mlen[k] && memcmp(d + tls, mbuf[k], mlen[k]) == 0) sw = 1;
+                }
+                if (sw) {
+                    comments++;
+                } else if (bsl > 0) {
+                    int has = 0;
+                    for (size_t i = pos; i + bsl <= le; i++) {
+                        if (memcmp(d + i, bs, bsl) == 0) {
+                            has = 1;
+                            break;
+                        }
+                    }
+                    if (!has) {
+                        code++;
+                    } else {
+                        // Clean + classify (mirror of the in_block gate).
+                        int need = 0;
+                        for (size_t i = pos; i < le && !need; i++) {
+                            unsigned char c = d[i];
+                            if (c == '"' || c == '\'' || c == '`') need = 1;
+                        }
+                        const unsigned char *cb = d;
+                        size_t cs = pos, ce = le;
+                        if (need) {
+                            size_t ln = le > pos ? le - pos : 0;
+                            if (ln + 1 > scratch_cap) {
+                                scratch_cap = ln + 1;
+                                scratch = (unsigned char *)realloc(scratch, scratch_cap);
+                            }
+                            if (!scratch) break;
+                            memcpy(scratch, d + pos, ln);
+                            cl_blank_q(scratch, 0, ln, '"');
+                            cl_blank_q(scratch, 0, ln, '`');
+                            cl_blank_q(scratch, 0, ln, '\'');
+                            cb = scratch;
+                            cs = 0;
+                            ce = ln;
+                        }
+                        int still = 0;
+                        for (size_t i = cs; i + bsl <= ce; i++) {
+                            if (memcmp(cb + i, bs, bsl) == 0) {
+                                still = 1;
+                                break;
+                            }
+                        }
+                        if (!still) {
+                            code++;
+                        } else {
+                            size_t bi = cs;
+                            for (; bi + bsl <= ce; bi++) {
+                                if (memcmp(cb + bi, bs, bsl) == 0) break;
+                            }
+                            size_t bl = cs;
+                            while (bl < bi && cl_is_ws(cb[bl])) bl++;
+                            size_t bh = bi;
+                            while (bh > bl && cl_is_ws(cb[bh - 1])) bh--;
+                            int commented = 0, commented_code = 0;
+                            for (size_t k = 0; k < nm; k++) {
+                                if (mlen[k] == 0) continue;
+                                int fi = -1;
+                                for (size_t i = bl; i + mlen[k] <= bh; i++) {
+                                    if (memcmp(cb + i, mbuf[k], mlen[k]) == 0) {
+                                        fi = (int)i;
+                                        break;
+                                    }
+                                }
+                                if (fi >= 0) {
+                                    commented = 1;
+                                    size_t st = (size_t)fi;
+                                    while (st > bl && cl_is_ws(cb[st - 1])) st--;
+                                    size_t ss = bl;
+                                    while (ss < st && cl_is_ws(cb[ss])) ss++;
+                                    if (ss < st) commented_code = 1;
+                                }
+                            }
+                            if (commented) {
+                                if (commented_code) code++;
+                                else comments++;
+                            } else if (bel > 0) {
+                                int inl = 0;
+                                for (size_t i = cs; i + bel <= ce; i++) {
+                                    if (memcmp(cb + i, be, bel) == 0) {
+                                        inl = 1;
+                                        break;
+                                    }
+                                }
+                                if (inl) {
+                                    if (bl >= bh) comments++;
+                                    else code++;
+                                } else {
+                                    in_block = 1;
+                                    depth = 1;
+                                    int tsw = 0;
+                                    for (size_t k = 0; k < nm && !tsw; k++) {
+                                        if (mlen[k] > 0 && the - tls >= mlen[k] && memcmp(d + tls, mbuf[k], mlen[k]) == 0)
+                                            tsw = 1;
+                                    }
+                                    if (bl >= bh || tsw) comments++;
+                                    else code++;
+                                }
+                            } else {
+                                in_block = 1;
+                                depth = 1;
+                                int tsw = 0;
+                                for (size_t k = 0; k < nm && !tsw; k++) {
+                                    if (mlen[k] > 0 && the - tls >= mlen[k] && memcmp(d + tls, mbuf[k], mlen[k]) == 0)
+                                        tsw = 1;
+                                }
+                                if (bl >= bh || tsw) comments++;
+                                else code++;
+                            }
+                        }
+                    }
+                } else {
+                    code++;
+                }
+            }
+        nextline:
+            if (le >= n) break;
+            pos = le + 1;
+        }
+        free(scratch);
+    }
+done:
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = lines}}, &sub_err);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = code}}, &sub_err);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = comments}}, &sub_err);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = blanks}}, &sub_err);
+    return arr;
+}
+
+// str.trim_span(s, start, end) — trimmed [lo, hi] byte offsets. Unicode
+// White_Space on both backends (explicit table, never the host trim).
+zz_value zz_str_trim_span(zz_value s, zz_value start, zz_value end, int *err) {
+    (void)err;
+    zz_value arr = zz_array_new();
+    int sub_err = 0;
+    int64_t lo = 0, hi = 0;
+    if (s.tag == ZZ_STR) {
+        const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
+        size_t n = s.s->len;
+        int64_t a = start.tag == ZZ_INT ? start.i : 0;
+        int64_t b = end.tag == ZZ_INT ? end.i : 0;
+        if (a < 0) a = 0;
+        if ((uint64_t)a > n) a = (int64_t)n;
+        if (b < 0) b = 0;
+        if ((uint64_t)b > n) b = (int64_t)n;
+        lo = a;
+        hi = b > a ? b : a;
+        size_t w;
+        while ((size_t)lo < (size_t)hi && (w = ws_width_fwd(d, (size_t)lo, (size_t)hi)) != 0) lo += (int64_t)w;
+        while (hi > lo && (w = ws_width_bwd(d, (size_t)lo, (size_t)hi)) != 0) hi -= (int64_t)w;
+    }
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = lo}}, &sub_err);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = hi}}, &sub_err);
+    return arr;
+}
+
+// str.startswith(s, prefix)// str.startswith(s, prefix)
 zz_value zz_str_startswith(zz_value s, zz_value prefix, int *err) {
     (void)err;
     if (s.tag != ZZ_STR || prefix.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
@@ -1449,11 +2282,24 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
     if (sep.tag == ZZ_STR) { sd = zz_str_ptr(sep.s); slen = sep.s->len; }
     zz_value arr = zz_array_new();
     if (slen == 0) {
-        // Split into individual characters.
-        for (size_t i = 0; i < len; i++) {
-            zz_value item = zz_str_new(d + i, 1);
+        // Empty separator: leading "" + one item per char (Unicode scalar
+        // values, like the VM) + trailing "" — matches Rust `split("")`
+        // exactly (`"ab"` → `["", "a", "b", ""]`, `""` → `["", ""]`).
+        {
+            int sub_err = 0;
+            zz_vec_append(arr, zz_str_static(""), &sub_err);
+        }
+        size_t i = 0;
+        while (i < len) {
+            size_t l = zz_utf8_seq_len((const unsigned char *)(d + i), len - i);
+            zz_value item = zz_str_new(d + i, l);
             int sub_err = 0;
             zz_vec_append(arr, item, &sub_err);
+            i += l;
+        }
+        {
+            int sub_err = 0;
+            zz_vec_append(arr, zz_str_static(""), &sub_err);
         }
         return arr;
     }
@@ -1536,6 +2382,23 @@ zz_value zz_str_from_int(int64_t n) {
     size_t len;
     const char *p = zz_fmt_i64(buf + sizeof buf, n, &len);
     return zz_str_new(p, len);
+}
+
+// Append a formatted int directly into the string buffer: one grow +
+// memcpy, no zz_value temp, no arena staging, no release. Used by the
+// `s = s + ... + str(i) + ...` append-chain fast path.
+void zz_str_append_int(zz_value *a, int64_t n) {
+    char buf[24];
+    size_t len;
+    const char *p = zz_fmt_i64(buf + sizeof buf, n, &len);
+    zz_str_append_lit(a, p, len);
+}
+
+// Append a bool in display form (`true`/`false`, matching
+// zz_print_value_display and the VM).
+void zz_str_append_bool(zz_value *a, bool b) {
+    if (b) zz_str_append_lit(a, "true", 4);
+    else zz_str_append_lit(a, "false", 5);
 }
 
 // typeof(v) — return type name as string.

@@ -1,3 +1,4 @@
+// features: func-call, imports, print, std-fs, string-literal
 // E2E: std.fs path lexing — normalize/join/basename/dirname/is_absolute/
 // extension. Host-style assertions (unix here; windows shapes are pinned
 // by `natives::fs::path` unit tests and mirror C in `core.c`).

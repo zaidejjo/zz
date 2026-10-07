@@ -1,0 +1,12 @@
+import std.vec
+func main() {
+    a := []
+    for i in 0..1000000 {
+        a = vec.push(a, i % 97)
+    }
+    s := 0
+    for v in a {
+        s = s + v
+    }
+    println(s)
+}

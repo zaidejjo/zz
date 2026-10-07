@@ -1,0 +1,12 @@
+// features: indexing, locals, print, string-literal, structs
+// E2E: edge — field store through an index writes through to the root
+// (was dropped natively; the VM always wrote through).
+struct R { v: int }
+s := [R{v: 1}]
+s[0].v = 42
+println("sv={s[0].v}")
+t := s
+t[0].v = 43
+println("st={s[0].v}")
+println("tt={t[0].v}")
+println("edge_field_index_store_ok")

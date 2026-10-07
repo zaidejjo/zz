@@ -73,7 +73,7 @@ fn walk_stmt_in<'a>(
                 walk_stmt_in(tp, &fname, s, f);
             }
         }
-        Stmt::Struct { .. } | Stmt::Import { .. } => {}
+        Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } | Stmt::Import { .. } => {}
         Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         Stmt::Impl { name, methods, .. } => {
             let tname = name.join(".");
@@ -97,6 +97,10 @@ fn walk_stmt_in<'a>(
             walk_expr_in(tp, scope, expr, f);
         }
         Stmt::Assign { target, value, .. } => {
+            walk_expr_in(tp, scope, target, f);
+            walk_expr_in(tp, scope, value, f);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
             walk_expr_in(tp, scope, target, f);
             walk_expr_in(tp, scope, value, f);
         }

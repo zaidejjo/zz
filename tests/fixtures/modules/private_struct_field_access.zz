@@ -1,3 +1,4 @@
+// features: func-call, int-arith, locals, print, pub-visibility, structs
 // Test: private struct cannot be instantiated cross-module.
 // Full multi-file test is in loader/tests.rs (private_struct_not_instantiateable).
 pub struct PublicPoint {x: int, y: int}
@@ -7,4 +8,5 @@ struct PrivatePoint {x: int, y: int}
 func main() {
     p := PublicPoint{x: 1, y: 2}
     println(p.x + p.y)
+    println("private_struct_field_access_ok")
 }

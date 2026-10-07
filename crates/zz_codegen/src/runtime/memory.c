@@ -41,26 +41,34 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
         a->offset = aligned + size;
         return ptr;
     }
-    // Arena full: save the current buffer as an overflow chunk, then
+    // Arena full: adopt the current buffer as an overflow chunk, then
     // allocate a fresh block large enough for this request (and future
-    // ones of similar size).
+    // ones of similar size). Adopting (not copying) keeps in-flight
+    // pointers valid: a caller may hold a pointer into this buffer
+    // (e.g. an object header whose payload overflows right after).
     size_t chunk_cap = (size > a->cap) ? size * 2 : a->cap;
 
-    // Save current buffer as a chunk node so destroy can free it later.
+    // Adopt the current buffer as a chunk node so destroy/reset can free
+    // it later. Empty primaries are simply dropped (nothing live in them).
     if (a->buf && a->offset > 0) {
-        zz_arena_chunk *old = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk) + a->cap);
+        zz_arena_chunk *old = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk));
         if (old) {
-            old->next = a->chunks;
+            old->buf = a->buf;
             old->cap = a->cap;
-            memcpy(old->buf, a->buf, a->offset);
+            old->next = a->chunks;
             a->chunks = old;
+            a->buf = NULL;
+        } else {
+            // Chunk-node malloc failed: the old data is lost either way,
+            // but free the buffer so nothing leaks even on the OOM path.
+            free(a->buf);
+            a->buf = NULL;
         }
-        // If malloc fails, we silently lose the old data — acceptable for
-        // an OOM path.  We do NOT free the old buf here; it's now owned
-        // by the chunk node.
     }
 
-    // Allocate the new primary block.
+    // Drop any previous primary (empty after a reset and too small here,
+    // or already NULL above) before installing the fresh block.
+    free(a->buf);
     a->buf = (char *)malloc(chunk_cap);
     if (!a->buf) {
         fprintf(stderr, "zz: arena chunk out of memory\n");
@@ -77,10 +85,11 @@ void zz_arena_destroy(zz_arena *a) {
         free(a->buf);
         a->buf = NULL;
     }
-    // Walk the overflow chunk list and free each one.
+    // Walk the overflow chunk list and free each adopted buffer + node.
     zz_arena_chunk *chunk = a->chunks;
     while (chunk) {
         zz_arena_chunk *next = chunk->next;
+        free(chunk->buf);
         free(chunk);
         chunk = next;
     }

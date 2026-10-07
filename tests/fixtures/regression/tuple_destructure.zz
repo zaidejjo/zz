@@ -1,3 +1,4 @@
+// features: destructuring, locals, print, string-literal, tuples
 // Regression: tuple destructuring must bind each element positionally.
 (a, b) := (10, 20)
 println(a)

@@ -29,6 +29,12 @@ pub struct Interp {
     /// writes use `Rc::make_mut` (clones only on actual sharing) while
     /// every spawn/read pays a single atomic inc — or nothing at all.
     pub structs: Arc<HashMap<String, Vec<String>>>,
+    /// User enum variants (`enum Token { ... }` → `Token` → variant
+    /// names with payload presence), same copy-on-write discipline as
+    /// [`Interp::structs`]. Construction (`Token.IntLit(1)`) and pattern
+    /// matching resolve against this table; values themselves are plain
+    /// `Object`s.
+    pub enums: Arc<HashMap<String, Vec<(String, bool)>>>,
     pub args: Vec<String>,
     pub defer_stacks: Vec<Vec<Value>>,
     /// Mutation counter for [`Interp::funcs`], bumped on every insert.
@@ -77,6 +83,9 @@ pub type SpawnHook = fn(
     interp: &mut Interp,
     chunk: &Arc<crate::vm::Chunk>,
     params: &[zz_frontend::ast::Param],
+    // Pre-compiled default-argument bodies, parallel to `params`
+    // (`.zzc` loads; empty on the normal path — see `MakeFunc`).
+    chunk_defaults: &[Option<Arc<crate::vm::Chunk>>],
     span: Span,
 ) -> Result<Value, crate::runtime::EvalError>;
 
@@ -100,6 +109,7 @@ impl Interp {
             funcs: HashMap::new(),
             natives: Arc::new(HashMap::new()),
             structs: Arc::new(HashMap::new()),
+            enums: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
@@ -117,6 +127,7 @@ impl Interp {
             funcs: HashMap::new(),
             natives: Arc::new(natives),
             structs: Arc::new(HashMap::new()),
+            enums: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
@@ -137,6 +148,7 @@ impl Interp {
             funcs: HashMap::new(),
             natives,
             structs: Arc::new(HashMap::new()),
+            enums: Arc::new(HashMap::new()),
             args: Vec::new(),
             defer_stacks: Vec::new(),
             funcs_version: 0,
@@ -204,6 +216,7 @@ impl Interp {
         program: &Program,
         types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
         structs: HashMap<String, zz_checker::StructSig>,
+        enums: HashMap<String, zz_checker::EnumSig>,
     ) -> Result<Value, EvalError> {
         let native_names: Arc<std::collections::HashSet<String>> =
             Arc::new(self.natives.keys().cloned().collect());
@@ -211,10 +224,31 @@ impl Interp {
             program,
             types,
             structs,
+            enums,
             native_names,
         ));
         let mut vm = crate::vm::Vm::new();
         match vm.run_chunk(&chunk, self)? {
+            Flow::Value(v) => Ok(v),
+            Flow::Return(_) => Err(EvalError::new(
+                "`return` outside of a function",
+                Span::new(0, 0),
+            )),
+            Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
+            Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),
+            Flow::Yield(_) => Err(EvalError::new(
+                "internal error: green-thread yield escaped its executor",
+                Span::new(0, 0),
+            )),
+        }
+    }
+
+    /// Execute a pre-compiled chunk with no AST involved (`.zzc` loads).
+    /// The chunk must come from raising verified `.zzc` bytes; spans
+    /// index the original sources for error rendering.
+    pub fn run_loaded_chunk(&mut self, chunk: &Arc<crate::vm::Chunk>) -> Result<Value, EvalError> {
+        let mut vm = crate::vm::Vm::new();
+        match vm.run_chunk(chunk, self)? {
             Flow::Value(v) => Ok(v),
             Flow::Return(_) => Err(EvalError::new(
                 "`return` outside of a function",

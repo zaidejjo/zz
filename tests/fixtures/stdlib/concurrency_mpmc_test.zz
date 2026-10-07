@@ -1,3 +1,4 @@
+// features: closures, for-loop, func-call, imports, int-arith, locals, print, ranges, std-chan, std-task, string-literal
 // E2E: MPMC — 4 senders x 200 msgs into one channel, main drains 800.
 import std.task
 import std.chan

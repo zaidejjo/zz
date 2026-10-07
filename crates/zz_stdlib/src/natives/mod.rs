@@ -19,7 +19,7 @@ pub(crate) mod encoding;
 pub(crate) mod env;
 pub mod fs;
 pub(crate) mod http;
-pub(crate) mod io;
+pub mod io;
 pub(crate) mod iterators;
 pub(crate) mod json;
 pub(crate) mod log;
@@ -31,6 +31,7 @@ pub(crate) mod regexp;
 pub(crate) mod result_mod;
 pub(crate) mod str_mod;
 pub(crate) mod sys;
+pub(crate) mod term;
 pub(crate) mod time;
 pub(crate) mod uuid;
 pub(crate) mod vec_mod;
@@ -168,10 +169,73 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "str.bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_bytes,
+        },
+    );
+    m.insert(
+        "str.classify".into(),
+        NativeEntry {
+            arity: 6,
+            f: str_mod::str_classify,
+        },
+    );
+    m.insert(
+        "str.classify".into(),
+        NativeEntry {
+            arity: 6,
+            f: str_mod::str_classify,
+        },
+    );
+    m.insert(
+        "bytes.to_str".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_to_str,
+        },
+    );
+    m.insert(
+        "bytes.to_ints".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_to_ints,
+        },
+    );
+    m.insert(
         "std.bytes.len".into(),
         NativeEntry {
             arity: 1,
             f: iterators::len,
+        },
+    );
+    m.insert(
+        "std.str.bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_bytes,
+        },
+    );
+    m.insert(
+        "std.str.classify".into(),
+        NativeEntry {
+            arity: 6,
+            f: str_mod::str_classify,
+        },
+    );
+    m.insert(
+        "std.bytes.to_str".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_to_str,
+        },
+    );
+    m.insert(
+        "std.bytes.to_ints".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_to_ints,
         },
     );
     m.insert(
@@ -223,6 +287,90 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: str_mod::str_contains,
+        },
+    );
+    m.insert(
+        "std.str.count".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_mod::str_count,
+        },
+    );
+    m.insert(
+        "std.str.find".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_find,
+        },
+    );
+    m.insert(
+        "std.str.rfind".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_rfind,
+        },
+    );
+    m.insert(
+        "std.str.starts_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_starts_with_at,
+        },
+    );
+    m.insert(
+        "std.str.ends_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_ends_with_at,
+        },
+    );
+    m.insert(
+        "std.str.trim_span".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_trim_span,
+        },
+    );
+    m.insert(
+        "std.str.find_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_find_in,
+        },
+    );
+    m.insert(
+        "std.str.rfind_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_rfind_in,
+        },
+    );
+    m.insert(
+        "std.str.count_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_count_in,
+        },
+    );
+    m.insert(
+        "std.str.starts_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_starts_with_at,
+        },
+    );
+    m.insert(
+        "std.str.ends_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_ends_with_at,
+        },
+    );
+    m.insert(
+        "std.str.trim_span".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_trim_span,
         },
     );
     // Canonical `std.str.*` twins of the method-dispatch entries below.
@@ -332,6 +480,90 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: str_mod::str_contains,
+        },
+    );
+    m.insert(
+        "str.count".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_mod::str_count,
+        },
+    );
+    m.insert(
+        "str.find".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_find,
+        },
+    );
+    m.insert(
+        "str.rfind".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_rfind,
+        },
+    );
+    m.insert(
+        "str.starts_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_starts_with_at,
+        },
+    );
+    m.insert(
+        "str.ends_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_ends_with_at,
+        },
+    );
+    m.insert(
+        "str.trim_span".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_trim_span,
+        },
+    );
+    m.insert(
+        "str.find_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_find_in,
+        },
+    );
+    m.insert(
+        "str.rfind_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_rfind_in,
+        },
+    );
+    m.insert(
+        "str.count_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_count_in,
+        },
+    );
+    m.insert(
+        "str.starts_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_starts_with_at,
+        },
+    );
+    m.insert(
+        "str.ends_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_ends_with_at,
+        },
+    );
+    m.insert(
+        "str.trim_span".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_trim_span,
         },
     );
     m.insert(
@@ -2302,6 +2534,30 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: sys::sys_avail_mem,
         },
     );
+
+    // std.term — terminal control: raw mode, single-key reads, size
+    // (both spellings each). Fallible ops return Result so non-TTY
+    // stdin degrades gracefully instead of hanging.
+    for (name, arity, func) in [
+        (
+            "std.term.enable_raw",
+            0_usize,
+            term::term_enable_raw as zz_runtime::NativeFn,
+        ),
+        ("std.term.disable_raw", 0, term::term_disable_raw),
+        ("std.term.read_key", 0, term::term_read_key),
+        ("std.term.get_size", 0, term::term_get_size),
+        ("std.term.is_tty", 0, term::term_is_tty),
+        ("std.term.flush", 0, term::term_flush),
+        ("term.enable_raw", 0, term::term_enable_raw),
+        ("term.disable_raw", 0, term::term_disable_raw),
+        ("term.read_key", 0, term::term_read_key),
+        ("term.get_size", 0, term::term_get_size),
+        ("term.is_tty", 0, term::term_is_tty),
+        ("term.flush", 0, term::term_flush),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
 
     // std.args — raw argv + flag parser (both spellings each).
     m.insert(

@@ -1,3 +1,4 @@
+// features: const, error-case
 // E2E: cannot reassign a const (immutable) variable
 const x = 10
 x = 20

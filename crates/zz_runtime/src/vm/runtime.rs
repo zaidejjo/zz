@@ -4,7 +4,7 @@ use zz_frontend::ast::{Block, Expr};
 use zz_frontend::span::Span;
 
 use super::chunk::Chunk;
-use super::op::Op;
+use super::op::{Op, TakeHome};
 use crate::env::{Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
@@ -437,48 +437,69 @@ impl Vm {
                 Op::Pop => {
                     self.stack.pop();
                 }
+                Op::Swap => {
+                    let len = self.stack.len();
+                    self.stack.swap(len - 1, len - 2);
+                }
                 Op::Truthy => {
                     let v = self.stack.pop().unwrap();
                     self.stack.push(Value::Bool(v.is_truthy()));
                 }
                 Op::LoadVar(name, span) => {
-                    let v = interp
-                        .env
-                        .get(name)
-                        .or_else(|| {
-                            interp
-                                .funcs
-                                .get(name)
-                                .map(|fv| Value::Func(Box::new(fv.clone())))
-                        })
-                        .or_else(|| {
-                            interp.natives.get(name).map(|entry| {
-                                Value::Native(Box::new(NativeFunc {
-                                    name: name.clone(),
-                                    arity: entry.arity,
-                                }))
-                            })
-                        })
-                        // C-only plugins (direct dlsym, no Rust shim).
-                        .or_else(|| crate::c_abi::native_value(name))
-                        .or_else(|| {
-                            // Selective-import alias (miss-only): resolve
-                            // `ns.sym` like a qualified path. See
-                            // tree-walker Ident eval for the full note.
-                            let qualified = interp.import_aliases.get(name).cloned();
-                            qualified.and_then(|q| {
-                                let parts: Vec<String> = q.split('.').map(str::to_string).collect();
-                                interp.resolve_path_value(&parts, *span).ok()
-                            })
-                        })
-                        .ok_or_else(|| {
-                            EvalError::new(format!("undefined variable `{name}`"), *span)
-                        })?;
+                    let v = Self::load_var(interp, name, *span)?;
                     self.stack.push(v);
                 }
                 Op::LoadPath(parts, span) => {
-                    let v = interp.resolve_path_value(parts, *span)?;
-                    self.stack.push(v);
+                    // Unit-variant value (`Token.Eof`): resolve against
+                    // the enum table before the value lookup (which
+                    // would report "undefined variable" for a type name).
+                    // Yields to real values on collision.
+                    let v = if parts.len() >= 2 {
+                        let head = parts[..parts.len() - 1].join(".");
+                        // Miss-only: a shadowing value keeps its meaning.
+                        let head_is_value =
+                            interp.env.get(&head).is_some() || interp.funcs.contains_key(&head);
+                        let canonical = if head_is_value {
+                            String::new()
+                        } else if interp.enums.contains_key(&head) {
+                            head.clone()
+                        } else {
+                            interp
+                                .import_aliases
+                                .get(&head)
+                                .filter(|q| interp.enums.contains_key(q.as_str()))
+                                .cloned()
+                                .unwrap_or_default()
+                        };
+                        if !canonical.is_empty() {
+                            let variant = parts.last().cloned().unwrap_or_default();
+                            match interp.enums.get(&canonical).and_then(|vs| {
+                                vs.iter().find(|(v, _)| v == &variant).map(|(_, has)| *has)
+                            }) {
+                                // Payload variants need call form; fall
+                                // through to the value lookup so the error
+                                // names the path, not the enum.
+                                Some(true) | None => None,
+                                Some(false) => {
+                                    Some(Value::Object(Box::new(crate::value::ObjectValue {
+                                        name: format!("{canonical}.{variant}"),
+                                        fields: Vec::new(),
+                                    })))
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    match v {
+                        Some(v) => self.stack.push(v),
+                        None => {
+                            let v = interp.resolve_path_value(parts, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
                 }
                 Op::DefineVar(name) => {
                     let v = self.stack.pop().unwrap();
@@ -505,13 +526,123 @@ impl Vm {
                     let base = self.frames.last().unwrap().stack_base;
                     self.stack[base + *slot as usize] = v;
                 }
+                Op::TakeSlot(slot) => {
+                    let base = self.frames.last().unwrap().stack_base;
+                    let v = std::mem::replace(&mut self.stack[base + *slot as usize], Value::Unit);
+                    self.stack.push(v);
+                }
+                Op::TakeVar(name, span) => {
+                    // Move out of the env (no clone); falls back to the
+                    // `LoadVar` chain for non-env bindings.
+                    if let Some(v) = interp.env.take(name) {
+                        self.stack.push(v);
+                    } else {
+                        let v = Self::load_var_fallback(interp, name, *span)?;
+                        self.stack.push(v);
+                    }
+                }
+                Op::VecPush { home, span } => {
+                    let elem = self.stack.pop().unwrap();
+                    let Some(taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(elem);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    let mut vs = match taken {
+                        Value::Array(b) => *b,
+                        other => {
+                            let msg = format!("`vec.push` expects an array, found `{other}`");
+                            Self::restore_home(self, interp, home, other);
+                            self.stack.push(elem);
+                            return Err(self.error(msg, *span));
+                        }
+                    };
+                    vs.push(elem);
+                    Self::restore_home(self, interp, home, Value::Array(Box::new(vs)));
+                }
+                Op::VecPushField { home, field, span } => {
+                    let elem = self.stack.pop().unwrap();
+                    let Some(mut taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(elem);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // `field_push_take` restores the field itself on type
+                    // errors; the home object stays intact either way.
+                    match Self::field_push_take(&mut taken, field, elem, *span) {
+                        Ok(()) => {}
+                        Err(msg) => {
+                            Self::restore_home(self, interp, home, taken);
+                            return Err(self.error(msg, *span));
+                        }
+                    }
+                    Self::restore_home(self, interp, home, taken);
+                }
+                Op::VecPushMethod { home, method, span } => {
+                    let elem = self.stack.pop().unwrap();
+                    let Some(taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(elem);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    match taken {
+                        Value::Array(b) => {
+                            let mut vs = *b;
+                            vs.push(elem);
+                            Self::restore_home(self, interp, home, Value::Array(Box::new(vs)));
+                        }
+                        other => {
+                            // Not an array: restore first (no transient
+                            // during user code), then the generic method
+                            // call with write-back. The call runs
+                            // synchronously via `Interp::call` (same path
+                            // the tree-walker uses): `Vm::call_value`
+                            // only *pushes* a callee frame for user funcs
+                            // and returns, so awaiting a result on the
+                            // stack here would read a live frame's slots.
+                            Self::restore_home(self, interp, home, other.clone());
+                            let (f, recv) = interp.lookup_method_recv(&other, method, *span)?;
+                            let arg_vals = vec![recv, elem];
+                            let result = interp.call(f, arg_vals, *span).map_err(|mut e| {
+                                e.backtrace.extend(self.backtrace());
+                                e
+                            })?;
+                            Self::restore_home(self, interp, home, result);
+                            yield_check!();
+                        }
+                    }
+                }
                 Op::SlotAddInt { dst, src } => {
                     let base = self.frames.last().unwrap().stack_base;
                     let idx_dst = base + *dst as usize;
                     let idx_src = base + *src as usize;
                     match (&self.stack[idx_dst], &self.stack[idx_src]) {
                         (Value::Int(a), Value::Int(b)) => {
-                            self.stack[idx_dst] = Value::Int(*a + *b);
+                            self.stack[idx_dst] = Value::Int(a.wrapping_add(*b));
                         }
                         // Slow path: fall back to generic add semantics.
                         _ => {
@@ -526,7 +657,7 @@ impl Vm {
                     let base = self.frames.last().unwrap().stack_base;
                     let idx = base + *slot as usize;
                     match &self.stack[idx] {
-                        Value::Int(a) => self.stack[idx] = Value::Int(*a + 1),
+                        Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(1)),
                         _ => {
                             let v = self.stack[idx].clone();
                             let span = Span::default();
@@ -540,7 +671,7 @@ impl Vm {
                     let base = self.frames.last().unwrap().stack_base;
                     let idx = base + *dst as usize;
                     match &self.stack[idx] {
-                        Value::Int(a) => self.stack[idx] = Value::Int(*a + *imm),
+                        Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(*imm)),
                         _ => {
                             let v = self.stack[idx].clone();
                             let span = Span::default();
@@ -627,6 +758,7 @@ impl Vm {
                     name,
                     params,
                     chunk: fchunk,
+                    defaults,
                 } => {
                     let fv = FuncValue {
                         params: params.clone(),
@@ -636,6 +768,7 @@ impl Vm {
                         }),
                         env: interp.env.clone(),
                         chunk: Some(Arc::clone(fchunk)),
+                        chunk_defaults: defaults.clone(),
                     };
                     interp.funcs.insert(name.clone(), fv.clone());
                     interp.funcs_version = interp.funcs_version.wrapping_add(1);
@@ -647,6 +780,71 @@ impl Vm {
                     Arc::make_mut(&mut interp.structs).insert(name.clone(), fields.clone());
                     self.stack.push(Value::Unit);
                 }
+                Op::RegisterEnum { name, variants } => {
+                    Arc::make_mut(&mut interp.enums).insert(name.clone(), variants.clone());
+                    self.stack.push(Value::Unit);
+                }
+                Op::MakeEnum {
+                    enum_name,
+                    variant,
+                    argc,
+                    span,
+                } => {
+                    // Miss-only alias fallback (mirrors `MakeStruct`):
+                    // bare `Token` from `import m(Token)` resolves to
+                    // `m.Token`. Seed entries take precedence.
+                    let resolved;
+                    let lookup = if interp.enums.contains_key(enum_name) {
+                        enum_name
+                    } else if let Some(qualified) = interp.import_aliases.get(enum_name) {
+                        resolved = qualified.clone();
+                        &resolved
+                    } else {
+                        return Err(self.error(format!("unknown enum `{enum_name}`"), *span));
+                    };
+                    let Some(variants) = interp.enums.get(lookup).cloned() else {
+                        return Err(self.error(format!("unknown enum `{enum_name}`"), *span));
+                    };
+                    let has_payload = match variants.iter().find(|(v, _)| v == variant) {
+                        Some((_, has)) => *has,
+                        None => {
+                            return Err(self.error(
+                                format!("unknown variant `{variant}` for enum `{lookup}`"),
+                                *span,
+                            ));
+                        }
+                    };
+                    let mut vals = Vec::with_capacity(*argc as usize);
+                    for _ in 0..*argc {
+                        vals.push(self.stack.pop().unwrap());
+                    }
+                    vals.reverse();
+                    // Arity is a checker error; the runtime keeps a
+                    // defensive gate so unchecked paths never silently
+                    // build a wrong-shaped value.
+                    let fields = match (has_payload, vals.len()) {
+                        (false, 0) => Vec::new(),
+                        (true, 1) => {
+                            vec![("value".to_string(), vals.into_iter().next().unwrap())]
+                        }
+                        _ => {
+                            return Err(self.error(
+                                format!(
+                                    "variant `{lookup}.{variant}` takes {} argument{} but {} given",
+                                    if has_payload { 1 } else { 0 },
+                                    if has_payload { "" } else { "s" },
+                                    vals.len(),
+                                ),
+                                *span,
+                            ));
+                        }
+                    };
+                    self.stack
+                        .push(Value::Object(Box::new(crate::value::ObjectValue {
+                            name: format!("{lookup}.{variant}"),
+                            fields,
+                        })));
+                }
                 Op::BinOp(op, span) => {
                     let r = self.stack.pop().unwrap();
                     let l = self.stack.pop().unwrap();
@@ -657,18 +855,9 @@ impl Vm {
                     let r = self.stack.pop().unwrap();
                     let l = self.stack.pop().unwrap();
                     match (&l, &r) {
+                        // Wrapping add in every profile (IR spec).
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_add(*b)));
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_add(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in addition", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_add(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Add, l, r, *span)?;
@@ -680,18 +869,9 @@ impl Vm {
                     let r = self.stack.pop().unwrap();
                     let l = self.stack.pop().unwrap();
                     match (&l, &r) {
+                        // Wrapping sub in every profile (IR spec).
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_sub(*b)));
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_sub(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in subtraction", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_sub(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Sub, l, r, *span)?;
@@ -703,18 +883,9 @@ impl Vm {
                     let r = self.stack.pop().unwrap();
                     let l = self.stack.pop().unwrap();
                     match (&l, &r) {
+                        // Wrapping mul in every profile (IR spec).
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_mul(*b)));
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_mul(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in multiplication", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_mul(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Mul, l, r, *span)?;
@@ -730,17 +901,12 @@ impl Vm {
                             return Err(EvalError::new("division by zero", *span));
                         }
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_div(*b)));
+                            // MIN/-1 traps in every profile (IR spec);
+                            // zero is rejected above.
+                            if *a == i64::MIN && *b == -1 {
+                                return Err(EvalError::new("integer overflow in division", *span));
                             }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_div(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in division", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_div(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Div, l, r, *span)?;
@@ -756,17 +922,12 @@ impl Vm {
                             return Err(EvalError::new("modulo by zero", *span));
                         }
                         (Value::Int(a), Value::Int(b)) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_rem(*b)));
+                            // MIN%-1 traps in every profile (IR spec);
+                            // zero is rejected above.
+                            if *a == i64::MIN && *b == -1 {
+                                return Err(EvalError::new("integer overflow in modulo", *span));
                             }
-                            #[cfg(debug_assertions)]
-                            {
-                                let v = a.checked_rem(*b).ok_or_else(|| {
-                                    EvalError::new("integer overflow in modulo", *span)
-                                })?;
-                                self.stack.push(Value::Int(v));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_rem(*b)));
                         }
                         _ => {
                             let v = eval_binary(zz_frontend::ast::BinOp::Rem, l, r, *span)?;
@@ -777,18 +938,9 @@ impl Vm {
                 Op::IntNeg(span) => {
                     let v = self.stack.pop().unwrap();
                     match &v {
+                        // Wrapping negation in every profile (IR spec).
                         Value::Int(a) => {
-                            #[cfg(not(debug_assertions))]
-                            {
-                                self.stack.push(Value::Int(a.wrapping_neg()));
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                let r = a.checked_neg().ok_or_else(|| {
-                                    EvalError::new("integer overflow in negation", *span)
-                                })?;
-                                self.stack.push(Value::Int(r));
-                            }
+                            self.stack.push(Value::Int(a.wrapping_neg()));
                         }
                         _ => {
                             let v = eval_unary(zz_frontend::ast::UnOp::Neg, v, *span)?;
@@ -952,7 +1104,7 @@ impl Vm {
                                 let end = r.end;
                                 let finished = if step > 0 { i >= end } else { i <= end };
                                 iter_done = finished;
-                                next_idx = Value::Int(i + step);
+                                next_idx = Value::Int(i.wrapping_add(step));
                                 push_val = Value::Int(i);
                                 push_val2 = None;
                             }
@@ -965,7 +1117,7 @@ impl Vm {
                                     push_val2 = None;
                                 } else {
                                     iter_done = false;
-                                    next_idx = Value::Int(i + 1);
+                                    next_idx = Value::Int(i.wrapping_add(1));
                                     let item = arr[i as usize].clone();
                                     if num_vars == 2 {
                                         // `for i, x in xs.enumerate()` —
@@ -1007,7 +1159,7 @@ impl Vm {
                                     push_val = Value::Unit;
                                 } else {
                                     iter_done = false;
-                                    next_idx = Value::Int(i + 1);
+                                    next_idx = Value::Int(i.wrapping_add(1));
                                     push_val = Value::Int(b.as_slice()[i as usize] as i64);
                                 }
                                 push_val2 = None;
@@ -1021,7 +1173,7 @@ impl Vm {
                                     push_val2 = None;
                                 } else {
                                     iter_done = false;
-                                    next_idx = Value::Int(i as i64 + 1);
+                                    next_idx = Value::Int((i as i64).wrapping_add(1));
                                     push_val = pairs[i].0.clone();
                                     if num_vars == 2 {
                                         push_val2 = Some(pairs[i].1.clone());
@@ -1176,10 +1328,21 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Op::StoreIndexOp(span) => {
-                    let mut ov = self.stack.pop().unwrap();
-                    let iv = self.stack.pop().unwrap();
+                    // Stack layout is evaluation order: [object, index,
+                    // value] (spec §7: base, index, value, left-to-right).
                     let value = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let mut ov = self.stack.pop().unwrap();
                     set_index(&mut ov, &iv, value, *span)?;
+                    self.stack.push(ov);
+                }
+                Op::CompoundIndexOp { op, span } => {
+                    let rhs = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let mut ov = self.stack.pop().unwrap();
+                    let cur = get_index(&ov, &iv, *span)?;
+                    let new = eval_binary(*op, cur, rhs, *span)?;
+                    set_index(&mut ov, &iv, new, *span)?;
                     self.stack.push(ov);
                 }
                 Op::SliceOp(span) => {
@@ -1284,6 +1447,14 @@ impl Vm {
                     set_object_field(&mut ov, name, value, *span)?;
                     self.stack.push(ov);
                 }
+                Op::CompoundFieldOp { name, op, span } => {
+                    let rhs = self.stack.pop().unwrap();
+                    let mut ov = self.stack.pop().unwrap();
+                    let cur = object_field(&ov, name, *span)?;
+                    let new = eval_binary(*op, cur, rhs, *span)?;
+                    set_object_field(&mut ov, name, new, *span)?;
+                    self.stack.push(ov);
+                }
                 Op::SetFieldIdx(idx, span) => {
                     let mut ov = self.stack.pop().unwrap();
                     let value = self.stack.pop().unwrap();
@@ -1310,7 +1481,11 @@ impl Vm {
                     }
                     self.stack.push(ov);
                 }
-                Op::MakeClosure { params, chunk } => {
+                Op::MakeClosure {
+                    params,
+                    chunk,
+                    defaults,
+                } => {
                     let fv = FuncValue {
                         params: params.clone(),
                         body: Expr::Block(Block {
@@ -1319,6 +1494,7 @@ impl Vm {
                         }),
                         env: interp.env.clone(),
                         chunk: Some(Arc::clone(chunk)),
+                        chunk_defaults: defaults.clone(),
                     };
                     self.stack.push(Value::Func(Box::new(fv)));
                 }
@@ -1326,6 +1502,7 @@ impl Vm {
                     params,
                     chunk,
                     span,
+                    defaults,
                 } => {
                     // Fused spawn (see `SpawnHook`): the chunk + params go
                     // straight to the task constructor — no FuncValue box,
@@ -1334,7 +1511,7 @@ impl Vm {
                     let hook = crate::eval::SPAWN_HOOK.get().copied().ok_or_else(|| {
                         self.error("`task.spawn` used without stdlib task support", *span)
                     })?;
-                    let v = hook(interp, chunk, params, *span)?;
+                    let v = hook(interp, chunk, params, defaults, *span)?;
                     self.stack.push(v);
                 }
                 Op::MakeVariant {
@@ -1564,6 +1741,7 @@ impl Vm {
                 }
                 Op::CallPath {
                     parts,
+                    joined,
                     argc,
                     span,
                     pspan,
@@ -1577,10 +1755,123 @@ impl Vm {
                     }
                     args.reverse();
                     if parts.len() >= 2 {
-                        let joined = parts.join(".");
-                        let is_direct = interp.env.get(&joined).is_some()
-                            || interp.funcs.contains_key(&joined)
-                            || interp.natives.contains_key(&joined);
+                        // Precomputed at compile time (see `Op::CallPath`):
+                        // no lookup-string allocation per call.
+                        let is_direct = interp.env.get(joined).is_some()
+                            || interp.funcs.contains_key(joined)
+                            || interp.natives.contains_key(joined);
+                        // Enum construction fallback (untyped compiles,
+                        // cross-snippet REPL): the head names an enum and
+                        // resolves to no value — build the variant object
+                        // directly instead of failing the path lookup.
+                        // Miss-only: a shadowing value keeps its
+                        // meaning (mirrors the checker and tree-walker).
+                        let head_shadowed = parts.len() >= 2
+                            && (interp
+                                .env
+                                .get(&parts[..parts.len() - 1].join("."))
+                                .is_some()
+                                || interp
+                                    .funcs
+                                    .contains_key(&parts[..parts.len() - 1].join(".")));
+                        if !is_direct && !head_shadowed && parts.len() >= 2 {
+                            let head = parts[..parts.len() - 1].join(".");
+                            let canonical = if interp.enums.contains_key(&head) {
+                                Some(head.clone())
+                            } else {
+                                interp
+                                    .import_aliases
+                                    .get(&head)
+                                    .filter(|q| interp.enums.contains_key(q.as_str()))
+                                    .cloned()
+                            };
+                            if let Some(ename) = canonical {
+                                if interp
+                                    .resolve_path_value(&parts[..parts.len() - 1], pspan)
+                                    .is_err()
+                                {
+                                    let variant = parts.last().cloned().unwrap_or_default();
+                                    let has = interp.enums.get(&ename).and_then(|vs| {
+                                        vs.iter().find(|(v, _)| v == &variant).map(|(_, h)| *h)
+                                    });
+                                    match has {
+                                        Some(has_payload) if has_payload == (args.len() == 1) => {
+                                            let fields = if has_payload {
+                                                vec![(
+                                                    "value".to_string(),
+                                                    args.into_iter().next().unwrap(),
+                                                )]
+                                            } else {
+                                                Vec::new()
+                                            };
+                                            self.stack.push(Value::Object(Box::new(
+                                                crate::value::ObjectValue {
+                                                    name: format!("{ename}.{variant}"),
+                                                    fields,
+                                                },
+                                            )));
+                                            continue;
+                                        }
+                                        // Wrong arity or unknown variant:
+                                        // fall through to the method path
+                                        // so the error names the real cause.
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        // Method on an inline unit variant (`E.V.m()`):
+                        // same resolution as above, then method dispatch
+                        // on the constructed receiver. Payload variants
+                        // can't chain (checker rejects with bind-first).
+                        let head2_shadowed = parts.len() >= 3
+                            && (interp
+                                .env
+                                .get(&parts[..parts.len() - 2].join("."))
+                                .is_some()
+                                || interp
+                                    .funcs
+                                    .contains_key(&parts[..parts.len() - 2].join(".")));
+                        if !is_direct && !head2_shadowed && parts.len() >= 3 {
+                            let head2 = parts[..parts.len() - 2].join(".");
+                            let canonical2 = if interp.enums.contains_key(&head2) {
+                                Some(head2.clone())
+                            } else {
+                                interp
+                                    .import_aliases
+                                    .get(&head2)
+                                    .filter(|q| interp.enums.contains_key(q.as_str()))
+                                    .cloned()
+                            };
+                            if let Some(ename) = canonical2 {
+                                let variant = parts[parts.len() - 2].clone();
+                                let method = parts.last().cloned().unwrap_or_default();
+                                let is_unit = interp
+                                    .enums
+                                    .get(&ename)
+                                    .and_then(|vs| {
+                                        vs.iter().find(|(v, _)| v == &variant).map(|(_, h)| *h)
+                                    })
+                                    .is_some_and(|has| !has);
+                                if is_unit {
+                                    let recv = Value::Object(Box::new(crate::value::ObjectValue {
+                                        name: format!("{ename}.{variant}"),
+                                        fields: Vec::new(),
+                                    }));
+                                    if let Ok((f, recv)) =
+                                        interp.lookup_method_recv(&recv, &method, span)
+                                    {
+                                        let mut arg_vals = vec![recv];
+                                        arg_vals.extend(args);
+                                        self.frames.last_mut().unwrap().ip = ip;
+                                        self.call_value(f, arg_vals, span, interp)?;
+                                        re_cache!();
+                                        yield_check!();
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         if !is_direct && interp.resolve_path_value(parts, pspan).is_err() {
                             let method = parts.last().unwrap();
                             let recv =
@@ -1864,7 +2155,8 @@ impl Vm {
     ) -> Result<(), EvalError> {
         match callee {
             Value::Func(fv) if fv.chunk.is_some() => {
-                if args.len() != fv.params.len() {
+                let mut args = args;
+                if args.len() > fv.params.len() {
                     return Err(self.error(
                         format!(
                             "expected {} arguments, found {}",
@@ -1873,6 +2165,55 @@ impl Vm {
                         ),
                         span,
                     ));
+                }
+                if args.len() < fv.params.len() {
+                    // Fill omitted trailing defaults (evaluated against the
+                    // caller's environment). Mirrors `Interp::call_func` so
+                    // cross-module calls — whose defaults the per-program
+                    // compiler never saw — still honor the checker contract.
+                    let missing = fv.params.len() - args.len();
+                    let start = args.len();
+                    for i in 0..missing {
+                        match fv.params[start + i].default.as_ref() {
+                            Some(d) => {
+                                let v = interp.eval(d)?.into_value()?;
+                                args.push(v);
+                            }
+                            None => {
+                                // `.zzc` loads carry pre-compiled default
+                                // bodies instead of AST (no AST is
+                                // available on the load path). The chunk
+                                // runs against the caller's environment —
+                                // exactly where `interp.eval` above runs.
+                                if let Some(Some(dchunk)) = fv.chunk_defaults.get(start + i) {
+                                    let mut sub = Vm::new();
+                                    match sub.run_chunk(dchunk, interp)? {
+                                        Flow::Value(v) | Flow::Return(v) => args.push(v),
+                                        Flow::Break(span) | Flow::Continue(span) => {
+                                            return Err(
+                                                self.error("invalid default-argument body", span)
+                                            );
+                                        }
+                                        Flow::Yield(_) => {
+                                            return Err(self.error(
+                                                "invalid default-argument body",
+                                                Span::new(0, 0),
+                                            ));
+                                        }
+                                    }
+                                } else {
+                                    return Err(self.error(
+                                        format!(
+                                            "expected {} arguments, found {}",
+                                            fv.params.len(),
+                                            start
+                                        ),
+                                        span,
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
                 let stack_base = self.stack.len();
                 self.stack.extend(args);
@@ -1950,9 +2291,14 @@ impl Vm {
     }
 
     fn unwind_frame(&mut self, flow: Flow, interp: &mut Interp) -> Unwind {
-        let v = match &flow {
-            Flow::Return(v) => v.clone(),
-            Flow::Break(_) | Flow::Continue(_) => Value::Unit,
+        // Move (never clone) the return payload out: the frame is
+        // discarded below, so this is its last use. Cloning here costs
+        // a full deep copy per call return — O(n) per key for threaded
+        // accumulators like `doc = push_node(doc, x)`.
+        let (payload, brk, ctn) = match flow {
+            Flow::Return(v) => (Some(v), None, None),
+            Flow::Break(s) => (None, Some(s), None),
+            Flow::Continue(s) => (None, None, Some(s)),
             Flow::Value(_) => unreachable!("unwind_frame on a plain value"),
             Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
@@ -1961,18 +2307,22 @@ impl Vm {
         self.stack.truncate(f.stack_base);
         interp.env = f.prev_env;
         if self.frames.is_empty() {
-            return Unwind::Escaped(flow);
-        }
-        match flow {
-            Flow::Return(_) => {
-                self.stack.push(v);
-                Unwind::Continue
+            if let Some(span) = brk {
+                return Unwind::Escaped(Flow::Break(span));
             }
-            Flow::Break(span) => Unwind::Error(self.error("`break` outside of a loop", span)),
-            Flow::Continue(span) => Unwind::Error(self.error("`continue` outside of a loop", span)),
-            Flow::Value(_) => unreachable!(),
-            Flow::Yield(_) => Unwind::Error(crate::runtime::EvalError::yield_escape()),
+            if let Some(span) = ctn {
+                return Unwind::Escaped(Flow::Continue(span));
+            }
+            return Unwind::Escaped(Flow::Return(payload.unwrap_or(Value::Unit)));
         }
+        if let Some(span) = brk {
+            return Unwind::Error(self.error("`break` outside of a loop", span));
+        }
+        if let Some(span) = ctn {
+            return Unwind::Error(self.error("`continue` outside of a loop", span));
+        }
+        self.stack.push(payload.unwrap_or(Value::Unit));
+        Unwind::Continue
     }
 
     /// Build a backtrace string from the current call stack.
@@ -1986,5 +2336,128 @@ impl Vm {
     /// Create an EvalError with the current backtrace attached.
     fn error(&self, message: impl Into<String>, span: Span) -> EvalError {
         EvalError::new(message, span).with_backtrace(self.backtrace())
+    }
+
+    /// `LoadVar` resolution chain (env, then funcs, then natives): shared by
+    /// `LoadVar` and the `TakeVar` fallback for non-env bindings.
+    fn load_var(interp: &mut Interp, name: &str, span: Span) -> Result<Value, EvalError> {
+        interp
+            .env
+            .get(name)
+            .or_else(|| {
+                interp
+                    .funcs
+                    .get(name)
+                    .map(|fv| Value::Func(Box::new(fv.clone())))
+            })
+            .or_else(|| {
+                interp.natives.get(name).map(|entry| {
+                    Value::Native(Box::new(NativeFunc {
+                        name: name.to_string(),
+                        arity: entry.arity,
+                    }))
+                })
+            })
+            // C-only plugins (direct dlsym, no Rust shim).
+            .or_else(|| crate::c_abi::native_value(name))
+            .or_else(|| {
+                // Selective-import alias (miss-only): resolve
+                // `ns.sym` like a qualified path. See
+                // tree-walker Ident eval for the full note.
+                let qualified = interp.import_aliases.get(name).cloned();
+                qualified.and_then(|q| {
+                    let parts: Vec<String> = q.split('.').map(str::to_string).collect();
+                    interp.resolve_path_value(&parts, span).ok()
+                })
+            })
+            .ok_or_else(|| EvalError::new(format!("undefined variable `{name}`"), span))
+    }
+
+    /// `TakeVar` fallback for names that are not env bindings (funcs,
+    /// natives, plugins): no take is possible, so load a clone exactly
+    /// like `LoadVar`.
+    fn load_var_fallback(interp: &mut Interp, name: &str, span: Span) -> Result<Value, EvalError> {
+        Self::load_var(interp, name, span)
+    }
+
+    /// Take the value out of a fused-op home (leaving `Unit`). Returns
+    /// `None` for unbound env homes (the caller errors like `LoadVar`).
+    fn take_home(vm: &mut Vm, interp: &mut Interp, home: &TakeHome) -> Option<Value> {
+        match home {
+            TakeHome::Slot(slot) => {
+                let base = vm.frames.last().unwrap().stack_base;
+                Some(std::mem::replace(
+                    &mut vm.stack[base + *slot as usize],
+                    Value::Unit,
+                ))
+            }
+            TakeHome::Env(name) => interp.env.take(name),
+        }
+    }
+
+    /// Store a value back into a fused-op home.
+    fn restore_home(vm: &mut Vm, interp: &mut Interp, home: &TakeHome, v: Value) {
+        match home {
+            TakeHome::Slot(slot) => {
+                let base = vm.frames.last().unwrap().stack_base;
+                vm.stack[base + *slot as usize] = v;
+            }
+            TakeHome::Env(name) => {
+                // The take proved the binding; nothing unbinds in the
+                // window, so this always hits the same owning scope with
+                // zero clones. The define arm is unreachable insurance.
+                if let Err(v) = interp.env.try_assign(name, v) {
+                    interp.env.define(name, v);
+                }
+            }
+        }
+    }
+
+    /// Push `elem` into the named field of an owned `home` object in place:
+    /// takes the field out (leaving `Unit`), reuses the owned `Vec`, stores
+    /// the field back. Direct fields answer inline; promoted, missing, or
+    /// non-object fields take the generic path (clone read + push +
+    /// promotion-aware write — same value, one extra clone).
+    /// Errors carry the message; the caller attaches its span and restores
+    /// the home first (REPL error-path parity).
+    fn field_push_take(
+        home: &mut Value,
+        field: &str,
+        elem: Value,
+        span: Span,
+    ) -> Result<(), String> {
+        if let Value::Object(o) = home {
+            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == field) {
+                let mut vs = match std::mem::replace(slot, Value::Unit) {
+                    Value::Array(b) => *b,
+                    other => {
+                        *slot = other;
+                        return Err(format!("`vec.push` expects an array, found `{}`", slot));
+                    }
+                };
+                vs.push(elem);
+                *slot = Value::Array(Box::new(vs));
+                return Ok(());
+            }
+        }
+        // Generic path: mirrors `GetField` + `vec.push` + `SetField`.
+        let cur = match object_field(home, field, span) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(e.message);
+            }
+        };
+        let mut vs = match cur {
+            Value::Array(b) => *b,
+            other => {
+                return Err(format!("`vec.push` expects an array, found `{other}`"));
+            }
+        };
+        vs.push(elem);
+        let pushed = Value::Array(Box::new(vs));
+        match set_object_field(home, field, pushed, span) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e.message),
+        }
     }
 }

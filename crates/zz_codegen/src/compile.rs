@@ -99,11 +99,158 @@ pub struct Clang {
     pub label: &'static str,
 }
 
+/// Probe whether fully-static linking works with `clang` (static
+/// `libcurl`/`libsqlite3` present). Only the libraries the program
+/// actually needs are probed: with conditional linking, programs that
+/// neither fetch nor query need no static syslibs at all. Used to
+/// downgrade a *default* static build to dynamic with a note instead of
+/// failing it on machines without the static system libraries. Results
+/// are cached per provider + lib set; a probe that cannot run fails open
+/// (proceed static — the real link surfaces any problem).
+pub fn static_syslibs_available(clang: &Clang) -> bool {
+    static_syslibs_available_for(clang, true, true)
+}
+
+/// [`static_syslibs_available`] scoped to the program's actual needs.
+/// `need_curl`/`need_sqlite` come from lowering (`curl_link`/
+/// `sqlite_link`); when neither is needed the probe trivially passes.
+pub fn static_syslibs_available_for(clang: &Clang, need_curl: bool, need_sqlite: bool) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let key = format!(
+        "{}:{}:{need_curl}:{need_sqlite}",
+        clang.path.display(),
+        clang.zig
+    );
+    if let Some(hit) = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).copied())
+    {
+        return hit;
+    }
+    let ok = static_syslibs_probe(clang, need_curl, need_sqlite);
+    if let Some(mut m) = CACHE.get().and_then(|c| c.lock().ok()) {
+        m.insert(key, ok);
+    }
+    ok
+}
+
+fn static_syslibs_probe(clang: &Clang, need_curl: bool, need_sqlite: bool) -> bool {
+    if !need_curl && !need_sqlite {
+        return true;
+    }
+    let dir = std::env::temp_dir().join(format!("zz-static-probe-{}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return true;
+    }
+    let out = dir.join("probe");
+    let mut cmd = std::process::Command::new(&clang.path);
+    if clang.zig {
+        cmd.arg("cc");
+    }
+    // Empty TU + `-static` + needed system libs: succeeds only when the
+    // static archives exist in the linker search path.
+    cmd.arg("-static");
+    if need_curl {
+        cmd.arg("-lcurl");
+    }
+    if need_sqlite {
+        cmd.arg("-lsqlite3");
+    }
+    let r = cmd
+        .arg("-o")
+        .arg(&out)
+        .arg("-x")
+        .arg("c")
+        .arg("/dev/null")
+        .output();
+    let _ = std::fs::remove_dir_all(&dir);
+    match r {
+        Ok(o) => o.status.success(),
+        Err(_) => true,
+    }
+}
+
+/// Managed Zig toolchain root: `~/.zz/toolchain` (override with
+/// `ZZ_TOOLCHAIN_ROOT`, used by hermetic tests). Layout:
+/// `versions/<semver>/` holds one extracted Zig release (the `zig`
+/// binary plus its adjacent `lib/`); a `pin` file names the active
+/// version. Written by `zz toolchain install`; read here so builds and
+/// the runtime-archive cache follow the pin.
+pub fn toolchain_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("ZZ_TOOLCHAIN_ROOT") {
+        if !root.is_empty() {
+            return PathBuf::from(root);
+        }
+    }
+    toolchain_home_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("zz"))
+        .join(".zz")
+        .join("toolchain")
+}
+
+fn toolchain_home_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    }
+}
+
+/// Pinned Zig version (`versions/<pin>/`), if `zz toolchain install` (or
+/// `zz toolchain use`) recorded one. The file holds `X.Y.Z` plus a
+/// trailing newline; anything unparseable is treated as unpinned.
+pub fn toolchain_pin() -> Option<String> {
+    let pin = std::fs::read_to_string(toolchain_root().join("pin")).ok()?;
+    let pin = pin.trim().to_string();
+    if pin.is_empty()
+        || !pin.bytes().any(|b| b.is_ascii_alphanumeric())
+        || !pin.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+    {
+        return None;
+    }
+    Some(pin)
+}
+
+/// Path to the managed `zig` binary for the pinned version, when the
+/// install is present and executable. Returns `None` when unpinned,
+/// incompletely installed, or not executable (falls back to PATH probing).
+/// Honors `ZZ_TEST_HIDE_CLANG` like [`detect_clang_with`].
+pub fn managed_zig_path() -> Option<PathBuf> {
+    if std::env::var_os("ZZ_TEST_HIDE_CLANG").is_some() {
+        return None;
+    }
+    let pin = toolchain_pin()?;
+    let exe = if cfg!(windows) { "zig.exe" } else { "zig" };
+    let path = toolchain_root().join("versions").join(&pin).join(exe);
+    if !path.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&path)
+            .map(|m| m.permissions().mode() & 0o111 == 0)
+            .unwrap_or(true)
+        {
+            return None;
+        }
+    }
+    Some(path)
+}
+
 /// Probe PATH for a Clang provider.
 ///
-/// Order: `clang`, `clang-22`, `zig`. Test hook: when the environment
-/// variable `ZZ_TEST_HIDE_CLANG` is set, detection pretends nothing is
-/// installed (used by the missing-toolchain fallback tests).
+/// Order: managed `zig` (an explicit `zz toolchain install` pin always
+/// wins), then `clang`, `clang-22`, then PATH `zig`. Test hook: when the
+/// environment variable `ZZ_TEST_HIDE_CLANG` is set, detection pretends
+/// nothing is installed (used by the missing-toolchain fallback tests).
 pub fn detect_clang() -> Option<Clang> {
     detect_clang_with(ClangProvider::Any)
 }
@@ -115,6 +262,17 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
     }
     let allow_clang = matches!(provider, ClangProvider::Any | ClangProvider::Clang);
     let allow_zig = matches!(provider, ClangProvider::Any | ClangProvider::Zig);
+    // Explicit opt-in wins: a pinned managed toolchain outranks everything
+    // on PATH (`--cc=clang` / `--cc=zig` still force their provider).
+    if provider == ClangProvider::Any {
+        if let Some(path) = managed_zig_path() {
+            return Some(Clang {
+                path,
+                zig: true,
+                label: "zig cc",
+            });
+        }
+    }
     if allow_clang {
         for name in ["clang", "clang-22"] {
             if let Some(path) = which(name) {
@@ -127,7 +285,7 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
         }
     }
     if allow_zig {
-        if let Some(path) = which("zig") {
+        if let Some(path) = managed_zig_path().or_else(|| which("zig")) {
             return Some(Clang {
                 path,
                 zig: true,
@@ -300,6 +458,28 @@ pub struct BuildOptions {
     /// Set automatically alongside `native_rt` when sqlz/pg natives are
     /// reachable (the C dispatcher's weak refs never pull members alone).
     pub pg_link: bool,
+    /// Force-extract the float-format object (`-u zz_float_format_raw`).
+    /// Set automatically when any typed node can hold a float (float
+    /// Display routes through the Rust core per spec §4). Implies the
+    /// staticlib link like `native_rt`.
+    pub float_link: bool,
+    /// Link libcurl (outbound `http.get/post/fetch` client). Set
+    /// automatically from the lowered program; programs that never fetch
+    /// omit `-lcurl` entirely so no `DT_NEEDED` entry is emitted.
+    pub curl_link: bool,
+    /// Link libsqlite3 (`sqlz`/`db` queries). Set automatically from the
+    /// lowered program; programs that never query omit `-lsqlite3`.
+    pub sqlite_link: bool,
+    /// Allow silently downgrading `static_link` to dynamic when static is
+    /// impossible (macOS target, or the program needs the Rust native
+    /// runtime). Set by the CLI only when static came from the *default*,
+    /// never from an explicit `--static` (which keeps today's hard error).
+    /// Part of the cache fingerprint: downgraded output differs.
+    pub allow_static_downgrade: bool,
+    /// Full LTO (`-flto=full` instead of thin) for `--full` max-opt
+    /// builds: deeper cross-TU optimization and elimination at the cost
+    /// of slower links. Only meaningful with `optimize` (release base).
+    pub full_lto: bool,
     /// Extra object files / static libraries from plugin packages to link
     /// into the final binary. Each entry is a path to a `.o` or `.a` file
     /// produced by a plugin's build hook.
@@ -315,7 +495,7 @@ pub struct BuildOptions {
 
 impl BuildOptions {
     /// Debug build: fast native compile (`-O0 -g`, no LTO).
-    /// Default for `zz build` without flags.
+    /// Used for `zz build --dynamic` and parity sweeps (`ZZ_NATIVE_DEV=1`).
     pub fn dev() -> Self {
         BuildOptions {
             optimize: false,
@@ -326,6 +506,11 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
+            curl_link: false,
+            sqlite_link: false,
+            allow_static_downgrade: false,
+            full_lto: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -344,6 +529,11 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
+            curl_link: false,
+            sqlite_link: false,
+            allow_static_downgrade: false,
+            full_lto: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -362,6 +552,11 @@ impl BuildOptions {
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
+            float_link: false,
+            curl_link: false,
+            sqlite_link: false,
+            allow_static_downgrade: false,
+            full_lto: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -380,6 +575,58 @@ impl BuildOptions {
             pgo: PgoMode::Generate,
             native_rt: false,
             pg_link: false,
+            float_link: false,
+            curl_link: false,
+            sqlite_link: false,
+            allow_static_downgrade: false,
+            full_lto: false,
+            plugin_artifacts: Vec::new(),
+            plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
+        }
+    }
+
+    /// Max optimization (`--full`): release base with full LTO —
+    /// whole-program optimization and elimination, dynamic link,
+    /// stripped. Slower links than ThinLTO release.
+    pub fn full() -> Self {
+        BuildOptions {
+            optimize: true,
+            strip: true,
+            static_link: false,
+            gc_sections: true,
+            thin_lto: true,
+            pgo: PgoMode::None,
+            native_rt: false,
+            pg_link: false,
+            float_link: false,
+            curl_link: false,
+            sqlite_link: false,
+            allow_static_downgrade: false,
+            full_lto: true,
+            plugin_artifacts: Vec::new(),
+            plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
+        }
+    }
+
+    /// Max optimization with PGO (`--full -- <train args>`): profile-use
+    /// plus full LTO. The instrumented leg uses plain `pgo_generate()`.
+    pub fn full_pgo_use() -> Self {
+        BuildOptions {
+            optimize: true,
+            strip: true,
+            static_link: false,
+            gc_sections: true,
+            thin_lto: true,
+            pgo: PgoMode::Use,
+            native_rt: false,
+            pg_link: false,
+            float_link: false,
+            curl_link: false,
+            sqlite_link: false,
+            allow_static_downgrade: false,
+            full_lto: true,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -398,6 +645,11 @@ impl BuildOptions {
             pgo: PgoMode::Use,
             native_rt: false,
             pg_link: false,
+            float_link: false,
+            curl_link: false,
+            sqlite_link: false,
+            allow_static_downgrade: false,
+            full_lto: false,
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
@@ -426,6 +678,11 @@ impl BuildOptions {
         self.pgo.hash(&mut h);
         self.native_rt.hash(&mut h);
         self.pg_link.hash(&mut h);
+        self.float_link.hash(&mut h);
+        self.curl_link.hash(&mut h);
+        self.sqlite_link.hash(&mut h);
+        self.allow_static_downgrade.hash(&mut h);
+        self.full_lto.hash(&mut h);
         // Hash plugin artifact paths so cache invalidates when plugins change.
         for p in &self.plugin_artifacts {
             p.hash(&mut h);
@@ -487,23 +744,32 @@ pub fn embed_c(assets: &[EmbedAsset]) -> String {
 
 /// The single release flag set (ThinLTO always).
 ///
-/// - `-march=native` ONLY when `target` is `None` (native host build).
-///   Cross builds drop it so Clang uses the triple's safe baseline CPU.
+/// Integer arithmetic is defined-wrapping (`-fwrapv`) and aliasing is
+/// conservative (`-fno-strict-aliasing`) in every mode: both engines
+/// specify wrap semantics and the C runtime type-puns `zz_value`, so
+/// aggressive assumptions would be miscompiles, not optimizations.
+/// There is deliberately NO `-ffast-math` (it folds NaN guards and
+/// reassociates floats — incompatible with the specified float
+/// semantics) and NO `-march=native` (host-CPU-specific codegen breaks
+/// reproducible parity and benchmarks).
+///
 /// - cross builds add `-fuse-ld=lld`; Windows triples add `-lws2_32`.
-/// - `-ffast-math` is release-only (relaxed FP reassociation; `-p`
-///   implies consent — documented in `docs/cli.md`).
 pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
     let mut flags: Vec<String> = Vec::new();
+    // Wrapping + aliasing contract first: applies to dev and release.
+    flags.push("-fwrapv".to_string());
+    flags.push("-fno-strict-aliasing".to_string());
     if opts.optimize {
-        // ThinLTO unconditionally: Clang is the only backend.
         flags.push("-O3".to_string());
-        flags.push("-flto=thin".to_string());
-        // Host-only: reads the build machine's CPU; illegal on other targets.
-        if target.is_none() {
-            flags.push("-march=native".to_string());
+        if opts.full_lto {
+            // Max-opt (`--full`): whole-program LTO. Slower links, better
+            // cross-TU inlining and elimination than ThinLTO.
+            flags.push("-flto=full".to_string());
+        } else {
+            // ThinLTO unconditionally otherwise: Clang is the only backend.
+            flags.push("-flto=thin".to_string());
         }
-        // Release-only relaxed FP + loop/codegen tuning.
-        flags.push("-ffast-math".to_string());
+        // Loop/codegen tuning (FP-safe only: no -ffast-math, see above).
         flags.push("-funroll-loops".to_string());
         flags.push("-fomit-frame-pointer".to_string());
     } else {
@@ -630,7 +896,7 @@ pub fn build_with(
     // Unified Rust native runtime: link the static library providing FFI
     // natives. Fully-static binaries cannot use it (shared libstd), so fail
     // early with a clear message instead of a cryptic `ld` error.
-    if opts.native_rt {
+    if opts.native_rt || opts.float_link {
         if opts.static_link {
             return Err(BuildError::NativeRt {
                 reason: "fully-static builds cannot link the Rust native runtime \
@@ -650,6 +916,12 @@ pub fn build_with(
                 cmd.arg(sym);
             }
         }
+        // Float Display (spec §4): same weak-ref situation — pull the
+        // Rust-core formatter explicitly when the gate fired.
+        if opts.float_link {
+            cmd.arg("-u");
+            cmd.arg(crate::ffi::FLOAT_FMT_SYMBOL);
+        }
         for a in &extra {
             cmd.arg(a);
         }
@@ -668,14 +940,24 @@ pub fn build_with(
     // ~1 MB of constructors at load. Placed after the runtime archive
     // (and every staticlib/plugin) so genuinely-needed refs keep them.
     // libm stays unconditional above (position-independent for shared).
-    // KNOWN WART: libsqlite3 currently survives even with zero SQL refs
-    // (single-TU archive granularity defeats section GC for it; curl
-    // drops fine). Costs ~100-300 KB RSS. True fix = split core.c by
-    // feature so db/fetch live in their own archive members.
-    cmd.arg("-Wl,--as-needed");
-    cmd.arg("-lcurl");
-    cmd.arg("-lsqlite3");
-    cmd.arg("-Wl,--no-as-needed");
+    // Conditional link (fix/link-hygiene): `-lcurl`/`-lsqlite3` are added
+    // only when reachable natives need them (`curl_link`/`sqlite_link`
+    // from lowering). Previously both were unconditional, and the
+    // single-TU runtime archive defeated `--as-needed` for sqlite: the
+    // whole TU's undefined refs (including `sqlite3_*`) were visible at
+    // the `--as-needed` decision point, so `DT_NEEDED libsqlite3` stuck
+    // even when `--gc-sections` later removed every `zz_db_*` section.
+    // Omitting the flag entirely leaves no NEEDED entry and links fine.
+    if opts.curl_link || opts.sqlite_link {
+        cmd.arg("-Wl,--as-needed");
+        if opts.curl_link {
+            cmd.arg("-lcurl");
+        }
+        if opts.sqlite_link {
+            cmd.arg("-lsqlite3");
+        }
+        cmd.arg("-Wl,--no-as-needed");
+    }
 
     let out = cmd.output().map_err(BuildError::Io)?;
     if !out.status.success() {
@@ -734,11 +1016,25 @@ pub fn emit_c_plus_script(
         }
     };
 
+    // Conditional system libs: mirror `build_with` so manual builds link
+    // exactly what the real build links (no phantom sqlite/curl NEEDED).
+    let mut syslibs = String::new();
+    if opts.curl_link || opts.sqlite_link {
+        syslibs.push_str(" -Wl,--as-needed");
+        if opts.curl_link {
+            syslibs.push_str(" -lcurl");
+        }
+        if opts.sqlite_link {
+            syslibs.push_str(" -lsqlite3");
+        }
+        syslibs.push_str(" -Wl,--no-as-needed");
+    }
+
     let sh = dir.join("build.sh");
     std::fs::write(
         &sh,
         format!(
-            "#!/bin/sh\n# Generated by `zz build`. Requires clang 18+ (or: replace `clang` with `zig cc -target <triple>`).\nset -e\ncd \"$(dirname \"$0\")\"\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm -Wl,--as-needed -lcurl -lsqlite3 -Wl,--no-as-needed -DZZ_HAS_SQLITE3\n"
+            "#!/bin/sh\n# Generated by `zz build`. Requires clang 18+ (or: replace `clang` with `zig cc -target <triple>`).\nset -e\ncd \"$(dirname \"$0\")\"\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs} -DZZ_HAS_SQLITE3\n"
         ),
     )?;
     #[cfg(unix)]
@@ -755,7 +1051,7 @@ pub fn emit_c_plus_script(
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nREM Generated by `zz build`. Requires clang (LLVM) on PATH.\r\ncd /d %~dp0\r\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm -Wl,--as-needed -lcurl -lsqlite3 -Wl,--no-as-needed -DZZ_HAS_SQLITE3\r\n"
+            "@echo off\r\nREM Generated by `zz build`. Requires clang (LLVM) on PATH.\r\ncd /d %~dp0\r\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs} -DZZ_HAS_SQLITE3\r\n"
         ),
     )?;
     Ok((app_c, sh, bat))
@@ -836,39 +1132,48 @@ mod tests {
     }
 
     #[test]
-    fn march_native_only_when_host() {
-        let native = clang_flags(&release_opts(), None);
-        assert!(
-            native.iter().any(|f| f == "-march=native"),
-            "native host build must carry -march=native: {native:?}"
-        );
-        // Any --target (even one spelling the host) drops it: the flag
-        // reads the build machine's CPU and is unsafe for cross output.
+    fn no_host_specific_or_unsafe_fp_flags() {
+        // Parity contract: no -march=native anywhere (host-specific
+        // codegen) and no -ffast-math anywhere (folds NaN guards,
+        // reassociates floats). Both native and cross, dev and release.
         for t in [
-            "aarch64-unknown-linux-gnu",
-            "x86_64-pc-windows-gnu",
-            "x86_64-apple-darwin",
-            host_triple().as_str(),
+            None,
+            Some("aarch64-unknown-linux-gnu"),
+            Some("x86_64-pc-windows-gnu"),
+            Some("x86_64-apple-darwin"),
         ] {
-            let cross = clang_flags(&release_opts(), Some(t));
-            assert!(
-                !cross.iter().any(|f| f == "-march=native"),
-                "cross build for {t} must not carry -march=native: {cross:?}"
-            );
+            for opts in [release_opts(), BuildOptions::dev()] {
+                let flags = clang_flags(&opts, t);
+                assert!(
+                    !flags.iter().any(|f| f == "-march=native"),
+                    "forbidden -march=native: {flags:?}"
+                );
+                assert!(
+                    !flags.iter().any(|f| f == "-ffast-math"),
+                    "forbidden -ffast-math: {flags:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn release_is_thin_lto_with_fast_math() {
+    fn release_is_thin_lto_with_wrap_contract() {
         let flags = clang_flags(&release_opts(), None);
         assert!(flags.contains(&"-O3".to_string()));
         assert!(flags.contains(&"-flto=thin".to_string()));
-        assert!(
-            flags.contains(&"-ffast-math".to_string()),
-            "release must apply -ffast-math: {flags:?}"
-        );
+        // Wrapping + aliasing contract (both modes — checked below).
+        for opts in [release_opts(), BuildOptions::dev()] {
+            let flags = clang_flags(&opts, None);
+            assert!(
+                flags.contains(&"-fwrapv".to_string()),
+                "missing -fwrapv: {flags:?}"
+            );
+            assert!(
+                flags.contains(&"-fno-strict-aliasing".to_string()),
+                "missing -fno-strict-aliasing: {flags:?}"
+            );
+        }
         let dev = clang_flags(&BuildOptions::dev(), None);
-        assert!(!dev.iter().any(|f| f == "-ffast-math"));
         assert!(dev.contains(&"-O0".to_string()));
     }
 
@@ -966,5 +1271,133 @@ mod tests {
         );
         assert!(text.contains("clang"), "script must use clang: {text}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Env vars are process-global: serialize every hermetic test so
+    /// parallel threads never observe (or remove) each other's root.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Hermetic toolchain root: unique temp dir + env override, restored
+    /// on drop so parallel tests never observe it afterwards. Mirrors the
+    /// existing `ZZ_TEST_HIDE_CLANG` pattern (set, assert, restore fast).
+    struct HermeticRoot {
+        dir: PathBuf,
+    }
+
+    impl HermeticRoot {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("zz-tc-test-{}-{uniq}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("ZZ_TOOLCHAIN_ROOT", &dir);
+            HermeticRoot { dir }
+        }
+
+        fn pin(&self, version: &str) {
+            std::fs::write(self.dir.join("pin"), format!("{version}\n")).unwrap();
+        }
+
+        fn fake_zig(&self, version: &str) -> PathBuf {
+            let exe = if cfg!(windows) { "zig.exe" } else { "zig" };
+            let dir = self.dir.join("versions").join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(exe);
+            #[cfg(unix)]
+            {
+                std::fs::write(&path, "#!/bin/sh\necho fake-zig\n").unwrap();
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            #[cfg(windows)]
+            {
+                std::fs::write(&path, "fake").unwrap();
+            }
+            path
+        }
+    }
+
+    impl Drop for HermeticRoot {
+        fn drop(&mut self) {
+            std::env::remove_var("ZZ_TOOLCHAIN_ROOT");
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn unpinned_has_no_managed_zig() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _root = HermeticRoot::new();
+        assert!(toolchain_pin().is_none());
+        assert!(managed_zig_path().is_none());
+    }
+
+    #[test]
+    fn garbage_pin_is_unpinned_not_fatal() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = HermeticRoot::new();
+        for bad in ["", ".", "..", "../evil", "0.17.0\nrm -rf", "v0.17.0-rc1!"] {
+            std::fs::write(root.dir.join("pin"), bad).unwrap();
+            assert!(toolchain_pin().is_none(), "bad pin must not parse: {bad:?}");
+            assert!(managed_zig_path().is_none());
+        }
+    }
+
+    #[test]
+    fn pin_without_install_is_not_managed() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = HermeticRoot::new();
+        root.pin("0.17.0");
+        assert_eq!(toolchain_pin().as_deref(), Some("0.17.0"));
+        assert!(managed_zig_path().is_none());
+    }
+
+    #[test]
+    fn managed_zig_wins_probe_and_hide_covers_it() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = HermeticRoot::new();
+        let fake = root.fake_zig("0.17.0");
+        root.pin("0.17.0");
+        assert_eq!(managed_zig_path(), Some(fake.clone()));
+        // Explicit opt-in outranks PATH.
+        let found = detect_clang_with(ClangProvider::Any).expect("managed zig must probe");
+        assert!(found.zig);
+        assert_eq!(found.path, fake);
+        // `--cc=clang` still forces the system provider.
+        if which("clang").or_else(|| which("clang-22")).is_some() {
+            let c = detect_clang_with(ClangProvider::Clang).expect("system clang present");
+            assert!(!c.zig);
+        }
+        // The test hook hides the managed toolchain too.
+        std::env::set_var("ZZ_TEST_HIDE_CLANG", "1");
+        assert!(detect_clang().is_none());
+        assert!(managed_zig_path().is_none());
+        std::env::remove_var("ZZ_TEST_HIDE_CLANG");
+    }
+
+    #[test]
+    fn cache_key_follows_the_pin() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = HermeticRoot::new();
+        let clang = Clang {
+            path: PathBuf::from("/usr/bin/clang"),
+            zig: false,
+            label: "clang",
+        };
+        let unpinned = crate::cache::cache_key(None, true, &clang);
+        assert!(unpinned.contains("-nopin-"), "unpinned key: {unpinned}");
+        root.pin("0.17.0");
+        let pinned = crate::cache::cache_key(None, true, &clang);
+        assert!(pinned.contains("-0.17.0-"), "pinned key: {pinned}");
+        assert_ne!(unpinned, pinned);
     }
 }

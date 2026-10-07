@@ -1,0 +1,20 @@
+// features: arrays, assert, comparison, for-loop, indexing, int-arith, locals, print, ranges, string-literal, structs, vec-push
+// Move-append elision on struct fields: `s.f = vec.push(s.f, e)` must
+// grow the field in place with identical values.
+struct Wrap {
+    f: [int],
+    tag: str,
+}
+
+s := Wrap{f: [], tag: "w"}
+for i in 0..10 {
+    s.f = vec.push(s.f, i * 3)
+}
+assert(len(s.f) == 10)
+assert(s.f[9] == 27)
+assert(s.tag == "w")
+// Sibling-field reads stay sound (field take moves only the field).
+t := Wrap{f: [1], tag: "t"}
+t.f = vec.push(t.f, len(t.tag))
+assert(t.f[1] == 1)
+println("move_append_field_ok")

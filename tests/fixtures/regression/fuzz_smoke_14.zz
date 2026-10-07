@@ -1,0 +1,13 @@
+// features: int-arith, locals, print, string-literal, structs
+// Fuzz smoke (fixed seed 96003, v4 struct shapes).
+// Regenerate with tests/fuzz/gen.py --shapes v4; screen with tests/fuzz/run.sh.
+struct Pt { x: int, y: int }
+p := Pt{x: 17, y: 14}
+p.x = p.x + 7
+println("px={p.x}")
+println("py={p.y}")
+q := p
+q.y = 92
+println("qy={q.y}")
+println("py2={p.y}")
+println("DONE")

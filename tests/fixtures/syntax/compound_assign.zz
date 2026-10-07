@@ -1,0 +1,66 @@
+// features: arrays, bitwise, comparison, float-arith, func-call, indexing, locals, print, string-literal, string-ops, structs
+// E2E: Compound assignment — all operators, targets, single evaluation
+struct Point {
+    x: int,
+}
+
+func idx() -> int {
+    1
+}
+
+func rhs() -> int {
+    5
+}
+
+func main() {
+    // all operators
+    a := 100
+    a += 7
+    println(a)
+    a -= 7
+    println(a)
+    a *= 7
+    println(a)
+    a /= 7
+    println(a)
+    a %= 7
+    println(a)
+    b := 2
+    b **= 10
+    println(b)
+    c := 100
+    c &= 7
+    println(c)
+    c |= 7
+    println(c)
+    c ^= 7
+    println(c)
+    c <<= 2
+    println(c)
+    c >>= 3
+    println(c)
+    // strings and floats
+    s := "cnt:"
+    s += "done"
+    println(s)
+    f := 2.5
+    f *= 2.0
+    println(f)
+    // struct field and index targets
+    p := Point{x: 10}
+    p.x += 5
+    println(p.x)
+    arr := [10, 20, 30]
+    arr[1] *= 2
+    println(arr[1])
+    // single evaluation, receiver first: idx() runs before rhs()
+    arr[idx()] += rhs()
+    println(arr[1])
+    // repeated increments
+    n := 0
+    n += 1
+    n += 1
+    n += 1
+    println(n)
+    println("compound_assign_ok")
+}

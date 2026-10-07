@@ -1,3 +1,4 @@
+// features: bool-logic, comparison, destructuring, func-call, if-else, locals, print, string-literal, tuples
 // Regression: shadowing re-destructuring inside a function block
 // must resolve to the outer binding afterwards, on both engines.
 func f() -> int {

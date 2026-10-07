@@ -76,6 +76,7 @@ impl Interp {
                     body: Expr::Block(body.clone()),
                     env: self.env.clone(),
                     chunk: None,
+                    chunk_defaults: Vec::new(),
                 };
                 self.funcs.insert(name.join("."), fv.clone());
                 self.funcs_version = self.funcs_version.wrapping_add(1);
@@ -102,6 +103,21 @@ impl Interp {
                 );
                 Ok(Flow::Value(Value::Unit))
             }
+            // Aliases erase at check time: nothing to register at runtime.
+            Stmt::TypeAlias { .. } => Ok(Flow::Value(Value::Unit)),
+            // Enums register their variant names so qualified
+            // construction (`Token.IntLit(1)`) resolves. Values are
+            // plain `Object`s — no other runtime state needed.
+            Stmt::Enum { name, variants, .. } => {
+                Arc::make_mut(&mut self.enums).insert(
+                    name.join("."),
+                    variants
+                        .iter()
+                        .map(|(n, p)| (n.name.clone(), p.is_some()))
+                        .collect(),
+                );
+                Ok(Flow::Value(Value::Unit))
+            }
             Stmt::Impl { name, methods, .. } => {
                 let type_name = name.join(".");
                 for method in methods {
@@ -118,6 +134,7 @@ impl Interp {
                             body: Expr::Block(body.clone()),
                             env: self.env.clone(),
                             chunk: None,
+                            chunk_defaults: Vec::new(),
                         };
                         self.funcs.insert(full_name.clone(), fv.clone());
                         self.funcs_version = self.funcs_version.wrapping_add(1);
@@ -271,6 +288,7 @@ impl Interp {
                     body: expr.as_ref().clone(),
                     env: self.env.clone(),
                     chunk: None,
+                    chunk_defaults: Vec::new(),
                 };
                 self.defer_stacks
                     .last_mut()
@@ -289,8 +307,45 @@ impl Interp {
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Assign { target, value, .. } => {
-                let v = self.eval(value)?.into_value()?;
-                self.assign_target(target, v)?;
+                // Source order for stores (spec §7): the base/index
+                // evaluate BEFORE the value. Plain names and paths have
+                // no user code in the base, so they keep the shared
+                // `assign_target` path.
+                match target {
+                    Expr::Index { obj, index, span } => {
+                        let mut objv = self.eval(obj)?.into_value()?;
+                        let iv = self.eval(index)?.into_value()?;
+                        let v = self.eval(value)?.into_value()?;
+                        set_index(&mut objv, &iv, v, *span)?;
+                        self.write_back(obj, objv)?;
+                        Ok(Flow::Value(Value::Unit))
+                    }
+                    Expr::Field { obj, name, span } => {
+                        let mut objv = self.eval(obj)?.into_value()?;
+                        let v = self.eval(value)?.into_value()?;
+                        set_object_field(&mut objv, name, v, *span)?;
+                        if let Expr::Ident { name, .. } = &**obj {
+                            self.env.assign(name, objv);
+                        }
+                        Ok(Flow::Value(Value::Unit))
+                    }
+                    _ => {
+                        let v = self.eval(value)?.into_value()?;
+                        self.assign_target(target, v)?;
+                        Ok(Flow::Value(Value::Unit))
+                    }
+                }
+            }
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => {
+                // Receiver first (read current), then the RHS — matching
+                // the `tmp = recv; tmp = tmp OP rhs` lowering in the spec.
+                // Each side evaluates exactly once.
+                self.compound_assign_target(target, *op, value, *span)?;
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Expr(e) => {
@@ -409,17 +464,95 @@ impl Interp {
             }
             Expr::Path { parts, span } => self.assign_path(parts, value, *span),
             Expr::Field { obj, name, span } => {
+                // Source order: base, then value (spec §7).
                 let mut objv = self.eval(obj)?.into_value()?;
-                set_object_field(&mut objv, name, value, *span)?;
+                let v = value;
+                set_object_field(&mut objv, name, v, *span)?;
                 if let Expr::Ident { name, .. } = &**obj {
                     self.env.assign(name, objv);
                 }
                 Ok(())
             }
             Expr::Index { obj, index, span } => {
-                let iv = self.eval(index)?.into_value()?;
+                // Source order: base, index, then value (spec §7).
                 let mut objv = self.eval(obj)?.into_value()?;
-                set_index(&mut objv, &iv, value, *span)?;
+                let iv = self.eval(index)?.into_value()?;
+                let v = value;
+                set_index(&mut objv, &iv, v, *span)?;
+                self.write_back(obj, objv)
+            }
+            other => Err(EvalError::new(
+                "cannot assign to this expression".to_string(),
+                other.span(),
+            )),
+        }
+    }
+
+    /// `target OP= rhs_expr` — like [`Self::assign_target`] but reads
+    /// the current value first and applies `op` before storing. The
+    /// receiver evaluates exactly once: it is loaded, then the RHS
+    /// evaluates, then the result stores back into the same evaluated
+    /// receiver — so `arr[i()] += f()` calls `i()` then `f()`, once
+    /// each, matching the `tmp = recv; tmp = tmp OP rhs` lowering
+    /// (receiver-first, left-to-right). Write-back rules (Ident-only
+    /// field parents, `write_back` for index roots) mirror
+    /// `assign_target` exactly — including its quirks — so `OP=`
+    /// never diverges from `=` except for collapsing the double
+    /// evaluation that textual expansion would perform.
+    fn compound_assign_target(
+        &mut self,
+        target: &Expr,
+        op: BinOp,
+        rhs_expr: &Expr,
+        span: Span,
+    ) -> Result<(), EvalError> {
+        match target {
+            Expr::Ident { name, span: tspan } => {
+                let cur = self.env.get(name).ok_or_else(|| {
+                    EvalError::new(format!("undefined variable `{name}`"), *tspan)
+                })?;
+                let rhs = self.eval(rhs_expr)?.into_value()?;
+                let new = eval_binary(op, cur, rhs, span)?;
+                if !self.env.assign(name, new) {
+                    return Err(EvalError::new(
+                        format!("undefined variable `{name}`"),
+                        *tspan,
+                    ));
+                }
+                Ok(())
+            }
+            Expr::Path { parts, span: pspan } => {
+                let cur = self.resolve_path_value(parts, *pspan)?;
+                let rhs = self.eval(rhs_expr)?.into_value()?;
+                let new = eval_binary(op, cur, rhs, span)?;
+                self.assign_path(parts, new, *pspan)
+            }
+            Expr::Field {
+                obj,
+                name,
+                span: fspan,
+            } => {
+                let mut objv = self.eval(obj)?.into_value()?;
+                let cur = object_field(&objv, name, *fspan)?;
+                let rhs = self.eval(rhs_expr)?.into_value()?;
+                let new = eval_binary(op, cur, rhs, span)?;
+                set_object_field(&mut objv, name, new, *fspan)?;
+                if let Expr::Ident { name, .. } = &**obj {
+                    self.env.assign(name, objv);
+                }
+                Ok(())
+            }
+            Expr::Index {
+                obj,
+                index,
+                span: ispan,
+            } => {
+                let mut objv = self.eval(obj)?.into_value()?;
+                let iv = self.eval(index)?.into_value()?;
+                let cur = get_index(&objv, &iv, *ispan)?;
+                let rhs = self.eval(rhs_expr)?.into_value()?;
+                let new = eval_binary(op, cur, rhs, span)?;
+                set_index(&mut objv, &iv, new, *ispan)?;
                 self.write_back(obj, objv)
             }
             other => Err(EvalError::new(
@@ -519,6 +652,80 @@ impl Interp {
             name: sname.to_string(),
             fields: out,
         })
+    }
+
+    /// Canonical enum name: a selectively-imported bare name resolves
+    /// to its qualified form (`Token` → `shapes.Token`), mirroring the
+    /// struct miss-only fallback in [`Interp::build_struct_value`].
+    pub(crate) fn canonical_enum_name(&self, name: &str) -> String {
+        if self.enums.contains_key(name) {
+            return name.to_string();
+        }
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.enums.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
+
+    /// Build an enum variant value (`Token.IntLit(1)` → qualified
+    /// `Object`). The checker guarantees arity; a defensive error
+    /// remains for hand-built ASTs (REPL paths that skip checking).
+    pub(crate) fn eval_enum_construction(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        span: Span,
+    ) -> Result<Value, EvalError> {
+        let variants = self.enums.get(enum_name).cloned().unwrap_or_default();
+        let has_payload = match variants.iter().find(|(v, _)| v == variant) {
+            Some((_, has)) => *has,
+            None => {
+                return Err(EvalError::new(
+                    format!("unknown variant `{variant}` for enum `{enum_name}`"),
+                    span,
+                ));
+            }
+        };
+        // Arity is a checker error; the runtime keeps a defensive gate
+        // so unchecked paths never silently build a wrong-shaped value.
+        if has_payload && args.is_empty() && named.is_empty() {
+            return Err(EvalError::new(
+                format!(
+                    "variant `{enum_name}.{variant}` holds a value: construct it as `{enum_name}.{variant}(...)`"
+                ),
+                span,
+            ));
+        }
+        if !has_payload && (!args.is_empty() || !named.is_empty()) {
+            return Err(EvalError::new(
+                format!("variant `{enum_name}.{variant}` takes no arguments"),
+                span,
+            ));
+        }
+        // Payload presence is structural: 0 args = unit variant, 1 arg =
+        // payload variant. Arity mismatches are checker errors; here a
+        // second positional is never silently dropped.
+        let fields = match args {
+            [] => Vec::new(),
+            [payload] => vec![("value".to_string(), self.eval(payload)?.into_value()?)],
+            _ => {
+                return Err(EvalError::new(
+                    format!(
+                        "variant `{enum_name}.{variant}` takes at most 1 argument but {} given",
+                        args.len(),
+                    ),
+                    span,
+                ));
+            }
+        };
+        Ok(Value::Object(Box::new(ObjectValue {
+            name: format!("{enum_name}.{variant}"),
+            fields,
+        })))
     }
 
     pub(crate) fn resolve_path_value(
@@ -732,6 +939,17 @@ impl Interp {
                 set_object_field(&mut objv, name, new_value, *span)?;
                 self.write_back(obj, objv)
             }
+            Expr::Index { obj, index, span } => {
+                // Chained index store (`m[0][0] = v`): store the mutated
+                // inner container back into its home and recurse to the
+                // root binding. Re-evaluates index/obj, mirroring the
+                // bytecode compiler's write-back (receivers with side
+                // effects evaluate twice on both engines).
+                let iv = self.eval(index)?.into_value()?;
+                let mut objv = self.eval(obj)?.into_value()?;
+                set_index(&mut objv, &iv, new_value, *span)?;
+                self.write_back(obj, objv)
+            }
             _ => Ok(()),
         }
     }
@@ -800,7 +1018,25 @@ impl Interp {
                 }
                 Ok(Flow::Value(Value::Str(out.into())))
             }
-            Expr::Path { parts, span } => self.resolve_path_value(parts, *span).map(Flow::Value),
+            Expr::Path { parts, span } => {
+                // Unit-variant value (`Token.Eof`): resolve against the
+                // enum table before the value lookup (which would report
+                // "undefined variable" for a type name).
+                if parts.len() >= 2 {
+                    let enum_head = parts[..parts.len() - 1].join(".");
+                    let canonical_head = self.canonical_enum_name(&enum_head);
+                    // Miss-only: a shadowing value keeps its meaning.
+                    let head_is_value =
+                        self.env.get(&enum_head).is_some() || self.funcs.contains_key(&enum_head);
+                    if !head_is_value && self.enums.contains_key(&canonical_head) {
+                        let variant = parts.last().cloned().unwrap_or_default();
+                        return self
+                            .eval_enum_construction(&canonical_head, &variant, &[], &[], *span)
+                            .map(Flow::Value);
+                    }
+                }
+                self.resolve_path_value(parts, *span).map(Flow::Value)
+            }
             Expr::Paren { expr, .. } => self.eval(expr),
             Expr::Unary { op, expr, span } => {
                 let v = self.eval(expr)?.into_value()?;
@@ -865,6 +1101,71 @@ impl Interp {
                         let is_direct = self.env.get(&joined).is_some()
                             || self.funcs.contains_key(&joined)
                             || self.natives.contains_key(&joined);
+                        // Enum construction (`Token.IntLit(1)`) builds a
+                        // qualified `Object` value — no function involved.
+                        // Yields to real functions/values on collision
+                        // (mirrors the checker's miss-only rule: a local
+                        // or function shadowing the head keeps its meaning,
+                        // so checked and unchecked engines agree).
+                        let enum_head = parts[..parts.len() - 1].join(".");
+                        let canonical_head = self.canonical_enum_name(&enum_head);
+                        let head_is_value = self.env.get(&enum_head).is_some()
+                            || self.funcs.contains_key(&enum_head);
+                        if !is_direct && !head_is_value && self.enums.contains_key(&canonical_head)
+                        {
+                            let variant = parts.last().cloned().unwrap_or_default();
+                            return self
+                                .eval_enum_construction(
+                                    &canonical_head,
+                                    &variant,
+                                    args,
+                                    named,
+                                    *span,
+                                )
+                                .map(Flow::Value);
+                        }
+                        // Method on an inline unit variant
+                        // (`Token.Eof.is_eof()`): construct the receiver,
+                        // then dispatch as a method call. Payload variants
+                        // can't chain (ambiguous) — the checker rejects
+                        // them with a bind-first hint.
+                        if !is_direct && parts.len() >= 3 {
+                            let enum_head2 = parts[..parts.len() - 2].join(".");
+                            let canonical_head2 = self.canonical_enum_name(&enum_head2);
+                            // Same shadowing rule as construction above.
+                            let head2_is_value = self.env.get(&enum_head2).is_some()
+                                || self.funcs.contains_key(&enum_head2);
+                            if !head2_is_value
+                                && self.enums.contains_key(&canonical_head2)
+                                && self.resolve_path_value(parts, *pspan).is_err()
+                            {
+                                let variant2 = parts[parts.len() - 2].clone();
+                                let method = parts.last().cloned().unwrap_or_default();
+                                let is_unit = self
+                                    .enums
+                                    .get(&canonical_head2)
+                                    .and_then(|vs| {
+                                        vs.iter().find(|(v, _)| v == &variant2).map(|(_, h)| *h)
+                                    })
+                                    .is_some_and(|has| !has);
+                                if is_unit {
+                                    let recv = self.eval_enum_construction(
+                                        &canonical_head2,
+                                        &variant2,
+                                        &[],
+                                        &[],
+                                        *pspan,
+                                    )?;
+                                    let (f, recv) =
+                                        self.lookup_method_recv(&recv, &method, *span)?;
+                                    let mut arg_vals = vec![recv];
+                                    for a in args {
+                                        arg_vals.push(self.eval(a)?.into_value()?);
+                                    }
+                                    return self.call(f, arg_vals, *span).map(Flow::Value);
+                                }
+                            }
+                        }
                         if !is_direct && self.resolve_path_value(parts, *pspan).is_err() {
                             let method = parts.last().unwrap();
                             let recv =
@@ -904,18 +1205,31 @@ impl Interp {
                 if !named_vals.is_empty() {
                     if let Value::Func(fv) = &f {
                         let n = fv.params.len();
-                        let mut reordered: Vec<Value> = vec![Value::Unit; n];
+                        let mut reordered: Vec<Option<Value>> = vec![None; n];
                         for (i, v) in arg_vals.iter().enumerate() {
                             if i < n {
-                                reordered[i] = v.clone();
+                                reordered[i] = Some(v.clone());
                             }
                         }
                         for (name, val) in &named_vals {
                             if let Some(i) = fv.params.iter().position(|p| &p.name.name == name) {
-                                reordered[i] = val.clone();
+                                reordered[i] = Some(val.clone());
                             }
                         }
-                        arg_vals = reordered;
+                        // Unfilled slots take their default (evaluated in
+                        // the caller's environment); slots without defaults
+                        // fall back to unit and let `call` report arity.
+                        let mut filled: Vec<Value> = Vec::with_capacity(n);
+                        for (i, slot) in reordered.into_iter().enumerate() {
+                            match slot {
+                                Some(v) => filled.push(v),
+                                None => match fv.params.get(i).and_then(|p| p.default.as_ref()) {
+                                    Some(d) => filled.push(self.eval(d)?.into_value()?),
+                                    None => filled.push(Value::Unit),
+                                },
+                            }
+                        }
+                        arg_vals = filled;
                     }
                 }
                 self.call(f, arg_vals, *span).map(Flow::Value)
@@ -926,6 +1240,7 @@ impl Interp {
                     body: (**body).clone(),
                     env: self.env.clone(),
                     chunk: None,
+                    chunk_defaults: Vec::new(),
                 }))))
             }
             Expr::If {
@@ -1266,6 +1581,19 @@ impl Interp {
                         Err(e) => Some(e),
                         Ok(_) => None,
                     },
+                    // User enums erase to qualified `Object`s
+                    // (`Token.IntLit`): the pattern names the variant
+                    // short (`.IntLit(v)`), so match on the trailing
+                    // segment. Cross-enum confusion is impossible —
+                    // the checker guarantees the scrutinee's type.
+                    (vname, Value::Object(obj))
+                        if obj.name.rsplit('.').next().unwrap_or("") == vname =>
+                    {
+                        obj.fields
+                            .iter()
+                            .find(|(k, _)| k == "value")
+                            .map(|(_, v)| v)
+                    }
                     _ => return false,
                 };
                 match (arg.as_deref(), inner) {
@@ -1365,10 +1693,10 @@ impl Interp {
     fn call_func(
         &mut self,
         fv: FuncValue,
-        args: Vec<Value>,
+        mut args: Vec<Value>,
         span: Span,
     ) -> Result<Value, EvalError> {
-        if args.len() != fv.params.len() {
+        if args.len() > fv.params.len() {
             return Err(EvalError::new(
                 format!(
                     "expected {} arguments, found {}",
@@ -1377,6 +1705,30 @@ impl Interp {
                 ),
                 span,
             ));
+        }
+        if args.len() < fv.params.len() {
+            // Fill omitted trailing defaults (evaluated in the caller's
+            // environment, mirroring call-site inline expansion). Every
+            // missing slot must have a default; the first default-less
+            // slot is still an arity error, matching the checker.
+            for p in &fv.params[args.len()..] {
+                match &p.default {
+                    Some(d) => {
+                        let v = self.eval(d)?.into_value()?;
+                        args.push(v);
+                    }
+                    None => {
+                        return Err(EvalError::new(
+                            format!(
+                                "expected {} arguments, found {}",
+                                fv.params.len(),
+                                args.len()
+                            ),
+                            span,
+                        ));
+                    }
+                }
+            }
         }
         let mut scope = Env::with_parent(&fv.env);
         for (p, v) in fv.params.iter().zip(args) {

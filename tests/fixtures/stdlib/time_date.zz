@@ -1,0 +1,31 @@
+// features: func-call, imports, indexing, locals, print, std-time, string-literal
+// E2E: std.time calendar dates (dict-based Date).
+import std.time
+
+func main() {
+    println(time.is_leap(2024))
+    println(time.is_leap(2025))
+    println(time.is_leap(2000))
+    println(time.is_leap(1900))
+    println(time.days_in_month(2024, 2))
+    println(time.days_in_month(2025, 2))
+    println(time.date_valid(2024, 2, 29))
+    println(time.date_valid(2025, 2, 29))
+
+    d := time.parse_rfc3339("2026-10-04T00:00:00Z")
+    println(d["year"])
+    println(d["month"])
+    println(d["day"])
+    println(time.format_rfc3339(d))
+    println(time.format_rfc3339(time.parse_rfc3339("2024-02-29T12:30:45Z")))
+
+    e := time.to_epoch_days(time.make_date(1970, 1, 1, 0, 0, 0))
+    println(e)
+    println(time.format_rfc3339(time.from_epoch_days(0)))
+    println(time.diff_days(time.make_date(2026, 10, 5, 0, 0, 0), time.make_date(2026, 10, 4, 0, 0, 0)))
+    n := time.add_days(time.make_date(2026, 10, 4, 0, 0, 0), 1)
+    println(n["day"])
+    println(time.format_rfc3339(time.add_days(time.make_date(2024, 2, 28, 0, 0, 0), 1)))
+    println(time.parse_rfc3339("not-a-date")["year"])
+    println("time_date_ok")
+}

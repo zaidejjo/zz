@@ -1,0 +1,6 @@
+// features: int-arith, locals, print, string-literal
+// E2E: edge — i64 addition wraps two's-complement on all legs (IR spec;
+// the old debug-VM trap is retired).
+x := 9223372036854775807 + 1
+println("sum={x}")
+println("edge_int_overflow_add_ok")

@@ -27,7 +27,24 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         ),
         None => return,
     };
-    let (init_bindings, init_funcs, init_structs) = state.checker_seed();
+    // Filesystem path for project-dependency harvest (`zz add` packages):
+    // non-file URIs (untitled buffers) skip dep seeding, everything else
+    // still applies.
+    let doc_path = uri.to_file_path().ok();
+    // Seed from this document's own imports (full namespaces plus
+    // selective/wildcard bare names), mirroring the loader — raw
+    // `stdlib_funcs()` only carries `std.*` keys, so unseeded checks
+    // reported `undefined variable 'PI'` + `unused import 'PI'` on valid
+    // selective files (#256) and starved `math.` completion (#257).
+    let seed = program
+        .as_ref()
+        .map(|p| state.checker_seed_for_path(p, doc_path.as_deref()))
+        .unwrap_or_else(|| state.checker_seed());
+    let (init_bindings, init_funcs, init_structs, init_aliases, init_enums) = seed;
+    // Snapshot the visible bindings for completion/hover: the check result
+    // only carries the file's own lets, but seeded dep/workspace globals
+    // (`lib.pi`) must complete too.
+    let seed_bindings = init_bindings.clone();
 
     let client_clone = client.clone();
     let state_clone = state.clone();
@@ -42,7 +59,14 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         }
 
         let program = program?;
-        let checked = check_program(&program, init_bindings, init_funcs, init_structs);
+        let checked = check_program(
+            &program,
+            init_bindings,
+            init_funcs,
+            init_structs,
+            init_aliases,
+            init_enums,
+        );
         Some(checked)
     })
     .await;
@@ -74,6 +98,7 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
     // Persist the CheckResult in the document for hover / go-to-definition.
     if let Some(mut doc) = state.documents.get_mut(&uri) {
         doc.check_result = Some(checked.clone());
+        doc.seed_bindings = Some(seed_bindings);
     }
 
     // Absorb new results into global seed.

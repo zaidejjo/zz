@@ -1,0 +1,13 @@
+// features: enums, error-case, func-call, print, string-literal
+// ERROR: duplicate enum definitions must report.
+enum Token {
+    Eof,
+}
+
+enum Token {
+    Eof,
+}
+
+func main() {
+    println("unreachable")
+}

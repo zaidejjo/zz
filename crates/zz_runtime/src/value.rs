@@ -534,6 +534,7 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
                 body: fv.body.clone(),
                 env: new_env,
                 chunk: fv.chunk.clone(),
+                chunk_defaults: fv.chunk_defaults.clone(),
             },
         );
     }
@@ -565,6 +566,7 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
                 body: fv.body.clone(),
                 env: new_env,
                 chunk: fv.chunk.clone(),
+                chunk_defaults: fv.chunk_defaults.clone(),
             },
         );
     }
@@ -632,6 +634,20 @@ pub fn reachable_refs(
                 Op::LoadVar(n, _) | Op::StoreVar(n, _) => {
                     loads.insert(n.clone());
                     admit(n, funcs, &mut names, &mut stack);
+                }
+                // Move-take homes resolve exactly like `LoadVar` (plus
+                // storing back through the same binding).
+                Op::TakeVar(n, _) => {
+                    loads.insert(n.clone());
+                    admit(n, funcs, &mut names, &mut stack);
+                }
+                Op::VecPush { home, .. }
+                | Op::VecPushField { home, .. }
+                | Op::VecPushMethod { home, .. } => {
+                    if let crate::vm::op::TakeHome::Env(n) = home {
+                        loads.insert(n.clone());
+                        admit(n, funcs, &mut names, &mut stack);
+                    }
                 }
                 Op::LoadPath(parts, _) | Op::StorePath(parts, _) => {
                     if parts.is_empty() {
@@ -760,6 +776,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 body: fv.body.clone(),
                 env: EnvLink::new(),
                 chunk: fv.chunk.clone(),
+                chunk_defaults: fv.chunk_defaults.clone(),
             };
             let placeholder_val = Value::Func(Box::new(placeholder));
             seen.insert(key, placeholder_val.clone());
@@ -776,6 +793,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 body: fv.body,
                 env: new_env,
                 chunk: fv.chunk,
+                chunk_defaults: fv.chunk_defaults.clone(),
             }));
             seen.insert(key, cloned.clone());
             cloned
@@ -974,6 +992,11 @@ pub struct FuncValue {
     /// Pre-compiled bytecode body, when the function was defined through the
     /// Phase 6 compiler. `None` for tree-walker-created closures.
     pub chunk: Option<std::sync::Arc<crate::vm::Chunk>>,
+    /// Pre-compiled default-argument bodies, parallel to `params`. `Some`
+    /// entries come from `.zzc` loads (which carry no AST to evaluate);
+    /// the normal compile path leaves this empty and evaluates the AST
+    /// `Param::default` instead. Tree-walker values never set it.
+    pub chunk_defaults: Vec<Option<std::sync::Arc<crate::vm::Chunk>>>,
 }
 
 impl Value {
@@ -1042,17 +1065,52 @@ impl Value {
                 out.push(')');
             }
             Value::Object(o) => {
-                out.push_str(o.display_name());
-                out.push('{');
-                for (i, (k, v)) in o.fields.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
+                // Enum variant values print in constructor form:
+                // `Token.IntLit(5)`, `Token.Eof`. Shape rule: a dotted
+                // name with no fields (unit variant) or exactly one
+                // `value` field (payload variant).
+                // Edge: a struct with exactly one field named `value`
+                // (`struct Wrap { value: int }`) shares the payload shape
+                // and prints as `Wrap(5)` — cosmetic only, equality and
+                // field access are unaffected.
+                let is_enum_shape = o.name.contains('.')
+                    && (o.fields.is_empty() || (o.fields.len() == 1 && o.fields[0].0 == "value"));
+                if is_enum_shape {
+                    // Like structs, the module namespace is shortened off
+                    // (`shapes.Token.Eof` → `Token.Eof`); identity keeps
+                    // the qualified name. Only with a real namespace
+                    // present (3+ segments): bare `Token.Eof` prints whole.
+                    let segs: Vec<&str> = o.name.split('.').collect();
+                    let short = if segs.len() >= 3 {
+                        o.name
+                            .split_once('.')
+                            .map(|(_, rest)| rest)
+                            .unwrap_or(&o.name)
+                    } else {
+                        &o.name
+                    };
+                    out.push_str(short);
+                    out.push('(');
+                    for (i, (_, v)) in o.fields.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        v.write_display(out, depth + 1);
                     }
-                    out.push_str(k);
-                    out.push_str(": ");
-                    v.write_display(out, depth + 1);
+                    out.push(')');
+                } else {
+                    out.push_str(o.display_name());
+                    out.push('{');
+                    for (i, (k, v)) in o.fields.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(k);
+                        out.push_str(": ");
+                        v.write_display(out, depth + 1);
+                    }
+                    out.push('}');
                 }
-                out.push('}');
             }
             Value::Result(r) => match &**r {
                 Ok(v) => {
@@ -1414,6 +1472,7 @@ mod snapshot_tests {
             body: str_body(body),
             env: env.clone(),
             chunk: None,
+            chunk_defaults: Vec::new(),
         }))
     }
 

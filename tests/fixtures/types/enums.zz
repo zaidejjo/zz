@@ -1,0 +1,94 @@
+// features: arrays, bool-logic, comparison, enums, func-call, if-else, if-let, indexing, int-arith, locals, match, methods, print, string-literal, struct-methods
+// E2E: user enums — declaration, construction, matching, methods,
+// equality, nested payloads.
+enum Token {
+    Eof,
+    IntLit(int),
+    Name(str),
+    Pair((int, int)),
+}
+
+impl Token {
+    func is_eof(self) -> bool {
+        match self {
+            .Eof => true
+            _ => false
+        }
+    }
+    func tag(self) -> str {
+        match self {
+            .Eof => "eof"
+            .IntLit(_) => "int"
+            .Name(_) => "name"
+            .Pair(_) => "pair"
+        }
+    }
+    func bump(self, n: int) -> int {
+        match self {
+            .Eof => n
+            .IntLit(v) => v + n
+            .Name(_) => -1
+            .Pair((a, b)) => a + b + n
+        }
+    }
+}
+
+func describe(t: Token) -> str {
+    match t {
+        .Eof => "eof"
+        .IntLit(_v) => "int"
+        .Name(_s) => _s
+        .Pair((_a, _b)) => "pair"
+    }
+}
+
+enum Shape {
+    Circle(int),
+    Empty,
+}
+
+enum ShapeWrap {
+    S(Shape),
+    N(int),
+}
+
+func describe_shape(w: ShapeWrap) -> int {
+    match w {
+        .S(.Circle(r)) => r,
+        .S(_) => -1,
+        .N(n) => n,
+    }
+}
+
+func main() {
+    a := Token.Eof
+    println(a)
+    b := Token.IntLit(42)
+    println(b)
+    println(describe(b))
+    println(describe(Token.Name("hi")))
+    println(describe(Token.Pair((1, 2))))
+    // Equality is structural.
+    println(b == Token.IntLit(42))
+    println(b == a)
+    // Methods on values and inline constructions.
+    println(a.is_eof())
+    println(Token.Eof.is_eof())
+    println(Token.IntLit(1).is_eof())
+    println(b.tag())
+    // Payload chaining: first arg fills the payload, rest go to the method.
+    println(Token.IntLit(1).bump(2))
+    println(b.bump(8))
+    // Enum in a collection.
+    toks:[Token] = [Token.Eof, Token.IntLit(1)]
+    println(toks[0].is_eof())
+    println(toks[1].tag())
+    // if-let works on enum patterns.
+    if let .IntLit(v) = b {
+        println(v)
+    }
+    // Nested enum patterns fall through to the next arm on inner miss.
+    e2 := ShapeWrap.S(Shape.Circle(5))
+    println(describe_shape(e2))
+    println("enums_ok")
+}

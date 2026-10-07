@@ -40,7 +40,7 @@ fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -
         Some(Type::Json) => vec![format!("json.{method}")],
         // Opaque handles dispatch on their module tag (`regex.*`, …).
         Some(Type::Opaque(tag)) => vec![format!("{tag}.{method}")],
-        Some(Type::Struct(s)) => {
+        Some(Type::Struct(s, _)) => {
             let fq = format!("{s}.{method}");
             if tp.funcs.contains_key(&fq) {
                 vec![fq]
@@ -72,7 +72,7 @@ fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -
 /// a struct whose last name segment equals the field name. Mirrors the
 /// checker's rule (see `zz_checker::checker::structs`).
 fn is_embedded_field(fname: &str, fty: &Type) -> bool {
-    matches!(fty, Type::Struct(s) if s.rsplit('.').next().unwrap_or(s) == fname)
+    matches!(fty, Type::Struct(s, _) if s.rsplit('.').next().unwrap_or(s) == fname)
 }
 
 /// Search structs embedded in `root` (transitively, breadth-first) for a
@@ -84,7 +84,7 @@ fn find_promoted_method(tp: &TypedProgram, root: &str, method: &str) -> Option<S
         queue.remove(0);
         let sig = tp.structs.get(&cur)?;
         for (fname, fty) in &sig.fields {
-            if let Type::Struct(inner) = fty {
+            if let Type::Struct(inner, _) = fty {
                 if is_embedded_field(fname, fty) && !visited.contains(inner) {
                     let fq = format!("{inner}.{method}");
                     if tp.funcs.contains_key(&fq) {
@@ -109,6 +109,11 @@ pub struct CallGraph {
     pub struct_uses: HashMap<String, Vec<String>>,
     /// caller → function names used as values (first-class funcs).
     pub value_uses: HashMap<String, Vec<String>>,
+    /// Import alias head → dotted module path (`fspath` → `std.path`,
+    /// from `import std.path as fspath`). Used to edge qualified alias
+    /// calls (`fspath.join`) to their canonical definitions, which is
+    /// where function bodies actually live.
+    pub import_aliases: HashMap<String, String>,
     /// All function/method names defined by this program (incl. stdlib
     /// seeded into `tp.funcs`).
     pub defined: HashSet<String>,
@@ -140,6 +145,31 @@ pub struct ReachableSet {
     pub natives: HashSet<String>,
 }
 
+/// Canonical targets for a call through an import alias head
+/// (`fspath.join` with `fspath` → `std.path`): the full dotted form plus
+/// the `std.`-stripped form, filtered to names that actually define a
+/// body. Bodies live under canonical names (seed copies under the alias
+/// have none), so edging these retains the real definition. Filtering
+/// to definitions (not just signatures) matters: edging a signature-only
+/// name would misclassify it as a native downstream.
+fn alias_canonical_targets(cg: &CallGraph, parts: &[String]) -> Vec<String> {
+    if parts.len() < 2 {
+        return Vec::new();
+    }
+    let Some(head) = cg.import_aliases.get(&parts[0]) else {
+        return Vec::new();
+    };
+    let method = &parts[parts.len() - 1];
+    let mut cands = vec![format!("{head}.{method}")];
+    if let Some(stripped) = head.strip_prefix("std.") {
+        cands.push(format!("{stripped}.{method}"));
+    }
+    cands
+        .into_iter()
+        .filter(|c| cg.program_defined.contains(c))
+        .collect()
+}
+
 /// Build the call graph for a typed program.
 pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
     let mut cg = CallGraph::default();
@@ -164,6 +194,11 @@ pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
             Stmt::Struct { name, .. } => {
                 program_defined.insert(name.join("."));
             }
+            // Enum type names count as program-defined (like structs);
+            // variant construction references them.
+            Stmt::Enum { name, .. } => {
+                program_defined.insert(name.join("."));
+            }
             _ => {}
         }
     }
@@ -176,6 +211,23 @@ pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
         cg.defined_structs.insert(name.clone());
     }
     cg.program_defined = program_defined;
+
+    // Import alias heads (`fspath` from `import std.path as fspath`):
+    // qualified calls through them (`fspath.join`) resolve against
+    // seed copies, but bodies live under canonical names — record the
+    // mapping so call/value edges can also retain the canonical target.
+    for stmt in tp.stmts() {
+        if let Stmt::Import {
+            path,
+            alias: Some(a),
+            ..
+        } = stmt
+        {
+            cg.import_aliases
+                .entry(a.clone())
+                .or_insert_with(|| path.join("."));
+        }
+    }
 
     // Walk all top-level statements, with TOP as the initial caller.
     for stmt in tp.stmts() {
@@ -224,9 +276,15 @@ fn walk_stmt_for_graph(tp: &TypedProgram, stmt: &Stmt, caller: &str, cg: &mut Ca
             walk_expr_for_graph(tp, target, caller, cg);
             walk_expr_for_graph(tp, value, caller, cg);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            walk_expr_for_graph(tp, target, caller, cg);
+            walk_expr_for_graph(tp, value, caller, cg);
+        }
         Stmt::Destructure { value, .. } => walk_expr_for_graph(tp, value, caller, cg),
         Stmt::Expr(e) => walk_expr_for_graph(tp, e, caller, cg),
         Stmt::Struct { .. }
+        | Stmt::TypeAlias { .. }
+        | Stmt::Enum { .. }
         | Stmt::Import { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
@@ -275,6 +333,12 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                         for c in candidates {
                             cg.edge(caller, &c);
                         }
+                    }
+                    // Qualified alias calls (`fspath.join`) edge only the
+                    // alias spelling above, whose seed copy has no body —
+                    // also edge the canonical definition so it survives.
+                    for c in alias_canonical_targets(cg, parts) {
+                        cg.edge(caller, &c);
                     }
                 }
                 Expr::Field { obj, name, .. } => {
@@ -414,12 +478,27 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
         }
         Expr::Ident { name, .. } => {
             // A function used as a value (first-class): if it names a known
-            // function, mark it reachable conservatively.
+            // function, mark it reachable conservatively. Bare selective
+            // names (`join` for `path.join`) additionally retain their
+            // canonical definitions, which is where bodies live.
             if tp.funcs.contains_key(name) {
                 cg.value_uses
                     .entry(caller.to_string())
                     .or_default()
                     .push(name.clone());
+                if !name.contains('.') && !cg.program_defined.contains(name) {
+                    let suffix = format!(".{name}");
+                    let mut hits: Vec<String> = cg
+                        .program_defined
+                        .iter()
+                        .filter(|pd| pd.ends_with(suffix.as_str()))
+                        .cloned()
+                        .collect();
+                    hits.sort();
+                    for h in hits {
+                        cg.value_uses.entry(caller.to_string()).or_default().push(h);
+                    }
+                }
             }
         }
         Expr::Path { parts, .. } => {
@@ -429,6 +508,11 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                     .entry(caller.to_string())
                     .or_default()
                     .push(joined);
+            }
+            // Same canonical retention as calls above (the use site
+            // itself still lowers through the value path).
+            for c in alias_canonical_targets(cg, parts) {
+                cg.value_uses.entry(caller.to_string()).or_default().push(c);
             }
         }
         Expr::Int { .. }
@@ -583,7 +667,20 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                     stmts.push(stmt.clone());
                 }
             }
-            Stmt::Impl { name, methods, .. } => {
+            // Aliases erase at check time: no code to keep.
+            Stmt::TypeAlias { .. } => {}
+            // Enums register their variants at runtime (all engines read
+            // the declaration to resolve `Enum.Variant` construction), so
+            // they are always kept — declarations are cheap, one per type.
+            Stmt::Enum { .. } => {
+                stmts.push(stmt.clone());
+            }
+            Stmt::Impl {
+                name,
+                generics,
+                methods,
+                ..
+            } => {
                 let tname = name.join(".");
                 let keep: Vec<Stmt> = methods
                     .iter()
@@ -600,6 +697,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                 if !keep.is_empty() {
                     stmts.push(Stmt::Impl {
                         name: name.clone(),
+                        generics: generics.clone(),
                         methods: keep,
                         span: stmt.span(),
                         pub_: false,
@@ -644,6 +742,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
         bindings: tp.bindings.clone(),
         funcs: tp.funcs.clone(),
         structs: tp.structs.clone(),
+        enums: tp.enums.clone(),
         try_converts: tp.try_converts.clone(),
     }
 }

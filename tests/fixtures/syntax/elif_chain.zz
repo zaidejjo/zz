@@ -1,3 +1,4 @@
+// features: comparison, func-call, if-else, locals, print, string-literal
 // elif chains: tail position, non-tail position (trailing statement),
 // and value position (if as an expression). Regression: the AOT
 // expression-position lowering silently dropped `else if` branches.

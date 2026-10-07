@@ -1,3 +1,4 @@
+// features: assert, bool-logic, break-continue, bytes, casts, closures, comparison, elvis, func-call, if-else, imports, int-arith, locals, match, option-result, print, selective-import, short-circuit, std-env, std-http, std-net, std-process, std-str, std-task, std-time, string-literal, while-loop
 // tests/fixtures/stdlib/http_keepalive_p1.zz — live socket Phase 1 checks
 // keep-alive reuse on one connection, 405 + Allow, close semantics.
 import std.env

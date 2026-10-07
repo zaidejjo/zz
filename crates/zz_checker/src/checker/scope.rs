@@ -32,19 +32,33 @@ impl Checker {
     /// additionally require the name to be present in `funcs` so import
     /// gating still applies (using `math.PI` without the import stays an
     /// "undefined variable" error).
-    pub(crate) fn is_math_const(name: &str) -> bool {
+    pub(crate) fn is_math_const(&self, name: &str) -> bool {
         const LEAVES: &[&str] = &[
             "PI", "E", "TAU", "SQRT_2", "SQRT_1_2", "LN_2", "LN_10", "LOG10_E", "LOG2_E", "INF",
             "NAN",
         ];
-        let (prefix, leaf) = match name.rsplit_once('.') {
+        // Resolve selective-import aliases first (`pi` from
+        // `import std.math(PI as pi)` checks as `math.PI`).
+        let resolved = self
+            .import_aliases
+            .get(name)
+            .map(|s| s.as_str())
+            .unwrap_or(name);
+        let (prefix, leaf) = match resolved.rsplit_once('.') {
             Some((p, l)) => (p, l),
-            None => ("", name),
+            None => ("", resolved),
         };
         if !LEAVES.contains(&leaf) {
             return false;
         }
-        matches!(prefix, "" | "math" | "std.math")
+        if matches!(prefix, "" | "math" | "std.math") {
+            return true;
+        }
+        // Resolve module-head aliases (`m.TAU` from `import std.math as m`).
+        if let Some(module) = self.module_aliases.get(prefix) {
+            return matches!(module.as_str(), "math" | "std.math");
+        }
+        false
     }
 
     pub(crate) fn pop_scope(&mut self) {
@@ -173,7 +187,21 @@ impl Checker {
             let used = self
                 .used_names
                 .iter()
-                .any(|n| n == alias || n.starts_with(&prefix));
+                .any(|n| n == alias || n.starts_with(&prefix))
+                // Selective imports rewritten to canonical paths
+                // (`join(...)` → `path.join(...)` by the loader): the
+                // import is used when its qualified form was used. The
+                // loader canonicalizes `std.*` calls to the `std.`-rooted
+                // spelling (`pow(...)` → `std.math.pow(...)`), which never
+                // matches the short alias form (`math.pow`) — so the
+                // `std.`-rooted spelling counts too, or every selectively
+                // imported std call warns falsely.
+                || self.import_aliases.get(alias).is_some_and(|q| {
+                    self.used_names.contains(q)
+                        || self
+                            .used_names
+                            .contains(format!("std.{q}").as_str())
+                });
             if !used {
                 self.errors.push(
                     warning_at(format!("unused import `{alias}`"), *span)
@@ -246,8 +274,14 @@ impl Checker {
                 if let Some((module, _func)) = name.split_once('.') {
                     let std_module = match module {
                         "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time"
-                        | "sqlz" | "db" => Some(module),
-                        _ => None,
+                        | "sqlz" | "db" => Some(module.to_string()),
+                        // Generalized: any other std module present in the
+                        // seed (`std.M.*` keys), not just the hardcoded list.
+                        _ => self
+                            .funcs
+                            .keys()
+                            .any(|k| k.starts_with(&format!("std.{module}.")))
+                            .then(|| module.to_string()),
                     };
                     if let Some(mod_name) = std_module {
                         let import_stmt = format!("import std.{mod_name}");
@@ -260,6 +294,43 @@ impl Checker {
                             format!("{import_stmt}\n"),
                             "add import",
                         ));
+                    }
+                } else {
+                    // Bare name matching exactly one std export (`sin` →
+                    // `std.math.sin`): point at the import that provides it.
+                    // Capped at 3 modules; more than that is a common word,
+                    // not a missed import.
+                    let mut providers: Vec<String> = Vec::new();
+                    for key in self.funcs.keys().chain(self.structs.keys()) {
+                        if let Some(rest) = key.strip_prefix("std.") {
+                            if let Some((module, bare)) = rest.split_once('.') {
+                                if bare == name && !bare.contains('.') {
+                                    let m = module.to_string();
+                                    if !providers.contains(&m) {
+                                        providers.push(m);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    providers.sort();
+                    providers.truncate(3);
+                    if !providers.is_empty() {
+                        let imports = providers
+                            .iter()
+                            .map(|m| format!("`import std.{m}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        diag = diag.with_note(format!(
+                            "to use `{name}`, add {imports} at the top of the file"
+                        ));
+                        if providers.len() == 1 {
+                            diag = diag.with_fixit(FixIt::safe(
+                                Span::new(0, 0),
+                                format!("import std.{}\n", providers[0]),
+                                "add import",
+                            ));
+                        }
                     }
                 }
                 self.errors.push(diag);
@@ -286,8 +357,7 @@ impl Checker {
             // Math constants (`math.PI`, `std.math.PI`, bare `PI` via a
             // selective import) are true `Float` values, not function
             // values — `println(math.PI)` must not suggest `()`.
-            if sig.params.is_empty() && matches!(sig.ret, Type::Float) && Self::is_math_const(name)
-            {
+            if sig.params.is_empty() && matches!(sig.ret, Type::Float) && self.is_math_const(name) {
                 return Some(Type::Float);
             }
             // Function used as a value: give its (uninstantiated) type. Call
@@ -361,56 +431,16 @@ impl Checker {
         let mut ty = root;
         for field in &parts[1..] {
             match self.unifier.resolve(&ty) {
-                Type::Struct(name) => match self.structs.get(&name).cloned() {
-                    Some(sig) => match sig.fields.iter().find(|(n, _)| n == field) {
-                        Some((_, ft)) => ty = ft.clone(),
-                        None => match self.resolve_struct_field(&name, field) {
-                            // Promoted through an embedded struct.
-                            Some(ft) => ty = ft,
-                            None => {
-                                // Suggest closest field name (including promoted fields).
-                                let visible = self.all_visible_fields(&name);
-                                let field_names: Vec<&str> =
-                                    visible.iter().map(|n| n.as_str()).collect();
-                                let mut diag = error_at(
-                                    format!("struct `{name}` has no field `{field}`"),
-                                    span,
-                                );
-                                let all = suggest_all(field, &field_names);
-                                if let Some((suggestion, _)) = all.first() {
-                                    diag = diag
-                                        .with_note(format!("did you mean field `{suggestion}`?"));
-                                    let field_span =
-                                        Span::new(span.end - field.len() as u32, span.end);
-                                    let fixit = if all.len() == 1 {
-                                        FixIt::safe(
-                                            field_span,
-                                            suggestion.to_string(),
-                                            "replace field",
-                                        )
-                                    } else {
-                                        let alts: Vec<String> =
-                                            all.iter().map(|(s, _)| s.to_string()).collect();
-                                        FixIt::ambiguous(
-                                            field_span,
-                                            suggestion.to_string(),
-                                            "replace field",
-                                            alts,
-                                        )
-                                    };
-                                    diag = diag.with_fixit(fixit);
-                                }
-                                self.errors.push(diag);
-                                return Type::Error;
-                            }
-                        },
-                    },
-                    None => {
-                        self.errors
-                            .push(error_at(format!("unknown struct `{name}`"), span));
+                Type::Struct(name, args) => {
+                    // On failure the helper reports and yields `Unit`;
+                    // paths stop here (historical: `Type::Error`) so a
+                    // bad middle segment doesn't cascade per segment.
+                    let before = self.errors.len();
+                    ty = self.struct_field_access(&name, &args, field, span);
+                    if self.errors.len() > before {
                         return Type::Error;
                     }
-                },
+                }
                 Type::Dict(k, v) => {
                     // Dict field access: req.body returns the value type
                     if let Err(e) = self.unifier.unify(&Type::Str, &k) {

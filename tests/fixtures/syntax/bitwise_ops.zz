@@ -1,0 +1,38 @@
+// features: bitwise, bool-logic, closures, comparison, func-call, int-arith, locals, match, option-result, print, string-literal
+// E2E: Bitwise operators — &, |, ^, ~, <<, >>
+println(6 & 3)
+println(6 | 3)
+println(6 ^ 3)
+println(~6)
+println(1 << 10)
+println(1024 >> 3)
+
+// precedence: & > ^ > |, shift between additive and &
+println(1 | 2 ^ 3 & 5)
+println(1 + 2 << 3)
+println(8 >> 1 + 1)
+
+// bitwise binds tighter than comparison
+println(15 & 7 == 7)
+
+// boundaries
+println(~0)
+println(1 << 63)
+println(1 << 64)
+
+// rotate-left building block (Xoshiro-style)
+func rotl(x: int, k: int) -> int {
+    (x << k) | (x >> (64 - k))
+}
+println(rotl(1, 1))
+println(rotl(-1, 17))
+
+// closures and `|` patterns still work alongside BitOr
+double := |x: int| x * 2
+println(double(21))
+match .some(5) {
+    .some(n) => println(n | 8),
+    .none => println(0),
+}
+
+println("bitwise_ops_ok")

@@ -6,6 +6,149 @@ use zz_frontend::ast::{Block, Expr, Pattern, Stmt};
 use super::*;
 
 impl Lowerer {
+    /// Root binding of a store target chain (`m` in `m[i][j]`, `s` in
+    /// `s[i].v`, base of a path). Stores invalidate its SROA forwarding
+    /// (plus dependents) — an element write may change any element.
+    fn store_root_ident(obj: &Expr) -> Option<&str> {
+        match obj {
+            Expr::Ident { name, .. } => Some(name),
+            Expr::Index { obj, .. } | Expr::Field { obj, .. } => Self::store_root_ident(obj),
+            Expr::Path { parts, .. } => parts.first().map(String::as_str),
+            _ => None,
+        }
+    }
+
+    /// Addressable container home for an index store: a C lvalue holding
+    /// the container, so `zz_index_set` can detach-and-reseat in place.
+    /// Plain locals / module vars qualify; struct-field spellings and
+    /// computed bases need the temp + write-back triple instead.
+    fn index_store_home(&self, obj: &Expr, names: &NameCtx) -> Option<String> {
+        match obj {
+            Expr::Ident { name, .. } => names.lookup(name).map(str::to_string),
+            Expr::Path { parts, .. } => {
+                let joined = parts.join(".");
+                match names.lookup(&joined) {
+                    Some(cid)
+                        if !matches!(
+                            names.checker_types.get(&parts[0]),
+                            Some(zz_checker::Type::Struct(_, _))
+                        ) =>
+                    {
+                        Some(cid.to_string())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Write an owned container temp back into an assign-target home.
+    /// Consumes `tmp` on every path. Homes: direct bindings assign;
+    /// Index/Field homes recurse (necessarily cloning the base — the
+    /// temp triple always owns its shares, so assign+release balances
+    /// without alias analysis); anything else releases (temp-drop,
+    /// matching the VM).
+    fn emit_store_writeback(
+        &self,
+        target: &Expr,
+        tmp: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) {
+        match target {
+            Expr::Ident { name, .. } => {
+                if let Some(cid) = names.lookup(name).map(str::to_string) {
+                    out.push_str(&format!("    zz_assign(&{cid}, {tmp});\n"));
+                }
+                out.push_str(&format!("    zz_release(&{tmp});\n"));
+            }
+            Expr::Path { parts, .. } => {
+                let joined = parts.join(".");
+                let base_is_struct = parts.len() >= 2
+                    && matches!(
+                        names.checker_types.get(&parts[0]),
+                        Some(zz_checker::Type::Struct(_, _))
+                    );
+                match names.lookup(&joined) {
+                    // Direct binding (module vars, promoted slots):
+                    // store straight through, unless it spells a
+                    // struct-field walk (handled by the peel below).
+                    Some(cid) if !base_is_struct => {
+                        let cid = cid.to_string();
+                        out.push_str(&format!("    zz_assign(&{cid}, {tmp});\n"));
+                        out.push_str(&format!("    zz_release(&{tmp});\n"));
+                    }
+                    _ if base_is_struct => {
+                        // Struct-field home: peel the last segment into a
+                        // field store on the parent prefix, then recurse.
+                        // The prefix is strictly shorter, so this ends at
+                        // a direct home (or a drop) above.
+                        let prefix = Expr::Path {
+                            parts: parts[..parts.len() - 1].to_vec(),
+                            span: zz_frontend::span::Span { start: 0, end: 0 },
+                        };
+                        let leaf = parts.last().cloned().unwrap_or_default();
+                        let tmp_p = names.fresh("_wbpp");
+                        let emitted_prefix = self.emit_expr(&prefix, names, out);
+                        out.push_str(&format!("    zz_value {tmp_p} = {emitted_prefix};\n"));
+                        out.push_str(&format!(
+                            "    zz_object_set_field(&{tmp_p}, \"{leaf}\", {tmp});\n"
+                        ));
+                        out.push_str(&format!("    zz_release(&{tmp});\n"));
+                        self.emit_store_writeback(&prefix, &tmp_p, names, out);
+                    }
+                    _ => {
+                        out.push_str(&format!("    zz_release(&{tmp});\n"));
+                    }
+                }
+            }
+            Expr::Index {
+                obj, index, span, ..
+            } => {
+                // Nested index home: store the temp into an owned copy
+                // of the base, then write that base back (recursion
+                // bottoms at a direct home or a drop). The base copy is
+                // an owned clone, so the inner set detaches exactly when
+                // truly shared and the outer assign+release balances.
+                let base = self.emit_expr(obj, names, out);
+                let idx = self.emit_expr(index, names, out);
+                let idx_boxed = self.box_index_arg(index, idx, names);
+                let base_tmp = names.fresh("_wbb");
+                let e = names.fresh("_wbe");
+                let itrap = names.fresh("_wbi");
+                let func = names.current_scope.clone();
+                out.push_str(&format!("    zz_value {base_tmp} = zz_clone({base});\n"));
+                out.push_str(&format!("    zz_value {itrap} = {idx_boxed};\n"));
+                out.push_str(&format!("    int {e} = 0;\n"));
+                out.push_str(&format!(
+                    "    zz_index_set(&{base_tmp}, {itrap}, {tmp}, &{e});\n"
+                ));
+                out.push_str(&format!(
+                    "    if ({e}) {{ zz_index_trap({base_tmp}, {itrap}, \"{func}\"); }}\n"
+                ));
+                let _ = span;
+                self.emit_store_writeback(obj, &base_tmp, names, out);
+            }
+            Expr::Field { obj, name, .. } => {
+                // Field home: store into an owned copy of the receiver,
+                // then write the receiver back (set_field detaches shared
+                // headers internally).
+                let recv = self.emit_expr(obj, names, out);
+                let recv_tmp = names.fresh("_wbr");
+                out.push_str(&format!("    zz_value {recv_tmp} = zz_clone({recv});\n"));
+                out.push_str(&format!(
+                    "    zz_object_set_field(&{recv_tmp}, \"{name}\", {tmp});\n"
+                ));
+                out.push_str(&format!("    zz_release(&{tmp});\n"));
+                self.emit_store_writeback(obj, &recv_tmp, names, out);
+            }
+            _ => {
+                out.push_str(&format!("    zz_release(&{tmp});\n"));
+            }
+        }
+    }
+
     pub(super) fn emit_stmt(
         &self,
         stmt: &Stmt,
@@ -67,7 +210,7 @@ impl Lowerer {
                 let struct_copy: Option<String> = match value {
                     Expr::Ident { .. } | Expr::Field { .. } | Expr::Path { .. } => {
                         match self.ty_at(names, value.span()) {
-                            Some(zz_checker::Type::Struct(s)) => Some(s.clone()),
+                            Some(zz_checker::Type::Struct(s, _)) => Some(s.clone()),
                             _ => None,
                         }
                     }
@@ -89,6 +232,9 @@ impl Lowerer {
                     Some(ref sname) => self.emit_boxed_value(sname, value, names, out),
                     None => self.emit_expr(value, names, out),
                 };
+                // Snapshot the emitted RHS for the array record below
+                // (`final_val` moves `val` for boxed types).
+                let emitted_val = val.clone();
 
                 // NOW enter the new scope entry with the correct C type.
                 // For scalars, use enter_with_type so that any subsequent code
@@ -143,96 +289,62 @@ impl Lowerer {
                     }
                     out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
                 }
-                // Track array literals so `len(v)` can fold to the arity.
+                // Track array literals so `len(v)` can fold to the arity,
+                // and record pure-scalar literals for index forwarding
+                // (`arr[lit]` reads lower to the element's raw C expr).
+                // Any other RHS drops a shadowed literal binding; an
+                // Ident RHS aliases it (the new binding may mutate the
+                // shared buffer, so the source's forwarding dies too).
                 if let Expr::Array { elems, .. } = value {
                     names.set_array_len(&name.name, elems.len());
+                    self.record_array_elems(&name.name, elems, &emitted_val, names);
+                } else {
+                    names.invalidate_stack_array_elems(&name.name);
+                    if let Expr::Ident { name: src, .. } = value {
+                        if names.stack_array_elems.contains_key(src) {
+                            names.invalidate_stack_array_elems(src);
+                        }
+                    }
                 }
             }
             Stmt::Assign { target, value, .. } => {
                 // Fast-path: `s = s + <rhs>` where `s` is a string
-                // (zz_value). Emit an in-place append shim instead of
+                // (zz_value). Emit in-place append shims instead of
                 // clone+binop+assign so the capacity-aware path in
-                // zz_str_append_* can fire. Without this, zz_clone()
-                // bumps refs and breaks the refs==1 fast path in the
-                // runtime.
+                // zz_str_append_* fires with amortized O(1) growth.
+                // Without this, zz_clone() bumps refs and breaks the
+                // refs==1 fast path in the runtime — and chained cats
+                // (`s = s + a + b + c`) lower to nested temporaries that
+                // each copy the whole accumulator (O(N^2), GB-scale).
                 //
-                // SAFETY: must only fire when both sides are strings.
+                // SAFETY: must only fire when the target and every
+                // appended term are strings.
                 //   - target type must NOT be a scalar (int64_t/double/bool).
-                //   - For non-literal RHS, the RHS must itself be string-
-                //     typed (else the runtime gets a non-zz_value arg).
+                //   - each term must be a Str literal, a string-typed
+                //     Ident/Path, or a str() conversion (owned temp that
+                //     is appended then released).
+                // Anything else bails to the generic path below.
                 // Any reassignment breaks the literal-length association
                 // until proven otherwise (re-inserted below for array
-                // literals on the generic path).
+                // literals on the generic path). Same for index
+                // forwarding (plus any literal mentioning the target —
+                // the C local is reused, so stored texts would go stale).
                 if let Expr::Ident { name, .. } = target {
                     names.invalidate_array_len(name);
+                    names.invalidate_stack_array_elems(name);
                 }
-                if let Expr::Binary {
-                    op: zz_frontend::ast::BinOp::Add,
-                    left,
-                    right,
-                    ..
-                } = value
-                {
-                    let left_ident = match left.as_ref() {
-                        Expr::Ident { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
-                    if let (Some(lname), Expr::Ident { name: tname, .. }) = (&left_ident, target) {
-                        if lname == tname {
-                            // Skip fast-path for scalar targets: their
-                            // storage is the raw type, not a zz_value.
-                            let target_is_scalar = names
-                                .lookup_type(tname.as_str())
-                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
-                                .unwrap_or(false);
-                            if !target_is_scalar {
-                                if let Some(cid) = names.lookup(tname.as_str()) {
-                                    let cid = cid.to_string();
-                                    match right.as_ref() {
-                                        Expr::Str { value: lit, .. } => {
-                                            let lit_c = self.emit_str_literal(lit);
-                                            let inner = extract_c_literal(&lit_c);
-                                            out.push_str(&format!(
-                                                "    zz_str_append_lit(&{cid}, {inner}, sizeof({inner}) - 1);\n"
-                                            ));
-                                            return;
-                                        }
-                                        Expr::Ident { name: rname, .. } => {
-                                            let rhs_scalar = names
-                                                .lookup_type(rname)
-                                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
-                                                .unwrap_or(false);
-                                            if !rhs_scalar {
-                                                if let Some(rcid) = names.lookup(rname) {
-                                                    let rcid = rcid.to_string();
-                                                    out.push_str(&format!(
-                                                        "    zz_str_append_str(&{cid}, {rcid});\n"
-                                                    ));
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        Expr::Path { parts, .. } => {
-                                            let joined = parts.join(".");
-                                            let rhs_scalar = names
-                                                .lookup_type(&joined)
-                                                .map(|t| matches!(t, "int64_t" | "double" | "bool"))
-                                                .unwrap_or(false);
-                                            if !rhs_scalar {
-                                                if let Some(rcid) = names.lookup(&joined) {
-                                                    let rcid = rcid.to_string();
-                                                    out.push_str(&format!(
-                                                        "    zz_str_append_str(&{cid}, {rcid});\n"
-                                                    ));
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
+                // `x = arr` aliases the array: the target may mutate the
+                // shared buffer, so the source's forwarding dies too.
+                // (Runs before the early-return paths below so moves and
+                // append-chains inherit it.)
+                if let Expr::Ident { name: src, .. } = value {
+                    if names.stack_array_elems.contains_key(src) {
+                        names.invalidate_stack_array_elems(src);
+                    }
+                }
+                if let Expr::Ident { name: tname, .. } = target {
+                    if self.try_emit_str_append_chain(tname, value, names, out) {
+                        return;
                     }
                 }
 
@@ -241,6 +353,11 @@ impl Lowerer {
                 // targets, so the assignment after the label is plain).
                 if self.green_active() {
                     self.stmt_direct.set(true);
+                }
+                // Move-on-self-reassign (`x = vec.push(x, e)` and friends):
+                // takes the slot and pushes in place when uniquely owned.
+                if self.try_emit_move_assign(target, value, names, out) {
+                    return;
                 }
                 let val = self.emit_expr(value, names, out);
                 // If the RHS expression was already lowered to a raw
@@ -296,6 +413,40 @@ impl Lowerer {
                                              memcpy(&{cid}, &{tmp}, sizeof({ct}));\n"
                                         ));
                                     }
+                                    ct if ct.starts_with("zz_struct_") => {
+                                        // Raw unboxed local, non-cell (#188.2):
+                                        // same-type raw values assign
+                                        // directly; boxed values unbox
+                                        // into place (`zz_assign` only
+                                        // takes `zz_value *`).
+                                        if let Some(root) = self.unmangled_struct_name(ct) {
+                                            let val_is_raw = match value {
+                                                Expr::StructInit { name: s, .. } => s == &root,
+                                                Expr::Ident { name: v, .. } => {
+                                                    names.lookup_type(v.as_str()) == Some(ct)
+                                                }
+                                                Expr::Path { parts, .. } => {
+                                                    names.lookup_type(&parts.join(".")) == Some(ct)
+                                                }
+                                                _ => false,
+                                            };
+                                            if val_is_raw {
+                                                out.push_str(&format!("    {cid} = {val};\n"));
+                                            } else {
+                                                let tmp = names.fresh("_unbox");
+                                                out.push_str(&format!(
+                                                    "    zz_value {tmp} = {val};\n"
+                                                ));
+                                                self.emit_unbox_struct(
+                                                    &root, &tmp, &cid, names, out,
+                                                );
+                                            }
+                                        } else {
+                                            out.push_str(&format!(
+                                                "    zz_assign(&{cid}, {val});\n"
+                                            ));
+                                        }
+                                    }
                                     _ => {
                                         out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
                                     }
@@ -304,9 +455,11 @@ impl Lowerer {
                                 out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
                             }
                             // Re-associate the target with a fresh array
-                            // literal length when the RHS is one.
+                            // literal length when the RHS is one (plus
+                            // index-forwarding elements when pure-scalar).
                             if let Expr::Array { elems, .. } = value {
                                 names.set_array_len(name, elems.len());
+                                self.record_array_elems(name, elems, &val, names);
                             }
                         }
                     }
@@ -483,7 +636,7 @@ impl Lowerer {
                         // were already handled by the direct paths above.
                         if parts.len() >= 2 {
                             if let Some(base_cid) = names.lookup(&parts[0]).map(str::to_string) {
-                                if let Some(zz_checker::Type::Struct(sname)) =
+                                if let Some(zz_checker::Type::Struct(sname, _)) =
                                     names.checker_types.get(&parts[0]).cloned()
                                 {
                                     let base_is_raw = names
@@ -566,31 +719,174 @@ impl Lowerer {
                     }
                     Expr::Index { obj, index, .. } => {
                         // `obj[idx] = v` — runtime-dispatched write (arrays/dicts).
-                        let o = self.emit_expr(obj, names, out);
-                        let i = self.emit_expr(index, names, out);
-                        // Box a scalar index to a zz_value.
-                        let i_boxed = self.box_index_arg(index, i, names);
-                        // Box a raw-scalar RHS to a zz_value before storing.
-                        let boxed_val = if value_is_scalar {
-                            if let Expr::Ident { name, .. } = value {
-                                let name_str = name.clone();
-                                auto_box(&val, names.lookup_type(&name_str))
-                            } else if let Expr::Path { parts, .. } = value {
-                                let joined = parts.join(".");
-                                auto_box(&val, names.lookup_type(&joined))
-                            } else if val.starts_with("(double)(") {
-                                format!("zz_float({val})")
-                            } else if val.starts_with("(bool)(") {
-                                format!("zz_bool({val})")
-                            } else {
-                                format!("zz_int({val})")
-                            }
+                        // A store may change any element: drop index
+                        // forwarding for the root binding (plus dependents).
+                        if let Some(root) = Self::store_root_ident(obj) {
+                            let root = root.to_string();
+                            names.invalidate_stack_array_elems(&root);
+                        }
+                        let boxed_val = self.box_index_store_value(value, val.clone(), names);
+                        if let Some(home) = self.index_store_home(obj, names) {
+                            let i = self.emit_expr(index, names, out);
+                            // Box a scalar index to a zz_value.
+                            let i_boxed = self.box_index_arg(index, i, names);
+                            // Direct home: detach-on-write inside
+                            // zz_index_set handles sharing with zero
+                            // copies in the unique case.
+                            let func = names.current_scope.clone();
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_value _si = {i_boxed}; zz_index_set(&{home}, _si, {boxed_val}, &_e);\n"
+                            ));
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({home}, _si, \"{func}\"); }} }}\n"
+                            ));
                         } else {
-                            val.clone()
-                        };
+                            // Computed base: owned temp, store, write back
+                            // (VM shape — plain reads would alias).
+                            let o = self.emit_expr(obj, names, out);
+                            let i = self.emit_expr(index, names, out);
+                            // Box a scalar index to a zz_value.
+                            let i_boxed = self.box_index_arg(index, i, names);
+                            let wb = names.fresh("_wbs");
+                            let func = names.current_scope.clone();
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_value {wb} = zz_clone({o}); zz_value _si = {i_boxed};\n"
+                            ));
+                            out.push_str(&format!(
+                                "      zz_index_set(&{wb}, _si, {boxed_val}, &_e);\n"
+                            ));
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({wb}, _si, \"{func}\"); }}\n"
+                            ));
+                            self.emit_store_writeback(obj, &wb, names, out);
+                            out.push_str("    }\n");
+                        }
+                    }
+                    Expr::Field { obj, name, .. } => {
+                        // `obj.field = v` with a computed receiver (plain
+                        // Ident/Path receivers go through their own arms
+                        // above): temp + set + write back (VM shape).
+                        // `zz_object_set_field` detaches shared headers
+                        // internally; the write-back lands the result.
+                        // Like index stores, drop forwarding for the root.
+                        if let Some(root) = Self::store_root_ident(obj) {
+                            let root = root.to_string();
+                            names.invalidate_stack_array_elems(&root);
+                        }
+                        let o = self.emit_expr(obj, names, out);
+                        let boxed_val = self.box_index_store_value(value, val.clone(), names);
+                        let tmp = names.fresh("_wbf");
+                        out.push_str(&format!("    {{ zz_value {tmp} = zz_clone({o});\n"));
                         out.push_str(&format!(
-                            "    {{ int _e = 0; zz_index_set({o}, {i_boxed}, {boxed_val}, &_e); }}\n"
+                            "      zz_object_set_field(&{tmp}, \"{name}\", {boxed_val});\n"
                         ));
+                        self.emit_store_writeback(obj, &tmp, names, out);
+                        out.push_str("    }\n");
+                    }
+                    _ => {}
+                }
+            }
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => {
+                // RHS first (same order as `=`).
+                match target {
+                    Expr::Ident { .. } | Expr::Path { .. } => {
+                        // Side-effect-free receivers: delegate to the plain
+                        // Assign path with `target = target OP value`,
+                        // inheriting scalar fast paths, string-append, struct
+                        // paths, and array-len tracking identically.
+                        let synthetic = Stmt::Assign {
+                            target: target.clone(),
+                            value: Expr::Binary {
+                                op: *op,
+                                left: Box::new(target.clone()),
+                                right: Box::new(value.clone()),
+                                span: *span,
+                            },
+                            span: *span,
+                        };
+                        self.emit_stmt(&synthetic, names, out, is_tail);
+                    }
+                    Expr::Index { obj, index, .. } => {
+                        // Single evaluation of each side, then read →
+                        // boxed zz_binop → write (index bound once in
+                        // `_ci`, never evaluated twice). The store kills
+                        // index forwarding for the root binding (plus
+                        // dependents). NOTE: side-effect order here is
+                        // source order (base, index, value), matching
+                        // the VM since the zzc-codec slice (spec §7,
+                        // pinned by edge_index_store_order).
+                        if let Some(root) = Self::store_root_ident(obj) {
+                            let root = root.to_string();
+                            names.invalidate_stack_array_elems(&root);
+                        }
+                        let rhs = self.emit_expr(value, names, out);
+                        let rhs_boxed = self.box_index_store_value(value, rhs, names);
+                        let cop = binop_runtime_op(op);
+                        if let Some(home) = self.index_store_home(obj, names) {
+                            let i = self.emit_expr(index, names, out);
+                            let i_boxed = self.box_index_arg(index, i, names);
+                            // Bind the index once: the get and the set
+                            // below must not evaluate it twice (side
+                            // effects would fire twice — observed as a
+                            // double log in differential probes).
+                            let func = names.current_scope.clone();
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_value _ci = {i_boxed}; zz_value _cc = zz_index_get({home}, _ci, &_e);\n"
+                            ));
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({home}, _ci, \"{func}\"); }}\n"
+                            ));
+                            out.push_str(&format!(
+                                "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
+                            ));
+                            out.push_str(&format!("      zz_index_set(&{home}, _ci, _cr, &_e);\n"));
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({home}, _ci, \"{func}\"); }} }}\n"
+                            ));
+                        } else {
+                            let o = self.emit_expr(obj, names, out);
+                            let i = self.emit_expr(index, names, out);
+                            let i_boxed = self.box_index_arg(index, i, names);
+                            let func = names.current_scope.clone();
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_value _co = zz_clone({o}); zz_value _ci = {i_boxed};\n"
+                            ));
+                            out.push_str("      zz_value _cc = zz_index_get(_co, _ci, &_e);\n");
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap(_co, _ci, \"{func}\"); }}\n"
+                            ));
+                            out.push_str(&format!(
+                                "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
+                            ));
+                            out.push_str("      zz_index_set(&_co, _ci, _cr, &_e);\n");
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap(_co, _ci, \"{func}\"); }}\n"
+                            ));
+                            self.emit_store_writeback(obj, "_co", names, out);
+                            out.push_str("    }\n");
+                        }
+                    }
+                    Expr::Field { .. } => {
+                        // Delegate to the plain `=` Field arm (temp +
+                        // set + write back) with `target = target OP
+                        // value`, like Ident/Path above. The plain arm
+                        // evaluates each side once, receiver first.
+                        let synthetic = Stmt::Assign {
+                            target: target.clone(),
+                            value: Expr::Binary {
+                                op: *op,
+                                left: Box::new(target.clone()),
+                                right: Box::new(value.clone()),
+                                span: *span,
+                            },
+                            span: *span,
+                        };
+                        self.emit_stmt(&synthetic, names, out, is_tail);
                     }
                     _ => {}
                 }
@@ -610,6 +906,11 @@ impl Lowerer {
                             self.stmt_direct.set(true);
                         }
                         let val = self.emit_expr(e, names, out);
+                        // Box raw scalars for the `zz_value` temp: tail
+                        // calls to specialized functions (and scalar
+                        // temporaries generally) lower raw. Idempotent —
+                        // already-boxed values pass through unchanged.
+                        let val = box_scalar_operand(e, names, &val);
                         out.push_str(&format!("    zz_value {tmp} = {val};\n"));
                         names
                             .stack
@@ -657,10 +958,15 @@ impl Lowerer {
             Stmt::Return { value, .. } => match value {
                 Some(v) => {
                     let val = self.emit_expr(v, names, out);
-                    let val = box_scalar_operand(v, names, &val);
-                    out.push_str(&format!("    return {val};\n"));
+                    if let Some(expected) = *self.unboxed_ret.borrow() {
+                        let val = self.unbox_for_return(v, val, names, expected);
+                        out.push_str(&format!("    return {val};\n"));
+                    } else {
+                        let val = box_scalar_operand(v, names, &val);
+                        out.push_str(&format!("    return {val};\n"));
+                    }
                 }
-                None => out.push_str("    return zz_unit();\n"),
+                None => out.push_str(&format!("    return {};\n", self.ret_unit())),
             },
             Stmt::For {
                 vars,
@@ -704,9 +1010,18 @@ impl Lowerer {
                 let rhs = self.emit_expr(value, names, out);
                 let tmp = names.fresh("__dtup");
                 out.push_str(&format!("    zz_value {tmp} = {rhs};\n"));
+                // Destructured bindings reuse ZZ names in the same scope:
+                // any literal association for them is stale (plus the RHS
+                // temp is not a literal at all).
+                names.clear_array_lens();
                 self.emit_destructure_pat(pat, &tmp, names, out);
             }
-            Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::Impl { .. } | Stmt::Import { .. } => {}
+            Stmt::Func { .. }
+            | Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. }
+            | Stmt::Impl { .. }
+            | Stmt::Import { .. } => {}
             // Top-level only: emitted in the preamble by `Lowerer::lower`.
             Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         }
@@ -718,6 +1033,229 @@ impl Lowerer {
     /// wildcards bind nothing. Literal/variant/or patterns cannot appear
     /// here from the parser (only flat bindings/wildcards); anything else
     /// is skipped without binding, matching the VM's Pop behavior.
+    ///
+    /// String-accumulator fast path (`s = s + t1 + t2 + ...`).
+    ///
+    /// Flattens a left- (or right-) nested `+` chain whose leftmost leaf
+    /// is the target itself into sequential in-place appends. Each term
+    /// appends with amortized O(1) growth (2x `str_grow`) instead of
+    /// allocating one full-size temporary per `+` (O(N^2) copies and
+    /// GB-scale transient garbage on 20k-iteration builds).
+    ///
+    /// Admissible terms (anything else bails to the generic path):
+    /// - `Str` literals → `zz_str_append_lit` (no temp at all).
+    /// - string-typed `Ident`/`Path` locals → `zz_str_append_str`
+    ///   borrowing the source (no clone bump, no release needed).
+    /// - `str(x)` conversions → emitted into an owned temp, appended,
+    ///   then `zz_release`d (heap path) or no-op released (arena SSO).
+    ///
+    /// Self-append (`s = s + s`) clones through a temp so `str_grow`'s
+    /// realloc cannot free the source out from under the copy.
+    /// Green closures bail (a suspend must never observe the
+    /// half-appended buffer through the slot).
+    pub(super) fn try_emit_str_append_chain(
+        &self,
+        tname: &str,
+        value: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> bool {
+        if self.green_active() {
+            return false;
+        }
+        // Scalar targets store raw C values, not zz_values.
+        let target_is_scalar = names
+            .lookup_type(tname)
+            .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+            .unwrap_or(false);
+        if target_is_scalar {
+            return false;
+        }
+        let cid = match names.lookup(tname).map(str::to_string) {
+            Some(c) => c,
+            None => return false,
+        };
+        // Flatten the `+` chain left-to-right.
+        fn flatten<'a>(e: &'a Expr, terms: &mut Vec<&'a Expr>) {
+            if let Expr::Binary {
+                op: zz_frontend::ast::BinOp::Add,
+                left,
+                right,
+                ..
+            } = e
+            {
+                flatten(left, terms);
+                flatten(right, terms);
+            } else {
+                terms.push(e);
+            }
+        }
+        // The RHS must itself be a `+` (single non-Add RHS like `s = t`
+        // is a plain copy, not an append).
+        if !matches!(
+            value,
+            Expr::Binary {
+                op: zz_frontend::ast::BinOp::Add,
+                ..
+            }
+        ) {
+            return false;
+        }
+        let mut terms = Vec::new();
+        flatten(value, &mut terms);
+        if terms.len() < 2 {
+            return false;
+        }
+        // Leftmost leaf must be the target itself.
+        match terms[0] {
+            Expr::Ident { name, .. } if name == tname => {}
+            _ => return false,
+        }
+        // Gate every appended term before emitting anything (all-or-nothing
+        // so we never leave a half-appended buffer on bail).
+        enum Term<'a> {
+            Lit(String),
+            Borrow(String),
+            StrCall(&'a Expr),
+            /// `str(x)` of a raw scalar int/bool: append the formatted
+            /// value directly (C type, raw C text). No temp, no release.
+            AppendScalar(&'static str, String),
+        }
+        let mut plan: Vec<Term> = Vec::with_capacity(terms.len() - 1);
+        for term in &terms[1..] {
+            match term {
+                Expr::Str { value: lit, .. } => {
+                    let lit_c = self.emit_str_literal(lit);
+                    plan.push(Term::Lit(extract_c_literal(&lit_c).to_string()));
+                }
+                Expr::Ident { name: rname, .. } => {
+                    if rname == tname {
+                        // Self-append: clone through a temp (see above).
+                        plan.push(Term::StrCall(term));
+                        continue;
+                    }
+                    let rhs_scalar = names
+                        .lookup_type(rname)
+                        .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+                        .unwrap_or(false);
+                    if rhs_scalar {
+                        return false;
+                    }
+                    // Must be a known string local; unknown types bail
+                    // rather than emitting a mistyped C call.
+                    let is_str = names.lookup_type(rname) == Some("string")
+                        || self.is_string_expr(term, names);
+                    if !is_str {
+                        return false;
+                    }
+                    match names.lookup(rname).map(str::to_string) {
+                        Some(rcid) => plan.push(Term::Borrow(rcid)),
+                        None => return false,
+                    }
+                }
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    let rhs_scalar = names
+                        .lookup_type(&joined)
+                        .map(|t| matches!(t, "int64_t" | "double" | "bool"))
+                        .unwrap_or(false);
+                    if rhs_scalar {
+                        return false;
+                    }
+                    let is_str = names.lookup_type(&joined) == Some("string")
+                        || self.is_string_expr(term, names);
+                    if !is_str {
+                        return false;
+                    }
+                    match names.lookup(&joined).map(str::to_string) {
+                        Some(rcid) => plan.push(Term::Borrow(rcid)),
+                        None => return false,
+                    }
+                }
+                Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    ..
+                } => {
+                    // Fast path: `str(x)` of a raw scalar int/bool
+                    // appends the formatted value directly — no temp
+                    // `zz_value`, no arena staging, no release. Only
+                    // single positional args (named args keep the
+                    // generic path); other string calls (e.g. `chr`)
+                    // must NOT take this path (different semantics).
+                    if named.is_empty() {
+                        if let [arg] = args.as_slice() {
+                            if matches!(
+                                callee.as_ref(),
+                                Expr::Ident { name, .. } if name == "str" || name == "std.str"
+                            ) {
+                                if let Some(t) = scalar_operand_type(arg, names) {
+                                    if t == "int64_t" || t == "bool" {
+                                        if let Some(raw) = scalar_operand_c(arg, names) {
+                                            plan.push(Term::AppendScalar(t, raw));
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Only string-producing calls (today: str()
+                    // conversions). Other calls may return non-strings,
+                    // which append_str would silently drop.
+                    if !self.is_string_expr(term, names) {
+                        return false;
+                    }
+                    plan.push(Term::StrCall(term));
+                }
+                _ => return false,
+            }
+        }
+        // All terms admissible — emit left-to-right.
+        for step in plan {
+            match step {
+                Term::Lit(inner) => {
+                    out.push_str(&format!(
+                        "    zz_str_append_lit(&{cid}, {inner}, sizeof({inner}) - 1);\n"
+                    ));
+                }
+                Term::Borrow(rcid) => {
+                    out.push_str(&format!("    zz_str_append_str(&{cid}, {rcid});\n"));
+                }
+                Term::AppendScalar(t, raw) => {
+                    // `str(int)` / `str(bool)` in append position: format
+                    // straight into the buffer (float keeps the generic
+                    // path — its `%.1f` vs `zz_print_double` fork must
+                    // match the cast exactly).
+                    let helper = if t == "bool" {
+                        "zz_str_append_bool"
+                    } else {
+                        "zz_str_append_int"
+                    };
+                    out.push_str(&format!("    {helper}(&{cid}, {raw});\n"));
+                }
+                Term::StrCall(term) => {
+                    // Self-append (`s = s + s`) arrives here as an Ident:
+                    // clone first so grow cannot free the source.
+                    let val = if matches!(term, Expr::Ident { .. } | Expr::Path { .. }) {
+                        let src = self.emit_expr(term, names, out);
+                        // emit_expr on an Ident already bumps (zz_clone);
+                        // use it directly as the owned temp.
+                        src
+                    } else {
+                        self.emit_expr(term, names, out)
+                    };
+                    let tmp = names.fresh("_sapp");
+                    out.push_str(&format!("    zz_value {tmp} = {val};\n"));
+                    out.push_str(&format!("    zz_str_append_str(&{cid}, {tmp});\n"));
+                    out.push_str(&format!("    zz_release(&{tmp});\n"));
+                }
+            }
+        }
+        true
+    }
+
     pub(super) fn emit_destructure_pat(
         &self,
         pat: &Pattern,
@@ -999,8 +1537,11 @@ impl Lowerer {
                     )
                 };
                 out.push_str(&s);
-                // Loop-top safepoint (mirrors the VM's `Op::Safepoint`).
-                out.push_str("    zz_safepoint();\n");
+                // Loop-top safepoint (mirrors the VM's `Op::Safepoint`),
+                // elided for concurrency-free programs (see
+                // `needs_safepoint`): the call barrier blocks clang from
+                // folding tight scalar loops to closed form.
+                self.emit_safepoint(out, "    ");
             } else {
                 // Slow path: both bounds are general expressions, use boxed loop
                 // (start must be boxed exactly like the end bound: a bare
@@ -1032,21 +1573,36 @@ impl Lowerer {
                     // run strictly before any suspend.
                     let (_, driver, _) = self.green_cell(names, "int64_t", true, out);
                     let (_, ederef, _) = self.green_cell(names, "zz_value", false, out);
+                    // Safepoint elided for concurrency-free programs (the
+                    // call barrier blocks loop folding; see
+                    // `needs_safepoint`). The literal keeps its exact
+                    // legacy spacing when enabled.
+                    let sp = if self.needs_safepoint() {
+                        "                         zz_safepoint();\n"
+                    } else {
+                        ""
+                    };
                     out.push_str(&format!(
                         "{{ zz_value _s = {sv_boxed};\n    \
                          {ederef} = {ev_boxed};\n    \
                          if (_s.tag == ZZ_INT && ({ederef}).tag == ZZ_INT) {{\n        \
                          for ({driver} = _s.i; {driver} < ({ederef}).i; {driver}++) {{\n            \
                          {cid} = {driver};\n            \
-                         zz_safepoint();\n"
+                         {sp}"
                     ));
                 } else {
+                    // Same safepoint gate as the green path above.
+                    let sp = if self.needs_safepoint() {
+                        "                     zz_safepoint();\n"
+                    } else {
+                        ""
+                    };
                     let s = format!(
                         "{{ zz_value _s = {sv_boxed}; zz_value _e = {ev_boxed};\n    \
                      if (_s.tag == ZZ_INT && _e.tag == ZZ_INT) {{\n        \
                      for (int64_t {cid}_i = _s.i; {cid}_i < _e.i; {cid}_i++) {{\n            \
                      int64_t {cid} = {cid}_i;\n            \
-                     zz_safepoint();\n"
+                     {sp}"
                     );
                     out.push_str(&s);
                 }
@@ -1083,9 +1639,13 @@ impl Lowerer {
                 self.loop_arenas.borrow_mut().push(name.clone());
                 *self.current_loop_arena.borrow_mut() = Some(name.clone());
             }
+            // Per-iteration scope: body-declared heap locals release at the
+            // bottom (loop_scope_end) instead of accumulating per iteration.
+            let body_scope = self.loop_scope_begin(names);
             for bstmt in &body.stmts {
                 self.emit_stmt(bstmt, names, out, false);
             }
+            self.loop_scope_end(names, out, body_scope);
             if let Some(ref name) = loop_arena {
                 self.loop_arenas.borrow_mut().pop();
                 *self.current_loop_arena.borrow_mut() = self.loop_arenas.borrow().last().cloned();
@@ -1133,7 +1693,9 @@ impl Lowerer {
                 // for x in <array|dict>: iterate array elements or dict keys.
                 // Enter a scope so redeclarations inside the body (e.g.
                 // `total := total + item`) don't leak past the loop boundary.
-                names.push_scope();
+                // The marker also drives per-iteration releases at the
+                // bottom (loop_scope_end): the item clone frees with it.
+                let item_scope = self.loop_scope_begin(names);
                 let v = &vars[0].name;
                 // Green: per-iteration item is a frame cell (fresh when a
                 // nested closure may capture it — same isolation as the
@@ -1177,7 +1739,7 @@ impl Lowerer {
                     (idx, len)
                 };
                 out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
-                out.push_str("    zz_safepoint();\n");
+                self.emit_safepoint(out, "    ");
                 // Green: the item is a frame cell (assigned, never
                 // declared); plain path declares the per-iteration local.
                 if green_iter {
@@ -1213,13 +1775,14 @@ impl Lowerer {
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
+                self.loop_scope_end(names, out, item_scope);
                 out.push_str("    }\n");
-                names.pop_scope();
             } else if vars.len() == 2 {
                 // for k, v in <dict> — dict entries — or
                 // for i, x in <array of pairs> (e.g. `xs.enumerate()`) —
                 // tuple elements. Runtime tag dispatch like the 1-var path.
-                names.push_scope();
+                // Marker covers both item clones for per-iteration release.
+                let pair_scope = self.loop_scope_begin(names);
                 let k_name = &vars[0].name;
                 let v_name = &vars[1].name;
                 // Green: per-iteration items are frame cells (fresh when
@@ -1269,7 +1832,7 @@ impl Lowerer {
                         "    {lderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     out.push_str(&format!("    for (; {ideref} < {lderef}; {ideref}++) {{\n"));
-                    out.push_str("    zz_safepoint();\n");
+                    self.emit_safepoint(out, "    ");
                     let (_, pederef, _) = self.green_cell(names, "int", false, out);
                     out.push_str(&format!("    {pederef} = 0;\n"));
                     let (_, pairderef, _) = self.green_cell(names, "zz_value", false, out);
@@ -1296,7 +1859,7 @@ impl Lowerer {
                         "    int64_t {len} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     out.push_str(&format!("    for (; {idx} < {len}; {idx}++) {{\n"));
-                    out.push_str("    zz_safepoint();\n");
+                    self.emit_safepoint(out, "    ");
                     let pe = names.fresh("_pe");
                     out.push_str(&format!("    int {pe} = 0;\n"));
                     let pair = names.fresh("_pair");
@@ -1339,8 +1902,8 @@ impl Lowerer {
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
+                self.loop_scope_end(names, out, pair_scope);
                 out.push_str("    }\n");
-                names.pop_scope();
             }
         }
     }
@@ -1374,11 +1937,13 @@ impl Lowerer {
             }
             // Tail call/compound was captured into __tail by emit_block.
             if let Some(tmp) = names.stack.get("__tail").and_then(|s| s.last()).cloned() {
-                out.push_str(&format!("    return {};\n", tmp.0));
+                let ret = self.ret_unbox(tmp.0);
+                out.push_str(&format!("    return {ret};\n"));
                 return Some(());
             }
             // Pure leaf tail: emit directly (rarely reached).
             let val = self.emit_tail_value(e, names, out);
+            let val = self.ret_unbox(val);
             out.push_str(&format!("    return {val};\n"));
             return Some(());
         }
@@ -1386,6 +1951,7 @@ impl Lowerer {
         if let Some(Stmt::Decl { name, .. }) = block.stmts.last() {
             let n = name.name.clone();
             if let Some(val) = self.decl_tail_value(&n, names, out) {
+                let val = self.ret_unbox(val);
                 out.push_str(&format!("    return {val};\n"));
                 return Some(());
             }
@@ -1407,8 +1973,47 @@ impl Lowerer {
         for stmt in &b.stmts[..n.saturating_sub(1)] {
             self.emit_stmt(stmt, names, out, false);
         }
-        if self.last_stmt_value(b, names, out).is_none() {
-            out.push_str("        return zz_unit();\n");
+        // NOTE: the tail statement is lowered here directly, NOT via
+        // `last_stmt_value`: that helper serves callers that already
+        // emitted the whole block (function/closure bodies, where a tail
+        // call was captured into `__tail`). In a branch the last
+        // statement was deliberately skipped above, so `__tail` lookup
+        // would read a stale outer entry — and trailing `return` was
+        // never handled at all (branches fell through to
+        // `return zz_unit()`, silently dropping call results).
+        match b.stmts.last() {
+            Some(Stmt::Expr(e)) if matches!(e, Expr::If { .. }) => {
+                self.emit_tail_expr(e, names, out);
+            }
+            Some(Stmt::Expr(e)) => {
+                let val = self.emit_tail_value(e, names, out);
+                let val = self.ret_unbox(val);
+                out.push_str(&format!("        return {val};\n"));
+            }
+            Some(Stmt::Return { value, .. }) => match value {
+                Some(v) => {
+                    let val = self.emit_expr(v, names, out);
+                    if let Some(expected) = *self.unboxed_ret.borrow() {
+                        let val = self.unbox_for_return(v, val, names, expected);
+                        out.push_str(&format!("        return {val};\n"));
+                    } else {
+                        let val = box_scalar_operand(v, names, &val);
+                        out.push_str(&format!("        return {val};\n"));
+                    }
+                }
+                None => out.push_str(&format!("        return {};\n", self.ret_unit())),
+            },
+            Some(Stmt::Decl { name, .. }) => {
+                if let Some(val) = self.decl_tail_value(&name.name, names, out) {
+                    let val = self.ret_unbox(val);
+                    out.push_str(&format!("        return {val};\n"));
+                } else {
+                    out.push_str(&format!("        return {};\n", self.ret_unit()));
+                }
+            }
+            _ => {
+                out.push_str(&format!("        return {};\n", self.ret_unit()));
+            }
         }
         names.pop_scope();
     }
@@ -1433,12 +2038,13 @@ impl Lowerer {
                         other => self.emit_tail_expr(other, names, out),
                     }
                 } else {
-                    out.push_str("        return zz_unit();\n");
+                    out.push_str(&format!("        return {};\n", self.ret_unit()));
                 }
                 out.push_str("    }\n");
             }
             _ => {
                 let val = self.emit_tail_value(e, names, out);
+                let val = self.ret_unbox(val);
                 out.push_str(&format!("    return {val};\n"));
             }
         }

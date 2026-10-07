@@ -1,0 +1,24 @@
+// features: comparison, func-call, import-alias, imports, match, print, selective-import, string-literal
+// E2E: cross-module `pub enum` (qualified + selective).
+import support.enum_shapes as shapes(Color)
+
+func describe(c: shapes.Color) -> str {
+    match c {
+        .Red => "red",
+        .Green => "green",
+        .Blue => "blue",
+        .Custom(s) => s,
+    }
+}
+
+func main() {
+    a: shapes.Color = shapes.Color.Red
+    println(a)
+    println(describe(a))
+    b: Color = Color.Custom("teal")
+    println(b)
+    println(describe(b))
+    println(shapes.is_red(a))
+    println(shapes.is_red(b))
+    println("enum_import_ok")
+}

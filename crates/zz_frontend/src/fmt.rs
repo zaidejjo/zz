@@ -142,7 +142,11 @@ impl<'a> FmtCtx<'a> {
                 self.fmt_block(body, source);
             }
             Stmt::Struct {
-                name, fields, pub_, ..
+                name,
+                generics,
+                fields,
+                pub_,
+                ..
             } => {
                 self.write_indent();
                 if *pub_ {
@@ -150,6 +154,16 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.write_str("struct ");
                 self.write_str(&name.join("."));
+                if !generics.is_empty() {
+                    self.write_str("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        self.write_str(&g.name);
+                    }
+                    self.write_str(">");
+                }
                 self.write_str(" {");
                 if fields.is_empty() {
                     self.write_str("}");
@@ -168,6 +182,75 @@ impl<'a> FmtCtx<'a> {
                             self.write_str(&fname.name);
                             self.write_str(": ");
                             self.fmt_ty(fty, source);
+                        }
+                        self.write_str(",");
+                        self.write_line();
+                    }
+                    self.write_indent();
+                    self.write_str("}");
+                }
+            }
+            Stmt::TypeAlias {
+                name,
+                generics,
+                target,
+                pub_,
+                ..
+            } => {
+                self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
+                self.write_str("type ");
+                self.write_str(&name.join("."));
+                if !generics.is_empty() {
+                    self.write_str("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        self.write_str(&g.name);
+                    }
+                    self.write_str(">");
+                }
+                self.write_str(" = ");
+                self.fmt_ty(target, source);
+            }
+            Stmt::Enum {
+                name,
+                generics,
+                variants,
+                pub_,
+                ..
+            } => {
+                self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
+                self.write_str("enum ");
+                self.write_str(&name.join("."));
+                if !generics.is_empty() {
+                    self.write_str("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        self.write_str(&g.name);
+                    }
+                    self.write_str(">");
+                }
+                self.write_str(" {");
+                if variants.is_empty() {
+                    self.write_str("}");
+                } else {
+                    self.write_line();
+                    for (vname, payload) in variants {
+                        self.write_indent();
+                        self.write_str(&vname.name);
+                        if let Some(pty) = payload {
+                            self.write_str("(");
+                            self.fmt_ty(pty, source);
+                            self.write_str(")");
                         }
                         self.write_str(",");
                         self.write_line();
@@ -288,6 +371,16 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(" = ");
                 self.fmt_expr(value, source);
             }
+            Stmt::CompoundAssign {
+                target, op, value, ..
+            } => {
+                self.write_indent();
+                self.fmt_expr(target, source);
+                self.write_str(" ");
+                self.write_str(op.symbol());
+                self.write_str("= ");
+                self.fmt_expr(value, source);
+            }
             Stmt::Destructure { pat, value, .. } => {
                 self.write_indent();
                 self.fmt_pattern(pat, source);
@@ -296,6 +389,7 @@ impl<'a> FmtCtx<'a> {
             }
             Stmt::Impl {
                 name,
+                generics,
                 methods,
                 pub_,
                 ..
@@ -306,6 +400,16 @@ impl<'a> FmtCtx<'a> {
                 }
                 self.write_str("impl ");
                 self.write_str(&name.join("."));
+                if !generics.is_empty() {
+                    self.write_str("<");
+                    for (i, g) in generics.iter().enumerate() {
+                        if i > 0 {
+                            self.write_str(", ");
+                        }
+                        self.write_str(&g.name);
+                    }
+                    self.write_str(">");
+                }
                 self.write_str(" {");
                 if methods.is_empty() {
                     self.write_str("}");
@@ -486,7 +590,7 @@ impl<'a> FmtCtx<'a> {
             Expr::Float { value, .. } => self.write_str(&value.to_string()),
             Expr::Str { value, .. } => {
                 self.write_str("\"");
-                self.write_str(value);
+                self.write_str(&escape_braces(value));
                 self.write_str("\"");
             }
             Expr::Bool { value, .. } => {
@@ -637,7 +741,7 @@ impl<'a> FmtCtx<'a> {
                 self.write_str("\"");
                 for part in parts {
                     match part {
-                        FmtPart::Text(t) => self.write_str(t),
+                        FmtPart::Text(t) => self.write_str(&escape_braces(t)),
                         FmtPart::Expr(e, spec) => {
                             self.write_str("{");
                             self.fmt_expr(e, source);
@@ -762,7 +866,7 @@ impl<'a> FmtCtx<'a> {
                 Lit::Float(v) => self.write_str(&v.to_string()),
                 Lit::Str(v) => {
                     self.write_str("\"");
-                    self.write_str(v);
+                    self.write_str(&escape_braces(v));
                     self.write_str("\"");
                 }
                 Lit::Bool(v) => {
@@ -778,15 +882,24 @@ impl<'a> FmtCtx<'a> {
                     self.write_str(")");
                 }
             }
-            Pattern::Tuple { pats, .. } => {
-                self.write_str("(");
+            Pattern::Tuple { pats, span } => {
+                // Bare destructuring (`a, b := ...`) has no parens in
+                // source; adding them would change the significant-token
+                // stream, which formatting must preserve. The span covers
+                // the parens exactly when they were written.
+                let paren = source.as_bytes().get(span.start as usize) == Some(&b'(');
+                if paren {
+                    self.write_str("(");
+                }
                 for (i, p) in pats.iter().enumerate() {
                     if i > 0 {
                         self.write_str(", ");
                     }
                     self.fmt_pattern(p, source);
                 }
-                self.write_str(")");
+                if paren {
+                    self.write_str(")");
+                }
             }
             Pattern::Or { pats, .. } => {
                 for (i, p) in pats.iter().enumerate() {
@@ -805,6 +918,7 @@ fn unop_str(op: UnOp) -> &'static str {
         UnOp::Neg => "-",
         UnOp::Pos => "+",
         UnOp::Not => "!",
+        UnOp::BitNot => "~",
     }
 }
 
@@ -825,7 +939,30 @@ fn binop_str(op: BinOp) -> &'static str {
         BinOp::And => "&&",
         BinOp::Or => "||",
         BinOp::Elvis => "?:",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
     }
+}
+
+/// Escape literal braces for string output: a decoded `{` / `}` must print
+/// as `{{` / `}}` so the result re-parses to the same value instead of
+/// opening an interpolation.
+fn escape_braces(s: &str) -> String {
+    if !s.contains(['{', '}']) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '{' => out.push_str("{{"),
+            '}' => out.push_str("}}"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -847,6 +984,16 @@ mod tests {
         assert!(out.contains("func add("));
         assert!(out.contains("-> int"));
         assert!(out.contains("return a + b"));
+    }
+
+    #[test]
+    fn format_bitwise_ops() {
+        let src = "x:=a&b|c^d<<e>>f";
+        let out = fmt(src);
+        assert!(out.contains("a & b | c ^ d << e >> f"), "got: {out}");
+        let src = "y:=~a";
+        let out = fmt(src);
+        assert!(out.contains("~a"), "got: {out}");
     }
 
     #[test]
@@ -915,6 +1062,21 @@ mod tests {
         let out = fmt(src);
         assert!(out.contains("if x > 0 {"));
         assert!(out.contains("} else {"));
+    }
+
+    #[test]
+    fn format_brace_escapes_roundtrip() {
+        // Literal `{` / `}` must print doubled so re-parsing yields the
+        // same value instead of opening an interpolation.
+        let out = fmt("x := \"{{name}}\"\n");
+        assert!(out.contains("\"{{name}}\""), "got: {out}");
+        let out = fmt("x := \"{{{y}}}\"\n");
+        assert!(out.contains("\"{{{y}}}\""), "got: {out}");
+        // Re-parse stability: formatting twice is idempotent.
+        let once = fmt("x := \"a{{b}}c\"\n");
+        let parsed = parse(&once);
+        let twice = format_program(&parsed.program, &once, &FormatConfig::default());
+        assert_eq!(once, twice, "fmt not idempotent: {once:?} vs {twice:?}");
     }
 
     #[test]

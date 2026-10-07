@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -15,16 +17,49 @@ pub(crate) async fn handle_completion(
         None => return Ok(None),
     };
     let program = match &doc.program {
-        Some(p) => p,
+        Some(p) => p.clone(),
         None => return Ok(None),
     };
 
+    // Self-heal when the async recheck hasn't populated `check_result` yet
+    // (slow check, debounce skip, or a check that predates this edit):
+    // run a synchronous single-file check so member completion (`math.`)
+    // never returns zero items on a healthy document (#257). Scope
+    // completion already answers without a result, but dot-access needs one.
+    let owned_result;
+    let owned_bindings: Option<HashMap<String, zz_checker::Type>>;
+    let check_ref = match doc.check_result.as_ref() {
+        Some(cr) => {
+            owned_bindings = None;
+            Some(cr)
+        }
+        None => {
+            let doc_path = uri.to_file_path().ok();
+            let (ib, ifunc, is, ia, ie) = backend
+                .state
+                .checker_seed_for_path(&program, doc_path.as_deref());
+            owned_bindings = Some(ib.clone());
+            owned_result = zz_checker::check_program(&program, ib, ifunc, is, ia, ie);
+            Some(&owned_result)
+        }
+    };
+
     let offset = doc.line_index.position_to_offset(&doc.source, pos);
+    let seed_bindings =
+        owned_bindings.unwrap_or_else(|| doc.seed_bindings.clone().unwrap_or_default());
+    let cenv = crate::completion::CompletionEnv {
+        doc_dir: uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf())),
+        seed_bindings,
+    };
     let resp = crate::completion::completions_for_position(
-        program,
+        &program,
         &doc.source,
         offset,
-        doc.check_result.as_ref(),
+        check_ref,
+        Some(&cenv),
     );
     Ok(resp)
 }
@@ -146,7 +181,7 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
         name: field, obj, ..
     }) = node.expr
     {
-        if let Some(zz_checker::Type::Struct(struct_name)) =
+        if let Some(zz_checker::Type::Struct(struct_name, _)) =
             crate::lookup::resolve_type_of_expr(program, check_result, obj)
         {
             if let Some(ssig) = check_result.structs.get(&struct_name) {

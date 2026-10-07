@@ -198,6 +198,21 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
                 mark_escaping_recursive(value, tp, ctx.func_name, result);
             }
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            // Same escape behavior as `=`: the target is also read, which
+            // never escapes anything the plain assignment wouldn't.
+            if let Expr::Ident { name, .. } = target {
+                if ctx.global_names.contains(name) || ctx.param_names.contains(name) {
+                    mark_escaping_recursive(value, tp, ctx.func_name, result);
+                } else {
+                    let cls = classify_expr(value, tp, ctx);
+                    result.classes.insert(value.span(), cls);
+                    analyze_expr(value, tp, ctx, result);
+                }
+            } else {
+                mark_escaping_recursive(value, tp, ctx.func_name, result);
+            }
+        }
         Stmt::Expr(e) => {
             analyze_expr(e, tp, ctx, result);
         }
@@ -509,6 +524,16 @@ fn stmt_has_non_scalar_alloc(stmt: &Stmt, tp: &TypedProgram, scope: &str) -> boo
     match stmt {
         Stmt::Decl { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
         Stmt::Expr(e) => expr_has_non_scalar_alloc(e, tp, scope),
+        // Assignments (and compound/destructure/defer payloads) allocate
+        // exactly like declarations: `s = s + lit` in a loop without this
+        // arm never gets a loop arena, and its chained heap temporaries are
+        // never released (GB-scale leak on accumulation loops). `Return`
+        // values are deliberately excluded: a returned allocation must stay
+        // valid past loop exit, which an iteration arena cannot provide.
+        Stmt::Assign { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
+        Stmt::CompoundAssign { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
+        Stmt::Destructure { value, .. } => expr_has_non_scalar_alloc(value, tp, scope),
+        Stmt::Defer { expr, .. } => expr_has_non_scalar_alloc(expr, tp, scope),
         Stmt::For { body, .. } => has_non_scalar_alloc(body, tp, scope),
         _ => false,
     }
@@ -601,7 +626,14 @@ mod tests {
                 ret: unit,
             },
         );
-        let res = crate::build_program(&parsed.program, HashMap::new(), funcs, HashMap::new());
+        let res = crate::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
         res.program
     }
 

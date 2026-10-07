@@ -63,12 +63,81 @@ fn unary_minus() {
 }
 
 #[test]
+fn unary_minus_folds_i64_min() {
+    // `-9223372036854775808` has no positive counterpart: the literal
+    // alone is out of range, but folded with the minus it is exactly MIN.
+    let p = parse_ok("-9223372036854775808");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Int { value, .. }) => {
+            assert_eq!(*value, i64::MIN)
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn unary_minus_folds_i64_min_underscores() {
+    let p = parse_ok("-9_223_372_036_854_775_808");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Int { value, .. }) => {
+            assert_eq!(*value, i64::MIN)
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn unary_minus_past_min_still_errors() {
+    // One past MIN must keep failing (genuine overflow, not a literal).
+    let parsed = zz_frontend::parse("-9223372036854775809");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("out of range")),
+        "expected range error, got: {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
 fn parses_call() {
     let p = parse_ok("add(1, 2)");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Expr(E::Call { args, .. }) => assert_eq!(args.len(), 2),
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+#[test]
+fn parses_call_trailing_comma() {
+    for src in ["add(1, 2,)", "add(\n    1,\n    2,\n)"] {
+        let p = parse_ok(src);
+        match &p.stmts[0] {
+            zz_frontend::ast::Stmt::Expr(E::Call { args, .. }) => assert_eq!(args.len(), 2),
+            other => panic!("unexpected for `{src}`: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn parses_call_trailing_comma_named_args() {
+    let p = parse_ok("greet(\"bo\", greeting: \"hey\",)");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Call { args, named, .. }) => {
+            assert_eq!(args.len(), 1);
+            assert_eq!(named.len(), 1);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn call_semicolon_still_rejected() {
+    // An explicit `;` is a real StmtEnd even inside parens: `f(a, ;)`
+    // must stay an error, unlike a bare trailing comma.
+    let parsed = zz_frontend::parse("f(a, ;)");
+    assert!(!parsed.errors.is_empty(), "expected parse errors");
 }
 
 #[test]
@@ -80,6 +149,24 @@ fn parses_closure() {
             assert!(params[0].ty.is_some());
             assert!(params[1].ty.is_none());
         }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_closure_trailing_comma() {
+    let p = parse_ok("|x: int, y,| x + y");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Closure { params, .. }) => assert_eq!(params.len(), 2),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_func_params_trailing_comma() {
+    let p = parse_ok("func add(a: int, b: int,) -> int { a + b }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { params, .. } => assert_eq!(params.len(), 2),
         other => panic!("unexpected: {other:?}"),
     }
 }
@@ -419,6 +506,37 @@ fn triple_escaped_braces_are_literal_text() {
 }
 
 #[test]
+fn double_brace_escapes_are_literal_text() {
+    // `"{{name}}"` is a plain string `{name}`, not an interpolation.
+    let p = parse_ok("\"{{name}}\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Str { value, .. }) => assert_eq!(value, "{name}"),
+        other => panic!("expected str expr, got {other:?}"),
+    }
+    // `"{{{x}}}"` is literal `{` + interpolation + literal `}`.
+    let parts = fmt_parts_of("\"{{{x}}}\"");
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(&parts[0], FmtPart::Text(t) if t == "{"));
+    assert!(
+        matches!(&parts[1], FmtPart::Expr(e, None) if matches!(e.as_ref(), E::Ident { name, .. } if name == "x"))
+    );
+    assert!(matches!(&parts[2], FmtPart::Text(t) if t == "}"));
+}
+
+#[test]
+fn triple_double_brace_escapes_are_literal_text() {
+    let p = parse_ok("\"\"\"{{name}}\"\"\"");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Str { value, .. }) => assert_eq!(value, "{name}"),
+        other => panic!("expected str expr, got {other:?}"),
+    }
+    let parts = fmt_parts_of("\"\"\"{{{x}}}\"\"\"");
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(&parts[0], FmtPart::Text(t) if t == "{"));
+    assert!(matches!(&parts[2], FmtPart::Text(t) if t == "}"));
+}
+
+#[test]
 fn triple_format_spec_parses() {
     let parts = fmt_parts_of("\"\"\"{pi:.2f}\"\"\"");
     assert_eq!(parts.len(), 3);
@@ -458,5 +576,121 @@ fn dict_literal_still_parses() {
             assert!(matches!(value, E::Dict { .. }));
         }
         other => panic!("expected decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn bitwise_and_binds_tighter_than_xor_and_or() {
+    // `a | b ^ c & d` => `a | (b ^ (c & d))`
+    let p = parse_ok("a | b ^ c & d");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Binary {
+            op: BinOp::BitOr,
+            left,
+            right,
+            ..
+        }) => {
+            assert!(matches!(**left, E::Ident { .. }));
+            match right.as_ref() {
+                E::Binary {
+                    op: BinOp::BitXor,
+                    right: xor_right,
+                    ..
+                } => {
+                    assert!(matches!(
+                        **xor_right,
+                        E::Binary {
+                            op: BinOp::BitAnd,
+                            ..
+                        }
+                    ));
+                }
+                other => panic!("expected BitXor, got {other:?}"),
+            }
+        }
+        other => panic!("expected BitOr, got {other:?}"),
+    }
+}
+
+#[test]
+fn shift_binds_tighter_than_bitand_but_looser_than_add() {
+    // `a & b << c + d` => `a & (b << (c + d))`
+    let p = parse_ok("a & b << c + d");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Binary {
+            op: BinOp::BitAnd,
+            right,
+            ..
+        }) => match right.as_ref() {
+            E::Binary {
+                op: BinOp::Shl,
+                right: shl_right,
+                ..
+            } => {
+                assert!(matches!(**shl_right, E::Binary { op: BinOp::Add, .. }));
+            }
+            other => panic!("expected Shl, got {other:?}"),
+        },
+        other => panic!("expected BitAnd, got {other:?}"),
+    }
+}
+
+#[test]
+fn bitwise_binds_tighter_than_comparison() {
+    // `x & mask == expected` => `(x & mask) == expected`
+    let p = parse_ok("x & mask == expected");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Binary {
+            op: BinOp::Eq,
+            left,
+            ..
+        }) => {
+            assert!(matches!(
+                **left,
+                E::Binary {
+                    op: BinOp::BitAnd,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected Eq, got {other:?}"),
+    }
+}
+
+#[test]
+fn shr_parses_as_shift() {
+    let p = parse_ok("a >> b");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Binary { op: BinOp::Shr, .. }) => {}
+        other => panic!("expected Shr, got {other:?}"),
+    }
+}
+
+#[test]
+fn bitnot_parses_as_unary() {
+    let p = parse_ok("~a");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Unary {
+            op: UnOp::BitNot, ..
+        }) => {}
+        other => panic!("expected BitNot, got {other:?}"),
+    }
+}
+
+#[test]
+fn single_pipe_still_parses_closure() {
+    // The `|` token doubles as BitOr — leading `|` must stay a closure.
+    let p = parse_ok("|x| x | 1");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Expr(E::Closure { body, .. }) => {
+            assert!(matches!(
+                **body,
+                E::Binary {
+                    op: BinOp::BitOr,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected closure, got {other:?}"),
     }
 }

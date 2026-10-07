@@ -7,9 +7,10 @@ pub mod checker;
 pub mod type_;
 pub mod unify;
 
+pub use checker::inference::subst as subst_type;
 pub use checker::{
-    check_program, check_program_typed, check_program_with_consts, CheckResult, ConvertImpl,
-    FuncSig, SpanKey, StructSig, TOP_SCOPE,
+    check_program, check_program_typed, check_program_with_consts, AliasSig, CheckResult,
+    ConvertImpl, EnumSig, FuncSig, SpanKey, StructSig, TOP_SCOPE,
 };
 pub use type_::Type;
 pub use unify::{Unifier, UnifyError};

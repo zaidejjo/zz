@@ -12,6 +12,7 @@ path = "src/main.rs"
 zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }
 zz_hir = { path = "../zz_hir" }
+zz_ir = { path = "../zz_ir" }
 zz_runtime = { path = "../zz_runtime" }
 zz_stdlib = { path = "../zz_stdlib" }
 zz_codegen = { path = "../zz_codegen" }
@@ -21,7 +22,14 @@ zz_plugin = { path = "../zz_plugin" }
 codespan-reporting = "0.11"
 reedline = "0.51"
 dirs = "6"
+sha2 = { workspace = true }
 nu-ansi-term = "0.50"
 toml = "0.8"
 serde_json = { workspace = true }
+hex = { workspace = true }
+# S1 arena-scale: check-cache derives.
+serde = { workspace = true }
 base64 = { workspace = true }
+ureq = { workspace = true }
+tar = { workspace = true }
+lzma-rs = { workspace = true }

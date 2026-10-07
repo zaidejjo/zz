@@ -1,3 +1,4 @@
+// features: bool-logic, closures, comparison, decorators, func-call, if-else, known-divergence, locals, methods, print, return, string-literal, struct-methods, structs
 // E2E: explicit compile-time decorators (logging, route, login_required)
 
 // Logging middleware: wraps any `func(str) -> str`.

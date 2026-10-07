@@ -1,0 +1,4 @@
+// features: error-case, int-arith
+// E2E: edge — i64::MIN % -1 traps Overflow on all legs.
+x := -9223372036854775808 % -1
+println(x)

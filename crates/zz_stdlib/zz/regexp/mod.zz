@@ -21,7 +21,7 @@ impl Regexp {
 }
 
 func regexp.is_email(s: str) -> bool {
-    match regexp.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$") {
+    match regexp.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{{2,}}$") {
         .ok(re) => re.is_match(s),
         .err(_) => false,
     }

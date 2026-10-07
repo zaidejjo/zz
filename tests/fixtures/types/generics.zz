@@ -1,3 +1,4 @@
+// features: arrays, bool-logic, comparison, float-arith, func-call, generics, indexing, locals, print, string-literal
 // E2E: Generics — generic functions with type inference
 func identity<T>(x: T) -> T {
     x

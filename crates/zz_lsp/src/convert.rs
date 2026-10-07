@@ -107,8 +107,19 @@ fn utf16_column(source: &str, line_start: usize, end: usize) -> u32 {
 /// If the column falls in the middle of a surrogate pair, the result is the
 /// start of that character (rounding down).
 fn byte_offset_for_utf16_col(source: &str, line_start: usize, utf16_col: u32) -> u32 {
+    // Clamp to the end of the *line*, not the end of the file: positions
+    // past the line end (e.g. a client asking for char 4 on an empty line)
+    // used to spill into following lines, misplacing completions and
+    // diagnostics. Newlines themselves count as one column then stop.
     let mut col = 0u32;
     for (i, ch) in source[line_start..].char_indices() {
+        if ch == '\n' {
+            return (line_start + i) as u32;
+        }
+        // Treat \r\n as one line ending: stop at the \r.
+        if ch == '\r' {
+            return (line_start + i) as u32;
+        }
         let char_len = ch.len_utf16() as u32;
         if col + char_len > utf16_col {
             return (line_start + i) as u32;
@@ -602,5 +613,29 @@ mod tests {
             DiagnosticSeverity::WARNING
         );
         assert_eq!(severity_to_lsp(Severity::Help), DiagnosticSeverity::HINT);
+    }
+}
+
+#[cfg(test)]
+mod line_clamp_tests {
+    use super::*;
+
+    #[test]
+    fn position_past_line_end_clamps_to_line_end() {
+        // "import std.math\nfunc main() {\n\n}\n": line 2 is empty.
+        // Asking for char 4 on the empty line must stay on line 2
+        // (offset of the newline), not spill into `}` on line 3.
+        let src = "import std.math\nfunc main() {\n\n}\n";
+        let index = LineIndex::new(src);
+        let offset = index.position_to_offset(
+            src,
+            Position {
+                line: 2,
+                character: 4,
+            },
+        );
+        let line_start_line2 = src.find("\n}\n").unwrap();
+        assert_eq!(offset as usize, line_start_line2);
+        assert_eq!(index.offset_to_position(src, offset).line, 2);
     }
 }

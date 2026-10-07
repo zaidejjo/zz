@@ -1,3 +1,4 @@
+// features: comparison, func-call, int-arith, locals, print, string-literal, struct-methods, structs
 // E2E: Struct embedding (anonymous fields) — composition via promotion.
 // `User` embeds `Base`: `u.id` resolves as `u.Base.id`, and `u.area()`
 // dispatches to `Base.area` with the embedded value as receiver.

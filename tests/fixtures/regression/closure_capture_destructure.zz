@@ -1,3 +1,4 @@
+// features: closures, destructuring, int-arith, locals, print, string-literal, tuples
 // Regression: top-level destructured names must be visible to
 // closures on both engines (native module globals, not main-locals).
 (a, b) := (10, 20)

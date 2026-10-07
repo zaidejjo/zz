@@ -1,3 +1,4 @@
+// features: comparison, func-call, locals, pub-visibility
 pub func hval() -> int { // hlpr
     v :=  1234
     v

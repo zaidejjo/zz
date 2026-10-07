@@ -122,6 +122,8 @@ impl<'a> Walk<'a> {
                 self.scopes.pop();
             }
             Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. }
             | Stmt::Import { .. }
             | Stmt::ExternBlock { .. }
             | Stmt::Link { .. } => {}
@@ -143,6 +145,11 @@ impl<'a> Walk<'a> {
             }
             Stmt::Assign { target, value, .. } => {
                 // The target is a use too: `count = count + 1` captures `count`.
+                self.expr(target);
+                self.expr(value);
+            }
+            Stmt::CompoundAssign { target, value, .. } => {
+                // Same as `=`: the target is read and written.
                 self.expr(target);
                 self.expr(value);
             }

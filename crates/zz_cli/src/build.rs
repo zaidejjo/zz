@@ -34,6 +34,16 @@ pub enum BuildMode {
     Release,
     Static,
     Pgo,
+    /// PGO phase 2: optimize with collected profile data (`zz profile`).
+    /// Same flags as the instrumented build, plus `-fprofile-use`.
+    PgoUse,
+    /// Max optimization (`zz build --release --full`): release base with
+    /// full LTO (deeper cross-TU optimization/elimination than ThinLTO).
+    Full,
+    /// Max optimization with PGO (`--full -- <train args>`): profile-use
+    /// plus full LTO. Instrumented leg reuses plain `Pgo` (same profile
+    /// quality, faster instrumented build).
+    FullPgo,
 }
 
 /// Release-build knobs: cross target, provider selection, verbosity.
@@ -54,6 +64,21 @@ pub struct ReleaseOptions {
     /// `--allow-hooks`: permit legacy `build = "..."` hooks (direct
     /// deps only; transitive hooks always error).
     pub allow_hooks: bool,
+    /// Internal: static came from the `zz build` default (not an explicit
+    /// `--static`), so impossible-static falls back to dynamic with a
+    /// note instead of erroring. Set by `build_cmd`; everything else
+    /// leaves the default `false` (strict).
+    pub allow_static_downgrade: bool,
+    /// `-o <name>`: publish the binary under this name instead of
+    /// `bin/<stem>`. A bare file name stays inside `bin/`; a value with
+    /// a path separator is used as-is relative to the current
+    /// directory (go-like). Excluded from the cache key: the same
+    /// cached binary is published under any name.
+    pub output: Option<PathBuf>,
+    /// `--chunk`: lower from the unified IR chunk instead of HIR.
+    /// Dual-codegen gate: both paths must agree until full coverage.
+    /// Carried into the cache filename so backends never share entries.
+    pub chunk: bool,
 }
 
 impl ReleaseOptions {
@@ -298,6 +323,9 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
         BuildMode::Release => BuildOptions::release(),
         BuildMode::Static => BuildOptions::static_lto(),
         BuildMode::Pgo => BuildOptions::pgo_generate(),
+        BuildMode::PgoUse => BuildOptions::pgo_use(),
+        BuildMode::Full => BuildOptions::full(),
+        BuildMode::FullPgo => BuildOptions::full_pgo_use(),
     }
 }
 
@@ -832,8 +860,10 @@ fn typed_program_for(
     let res = zz_hir::build_program(
         &merged,
         HashMap::new(),
-        loaded.funcs.clone(),
-        loaded.structs.clone(),
+        loaded.funcs,
+        loaded.structs,
+        loaded.aliases,
+        loaded.enums,
     );
     if !res.diagnostics.is_empty() {
         for d in &res.diagnostics {
@@ -845,6 +875,80 @@ fn typed_program_for(
     let main_key = format!("{entry_ns}.main");
     let (pruned, reach) = zz_hir::dce(&res.program, &main_key);
     Ok((pruned, reach, main_key))
+}
+
+/// Build the unified IR module for `path` (chunk-backend input): load,
+/// check, merge (pure-ZZ stdlib first, mirroring [`typed_program_for`]),
+/// VM-compile, then `lower_typed`. Returns the module + dotted main key.
+fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
+    let entry_ns = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let plugin_funcs = discover_plugin_manifests(path);
+    let loaded = if plugin_funcs.is_empty() {
+        loader::load_program(path)?
+    } else {
+        loader::load_program_with_plugins(path, &plugin_funcs)?
+    };
+    let mut has_errors = false;
+    for e in &loaded.errors {
+        let mut files = zz_frontend::diag::Files::new();
+        let id = files.add(e.name.clone(), e.source.clone());
+        eprint!(
+            "{}",
+            zz_frontend::diag::render_to_string(&files, id, &e.diags)
+        );
+        if e.diags
+            .iter()
+            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+        {
+            has_errors = true;
+        }
+    }
+    if has_errors {
+        return Err("program failed to type-check".into());
+    }
+    // Merged user program. Pure-ZZ stdlib sources are deliberately NOT
+    // merged here: their bodies trip the VM compiler's join verifier
+    // when compiled outside their home module (latent gap — stdlib only
+    // ever runs through the tree-walker today). Calls to pure-ZZ
+    // helpers (e.g. `str.repeat`) therefore fail `coverage` with a clean
+    // "cannot resolve call target" error instead of miscompiling.
+    // Slice-2 (cross-module IR merge, #253) will include them.
+    let mut merged_stmts = Vec::new();
+    let merged_span = loaded
+        .programs
+        .last()
+        .map(|p| p.span)
+        .unwrap_or(Span::new(0, 0));
+    for p in &loaded.programs {
+        merged_stmts.extend(p.stmts.iter().cloned());
+    }
+    let merged = zz_frontend::ast::Program {
+        stmts: merged_stmts,
+        span: merged_span,
+    };
+    let typed = zz_hir::build_program(
+        &merged,
+        HashMap::new(),
+        loaded.funcs,
+        loaded.structs.clone(),
+        loaded.aliases,
+        loaded.enums.clone(),
+    );
+    let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(loaded.natives.keys().cloned().collect());
+    let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+        &merged,
+        std::sync::Arc::new(typed.program.types),
+        loaded.structs,
+        loaded.enums,
+        native_names,
+    );
+    let module = zz_ir::lower::lower_typed(&chunk, &typed.program.funcs)
+        .map_err(|e| format!("zz: ir lower failed: {e}"))?;
+    Ok((module, format!("{entry_ns}.main")))
 }
 
 /// Directory holding build artifacts: `bin/` next to the source file
@@ -920,7 +1024,24 @@ pub fn build_release(
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
     let mut opts = opts_for(mode);
+    opts.allow_static_downgrade = rel.allow_static_downgrade;
     let target = rel.target_opt();
+    // Default-static fallback for macOS (static linking is rejected
+    // there): downgrade to dynamic with a note instead of failing the
+    // default build. Explicit `--static` keeps the hard error in
+    // `validate` below. The note prints only on a real build, after the
+    // cache check, so cache hits stay silent.
+    let mut static_note: Option<&str> = None;
+    if opts.static_link && opts.allow_static_downgrade {
+        let macos = match target {
+            Some(t) => zz_codegen::is_macos_target(t),
+            None => cfg!(target_os = "macos"),
+        };
+        if macos {
+            opts.static_link = false;
+            static_note = Some("macOS targets cannot statically link; building dynamic");
+        }
+    }
 
     // Discover and build plugin native artifacts (compiled .o / .a files
     // plus dependency link flags from each package's ldflags.txt).
@@ -960,11 +1081,42 @@ pub fn build_release(
         Some(c) => c,
         None => {
             let lowered = zz_codegen::lower_only(&pruned, &reach, &main_key);
+            let mut script_opts = opts.clone();
+            script_opts.curl_link = script_opts.curl_link || lowered.needs_curl;
+            script_opts.sqlite_link = script_opts.sqlite_link || lowered.needs_sqlite;
             let dir = bin_dir_for(path);
-            let _ = zz_codegen::emit_c_plus_script(&lowered.source, &dir, target, &opts);
+            let _ = zz_codegen::emit_c_plus_script(&lowered.source, &dir, target, &script_opts);
             return Err(zz_codegen::BuildError::NoClang.to_string());
         }
     };
+    // Seed system-lib needs from reachability before the static-syslibs
+    // probe: with conditional linking, programs that neither fetch nor
+    // query need no static syslibs, so the probe must not downgrade them.
+    // The final `build_native` ORs the same flags again from lowering.
+    opts.curl_link = opts.curl_link || zz_codegen::ffi::needs_curl_link(&reach.natives);
+    opts.sqlite_link = opts.sqlite_link || zz_codegen::ffi::needs_sqlite_link(&reach.natives);
+    // Default-static fallback for missing static system libraries: only
+    // the libraries the program actually needs are probed (cached per
+    // provider + lib set). Downgrade to dynamic with a note instead of
+    // failing the default build. Explicit `--static` skips this
+    // (allow_static_downgrade false) and keeps the linker's error.
+    if opts.static_link
+        && opts.allow_static_downgrade
+        && !zz_codegen::compile::static_syslibs_available_for(
+            &clang,
+            opts.curl_link,
+            opts.sqlite_link,
+        )
+    {
+        opts.static_link = false;
+        static_note = if opts.curl_link && opts.sqlite_link {
+            Some("static system libraries (libcurl.a, libsqlite3.a) not found; building dynamic")
+        } else if opts.curl_link {
+            Some("static system library (libcurl.a) not found; building dynamic")
+        } else {
+            Some("static system library (libsqlite3.a) not found; building dynamic")
+        };
+    }
     if rel.verbose {
         eprintln!(
             "zz: {} {}",
@@ -973,6 +1125,18 @@ pub fn build_release(
         );
     }
 
+    // `-o` renames at publish time only (excluded from the cache key:
+    // identical source + options reuse one cached binary under any name).
+    // Captured before `opts` moves into the clang build below.
+    let output = rel.output.clone();
+    // Cache: reuse when the same source + build options + target were
+    // built before. The chunk backend carries its own slug so the two
+    // codegen paths never share entries (dual-codegen gate).
+    let kind_slug = if rel.chunk {
+        format!("{mode:?}-chunk")
+    } else {
+        format!("{mode:?}")
+    };
     // Cache: reuse when the same source + build options + target were
     // built before.
     let dir = cache_dir();
@@ -983,18 +1147,21 @@ pub fn build_release(
     // The embed tree is content-fingerprinted separately (compact slug
     // addition — asset edits must never reuse a non-embed binary).
     let cached = if embed_slug.is_empty() {
-        dir.join(format!("{key}-{mode:?}-{target_slug}"))
+        dir.join(format!("{key}-{kind_slug}-{target_slug}"))
     } else {
-        dir.join(format!("{key}-{mode:?}-{target_slug}-{embed_slug}"))
+        dir.join(format!("{key}-{kind_slug}-{target_slug}-{embed_slug}"))
     };
 
     if is_usable_cache_binary(&cached) {
         // Reuse the cached binary.
-        return publish_to_bin(&cached, path, target);
+        return publish_to_bin(&cached, path, target, output.as_deref());
     }
     // Stale artifact (interrupted build, missing exec bit, empty file):
     // drop it so the fresh build below replaces it.
     let _ = std::fs::remove_file(&cached);
+    if let Some(note) = static_note {
+        eprintln!("zz: note: {note}");
+    }
 
     // Build to a unique temp path in the same directory, then atomically
     // rename into place. Concurrent builds of the same key (parallel tests,
@@ -1002,11 +1169,33 @@ pub fn build_release(
     // observers never see a partially-written or non-executable binary.
     static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let tmp = dir.join(format!(
-        "{key}-{mode:?}-{target_slug}.{}.{}.tmp",
+        "{key}-{kind_slug}-{target_slug}.{}.{}.tmp",
         std::process::id(),
         TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
     ));
-    if let Err(e) =
+    // Chunk backend: lower from the unified IR, then compile the
+    // emitted source with the same option/flag flow as `build_native`.
+    if rel.chunk {
+        let (module, main_key) = chunk_module_for(path)?;
+        let lowered =
+            zz_codegen::build_chunk_module(&module, &main_key).map_err(|e| e.to_string())?;
+        opts.native_rt = opts.native_rt || lowered.needs_native_rt;
+        opts.pg_link = opts.pg_link || lowered.needs_pg_link;
+        opts.float_link = opts.float_link || lowered.needs_float_fmt;
+        opts.curl_link = opts.curl_link || lowered.needs_curl;
+        opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+        if opts.static_link && (opts.native_rt || opts.float_link) && opts.allow_static_downgrade {
+            opts.static_link = false;
+            eprintln!(
+                "zz: note: static link unavailable (program needs the Rust native runtime); building dynamic"
+            );
+        }
+        if let Err(e) = zz_codegen::compile::build_with(&lowered.source, &tmp, opts, target, &clang)
+        {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+    } else if let Err(e) =
         zz_codegen::build_native_with(&pruned, &reach, &main_key, opts, target, &clang, &tmp)
     {
         let _ = std::fs::remove_file(&tmp);
@@ -1033,7 +1222,7 @@ pub fn build_release(
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("cannot publish cache entry: {e}"));
     }
-    publish_to_bin(&cached, path, target)
+    publish_to_bin(&cached, path, target, output.as_deref())
 }
 
 /// Copy a cached binary into `bin/` next to the source with the
@@ -1043,16 +1232,48 @@ pub fn build_release(
 /// atomic rename: parallel `zz run --native` / `zz build` invocations for
 /// the same fixture (e.g. `cargo test --all` running several test binaries
 /// at once) must never observe — or execute — a half-written binary.
-fn publish_to_bin(cached: &Path, src: &Path, target: Option<&str>) -> Result<PathBuf, String> {
-    let stem = src
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "app".to_string());
-    let dir = bin_dir_for(src);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create bin dir: {e}"))?;
-    let dest = dir.join(bin_name(&stem, target));
+fn publish_to_bin(
+    cached: &Path,
+    src: &Path,
+    target: Option<&str>,
+    output: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let dest = match output {
+        Some(o) if o.components().count() > 1 => {
+            // Path-like `-o` (contains a separator): exact destination
+            // relative to the current directory (go-like).
+            let mut dest = o.to_path_buf();
+            let windows = match target {
+                Some(t) => zz_codegen::is_windows_target(t),
+                None => cfg!(windows),
+            };
+            if windows && dest.extension().is_none() {
+                dest.set_extension("exe");
+            }
+            dest
+        }
+        Some(o) => {
+            // Bare `-o` name: keep the `bin/` convention.
+            let stem = o.to_string_lossy().into_owned();
+            bin_dir_for(src).join(bin_name(&stem, target))
+        }
+        None => {
+            let stem = src
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "app".to_string());
+            bin_dir_for(src).join(bin_name(&stem, target))
+        }
+    };
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create output dir: {e}"))?;
+        }
+    }
     static PUBLISH_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let tmp = dir.join(format!(
+    let tmp_dir = dest.parent().filter(|p| !p.as_os_str().is_empty());
+    let tmp = tmp_dir.unwrap_or(std::path::Path::new(".")).join(format!(
         ".{}.publish-{}.{}.tmp",
         dest.file_name().unwrap_or_default().to_string_lossy(),
         std::process::id(),

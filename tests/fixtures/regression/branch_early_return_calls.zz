@@ -1,0 +1,31 @@
+// features: bool-logic, comparison, func-call, if-else, int-arith, print, return, string-literal
+// Regression: early return-of-call mixed with a trailing return-of-call
+// must yield call values on both engines (sibling of
+// branch_call_returns, which covers if/else-shaped tails).
+func g(x: int) -> int {
+    x + 1
+}
+func h(x: int) -> int {
+    x + 2
+}
+func f2(c: bool, x: int) -> int {
+    if c {
+        return g(x)
+    }
+    return h(x)
+}
+func f3(c: bool, x: int) -> int {
+    if c {
+        if x == 0 {
+            return 0 - 1
+        }
+        return g(x)
+    }
+    return h(x)
+}
+println(f2(true, 5))
+println(f2(false, 5))
+println(f3(true, 5))
+println(f3(false, 5))
+println(f3(true, 0))
+println("branch_early_return_calls_ok")

@@ -290,3 +290,216 @@ fn paren_type_still_parses_as_grouped() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+#[test]
+fn parses_generic_struct() {
+    let p = parse_ok("struct Box<T> { v: T }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Struct {
+            name,
+            generics,
+            fields,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Box".to_string()]);
+            assert_eq!(
+                generics.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+                vec!["T".to_string()]
+            );
+            assert_eq!(fields.len(), 1);
+            assert!(matches!(&fields[0].1.kind, TyKind::Named(n, a) if n == "T" && a.is_empty()));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_generic_struct_multi_param() {
+    let p = parse_ok("struct Pair<A, B> { a: A, b: B }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Struct { generics, .. } => {
+            assert_eq!(generics.len(), 2);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_generic_impl() {
+    let p = parse_ok("impl Box<T> { func get(self) -> T { self.v } }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Impl {
+            name,
+            generics,
+            methods,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Box".to_string()]);
+            assert_eq!(generics.len(), 1);
+            assert_eq!(methods.len(), 1);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn struct_bounds_are_an_error() {
+    let parsed = zz_frontend::parse("struct Box<T: Num> { v: T }");
+    assert!(
+        parsed.errors.iter().any(|e| e.message.contains("bounds")),
+        "expected bounds error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn plain_struct_has_no_generics() {
+    let p = parse_ok("struct Point { x: int }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Struct { generics, .. } => assert!(generics.is_empty()),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_type_alias() {
+    let p = parse_ok("type Tokens = [Token]");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::TypeAlias {
+            name,
+            generics,
+            target,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Tokens".to_string()]);
+            assert!(generics.is_empty());
+            assert!(
+                matches!(&target.kind, TyKind::Array(t) if matches!(&t.kind, TyKind::Named(n, a) if n == "Token" && a.is_empty()))
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_generic_type_alias() {
+    let p = parse_ok("type Pair<T> = (T, T)");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::TypeAlias {
+            name,
+            generics,
+            target,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Pair".to_string()]);
+            assert_eq!(
+                generics.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+                vec!["T".to_string()]
+            );
+            assert!(matches!(&target.kind, TyKind::Tuple(_)));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn type_alias_needs_equals() {
+    let parsed = zz_frontend::parse("type Tokens [Token]");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("expected `=`")),
+        "expected `=` error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn type_stays_identifier_elsewhere() {
+    // `type` is contextual: field access, calls, and plain variables
+    // named `type` keep parsing as identifiers.
+    let p = parse_ok("x := json.type(j)\ntype := 1\nprintln(type)");
+    assert_eq!(p.stmts.len(), 3);
+}
+
+#[test]
+fn parses_enum() {
+    let p = parse_ok("enum Token { Eof, IntLit(int) }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Enum { name, variants, .. } => {
+            assert_eq!(name, &vec!["Token".to_string()]);
+            assert_eq!(variants.len(), 2);
+            assert_eq!(variants[0].0.name, "Eof");
+            assert!(variants[0].1.is_none());
+            assert_eq!(variants[1].0.name, "IntLit");
+            assert!(variants[1].1.is_some());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_multiline_enum() {
+    let p = parse_ok("enum Color {\n    Red,\n    Green,\n    Custom(str),\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Enum { variants, .. } => {
+            assert_eq!(variants.len(), 3);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_enum_variant_errors() {
+    let parsed = zz_frontend::parse("enum Token { Eof, Eof }");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("duplicate variant")),
+        "expected duplicate variant error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn empty_enum_errors() {
+    let parsed = zz_frontend::parse("enum Token { }");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("at least one variant")),
+        "expected empty-enum error, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn parses_generic_enum() {
+    let p = parse_ok("enum Box<T> { V(T), E }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Enum {
+            name,
+            generics,
+            variants,
+            ..
+        } => {
+            assert_eq!(name, &vec!["Box".to_string()]);
+            assert_eq!(
+                generics.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+                vec!["T".to_string()]
+            );
+            assert_eq!(variants.len(), 2);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn enum_stays_identifier_elsewhere() {
+    // `enum` is contextual: plain variables named `enum` keep working.
+    let p = parse_ok("enum := 1\nprintln(enum)");
+    assert_eq!(p.stmts.len(), 2);
+}

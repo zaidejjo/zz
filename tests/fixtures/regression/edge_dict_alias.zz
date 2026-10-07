@@ -1,0 +1,8 @@
+// features: dicts, indexing, locals, print, string-literal
+// E2E: edge — storing through a cloned dict leaves the source intact.
+d := {"k": 1}
+d2 := d
+d2["k"] = 9
+println("dk={d["k"]}")
+println("d2k={d2["k"]}")
+println("edge_dict_alias_ok")

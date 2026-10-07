@@ -1,0 +1,53 @@
+// features: arrays, for-loop, func-call, hof, imports, indexing, locals, print, std-vec, string-literal, structs, vec-push
+// tests/fixtures/stdlib/vec_nested_str_parity.zz — nested [[str]] parity.
+// Covers plain-local pushes, struct-field pushes, and loop-built inner
+// arrays (the loop + struct shape used to corrupt the first inner element
+// and SIGSEGV natively: inner literals live on the loop arena and must be
+// healed to heap ownership on store). Read-only: chained index *stores*
+// (`t.rows[0][0] = x`) intentionally excluded — the VM drops them into a
+// temp clone while native writes through (separate known divergence).
+import std.vec
+
+struct T { rows: [[str]] }
+
+func main() {
+  // Plain local, two pushes.
+  rows: [[str]] = []
+  rows = vec.push(rows, ["Alice", "25"])
+  rows = vec.push(rows, ["Bob", "30"])
+  println(rows[0][0])
+  println(rows[0][1])
+  println(rows[1][0])
+  println(rows[1][1])
+
+  // Struct field, two pushes.
+  t := T{ rows: [] }
+  t.rows = vec.push(t.rows, ["Alice", "25"])
+  t.rows = vec.push(t.rows, ["Bob", "30"])
+  println(t.rows[0][0])
+  println(t.rows[0][1])
+  println(t.rows[1][0])
+  println(t.rows[1][1])
+
+  // Loop-built inner arrays through a struct field (former SIGSEGV).
+  u := T{ rows: [] }
+  for i in range(0, 5) {
+    r := ["a", "b"]
+    u.rows = vec.push(u.rows, r)
+  }
+  println(u.rows[0][0])
+  println(u.rows[0][1])
+  println(u.rows[4][0])
+  println(u.rows[4][1])
+  println(len(u.rows))
+
+  // Loop-built plain-local nested array.
+  flat: [[str]] = []
+  for i in range(0, 3) {
+    r := ["x", "y"]
+    flat = vec.push(flat, r)
+  }
+  println(flat[0][0])
+  println(flat[2][1])
+  println("vec_nested_str_parity_ok")
+}

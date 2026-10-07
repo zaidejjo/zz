@@ -1,0 +1,6 @@
+// features: int-arith, locals, print, string-literal
+// E2E: edge — negating i64::MIN wraps to itself on all legs.
+x := -9223372036854775808
+y := -x
+println("neg={y}")
+println("edge_int_neg_min_ok")

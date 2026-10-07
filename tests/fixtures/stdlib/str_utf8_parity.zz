@@ -1,0 +1,26 @@
+// features: func-call, imports, indexing, locals, print, slicing, std-str, string-literal, string-ops
+// tests/fixtures/stdlib/str_utf8_parity.zz — UTF-8 string measure parity.
+// str is UTF-8: len / str.length / indexing / slicing all count Unicode
+// scalar values (chars), on both the VM and the native (AOT) engine.
+import std.str
+
+func main() {
+  s := "╭─╮日本"
+  println(len(s))
+  println(str.length(s))
+  println(s[0])
+  println(s[-1])
+  println(s[0:2])
+  println(s[3:5])
+  println(len(""))
+  println(len("abc"))
+  println(s[1])
+  parts := str.split("╭─╮", "")
+  println(len(parts))
+  println("[" + parts[0] + "]")
+  println("[" + parts[1] + "]")
+  println("[" + parts[4] + "]")
+  b := str.split("", "")
+  println(len(b))
+  println("str_utf8_parity_ok")
+}

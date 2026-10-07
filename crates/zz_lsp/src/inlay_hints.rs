@@ -61,6 +61,10 @@ fn collect_stmt_hints(
             collect_expr_hints(target, source, cr, out);
             collect_expr_hints(value, source, cr, out);
         }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_expr_hints(target, source, cr, out);
+            collect_expr_hints(value, source, cr, out);
+        }
         Stmt::Defer { expr, .. } => {
             collect_expr_hints(expr, source, cr, out);
         }
@@ -238,6 +242,8 @@ mod tests {
         let parsed = parse(source);
         let cr = check_program(
             &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),

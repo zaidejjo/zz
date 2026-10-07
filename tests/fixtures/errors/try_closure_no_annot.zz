@@ -1,3 +1,4 @@
+// features: closures, comparison, error-case, func-call, locals, option-result, print, try-question
 // `try` inside a closure without an explicit return type is a compile error.
 func fetch() -> Result<int, str> {
     .ok(1)

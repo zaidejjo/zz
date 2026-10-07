@@ -87,6 +87,60 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 },
             })
         }
+        Stmt::TypeAlias {
+            name,
+            generics: _,
+            target,
+            span,
+            ..
+        } => {
+            let full_name = name.join(".");
+            Some(DocumentSymbol {
+                name: full_name,
+                detail: Some(fmt_ty(target)),
+                kind: SymbolKind::STRUCT,
+                tags: None,
+                deprecated: None,
+                range: span_to_range(source, *span),
+                selection_range: struct_name_range(name, source),
+                children: None,
+            })
+        }
+        Stmt::Enum {
+            name,
+            variants,
+            span,
+            ..
+        } => {
+            let full_name = name.join(".");
+            let children: Vec<DocumentSymbol> = variants
+                .iter()
+                .map(|(vname, _)| DocumentSymbol {
+                    name: vname.name.clone(),
+                    detail: None,
+                    kind: SymbolKind::FUNCTION,
+                    tags: None,
+                    deprecated: None,
+                    range: span_to_range(source, vname.span),
+                    selection_range: span_to_range(source, vname.span),
+                    children: None,
+                })
+                .collect();
+            Some(DocumentSymbol {
+                name: full_name,
+                detail: None,
+                kind: SymbolKind::STRUCT,
+                tags: None,
+                deprecated: None,
+                range: span_to_range(source, *span),
+                selection_range: struct_name_range(name, source),
+                children: if children.is_empty() {
+                    None
+                } else {
+                    Some(children)
+                },
+            })
+        }
         Stmt::Impl {
             name,
             methods,
@@ -187,6 +241,7 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
             None
         }
         Stmt::Assign { .. } => None,
+        Stmt::CompoundAssign { .. } => None,
         Stmt::Destructure { .. } => None,
         Stmt::ExternBlock { .. } => None,
         Stmt::Link { .. } => None,
@@ -358,6 +413,34 @@ fn collect_workspace_symbols(
                 });
             }
             Stmt::Struct { name, span, .. } => {
+                let full_name = name.join(".");
+                out.push(SymbolInformation {
+                    name: full_name,
+                    kind: SymbolKind::STRUCT,
+                    tags: None,
+                    deprecated: None,
+                    location: tower_lsp::lsp_types::Location {
+                        uri: uri.clone(),
+                        range: span_to_range(source, *span),
+                    },
+                    container_name: None,
+                });
+            }
+            Stmt::TypeAlias { name, span, .. } => {
+                let full_name = name.join(".");
+                out.push(SymbolInformation {
+                    name: full_name,
+                    kind: SymbolKind::STRUCT,
+                    tags: None,
+                    deprecated: None,
+                    location: tower_lsp::lsp_types::Location {
+                        uri: uri.clone(),
+                        range: span_to_range(source, *span),
+                    },
+                    container_name: None,
+                });
+            }
+            Stmt::Enum { name, span, .. } => {
                 let full_name = name.join(".");
                 out.push(SymbolInformation {
                     name: full_name,

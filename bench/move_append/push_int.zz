@@ -1,0 +1,19 @@
+// push_int.zz — `b = vec.push(b, x)` on an int array.
+import std.env
+
+func first_arg(args: [str], fallback: str) -> str {
+    for a in args {
+        if a != "--" {
+            return a
+        }
+    }
+    fallback
+}
+
+n := int(first_arg(env.args(), "10000")) ?? 10000
+b: [int] = []
+for i in 0..n {
+    b = vec.push(b, i)
+}
+println(len(b))
+println("PUSH_INT_DONE")

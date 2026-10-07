@@ -375,6 +375,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
+dependencies = [
+ "crc-catalog",
+]
+
+[[package]]
+name = "crc-catalog"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1496,6 +1511,16 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "url",
+]
+
+[[package]]
+name = "lzma-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "297e814c836ae64db86b36cf2a557ba54368d03f6afcd7d947c266692f71115e"
+dependencies = [
+ "byteorder",
+ "crc",
 ]
 
 [[package]]
@@ -3554,9 +3579,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
+name = "zz_arena"
+version = "0.1.6"
+
+[[package]]
 name = "zz_checker"
 version = "0.1.6"
 dependencies = [
+ "serde",
+ "serde_json",
  "zz_frontend",
 ]
 
@@ -3567,15 +3598,22 @@ dependencies = [
  "base64 0.22.1",
  "codespan-reporting",
  "dirs",
+ "hex",
+ "lzma-rs",
  "nu-ansi-term",
  "reedline",
+ "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "toml",
+ "ureq",
  "zz_checker",
  "zz_codegen",
  "zz_fmt",
  "zz_frontend",
  "zz_hir",
+ "zz_ir",
  "zz_plugin",
  "zz_pm",
  "zz_runtime",
@@ -3589,6 +3627,7 @@ dependencies = [
  "zz_checker",
  "zz_frontend",
  "zz_hir",
+ "zz_ir",
  "zz_native_rt",
  "zz_runtime",
  "zz_stdlib",
@@ -3624,6 +3663,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_ir"
+version = "0.1.6"
+dependencies = [
+ "zz_checker",
+ "zz_frontend",
+ "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_lsp"
 version = "0.1.6"
 dependencies = [
@@ -3636,6 +3685,7 @@ dependencies = [
  "zz_checker",
  "zz_fmt",
  "zz_frontend",
+ "zz_runtime",
  "zz_stdlib",
 ]
 
@@ -3649,6 +3699,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "hmac",
+ "libc",
  "rand_core",
  "rcgen",
  "regex",
@@ -3714,6 +3765,7 @@ dependencies = [
  "crossbeam-deque",
  "httparse",
  "libc",
+ "memchr",
  "rcgen",
  "reqwest",
  "rusqlite",

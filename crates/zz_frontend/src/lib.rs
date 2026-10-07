@@ -11,6 +11,7 @@ pub mod diag;
 pub mod fmt;
 pub mod levenshtein;
 pub mod lexer;
+pub mod move_elide;
 pub mod parser;
 pub mod printer;
 pub mod span;

@@ -34,6 +34,21 @@ fn collect_stmt_folds(stmt: &Stmt, source: &str, out: &mut Vec<FoldingRange>) {
                 });
             }
         }
+        Stmt::Enum { variants, .. } => {
+            if !variants.is_empty() {
+                let span = stmt.span();
+                let start = crate::convert::offset_to_position(source, span.start);
+                let end = crate::convert::offset_to_position(source, span.end.saturating_sub(1));
+                out.push(FoldingRange {
+                    start_line: start.line,
+                    start_character: Some(start.character),
+                    end_line: end.line,
+                    end_character: Some(end.character),
+                    kind: Some(FoldingRangeKind::Region),
+                    collapsed_text: None,
+                });
+            }
+        }
         Stmt::For { body, .. } => {
             push_block_fold(body, source, out);
             collect_block_folds(body, source, out);
@@ -46,6 +61,10 @@ fn collect_stmt_folds(stmt: &Stmt, source: &str, out: &mut Vec<FoldingRange>) {
         }
         Stmt::Return { .. } => {}
         Stmt::Assign { target, value, .. } => {
+            collect_expr_folds(target, source, out);
+            collect_expr_folds(value, source, out);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
             collect_expr_folds(target, source, out);
             collect_expr_folds(value, source, out);
         }

@@ -1,0 +1,19 @@
+// features: bool-logic, comparison, func-call, if-else, int-arith, print, return, string-literal
+// Regression: if/else branches returning call results must yield the
+// values on both engines (native dropped them to empty output).
+func g(x: int) -> int {
+    x + 1
+}
+func h(x: int) -> int {
+    x + 2
+}
+func f(c: bool, x: int) -> int {
+    if c {
+        return g(x)
+    } else {
+        return h(x)
+    }
+}
+println(f(true, 5))
+println(f(false, 5))
+println("branch_call_returns_ok")

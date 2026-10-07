@@ -16,6 +16,8 @@ pub fn check_src(src: &str) -> CheckResult {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     )
 }
 
@@ -51,7 +53,14 @@ pub fn check_src_with_funcs(src: &str, funcs: HashMap<String, FuncSig>) -> Check
         "parse errors: {:?}",
         parsed.errors
     );
-    check_program(&parsed.program, HashMap::new(), funcs, HashMap::new())
+    check_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    )
 }
 
 /// Check with seeded functions and structs (e.g. a namespaced struct
@@ -67,5 +76,12 @@ pub fn check_src_with_funcs_and_structs(
         "parse errors: {:?}",
         parsed.errors
     );
-    check_program(&parsed.program, HashMap::new(), funcs, structs)
+    check_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        structs,
+        HashMap::new(),
+        HashMap::new(),
+    )
 }

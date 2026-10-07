@@ -1,0 +1,4 @@
+// features: comparison, error-case, generics, structs
+// E2E: Generic struct used without its type arguments is an error.
+struct Box<T> { v: T }
+b: Box = Box{ v: 1 }

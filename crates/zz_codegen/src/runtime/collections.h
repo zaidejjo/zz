@@ -17,6 +17,19 @@ zz_value zz_dict_new(void);
 zz_value zz_dict_new_sized(size_t hint);
 zz_value zz_range(int64_t start, int64_t end, int64_t step);
 
+// ---- arena healing -----------------------------------------------------
+// True when the container header lives on an arena (or the C stack), so a
+// retaining store into an escaping container must copy it to the heap
+// first — the per-iteration `zz_arena_reset` would otherwise corrupt the
+// stored alias (nested-array first-element garbage + SIGSEGV class).
+int zz_array_is_arena(const zz_array *a);
+int zz_dict_is_arena(const zz_dict *d);
+// Heal for move paths (callers transfer ownership: `zz_array_push`,
+// `zz_assign`): arena-owned values (deep: nested arena values copied
+// recursively, heap elements shared via clone) become independent
+// heap-owned copies; heap values pass through unchanged (adopted).
+zz_value zz_heal_for_move(zz_value v);
+
 // ---- arena-aware constructors -------------------------------------------
 // When arena is non-NULL, the object header is bump-allocated on the arena
 // (O(1) alloc, freed in bulk at arena reset). When arena is NULL, falls
@@ -137,7 +150,19 @@ static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
         return zz_unit();
     }
 }
-void zz_index_set(zz_value obj, zz_value idx, zz_value item, int *err);
+// Duplicate a dict with an INDEPENDENT entries buffer (shallow value
+// clone, like `zz_array_dup`): callers may mutate the result without
+// affecting the original. Arena-owned keys/values heal to heap.
+zz_value zz_dict_dup_value(const zz_dict *d);
+
+// Detach-on-mutation for index stores (value semantics): when the
+// container buffer is shared (or a non-owned sentinel), replace this
+// slot's buffer with a private dup first. Uniquely-owned buffers
+// (`refs == 1`) write in place with zero copies.
+void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err);
+
+// Bounds-check trap with operands and enclosing function (#251).
+void zz_index_trap(zz_value obj, zz_value idx, const char *func);
 
 // Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
@@ -158,9 +183,19 @@ zz_value zz_tuple(zz_value a, zz_value b);
 
 // ---- vec natives -------------------------------------------------------
 zz_value zz_len(zz_value v, int *err);
+zz_value zz_len_field(zz_value *obj, const char *field, int *err);
 zz_value zz_vec_len(zz_value v, int *err);
 zz_value zz_vec_append(zz_value arr, zz_value item, int *err);
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err);
+// Move-aware push for `x = vec.push(x, e)`: `taken` is owned (the caller
+// moved it out of its slot, which now holds unit). A uniquely-owned heap
+// array (refs==1) grows in place — no dup, no copy; anything else takes
+// the copy-on-write fallback (`zz_vec_push` + release of the taken share,
+// which balances the take exactly like the old assign-release did).
+zz_value zz_vec_push_take(zz_value taken, zz_value item, int *err);
+// Move-aware field push for `s.f = vec.push(s.f, e)` on boxed structs:
+// same in-place rule for the field array, copy fallback otherwise.
+void zz_object_push_field_take(zz_value *obj, const char *field, zz_value item, int *err);
 zz_value zz_vec_pop(zz_value arr, int *err);
 zz_value zz_vec_remove(zz_value arr, zz_value idx, int *err);
 zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err);
@@ -189,6 +224,15 @@ zz_value zz_object_get_field(zz_value *obj, const char *name);
 
 // Release helper for boxed objects (called by the ARC dispatcher).
 void zz_release_object(zz_value *v);
+
+// ---- user enum helpers ------------------------------------------------
+// True when `v` is a boxed object whose qualified type name equals
+// `qualified` (`Token.IntLit`). Used for `.Variant` pattern guards in
+// generated `match` code.
+int zz_enum_is(const zz_value *v, const char *qualified);
+// True for user-enum variant values (unit or single-`value`-payload
+// objects with a dotted type name). See `zz_object_is_enum_shape`.
+int zz_object_is_enum_shape(const struct zz_object *o);
 
 // ---- match extraction helpers ------------------------------------------
 // Returns the payload of a variant, or unit if tag doesn't match.

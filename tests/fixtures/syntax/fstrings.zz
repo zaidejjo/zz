@@ -1,3 +1,4 @@
+// features: float-arith, locals, print, string-literal, string-ops
 // E2E: String interpolation and format specs
 name := "ZZ"
 version := 42

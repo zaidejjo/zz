@@ -15,6 +15,7 @@ mod expr;
 mod extern_call;
 mod fn_decl;
 mod green;
+mod move_elide;
 mod stmt;
 
 use zz_frontend::ast::{Expr, Pattern, Stmt};
@@ -23,8 +24,8 @@ pub use context::{Lowerer, NameCtx};
 
 // Internal helpers shared across the lowering submodules.
 pub(crate) use context::{
-    auto_box, box_scalar_operand, emit_guard_expr, is_dup_safe, scalar_operand_c,
-    scalar_operand_type,
+    auto_box, binop_runtime_op, box_scalar_operand, emit_guard_expr, is_dup_safe, is_simple_ident,
+    scalar_operand_c, scalar_operand_type,
 };
 
 /// Result of lowering.
@@ -40,6 +41,45 @@ pub struct LoweredC {
     /// archive (`-u`), since the C dispatcher references them weakly and
     /// weak refs alone never pull archive members.
     pub needs_pg_link: bool,
+    /// True when any typed node in the program can hold a float: float
+    /// Display (`println`, interpolation, `str()`) routes through the
+    /// Rust core (`zz_float_format_raw`), so the link must force-extract
+    /// that object (`-u`). The type scan is sound — there is no `Any` /
+    /// dynamic type, and JSON values print through their own (already
+    /// agreeing) stringify path, never float Display.
+    pub needs_float_fmt: bool,
+    /// True when reachable natives lower to curl-backed C client calls:
+    /// the link must add `-lcurl`. Server/route-only programs skip it.
+    pub needs_curl: bool,
+    /// True when reachable natives lower to sqlite-backed C calls: the
+    /// link must add `-lsqlite3`. Programs that never query skip it
+    /// (previously every binary carried the dependency via the
+    /// single-TU archive + `--as-needed` ordering).
+    pub needs_sqlite: bool,
+}
+
+/// True when a resolved type can carry an `f64` to a Display site.
+/// Recursive over every compound shape (no `Any` exists, so a whole-
+/// program scan of `TypedProgram` types is a sound float-format gate).
+fn type_has_float(t: &zz_checker::Type) -> bool {
+    match t {
+        zz_checker::Type::Float => true,
+        zz_checker::Type::Tuple(ts) | zz_checker::Type::Union(ts) => ts.iter().any(type_has_float),
+        zz_checker::Type::Option(b) | zz_checker::Type::Array(b) | zz_checker::Type::Range(b) => {
+            type_has_float(b)
+        }
+        zz_checker::Type::Result(a, b) | zz_checker::Type::Dict(a, b) => {
+            type_has_float(a) || type_has_float(b)
+        }
+        zz_checker::Type::Func(params, ret) => {
+            params.iter().any(type_has_float) || type_has_float(ret)
+        }
+        zz_checker::Type::Struct(_, args) | zz_checker::Type::Enum(_, args) => {
+            args.iter().any(type_has_float)
+        }
+        zz_checker::Type::Ptr { inner, .. } => type_has_float(inner),
+        _ => false,
+    }
 }
 
 /// Mangle a zz qualified name to a C identifier.
@@ -56,14 +96,23 @@ pub fn mangle(name: &str) -> String {
         .collect()
 }
 
-/// Lower a `std.math` numeric constant path (`std.math.PI`, `math.PI`) to a
-/// `zz_float(...)` literal. Constants are true values — the checker rejects
-/// calls like `math.PI()`, so value position is the only valid use.
+/// Lower a `std.math` numeric constant path (`std.math.PI`, `math.PI`,
+/// or bare `PI` from `import std.math(PI)`) to a `zz_float(...)` literal.
+/// Constants are true values — the checker rejects calls like `math.PI()`,
+/// so value position is the only valid use.
+/// Bare single-component names consult the same table because the checker
+/// only lets selective-import consts reach lowering unresolved this way
+/// (locals/globals resolve earlier; anything else errors upstream).
+/// Dotted non-`std.math` paths (user modules) never match.
 /// Returns `None` for anything that is not a known constant spelling.
 pub(crate) fn math_const_c_literal(joined: &str) -> Option<String> {
     let leaf = joined
         .strip_prefix("std.math.")
-        .or_else(|| joined.strip_prefix("math."))?;
+        .or_else(|| joined.strip_prefix("math."))
+        .unwrap_or(joined);
+    if leaf.contains('.') {
+        return None;
+    }
     // Shortest round-trip decimals, matching Rust's `to_string()` output.
     let num = match leaf {
         "PI" => std::f64::consts::PI.to_string(),
@@ -204,7 +253,7 @@ impl Lowerer {
         let Some((_, first)) = sig.params.first() else {
             return false;
         };
-        let zz_checker::Type::Struct(sname) = first else {
+        let zz_checker::Type::Struct(sname, _) = first else {
             return false;
         };
         let method = fname.rsplit('.').next().unwrap_or(fname);
@@ -225,6 +274,7 @@ impl Lowerer {
         // globals. Top-level Decl assigns into its global (no local redecl).
         let mut names = NameCtx::new();
         self.seed_globals(&mut names);
+        self.seed_scalar_fns(&mut names);
         let mut global_init_done: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
@@ -265,7 +315,10 @@ impl Lowerer {
                         }
                     }
                 }
-                Stmt::Struct { .. } | Stmt::Import { .. } => {}
+                Stmt::Struct { .. }
+                | Stmt::TypeAlias { .. }
+                | Stmt::Enum { .. }
+                | Stmt::Import { .. } => {}
                 Stmt::Decl { name, value, .. } => {
                     // Top-level `x := <rhs>` → assign into `zz_global_*`.
                     // The global is pre-declared; zz_main only initializes it.
@@ -288,17 +341,28 @@ impl Lowerer {
                     } = value
                     {
                         if self.is_unboxed_struct(struct_name) {
-                            let val = self.emit_expr(value, &mut names, &mut out);
-                            out.push_str(&format!("    {gid} = {val};\n"));
+                            // Globals are boxed (see collect_globals):
+                            // emit the literal directly as a boxed
+                            // object — no unboxed intermediate.
+                            let boxed =
+                                self.emit_boxed_value(struct_name, value, &mut names, &mut out);
+                            out.push_str(&format!("    {gid} = {boxed};\n"));
                             body.push_str(&out);
                             global_init_done.insert(zz_name.clone());
                             continue;
                         }
                     }
                     let val = self.emit_expr(value, &mut names, &mut out);
+                    // Raw-scalar detection: cast-prefixed expressions plus
+                    // bare scalar globals (`zz_global_x` for int64_t /
+                    // double / bool globals emit raw — no cast prefix —
+                    // and must not gain a `.i` / `.f` / `.b` suffix).
                     let val_is_unboxed = val.starts_with("(int64_t)(")
                         || val.starts_with("(double)(")
-                        || val.starts_with("(bool)(");
+                        || val.starts_with("(bool)(")
+                        || names.globals.values().any(|(gid, gtype)| {
+                            val == *gid && matches!(gtype.as_str(), "int64_t" | "double" | "bool")
+                        });
                     let final_val = match gtype.as_str() {
                         "int64_t" if !val_is_unboxed => format!("({val}).i"),
                         "double" if !val_is_unboxed => format!("({val}).f"),
@@ -369,8 +433,9 @@ impl Lowerer {
         }
 
         let main_decl = if self.reachable_funcs.contains(&self.entry_main) {
-            // main exists: call its stub from zz_call_main.
-            "zz_call_into_main();".to_string()
+            // main exists: its return value decides the exit code
+            // (`zz_main_result_code`: `.err` prints + exits 1).
+            "return zz_call_into_main();".to_string()
         } else {
             String::new()
         };
@@ -418,7 +483,7 @@ impl Lowerer {
                 .funcs
                 .get(fname)
                 .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
-                .filter(|t| matches!(t, zz_checker::Type::Struct(_)))
+                .filter(|t| matches!(t, zz_checker::Type::Struct(_, _)))
                 .filter(|_| self.is_impl_method(fname))
                 .map(|t| self.type_to_c(&t));
             let proto = match first_struct_c {
@@ -432,6 +497,27 @@ impl Lowerer {
                 ),
             };
             forward_decls.push_str(&proto);
+            // Scalar-specialized functions also get an unboxed prototype
+            // so callers earlier in the TU can route to `_u` directly.
+            if self.specialized.contains(fname) {
+                if let Some(sig) = self.tp.funcs.get(fname) {
+                    let ret = Self::scalar_ctype(&sig.ret).unwrap_or("zz_value");
+                    let params: Vec<String> = sig
+                        .params
+                        .iter()
+                        .map(|(_, t)| Self::scalar_ctype(t).unwrap_or("zz_value").to_string())
+                        .collect();
+                    let psig = if params.is_empty() {
+                        "void".to_string()
+                    } else {
+                        params.join(", ")
+                    };
+                    forward_decls.push_str(&format!(
+                        "static {ret} zz_fn_{}_u({psig});\n",
+                        mangle(fname)
+                    ));
+                }
+            }
         }
 
         let closure_fwd = self.closure_forward_decls.borrow().join("");
@@ -475,8 +561,14 @@ impl Lowerer {
         } else {
             crate::RUNTIME_C
         };
+        let main_tail = if self.reachable_funcs.contains(&self.entry_main) {
+            // main() exists: its stub returns the exit code already.
+            String::new()
+        } else {
+            "    return 0;".to_string()
+        };
         let source = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n    return 0;\n}}\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals ----\n{globals_decl}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}\n// ---- generated code ----\n{funcs}\n// ---- closures ----\n{closure_defs}\nvoid zz_main(void) {{\n{body}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n{main_tail}\n}}\n",
             runtime_h = crate::RUNTIME_H,
             runtime_c = runtime_c,
             struct_preamble = struct_preamble,
@@ -511,11 +603,11 @@ impl Lowerer {
                 .unwrap_or(false);
             if takes_argv {
                 format!(
-                    "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ int _e = 0; zz_value _cli = zz_env_args(zz_unit(), &_e); zz_value _r = {m}(&_cli, 1); (void)_r; }}\n"
+                    "\nstatic int zz_call_into_main(void);\nstatic int zz_call_into_main(void) {{ int _e = 0; zz_value _cli = zz_env_args(zz_unit(), &_e); zz_value _r = {m}(&_cli, 1); return zz_main_result_code(_r); }}\n"
                 )
             } else {
                 format!(
-                    "\nstatic void zz_call_into_main(void);\nstatic void zz_call_into_main(void) {{ zz_value _r = {m}(NULL, 0); (void)_r; }}\n"
+                    "\nstatic int zz_call_into_main(void);\nstatic int zz_call_into_main(void) {{ zz_value _r = {m}(NULL, 0); return zz_main_result_code(_r); }}\n"
                 )
             }
         } else {
@@ -532,6 +624,13 @@ impl Lowerer {
             source,
             needs_native_rt,
             needs_pg_link: crate::ffi::needs_pg_link(&expanded_natives),
+            needs_float_fmt: self.tp.types.values().any(type_has_float)
+                || self.tp.bindings.values().any(type_has_float)
+                || self.tp.funcs.values().any(|s| {
+                    s.params.iter().any(|(_, ty)| type_has_float(ty)) || type_has_float(&s.ret)
+                }),
+            needs_curl: crate::ffi::needs_curl_link(&expanded_natives),
+            needs_sqlite: crate::ffi::needs_sqlite_link(&expanded_natives),
         }
     }
 
@@ -755,7 +854,7 @@ fn ty_to_ctype(ty: &zz_hir::Type) -> String {
 }
 
 /// Map a zz native qualified name to its C runtime implementation name.
-fn native_impl(name: &str) -> Option<&'static str> {
+pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
     match name {
         // Builtin console I/O (no import, no `std.io` module).
         "println" => Some("zz_io_println"),
@@ -785,7 +884,12 @@ fn native_impl(name: &str) -> Option<&'static str> {
         // vec methods — bare names for method dispatch
         "vec.len" | "std.vec.len" | "vec_len" => Some("zz_vec_len"),
         "bytes.len" | "std.bytes.len" => Some("zz_len"),
-        "vec.append" | "std.vec.append" => Some("zz_vec_append"),
+        // `vec.append` is documented (stdlib.md, checker sigs) as an alias
+        // for `vec.push`: it returns the new array. Map to the value form
+        // `zz_vec_push`; statement position still mutates in place via the
+        // existing void-context `zz_vec_push` → `zz_vec_append` swap in
+        // expr.rs (same as `vec.push` and bare `append`).
+        "vec.append" | "std.vec.append" => Some("zz_vec_push"),
         "vec.push" | "std.vec.push" => Some("zz_vec_push"),
         "vec.pop" | "std.vec.pop" => Some("zz_vec_pop"),
         "vec.remove" | "std.vec.remove" => Some("zz_vec_remove"),
@@ -799,6 +903,7 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "str.to_lower" | "std.str.to_lower" | "str.lower" | "std.str.lower" => Some("zz_str_lower"),
         "str.to_upper" | "std.str.to_upper" | "str.upper" | "std.str.upper" => Some("zz_str_upper"),
         "str.replace" | "std.str.replace" => Some("zz_str_replace"),
+        "str.count" | "std.str.count" => Some("zz_str_count"),
         "str.contains" | "std.str.contains" => Some("zz_str_contains"),
         "str.starts_with" | "std.str.starts_with" | "str.startswith" | "std.str.startswith" => {
             Some("zz_str_startswith")
@@ -811,6 +916,18 @@ fn native_impl(name: &str) -> Option<&'static str> {
         "str.trim_end" | "std.str.trim_end" => Some("zz_str_trim_end"),
         "str.join" | "std.str.join" => Some("zz_str_join"),
         "str.split" | "std.str.split" => Some("zz_str_split"),
+        "str.find" | "std.str.find" => Some("zz_str_find"),
+        "str.rfind" | "std.str.rfind" => Some("zz_str_rfind"),
+        "str.starts_with_at" | "std.str.starts_with_at" => Some("zz_str_starts_with_at"),
+        "str.ends_with_at" | "std.str.ends_with_at" => Some("zz_str_ends_with_at"),
+        "str.trim_span" | "std.str.trim_span" => Some("zz_str_trim_span"),
+        "str.find_in" | "std.str.find_in" => Some("zz_str_find_in"),
+        "str.rfind_in" | "std.str.rfind_in" => Some("zz_str_rfind_in"),
+        "str.count_in" | "std.str.count_in" => Some("zz_str_count_in"),
+        "str.classify" | "std.str.classify" => Some("zz_str_classify"),
+        "str.bytes" | "std.str.bytes" => Some("zz_str_bytes"),
+        "bytes.to_str" | "std.bytes.to_str" => Some("zz_bytes_to_str"),
+        "bytes.to_ints" | "std.bytes.to_ints" => Some("zz_bytes_to_ints"),
         // math
         "math.abs" | "std.math.abs" => Some("zz_math_abs"),
         "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),

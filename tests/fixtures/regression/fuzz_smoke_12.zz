@@ -1,0 +1,26 @@
+// features: float-arith, imports, locals, print, std-math, string-literal
+// Fuzz smoke (fixed seed 96002, v4 float shapes).
+// Regenerate with tests/fuzz/gen.py --shapes v4; screen with tests/fuzz/run.sh.
+import std.math
+fl1 := 21.3
+fl2 := 3.14 * fl1
+println("fl2={fl2}")
+fl3 := fl1 - fl2
+println("fl3={fl3}")
+fl4 := fl2 - fl1
+println("fl4={fl4}")
+fl5 := fl3 / 24.0
+println("fl5={fl5}")
+fl6 := 13 + 31.8
+println("fl6={fl6}")
+fl7 := int(69.2)
+println("fl7={fl7}")
+fl8 := float(10)
+println("fl8={fl8}")
+fl9 := math.pow(10.0, 3.0)
+println("fl9={fl9}")
+fl10 := 0.0 / 0.0
+println("fl10={fl10}")
+fl11 := math.INF
+println("fl11={fl11}")
+println("DONE")

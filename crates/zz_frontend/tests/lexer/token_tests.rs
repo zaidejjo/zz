@@ -272,3 +272,81 @@ fn pipeline_operator() {
         vec![K::Ident, K::OrOr, K::Ident, K::Eof]
     );
 }
+
+#[test]
+fn compound_assignment_tokens() {
+    assert_eq!(
+        lex_kinds("x += 1"),
+        vec![K::Ident, K::PlusEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x -= 1"),
+        vec![K::Ident, K::MinusEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x *= 2"),
+        vec![K::Ident, K::StarEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x /= 2"),
+        vec![K::Ident, K::SlashEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x %= 2"),
+        vec![K::Ident, K::PercentEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x **= 2"),
+        vec![K::Ident, K::StarStarEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x &= 1"),
+        vec![K::Ident, K::AmpEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x |= 1"),
+        vec![K::Ident, K::PipeEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x ^= 1"),
+        vec![K::Ident, K::CaretEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x <<= 1"),
+        vec![K::Ident, K::ShlEq, K::Int, K::Eof]
+    );
+    assert_eq!(
+        lex_kinds("x >>= 1"),
+        vec![K::Ident, K::ShrEq, K::Int, K::Eof]
+    );
+}
+
+#[test]
+fn compound_tokens_do_not_swallow_neighbors() {
+    // `**` vs `**=`, `<<` vs `<<=`, `>>` vs `>>=`.
+    assert_eq!(
+        lex_kinds("2 ** 10"),
+        vec![K::Int, K::StarStar, K::Int, K::Eof]
+    );
+    assert_eq!(lex_kinds("1 << 2"), vec![K::Int, K::Shl, K::Int, K::Eof]);
+    assert_eq!(lex_kinds("8 >> 1"), vec![K::Int, K::Shr, K::Int, K::Eof]);
+    // Spaced `+ =` stays two tokens (a syntax error downstream).
+    assert_eq!(
+        lex_kinds("x + = 1"),
+        vec![K::Ident, K::Plus, K::Assign, K::Int, K::Eof]
+    );
+    // Comments and arrows still win over `/=` and `-=`.
+    assert_eq!(lex_kinds("// x += 1"), vec![K::Eof]);
+    assert_eq!(
+        lex_kinds("a -> b"),
+        vec![K::Ident, K::Arrow, K::Ident, K::Eof]
+    );
+}
+
+#[test]
+fn newline_after_compound_op_is_trivia() {
+    assert_eq!(
+        lex_kinds("x +=\n1"),
+        vec![K::Ident, K::PlusEq, K::Int, K::Eof]
+    );
+}

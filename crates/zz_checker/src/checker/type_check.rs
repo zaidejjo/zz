@@ -1,10 +1,12 @@
 //! Core type-checking logic: statements, expressions, patterns.
 
+use std::sync::Arc;
+
 use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Param, Pattern, Stmt, Ty, UnOp};
-use zz_frontend::diag::{error_at, FixIt};
+use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
 
@@ -48,6 +50,18 @@ fn check_sql_static(text: &str) -> Option<String> {
         return Some("unbalanced `(` in SQL string".to_string());
     }
     None
+}
+
+/// A method invocation: resolved signature plus receiver, args, and span.
+pub(crate) struct MethodCall<'a> {
+    pub sig: &'a super::FuncSig,
+    pub recv_t: &'a Type,
+    /// Embedded-promoted receiver (struct embedding only), if any.
+    pub promoted_recv: Option<Type>,
+    pub method: &'a str,
+    pub args: &'a [Expr],
+    pub named: &'a [(String, Expr)],
+    pub span: Span,
 }
 
 impl Checker {
@@ -132,7 +146,12 @@ impl Checker {
                         .cloned()
                         .or_else(|| path.last().cloned())
                         .unwrap_or_default();
-                    self.imports.push((ns, *span));
+                    self.imports.push((ns.clone(), *span));
+                    // Remember the module behind an aliased head (`m` →
+                    // `std.math`) for const/call diagnostics.
+                    self.module_aliases
+                        .entry(ns)
+                        .or_insert_with(|| path.join("."));
                 } else {
                     // Selective/wildcard import: track each imported name.
                     // Record bare→qualified aliases for call-site fallback
@@ -195,7 +214,7 @@ impl Checker {
                 }
                 // Scope span recording to this function: spans repeat
                 // across modules, so the typed map keys (scope, span).
-                self.scope.push(fname);
+                self.scope.push(Arc::from(fname));
                 self.check_func_body(stmt, &sig);
                 self.scope.pop();
                 Type::Unit
@@ -217,7 +236,7 @@ impl Checker {
                         let method_name = Self::func_name(method);
                         let full_name = format!("{}.{}", type_name, method_name);
                         let sig = self.funcs.get(&full_name).unwrap().clone();
-                        self.scope.push(full_name);
+                        self.scope.push(Arc::from(full_name));
                         self.check_func_body(method, &sig);
                         self.scope.pop();
                     }
@@ -237,7 +256,9 @@ impl Checker {
                     Some(v) => {
                         let vt = self.check_expr(v);
                         if let Err(e) = self.unifier.unify(&vt, &ret) {
-                            self.report_mismatch(e, v.span());
+                            if !self.report_result_return_hint(&vt, &ret, v.span()) {
+                                self.report_mismatch(e, v.span());
+                            }
                         }
                         // A `return` diverges: it never yields a value to the
                         // enclosing block. Its statement type is `Never`
@@ -258,6 +279,12 @@ impl Checker {
             }
             Stmt::Expr(e) => self.check_expr(e),
             Stmt::Struct { .. } => Type::Unit,
+            // Aliases are collected and resolved in pass 1a; checking
+            // the declaration itself is a no-op (uses resolve on demand).
+            Stmt::TypeAlias { .. } => Type::Unit,
+            // Enums are collected in pass 1b; the declaration itself is
+            // a no-op (construction and patterns resolve on demand).
+            Stmt::Enum { .. } => Type::Unit,
             Stmt::For {
                 vars,
                 iter,
@@ -449,30 +476,7 @@ impl Checker {
                 // Reject assignment to immutable (`const`) variables. The target is an
                 // `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
                 // the loader namespaces top-level bindings.
-                let tname: Option<String> = match target {
-                    Expr::Ident { name, .. } => Some(name.clone()),
-                    Expr::Path { parts, .. } => Some(parts.join(".")),
-                    _ => None,
-                };
-                if let Some(tname) = tname {
-                    if let Some(def_span) = self.lookup_const_span(&tname) {
-                        let display = Self::display_name(&tname);
-                        self.errors.push(
-                            error_at(
-                                format!("cannot assign to immutable variable `{}`", display),
-                                target.span(),
-                            )
-                            .with_secondary(zz_frontend::diag::SecondaryLabel {
-                                span: def_span,
-                                message: "variable defined as immutable here".to_string(),
-                            })
-                            .with_note(format!(
-                                "hint: remove `const` to make `{}` mutable",
-                                display
-                            )),
-                        );
-                    }
-                }
+                self.reject_const_target(target);
                 let errors_before = self.errors.len();
                 let tt = self.check_assign_target(target);
                 let vt = self.check_expr(value);
@@ -490,11 +494,124 @@ impl Checker {
                 }
                 Type::Unit
             }
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => {
+                // `target OP= value` checks exactly like
+                // `target = target OP value`: same const rule, same
+                // target rules, same binary-op rules (check_binary
+                // re-checks both sides, so float promotion, int-only
+                // bitwise, and error messages are identical).
+                self.reject_const_target(target);
+                let errors_before = self.errors.len();
+                let tt = self.check_assign_target(target);
+                let bt = self.check_binary(*op, target, value, *span);
+                // Phase 2.2: same route-table propagation as `=`.
+                match target {
+                    Expr::Ident { name, .. } => self.propagate_http_routes(name, value),
+                    Expr::Path { parts, .. } => self.propagate_http_routes(&parts.join("."), value),
+                    _ => {}
+                }
+                if self.errors.len() == errors_before {
+                    if let Err(e) = self.unifier.unify(&bt, &tt) {
+                        self.report_mismatch(e, *span);
+                    }
+                }
+                Type::Unit
+            }
         }
     }
 
     /// Type of an assignment target: a variable, a qualified name, or a
     /// struct field path.
+    /// Reject assignment to immutable (`const`) variables. The target
+    /// is an `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
+    /// the loader namespaces top-level bindings. Shared by `=` and
+    /// compound assignment so both reject `const` identically.
+    pub(crate) fn reject_const_target(&mut self, target: &Expr) {
+        let tname: Option<String> = match target {
+            Expr::Ident { name, .. } => Some(name.clone()),
+            Expr::Path { parts, .. } => Some(parts.join(".")),
+            _ => None,
+        };
+        if let Some(tname) = tname {
+            if let Some(def_span) = self.lookup_const_span(&tname) {
+                let display = Self::display_name(&tname);
+                self.errors.push(
+                    error_at(
+                        format!("cannot assign to immutable variable `{}`", display),
+                        target.span(),
+                    )
+                    .with_secondary(zz_frontend::diag::SecondaryLabel {
+                        span: def_span,
+                        message: "variable defined as immutable here".to_string(),
+                    })
+                    .with_note(format!(
+                        "hint: remove `const` to make `{}` mutable",
+                        display
+                    )),
+                );
+            }
+        }
+    }
+
+    /// Field read with generic arguments substituted: `Box[int].v` where
+    /// `v: T` yields `int`. Direct fields hit first; otherwise the lookup
+    /// promotes through embedded structs (threading each level's arguments).
+    /// Error reporting (unknown struct/field, did-you-mean) matches the
+    /// historical inline blocks this replaces.
+    pub(crate) fn struct_field_access(
+        &mut self,
+        sname: &str,
+        args: &[Type],
+        name: &str,
+        span: Span,
+    ) -> Type {
+        match self.structs.get(sname).cloned() {
+            Some(_) => match self.direct_field_type(sname, args, name) {
+                Some(ft) => ft,
+                None => match self.resolve_struct_field_generic(sname, args, name) {
+                    // Promoted through an embedded struct.
+                    Some((_, ft)) => ft,
+                    None => {
+                        let visible = self.all_visible_fields(sname);
+                        let field_names: Vec<&str> = visible.iter().map(|n| n.as_str()).collect();
+                        let mut diag =
+                            error_at(format!("struct `{sname}` has no field `{name}`"), span);
+                        let all = suggest_all(name, &field_names);
+                        if let Some((suggestion, _)) = all.first() {
+                            diag = diag.with_note(format!("did you mean field `{suggestion}`?"));
+                            let field_span = Span::new(span.end - name.len() as u32, span.end);
+                            let alts: Vec<String> =
+                                all.iter().map(|(s, _)| s.to_string()).collect();
+                            let fixit = if all.len() == 1 {
+                                FixIt::safe(field_span, suggestion.to_string(), "replace field")
+                            } else {
+                                FixIt::ambiguous(
+                                    field_span,
+                                    suggestion.to_string(),
+                                    "replace field",
+                                    alts,
+                                )
+                            };
+                            diag = diag.with_fixit(fixit);
+                        }
+                        self.errors.push(diag);
+                        Type::Unit
+                    }
+                },
+            },
+            None => {
+                self.errors
+                    .push(error_at(format!("unknown struct `{sname}`"), span));
+                Type::Unit
+            }
+        }
+    }
+
     pub(crate) fn check_assign_target(&mut self, target: &Expr) -> Type {
         match target {
             Expr::Ident { name, span } => self.lookup(name, *span),
@@ -503,56 +620,9 @@ impl Checker {
                 let ot = self.check_expr(obj);
                 let ot = self.unifier.resolve(&ot);
                 match ot {
-                    Type::Struct(sname) => match self.structs.get(&sname).cloned() {
-                        Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
-                            Some((_, ft)) => ft.clone(),
-                            None => match self.resolve_struct_field(&sname, name) {
-                                // Promoted through an embedded struct.
-                                Some(ft) => ft,
-                                None => {
-                                    let visible = self.all_visible_fields(&sname);
-                                    let field_names: Vec<&str> =
-                                        visible.iter().map(|n| n.as_str()).collect();
-                                    let mut diag = error_at(
-                                        format!("struct `{sname}` has no field `{name}`"),
-                                        *span,
-                                    );
-                                    let all = suggest_all(name, &field_names);
-                                    if let Some((suggestion, _)) = all.first() {
-                                        diag = diag.with_note(format!(
-                                            "did you mean field `{suggestion}`?"
-                                        ));
-                                        let field_span =
-                                            Span::new(span.end - name.len() as u32, span.end);
-                                        let alts: Vec<String> =
-                                            all.iter().map(|(s, _)| s.to_string()).collect();
-                                        let fixit = if all.len() == 1 {
-                                            FixIt::safe(
-                                                field_span,
-                                                suggestion.to_string(),
-                                                "replace field",
-                                            )
-                                        } else {
-                                            FixIt::ambiguous(
-                                                field_span,
-                                                suggestion.to_string(),
-                                                "replace field",
-                                                alts,
-                                            )
-                                        };
-                                        diag = diag.with_fixit(fixit);
-                                    }
-                                    self.errors.push(diag);
-                                    Type::Unit
-                                }
-                            },
-                        },
-                        None => {
-                            self.errors
-                                .push(error_at(format!("unknown struct `{sname}`"), *span));
-                            Type::Unit
-                        }
-                    },
+                    Type::Struct(sname, args) => {
+                        self.struct_field_access(&sname, &args, name, *span)
+                    }
                     Type::Dict(k, v) => {
                         // Dict field access: req.body returns the value type
                         if let Err(e) = self.unifier.unify(&Type::Str, &k) {
@@ -589,6 +659,7 @@ impl Checker {
                             .push(error_at("cannot assign to an index of a string", *span));
                         Type::Unit
                     }
+                    Type::Tuple(elems) => self.check_tuple_index(&elems, index),
                     Type::Bytes => {
                         self.errors
                             .push(error_at("cannot assign to an index of bytes", *span));
@@ -620,11 +691,87 @@ impl Checker {
         }
     }
 
+    /// Element type of a tuple index, shared by reads and writes.
+    /// Tuples index like arrays at runtime (AOT lowers them to arrays;
+    /// the VM stores them as `Tuple`), but the element type depends on
+    /// the position, so only integer literals type-check — negative
+    /// literals count from the end like arrays. Anything else should
+    /// destructure: `(a, b) := t`.
+    pub(crate) fn check_tuple_index(&mut self, elems: &[Type], index: &Expr) -> Type {
+        let pos: Option<usize> = match index {
+            Expr::Int { value, .. } if *value >= 0 => Some(*value as usize),
+            // Literal `i64::MIN` (the negation fold) and other negatives
+            // fall through to the out-of-bounds error below.
+            Expr::Int { .. } => None,
+            Expr::Unary { op, expr, .. } if *op == UnOp::Neg => match expr.as_ref() {
+                Expr::Int { value: 0, .. } => Some(0),
+                Expr::Int { value, .. } => elems.len().checked_sub(*value as usize),
+                _ => {
+                    self.errors.push(error_at(
+                        "tuple index must be an integer literal\n\
+                         hint: destructure with `(a, b) := t` for dynamic access",
+                        index.span(),
+                    ));
+                    return Type::Error;
+                }
+            },
+            _ => {
+                self.errors.push(error_at(
+                    "tuple index must be an integer literal\n\
+                     hint: destructure with `(a, b) := t` for dynamic access",
+                    index.span(),
+                ));
+                return Type::Error;
+            }
+        };
+        match pos {
+            Some(i) if i < elems.len() => elems[i].clone(),
+            _ => {
+                self.errors.push(error_at(
+                    format!("tuple index out of bounds for length {}", elems.len()),
+                    index.span(),
+                ));
+                Type::Error
+            }
+        }
+    }
+
     pub(crate) fn check_block(&mut self, block: &Block) -> Type {
         self.push_scope();
         let mut result = Type::Unit;
+        // Sherlock: code after a diverging statement (`return`/`break`/
+        // `continue`, or an if/match that diverges on every path) never
+        // runs — warn once per statement instead of checking dead code
+        // into confusing cascades.
+        let mut diverged: Option<&'static str> = None;
         for stmt in &block.stmts {
+            if let Some(how) = diverged {
+                self.errors.push(warning_at(
+                    format!("unreachable code after diverging {how}"),
+                    stmt.span(),
+                ));
+            }
             result = self.check_stmt(stmt);
+            // A bare `return` types as `unit` (not `Never`), so track
+            // syntactic divergence too — it still never falls through.
+            let syntactic = matches!(
+                stmt,
+                Stmt::Return { .. }
+                    | Stmt::Break { .. }
+                    | Stmt::Continue { .. }
+                    | Stmt::Expr(Expr::Break { .. })
+                    | Stmt::Expr(Expr::Continue { .. })
+            );
+            if syntactic || matches!(self.unifier.resolve(&result), Type::Never) {
+                diverged = Some(match stmt {
+                    Stmt::Return { .. } => "`return`",
+                    Stmt::Break { .. } => "`break`",
+                    Stmt::Continue { .. } => "`continue`",
+                    Stmt::Expr(Expr::Break { .. }) => "`break`",
+                    Stmt::Expr(Expr::Continue { .. }) => "`continue`",
+                    _ => "statement",
+                });
+            }
         }
         self.pop_scope();
         result
@@ -651,61 +798,47 @@ impl Checker {
             Expr::Str { .. } => Type::Str,
             Expr::Bool { .. } => Type::Bool,
             Expr::Ident { name, span } => self.lookup(name, *span),
-            Expr::Path { parts, span } => self.lookup_path(parts, *span),
+            Expr::Path { parts, span } => {
+                // Unit-variant value (`Token.Eof`, no parens): a path, not
+                // a call. Resolves against the enum table; payload
+                // variants must use call form (`Token.IntLit(1)`).
+                if parts.len() >= 2 {
+                    let enum_head = parts[..parts.len() - 1].join(".");
+                    let canonical_head = self.canonical_enum_name(&enum_head);
+                    if self.enums.contains_key(&canonical_head)
+                        && !self.funcs.contains_key(&parts.join("."))
+                        && self.lookup_opt(&enum_head).is_none()
+                    {
+                        let variant = parts.last().cloned().unwrap_or_default();
+                        if self
+                            .enum_variant_payload(&canonical_head, &variant, *span)
+                            .is_some_and(|p| p.is_some())
+                        {
+                            self.errors.push(error_at(
+                                format!(
+                                    "variant `{canonical_head}.{variant}` holds a value: construct it as `{canonical_head}.{variant}(...)`"
+                                ),
+                                *span,
+                            ));
+                        }
+                        if canonical_head.contains('.') {
+                            self.used_names.insert(canonical_head.clone());
+                        }
+                        // Generic parameters stay inference variables
+                        // (defaulted like `Option` when never constrained).
+                        let (gen_vars, _) = self.fresh_enum_vars(&canonical_head);
+                        return Type::Enum(canonical_head, gen_vars);
+                    }
+                }
+                self.lookup_path(parts, *span)
+            }
             Expr::Field { obj, name, span } => {
                 let ot = self.check_expr(obj);
                 let ot = self.unifier.resolve(&ot);
                 match ot {
-                    Type::Struct(sname) => match self.structs.get(&sname).cloned() {
-                        Some(sig) => match sig.fields.iter().find(|(n, _)| n == name) {
-                            Some((_, ft)) => ft.clone(),
-                            None => match self.resolve_struct_field(&sname, name) {
-                                // Promoted through an embedded struct.
-                                Some(ft) => ft,
-                                None => {
-                                    let visible = self.all_visible_fields(&sname);
-                                    let field_names: Vec<&str> =
-                                        visible.iter().map(|n| n.as_str()).collect();
-                                    let mut diag = error_at(
-                                        format!("struct `{sname}` has no field `{name}`"),
-                                        *span,
-                                    );
-                                    let all = suggest_all(name, &field_names);
-                                    if let Some((suggestion, _)) = all.first() {
-                                        diag = diag.with_note(format!(
-                                            "did you mean field `{suggestion}`?"
-                                        ));
-                                        let field_span =
-                                            Span::new(span.end - name.len() as u32, span.end);
-                                        let alts: Vec<String> =
-                                            all.iter().map(|(s, _)| s.to_string()).collect();
-                                        let fixit = if all.len() == 1 {
-                                            FixIt::safe(
-                                                field_span,
-                                                suggestion.to_string(),
-                                                "replace field",
-                                            )
-                                        } else {
-                                            FixIt::ambiguous(
-                                                field_span,
-                                                suggestion.to_string(),
-                                                "replace field",
-                                                alts,
-                                            )
-                                        };
-                                        diag = diag.with_fixit(fixit);
-                                    }
-                                    self.errors.push(diag);
-                                    Type::Unit
-                                }
-                            },
-                        },
-                        None => {
-                            self.errors
-                                .push(error_at(format!("unknown struct `{sname}`"), *span));
-                            Type::Unit
-                        }
-                    },
+                    Type::Struct(sname, args) => {
+                        self.struct_field_access(&sname, &args, name, *span)
+                    }
                     Type::Dict(k, v) => {
                         // Dict field access: req.body returns the value type
                         if let Err(e) = self.unifier.unify(&Type::Str, &k) {
@@ -802,16 +935,33 @@ impl Checker {
                 // `[name]`, promoted (flattened) fields to their embedded
                 // prefix + `[name]` (e.g. `id` in `User{id: 1, ...}` maps to
                 // `[Base, id]`).
+                //
+                // Generic parameters instantiate to fresh variables, filled
+                // in by unifying each value with its (substituted) field
+                // type — so `Box{ v: 1 }` infers `Box[int]`, exactly like a
+                // generic function call infers its type arguments.
+                let gen_vars: Vec<Type> = sig
+                    .generics
+                    .iter()
+                    .map(|_| self.unifier.fresh_var())
+                    .collect();
+                let gen_map: std::collections::HashMap<String, Type> = sig
+                    .generics
+                    .iter()
+                    .cloned()
+                    .zip(gen_vars.iter().cloned())
+                    .collect();
                 let mut given_paths: Vec<Vec<String>> = Vec::new();
                 for (fname, fval) in fields {
                     if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == fname) {
                         let vt = self.check_expr(fval);
-                        if let Err(e) = self.unifier.unify(&vt, ft) {
+                        let exp = crate::checker::inference::subst(ft, &gen_map);
+                        if let Err(e) = self.unifier.unify(&vt, &exp) {
                             self.report_mismatch(e, fval.span());
                         }
                         given_paths.push(vec![fname.clone()]);
                     } else if let Some((prefix, pft)) =
-                        self.resolve_struct_field_path(&cname, fname)
+                        self.resolve_struct_field_generic(&cname, &gen_vars, fname)
                     {
                         if prefix.is_empty() {
                             // Unreachable: direct fields are handled above.
@@ -861,7 +1011,13 @@ impl Checker {
                         *span,
                     ));
                 }
-                Type::Struct(cname)
+                Type::Struct(
+                    cname,
+                    gen_vars
+                        .iter()
+                        .map(|v| self.unifier.resolve_deep(v))
+                        .collect(),
+                )
             }
             Expr::Index { obj, index, span } => {
                 let ot = self.check_expr(obj);
@@ -886,6 +1042,7 @@ impl Checker {
                         self.ensure_int(it, index.span());
                         Type::Str
                     }
+                    Type::Tuple(elems) => self.check_tuple_index(&elems, index),
                     Type::Var(_) => {
                         self.errors.push(error_at(
                             "cannot index a value whose type could not be inferred",
@@ -1195,6 +1352,23 @@ impl Checker {
                     Type::Bool
                 }
             },
+            UnOp::BitNot => match t {
+                Type::Int => Type::Int,
+                Type::Var(id) => {
+                    self.unifier.bind(id, Type::Int);
+                    Type::Int
+                }
+                other => {
+                    self.errors.push(error_at(
+                        format!(
+                            "bitwise `~` requires an `int` operand, found `{other}`\n\
+                             hint: use `!` for boolean negation"
+                        ),
+                        span,
+                    ));
+                    Type::Error
+                }
+            },
             UnOp::Pos | UnOp::Neg => match t {
                 Type::Int => Type::Int,
                 Type::Float => Type::Float,
@@ -1345,6 +1519,62 @@ impl Checker {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => {
                 self.check_arith(op, left, right, span)
             }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                self.check_bitwise(op, left, right, span)
+            }
+        }
+    }
+
+    /// Bitwise operators are strictly `(int, int) -> int`. Unlike
+    /// [`Self::check_arith`] there is no float promotion, no string
+    /// overload, and no generic `Num` path — a float bit-pattern op is
+    /// almost always a bug, so it is a hard error with a cast hint.
+    pub(crate) fn check_bitwise(
+        &mut self,
+        op: BinOp,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+    ) -> Type {
+        let lt = self.check_expr(left);
+        let lt = self.unifier.resolve(&lt);
+        let rt = self.check_expr(right);
+        let rt = self.unifier.resolve(&rt);
+        match (&lt, &rt) {
+            (Type::Int, Type::Int) => Type::Int,
+            // Inference variables default to int (bitwise pins them).
+            (Type::Var(_), Type::Int) => {
+                self.unifier.bind_var(&lt, Type::Int);
+                Type::Int
+            }
+            (Type::Int, Type::Var(_)) => {
+                self.unifier.bind_var(&rt, Type::Int);
+                Type::Int
+            }
+            (Type::Var(_), Type::Var(_)) => {
+                self.unifier.bind_var(&lt, Type::Int);
+                self.unifier.bind_var(&rt, Type::Int);
+                Type::Int
+            }
+            _ => {
+                // `Error` (earlier failure) and `Never` (divergent,
+                // unreachable operand) suppress cascading errors —
+                // same convention as `check_arith`.
+                if !matches!(
+                    (&lt, &rt),
+                    (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
+                ) {
+                    self.errors.push(error_at(
+                        format!(
+                            "bitwise `{}` requires `int` operands, found `{lt}` and `{rt}`\n\
+                             hint: use `int(x)` to cast, `&&`/`||` for boolean logic",
+                            op.symbol()
+                        ),
+                        span,
+                    ));
+                }
+                Type::Error
+            }
         }
     }
 
@@ -1355,7 +1585,26 @@ impl Checker {
         let rt = self.check_expr(right);
         let rt = self.unifier.resolve(&rt);
         match (&lt, &rt) {
-            (Type::Int, Type::Int) => Type::Int,
+            (Type::Int, Type::Int) => {
+                // Sherlock: a literal zero divisor always traps at runtime —
+                // fail at check time with the exact spot instead (#250-area).
+                // Float division is excluded (`1.0 / 0.0` is `inf`, not an error).
+                if matches!(op, BinOp::Div | BinOp::Rem) {
+                    if let Expr::Int { value: 0, .. } = right {
+                        let what = if op == BinOp::Div {
+                            "division"
+                        } else {
+                            "remainder"
+                        };
+                        self.errors.push(error_at(
+                            format!("integer {what} by zero (divisor is literal `0`)"),
+                            right.span(),
+                        ));
+                        return Type::Error;
+                    }
+                }
+                Type::Int
+            }
             (Type::Str, Type::Str) if op == BinOp::Add => Type::Str,
             (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
                 Type::Float
@@ -1422,14 +1671,93 @@ impl Checker {
                     (&a, &b),
                     (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
                 ) {
-                    self.errors.push(error_at(
+                    let mut diag = error_at(
                         format!("cannot apply `{}` to `{}` and `{}`", op.symbol(), a, b),
                         span,
-                    ));
+                    );
+                    // Suggest the conversion matching the other operand (#247).
+                    let conv = match (&a, &b) {
+                        (Type::Str, Type::Int) | (Type::Int, Type::Str) => Some("str"),
+                        (Type::Str, Type::Float) | (Type::Float, Type::Str) => Some("str"),
+                        (Type::Str, Type::Bool) | (Type::Bool, Type::Str) => Some("str"),
+                        (Type::Int, Type::Float) | (Type::Float, Type::Int) => Some("float"),
+                        _ => None,
+                    };
+                    if let Some(f) = conv {
+                        diag = diag
+                            .with_note(format!("use {f}(x) to convert, or \"{{x}}\"-format it"));
+                    }
+                    self.errors.push(diag);
                 }
                 Type::Error
             }
         }
+    }
+
+    /// True when a `head.method(args)` call must be read as a method call
+    /// even though `head.method` also names a seeded free function: the
+    /// head is a genuine local value, the direct reading is already
+    /// impossible (fewer args than its minimum), and the method reading
+    /// fits with a receiver type matching the first parameter. Because
+    /// diversion requires the direct reading to fail, previously-passing
+    /// programs are untouched by construction.
+    ///
+    /// Motivating case: `db.exec(sql)` with a *local* `db` must not match
+    /// the seeded `db.exec` free function at full arity (which rejects
+    /// the receiver-implicit form); a top-level `db` instead resolves
+    /// through the module-namespace path and is unaffected, as are all
+    /// qualified module calls (their heads never live in value scope).
+    pub(crate) fn method_shadow_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(String, Expr)],
+    ) -> bool {
+        let Expr::Path { parts, .. } = callee else {
+            return false;
+        };
+        if parts.len() != 2 {
+            return false;
+        }
+        let Some(sig) = self.funcs.get(&parts.join(".")).cloned() else {
+            return false;
+        };
+        // The head must be a real local binding — module namespaces never
+        // live in value scope. Walk scopes directly: `lookup_opt` would
+        // also match the `joined` function entry itself.
+        if !self.env.iter().rev().any(|s| s.contains_key(&parts[0])) {
+            return false;
+        }
+        if sig.params.is_empty() {
+            return false;
+        }
+        let provided = args.len() + named.len();
+        let total = sig.params.len();
+        let direct_min = total - sig.has_default.iter().filter(|&&d| d).count();
+        // Divert only when the direct reading already fails...
+        if provided >= direct_min {
+            return false;
+        }
+        // ...and the method reading fits: within the non-receiver arity
+        // window, with a receiver type matching the first parameter.
+        // Compared structurally (no unification): binding inference vars
+        // here could leak across the two readings.
+        let method_total = total - 1;
+        if provided > method_total {
+            return false;
+        }
+        let method_min = method_total - sig.has_default.iter().skip(1).filter(|&&d| d).count();
+        if provided < method_min {
+            return false;
+        }
+        let recv_t = self
+            .env
+            .iter()
+            .rev()
+            .find_map(|s| s.get(&parts[0]).cloned())
+            .map(|t| self.unifier.resolve(&t));
+        let first_t = self.unifier.resolve(&sig.params[0].1);
+        recv_t.is_some_and(|r| r == first_t)
     }
 
     pub(crate) fn check_call(
@@ -1533,12 +1861,22 @@ impl Checker {
                         Type::Opaque(tag) => {
                             sig = self.funcs.get(&format!("{tag}.{method}")).cloned()
                         }
-                        Type::Struct(sname) => {
+                        Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
                             sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
+                            }
+                        }
+                        // Enum values erase to `Object`s, so `impl Enum`
+                        // methods dispatch exactly like struct methods.
+                        Type::Enum(ename, _) => {
+                            sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
+                            if sig.is_none() {
+                                if let Some((ns, _)) = ename.rsplit_once('.') {
                                     sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
                                 }
                             }
@@ -1552,42 +1890,27 @@ impl Checker {
                 // against the method's receiver below.
                 let mut promoted_recv: Option<Type> = None;
                 if sig.is_none() {
-                    if let Type::Struct(sname) = self.unifier.resolve(&recv_t) {
+                    if let Type::Struct(sname, sargs) = self.unifier.resolve(&recv_t) {
                         if let Some((defining, psig)) = self.find_struct_method(&sname, &method) {
-                            promoted_recv = Some(Type::Struct(defining));
+                            // The runtime passes the embedded value itself
+                            // as the receiver (with its own arguments).
+                            promoted_recv = self
+                                .promoted_method_receiver(&sname, &sargs, &defining)
+                                .or_else(|| Some(Type::Struct(defining, Vec::new())));
                             sig = Some(psig);
                         }
                     }
                 }
                 if let Some(sig) = sig {
-                    let (ps, ret, subs) = self.instantiate(&sig);
-                    if ps.is_empty() {
-                        self.errors.push(error_at(
-                            format!("method `{method}` takes no arguments"),
-                            span,
-                        ));
-                        return Type::Unit;
-                    }
-                    if let Some(promoted) = promoted_recv {
-                        if let Err(e) = self.unifier.unify(&promoted, &ps[0]) {
-                            self.report_mismatch(e, span);
-                        }
-                    } else if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
-                        self.report_mismatch(e, span);
-                    }
-                    self.check_args_against(
-                        &sig.params[1..]
-                            .iter()
-                            .map(|(n, _)| n.clone())
-                            .collect::<Vec<_>>(),
-                        &ps[1..],
-                        &[],
+                    return self.check_method_call(&MethodCall {
+                        sig: &sig,
+                        recv_t: &recv_t,
+                        promoted_recv,
+                        method: &method,
                         args,
                         named,
                         span,
-                    );
-                    self.validate_bounds(&sig, &subs, span);
-                    return ret;
+                    });
                 }
                 None
             }
@@ -1596,7 +1919,7 @@ impl Checker {
         if let Some(name) = &direct_name {
             // Math constants are values, not functions: `math.PI()` is
             // always an error — use bare `math.PI`.
-            if Self::is_math_const(name) && self.funcs.contains_key(name) {
+            if self.is_math_const(name) && self.funcs.contains_key(name) {
                 self.used_names.insert(name.clone());
                 // Still check the args so nested errors inside them surface.
                 for arg in args {
@@ -1673,7 +1996,15 @@ impl Checker {
                         let (ps, ret, subs) = self.instantiate(&sig);
                         let pnames: Vec<String> =
                             sig.params.iter().map(|(n, _)| n.clone()).collect();
-                        self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
+                        self.check_args_against(
+                            Some(Self::short_name(name)),
+                            &pnames,
+                            &ps,
+                            &sig.has_default,
+                            args,
+                            named,
+                            span,
+                        );
                         // Explicit-receiver forms (`pg.query(db, sql)`,
                         // `sqlz.query(db, sql)`) carry the SQL second;
                         // the bare method-namespace form carries it first.
@@ -1707,100 +2038,112 @@ impl Checker {
             // `check_call`, so a bare `route`/`param` reaching this point
             // is user code (e.g. a `@route` decorator) — linting it would
             // false-positive (see `syntax/decorators.zz`).
-            if let Some(sig) = self.funcs.get(name).cloned() {
-                self.used_names.insert(name.clone());
-                let (ps, ret, subs) = self.instantiate(&sig);
-                if name == "input" {
-                    if args.len() + named.len() > 1 {
-                        self.errors.push(error_at(
-                            format!(
-                                "expected 0 or 1 arguments, found {}",
-                                args.len() + named.len()
-                            ),
-                            span,
-                        ));
-                    } else if args.len() + named.len() == 1 {
-                        let arg_expr = if !args.is_empty() {
-                            &args[0]
+            if !self.method_shadow_call(callee, args, named) {
+                if let Some(sig) = self.funcs.get(name).cloned() {
+                    self.used_names.insert(name.clone());
+                    let (ps, ret, subs) = self.instantiate(&sig);
+                    if name == "input" {
+                        if args.len() + named.len() > 1 {
+                            self.errors.push(error_at(
+                                format!(
+                                    "expected 0 or 1 arguments, found {}",
+                                    args.len() + named.len()
+                                ),
+                                span,
+                            ));
+                        } else if args.len() + named.len() == 1 {
+                            let arg_expr = if !args.is_empty() {
+                                &args[0]
+                            } else {
+                                &named[0].1
+                            };
+                            let at = self.check_expr(arg_expr);
+                            if let Err(e) = self.unifier.unify(&at, &Type::Str) {
+                                self.report_mismatch(e, arg_expr.span());
+                            }
+                        }
+                        return ret;
+                    }
+                    if name == "range" {
+                        let total = args.len() + named.len();
+                        if total == 0 || total > 3 {
+                            self.errors.push(error_at(
+                                format!("range expects 1, 2, or 3 arguments, found {total}"),
+                                span,
+                            ));
                         } else {
-                            &named[0].1
-                        };
-                        let at = self.check_expr(arg_expr);
-                        if let Err(e) = self.unifier.unify(&at, &Type::Str) {
-                            self.report_mismatch(e, arg_expr.span());
+                            for arg in args {
+                                let at = self.check_expr(arg);
+                                if let Err(e) = self.unifier.unify(&at, &Type::Int) {
+                                    self.report_mismatch(e, arg.span());
+                                }
+                            }
+                            for (_, val) in named {
+                                let at = self.check_expr(val);
+                                if let Err(e) = self.unifier.unify(&at, &Type::Int) {
+                                    self.report_mismatch(e, val.span());
+                                }
+                            }
                         }
+                        return ret;
                     }
-                    return ret;
-                }
-                if name == "range" {
-                    let total = args.len() + named.len();
-                    if total == 0 || total > 3 {
-                        self.errors.push(error_at(
-                            format!("range expects 1, 2, or 3 arguments, found {total}"),
-                            span,
-                        ));
-                    } else {
-                        for arg in args {
-                            let at = self.check_expr(arg);
-                            if let Err(e) = self.unifier.unify(&at, &Type::Int) {
-                                self.report_mismatch(e, arg.span());
-                            }
-                        }
-                        for (_, val) in named {
-                            let at = self.check_expr(val);
-                            if let Err(e) = self.unifier.unify(&at, &Type::Int) {
-                                self.report_mismatch(e, val.span());
-                            }
-                        }
-                    }
-                    return ret;
-                }
-                let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
-                self.check_args_against(&pnames, &ps, &sig.has_default, args, named, span);
-                self.validate_bounds(&sig, &subs, span);
-                // A bare function value as a print argument is always a
-                // missing `()` (`println(env.os)` would print the function
-                // itself instead of calling it). Catch it here — with the
-                // name attached — rather than letting each engine render
-                // `<func>` / `<native ...>` / empty output.
-                if name == "print" || name == "println" {
-                    if let Some(first) = args.first() {
-                        // Resolve silently (lookup_opt, never check_expr:
-                        // the argument was already checked above and a
-                        // second pass would duplicate diagnostics).
-                        let (arg_t, fname) = match first {
-                            Expr::Ident { name: n, .. } => (self.lookup_opt(n), Some(n.clone())),
-                            Expr::Path { parts, .. } => {
-                                let joined = parts.join(".");
-                                (self.lookup_opt(&joined), Some(joined))
-                            }
-                            _ => (None, None),
-                        };
-                        let is_func = matches!(
-                            arg_t.as_ref().map(|t| self.unifier.resolve(t)),
-                            Some(Type::Func(_, _))
-                        ) || matches!(fname.as_deref(), Some(n)
-                            if self.funcs.contains_key(n) && !Self::is_math_const(n));
-                        if is_func {
-                            if let Some(fname) = fname {
-                                let mut diag = error_at(
-                                    format!(
+                    let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
+                    self.check_args_against(
+                        Some(Self::short_name(name)),
+                        &pnames,
+                        &ps,
+                        &sig.has_default,
+                        args,
+                        named,
+                        span,
+                    );
+                    self.validate_bounds(&sig, &subs, span);
+                    // A bare function value as a print argument is always a
+                    // missing `()` (`println(env.os)` would print the function
+                    // itself instead of calling it). Catch it here — with the
+                    // name attached — rather than letting each engine render
+                    // `<func>` / `<native ...>` / empty output.
+                    if name == "print" || name == "println" {
+                        if let Some(first) = args.first() {
+                            // Resolve silently (lookup_opt, never check_expr:
+                            // the argument was already checked above and a
+                            // second pass would duplicate diagnostics).
+                            let (arg_t, fname) = match first {
+                                Expr::Ident { name: n, .. } => {
+                                    (self.lookup_opt(n), Some(n.clone()))
+                                }
+                                Expr::Path { parts, .. } => {
+                                    let joined = parts.join(".");
+                                    (self.lookup_opt(&joined), Some(joined))
+                                }
+                                _ => (None, None),
+                            };
+                            let is_func = matches!(
+                                arg_t.as_ref().map(|t| self.unifier.resolve(t)),
+                                Some(Type::Func(_, _))
+                            ) || matches!(fname.as_deref(), Some(n)
+                            if self.funcs.contains_key(n) && !self.is_math_const(n));
+                            if is_func {
+                                if let Some(fname) = fname {
+                                    let mut diag = error_at(
+                                        format!(
                                         "cannot print function `{fname}`: call it with arguments"
                                     ),
-                                    first.span(),
-                                );
-                                diag = diag.with_note(format!("did you mean `{fname}()`?"));
-                                diag = diag.with_fixit(FixIt::safe(
-                                    Span::new(first.span().end, first.span().end),
-                                    "()".to_string(),
-                                    "call function",
-                                ));
-                                self.errors.push(diag);
+                                        first.span(),
+                                    );
+                                    diag = diag.with_note(format!("did you mean `{fname}()`?"));
+                                    diag = diag.with_fixit(FixIt::safe(
+                                        Span::new(first.span().end, first.span().end),
+                                        "()".to_string(),
+                                        "call function",
+                                    ));
+                                    self.errors.push(diag);
+                                }
                             }
                         }
                     }
+                    return ret;
                 }
-                return ret;
             }
         }
         // Method call: `p.dist()` resolves to `dist(p, ...)`.
@@ -1810,54 +2153,180 @@ impl Checker {
                 // (e.g. module-level closure `ns.f`). If so, treat it as
                 // a regular call, not a method call.
                 let joined = parts.join(".");
-                if let Some(var_ty) = self.lookup_opt(&joined) {
-                    self.used_names.insert(joined.clone());
-                    let callee_t = self.unifier.resolve(&var_ty);
-                    // If the var is still an unresolved inference var, or is
-                    // already known to be a Func/Named, treat as a variable
-                    // call — not a method call on the first path component.
-                    match &callee_t {
-                        Type::Func(..) | Type::Named(..) => {
-                            let pnames: Vec<String> =
-                                (0..args.len()).map(|i| format!("_{i}")).collect();
-                            match callee_t {
-                                Type::Func(ps, ret) => {
-                                    self.check_args_against(&pnames, &ps, &[], args, named, span);
-                                    return *ret;
+                // Enum construction (`Token.IntLit(1)`) reads as a call
+                // but builds a value, not a function invocation. Takes
+                // priority over method dispatch (no receiver exists) but
+                // yields to real functions and locals: an exact `funcs`
+                // entry or a shadowing value keeps its meaning.
+                let enum_head = parts[..parts.len() - 1].join(".");
+                let canonical_head = self.canonical_enum_name(&enum_head);
+                if self.enums.contains_key(&canonical_head)
+                    && !self.funcs.contains_key(&joined)
+                    && self.lookup_opt(&enum_head).is_none()
+                {
+                    let variant = parts.last().cloned().unwrap_or_default();
+                    if let Some(t) =
+                        self.check_enum_construction(&canonical_head, &variant, args, named, span)
+                    {
+                        return t;
+                    }
+                }
+                // Method on a constructed variant (`Token.Eof.is_eof()`
+                // parses as a 3+-part path): the call arguments split —
+                // the first fills a payload variant, the rest go to the
+                // method (`Token.IntLit(1).add(2)` constructs with `1`,
+                // calls `add` with `2`). Unit variants delegate to the
+                // Field branch with a synthetic receiver.
+                if parts.len() >= 3 {
+                    let enum_head2 = parts[..parts.len() - 2].join(".");
+                    let canonical_head2 = self.canonical_enum_name(&enum_head2);
+                    if self.enums.contains_key(&canonical_head2)
+                        && !self.funcs.contains_key(&joined)
+                        && self.lookup_opt(&enum_head2).is_none()
+                    {
+                        let variant2 = parts[parts.len() - 2].clone();
+                        let method2 = parts.last().cloned().unwrap_or_default();
+                        let _pv = self.enum_variant_payload(&canonical_head2, &variant2, *pspan);
+                        match _pv {
+                            Some(Some(pty)) => {
+                                if args.is_empty() {
+                                    self.errors.push(error_at(
+                                        format!(
+                                            "variant `{canonical_head2}.{variant2}` holds a value: pass it before the method arguments (e.g. `{canonical_head2}.{variant2}(v).{method2}(...)`)"
+                                        ),
+                                        span,
+                                    ));
+                                    let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                    return Type::Enum(canonical_head2, gen_vars);
                                 }
-                                Type::Named(ref nname) => {
-                                    if let Some(sig) = self.funcs.get(nname).cloned() {
-                                        let (ps, ret, subs) = self.instantiate(&sig);
-                                        let pnames: Vec<String> =
-                                            sig.params.iter().map(|(n, _)| n.clone()).collect();
+                                // First argument fills the payload; the
+                                // rest are the method's. Generic parameters
+                                // instantiate fresh, as in construction.
+                                let (gen_vars, gen_map) = self.fresh_enum_vars(&canonical_head2);
+                                let at = self.check_expr(&args[0]);
+                                let exp = super::inference::subst(&pty, &gen_map);
+                                if let Err(e) = self.unifier.unify(&at, &exp) {
+                                    self.report_mismatch(e, args[0].span());
+                                }
+                                let recv_args: Vec<Type> = gen_vars
+                                    .iter()
+                                    .map(|v| self.unifier.resolve_deep(v))
+                                    .collect();
+                                let recv_t = Type::Enum(canonical_head2.clone(), recv_args);
+                                let mut sig = self
+                                    .funcs
+                                    .get(&format!("{canonical_head2}.{method2}"))
+                                    .cloned();
+                                if sig.is_none() {
+                                    if let Some((ns, _)) = canonical_head2.rsplit_once('.') {
+                                        sig = self.funcs.get(&format!("{ns}.{method2}")).cloned();
+                                    }
+                                }
+                                if let Some(sig) = sig {
+                                    self.used_names
+                                        .insert(format!("{canonical_head2}.{method2}"));
+                                    return self.check_method_call(&MethodCall {
+                                        sig: &sig,
+                                        recv_t: &recv_t,
+                                        promoted_recv: None,
+                                        method: &method2,
+                                        args: &args[1..],
+                                        named,
+                                        span,
+                                    });
+                                }
+                                self.errors.push(error_at(
+                                    format!(
+                                        "unknown method `{method2}` for enum `{canonical_head2}`"
+                                    ),
+                                    span,
+                                ));
+                                let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                return Type::Enum(canonical_head2, gen_vars);
+                            }
+                            Some(None) => {
+                                let recv = Expr::Path {
+                                    parts: parts[..parts.len() - 1].to_vec(),
+                                    span: *pspan,
+                                };
+                                let field_callee = Expr::Field {
+                                    obj: Box::new(recv),
+                                    name: parts.last().cloned().unwrap_or_default(),
+                                    span: *pspan,
+                                };
+                                return self.check_call(&field_callee, args, named, span);
+                            }
+                            // Unknown variant: already reported inside.
+                            None => {
+                                let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
+                                return Type::Enum(canonical_head2, gen_vars);
+                            }
+                        }
+                    }
+                }
+                // A `head.method` call on a genuine local value reads as
+                // a method call when the free-function reading is already
+                // impossible (see `method_shadow_call`) — e.g. `db.exec`
+                // on a local `db`, never the seeded free function.
+                let shadowed = self.method_shadow_call(callee, args, named);
+                if !shadowed {
+                    if let Some(var_ty) = self.lookup_opt(&joined) {
+                        let callee_t = self.unifier.resolve(&var_ty);
+                        // If the var is still an unresolved inference var, or is
+                        // already known to be a Func/Named, treat as a variable
+                        // call — not a method call on the first path component.
+                        match &callee_t {
+                            Type::Func(..) | Type::Named(..) => {
+                                let pnames: Vec<String> =
+                                    (0..args.len()).map(|i| format!("_{i}")).collect();
+                                match callee_t {
+                                    Type::Func(ps, ret) => {
                                         self.check_args_against(
+                                            None,
                                             &pnames,
                                             &ps,
-                                            &sig.has_default,
+                                            &[],
                                             args,
                                             named,
                                             span,
                                         );
-                                        self.validate_bounds(&sig, &subs, span);
-                                        return ret;
+                                        return *ret;
                                     }
+                                    Type::Named(ref nname) => {
+                                        if let Some(sig) = self.funcs.get(nname).cloned() {
+                                            let (ps, ret, subs) = self.instantiate(&sig);
+                                            let pnames: Vec<String> =
+                                                sig.params.iter().map(|(n, _)| n.clone()).collect();
+                                            self.check_args_against(
+                                                Some(Self::short_name(nname)),
+                                                &pnames,
+                                                &ps,
+                                                &sig.has_default,
+                                                args,
+                                                named,
+                                                span,
+                                            );
+                                            self.validate_bounds(&sig, &subs, span);
+                                            return ret;
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
-                        }
-                        Type::Var(_) => {
-                            // Fresh var from recursive closure pre-binding.
-                            // Build a Func type from the args and unify.
-                            let arg_types: Vec<Type> =
-                                args.iter().map(|a| self.check_expr(a)).collect();
-                            let ret_var = self.unifier.fresh_var();
-                            let func_ty = Type::Func(arg_types, Box::new(ret_var.clone()));
-                            if let Err(e) = self.unifier.unify(&var_ty, &func_ty) {
-                                self.report_mismatch(e, span);
+                            Type::Var(_) => {
+                                // Fresh var from recursive closure pre-binding.
+                                // Build a Func type from the args and unify.
+                                let arg_types: Vec<Type> =
+                                    args.iter().map(|a| self.check_expr(a)).collect();
+                                let ret_var = self.unifier.fresh_var();
+                                let func_ty = Type::Func(arg_types, Box::new(ret_var.clone()));
+                                if let Err(e) = self.unifier.unify(&var_ty, &func_ty) {
+                                    self.report_mismatch(e, span);
+                                }
+                                return self.unifier.resolve(&ret_var);
                             }
-                            return self.unifier.resolve(&ret_var);
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
                 let method = parts.last().unwrap();
@@ -1921,12 +2390,22 @@ impl Checker {
                         Type::Opaque(tag) => {
                             sig = self.funcs.get(&format!("{tag}.{method}")).cloned();
                         }
-                        Type::Struct(sname) => {
+                        Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
                             sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
+                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                }
+                            }
+                        }
+                        // Enum values erase to `Object`s, so `impl Enum`
+                        // methods dispatch exactly like struct methods.
+                        Type::Enum(ename, _) => {
+                            sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
+                            if sig.is_none() {
+                                if let Some((ns, _)) = ename.rsplit_once('.') {
                                     sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
                                 }
                             }
@@ -1937,9 +2416,13 @@ impl Checker {
                 // Embedded promotion (see the `Field`-callee branch above).
                 let mut promoted_recv: Option<Type> = None;
                 if sig.is_none() {
-                    if let Type::Struct(sname) = self.unifier.resolve(&recv_t) {
+                    if let Type::Struct(sname, sargs) = self.unifier.resolve(&recv_t) {
                         if let Some((defining, psig)) = self.find_struct_method(&sname, method) {
-                            promoted_recv = Some(Type::Struct(defining));
+                            // The runtime passes the embedded value itself
+                            // as the receiver (with its own arguments).
+                            promoted_recv = self
+                                .promoted_method_receiver(&sname, &sargs, &defining)
+                                .or_else(|| Some(Type::Struct(defining, Vec::new())));
                             sig = Some(psig);
                         }
                     }
@@ -2027,6 +2510,7 @@ impl Checker {
                         self.report_mismatch(e, *pspan);
                     }
                     self.check_args_against(
+                        None,
                         &sig.params[1..]
                             .iter()
                             .map(|(n, _)| n.clone())
@@ -2047,7 +2531,7 @@ impl Checker {
         match callee_t {
             Type::Func(ps, ret) => {
                 let pnames: Vec<String> = (0..ps.len()).map(|i| format!("_{i}")).collect();
-                self.check_args_against(&pnames, &ps, &[], args, named, span);
+                self.check_args_against(None, &pnames, &ps, &[], args, named, span);
                 *ret
             }
             Type::Named(name) => match self.funcs.get(&name).cloned() {
@@ -2055,13 +2539,42 @@ impl Checker {
                     let (ps, ret, subs) = self.instantiate(&sig);
                     let param_names: Vec<String> =
                         sig.params.iter().map(|(n, _)| n.clone()).collect();
-                    self.check_args_against(&param_names, &ps, &sig.has_default, args, named, span);
+                    self.check_args_against(
+                        Some(Self::short_name(&name)),
+                        &param_names,
+                        &ps,
+                        &sig.has_default,
+                        args,
+                        named,
+                        span,
+                    );
                     self.validate_bounds(&sig, &subs, span);
                     ret
                 }
                 None => {
-                    self.errors
-                        .push(error_at(format!("unknown function `{name}`"), span));
+                    // Sherlock: suggest the closest known function so a typo
+                    // (`lenght`) points at the fix instead of a dead end.
+                    let mut diag = error_at(format!("unknown function `{name}`"), span);
+                    let candidates: Vec<String> = self
+                        .funcs
+                        .keys()
+                        .flat_map(|k| {
+                            let mut v = vec![k.clone()];
+                            if let Some(bare) = k.rsplit('.').next() {
+                                if bare != k {
+                                    v.push(bare.to_string());
+                                }
+                            }
+                            v
+                        })
+                        .collect();
+                    let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+                    if let Some((suggestion, _)) = suggest_all(&name, &refs).first() {
+                        // Note only: the span covers the whole call, not
+                        // just the name, so a replace fix would eat the args.
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.errors.push(diag);
                     Type::Unit
                 }
             },
@@ -2090,8 +2603,49 @@ impl Checker {
     /// Check that the given positional and named arguments match the parameter
     /// types.  `has_default` indicates which trailing parameters have defaults;
     /// callers may omit those.
+    pub(crate) fn check_method_call(&mut self, call: &MethodCall<'_>) -> Type {
+        let (ps, ret, subs) = self.instantiate(call.sig);
+        if ps.is_empty() {
+            self.errors.push(error_at(
+                format!("method `{}` takes no arguments", call.method),
+                call.span,
+            ));
+            return Type::Unit;
+        }
+        if let Some(promoted) = &call.promoted_recv {
+            if let Err(e) = self.unifier.unify(promoted, &ps[0]) {
+                self.report_mismatch(e, call.span);
+            }
+        } else if let Err(e) = self.unifier.unify(call.recv_t, &ps[0]) {
+            self.report_mismatch(e, call.span);
+        }
+        self.check_args_against(
+            Some(call.method),
+            &call.sig.params[1..]
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>(),
+            &ps[1..],
+            &[],
+            call.args,
+            call.named,
+            call.span,
+        );
+        self.validate_bounds(call.sig, &subs, call.span);
+        ret
+    }
+
+    /// Short display name for call diagnostics: `math.sin` → `sin`.
+    pub(crate) fn short_name(name: &str) -> &str {
+        name.rsplit('.').next().unwrap_or(name)
+    }
+
+    // Eight args is the honest shape here (callee + params + args + span);
+    // a struct would churn every call site for no checking benefit.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_args_against(
         &mut self,
+        callee: Option<&str>,
         param_names: &[String],
         ps: &[Type],
         has_default: &[bool],
@@ -2104,13 +2658,42 @@ impl Checker {
         let allowed_min = total_params - has_default.iter().filter(|&&d| d).count();
 
         if total_provided < allowed_min || total_provided > total_params {
-            self.errors.push(error_at(
-                format!(
-                    "expected {} to {} arguments, found {}",
-                    allowed_min, total_params, total_provided
-                ),
-                span,
-            ));
+            let sig = param_names
+                .iter()
+                .zip(ps.iter())
+                .map(|(n, t)| format!("{n}: {t}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count = if allowed_min == total_params {
+                if total_params == 1 {
+                    "takes 1 argument".to_string()
+                } else {
+                    format!("takes {total_params} arguments")
+                }
+            } else {
+                format!("takes {allowed_min} to {total_params} arguments")
+            };
+            let head = match callee.filter(|c| !c.is_empty()) {
+                Some(name) => format!("`{name}` {count}"),
+                None => count,
+            };
+            let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span);
+            // Name the missing parameters when too few were given. A named
+            // argument covers its parameter wherever it sits, so only
+            // report slots filled by neither position nor name.
+            if total_provided < allowed_min {
+                let missing: Vec<String> = param_names
+                    .iter()
+                    .zip(ps.iter())
+                    .enumerate()
+                    .filter(|(i, (n, _))| *i >= args.len() && !named.iter().any(|(an, _)| an == *n))
+                    .map(|(_, (n, t))| format!("{n}: {t}"))
+                    .collect();
+                if let Some(first) = missing.first() {
+                    diag = diag.with_note(format!("missing argument for `{first}`"));
+                }
+            }
+            self.errors.push(diag);
             return;
         }
 
@@ -2148,8 +2731,14 @@ impl Checker {
                     slots[i] = Some(val);
                 }
                 None => {
-                    self.errors
-                        .push(error_at(format!("unknown parameter `{name}`"), val.span()));
+                    // Sherlock: typo'd named argument (`nmae:`) suggests the
+                    // real parameter instead of dying with just the name.
+                    let mut diag = error_at(format!("unknown parameter `{name}`"), val.span());
+                    let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
+                    if let Some((suggestion, _)) = suggest_all(name, &refs).first() {
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.errors.push(diag);
                     return;
                 }
             }
@@ -2409,7 +2998,7 @@ impl Checker {
                     "`?`/`try` can only be used inside a function returning `Result` or `Option`",
                     span,
                 ));
-                return Type::Unit;
+                return Type::Error;
             }
         };
         match ot {
@@ -2424,10 +3013,15 @@ impl Checker {
                     *t
                 }
                 other => {
-                    self.errors.push(error_at(
-                        format!("`?` on `Option` cannot propagate through a function returning `{other}`"),
-                        span,
-                    ));
+                    self.errors.push(
+                        error_at(
+                            format!("`?` on `Option` cannot propagate through a function returning `{other}`"),
+                            span,
+                        )
+                        .with_note(format!(
+                            "to use `?` here, change the return type to `Option<{t}>`"
+                        )),
+                    );
                     *t
                 }
             },
@@ -2488,10 +3082,15 @@ impl Checker {
                     *t
                 }
                 other => {
-                    self.errors.push(error_at(
-                        format!("`?` on `Result` cannot propagate through a function returning `{other}`\nhelp: enclosing function must return `Result<T, E>` to use `try`"),
-                        span,
-                    ));
+                    self.errors.push(
+                        error_at(
+                            format!("`?` on `Result` cannot propagate through a function returning `{other}`"),
+                            span,
+                        )
+                        .with_note(format!(
+                            "to use `?` here, change the return type to `Result<{t}, {e}>`"
+                        )),
+                    );
                     *t
                 }
             },
@@ -2500,14 +3099,16 @@ impl Checker {
                     "cannot use `?` on a value whose type could not be inferred",
                     span,
                 ));
-                Type::Unit
+                Type::Error
             }
             other => {
-                self.errors.push(error_at(
-                    format!("cannot use `?` on a value of type `{other}`"),
-                    span,
-                ));
-                Type::Unit
+                self.errors.push(
+                    error_at(format!("cannot use `?` on a value of type `{other}`"), span)
+                        .with_note(format!(
+                            "`?` unwraps `Result`/`Option`; `{other}` is neither — remove the `?`"
+                        )),
+                );
+                Type::Error
             }
         }
     }
@@ -2716,14 +3317,105 @@ impl Checker {
                     (Type::Result(_, e), "err") => {
                         arg.as_ref().map(|p| (p.as_ref().clone(), (**e).clone()))
                     }
+                    (Type::Enum(ename, eargs), vname) => {
+                        match self.enum_variant_payload(ename, vname, *span) {
+                            Some(Some(pty)) => {
+                                // Substitute the scrutinee's arguments for
+                                // the enum's parameters (`Box[int]` + `T`
+                                // → `int`), exactly like generic struct
+                                // field access.
+                                let inner = self.subst_enum_payload(ename, eargs, &pty);
+                                match arg {
+                                    Some(p) => Some((p.as_ref().clone(), inner)),
+                                    None => {
+                                        self.errors.push(error_at(
+                                            format!(
+                                                "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
+                                            ),
+                                            *span,
+                                        ));
+                                        None
+                                    }
+                                }
+                            }
+                            Some(None) => {
+                                if arg.is_some() {
+                                    self.errors.push(error_at(
+                                        format!(
+                                            "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
+                                        ),
+                                        *span,
+                                    ));
+                                }
+                                None
+                            }
+                            // Unknown variant: already reported; bind
+                            // nothing to suppress cascades.
+                            None => None,
+                        }
+                    }
                     (Type::Var(_), _) => arg
                         .as_ref()
                         .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
+                    (Type::Error, _) => {
+                        // Poisoned scrutinee: bind names as Error silently
+                        // so follow-on uses don't cascade (#246).
+                        if let Some(p) = arg {
+                            self.bind_pattern(p, &Type::Error);
+                        }
+                        None
+                    }
                     (other, vname) => {
-                        self.errors.push(error_at(
+                        let mut diag = error_at(
                             format!("pattern `.{vname}` does not match a value of type `{other}`"),
                             *span,
-                        ));
+                        );
+                        // Sherlock hints: point at the right variant family
+                        // for the scrutinee type (#247 follow-up).
+                        let hint: Option<String> = match (other, vname) {
+                            (Type::Option(_), "ok") => {
+                                Some("use `.some(x)` for the Option value".to_string())
+                            }
+                            (Type::Option(_), "err") => {
+                                Some("Option has no `.err`; use `.some(x)` / `.none`".to_string())
+                            }
+                            (Type::Option(_), _) => {
+                                Some("Option patterns are `.some(x)` / `.none`".to_string())
+                            }
+                            (Type::Result(_, _), "some") => {
+                                Some("use `.ok(x)` for the Result value".to_string())
+                            }
+                            (Type::Result(_, _), "none") => Some(
+                                "use `.err(e)` for the Result error; `.none` is an Option pattern"
+                                    .to_string(),
+                            ),
+                            (Type::Result(_, _), _) => {
+                                Some("Result patterns are `.ok(x)` / `.err(e)`".to_string())
+                            }
+                            (Type::Bool, _) => {
+                                Some("use `true` / `false` patterns for `bool`".to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(h) = hint {
+                            diag = diag.with_note(h);
+                        }
+                        // Mismatch-first help when variant arms meet a plain
+                        // scalar scrutinee (user assumed Result/Option) (#247).
+                        if matches!(
+                            other,
+                            Type::Int | Type::Float | Type::Str | Type::Unit | Type::Bool
+                        ) {
+                            diag = diag.with_note(format!(
+                                "match on plain `{other}` needs no `.ok`/`.err` arms"
+                            ));
+                        }
+                        self.errors.push(diag);
+                        // Bind the payload names as Error so their uses
+                        // don't cascade into `undefined variable` noise (#246).
+                        if let Some(p) = arg {
+                            self.bind_pattern(p, &Type::Error);
+                        }
                         None
                     }
                 };
@@ -2826,6 +3518,11 @@ impl Checker {
         arms: &[zz_frontend::ast::MatchArm],
         span: Span,
     ) {
+        // Poisoned scrutinee: the root error is already reported; skip
+        // exhaustiveness noise (#246).
+        if matches!(self.unifier.resolve(st), Type::Error) {
+            return;
+        }
         fn pat_is_wildcard(pat: &Pattern) -> bool {
             match pat {
                 Pattern::Wildcard { .. } => true,
@@ -2836,15 +3533,62 @@ impl Checker {
         if arms.iter().any(|a| pat_is_wildcard(&a.pat)) {
             return;
         }
+        // Enum exhaustiveness needs owned names (the signature table
+        // can't lend `&str`s past the borrow), so enums take a separate
+        // path from the static `&str` tables above.
+        if let Type::Enum(ename, _) = st {
+            let needs: Vec<String> = self
+                .enums
+                .get(ename)
+                .map(|s| s.variants.iter().map(|(v, _)| v.clone()).collect())
+                .unwrap_or_default();
+            if needs.is_empty() {
+                // Unknown enum (no registered signature): can't verify,
+                // don't cascade.
+                return;
+            }
+            let mut have: Vec<String> = Vec::new();
+            for a in arms {
+                pat_tags(&a.pat, &mut have);
+            }
+            let missing: Vec<&String> = needs.iter().filter(|n| !have.contains(n)).collect();
+            if !missing.is_empty() {
+                let missing = missing
+                    .iter()
+                    .map(|m| format!("`.{m}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                self.errors.push(error_at(
+                    format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
+                    span,
+                ));
+            }
+            return;
+        }
         let needs: Option<Vec<&str>> = match st {
             Type::Option(_) => Some(vec!["some", "none"]),
             Type::Result(_, _) => Some(vec!["ok", "err"]),
             Type::Bool => Some(vec!["true", "false"]),
             Type::Int | Type::Float | Type::Str | Type::Unit => {
-                self.errors.push(error_at(
-                    format!("match on `{st}` requires a `_` wildcard arm"),
-                    span,
-                ));
+                // Mismatch-first: variant arms on a plain scalar get their
+                // mismatch errors from bind_pattern; skip the wildcard noise
+                // here so the real error leads (#247).
+                let has_variant = arms.iter().any(|a| {
+                    fn has_variant_pat(pat: &Pattern) -> bool {
+                        match pat {
+                            Pattern::Variant { .. } => true,
+                            Pattern::Or { pats, .. } => pats.iter().any(has_variant_pat),
+                            _ => false,
+                        }
+                    }
+                    has_variant_pat(&a.pat)
+                });
+                if !has_variant {
+                    self.errors.push(error_at(
+                        format!("match on `{st}` requires a `_` wildcard arm"),
+                        span,
+                    ));
+                }
                 return;
             }
             _ => return,

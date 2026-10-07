@@ -403,12 +403,15 @@ struct zz_task_join {
 // Thread-local: each thread maintains its own arena (no locking needed).
 //
 // Overflow chunks form a singly-linked list so that zz_arena_destroy can
-// free them all in one walk (instead of the old code that leaked or
-// free'd the primary buffer prematurely).
+// free them all in one walk. Each node ADOPTS a full primary buffer (no
+// copying): the buffer stays mapped and readable until reset/destroy, so
+// in-flight pointers (e.g. an object header allocated just before its
+// payload overflowed) remain valid. Copying instead would leave such
+// pointers dangling at freed memory (heap corruption).
 typedef struct zz_arena_chunk {
     struct zz_arena_chunk *next;
-    size_t cap;
-    char buf[];              // flexible array
+    char *buf;              // adopted overflow buffer (owned by this node)
+    size_t cap;             // capacity of buf (informational)
 } zz_arena_chunk;
 
 typedef struct zz_arena {
@@ -418,16 +421,41 @@ typedef struct zz_arena {
     zz_arena_chunk *chunks;  // linked list of overflow chunks (for destroy)
 } zz_arena;
 
-// O(1) reset: free all arena allocations at once by resetting the offset.
-// The arena's buffer is NOT freed — it is reused for the next function call.
+// O(1)-ish reset: free all arena allocations at once. Overflow chunks
+// (prior iterations' overflowed buffers) are freed; the primary block is
+// kept for reuse, so the steady state is one malloc-free reset when the
+// working set fits. Previously chunks were never released here, so any
+// loop whose per-iteration footprint exceeded the primary block leaked a
+// chunk per iteration (GBs on string-accumulation loops).
+// Contract unchanged: every live pointer into the arena (primary or
+// chunks) is dead after reset — escaping values must be healed out first
+// (see zz_str_heal_arena / zz_heal_for_move).
 static inline void zz_arena_reset(zz_arena *a) {
+    zz_arena_chunk *chunk = a->chunks;
+    while (chunk) {
+        zz_arena_chunk *next = chunk->next;
+        free(chunk->buf);
+        free(chunk);
+        chunk = next;
+    }
+    a->chunks = NULL;
     a->offset = 0;
 }
 
 // Reset the arena and hint the C allocator to return freed heap pages to
 // the OS. Slower than bare reset — call only at function-level cleanup,
-// not per-iteration in tight loops.
+// not per-iteration in tight loops. Like `zz_arena_reset`, overflows are
+// freed (otherwise a function whose working set overflowed would leak its
+// chunks at exit).
 static inline void zz_arena_reset_trim(zz_arena *a) {
+    zz_arena_chunk *chunk = a->chunks;
+    while (chunk) {
+        zz_arena_chunk *next = chunk->next;
+        free(chunk->buf);
+        free(chunk);
+        chunk = next;
+    }
+    a->chunks = NULL;
     a->offset = 0;
 #ifdef __GLIBC__
     malloc_trim(0);
@@ -560,6 +588,21 @@ static inline void zz_release(zz_value *v) {
     }
 }
 
+// Forward: defined in strings.c (same translation unit once the runtime
+// sources are concatenated). Heals an arena-owned string (refs==0
+// sentinel) into an independent heap copy; every other value passes
+// through unchanged. Retaining stores must heal: the per-iteration
+// loop-arena reset reuses the buffer, so a stored alias would read back
+// garbage on the next iteration (and dangle past loop-arena destroy).
+zz_value zz_str_heal_arena(zz_value v);
+// Forward: defined in collections.c. Arena predicates + move-path heal
+// for containers (deep copy of arena-owned arrays/dicts, adopt heap).
+// `zz_assign` heals through these so `a[i] = lit` and `x = lit` inside
+// loops never alias the loop arena past its reset.
+int zz_array_is_arena(const zz_array *a);
+int zz_dict_is_arena(const zz_dict *d);
+zz_value zz_heal_for_move(zz_value v);
+
 static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
     if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
@@ -568,12 +611,26 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
         zz_release(dst);
     }
+    // Heal arena-owned values into independent heap copies (loop-arena
+    // reset would otherwise corrupt the stored alias). Healed values
+    // arrive fresh-owned (refs==1, solely ours), so the retain below
+    // must be skipped for them — retaining would leak one share.
+    int healed = 0;
+    if (src.tag == ZZ_STR && src.s && !src.s->interned && src.s->refs == 0) {
+        src = zz_str_heal_arena(src);
+    } else if (src.tag == ZZ_ARRAY && src.arr && zz_array_is_arena(src.arr)) {
+        src = zz_heal_for_move(src);
+        healed = 1;
+    } else if (src.tag == ZZ_DICT && src.dict && zz_dict_is_arena(src.dict)) {
+        src = zz_heal_for_move(src);
+        healed = 1;
+    }
     *dst = src;
     // Retain the new value for refcounted types.
-    if (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
+    if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
         src.tag == ZZ_OBJECT ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
-        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON) {
+        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON)) {
         zz_retain(dst);
     }
 }
@@ -630,11 +687,17 @@ static inline zz_value zz_clone(zz_value v) {
 #define ZZOP_GT 10
 #define ZZOP_LE 11
 #define ZZOP_GE 12
+#define ZZOP_AND 13
+#define ZZOP_OR 14
+#define ZZOP_XOR 15
+#define ZZOP_SHL 16
+#define ZZOP_SHR 17
 
 zz_value zz_binop(int op, zz_value a, zz_value b);
 zz_value zz_unimplemented_native(const char *name);
 zz_value zz_neg(zz_value a);
 zz_value zz_not(zz_value a);
+zz_value zz_bitnot(zz_value a);
 bool zz_truthy(zz_value v);
 
 // ---- calls --------------------------------------------------------------// Closure entry point: args, argc, then the captured environment (array of
@@ -662,6 +725,13 @@ zz_value zz_closure_make_ex_typed(
     const unsigned char *kinds,
     const size_t *sizes,
     size_t nenv);
+// Box a plain (args, argc) ZZ function as a first-class callable value
+// (`f := add`). The target rides in a RAW env cell (plain bytes — never
+// freed as an object; heap-owned so release stays sound) behind a thunk
+// adapting it to the dispatch convention. Only for regular functions:
+// methods need a receiver and externs need a C ABI, neither of which a
+// value can carry (both keep their existing behavior).
+zz_value zz_func_of_static(zz_native_fn f);
 // Extract the generated function pointer from a closure value.
 zz_dispatch_fn zz_closure_target(zz_value v);
 // Suspendable-frame (B3) constructors: like the plain makers, but the
@@ -697,6 +767,7 @@ zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, z
 zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c);
 zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d);
 zz_value zz_call_native5(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e);
+zz_value zz_call_native6(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e, zz_value g);
 zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
                               const unsigned char *kinds, const size_t *sizes,
                               size_t nenv, int is_green);
@@ -953,6 +1024,9 @@ zz_value zz_result_expect(zz_value res, zz_value msg, int *err);
 // ---- runtime glue ------------------------------------------------------
 // Generated code calls zz_main (top-level statements) then zz_call_main.
 int zz_run(void);
+
+// Maps `main()`'s return value to a process exit code (`.err` → 1).
+int zz_main_result_code(zz_value r);
 
 // Externs defined by generated code:
 extern void zz_main(void);

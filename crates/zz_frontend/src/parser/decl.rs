@@ -7,7 +7,7 @@ use crate::token::TokenKind;
 
 use super::Parser;
 
-impl Parser {
+impl<'a> Parser<'a> {
     // --- types ------------------------------------------------------------
 
     pub(crate) fn parse_type(&mut self) -> Ty {
@@ -73,7 +73,7 @@ impl Parser {
                     ts
                 };
                 if !self.eat(TokenKind::RParen) {
-                    self.error_here("expected `)` to close function type parameters");
+                    self.error_missing_close(")", "expected `)` to close function type parameters");
                 } else {
                     self.pop_delim(TokenKind::RParen, self.previous().span);
                 }
@@ -90,7 +90,7 @@ impl Parser {
             TokenKind::Ident => {
                 self.advance();
                 // Consume dotted type names: `shapes.Point`, `a.b.c`, etc.
-                let mut full_name = tok.text.clone();
+                let mut full_name = tok.text.clone().into_owned();
                 let mut end_span = tok.span;
                 while self.eat(TokenKind::Dot) {
                     if let Some(id) = self.expect_ident() {
@@ -106,7 +106,7 @@ impl Parser {
                     while self.eat(TokenKind::Comma) {
                         ts.push(self.parse_type());
                     }
-                    if !self.eat(TokenKind::Gt) {
+                    if !self.eat_gt_close() {
                         self.error_here("expected `>` to close type arguments");
                     }
                     ts
@@ -216,7 +216,7 @@ impl Parser {
                 let end = if self.eat_close(TokenKind::RBracket) {
                     self.previous().span
                 } else {
-                    self.error_here("expected `]` to close array type");
+                    self.error_missing_close("]", "expected `]` to close array type");
                     tok.span
                 };
                 Ty {
@@ -234,7 +234,7 @@ impl Parser {
                 let end = if self.eat_close(TokenKind::RBrace) {
                     self.previous().span
                 } else {
-                    self.error_here("expected `}` to close dict type");
+                    self.error_missing_close("}", "expected `}` to close dict type");
                     tok.span
                 };
                 Ty {
@@ -280,7 +280,7 @@ impl Parser {
                             }
                         }
                     } else {
-                        self.error_here("expected `)` to close tuple type");
+                        self.error_missing_close(")", "expected `)` to close tuple type");
                         Ty {
                             kind: TyKind::Tuple(ts),
                             span: tok.span.join(first_span),
@@ -307,7 +307,7 @@ impl Parser {
                             }
                         }
                     } else {
-                        self.error_here("expected `)` to close type");
+                        self.error_missing_close(")", "expected `)` to close type");
                         Ty {
                             kind: first.kind,
                             span: tok.span.join(first_span),
@@ -344,6 +344,9 @@ impl Parser {
             i += 2;
         }
         // Skip a single `<...>` generic argument list, if present.
+        // `Shr` counts as two `>` closes (nested `A<B<int>>` lexes the
+        // end as one token); each half decrements independently so the
+        // depth accounting matches `eat_gt_close`.
         if self.peek_kind_at(i) == TokenKind::Lt {
             let mut depth = 0usize;
             loop {
@@ -356,6 +359,22 @@ impl Parser {
                     TokenKind::Gt => {
                         depth -= 1;
                         i += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    TokenKind::Shr => {
+                        // First half-close.
+                        depth = depth.saturating_sub(1);
+                        i += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        // Second half-close banks one owed `>` for the
+                        // enclosing list — mirror `pending_gt`.
+                        // (Lookahead only: record nothing, just stop if
+                        // it also closes the outer level.)
+                        depth = depth.saturating_sub(1);
                         if depth == 0 {
                             break;
                         }

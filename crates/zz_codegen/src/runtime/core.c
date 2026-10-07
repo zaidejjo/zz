@@ -37,6 +37,12 @@ zz_value zz_not(zz_value a) {
     return zz_bool(!zz_truthy(a));
 }
 
+zz_value zz_bitnot(zz_value a) {
+    if (a.tag == ZZ_INT)
+        return zz_int(~a.i);
+    return zz_unit();
+}
+
 static double dpow(double a, double b) {
     if (b == 0)
         return 1;
@@ -55,6 +61,127 @@ static double dpow(double a, double b) {
     return neg ? 1.0 / r : r;
 }
 
+// Deep value equality for `==`/`!=` (mirrors the VM's `Value::PartialEq`):
+// structs compare by type name + fields, dicts by key/value pairs,
+// arrays (and tuples) element-wise, strings by bytes, numerics with
+// int/float mixing. Mismatched types compare as unequal.
+static int zz_str_bytes_eq(const zz_str *a, const zz_str *b) {
+    if (a == b)
+        return 1;
+    if (!a || !b)
+        return 0;
+    if (a->len != b->len)
+        return 0;
+    if (a->len == 0)
+        return 1;
+    return memcmp(zz_str_cptr(a), zz_str_cptr(b), a->len) == 0;
+}
+
+static int zz_values_equal(zz_value a, zz_value b) {
+    if (a.tag == ZZ_INT && b.tag == ZZ_INT)
+        return a.i == b.i;
+    if ((a.tag == ZZ_INT || a.tag == ZZ_FLOAT) &&
+        (b.tag == ZZ_INT || b.tag == ZZ_FLOAT)) {
+        double x = a.tag == ZZ_FLOAT ? a.f : (double)a.i;
+        double y = b.tag == ZZ_FLOAT ? b.f : (double)b.i;
+        return x == y;
+    }
+    if (a.tag != b.tag)
+        return 0;
+    switch (a.tag) {
+    case ZZ_UNIT:
+        return 1;
+    case ZZ_BOOL:
+        return a.b == b.b;
+    case ZZ_STR:
+        return zz_str_bytes_eq(a.s, b.s);
+    case ZZ_BYTES: {
+        if (!a.bytes || !b.bytes)
+            return a.bytes == b.bytes;
+        if (a.bytes->len != b.bytes->len)
+            return 0;
+        if (a.bytes->len == 0)
+            return 1;
+        return memcmp(a.bytes->buf->data + a.bytes->off,
+                      b.bytes->buf->data + b.bytes->off, a.bytes->len) == 0;
+    }
+    case ZZ_ARRAY:
+    case ZZ_TUPLE: {
+        zz_array *aa = a.arr, *bb = b.arr;
+        if (!aa || !bb)
+            return aa == bb;
+        if (aa->len != bb->len)
+            return 0;
+        for (size_t i = 0; i < aa->len; i++) {
+            if (!zz_values_equal(aa->items[i], bb->items[i]))
+                return 0;
+        }
+        return 1;
+    }
+    case ZZ_DICT: {
+        zz_dict *da = a.dict, *db = b.dict;
+        if (!da || !db)
+            return da == db;
+        if (da->len != db->len)
+            return 0;
+        for (size_t i = 0; i < da->len; i++) {
+            zz_dict_entry *e = &da->entries[i];
+            int found = 0;
+            for (size_t j = 0; j < db->len; j++) {
+                zz_dict_entry *f = &db->entries[j];
+                if (zz_str_bytes_eq(e->key, f->key)) {
+                    if (!zz_values_equal(e->val, f->val))
+                        return 0;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found)
+                return 0;
+        }
+        return 1;
+    }
+    case ZZ_OBJECT: {
+        zz_object *oa = a.obj, *ob = b.obj;
+        if (!oa || !ob)
+            return oa == ob;
+        if (oa->len != ob->len)
+            return 0;
+        if (oa->type_name || ob->type_name) {
+            if (!oa->type_name || !ob->type_name)
+                return 0;
+            if (strcmp(oa->type_name, ob->type_name) != 0)
+                return 0;
+        }
+        for (size_t i = 0; i < oa->len; i++) {
+            zz_value an = oa->fields[i * 2], bn = ob->fields[i * 2];
+            zz_value av = oa->fields[i * 2 + 1], bv = ob->fields[i * 2 + 1];
+            if (an.tag != ZZ_STR || bn.tag != ZZ_STR)
+                return 0;
+            if (!zz_str_bytes_eq(an.s, bn.s))
+                return 0;
+            if (!zz_values_equal(av, bv))
+                return 0;
+        }
+        return 1;
+    }
+    case ZZ_OPTION_NONE:
+        return 1;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON: {
+        if (!a.payload || !b.payload)
+            return a.payload == b.payload;
+        return zz_values_equal(*a.payload, *b.payload);
+    }
+    case ZZ_RANGE:
+        return a.i == b.i;
+    default:
+        return 0;
+    }
+}
+
 zz_value zz_binop(int op, zz_value a, zz_value b) {
     // int fast path
     if (a.tag == ZZ_INT && b.tag == ZZ_INT) {
@@ -67,17 +194,35 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
             return zz_int(a.i * b.i);
         case ZZOP_DIV:
             if (b.i == 0) {
-                fprintf(stderr, "zz error: integer division by zero\n");
+                fprintf(stderr, "zz error: integer division by zero (%lld / %lld)\n",
+                        (long long)a.i, (long long)b.i);
+                exit(1);
+            }
+            if (a.i == INT64_MIN && b.i == -1) {
+                fprintf(stderr, "zz error: integer overflow in division (%lld / %lld)\n",
+                        (long long)a.i, (long long)b.i);
                 exit(1);
             }
             return zz_int(a.i / b.i);
         case ZZOP_REM:
             if (b.i == 0) {
-                fprintf(stderr, "zz error: integer modulo by zero\n");
+                fprintf(stderr, "zz error: integer modulo by zero (%lld %% %lld)\n",
+                        (long long)a.i, (long long)b.i);
+                exit(1);
+            }
+            if (a.i == INT64_MIN && b.i == -1) {
+                fprintf(stderr, "zz error: integer overflow in modulo (%lld %% %lld)\n",
+                        (long long)a.i, (long long)b.i);
                 exit(1);
             }
             return zz_int(a.i % b.i);
         case ZZOP_POW:
+            // Integer power traps on negative exponents (VM parity);
+            // float pow handles them as reciprocals below.
+            if (b.i < 0) {
+                fprintf(stderr, "zz error: negative exponent for integer power\n");
+                exit(1);
+            }
             return zz_int((int64_t)dpow((double)a.i, (double)b.i));
         case ZZOP_EQ:
             return zz_bool(a.i == b.i);
@@ -91,6 +236,34 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
             return zz_bool(a.i <= b.i);
         case ZZOP_GE:
             return zz_bool(a.i >= b.i);
+        case ZZOP_AND:
+            return zz_int(a.i & b.i);
+        case ZZOP_OR:
+            return zz_int(a.i | b.i);
+        case ZZOP_XOR:
+            return zz_int(a.i ^ b.i);
+        case ZZOP_SHL: {
+            if (b.i < 0) {
+                fprintf(stderr, "zz error: negative shift count for `<<`\n");
+                exit(1);
+            }
+            // Masked `int` count: well-defined for all inputs, and the
+            // unsigned left operand makes `<<` modulo-2^64 (no signed
+            // overflow UB) before the two's-complement cast back.
+            int s = (int)((uint64_t)b.i & 63);
+            return zz_int((int64_t)((uint64_t)a.i << (unsigned)s));
+        }
+        case ZZOP_SHR: {
+            if (b.i < 0) {
+                fprintf(stderr, "zz error: negative shift count for `>>`\n");
+                exit(1);
+            }
+            // Arithmetic (sign-extending) right shift: the left operand
+            // stays signed `int64_t` (shift operators promote — not
+            // convert — their operands, so no unsigned conversion here).
+            int s = (int)((uint64_t)b.i & 63);
+            return zz_int(a.i >> s);
+        }
         }
     }
     // float
@@ -177,6 +350,13 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
         if (op == ZZOP_EQ || op == ZZOP_NE) {
             return zz_binop(op, *a.payload, *b.payload);
         }
+    }
+    // Deep equality for objects/dicts/arrays/options (e.g. struct `==`):
+    // the VM compares every value via `PartialEq`; the paths above only
+    // covered scalars. Mismatched types compare as unequal.
+    if (op == ZZOP_EQ || op == ZZOP_NE) {
+        int eq = zz_values_equal(a, b);
+        return zz_bool(op == ZZOP_EQ ? eq : !eq);
     }
     return zz_unit();
 }
@@ -314,6 +494,25 @@ zz_value zz_closure_make(zz_dispatch_fn f) {
 
 zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv) {
     return zz_closure_make_ex_typed(f, cells, NULL, NULL, nenv);
+}
+
+// Adapter: call a plain ZZ function through the closure dispatch
+// convention. The target lives in env[0] (see `zz_func_of_static`).
+// Function-pointer ↔ data-pointer conversion is implementation-defined
+// but universal on the supported targets (required by POSIX dlsym).
+static zz_value zz_static_thunk(zz_value *args, size_t argc, void **env, size_t nenv) {
+    (void)nenv;
+    zz_native_fn f = (zz_native_fn)(env[0]);
+    return f(args, argc);
+}
+
+zz_value zz_func_of_static(zz_native_fn f) {
+    void **slot = (void **)malloc(sizeof(void *));
+    if (!slot) return zz_unit();
+    slot[0] = (void *)f;
+    static const unsigned char kinds[1] = { ZZ_CELL_RAW };
+    static const size_t sizes[1] = { sizeof(void *) };
+    return zz_closure_make_ex_typed(zz_static_thunk, slot, kinds, sizes, 1);
 }
 
 zz_value zz_closure_make_ex_typed(
@@ -3186,18 +3385,30 @@ int64_t zz_pg_exec_raw(uint64_t id, const char *sql, size_t len, const zz_value 
 zz_value zz_pg_query_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 void zz_pg_close_raw(uint64_t id) ZZ_WEAK_IMPORT;
 
-// `pg.connect(conninfo)` — URL or keyword form (the driver parses both);
-// `ZZ_DB`-NULL on failure, mirroring the SQLite open leniency.
+// `pg.connect(conninfo)` — URL or keyword form (the driver parses both).
+// Connection failures trap (VM parity: `pg.connect failed`), never a
+// NULL handle: a refused/unreachable server must fail loudly. The
+// conninfo is never printed (it may carry passwords).
 zz_value zz_pg_connect(zz_value info, int *err) {
     (void)err;
-    if (info.tag != ZZ_STR || !info.s) return (zz_value){ZZ_DB, {.db = NULL}};
-    if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+    if (info.tag != ZZ_STR || !info.s) {
+        fprintf(stderr, "zz error: pg.connect failed: expected a connection string\n");
+        exit(1);
+    }
+    if (!zz_pg_connect_raw) {
+        fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
+        exit(1);
+    }
     uint64_t id = zz_pg_connect_raw(zz_str_cptr(info.s), info.s->len);
-    if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+    if (id == 0) {
+        fprintf(stderr, "zz error: pg.connect failed: connection refused or unreachable\n");
+        exit(1);
+    }
     zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
     if (!h) {
         zz_pg_close_raw(id);
-        return (zz_value){ZZ_DB, {.db = NULL}};
+        fprintf(stderr, "zz: out of memory (pg handle)\n");
+        exit(1);
     }
     h->backend = ZZDB_PG;
     h->pg_id = id;
@@ -3212,11 +3423,20 @@ zz_value zz_db_open(zz_value path, int *err) {
     // handle enum below records the backend so query/exec/close
     // dispatch without re-sniffing.
     if (strncmp(p, "postgres://", 11) == 0 || strncmp(p, "postgresql://", 13) == 0) {
-        if (!zz_pg_connect_raw) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (!zz_pg_connect_raw) {
+            fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
+            exit(1);
+        }
         uint64_t id = zz_pg_connect_raw(p, path.s->len);
-        if (id == 0) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (id == 0) {
+            fprintf(stderr, "zz error: pg.connect failed: connection refused or unreachable\n");
+            exit(1);
+        }
         zz_db_handle *h = (zz_db_handle *)malloc(sizeof(zz_db_handle));
-        if (!h) return (zz_value){ZZ_DB, {.db = NULL}};
+        if (!h) {
+            fprintf(stderr, "zz: out of memory (pg handle)\n");
+            exit(1);
+        }
         h->backend = ZZDB_PG;
         h->pg_id = id;
         return (zz_value){ZZ_DB, {.db = h}};
@@ -3354,9 +3574,12 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         zz_value row = zz_dict_new();
         for (int i = 0; i < ncol; i++) {
-            /* Use the real SQL column name so ZZ struct field access
-               (e.g. users[0].id) works in AOT mode.  Fall back to
-               the positional "cN" form if the name is unavailable. */
+            /* Real SQL column name so ZZ struct field access
+               (e.g. users[0].id) works in AOT mode, PLUS the
+               positional "cN" alias so unannotated `row{c0..}`
+               reads (the VM fallback shape) work too. Both keys
+               point at the same value; a column literally named
+               e.g. "c0" simply overwrites with an identical value. */
             const char *cname = sqlite3_column_name(st, i);
             char fallback[32];
             if (!cname || !cname[0]) {
@@ -3365,7 +3588,21 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
             }
             zz_value val;
             switch (sqlite3_column_type(st, i)) {
-            case SQLITE_INTEGER: val = zz_int(sqlite3_column_int64(st, i)); break;
+            case SQLITE_INTEGER: {
+                long long iv = sqlite3_column_int64(st, i);
+                /* Declared booleans (`BIT`/`BOOL`/`BOOLEAN`) read as
+                   ZZ booleans — SQLite has no boolean storage class,
+                   so 0 is false and anything else is true. Mirrors the
+                   rusqlite mapping (see `sqlite_bool_decl`). */
+                const char *dt = sqlite3_column_decltype(st, i);
+                if (dt && (strcasecmp(dt, "BIT") == 0 || strcasecmp(dt, "BOOL") == 0
+                           || strcasecmp(dt, "BOOLEAN") == 0)) {
+                    val = zz_bool(iv != 0);
+                } else {
+                    val = zz_int(iv);
+                }
+                break;
+            }
             case SQLITE_FLOAT: val = zz_float(sqlite3_column_double(st, i)); break;
             case SQLITE_TEXT: {
                 const unsigned char *t = sqlite3_column_text(st, i);
@@ -3384,7 +3621,21 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
             }
             int derr = 0;
             zz_value k = zz_str_owned(copy_cstr(cname, strlen(cname)));
-            zz_index_set(row, k, val, &derr);
+            /* Clone for the positional alias below: `zz_index_set`
+               adopts the value (move convention), so the second
+               insert needs its own reference. */
+            zz_value alias_val = zz_clone(val);
+            zz_index_set(&row, k, val, &derr);
+            char poskey[32];
+            snprintf(poskey, sizeof poskey, "c%d", i);
+            if (strcmp(poskey, cname) != 0) {
+                zz_value ka = zz_str_owned(copy_cstr(poskey, strlen(poskey)));
+                int aerr2 = 0;
+                zz_index_set(&row, ka, alias_val, &aerr2);
+                (void)aerr2;
+            } else {
+                zz_release(&alias_val);
+            }
             (void)derr;
         }
         int aerr = 0;
@@ -5825,6 +6076,19 @@ int zz_run(void) {
     return main_err;
 }
 
+// Map `main()`'s return value to a process exit code: `.err(e)` prints
+// `e` (Display form, like the VM) to stderr and exits 1; anything else
+// (`.ok(v)`, unit, …) exits 0.
+int zz_main_result_code(zz_value r) {
+    if (r.tag == ZZ_RESULT_ERR && r.payload) {
+        char *msg = zz_value_to_display_string(r.payload);
+        fprintf(stderr, "%s\n", msg ? msg : "<error>");
+        free(msg);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     zz_g_argc = argc;
     zz_g_argv = argv;
@@ -5875,6 +6139,13 @@ zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, i
 zz_value zz_call_native5(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e) {
     int err = 0;
     zz_value r = f(a, b, c, d, e, &err);
+    return r;
+}
+// 6-arg natives (e.g. str.classify/text+markers+bstart+bend+nested+whole).
+// Same err discipline as the other shims.
+zz_value zz_call_native6(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e, zz_value g) {
+    int err = 0;
+    zz_value r = f(a, b, c, d, e, g, &err);
     return r;
 }
 // Spawn-closure-literal fuse (`task.spawn(|...| ...)`): the lowerer passes
@@ -5931,7 +6202,10 @@ zz_value zz_int_cast(zz_value v, int *err) {
         case ZZ_FLOAT: {
             double f = v.f;
             int64_t n;
-            if (f != f) n = 0; // NaN saturates to 0 (Rust `as` semantics)
+            // Explicit isnan: never folds, regardless of FP flags
+            // (-ffast-math is gone, but the guard must not depend on that).
+            // NaN saturates to 0, infinities to the ends (matches the VM).
+            if (isnan(f)) n = 0;
             else if (f >= (double)INT64_MAX) n = INT64_MAX;
             else if (f <= (double)INT64_MIN) n = INT64_MIN;
             else n = (int64_t)f;

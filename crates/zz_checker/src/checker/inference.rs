@@ -169,40 +169,154 @@ impl Checker {
                         ));
                     }
                     Type::Named(name.clone())
-                } else if self.structs.contains_key(name) {
-                    if !args.is_empty() {
-                        self.errors.push(error_at(
-                            format!("struct `{name}` does not take type arguments"),
-                            ty.span,
-                        ));
-                    }
-                    // Canonicalize selective imports, mirroring
-                    // StructInit: `Product` → `product.Product`.
-                    Type::Struct(self.canonical_struct_name(name))
-                } else if name == "json" {
-                    Type::Json
-                } else if name == "bytes" {
-                    Type::Bytes
-                } else if name == "db" || name == "sqlz" {
-                    Type::Db
-                } else if name == "chan" {
-                    Type::Chan
-                } else if name == "task.join" {
-                    Type::TaskJoin
-                } else if name == "http.server" {
-                    Type::HttpServer
-                } else if name == "tcp.stream" {
-                    Type::TcpStream
-                } else if name == "tcp.listener" {
-                    Type::TcpListener
-                } else if name == "http.response" {
-                    Type::Response
-                } else if name == "http.request" {
-                    Type::HttpRequest
                 } else {
-                    self.errors
-                        .push(error_at(format!("unknown type `{name}`"), ty.span));
-                    Type::Unit
+                    // Type-position uses count for unused-import tracking
+                    // (`import shapes` + `t: shapes.Tokens` marks `shapes`
+                    // used). Bare names are skipped: a type sharing a
+                    // variable's name must not silence its warning.
+                    if name.contains('.') {
+                        self.used_names.insert(name.clone());
+                    }
+                    if self.alias_asts.contains_key(name)
+                        || self.aliases.contains_key(name)
+                        || self
+                            .import_aliases
+                            .get(name)
+                            .is_some_and(|q| self.aliases.contains_key(q))
+                    {
+                        // Type aliases erase: uses resolve to the target type.
+                        // Unconverted program-local aliases convert on demand
+                        // inside `expand_alias` (order-independent).
+                        let cname = self.canonical_alias_name(name);
+                        // A bare name resolved through a selective import
+                        // counts as using that import (mirrors value
+                        // lookups through `import_aliases`).
+                        if cname != *name {
+                            self.used_names.insert(name.clone());
+                        }
+                        self.expand_alias(&cname, args, generics, ty.span)
+                    } else if self.enums.contains_key(name)
+                        || self
+                            .import_aliases
+                            .get(name)
+                            .is_some_and(|q| self.enums.contains_key(q))
+                    {
+                        // User enums name their type directly (`t: Token`);
+                        // generic enums name their arguments (`Box[int]`),
+                        // exactly like generic structs.
+                        let cname = self.canonical_enum_name(name);
+                        if cname != *name {
+                            self.used_names.insert(name.clone());
+                        }
+                        let want = self
+                            .enums
+                            .get(&cname)
+                            .map(|s| s.generics.len())
+                            .unwrap_or(0);
+                        if args.is_empty() && want > 0 {
+                            // Mirror generic structs: name the arguments
+                            // (`Box[int]`). Inference still flows from
+                            // construction (`Box.V(1)` unifies on its own).
+                            self.errors.push(error_at(
+                                format!(
+                                    "enum `{name}` takes {want} type argument{} (e.g. `{name}<{}>`)",
+                                    if want == 1 { "" } else { "s" },
+                                    vec!["T"; want].join(", "),
+                                ),
+                                ty.span,
+                            ));
+                            return Type::Enum(
+                                cname,
+                                (0..want).map(|_| self.unifier.fresh_var()).collect(),
+                            );
+                        }
+                        if args.len() != want {
+                            self.errors.push(error_at(
+                                format!(
+                                    "enum `{name}` takes {want} type argument{} but {} given",
+                                    if want == 1 { "" } else { "s" },
+                                    args.len(),
+                                ),
+                                ty.span,
+                            ));
+                            return Type::Enum(
+                                cname,
+                                (0..want).map(|_| self.unifier.fresh_var()).collect(),
+                            );
+                        }
+                        Type::Enum(
+                            cname,
+                            args.iter()
+                                .map(|a| self.ast_to_type_inner(a, generics))
+                                .collect(),
+                        )
+                    } else if self.structs.contains_key(name) {
+                        // Canonicalize selective imports, mirroring
+                        // StructInit: `Product` → `product.Product`.
+                        let cname = self.canonical_struct_name(name);
+                        if cname != *name {
+                            self.used_names.insert(name.clone());
+                        }
+                        let want = self
+                            .structs
+                            .get(&cname)
+                            .map(|s| s.generics.len())
+                            .unwrap_or(0);
+                        if args.is_empty() && want > 0 {
+                            self.errors.push(error_at(
+                                format!(
+                                "struct `{name}` takes {want} type argument{} (e.g. `{name}<{}>`)",
+                                if want == 1 { "" } else { "s" },
+                                vec!["T"; want].join(", "),
+                            ),
+                                ty.span,
+                            ));
+                            Type::Struct(cname, Vec::new())
+                        } else if args.len() != want {
+                            if !(args.is_empty() && want == 0) {
+                                self.errors.push(error_at(
+                                    format!(
+                                        "struct `{name}` takes {want} type argument{} but {} given",
+                                        if want == 1 { "" } else { "s" },
+                                        args.len(),
+                                    ),
+                                    ty.span,
+                                ));
+                            }
+                            Type::Struct(cname, Vec::new())
+                        } else {
+                            Type::Struct(
+                                cname,
+                                args.iter()
+                                    .map(|a| self.ast_to_type_inner(a, generics))
+                                    .collect(),
+                            )
+                        }
+                    } else if name == "json" {
+                        Type::Json
+                    } else if name == "bytes" {
+                        Type::Bytes
+                    } else if name == "db" || name == "sqlz" {
+                        Type::Db
+                    } else if name == "chan" {
+                        Type::Chan
+                    } else if name == "task.join" {
+                        Type::TaskJoin
+                    } else if name == "http.server" {
+                        Type::HttpServer
+                    } else if name == "tcp.stream" {
+                        Type::TcpStream
+                    } else if name == "tcp.listener" {
+                        Type::TcpListener
+                    } else if name == "http.response" {
+                        Type::Response
+                    } else if name == "http.request" {
+                        Type::HttpRequest
+                    } else {
+                        self.errors
+                            .push(error_at(format!("unknown type `{name}`"), ty.span));
+                        Type::Unit
+                    }
                 }
             }
         }
@@ -220,10 +334,34 @@ pub(crate) fn contains_var(t: &Type) -> bool {
         Type::Func(ps, r) => ps.iter().any(contains_var) || contains_var(r),
         Type::Array(x) => contains_var(x),
         Type::Dict(k, v) => contains_var(k) || contains_var(v),
+        Type::Struct(_, args) => args.iter().any(contains_var),
+        Type::Enum(_, args) => args.iter().any(contains_var),
         Type::Union(ts) => ts.iter().any(contains_var),
         Type::Range(x) => contains_var(x),
         Type::Ptr { inner, .. } => contains_var(inner),
         _ => false,
+    }
+}
+
+/// Largest inference-variable id inside a type (`None` when var-free).
+/// Used to offset a fresh checker's unifier above ids imported from
+/// already-checked modules (see `Unifier::reserve_vars_above`).
+pub(crate) fn max_var_id(t: &Type) -> Option<u32> {
+    match t {
+        Type::Var(id) => Some(*id),
+        Type::Void => None,
+        Type::Tuple(ts) => ts.iter().filter_map(max_var_id).max(),
+        Type::Option(x) => max_var_id(x),
+        Type::Result(a, b) => max_var_id(a).into_iter().chain(max_var_id(b)).max(),
+        Type::Func(ps, r) => ps.iter().filter_map(max_var_id).chain(max_var_id(r)).max(),
+        Type::Array(x) => max_var_id(x),
+        Type::Dict(k, v) => max_var_id(k).into_iter().chain(max_var_id(v)).max(),
+        Type::Struct(_, args) => args.iter().filter_map(max_var_id).max(),
+        Type::Enum(_, args) => args.iter().filter_map(max_var_id).max(),
+        Type::Union(ts) => ts.iter().filter_map(max_var_id).max(),
+        Type::Range(x) => max_var_id(x),
+        Type::Ptr { inner, .. } => max_var_id(inner),
+        _ => None,
     }
 }
 
@@ -253,12 +391,24 @@ pub(crate) fn default_variant_vars(t: &mut Type) {
                 }
             }
         }
+        Type::Enum(_, args) => {
+            // Unconstrained enum parameters default like `Option`'s
+            // (bare `Box.Empty` with nothing to infer from is `Box[unit]`).
+            for a in args {
+                if contains_var(a) {
+                    default_variant_vars(a);
+                    if contains_var(a) {
+                        *a = Type::Unit;
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
 
 /// Substitute generic type parameters in a type.
-pub(crate) fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) -> Type {
+pub fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) -> Type {
     match t {
         Type::Named(name) => subs
             .get(name)
@@ -273,6 +423,10 @@ pub(crate) fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) ->
         ),
         Type::Array(x) => Type::Array(Box::new(subst(x, subs))),
         Type::Dict(k, v) => Type::Dict(Box::new(subst(k, subs)), Box::new(subst(v, subs))),
+        Type::Struct(n, args) => {
+            Type::Struct(n.clone(), args.iter().map(|x| subst(x, subs)).collect())
+        }
+        Type::Enum(n, args) => Type::Enum(n.clone(), args.iter().map(|x| subst(x, subs)).collect()),
         Type::Union(ts) => Type::Union(ts.iter().map(|x| subst(x, subs)).collect()),
         Type::Range(x) => Type::Range(Box::new(subst(x, subs))),
         Type::Ptr { mutable, inner } => Type::Ptr {

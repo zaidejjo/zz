@@ -1,3 +1,4 @@
+// features: comparison, locals, print, string-literal, string-ops
 // Control char directly followed by hex digits: the AOT C emitter must
 // not fold `\x1f` + `1` into the single C escape `\x1f1` (out of range).
 s := "A\x1f1\x1fB"

@@ -1,3 +1,4 @@
+// features: comparison, elvis, func-call, int-arith, locals, option-result, pipe, print, string-literal
 // E2E: Pipe |> and Elvis ?? precedence
 // |> binds tighter than ?? — so `a ?? b |> f` = `a ?? (b |> f)`
 func double(n: int) -> int {

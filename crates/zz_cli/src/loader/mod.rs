@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use zz_checker::{check_program, FuncSig, StructSig, Type};
+use zz_checker::{check_program, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type};
 use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
@@ -28,6 +28,7 @@ use zz_stdlib::{
     stdlib_funcs, stdlib_natives, STDLIB_MODULES,
 };
 
+mod cache;
 mod rewrite;
 
 #[cfg(test)]
@@ -60,6 +61,12 @@ pub struct LoadResult {
     /// Struct definitions from all modules.
     #[allow(dead_code)]
     pub structs: HashMap<String, StructSig>,
+    /// Type alias definitions from all modules.
+    #[allow(dead_code)]
+    pub aliases: HashMap<String, AliasSig>,
+    /// User enum definitions from all modules.
+    #[allow(dead_code)]
+    pub enums: HashMap<String, EnumSig>,
     /// Native implementations (stdlib + namespaced copies), for the
     /// interpreter.
     pub natives: HashMap<String, NativeEntry>,
@@ -78,6 +85,8 @@ pub struct LoadResult {
     /// First registration wins (mirrors the loader seed, where an earlier
     /// import shadows a later one for the same bare name).
     pub import_aliases: HashMap<String, String>,
+    /// Check-pipeline counters for `zz check --stats`.
+    pub stats: LoadStats,
 }
 
 struct Loader {
@@ -91,10 +100,41 @@ struct Loader {
     funcs: HashMap<String, FuncSig>,
     bindings: HashMap<String, Type>,
     structs: HashMap<String, StructSig>,
+    /// Cross-module seed: `pub type` aliases from previously loaded modules.
+    aliases: HashMap<String, AliasSig>,
+    /// Cross-module seed: `pub enum` definitions from previously loaded modules.
+    enums: HashMap<String, EnumSig>,
+    /// Keys currently owned by the seed maps above (stdlib + plugin + prior
+    /// modules' pubs). Lets each module's seed maps MOVE into the checker
+    /// and come back via key-set restore instead of O(seed) clones per
+    /// module (quadratic → linear across modules). Key maintenance is O(new
+    /// pubs) total; values are never cloned on the seed path.
+    seed_func_keys: HashSet<String>,
+    seed_struct_keys: HashSet<String>,
+    seed_alias_keys: HashSet<String>,
+    seed_enum_keys: HashSet<String>,
+    /// Whether the per-module check cache is active (S1 arena-scale).
+    /// Only the `zz check` entry point enables it: `run`/`build` need
+    /// span types and codegen inputs the cache does not store.
+    use_cache: bool,
+    /// Plugin function names, for the cache genesis hash.
+    plugin_names: Vec<String>,
+    /// File dependency edges (importer → imported canonical paths) for S1
+    /// dep-aware cache keys. Recorded during discovery, which already
+    /// resolves every import; key resolution follows true dependencies
+    /// instead of load order.
+    dep_edges: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Whether the seed tables have been contributed to `all_*` yet.
+    /// `all_*` must contain the seeds (stdlib!) exactly once: the first
+    /// succeeding module contributes them (prior modules all errored, so
+    /// seeds are still just stdlib/plugins). One O(seed) clone total.
+    contributed_seeds: bool,
     /// All items (pub + private) for the entry file / runtime.
     all_funcs: HashMap<String, FuncSig>,
     all_bindings: HashMap<String, Type>,
     all_structs: HashMap<String, StructSig>,
+    all_aliases: HashMap<String, AliasSig>,
+    all_enums: HashMap<String, EnumSig>,
     natives: HashMap<String, NativeEntry>,
     /// Namespace → canonical path of the module (or `std:<module>` for the
     /// standard library) that owns it.
@@ -111,11 +151,36 @@ struct Loader {
     selected_consts: HashMap<String, f64>,
     /// Mirrors LoadResult::stdlib_aliases while loading.
     stdlib_aliases: Vec<(String, String)>,
+    /// S1 check-cache outcomes for `--stats` observability (#248).
+    cache_hits: usize,
+    cache_misses: usize,
+}
+
+/// Check-pipeline observability for `zz check --stats` (#248): per-load
+/// module counts, cache outcomes, and seed size.
+#[derive(Debug, Clone, Default)]
+pub struct LoadStats {
+    /// Modules in the load closure (dependencies + entry).
+    pub modules: usize,
+    /// Modules served from the S1 content-addressed cache.
+    pub cache_hits: usize,
+    /// Modules freshly checked (cache disabled, unresolvable key, or miss).
+    pub cache_misses: usize,
+    /// Seed function entries shared by every module (stdlib + plugins).
+    pub seed_funcs: usize,
 }
 
 /// Load an entry file and all of its imports.
 pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
     load_program_with_plugins(main_path, &[])
+}
+
+/// Load an entry file for `zz check`, with the per-module check cache
+/// enabled (S1 arena-scale): unchanged modules skip re-checking via a
+/// content-addressed on-disk cache. `run`/`build` must use `load_program`
+/// (they need span types and codegen inputs the cache does not store).
+pub fn load_program_check(main_path: &Path) -> Result<LoadResult, String> {
+    load_program_impl(main_path, &[], true)
 }
 
 /// Load an entry file and all of its imports, merging additional function
@@ -128,6 +193,14 @@ pub fn load_program_with_plugins(
     main_path: &Path,
     plugin_funcs: &[(String, FuncSig)],
 ) -> Result<LoadResult, String> {
+    load_program_impl(main_path, plugin_funcs, false)
+}
+
+fn load_program_impl(
+    main_path: &Path,
+    plugin_funcs: &[(String, FuncSig)],
+    use_cache: bool,
+) -> Result<LoadResult, String> {
     let entry = main_path.canonicalize().map_err(|e| {
         format!(
             "cannot read entry file `{}`: {e}\n\
@@ -135,6 +208,8 @@ pub fn load_program_with_plugins(
             main_path.display()
         )
     })?;
+    let std_funcs = stdlib_funcs();
+    let seed_func_keys = std_funcs.keys().cloned().collect();
     let mut loader = Loader {
         sources: HashMap::new(),
         programs: HashMap::new(),
@@ -142,12 +217,24 @@ pub fn load_program_with_plugins(
         visiting: HashSet::new(),
         done: HashSet::new(),
         errors: Vec::new(),
-        funcs: stdlib_funcs(),
+        funcs: std_funcs,
         bindings: HashMap::new(),
         structs: HashMap::new(),
+        aliases: HashMap::new(),
+        enums: HashMap::new(),
+        seed_func_keys,
+        seed_struct_keys: HashSet::new(),
+        seed_alias_keys: HashSet::new(),
+        seed_enum_keys: HashSet::new(),
+        contributed_seeds: false,
+        use_cache,
+        plugin_names: Vec::new(),
+        dep_edges: HashMap::new(),
         all_funcs: HashMap::new(),
         all_bindings: HashMap::new(),
         all_structs: HashMap::new(),
+        all_aliases: HashMap::new(),
+        all_enums: HashMap::new(),
         natives: stdlib_natives(),
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
@@ -155,10 +242,14 @@ pub fn load_program_with_plugins(
         selective_imports: Vec::new(),
         selected_consts: HashMap::new(),
         stdlib_aliases: Vec::new(),
+        cache_hits: 0,
+        cache_misses: 0,
     };
     // Merge plugin manifest function signatures into the checker's function table.
     for (name, sig) in plugin_funcs {
         loader.funcs.insert(name.clone(), sig.clone());
+        loader.seed_func_keys.insert(name.clone());
+        loader.plugin_names.push(name.clone());
     }
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
@@ -306,7 +397,49 @@ fn push_private_note(d: &mut RawDiag, name: &str, template: &str) {
     d.notes.push(template.replace("{}", last));
 }
 
+/// Resolve one module's S1 cache key over in-memory sources (no IO):
+/// `H(genesis, source, sorted(dep path, dep key)...)`, memoized.
+/// Returns `None` when unresolvable (missing source, cycle) — the caller
+/// treats it as a cache miss and checks normally.
+fn resolve_module_key(
+    genesis: &str,
+    sources: &HashMap<PathBuf, String>,
+    edges: &HashMap<PathBuf, Vec<PathBuf>>,
+    path: &Path,
+    memo: &mut HashMap<PathBuf, String>,
+    stack: &mut Vec<PathBuf>,
+) -> Option<String> {
+    if let Some(key) = memo.get(path) {
+        return Some(key.clone());
+    }
+    if stack.contains(&path.to_path_buf()) {
+        return None;
+    }
+    let source = sources.get(path)?;
+    stack.push(path.to_path_buf());
+    let mut deps = Vec::new();
+    if let Some(edge_list) = edges.get(path) {
+        for dep in edge_list {
+            let dep_key = resolve_module_key(genesis, sources, edges, dep, memo, stack)?;
+            deps.push((dep.display().to_string(), dep_key));
+        }
+    }
+    stack.pop();
+    let key = cache::module_key(genesis, source, &deps);
+    memo.insert(path.to_path_buf(), key.clone());
+    Some(key)
+}
+
 impl Loader {
+    /// Record an importer → imported edge (deduped). Small vecs; linear
+    /// scan is cheaper than a second map.
+    fn record_edge(edges: &mut HashMap<PathBuf, Vec<PathBuf>>, importer: &Path, dep: &Path) {
+        let entry = edges.entry(importer.to_path_buf()).or_default();
+        if !entry.contains(&dep.to_path_buf()) {
+            entry.push(dep.to_path_buf());
+        }
+    }
+
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
     fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
@@ -391,6 +524,15 @@ impl Loader {
                 // Dotted module key: `std.sqlz` -> "sqlz",
                 // `std.sqlz.postgres` -> "sqlz.postgres".
                 if imp.len() < 2 {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            "`import std` names no module\n\
+                             hint: import a concrete module, e.g. `import std.str`",
+                            Span::new(0, 0),
+                        )],
+                    });
                     continue;
                 }
                 let module = imp[1..].join(".");
@@ -420,49 +562,103 @@ impl Loader {
                     let ns = imp_alias
                         .clone()
                         .unwrap_or_else(|| imp.last().cloned().unwrap_or_else(|| module.clone()));
-                    if let Err(msg) =
-                        register_module_namespace(&module, &ns, &mut self.funcs, &mut self.natives)
-                    {
-                        self.errors.push(LoadError {
-                             name: path.display().to_string(),
-                             source: source.clone(),
-                             diags: vec![error_at(
-                                 format!("{msg}\n\
-                                          hint: this may occur if the stdlib module exports a conflicting name"),
-                                 Span::new(0, 0),
-                             )],
-                         });
-                        continue;
+                    match register_module_namespace(
+                        &module,
+                        &ns,
+                        &mut self.funcs,
+                        &mut self.natives,
+                    ) {
+                        Err(msg) => {
+                            self.errors.push(LoadError {
+                                 name: path.display().to_string(),
+                                 source: source.clone(),
+                                 diags: vec![error_at(
+                                     format!("{msg}\n\
+                                              hint: this may occur if the stdlib module exports a conflicting name"),
+                                     Span::new(0, 0),
+                                 )],
+                             });
+                            continue;
+                        }
+                        // Seed-owned: the per-module check partition
+                        // restores (rather than consumes) these keys,
+                        // so every importer resolves identically (#214).
+                        Ok(inserted) => self.seed_func_keys.extend(inserted),
                     }
-                    self.register_ns(&ns, &PathBuf::from(format!("std:{module}")), path, &source);
+                    self.register_std_ns(&ns, &module, path, &source);
                     self.stdlib_aliases.push((module.clone(), ns.clone()));
                 }
                 continue;
             }
             // Plugin dependency import (`import zimg`): the dep ships a
             // `plugin.zzi` manifest. Merge its signatures under their
-            // declared ZZ names and register the namespace. Unlike std,
-            // no bare aliases are created — two plugins must never
-            // collide on short names.
+            // declared ZZ names and register the namespace. Selective
+            // (`import zimg(resize)` / `as rz` / `(*)`) registers bare
+            // names first-wins, mirroring std selective imports (#229).
             if imp.len() == 1 {
                 if let Some(root) = find_project_root(&canon) {
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
-                        if !imp_items.is_empty() {
-                            self.errors.push(LoadError {
-                                name: path.display().to_string(),
-                                source: source.clone(),
-                                diags: vec![error_at(
-                                    format!(
-                                        "selective imports from plugin `{}` are not supported\n\
-                                         hint: `import {0}` imports the full module; call `{}.*` qualified",
-                                        imp[0], imp[0]
-                                    ),
-                                    Span::new(0, 0),
-                                )],
-                            });
-                            continue;
-                        }
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
+                        if !imp_items.is_empty() {
+                            let ns = imp_alias.as_deref().unwrap_or(&imp[0]);
+                            let prefix = format!("{ns}.");
+                            for item in &imp_items {
+                                match item {
+                                    ImportItem::Named { name, alias, .. } => {
+                                        let target = alias.as_ref().unwrap_or(name).clone();
+                                        let qualified = format!("{prefix}{name}");
+                                        if let Some(sig) = self.funcs.get(&qualified).cloned() {
+                                            // First registration wins: two
+                                            // plugins must never collide
+                                            // silently on short names.
+                                            self.funcs.entry(target.clone()).or_insert(sig.clone());
+                                            self.all_funcs.entry(target).or_insert(sig);
+                                        } else if let Some(sig) = self.funcs.get(name).cloned() {
+                                            // Manifest declared a bare name
+                                            // (no ns prefix); still honor it.
+                                            self.funcs.entry(target.clone()).or_insert(sig.clone());
+                                            self.all_funcs.entry(target).or_insert(sig);
+                                        } else {
+                                            self.errors.push(LoadError {
+                                                name: path.display().to_string(),
+                                                source: source.clone(),
+                                                diags: vec![error_at(
+                                                    format!(
+                                                        "symbol `{name}` not found in plugin `{}`\n\
+                                                         hint: check the plugin's `plugin.zzi` exports",
+                                                        imp[0]
+                                                    ),
+                                                    Span::new(0, 0),
+                                                )],
+                                            });
+                                        }
+                                    }
+                                    ImportItem::Wildcard { .. } => {
+                                        let keys: Vec<String> = self
+                                            .funcs
+                                            .keys()
+                                            .filter(|k| k.starts_with(&prefix))
+                                            .cloned()
+                                            .collect();
+                                        for key in keys {
+                                            if let Some(bare) = key.strip_prefix(&prefix) {
+                                                if bare.is_empty() || bare.contains('.') {
+                                                    continue;
+                                                }
+                                                if let Some(sig) = self.funcs.get(&key).cloned() {
+                                                    self.funcs
+                                                        .entry(bare.to_string())
+                                                        .or_insert(sig.clone());
+                                                    self.all_funcs
+                                                        .entry(bare.to_string())
+                                                        .or_insert(sig);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
                 }
@@ -482,6 +678,12 @@ impl Loader {
                     if let Some(entry) = resolved {
                         let alias = imp_alias.clone().unwrap_or_else(|| imp[0].clone());
                         self.load_file(&entry, Some(alias.as_str()))?;
+                        // S1 dep edge (registry package file).
+                        Self::record_edge(
+                            &mut self.dep_edges,
+                            &canon,
+                            &entry.canonicalize().unwrap_or(entry.clone()),
+                        );
                         if is_selective {
                             // Deferred to finish(): seed holds `alias.sym`,
                             // so record the effective namespace, not the
@@ -544,10 +746,24 @@ impl Loader {
                 }
             }
             self.load_file(&rel, imp_alias.as_deref())?;
+            // S1 dep edge (local file). `rel_canon` was verified above;
+            // re-canonicalize defensively (filesystem cache hot).
+            if let Ok(dep) = rel.canonicalize() {
+                Self::record_edge(&mut self.dep_edges, &canon, &dep);
+            }
             if is_selective {
                 // Store for processing in finish() when all modules are loaded.
+                // Record the effective namespace (`as` alias when present),
+                // matching the registry-package branch below: seeds hold
+                // `alias.sym`, not `file.sym`.
+                let mut sel_path = imp.clone();
+                if let Some(a) = imp_alias.as_deref() {
+                    if let Some(last) = sel_path.last_mut() {
+                        *last = a.to_string();
+                    }
+                }
                 self.selective_imports
-                    .push((canon.clone(), imp.clone(), imp_items, false));
+                    .push((canon.clone(), sel_path, imp_items, false));
             }
         }
 
@@ -594,6 +810,9 @@ impl Loader {
         };
         for (name, sig) in &manifest.funcs {
             self.funcs.insert(name.clone(), sig.clone());
+            // Seed-owned: plugin deps shared by several modules must
+            // resolve identically in each (same consumption bug as #214).
+            self.seed_func_keys.insert(name.clone());
         }
         let ns = alias.unwrap_or(dep);
         if ns != dep {
@@ -605,7 +824,8 @@ impl Loader {
                 .map(|(n, s)| (format!("{ns}.{}", &n[prefix.len()..]), s.clone()))
                 .collect();
             for (name, sig) in aliased {
-                self.funcs.insert(name, sig);
+                self.funcs.insert(name.clone(), sig);
+                self.seed_func_keys.insert(name);
             }
         }
         // Ergonomic layer: a `<dep>.zz` entry file in the package root
@@ -627,6 +847,36 @@ impl Loader {
         }
     }
 
+    /// Register a stdlib namespace without the one-namespace-per-module
+    /// rule that governs user files: the same std module may serve
+    /// several importers under different qualifiers (`import std.path
+    /// as fspath` in one module, plain `import std.path` in another),
+    /// since every qualifier gets its own copied entries (issue #216).
+    /// A namespace claimed by two DIFFERENT modules stays an error.
+    fn register_std_ns(&mut self, ns: &str, module: &str, display: &Path, source: &str) -> bool {
+        let canon = PathBuf::from(format!("std:{module}"));
+        if let Some(existing) = self.namespaces.get(ns) {
+            if *existing != canon {
+                self.errors.push(LoadError {
+                    name: display.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!(
+                            "namespace `{ns}` is claimed by both `{}` and `std.{module}`\n\
+                             hint: use an alias for one of the imports",
+                            existing.display()
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+            return true;
+        }
+        self.namespaces.insert(ns.to_string(), canon);
+        true
+    }
+
     /// Register a namespace → module mapping, detecting collisions. Returns
     /// false (and records an error) when two different modules claim the same
     /// namespace, or one module is claimed by two namespaces.
@@ -639,7 +889,8 @@ impl Loader {
                     diags: vec![error_at(
                         format!(
                             "module `{}` is imported under two namespaces: `{existing}` and `{ns}`\n\
-                             hint: this can happen when the same file is imported via different paths",
+                             hint: each file can only be imported under one namespace; \
+                             have both importers use the same name, or import the file directly without alias",
                             display.display()
                         ),
                         Span::new(0, 0),
@@ -745,6 +996,26 @@ impl Loader {
     fn finish(mut self) -> LoadResult {
         let mut files = Vec::with_capacity(self.order.len());
         let mut programs = Vec::with_capacity(self.order.len());
+        // S1 dep-aware check-cache keys, resolved up front (sources still
+        // intact): each module's key covers its source plus its transitive
+        // deps' keys. Only true dependents recheck on an edit; anything
+        // unresolvable (deleted file, cycle) misses and checks normally.
+        let genesis = cache::genesis_key(&self.plugin_names);
+        let mut key_memo: HashMap<PathBuf, String> = HashMap::new();
+        let mut module_keys: HashMap<PathBuf, String> = HashMap::new();
+        for path in &self.order {
+            let mut stack = Vec::new();
+            if let Some(key) = resolve_module_key(
+                &genesis,
+                &self.sources,
+                &self.dep_edges,
+                path,
+                &mut key_memo,
+                &mut stack,
+            ) {
+                module_keys.insert(path.clone(), key);
+            }
+        }
 
         for path in &self.order {
             let name = path.display().to_string();
@@ -771,20 +1042,37 @@ impl Loader {
                         .iter()
                         .any(|i| matches!(i, ImportItem::Wildcard { .. }));
                     if has_wildcard {
-                        if let Err(msg) = register_wildcard_namespace(
+                        match register_wildcard_namespace(
                             module.as_str(),
                             &mut self.funcs,
                             &mut self.natives,
                         ) {
-                            self.errors.push(LoadError {
-                                name: name.clone(),
-                                source: source.clone(),
-                                diags: vec![error_at(
-                                    format!("{msg}\n\
-                                             hint: this may occur if the stdlib module exports a conflicting name"),
-                                    Span::new(0, 0),
-                                )],
-                            });
+                            Err(msg) => {
+                                self.errors.push(LoadError {
+                                    name: name.clone(),
+                                    source: source.clone(),
+                                    diags: vec![error_at(
+                                        format!("{msg}\n\
+                                                 hint: this may occur if the stdlib module exports a conflicting name"),
+                                        Span::new(0, 0),
+                                    )],
+                                });
+                            }
+                            // Seed-owned like full-module copies (#214).
+                            Ok(inserted) => {
+                                self.seed_func_keys.extend(inserted.clone());
+                                // Mirror into the all-universe (the
+                                // first-success snapshot below misses later
+                                // modules' selectives): skip generic bare
+                                // values like the local branch.
+                                for target in &inserted {
+                                    if let Some(sig) = self.funcs.get(target).cloned() {
+                                        if sig.generics.is_empty() {
+                                            self.all_funcs.entry(target.clone()).or_insert(sig);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     } else {
                         let name_aliases: Vec<(String, Option<String>)> = items
@@ -802,7 +1090,20 @@ impl Loader {
                             &mut self.funcs,
                             &mut self.natives,
                         ) {
-                            Ok(missing) => {
+                            Ok((missing, inserted)) => {
+                                // Seed-owned like full-module copies (#214).
+                                self.seed_func_keys.extend(inserted.clone());
+                                // Mirror into the all-universe (the
+                                // first-success snapshot below misses later
+                                // modules' selectives): skip generic bare
+                                // values like the local branch.
+                                for target in &inserted {
+                                    if let Some(sig) = self.funcs.get(target).cloned() {
+                                        if sig.generics.is_empty() {
+                                            self.all_funcs.entry(target.clone()).or_insert(sig);
+                                        }
+                                    }
+                                }
                                 for sym in &missing {
                                     self.errors.push(LoadError {
                                         name: name.clone(),
@@ -879,6 +1180,16 @@ impl Loader {
                                     self.all_structs.insert(target.clone(), sig);
                                     found = true;
                                 }
+                                if let Some(sig) = self.aliases.get(&full).cloned() {
+                                    self.aliases.insert(target.clone(), sig.clone());
+                                    self.all_aliases.insert(target.clone(), sig);
+                                    found = true;
+                                }
+                                if let Some(sig) = self.enums.get(&full).cloned() {
+                                    self.enums.insert(target.clone(), sig.clone());
+                                    self.all_enums.insert(target.clone(), sig);
+                                    found = true;
+                                }
                                 if !found {
                                     self.errors.push(LoadError {
                                         name: name.clone(),
@@ -941,6 +1252,32 @@ impl Loader {
                                     if let Some(sig) = self.structs.get(&key).cloned() {
                                         self.structs.insert(bare.clone(), sig.clone());
                                         self.all_structs.insert(bare, sig);
+                                    }
+                                }
+                                let akeys: Vec<String> = self
+                                    .aliases
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in akeys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(sig) = self.aliases.get(&key).cloned() {
+                                        self.aliases.insert(bare.clone(), sig.clone());
+                                        self.all_aliases.insert(bare, sig);
+                                    }
+                                }
+                                let ekeys: Vec<String> = self
+                                    .enums
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in ekeys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(sig) = self.enums.get(&key).cloned() {
+                                        self.enums.insert(bare.clone(), sig.clone());
+                                        self.all_enums.insert(bare, sig);
                                     }
                                 }
                             }
@@ -1024,6 +1361,16 @@ impl Loader {
                                         // runtime binding.
                                         let qualified = format!("{prefix}{sym_name}");
                                         let is_struct = self.structs.contains_key(&qualified);
+                                        // Aliases are types, not values: same
+                                        // skip as structs, or `Name :=
+                                        // ns.Name` forces a value lookup of
+                                        // a type name ("undefined variable
+                                        // `ns.Name`").
+                                        let is_alias = self.aliases.contains_key(&qualified);
+                                        // Enums are types, not values: same
+                                        // skip (variant construction is a
+                                        // call, resolved via the enum table).
+                                        let is_enum = self.enums.contains_key(&qualified);
                                         let is_value = self
                                             .funcs
                                             .get(&qualified)
@@ -1031,7 +1378,7 @@ impl Loader {
                                             .unwrap_or(false)
                                             || self.natives.contains_key(&qualified)
                                             || self.bindings.contains_key(&qualified);
-                                        if is_struct && !is_value {
+                                        if (is_struct || is_alias || is_enum) && !is_value {
                                             continue;
                                         }
                                         let parts = vec![ns.to_string(), sym_name.clone()];
@@ -1109,6 +1456,15 @@ impl Loader {
             }
             program.stmts = new_stmts;
 
+            // Selective imports (`import std.path(join)`) call bare names
+            // that resolve through a synthetic runtime binding with no
+            // native equivalent — rewrite bare *call* callees to their
+            // canonical paths (verified against the checker seed, so the
+            // spelling always resolves on every engine). Value positions
+            // keep the binding (first-class function values).
+            let selective_map = rewrite::selective_rewrites(&program.stmts, &self.funcs);
+            rewrite::rewrite_selective_calls(&mut program, &selective_map);
+
             // In the entry file, error if func main() and a top-level main()
             // call coexist — the auto-call would double-execute main().
             if *path == self.entry {
@@ -1149,16 +1505,159 @@ impl Loader {
                 }
             }
 
-            let checked = check_program(
-                &program,
-                self.bindings.clone(),
-                self.funcs.clone(),
-                self.structs.clone(),
-            );
+            // Move (never clone) the seed maps into the checker: it stores
+            // them in its tables untouched (seed entries are only read;
+            // module items insert alongside) and they come back below via
+            // key-set restore. Per-module seed cost drops from O(seed)
+            // clones to zero (quadratic to linear across modules).
+            // Bindings seeds stay cloned: the checker drops its seed env
+            // (only new bindings are returned), so they are unrecoverable;
+            // top-level bindings are rare, so the term is noise.
+            //
+            // S1 check-cache: on a hit the outcome is synthesized from
+            // disk (seeds move out and back so the shared tail below sees
+            // the exact same shapes as a fresh check); on a miss the fresh
+            // outcome runs the shared tail and is stored afterwards from
+            // own-only maps (never seeds — entries stay ~30KB, not 460KB).
+            // Parse/selective/namespace work above always runs and feeds
+            // both paths identically.
+            let (mut checked, pending_key): (CheckResult, Option<String>) = if self.use_cache {
+                // Dep-aware hit: the precomputed key covers source + true
+                // transitive deps. Absent key (unresolvable) misses.
+                let pending = module_keys.get(path).cloned();
+                match pending {
+                    Some(key) => match cache::read_cached(&key) {
+                        Some(cached) => {
+                            self.cache_hits += 1;
+                            let mut funcs = std::mem::take(&mut self.funcs);
+                            funcs.extend(cached.funcs.into_owned());
+                            let mut structs = std::mem::take(&mut self.structs);
+                            structs.extend(cached.structs.into_owned());
+                            let mut aliases = std::mem::take(&mut self.aliases);
+                            aliases.extend(cached.aliases.into_owned());
+                            let mut enums = std::mem::take(&mut self.enums);
+                            enums.extend(cached.enums.into_owned());
+                            (
+                                CheckResult {
+                                    errors: cached.diags,
+                                    bindings: cached.bindings.into_owned(),
+                                    funcs,
+                                    structs,
+                                    aliases,
+                                    enums,
+                                    try_resolutions: HashMap::new(),
+                                    try_converts: HashMap::new(),
+                                    link_libs: Vec::new(),
+                                    const_bindings: HashMap::new(),
+                                    pub_bindings: cached.pub_bindings.into_owned(),
+                                    pub_funcs: cached.pub_funcs.into_owned(),
+                                    pub_structs: cached.pub_structs.into_owned(),
+                                    pub_aliases: cached.pub_aliases.into_owned(),
+                                    pub_enums: cached.pub_enums.into_owned(),
+                                },
+                                None,
+                            )
+                        }
+                        None => {
+                            self.cache_misses += 1;
+                            (
+                                check_program(
+                                    &program,
+                                    self.bindings.clone(),
+                                    std::mem::take(&mut self.funcs),
+                                    std::mem::take(&mut self.structs),
+                                    std::mem::take(&mut self.aliases),
+                                    std::mem::take(&mut self.enums),
+                                ),
+                                Some(key),
+                            )
+                        }
+                    },
+                    // Unresolvable key (missing source, cycle): check without
+                    // storing (nothing to key the entry by).
+                    None => {
+                        self.cache_misses += 1;
+                        (
+                            check_program(
+                                &program,
+                                self.bindings.clone(),
+                                std::mem::take(&mut self.funcs),
+                                std::mem::take(&mut self.structs),
+                                std::mem::take(&mut self.aliases),
+                                std::mem::take(&mut self.enums),
+                            ),
+                            None,
+                        )
+                    }
+                }
+            } else {
+                self.cache_misses += 1;
+                (
+                    check_program(
+                        &program,
+                        self.bindings.clone(),
+                        std::mem::take(&mut self.funcs),
+                        std::mem::take(&mut self.structs),
+                        std::mem::take(&mut self.aliases),
+                        std::mem::take(&mut self.enums),
+                    ),
+                    None,
+                )
+            };
             let has_errors = checked
                 .errors
                 .iter()
                 .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+            // Restore seeds BEFORE error enrichment (it reads the seeds).
+            // Each checked table splits into seed-owned entries (keys known
+            // before the check — move back untouched) and module-owned
+            // entries. On error the module contributes nothing, exactly as
+            // before (seeds were never mutated: registration is insert-only
+            // under namespace-qualified keys).
+            let (seeded_funcs, own_funcs): (HashMap<String, FuncSig>, HashMap<String, FuncSig>) =
+                std::mem::take(&mut checked.funcs)
+                    .into_iter()
+                    .partition(|(k, _)| self.seed_func_keys.contains(k));
+            let (seeded_structs, own_structs): (
+                HashMap<String, StructSig>,
+                HashMap<String, StructSig>,
+            ) = std::mem::take(&mut checked.structs)
+                .into_iter()
+                .partition(|(k, _)| self.seed_struct_keys.contains(k));
+            let (seeded_aliases, own_aliases): (
+                HashMap<String, AliasSig>,
+                HashMap<String, AliasSig>,
+            ) = std::mem::take(&mut checked.aliases)
+                .into_iter()
+                .partition(|(k, _)| self.seed_alias_keys.contains(k));
+            let (seeded_enums, own_enums): (HashMap<String, EnumSig>, HashMap<String, EnumSig>) =
+                std::mem::take(&mut checked.enums)
+                    .into_iter()
+                    .partition(|(k, _)| self.seed_enum_keys.contains(k));
+            self.funcs = seeded_funcs;
+            self.structs = seeded_structs;
+            self.aliases = seeded_aliases;
+            self.enums = seeded_enums;
+            // Store the miss (own-only maps + pubs + diags, all borrowed —
+            // zero copy before the tail moves them below).
+            if let Some(key) = pending_key.as_deref() {
+                cache::write_cached(
+                    key,
+                    &cache::CachedModule {
+                        funcs: std::borrow::Cow::Borrowed(&own_funcs),
+                        pub_funcs: std::borrow::Cow::Borrowed(&checked.pub_funcs),
+                        structs: std::borrow::Cow::Borrowed(&own_structs),
+                        pub_structs: std::borrow::Cow::Borrowed(&checked.pub_structs),
+                        aliases: std::borrow::Cow::Borrowed(&own_aliases),
+                        pub_aliases: std::borrow::Cow::Borrowed(&checked.pub_aliases),
+                        enums: std::borrow::Cow::Borrowed(&own_enums),
+                        pub_enums: std::borrow::Cow::Borrowed(&checked.pub_enums),
+                        bindings: std::borrow::Cow::Borrowed(&checked.bindings),
+                        pub_bindings: std::borrow::Cow::Borrowed(&checked.pub_bindings),
+                        diags: checked.errors.clone(),
+                    },
+                );
+            }
             let mut diags = checked.errors;
             if has_errors {
                 // Upgrade generic "undefined variable / unknown struct / no
@@ -1200,22 +1699,53 @@ impl Loader {
                     });
                 }
                 // Only propagate pub items to the cross-module seed.
-                self.bindings.extend(checked.pub_bindings.clone());
-                self.funcs.extend(checked.pub_funcs.clone());
-                self.structs.extend(checked.pub_structs.clone());
+                // Resolved pub versions move over the seeds (was `.clone()`);
+                // key sets grow by exactly the new pubs (O(pubs) total).
+                self.seed_func_keys
+                    .extend(checked.pub_funcs.keys().cloned());
+                self.seed_struct_keys
+                    .extend(checked.pub_structs.keys().cloned());
+                self.seed_alias_keys
+                    .extend(checked.pub_aliases.keys().cloned());
+                self.seed_enum_keys
+                    .extend(checked.pub_enums.keys().cloned());
                 // Track all items for the entry file / runtime.
+                // Seeds are contributed here once (first success only —
+                // prior modules all errored, so seeds are still just
+                // stdlib/plugins): one O(seed) clone total instead of one
+                // per module. Runs BEFORE pubs extend the seeds below.
+                if !self.contributed_seeds {
+                    self.contributed_seeds = true;
+                    self.all_funcs
+                        .extend(self.funcs.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    self.all_structs
+                        .extend(self.structs.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    self.all_aliases
+                        .extend(self.aliases.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    self.all_enums
+                        .extend(self.enums.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+                self.bindings.extend(checked.pub_bindings);
+                self.funcs.extend(checked.pub_funcs);
+                self.structs.extend(checked.pub_structs);
+                self.aliases.extend(checked.pub_aliases);
+                self.enums.extend(checked.pub_enums);
+                // `own_*` (module pubs + privates) move into `all_*` after
+                // the seeds, so overlapping keys overwrite with the same
+                // (unresolved) values as the old `checked.funcs` move.
                 self.all_bindings.extend(checked.bindings);
-                self.all_funcs.extend(checked.funcs);
-                self.all_structs.extend(checked.structs);
+                self.all_funcs.extend(own_funcs);
+                self.all_structs.extend(own_structs);
+                self.all_aliases.extend(own_aliases);
+                self.all_enums.extend(own_enums);
 
                 // Handle `pub import` re-exports: for each `pub import ns` in
                 // this module, copy the re-exported namespace's pub functions
                 // and bindings into the current module's namespace in the
                 // cross-module seed.
-                // NOTE: struct re-exports are not yet supported because struct
-                // types are identity-based (Type::Struct("a.X") ≠
-                // Type::Struct("b.X")). Struct re-exports require type aliasing
-                // support (future work).
+                // Structs cannot be re-exported (identity-based types:
+                // Type::Struct("a.X") != Type::Struct("b.X")). Fail loudly
+                // at the re-export site instead of silently dropping (#230).
                 if let Some(module_ns) = self.ns_of.get(path).cloned() {
                     for stmt in &program.stmts {
                         if let Stmt::Import {
@@ -1229,9 +1759,27 @@ impl Loader {
                                 .as_deref()
                                 .or_else(|| imp_path.last().map(|s| s.as_str()))
                                 .unwrap_or("");
-                            // Copy items from seed `reexport_ns.*` to
-                            // `module_ns.reexport_ns.*`
                             let prefix = format!("{}.", reexport_ns);
+                            if let Some(offender) = self
+                                .structs
+                                .keys()
+                                .chain(self.all_structs.keys())
+                                .find(|k| k.starts_with(&prefix))
+                                .map(|k| k[prefix.len()..].to_string())
+                            {
+                                self.errors.push(LoadError {
+                                    name: name.clone(),
+                                    source: source.clone(),
+                                    diags: vec![error_at(
+                                        format!(
+                                            "`pub import {reexport_ns}` cannot re-export struct `{offender}` (struct re-exports unsupported)\n\
+                                             hint: import `{reexport_ns}` directly instead of through `{module_ns}`"
+                                        ),
+                                        Span::new(0, 0),
+                                    )],
+                                });
+                                continue;
+                            }
                             let new_prefix = format!("{}.{reexport_ns}.", module_ns);
                             let seed_b = self.bindings.clone();
                             for (k, v) in &seed_b {
@@ -1263,11 +1811,19 @@ impl Loader {
             funcs: self.all_funcs,
             bindings: self.all_bindings,
             structs: self.all_structs,
+            aliases: self.all_aliases,
+            enums: self.all_enums,
             natives: self.natives,
             consts: self.selected_consts,
             errors: self.errors,
             stdlib_aliases: self.stdlib_aliases,
             import_aliases,
+            stats: LoadStats {
+                modules: self.order.len(),
+                cache_hits: self.cache_hits,
+                cache_misses: self.cache_misses,
+                seed_funcs: self.seed_func_keys.len(),
+            },
         }
     }
 }
@@ -1336,7 +1892,10 @@ fn namespace_program(program: &mut Program, ns: &str) {
     let mut top = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
-            Stmt::Func { name, .. } | Stmt::Struct { name, .. } => {
+            Stmt::Func { name, .. }
+            | Stmt::Struct { name, .. }
+            | Stmt::TypeAlias { name, .. }
+            | Stmt::Enum { name, .. } => {
                 top.insert(name.join("."));
             }
             Stmt::Decl { name, .. } => {

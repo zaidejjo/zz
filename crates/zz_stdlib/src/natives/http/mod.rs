@@ -1859,6 +1859,7 @@ struct FuncSnapshot {
     params: Vec<Param>,
     body: Expr,
     chunk: Option<Arc<Chunk>>,
+    chunk_defaults: Vec<Option<Arc<Chunk>>>,
     env_snapshot: HashMap<String, Value>,
 }
 
@@ -1875,6 +1876,7 @@ impl FuncSnapshot {
             body: self.body.clone(),
             env,
             chunk: self.chunk.clone(),
+            chunk_defaults: self.chunk_defaults.clone(),
         }))
     }
 }
@@ -1956,6 +1958,7 @@ fn snapshot_func_scoped(v: &Value, interp: &Interp) -> Option<FuncSnapshot> {
                 params: fv.params.clone(),
                 body: fv.body.clone(),
                 chunk: fv.chunk.clone(),
+                chunk_defaults: fv.chunk_defaults.clone(),
                 env_snapshot,
             })
         }
@@ -2074,11 +2077,21 @@ impl Default for ServerLimits {
 }
 
 /// Graceful-shutdown flag, set by SIGINT/SIGTERM (unix only).
+/// First press starts the drain; a second press force-exits so a
+/// keep-alive browser tab can never wedge Ctrl+C.
 static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SHUTDOWN_COUNT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 #[cfg(unix)]
 extern "C" fn on_shutdown_signal(_: libc::c_int) {
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Second signal: bail immediately (128 + SIGINT = 130, shell convention).
+    // `fetch_add` + `_exit` are both async-signal-safe; no ZZ state touched.
+    if SHUTDOWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1 {
+        unsafe {
+            libc::_exit(130);
+        }
+    }
 }
 
 /// Install the SIGINT/SIGTERM → drain handler once per process.
@@ -2289,6 +2302,7 @@ fn listen_inner(
     // Fresh shutdown state per `listen` (a previous drain must not poison
     // a later server in the same process, e.g. sequential e2e servers).
     SHUTDOWN.store(false, std::sync::atomic::Ordering::Relaxed);
+    SHUTDOWN_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
     install_shutdown_hook();
 
     let listener = std::net::TcpListener::bind(("0.0.0.0", port as u16)).map_err(|e| {
@@ -2383,6 +2397,11 @@ fn listen_inner(
     }
     // Drain: in-flight connections finish (keep-alive sockets close via
     // their read timeouts at the latest) or the budget expires.
+    // A second SIGINT/SIGTERM force-exits via `_exit(130)` (see handler),
+    // so a browser-held keep-alive can never wedge Ctrl+C.
+    if shutdown_requested() {
+        eprintln!("\nShutting down (draining, Ctrl+C again to force)...");
+    }
     let deadline = Instant::now() + limits.shutdown_timeout;
     while inflight.load(std::sync::atomic::Ordering::Relaxed) > 0 && Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));

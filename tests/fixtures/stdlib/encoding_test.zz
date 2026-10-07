@@ -1,3 +1,4 @@
+// features: comparison, elvis, imports, known-divergence, locals, match, option-result, print, std-encoding, string-literal
 // tests/fixtures/stdlib/encoding_test.zz — encoding E2E test
 import std.encoding
 

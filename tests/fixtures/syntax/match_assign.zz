@@ -1,0 +1,52 @@
+// features: casts, comparison, func-call, int-arith, locals, match, option-result, print, string-literal
+// E2E: match arms accept statements (assignment, decl, return).
+// Regression: `=> y = v` used to die with
+// "expected `,` or `}` after match arm".
+
+func classify(n: int) -> str {
+    out := ""
+    m := int(str(n))
+    match m {
+        .some(v) => out = "some",
+        .none => out = "none",
+    }
+    out
+}
+
+func first_or_zero(n: int) -> int {
+    v := 0
+    match n {
+        0 => v = 0 - 1,
+        1 => v = 10,
+        _ => v = n * 2,
+    }
+    v
+}
+
+func main() {
+    println(classify(42))
+    x := .some(7)
+    y := 0
+    match x {
+        .some(v) => y = v,
+        .none => y = 0 - 1,
+    }
+    println(y)
+    z := 0
+    match .ok(3) {
+        .ok(v) => z = v * 2,
+        .err(e) => z = 0 - 1,
+    }
+    println(z)
+    w := 0
+    m2 := int("abc")
+    match m2 {
+        .some(v) => w = v,
+        .none => w = 99,
+    }
+    println(w)
+    println(first_or_zero(0))
+    println(first_or_zero(1))
+    println(first_or_zero(5))
+    println("match_assign_ok")
+}

@@ -1,0 +1,41 @@
+// features: arrays, comparison, func-call, indexing, int-arith, locals, methods, print, string-literal, structs
+// Chained / non-local method receivers: `origin().bump()` must lower
+// exactly like `bump(origin())` (Bug 8b regression: the AOT Field-callee
+// arm dropped the receiver for anything but bare locals, and the extra
+// args of `bump_by` were boxed against the wrong signature slots —
+// silent zeroed structs while the VM was correct).
+struct Pt { x: int, y: int }
+struct Outer { inner: Pt, tag: str }
+
+func origin() -> Pt { Pt{ x: 0, y: 0 } }
+
+func bump(p: Pt) -> Pt {
+    p.x = p.x + 1
+    p
+}
+
+func bump_by(p: Pt, n: int) -> Pt {
+    p.x = p.x + n
+    p
+}
+
+func main() {
+    // Call-result receiver.
+    q := origin().bump()
+    println(q.x)
+    // Deep chain on call results.
+    println(origin().bump().bump().x)
+    // Extra args: receiver must not shift signature slots.
+    println(origin().bump_by(5).x)
+    // Parenthesized receiver.
+    println((origin()).bump().x)
+    // Struct-literal receiver.
+    println(Pt{ x: 10, y: 0 }.bump().x)
+    // Index receiver.
+    arr := [Pt{ x: 20, y: 0 }]
+    println(arr[0].bump().x)
+    // Nested-field receiver.
+    o := Outer{ inner: Pt{ x: 30, y: 0 }, tag: "t" }
+    println(o.inner.bump().x)
+    println("method_chain_recv_ok")
+}

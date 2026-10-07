@@ -1,3 +1,4 @@
+// features: comparison, elvis, embed, func-call, imports, locals, match, option-result, print, selective-import, std-env, std-fs, std-process, string-literal, vfs
 // E2E: `fs.FS` providers (Os / Mem / Tar / Embed) + binary-safe
 // `read_chunk_bytes`. Same output on VM and AOT.
 // OS scratch path is per (process, sweep task) so parallel runners

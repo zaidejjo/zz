@@ -1,0 +1,19 @@
+// features: func-call, imports, print, std-dec, string-literal
+// E2E: std.dec exact decimal math on strings.
+import std.dec
+
+func main() {
+    println(dec.is_valid("19.99"))
+    println(dec.is_valid("abc"))
+    println(dec.is_valid("-0.5"))
+    println(dec.add("0.1", "0.2"))
+    println(dec.sub("1.00", "0.42"))
+    println(dec.mul("1.5", "2"))
+    println(dec.cmp("1.10", "1.9"))
+    println(dec.eq("1.10", "1.1"))
+    println(dec.lt("0.9", "1"))
+    println(dec.gt("2", "1.99"))
+    println(dec.format("3.14159", 2))
+    println(dec.trim_zeros("1.200"))
+    println("dec_ok")
+}

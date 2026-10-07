@@ -18,7 +18,7 @@ fn closure_ignores_param(params: &[Param], body: &Expr) -> bool {
     !mentions_ident(body, &p.name.name)
 }
 
-fn mentions_ident(e: &Expr, name: &str) -> bool {
+pub(super) fn mentions_ident(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Int { .. }
         | Expr::Float { .. }
@@ -149,12 +149,17 @@ fn mentions_stmt(s: &Stmt, name: &str) -> bool {
                 || decorators.iter().any(|d| mentions_decorator(d, name))
         }
         Stmt::Return { value, .. } => value.as_ref().is_some_and(|v| mentions_ident(v, name)),
-        // Struct shapes carry types only.
-        Stmt::Struct { .. } => false,
+        // Struct shapes, aliases, and enums carry types only (enum
+        // payloads are types, but mentioning a type never forces a
+        // value into a closure — same rule as struct fields).
+        Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => false,
         Stmt::Impl { methods, .. } => methods.iter().any(|m| mentions_stmt(m, name)),
         Stmt::For { iter, body, .. } => mentions_ident(iter, name) || mentions_block(body, name),
         Stmt::Defer { expr, .. } => mentions_ident(expr, name),
         Stmt::Assign { target, value, .. } => {
+            mentions_ident(target, name) || mentions_ident(value, name)
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
             mentions_ident(target, name) || mentions_ident(value, name)
         }
         Stmt::Destructure { pat, value, .. } => {
@@ -242,7 +247,7 @@ impl Lowerer {
             "bool" => Some(format!("zz_bool({cid})")),
             t if t.starts_with("zz_struct_") => {
                 let sname = match names.checker_types.get(name) {
-                    Some(zz_checker::Type::Struct(s)) => s.clone(),
+                    Some(zz_checker::Type::Struct(s, _)) => s.clone(),
                     _ => return None,
                 };
                 let ident = Expr::Ident {
@@ -317,6 +322,12 @@ impl Lowerer {
                 Some(cid) => {
                     // Check if the variable is a scalar type that can be used directly
                     if let Some(ctype) = names.lookup_type(name) {
+                        // Moved-from temporaries (`x = f(x)` fast path):
+                        // the slot was taken, so pass the temp through
+                        // without a `zz_clone` bump.
+                        if super::move_elide::is_moved_type(Some(ctype)) {
+                            return cid.to_string();
+                        }
                         match ctype {
                             "int64_t" | "double" | "bool" => cid.to_string(),
                             // Raw C structs are Copy (not refcounted) — pass
@@ -330,9 +341,73 @@ impl Lowerer {
                         format!("zz_clone({cid})")
                     }
                 }
-                None => "zz_unit()".to_string(),
+                None => {
+                    // First-class reference to a named function
+                    // (`f := add`): box the static function when it
+                    // resolves (selective-import canonical first, then
+                    // the bare spelling). Bare selective-import consts
+                    // (`import std.math(PI)` then `PI`, or `PI as pi`)
+                    // lower to float literals — the checker only lets valid
+                    // consts reach here unresolved. Anything else unknown
+                    // stays unit (the checker rejects it upstream).
+                    if let Some(v) = self.static_func_value_ident(name) {
+                        return v;
+                    }
+                    // Aliased consts resolve through the import map first.
+                    if let Some(canonical) = self.import_fn_aliases.get(name) {
+                        if let Some(v) = super::math_const_c_literal(canonical) {
+                            return v;
+                        }
+                    }
+                    super::math_const_c_literal(name).unwrap_or_else(|| "zz_unit()".to_string())
+                }
             },
-            Expr::Path { parts, .. } => {
+            Expr::Path { parts, span } => {
+                // Unit-variant value (`Token.Eof`, no parens): precise via
+                // the HIR type when available, else by enum name (keeps
+                // typeless top-level scripts working). Both yield to
+                // shadowing values, mirroring the checker.
+                if parts.len() >= 2 {
+                    // The head must BE the enum: namespaced globals
+                    // (`ns.x` of enum type) share the type but are
+                    // variable references, not construction.
+                    if let Some(zz_checker::Type::Enum(enum_name, _)) =
+                        self.ty_at(names, *span).cloned()
+                    {
+                        let head = parts[..parts.len() - 1].join(".");
+                        if head == enum_name {
+                            let variant = parts.last().cloned().unwrap_or_default();
+                            return format!("zz_object_new(\"{enum_name}.{variant}\", NULL, 0)");
+                        }
+                    }
+                    let head = parts[..parts.len() - 1].join(".");
+                    let variant = parts.last().cloned().unwrap_or_default();
+                    let resolved_head: &str = if let Some(q) = self.import_fn_aliases.get(&head) {
+                        if self.tp.enums.contains_key(q) {
+                            q
+                        } else {
+                            &head
+                        }
+                    } else {
+                        &head
+                    };
+                    if names.lookup(&head).is_none() {
+                        if let Some(sig) = self.tp.enums.get(resolved_head) {
+                            // Unit variants only here: payload variants
+                            // must use call form (checker-enforced).
+                            let is_unit = sig
+                                .variants
+                                .iter()
+                                .find(|(v, _)| v == &variant)
+                                .is_some_and(|(_, p)| p.is_none());
+                            if is_unit {
+                                return format!(
+                                    "zz_object_new(\"{resolved_head}.{variant}\", NULL, 0)"
+                                );
+                            }
+                        }
+                    }
+                }
                 // Handle struct field access (e.g., p.x or r.origin.x)
                 if parts.len() == 2 {
                     if let Some(base_name) = names.lookup(&parts[0]) {
@@ -452,8 +527,24 @@ impl Lowerer {
                 } else {
                     // Math constants (`math.PI`, `std.math.PI`) lower to
                     // float literals — the checker rejects calls, so value
-                    // position is the only valid use. Anything else unknown
-                    // stays unit (the checker rejects it upstream).
+                    // position is the only valid use. Named function
+                    // references (`f := path.join`) box the static
+                    // function the same way. Anything else unknown stays
+                    // unit (the checker rejects it upstream).
+                    if let Some(v) = self.static_func_value_path(parts) {
+                        return v;
+                    }
+                    // Module-head aliases (`m.PI` from `import std.math as m`)
+                    // rewrite to the canonical path before the const table.
+                    if parts.len() > 1 {
+                        if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                            let mut fixed = parts.to_vec();
+                            fixed[0] = head.clone();
+                            if let Some(v) = super::math_const_c_literal(&fixed.join(".")) {
+                                return v;
+                            }
+                        }
+                    }
                     super::math_const_c_literal(&joined).unwrap_or_else(|| "zz_unit()".to_string())
                 }
             }
@@ -471,6 +562,9 @@ impl Lowerer {
                     zz_frontend::ast::UnOp::Pos => v,
                     zz_frontend::ast::UnOp::Not => {
                         format!("zz_not({})", box_scalar_operand(expr, names, &v))
+                    }
+                    zz_frontend::ast::UnOp::BitNot => {
+                        format!("zz_bitnot({})", box_scalar_operand(expr, names, &v))
                     }
                 }
             }
@@ -506,53 +600,90 @@ impl Lowerer {
                     }
                 }
                 let l = self.emit_expr(left, names, out);
-                let r = self.emit_expr(right, names, out);
+                // The right operand emits into a side buffer: `&&`/`||`
+                // short-circuit, so its statements (index traps, calls)
+                // must NOT run when the left side decides the result.
+                // Emitting inline (as other operators do) would hoist those
+                // statements before the `&&`/`||` and defeat C-level
+                // short-circuiting (#239: `len(t)>=8 && t[2]==":"` OOB'd
+                // natively on short tokens).
+                let mut r_stmts = String::new();
+                let r = self.emit_expr(right, names, &mut r_stmts);
                 match op {
                     zz_frontend::ast::BinOp::And => {
                         // `zz_truthy` takes `zz_value`: box raw-scalar
-                        // operands (e.g. `bool` locals lower to C `bool`).
+                        // operands (e.g. `bool` locals lower to C `bool`)
+                        // and raw unboxed structs (e.g. `p && q`).
+                        let raw_l = l.clone();
+                        let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
+                        let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
-                        format!("zz_bool(zz_truthy({l}) && zz_truthy({r}))")
+                        let r = self.box_struct_operand(right, r, &raw_r, names, &mut r_stmts);
+                        let tmp = names.fresh("_and");
+                        out.push_str(&format!("    zz_value {tmp};\n"));
+                        out.push_str(&format!(
+                            "    if (!zz_truthy({l})) {tmp} = zz_bool(false);\n"
+                        ));
+                        out.push_str("    else {\n");
+                        out.push_str(&r_stmts);
+                        out.push_str(&format!("    {tmp} = zz_bool(zz_truthy({r}));\n"));
+                        out.push_str("    }\n");
+                        tmp
                     }
                     zz_frontend::ast::BinOp::Or => {
+                        let raw_l = l.clone();
+                        let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
+                        let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
-                        format!("zz_bool(zz_truthy({l}) || zz_truthy({r}))")
+                        let r = self.box_struct_operand(right, r, &raw_r, names, &mut r_stmts);
+                        let tmp = names.fresh("_or");
+                        out.push_str(&format!("    zz_value {tmp};\n"));
+                        out.push_str(&format!("    if (zz_truthy({l})) {tmp} = zz_bool(true);\n"));
+                        out.push_str("    else {\n");
+                        out.push_str(&r_stmts);
+                        out.push_str(&format!("    {tmp} = zz_bool(zz_truthy({r}));\n"));
+                        out.push_str("    }\n");
+                        tmp
                     }
                     zz_frontend::ast::BinOp::Elvis => {
                         // Evaluate the left side once and store in a temp to avoid
                         // double-evaluation (which would call side-effecting natives
                         // like `input()` twice). Box: the temp is `zz_value`
                         // but a raw-scalar operand lowers to its C type.
+                        // NOTE: the right side still evaluates unconditionally
+                        // (its statements were hoisted above); guarding it needs
+                        // a `zz_elvis_needs_right` runtime predicate — tracked
+                        // follow-up, same root-cause class as #239.
+                        out.push_str(&r_stmts);
+                        let raw_l = l.clone();
+                        let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
+                        let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
+                        let r = self.box_struct_operand(right, r, &raw_r, names, out);
                         let tmp = names.fresh("elvis");
                         out.push_str(&format!("    zz_value {tmp} = {l};\n"));
                         format!("zz_elvis({tmp}, {r})")
                     }
                     _ => {
-                        let cop = match op {
-                            zz_frontend::ast::BinOp::Add => "ZZOP_ADD",
-                            zz_frontend::ast::BinOp::Sub => "ZZOP_SUB",
-                            zz_frontend::ast::BinOp::Mul => "ZZOP_MUL",
-                            zz_frontend::ast::BinOp::Div => "ZZOP_DIV",
-                            zz_frontend::ast::BinOp::Rem => "ZZOP_REM",
-                            zz_frontend::ast::BinOp::Pow => "ZZOP_POW",
-                            zz_frontend::ast::BinOp::Eq => "ZZOP_EQ",
-                            zz_frontend::ast::BinOp::Ne => "ZZOP_NE",
-                            zz_frontend::ast::BinOp::Lt => "ZZOP_LT",
-                            zz_frontend::ast::BinOp::Gt => "ZZOP_GT",
-                            zz_frontend::ast::BinOp::Le => "ZZOP_LE",
-                            zz_frontend::ast::BinOp::Ge => "ZZOP_GE",
-                            _ => "ZZOP_ADD",
-                        };
+                        out.push_str(&r_stmts);
+                        let cop = binop_runtime_op(op);
                         // Check if either operand is a scalar. We treat both scalar-typed locals
                         // AND Int/Float literals as scalar operands so that patterns like
                         // `i + 1` or `count + n` unbox to raw C arithmetic instead of routing
                         // through the boxed `zz_binop` path.
                         let left_type = scalar_operand_type(left, names);
                         let right_type = scalar_operand_type(right, names);
+                        // Verified raw texts: classification alone can
+                        // disagree with the emission (a specialized call
+                        // that fell back to boxed still classifies
+                        // scalar). Raw C operators must only see
+                        // genuinely-raw operands — anything else routes
+                        // through the boxing paths below.
+                        let left_raw = crate::lower::context::raw_scalar_text(left, &l, names);
+                        let right_raw = crate::lower::context::raw_scalar_text(right, &r, names);
 
                         // Both operands are scalars of compatible type:
                         // emit a raw C arithmetic op instead of going
@@ -567,7 +698,15 @@ impl Lowerer {
                                 | zz_frontend::ast::BinOp::Mul
                                 | zz_frontend::ast::BinOp::Div
                                 | zz_frontend::ast::BinOp::Rem
+                                | zz_frontend::ast::BinOp::BitAnd
+                                | zz_frontend::ast::BinOp::BitOr
+                                | zz_frontend::ast::BinOp::BitXor
                         );
+                        // NOTE: `Shl`/`Shr` deliberately stay out of the raw
+                        // path — raw C `<<` on signed overflow / shifts >=
+                        // width is UB. They route through `zz_binop`
+                        // (`ZZOP_SHL`/`ZZOP_SHR`) which masks `& 63` and
+                        // rejects negative counts.
                         if is_arith {
                             // Arena string concatenation: when Add is used on
                             // strings inside a loop, allocate the result on
@@ -581,33 +720,53 @@ impl Lowerer {
                                 let boxed_l = box_scalar_operand(left, names, &l);
                                 let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop_cat_arena({boxed_l}, {boxed_r}, &{arena})")
-                            } else if left_type == Some("int64_t") && right_type == Some("int64_t")
-                            {
-                                // Both sides are int64 — emit raw C arith.
+                            } else if matches!(
+                                (&left_raw, &right_raw),
+                                (Some((_, "int64_t")), Some((_, "int64_t")),)
+                            ) {
+                                let (lc, rc) = match (&left_raw, &right_raw) {
+                                    (Some((lc, _)), Some((rc, _))) => (lc.clone(), rc.clone()),
+                                    _ => unreachable!(),
+                                };
                                 let c_op = match op {
                                     zz_frontend::ast::BinOp::Add => "+",
                                     zz_frontend::ast::BinOp::Sub => "-",
                                     zz_frontend::ast::BinOp::Mul => "*",
                                     zz_frontend::ast::BinOp::Div => "/",
                                     zz_frontend::ast::BinOp::Rem => "%",
+                                    zz_frontend::ast::BinOp::BitAnd => "&",
+                                    zz_frontend::ast::BinOp::BitOr => "|",
+                                    zz_frontend::ast::BinOp::BitXor => "^",
                                     _ => "+",
                                 };
-                                let lc = scalar_operand_c(left, names).unwrap_or_else(|| l.clone());
-                                let rc =
-                                    scalar_operand_c(right, names).unwrap_or_else(|| r.clone());
-                                // Literal-zero divisor guard: a `*int` local
-                                // can't be statically proven nonzero, but a
-                                // literal zero would divide-by-zero at -O3.
+                                // Div/Rem always route through zz_binop: they can
+                                // trap (zero divisor, MIN/-1), and raw C
+                                // `/`/`%` would be UB/SIGFPE (-fwrapv does
+                                // not save division). Operands are boxed
+                                // first: scalar locals/arith emit raw C,
+                                // which zz_binop cannot take directly.
                                 if matches!(
                                     op,
                                     zz_frontend::ast::BinOp::Div | zz_frontend::ast::BinOp::Rem
-                                ) && matches!(right.as_ref(), Expr::Int { value: 0, .. })
-                                {
-                                    format!("zz_binop({cop}, {l}, {r})")
+                                ) {
+                                    let boxed_l = box_scalar_operand(left, names, &l);
+                                    let boxed_l =
+                                        self.box_struct_operand(left, boxed_l, &l, names, out);
+                                    let boxed_r = box_scalar_operand(right, names, &r);
+                                    let boxed_r =
+                                        self.box_struct_operand(right, boxed_r, &r, names, out);
+                                    format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                                 } else {
                                     format!("(int64_t)({lc} {c_op} {rc})")
                                 }
-                            } else if left_type == Some("double") && right_type == Some("double") {
+                            } else if matches!(
+                                (&left_raw, &right_raw),
+                                (Some((_, "double")), Some((_, "double")),)
+                            ) {
+                                let (lc, rc) = match (&left_raw, &right_raw) {
+                                    (Some((lc, _)), Some((rc, _))) => (lc.clone(), rc.clone()),
+                                    _ => unreachable!(),
+                                };
                                 let c_op = match op {
                                     zz_frontend::ast::BinOp::Add => "+",
                                     zz_frontend::ast::BinOp::Sub => "-",
@@ -615,9 +774,6 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::Div => "/",
                                     _ => "+",
                                 };
-                                let lc = scalar_operand_c(left, names).unwrap_or_else(|| l.clone());
-                                let rc =
-                                    scalar_operand_c(right, names).unwrap_or_else(|| r.clone());
                                 if matches!(op, zz_frontend::ast::BinOp::Rem) {
                                     format!("(double)(fmod({l}, {r}))")
                                 } else {
@@ -629,26 +785,56 @@ impl Lowerer {
                             {
                                 // Mixed: one scalar, one boxed. Box both
                                 // sides and dispatch through zz_binop.
+                                // Struct operands (never scalar-typed) box
+                                // from raw structs to runtime objects here.
                                 let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_l =
+                                    self.box_struct_operand(left, boxed_l, &l, names, out);
                                 let boxed_r = box_scalar_operand(right, names, &r);
+                                let boxed_r =
+                                    self.box_struct_operand(right, boxed_r, &r, names, out);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             } else {
                                 // Neither operand has a known scalar type in
                                 // NameCtx, but struct field accesses like
                                 // `(v0).width` are raw C scalars that need
                                 // boxing for `zz_binop`. Use `box_scalar_operand`
-                                // which recognizes the cast pattern.
+                                // which recognizes the cast pattern. Raw
+                                // unboxed structs box to objects here.
                                 let boxed_l = box_scalar_operand(left, names, &l);
+                                let boxed_l =
+                                    self.box_struct_operand(left, boxed_l, &l, names, out);
                                 let boxed_r = box_scalar_operand(right, names, &r);
+                                let boxed_r =
+                                    self.box_struct_operand(right, boxed_r, &r, names, out);
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             }
                         } else {
                             // Comparisons / pow / etc: use the boxed path
                             // (result must be zz_value). Also handles
                             // struct field accesses that emit as raw C
-                            // scalars.
+                            // scalars, plus raw unboxed structs (e.g.
+                            // `Pt{...} == p`, `p == q`) which box to
+                            // runtime objects for `zz_binop`.
+                            //
+                            // `_u` fast path: numeric comparisons with
+                            // verifiably-raw operands emit raw C directly
+                            // (`(bool)(a < b)`). IEEE semantics match the
+                            // runtime (`zz_binop` compares doubles the
+                            // same way); strings/structs never classify
+                            // raw, so content equality keeps the boxed
+                            // path. Gated to `_u` bodies so existing
+                            // generated C stays byte-identical.
+                            if self.unboxed_ret.borrow().is_some() {
+                                if let Some(raw) = self.emit_raw_cmp(op, left, right, &l, &r, names)
+                                {
+                                    return raw;
+                                }
+                            }
                             let boxed_l = box_scalar_operand(left, names, &l);
+                            let boxed_l = self.box_struct_operand(left, boxed_l, &l, names, out);
                             let boxed_r = box_scalar_operand(right, names, &r);
+                            let boxed_r = self.box_struct_operand(right, boxed_r, &r, names, out);
                             format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                         }
                     }
@@ -658,8 +844,60 @@ impl Lowerer {
                 callee,
                 args,
                 named,
-                ..
-            } => self.emit_call(callee, args, named, names, out, stmt_direct),
+                span,
+            } => {
+                // Enum construction (`Token.IntLit(1)`) builds a boxed
+                // object, not a call. Resolved two ways: precise via the
+                // HIR type when available, else by enum name from the HIR
+                // table (top-level scripts record no span types, so the
+                // name table keeps them working). Both yield to shadowing
+                // values, mirroring the checker.
+                if let Expr::Path { parts, .. } = callee.as_ref() {
+                    if parts.len() >= 2 {
+                        let head = parts[..parts.len() - 1].join(".");
+                        let variant = parts.last().cloned().unwrap_or_default();
+                        // Precise path first (head must be the enum itself;
+                        // namespaced globals share the type but are not
+                        // construction — see the Path arm).
+                        if let Some(zz_checker::Type::Enum(enum_name, _)) =
+                            self.ty_at(names, *span).cloned()
+                        {
+                            if head == enum_name {
+                                return self.emit_enum_construction(
+                                    &enum_name, variant, args, named, names, out,
+                                );
+                            }
+                        }
+                        // Name-table fallback for typeless positions.
+                        let resolved_head: &str = if let Some(q) = self.import_fn_aliases.get(&head)
+                        {
+                            if self.tp.enums.contains_key(q) {
+                                q
+                            } else {
+                                &head
+                            }
+                        } else {
+                            &head
+                        };
+                        let head_is_value = names.lookup(&head).is_some();
+                        if !head_is_value {
+                            if let Some(sig) = self.tp.enums.get(resolved_head) {
+                                if sig.variants.iter().any(|(v, _)| v == &variant) {
+                                    return self.emit_enum_construction(
+                                        resolved_head,
+                                        variant,
+                                        args,
+                                        named,
+                                        names,
+                                        out,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                self.emit_call(callee, args, named, names, out, stmt_direct)
+            }
             Expr::While {
                 cond, body, span, ..
             } => {
@@ -689,20 +927,23 @@ impl Lowerer {
                 // Cooperative safepoint at the loop top (mirrors the VM's
                 // `Op::Safepoint`): budget-guarded `zz_safepoint()` yields
                 // the OS thread on quantum expiry so sibling AOT task
-                // threads get scheduled.
-                out.push_str("        zz_safepoint();\n");
+                // threads get scheduled. Elided for concurrency-free
+                // programs (see `needs_safepoint`).
+                self.emit_safepoint(out, "        ");
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
                 // Lexical scope for the body (same push/pop_scope
                 // discipline as for-loop bodies and value blocks):
                 // shadowing declarations must not leak past the braces.
-                names.push_scope();
+                // The marker additionally releases body-declared heap
+                // locals at the bottom of every iteration.
+                let while_scope = self.loop_scope_begin(names);
                 // Loop body is never a function tail.
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
-                names.pop_scope();
+                self.loop_scope_end(names, out, while_scope);
                 if let Some(ref name) = loop_arena {
                     self.loop_arenas.borrow_mut().pop();
                     *self.current_loop_arena.borrow_mut() =
@@ -723,10 +964,26 @@ impl Lowerer {
                 // Chained `else if` arrives as a bare If — recurse so
                 // nested branches emit instead of collapsing to unit.
                 let c = self.emit_expr(cond, names, out);
-                let c = box_scalar_operand(cond, names, &c);
+                // `_u` fast path: a raw scalar condition tests directly
+                // (`zz_truthy` on `int`/`float` is `!= 0`, matching the
+                // runtime). Boxed mode keeps `zz_truthy` byte-identical.
+                let c = if self.unboxed_ret.borrow().is_some() {
+                    match crate::lower::context::raw_scalar_text(cond, &c, names) {
+                        Some((raw, "bool")) => raw,
+                        Some((raw, "double")) => format!("({raw} != 0.0)"),
+                        Some((raw, _)) => format!("({raw} != 0)"),
+                        None => {
+                            let c = box_scalar_operand(cond, names, &c);
+                            format!("zz_truthy({c})")
+                        }
+                    }
+                } else {
+                    let c = box_scalar_operand(cond, names, &c);
+                    format!("zz_truthy({c})")
+                };
                 let tmp = names.fresh("_ifv");
                 out.push_str(&format!("    zz_value {tmp} = zz_unit();\n"));
-                out.push_str(&format!("    if (zz_truthy({c})) {{\n"));
+                out.push_str(&format!("    if ({c}) {{\n"));
                 let tv = self.emit_block_value(then, names, out);
                 out.push_str(&format!("        {tmp} = {tv};\n"));
                 if let Some(el) = els {
@@ -755,6 +1012,26 @@ impl Lowerer {
             }
             Expr::Index { obj, index, .. } => {
                 // `obj[idx]` — runtime-dispatched read (arrays/dicts).
+                // Stack-literal forwarding (SROA): `arr[lit]` where `arr`
+                // is bound to a pure-scalar literal in straight-line code
+                // reads the element's raw C expression directly — no
+                // `zz_index_get` call, no bounds-check temp. Returned
+                // pre-boxed (`zz_int(…)` etc.) so the boxed `zz_value`
+                // contract holds at every use site; scalar contexts
+                // re-derive the raw text through the classifier arms
+                // (which stay raw end to end, e.g. in `a + arr[0]`).
+                if let (Expr::Ident { name, .. }, Expr::Int { value, .. }) =
+                    (obj.as_ref(), index.as_ref())
+                {
+                    if let Some((raw, t)) = names.stack_array_elem(name, *value) {
+                        let ctor = match t {
+                            "double" => "zz_float",
+                            "bool" => "zz_bool",
+                            _ => "zz_int",
+                        };
+                        return format!("{ctor}({raw})");
+                    }
+                }
                 // Two fast-paths over the naive
                 // `zz_call_native2(zz_index_get, zz_clone(o), boxed_i)`:
                 //   1. Plain Ident receivers pass borrowed: zz_index_get
@@ -774,9 +1051,28 @@ impl Lowerer {
                 let i = self.emit_expr(index, names, out);
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
+                // Hoist the read into a temp and check the error flag:
+                // OOB (and bad-receiver) reads trap instead of yielding
+                // unit (VM parity). The SROA path above only fires for
+                // statically in-bounds literals, so every dynamic read
+                // flows through this check. Bound once into owned temps
+                // (borrow-safe synchronous use) so the trap below reports
+                // the exact operands without re-evaluating them (#251).
                 let e = names.fresh("_idxe");
+                let tmp = names.fresh("_idxv");
+                let otmp = names.fresh("_idxo");
+                let itmp = names.fresh("_idxi");
+                let func = names.current_scope.clone();
+                out.push_str(&format!("    zz_value {otmp} = {o};\n"));
+                out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
                 out.push_str(&format!("    int {e} = 0;\n"));
-                format!("zz_index_get({o}, {i_boxed}, &{e})")
+                out.push_str(&format!(
+                    "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{e});\n"
+                ));
+                out.push_str(&format!(
+                    "    if ({e}) {{ zz_index_trap({otmp}, {itmp}, \"{func}\"); }}\n"
+                ));
+                tmp
             }
             Expr::Slice {
                 obj, start, end, ..
@@ -815,7 +1111,11 @@ impl Lowerer {
                 // `zz_value`s at runtime — array elements (including DB
                 // row dicts standing in for structs) never inhabit raw
                 // C structs — so they must use the runtime accessor even
-                // when the checker type is an unboxed struct.
+                // when the checker type is an unboxed struct. Call results
+                // are also always boxed: every function returns `zz_value`
+                // (struct returns are boxed via `emit_boxed_value`), so
+                // `make_pt().x` and `id_pt(q).x` must use the runtime
+                // accessor, never raw `(call).field`.
                 let is_unboxed = if matches!(obj.as_ref(), Expr::Index { .. }) {
                     false
                 } else if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
@@ -823,10 +1123,59 @@ impl Lowerer {
                         .lookup_type(obj_name)
                         .map(|t| t.starts_with("zz_struct_"))
                         .unwrap_or(false)
-                } else if let Some(zz_checker::Type::Struct(sname)) = self.ty_at(names, obj.span())
-                {
+                } else if let Expr::StructInit { name: sname, .. } = obj.as_ref() {
+                    // A struct literal of unboxed type lowers to a raw C
+                    // struct value, so `Pt{...}.x` can use direct access.
                     self.is_unboxed_struct(sname)
+                } else if matches!(
+                    obj.as_ref(),
+                    Expr::Field { .. } | Expr::Path { .. } | Expr::Paren { .. }
+                ) {
+                    // Field/Path chains lower raw only when rooted at a raw
+                    // unboxed value (an unboxed local or literal). A chain
+                    // rooted at a call/index (`make_pt().a.b`) is boxed at
+                    // the first step, so every outer step stays boxed even
+                    // though the checker type is still a struct.
+                    let root_is_raw = {
+                        let mut cur = obj.as_ref();
+                        loop {
+                            match cur {
+                                Expr::Paren { expr, .. } => cur = expr.as_ref(),
+                                Expr::Field { obj: inner, .. } => cur = inner.as_ref(),
+                                Expr::Path { parts, .. } => {
+                                    break parts
+                                        .first()
+                                        .and_then(|b| names.lookup_type(b))
+                                        .map(|t| t.starts_with("zz_struct_"))
+                                        .unwrap_or(false);
+                                }
+                                Expr::Ident { name: b, .. } => {
+                                    break names
+                                        .lookup_type(b)
+                                        .map(|t| t.starts_with("zz_struct_"))
+                                        .unwrap_or(false);
+                                }
+                                Expr::StructInit { name: s, .. } => {
+                                    break self.is_unboxed_struct(s);
+                                }
+                                _ => break false,
+                            }
+                        }
+                    };
+                    if root_is_raw {
+                        if let Some(zz_checker::Type::Struct(sname, _)) =
+                            self.ty_at(names, obj.span())
+                        {
+                            self.is_unboxed_struct(sname)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 } else {
+                    // Calls, arrays, dicts, blocks, if/match, etc. all lower
+                    // to boxed `zz_value` — never raw structs.
                     false
                 };
                 if is_unboxed {
@@ -834,7 +1183,7 @@ impl Lowerer {
                     // scalar fields so the result is always a zz_value.
                     // Derive the field C type from the parent object's struct type.
                     let field_ctype = self.ty_at(names, obj.span()).and_then(|ot| {
-                        if let zz_checker::Type::Struct(sname) = ot {
+                        if let zz_checker::Type::Struct(sname, _) = ot {
                             if let Some(sig) = self.tp.structs.get(sname) {
                                 if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
                                     return Some(self.type_to_c(ft));
@@ -856,7 +1205,7 @@ impl Lowerer {
                     let raw = self
                         .ty_at(names, obj.span())
                         .and_then(|ot| match ot {
-                            zz_checker::Type::Struct(sname) => self
+                            zz_checker::Type::Struct(sname, _) => self
                                 .resolve_access_chain(sname, std::slice::from_ref(name))
                                 .map(|(chain, _)| {
                                     let mut acc = format!("({obj_val})");
@@ -872,10 +1221,13 @@ impl Lowerer {
                 } else {
                     // Boxed object: use runtime function.
                     // `zz_object_get_field` takes a pointer, so we need
-                    // an lvalue.  A simple Ident produces a C variable
-                    // name (lvalue), but anything else (Index, Call,
-                    // Field chain, …) is an rvalue — hoist to a temp.
-                    if matches!(obj.as_ref(), Expr::Ident { .. }) {
+                    // an lvalue.  A simple Ident usually produces a C
+                    // variable name (lvalue), but emission can also yield
+                    // an rvalue for one (e.g. `zz_clone(v0)`) — so check
+                    // the emitted form, not just the AST shape. Anything
+                    // else (Index, Call, Field chain, …) is an rvalue —
+                    // hoist to a temp.
+                    if matches!(obj.as_ref(), Expr::Ident { .. }) && is_simple_ident(&obj_val) {
                         format!("zz_object_get_field(&{obj_val}, \"{name}\")")
                     } else {
                         let tmp = names.fresh("_field_obj");
@@ -946,16 +1298,7 @@ impl Lowerer {
                 };
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 for item in elems {
-                    let item_val = self.emit_expr(item, names, out);
-                    // Auto-box if needed
-                    let boxed = if let Expr::Ident { name: n, .. } = item {
-                        auto_box(&item_val, names.lookup_type(n))
-                    } else {
-                        item_val
-                    };
-                    out.push_str(&format!(
-                        "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
-                    ));
+                    self.append_container_item(&arr_var, item, names, out);
                 }
                 arr_var
             }
@@ -976,15 +1319,7 @@ impl Lowerer {
                 out.push_str(&format!("    zz_value {arr_var} = {ctor};\n"));
                 if !items.is_empty() {
                     for item in items {
-                        let item_val = self.emit_expr(item, names, out);
-                        let boxed = if let Expr::Ident { name: n, .. } = item {
-                            auto_box(&item_val, names.lookup_type(n))
-                        } else {
-                            item_val
-                        };
-                        out.push_str(&format!(
-                            "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
-                        ));
+                        self.append_container_item(&arr_var, item, names, out);
                     }
                 }
                 arr_var
@@ -1008,7 +1343,7 @@ impl Lowerer {
                     let key = box_scalar_operand(k, names, &raw_key);
                     let val = box_scalar_operand(v, names, &raw_val);
                     out.push_str(&format!(
-                        "    {{ int _de = 0; zz_index_set({dv}, {key}, {val}, &_de); }}\n"
+                        "    {{ int _de = 0; zz_index_set(&{dv}, {key}, {val}, &_de); }}\n"
                     ));
                 }
                 dv
@@ -1256,6 +1591,10 @@ impl Lowerer {
         let globals = self.global_name_set();
         let mut caps: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
         for fv in zz_hir::closure_free_vars(&param_names, body, &globals) {
+            // A captured name may be mutated through the shared cell
+            // after this point: drop index forwarding for it (plus any
+            // literal mentioning it) so later reads stay truthful.
+            names.invalidate_stack_array_elems(&fv);
             let Some(ptr) = names.cell_ptr(&fv) else {
                 continue;
             };
@@ -1344,8 +1683,14 @@ impl Lowerer {
         if green {
             *self.current_loop_arena.borrow_mut() = None;
         }
+        // Closures are always boxed (`zz_closure_N` returns `zz_value`),
+        // even when nested inside a `_u` body: suspend the unboxed-return
+        // flag across the inner lowering so tail returns stay boxed.
+        let saved_unboxed = *self.unboxed_ret.borrow();
+        *self.unboxed_ret.borrow_mut() = None;
         let scope = outer_names.current_scope.clone();
         let mut o = self.emit_closure_inner(params, body, cid, caps, green, &scope);
+        *self.unboxed_ret.borrow_mut() = saved_unboxed;
         if green {
             self.green_finish(&mut o);
             *self.current_loop_arena.borrow_mut() = saved_arena;
@@ -1367,6 +1712,7 @@ impl Lowerer {
         // scope so typed lookups hit the right entries.
         names.current_scope = scope.to_string();
         self.seed_globals(&mut names);
+        self.seed_scalar_fns(&mut names);
         for (i, (name, _, ctype, checker)) in caps.iter().enumerate() {
             let ptr = format!("env[{i}]");
             let deref = NameCtx::cap_deref_of(&ptr, ctype);
@@ -1556,7 +1902,7 @@ impl Lowerer {
                     .funcs
                     .get(&fname)
                     .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
-                    .map(|t| matches!(&t, zz_checker::Type::Struct(_)))
+                    .map(|t| matches!(&t, zz_checker::Type::Struct(_, _)))
                     .unwrap_or(false);
                 out.push_str(&format!(
                     "        zz_value {err_tmp} = zz_match_err({tmp});\n"
@@ -1612,6 +1958,45 @@ impl Lowerer {
         }
     }
 
+    /// Raw comparison for `_u` bodies: `Eq/Ne/Lt/Gt/Le/Ge` with
+    /// verifiably-raw numeric operands emits `(bool)(a <op> b)`.
+    /// Returns `None` when the boxed `zz_binop` path must stay (pow,
+    /// non-numeric operands, mixed bool/numeric whose runtime semantics
+    /// differ from C promotion). The `(bool)` marker keeps downstream
+    /// classifiers (boxing, returns, conds) honest.
+    pub(super) fn emit_raw_cmp(
+        &self,
+        op: &zz_frontend::ast::BinOp,
+        left: &Expr,
+        right: &Expr,
+        l: &str,
+        r: &str,
+        names: &NameCtx,
+    ) -> Option<String> {
+        use zz_frontend::ast::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
+        let c_op = match op {
+            Eq => "==",
+            Ne => "!=",
+            Lt => "<",
+            Gt => ">",
+            Le => "<=",
+            Ge => ">=",
+            _ => return None,
+        };
+        let lraw = crate::lower::context::raw_scalar_text(left, l, names)?;
+        let rraw = crate::lower::context::raw_scalar_text(right, r, names)?;
+        // Same-type numerics, plus int/float promotion (the runtime
+        // promotes the same way). Mixed bool/numeric stays boxed: C
+        // promotion (`true == 1`) disagrees with tag-dispatched `zz_binop`.
+        let pair = (lraw.1, rraw.1);
+        match pair {
+            ("int64_t", "int64_t") | ("double", "double") | ("bool", "bool") => {}
+            ("int64_t", "double") | ("double", "int64_t") => {}
+            _ => return None,
+        }
+        Some(format!("(bool)({} {c_op} {})", lraw.0, rraw.0))
+    }
+
     pub(super) fn emit_call(
         &self,
         callee: &Expr,
@@ -1628,6 +2013,7 @@ impl Lowerer {
         // Resolve callee name — handle method dispatch for Path/Field expressions.
         // Returns (cname, method_receiver) where method_receiver is the owned Expr
         // to insert as the first argument for method calls like `x.push(4)`.
+
         let (cname, method_receiver): (String, Option<Expr>) = match callee {
             Expr::Ident { name, .. } => {
                 // Selective-import aliases (`rts` from
@@ -1666,8 +2052,28 @@ impl Lowerer {
                         match self.import_ns_aliases.get(obj_name) {
                             Some(head) => {
                                 let resolved = format!("{head}.{method}");
-                                if !native_supported(&joined) && native_supported(&resolved) {
-                                    resolved
+                                // Bodies live under canonical names (seed
+                                // copies under the alias have none): when
+                                // the alias spelling has neither a native
+                                // impl nor a definition but a canonical
+                                // spelling does, call the canonical one.
+                                // The `std.`-stripped form covers stdlib
+                                // definitions (`std.path.join` is defined
+                                // as `path.join`).
+                                let mut cands = vec![resolved.clone()];
+                                if let Some(stripped) = resolved.strip_prefix("std.") {
+                                    cands.push(stripped.to_string());
+                                }
+                                let joined_ok = native_supported(&joined)
+                                    || self.find_func_def(&joined).is_some();
+                                if !joined_ok {
+                                    if let Some(hit) = cands.into_iter().find(|c| {
+                                        native_supported(c) || self.find_func_def(c).is_some()
+                                    }) {
+                                        hit
+                                    } else {
+                                        joined
+                                    }
                                 } else {
                                     joined
                                 }
@@ -1724,7 +2130,22 @@ impl Lowerer {
                                     },
                                 )
                             });
+                        // Enum-typed local (always boxed erasure):
+                        // resolve `Enum.method` the same way.
+                        let enum_dispatch: Option<(String, Expr)> = self
+                            .checker_enum_of(names, obj_name, Some(first_ident_span))
+                            .and_then(|ename| {
+                                self.enum_method_target(&ename, method).map(|impl_name| {
+                                    let recv = Expr::Ident {
+                                        name: obj_name.clone(),
+                                        span: first_ident_span,
+                                    };
+                                    (impl_name, recv)
+                                })
+                            });
                         if let Some((c, r)) = struct_dispatch {
+                            (c, Some(r))
+                        } else if let Some((c, r)) = enum_dispatch {
                             (c, Some(r))
                         } else {
                             // Use the receiver's type from the type checker to
@@ -1864,14 +2285,89 @@ impl Lowerer {
                                 }
                             }
                             if found_ns.is_empty() {
-                                // Also check if the bare method name is a native
-                                // (e.g. `len`, `println`).
-                                if self.reachable_natives.contains(method) {
-                                    // Bare builtin — no receiver injection needed.
-                                    (method.clone(), None)
-                                } else {
-                                    // Unknown — fall through
-                                    (method.clone(), None)
+                                // Free-function / bare-native method syntax
+                                // (mirrors the VM's `lookup_method_recv`
+                                // bare-callable-first rule and the checker's
+                                // Path-method `funcs.get(method)` branch):
+                                // `p.bump()` where `bump` is a free function
+                                // resolves to `bump(p)` — the receiver becomes
+                                // the first argument. Without this the call
+                                // lowers to `bump()` with the receiver dropped
+                                // (arity mismatch: the callee reads `args[0]`
+                                // out of bounds — Bug 8's garbage/hang/segfault).
+                                //
+                                // Name resolution has three shapes because the
+                                // loader namespaces top-level items by file
+                                // stem (`bump` → `m1.bump`) while the method
+                                // tail of a true receiver call stays bare
+                                // (locals shadow the namespace rewrite):
+                                //   1. bare `method` (harness/REPL programs),
+                                //   2. `{struct-ns}.{method}` (same-module
+                                //      free function — mirrors the checker's
+                                //      `Struct(sname)` → `{ns}.{method}`
+                                //      fallback),
+                                //   3. unique `*.{method}` suffix (mirrors the
+                                //      callgraph candidates + the bare-Ident
+                                //      `owned_fallback` below).
+                                let receiver = Expr::Ident {
+                                    name: obj_name.clone(),
+                                    span: first_ident_span,
+                                };
+                                let mut target: Option<String> = None;
+                                if self.reachable_funcs.contains(method)
+                                    || self.tp.funcs.contains_key(method)
+                                {
+                                    target = Some(method.clone());
+                                }
+                                if target.is_none() {
+                                    if let Some(unmangled) = self.dispatch_struct_name(
+                                        names,
+                                        names.lookup_type(obj_name),
+                                        obj_name,
+                                        first_ident_span,
+                                    ) {
+                                        if let Some((ns, _)) = unmangled.rsplit_once('.') {
+                                            let cand = format!("{ns}.{method}");
+                                            if self.reachable_funcs.contains(&cand)
+                                                || self.tp.funcs.contains_key(&cand)
+                                            {
+                                                target = Some(cand);
+                                            }
+                                        }
+                                    }
+                                }
+                                if target.is_none() {
+                                    let suffix = format!(".{method}");
+                                    let mut hits: Vec<&String> = self
+                                        .reachable_funcs
+                                        .iter()
+                                        .filter(|f| f.ends_with(&suffix))
+                                        .collect();
+                                    for k in self.tp.funcs.keys() {
+                                        if k.ends_with(&suffix) && !hits.contains(&k) {
+                                            hits.push(k);
+                                        }
+                                    }
+                                    hits.sort_unstable();
+                                    hits.dedup();
+                                    if hits.len() == 1 {
+                                        target = Some(hits[0].clone());
+                                    }
+                                }
+                                if target.is_none()
+                                    && (self.reachable_natives.contains(method)
+                                        || native_supported(method))
+                                {
+                                    // Bare native with an untyped receiver
+                                    // (`xs.len()` missing type info → `len(xs)`).
+                                    target = Some(method.clone());
+                                }
+                                match target {
+                                    Some(t) => (t, Some(receiver)),
+                                    None => {
+                                        // Unknown — fall through to unit below.
+                                        (method.clone(), None)
+                                    }
                                 }
                             } else {
                                 let receiver = Expr::Ident {
@@ -1902,7 +2398,60 @@ impl Lowerer {
                 //     (longest matching local first) to find the local
                 //     and uses its struct type to look up
                 //     `<StructType>.<method>` in funcs.
-                if parts.len() >= 2 {
+                //   - `Token.Eof.is_eof()` — receiver is an inline unit
+                //     variant (no local exists); resolved against the HIR
+                //     enum table and emitted as a synthetic Path receiver
+                //     (which lowers to the variant object).
+                // Inline unit-variant receiver (`Token.Eof.is_eof()`):
+                // resolved against the HIR enum table; the synthetic Path
+                // receiver lowers to the variant object via the Path arm.
+                // `None` falls through to the regular dispatch below.
+                let inline_enum_recv: Option<(String, Expr)> = if parts.len() >= 3 {
+                    let head2 = parts[..parts.len() - 2].join(".");
+                    let resolved_head: &str = if let Some(q) = self.import_fn_aliases.get(&head2) {
+                        if self.tp.enums.contains_key(q) {
+                            q
+                        } else {
+                            &head2
+                        }
+                    } else {
+                        &head2
+                    };
+                    // Owned copy: `resolved_head` may borrow `head2`.
+                    let resolved_head = resolved_head.to_string();
+                    match self.tp.enums.get(&resolved_head) {
+                        Some(sig)
+                            if sig
+                                .variants
+                                .iter()
+                                .any(|(v, p)| v == &parts[parts.len() - 2] && p.is_none()) =>
+                        {
+                            let target = format!(
+                                "{resolved_head}.{}",
+                                parts.last().cloned().unwrap_or_default()
+                            );
+                            if self.reachable_funcs.contains(&target)
+                                || self.tp.funcs.contains_key(&target)
+                            {
+                                Some((
+                                    target,
+                                    Expr::Path {
+                                        parts: parts[..parts.len() - 1].to_vec(),
+                                        span: callee.span(),
+                                    },
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some((target, recv_expr)) = inline_enum_recv {
+                    (target, Some(recv_expr))
+                } else if parts.len() >= 2 {
                     // Same collision rule as the 2-part arm above: an exact
                     // user-function match is a direct call even when a local
                     // shares the head segment.
@@ -1914,6 +2463,28 @@ impl Lowerer {
                         self.resolve_path_receiver(parts, names)
                     {
                         (recv_cname, Some(recv_expr))
+                    } else if names.lookup(&parts[0]).is_some() {
+                        // Head is a local but no impl target matched
+                        // (`o.inner.bump()` with free `bump`): the tail is
+                        // a free-function call on the head chain. Resolve
+                        // it and keep the chain as receiver instead of
+                        // emitting a bogus `o.inner.bump` direct call
+                        // (which lowers to unit / reads OOB).
+                        let method = parts.last().cloned().unwrap_or_default();
+                        let recv_expr = Expr::Path {
+                            parts: parts[..parts.len() - 1].to_vec(),
+                            span: callee.span(),
+                        };
+                        match self.field_free_target(&method, None) {
+                            Some(t) => (t, Some(recv_expr)),
+                            None => {
+                                let mut fixed = parts.clone();
+                                if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                                    fixed[0] = head.clone();
+                                }
+                                (fixed.join("."), None)
+                            }
+                        }
                     } else {
                         // Module head aliases (`pg` from
                         // `import std.sqlz.postgres as pg`) rewrite the head.
@@ -1934,13 +2505,49 @@ impl Lowerer {
                 // Look up receiver type and dispatch.
                 if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
-                        zz_checker::Type::Struct(sname) => {
-                            // Keep the direct-form convention (no receiver);
-                            // promotion included for embedded methods.
-                            if let Some((target, _)) = self.struct_method_target(sname, method) {
-                                (target, None)
+                        zz_checker::Type::Enum(ename, _) => {
+                            // Enum values erase to boxed objects: methods
+                            // take the boxed receiver (same convention as
+                            // boxed structs — no `&` unboxed form).
+                            let target = format!("{ename}.{method}");
+                            if self.reachable_funcs.contains(&target)
+                                || self.tp.funcs.contains_key(&target)
+                            {
+                                (target, Some(*obj.clone()))
+                            } else if let Some((ns, _)) = ename.rsplit_once('.') {
+                                let target = format!("{ns}.{method}");
+                                if self.reachable_funcs.contains(&target)
+                                    || self.tp.funcs.contains_key(&target)
+                                {
+                                    (target, Some(*obj.clone()))
+                                } else {
+                                    (method.clone(), None)
+                                }
                             } else {
-                                (format!("{sname}.{method}"), None)
+                                (method.clone(), None)
+                            }
+                        }
+                        zz_checker::Type::Struct(sname, _) => {
+                            // Impl methods keep the direct-form convention
+                            // (struct-pointer receiver); promotion included
+                            // for embedded methods. The receiver is kept so
+                            // the impl call site can pass `&recv` — including
+                            // non-Ident receivers like `arr[0]` (boxed at
+                            // runtime, unboxed into a temp at the call site).
+                            if let Some((target, _)) = self.struct_method_target(sname, method) {
+                                (target, Some(*obj.clone()))
+                            } else {
+                                // Free function on a non-Ident receiver
+                                // (`origin().bump()`, `arr[0].bump()`,
+                                // `Pt{..}.bump()`): resolve and KEEP the
+                                // receiver as first arg. Dropping it makes
+                                // the callee read args[0] out of bounds
+                                // (silent zeroed structs/segfaults).
+                                let receiver = *obj.clone();
+                                match self.field_free_target(method, Some(sname.as_str())) {
+                                    Some(t) => (t, Some(receiver)),
+                                    None => (method.clone(), None),
+                                }
                             }
                         }
                         // Canonical `sqlz.*`; `db.*` alias resolves to the
@@ -1961,12 +2568,26 @@ impl Lowerer {
                             if !ns.is_empty() {
                                 (format!("{ns}.{method}"), Some(*obj.clone()))
                             } else {
-                                (method.clone(), None)
+                                // Unknown-type receiver (e.g. a span the
+                                // checker never recorded): still resolve a
+                                // free function and keep the receiver —
+                                // mirrors the VM's bare-callable rule.
+                                let receiver = *obj.clone();
+                                match self.field_free_target(method, None) {
+                                    Some(t) => (t, Some(receiver)),
+                                    None => (method.clone(), None),
+                                }
                             }
                         }
                     }
                 } else {
-                    (method.clone(), None)
+                    // No recorded receiver type at all: same free-function
+                    // fallback with the receiver kept.
+                    let receiver = *obj.clone();
+                    match self.field_free_target(method, None) {
+                        Some(t) => (t, Some(receiver)),
+                        None => (method.clone(), None),
+                    }
                 }
             }
             _ => return "zz_unit()".to_string(),
@@ -2004,16 +2625,22 @@ impl Lowerer {
         }
         // Any other call may mutate or retain its array arguments — drop
         // literal-length knowledge for every variable passed in (including
-        // the method receiver, e.g. `arr.push(4)`).
+        // the method receiver, e.g. `arr.push(4)`). Same for index
+        // forwarding (a store through the call would stale the texts).
         if let Some(Expr::Ident { name, .. }) = &method_receiver {
             names.invalidate_array_len(name);
+            names.invalidate_stack_array_elems(name);
         }
         for a in args {
             match a {
-                Expr::Ident { name, .. } => names.invalidate_array_len(name),
+                Expr::Ident { name, .. } => {
+                    names.invalidate_array_len(name);
+                    names.invalidate_stack_array_elems(name);
+                }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
                     names.invalidate_array_len(&joined);
+                    names.invalidate_stack_array_elems(&joined);
                 }
                 _ => {}
             }
@@ -2084,6 +2711,17 @@ impl Lowerer {
         }
 
         let mut arg_items: Vec<String> = Vec::new();
+        // `len(s.f)` without the getter's retain (see `zz_len_field`):
+        // runs before arg emission so the field is never cloned.
+        if cname == "len"
+            && method_receiver.is_none()
+            && named.is_empty()
+            && ordered_args.len() == 1
+        {
+            if let Some(len_c) = self.try_emit_len_field(ordered_args[0], names) {
+                return len_c;
+            }
+        }
         // sqlz early-out: sqlz.query/sqlz.exec (+ db.* alias, + pg.* free
         // form) lower via emit_db_call, which needs the raw Exprs (Fmt
         // split into template + binds). Runs BEFORE the generic
@@ -2259,7 +2897,22 @@ impl Lowerer {
             } else {
                 self.emit_expr(recv, names, out)
             };
-            if recv_is_struct {
+            if recv_is_struct && self.is_impl_method(&cname) {
+                arg_items.push(recv_val);
+            } else if let Some(sname) = self.struct_box_name(recv, names) {
+                // Free-function / native method syntax on an unboxed struct
+                // (`p.bump()` → `bump(p)`): regular funcs and natives take
+                // boxed `zz_value` args, so the raw C struct must be boxed
+                // into a runtime object — exactly like `struct_box_for_arg`
+                // does for positional struct params. `box_raw_struct` reuses
+                // the already-emitted raw value (pure for Ident/Path/Field
+                // roots) with no re-emission.
+                arg_items.push(self.box_raw_struct(&sname, &recv_val, names, out));
+            } else if recv_is_struct {
+                // Defensive: unboxed receiver where `struct_box_name` missed
+                // (should not happen for Ident/Path). Push raw so a shape
+                // mismatch surfaces as a loud C type error, never a silent
+                // arg drop.
                 arg_items.push(recv_val);
             } else {
                 let boxed = auto_box(&recv_val, None); // receiver is always zz_value
@@ -2275,14 +2928,21 @@ impl Lowerer {
         // struct first are NOT impl methods): the emitted arg is a raw C
         // struct and must be boxed into a runtime object. Positional: slot
         // i of ordered_args matches sig param i (named args already
-        // reordered above); the method receiver (if any) lives outside.
+        // reordered above); the method receiver (if any) lives outside
+        // `ordered_args`. Whenever a receiver is present, explicit arg `i`
+        // maps to sig param `i+1` (param 0 is the receiver) — for impl
+        // methods and non-impl callees alike, since the impl emission path
+        // also passes `self` separately (`skip(1)` below).
+        let recv_shift = usize::from(method_receiver.is_some());
         let struct_box_for_arg: Vec<Option<String>> = match self.tp.funcs.get(&cname) {
             Some(sig) => ordered_args
                 .iter()
                 .enumerate()
                 .map(|(i, _)| {
-                    sig.params.get(i).and_then(|(_, t)| match t {
-                        zz_checker::Type::Struct(s) if self.is_unboxed_struct(s) => Some(s.clone()),
+                    sig.params.get(i + recv_shift).and_then(|(_, t)| match t {
+                        zz_checker::Type::Struct(s, _) if self.is_unboxed_struct(s) => {
+                            Some(s.clone())
+                        }
                         _ => None,
                     })
                 })
@@ -2424,7 +3084,7 @@ impl Lowerer {
                 // scalar that must be boxed for function calls.
                 // Derive field type from the parent object's struct type.
                 let ctype = self.ty_at(names, obj.span()).and_then(|ot| {
-                    if let zz_checker::Type::Struct(sname) = ot {
+                    if let zz_checker::Type::Struct(sname, _) = ot {
                         if let Some(sig) = self.tp.structs.get(sname) {
                             if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
                                 return Some(self.type_to_c(ft));
@@ -2435,7 +3095,13 @@ impl Lowerer {
                 });
                 auto_box(&emitted, ctype.as_deref())
             } else {
-                emitted
+                // Anything else (notably calls): box raw scalars. Plain
+                // calls historically emitted boxed `zz_value`s, but calls
+                // to scalar-specialized functions emit raw C scalars
+                // (`(int64_t)cf_u(...)`) that native `zz_value` params
+                // would reject. `box_scalar_operand` passes boxed
+                // emissions through unchanged.
+                box_scalar_operand(a, names, &emitted)
             };
             arg_items.push(boxed);
         }
@@ -2567,6 +3233,33 @@ impl Lowerer {
                     arg_items.push(pad);
                 }
             }
+            // Borrowed-arg fast path for proven read-only natives: `zz_len`
+            // only inspects its input's tag/length and `zz_fs_write` /
+            // `zz_fs_append` only read the data bytes during the call, so
+            // passing the live local directly avoids a `zz_clone` temporary
+            // that nothing would release (one leaked share per call — a
+            // full 1MB per `len(big)` / `write(big)`). Mirrors the
+            // index-receiver borrowed fast path above. Only exact
+            // `zz_clone(barecid)` shapes are stripped (live C locals and
+            // globals, which outlive the synchronous call); complex
+            // temporaries keep their owned form.
+            if matches!(effective_name, "zz_len" | "zz_fs_write" | "zz_fs_append") {
+                for item in arg_items.iter_mut() {
+                    if let Some(inner) = item
+                        .strip_prefix("zz_clone(")
+                        .and_then(|s| s.strip_suffix(')'))
+                    {
+                        if !inner.is_empty()
+                            && inner
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            && !inner.starts_with("zz_")
+                        {
+                            *item = inner.to_string();
+                        }
+                    }
+                }
+            }
             return match arg_items.len() {
                 1 => {
                     let a = &arg_items[0];
@@ -2632,6 +3325,15 @@ impl Lowerer {
                     let e = &arg_items[4];
                     format!("zz_call_native5({effective_name}, {a}, {b}, {c}, {d}, {e})")
                 }
+                6 => {
+                    let a = &arg_items[0];
+                    let b = &arg_items[1];
+                    let c = &arg_items[2];
+                    let d = &arg_items[3];
+                    let e = &arg_items[4];
+                    let f = &arg_items[5];
+                    format!("zz_call_native6({effective_name}, {a}, {b}, {c}, {d}, {e}, {f})")
+                }
                 _ => "zz_unit()".to_string(),
             };
         }
@@ -2641,7 +3343,17 @@ impl Lowerer {
         // silent unit wedged programs — a retry loop matching on the
         // result never fires when the value is unit (http_tls_p3 spun
         // forever). The name is an internal dotted key (safe charset).
-        if is_native {
+        //
+        // A real ZZ body shadows the native classification: the
+        // `std.`-twin rule above admits std-qualified ghosts (e.g.
+        // `std.csv.len` reached via a conservative `.len` fallback)
+        // of genuinely defined functions. Emitting the shim for those
+        // would abort programs that work — fall through to the ZZ
+        // call below instead (issue #222).
+        let has_zz_body = self.reachable_funcs.contains(&cname_for_native)
+            && (self.tp.funcs.contains_key(&cname_for_native)
+                || self.is_impl_method(&cname_for_native));
+        if is_native && !has_zz_body {
             return format!("zz_unimplemented_native(\"{cname_for_native}\")");
         }
 
@@ -2690,15 +3402,45 @@ impl Lowerer {
             let is_impl_method = self.is_impl_method(&cname_for_native);
             if is_impl_method {
                 if let Some(method_receiver) = method_receiver_for_call.as_ref() {
-                    // For struct receivers, use the raw C variable name
-                    // (no clone) so we can take its address for the
-                    // struct-pointer parameter. For non-struct receivers,
-                    // emit normally.
-                    let recv_val = if let Expr::Ident { name, .. } = method_receiver {
-                        if let Some(cid) = names.lookup(name) {
-                            cid.to_string()
+                    // Struct name from `ns.Type.method` (e.g. `main.Box`
+                    // from `main.Box.inc`).
+                    let sname: Option<String> = cname_for_native
+                        .rsplit_once('.')
+                        .map(|(s, _)| s.to_string());
+                    let unboxed = sname.as_deref().is_some_and(|s| self.is_unboxed_struct(s));
+                    // Unbox a boxed `zz_value` temp into a raw struct temp
+                    // for unboxed-receiver methods. Boxed-receiver methods
+                    // take `zz_value *self`, so the boxed temp passes
+                    // directly.
+                    let unbox_tmp = |boxed: &str, names: &mut NameCtx, out: &mut String| {
+                        if unboxed {
+                            let sname = sname.clone().unwrap_or_default();
+                            let raw = names.fresh("_recv_raw");
+                            let ctype = format!("zz_struct_{}", mangle(&sname));
+                            out.push_str(&format!("    {ctype} {raw};\n"));
+                            self.emit_unbox_struct(&sname, boxed, &raw, names, out);
+                            raw
                         } else {
-                            self.emit_expr(method_receiver, names, out)
+                            boxed.to_string()
+                        }
+                    };
+                    let recv_val = if let Expr::Ident { name, .. } = method_receiver {
+                        match names.lookup(name) {
+                            Some(cid) => {
+                                let cid = cid.to_string();
+                                // Raw struct local: pass its address
+                                // directly. Boxed local (e.g. bound to a
+                                // call/index result): unbox into a temp.
+                                let is_raw = names
+                                    .lookup_type(name)
+                                    .is_some_and(|t| t.starts_with("zz_struct_"));
+                                if is_raw {
+                                    cid
+                                } else {
+                                    unbox_tmp(&cid, names, out)
+                                }
+                            }
+                            None => self.emit_expr(method_receiver, names, out),
                         }
                     } else if let Expr::Path { parts, .. } = method_receiver {
                         // Promoted struct receiver (`u.Base`): emit the raw
@@ -2711,10 +3453,19 @@ impl Lowerer {
                             let rv = self.emit_expr(method_receiver, names, out);
                             let tmp = names.fresh("_recv");
                             out.push_str(&format!("    zz_value {tmp} = {rv};\n"));
-                            tmp
+                            unbox_tmp(&tmp, names, out)
                         }
                     } else {
-                        self.emit_expr(method_receiver, names, out)
+                        // Arbitrary receiver (`arr[0]`, `make_pt()`, ...):
+                        // always a boxed `zz_value` at runtime (array
+                        // elements and call results never inhabit raw C
+                        // structs). Materialize into a temp, then unbox
+                        // into a raw struct temp when the method expects
+                        // an unboxed receiver.
+                        let rv = self.emit_expr(method_receiver, names, out);
+                        let boxed = names.fresh("_recv_box");
+                        out.push_str(&format!("    zz_value {boxed} = {rv};\n"));
+                        unbox_tmp(&boxed, names, out)
                     };
                     let rest_args: Vec<String> = arg_items.into_iter().skip(1).collect();
                     let rest_n = rest_args.len();
@@ -2729,6 +3480,41 @@ impl Lowerer {
                 }
                 // No receiver (shouldn't happen for impl methods but
                 // fall through to the regular path defensively).
+            }
+            // Unboxed fast path: scalar-specialized callee, receiver-free,
+            // all args raw-provable. Emits `(ctype)cf_u(raw, ...)` with a
+            // cast marker so downstream classifiers (binary folds, return
+            // unboxing, tail temps) treat the result as a raw scalar.
+            // Anything else keeps the boxed convention below.
+            if method_receiver.is_none() && named.is_empty() {
+                if let Some(ret_c) = self.specialized_ret(&cname_for_native) {
+                    let arity = self
+                        .tp
+                        .funcs
+                        .get(&cname_for_native)
+                        .map(|sig| sig.params.len())
+                        .unwrap_or(usize::MAX);
+                    if ordered_args.len() == arity {
+                        let mut raws: Vec<String> = Vec::with_capacity(ordered_args.len());
+                        let mut all_raw = true;
+                        for (a, emitted) in ordered_args.iter().zip(arg_items.iter()) {
+                            match crate::lower::context::raw_scalar_text(a, emitted, names) {
+                                Some((raw, _)) => raws.push(raw),
+                                None => {
+                                    all_raw = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if all_raw {
+                            let args_s = raws.join(", ");
+                            if raws.is_empty() {
+                                return format!("({ret_c})({cf}_u())");
+                            }
+                            return format!("({ret_c})({cf}_u({args_s}))");
+                        }
+                    }
+                }
             }
             if arg_items.is_empty() {
                 return format!("{cf}(NULL, 0)");
@@ -2851,6 +3637,54 @@ impl Lowerer {
         box_scalar_operand(e, names, &v)
     }
 
+    /// Lower a user-enum construction (`Token.IntLit(1)`) to a boxed
+    /// object named `Enum.Variant` with a single `value` field (or no
+    /// fields for unit variants) — the same runtime shape the VM and
+    /// tree-walker build, so all engines agree on representation.
+    /// `enum_name` arrives canonicalized from the HIR type.
+    pub(super) fn emit_enum_construction(
+        &self,
+        enum_name: &str,
+        variant: String,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let qualified = format!("{enum_name}.{variant}");
+        let obj_tmp = names.fresh("__enum");
+        if args.is_empty() && named.is_empty() {
+            out.push_str(&format!(
+                "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", NULL, 0);\n",
+            ));
+        } else {
+            // The checker enforces ≤1 positional and no named args; emit
+            // positionally in order so nothing is silently dropped.
+            let payload_expr: &Expr = args
+                .first()
+                .or_else(|| named.first().map(|(_, v)| v))
+                .expect("enum payload expr");
+            let raw = self.emit_expr(payload_expr, names, out);
+            // Box scalars AND unboxed structs (a struct payload lowers to
+            // a raw C struct — same two-step boxing as struct fields and
+            // binop operands).
+            let boxed = box_scalar_operand(payload_expr, names, &raw);
+            let boxed = self.box_struct_operand(payload_expr, boxed, &raw, names, out);
+            let names_arr_tmp = names.fresh("__enum_fields");
+            out.push_str(&format!("    zz_value {names_arr_tmp}[1];\n"));
+            out.push_str(&format!(
+                "    {names_arr_tmp}[0] = zz_str_static(\"value\");\n",
+            ));
+            out.push_str(&format!(
+                "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", {names_arr_tmp}, 1);\n",
+            ));
+            out.push_str(&format!(
+                "    zz_object_set_field(&{obj_tmp}, \"value\", {boxed});\n",
+            ));
+        }
+        obj_tmp
+    }
+
     /// Lower a struct literal, distributing flattened (promoted) fields
     /// into embedded sub-objects (`User{id: 1, age: 2}` fills `Base.id`).
     /// Literals without flattened fields keep the historical emission
@@ -2912,10 +3746,22 @@ impl Lowerer {
                 if let Some(sig) = self.tp.structs.get(name) {
                     if let Some((_, field_type)) = sig.fields.iter().find(|(n, _)| n == field_name)
                     {
+                        // Scalar fields arrive boxed (`zz_int(1)`, call
+                        // results) or raw (locals, arithmetic) depending on
+                        // the producer — extract `.i`/`.f`/`.b` only from
+                        // boxed forms, otherwise use the raw value as-is.
+                        // (Unconditional extraction miscompiles
+                        // `Box{v: i}` for raw `i` as `(i).i`.)
+                        let ident = match field_expr {
+                            Expr::Ident { name, .. } => Some(name.as_str()),
+                            _ => None,
+                        };
+                        let raw =
+                            crate::lower::context::emitted_is_raw_scalar(&field_val, names, ident);
                         let final_val = match field_type {
-                            zz_checker::Type::Int => format!("({field_val}).i"),
-                            zz_checker::Type::Float => format!("({field_val}).f"),
-                            zz_checker::Type::Bool => format!("({field_val}).b"),
+                            zz_checker::Type::Int if !raw => format!("({field_val}).i"),
+                            zz_checker::Type::Float if !raw => format!("({field_val}).f"),
+                            zz_checker::Type::Bool if !raw => format!("({field_val}).b"),
                             _ => field_val,
                         };
                         field_inits.push(format!(".{field_name} = {final_val}"));
@@ -2957,7 +3803,7 @@ impl Lowerer {
                     .iter()
                     .find(|(n, _)| n == fname)
                     .and_then(|(_, ft)| match ft {
-                        zz_checker::Type::Struct(inner) if self.is_unboxed_struct(inner) => {
+                        zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner) => {
                             Some(inner.clone())
                         }
                         _ => None,
@@ -3031,7 +3877,7 @@ impl Lowerer {
                 name: fname.clone(),
                 span: value.span(),
             };
-            if let zz_checker::Type::Struct(inner) = fty {
+            if let zz_checker::Type::Struct(inner, _) = fty {
                 if self.is_unboxed_struct(inner) {
                     let child = self.emit_boxed_value(inner, &access, names, out);
                     out.push_str(&format!(
@@ -3087,7 +3933,7 @@ impl Lowerer {
                         _ => field_val,
                     };
                     field_inits.push(format!(".{fname} = {final_val}"));
-                } else if let zz_checker::Type::Struct(inner) = fty {
+                } else if let zz_checker::Type::Struct(inner, _) = fty {
                     let child: Vec<(Vec<String>, &Expr)> = entries
                         .iter()
                         .filter(|(p, _)| p.len() > 1 && &p[0] == fname)
@@ -3122,7 +3968,7 @@ impl Lowerer {
                 {
                     // An unboxed struct value stored in a boxed parent must
                     // be boxed into a runtime object first.
-                    if let zz_checker::Type::Struct(inner) = fty {
+                    if let zz_checker::Type::Struct(inner, _) = fty {
                         if self.is_unboxed_struct(inner) {
                             let child = self.emit_boxed_value(inner, fexpr, names, out);
                             out.push_str(&format!(
@@ -3136,7 +3982,7 @@ impl Lowerer {
                     out.push_str(&format!(
                         "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed_fval});\n",
                     ));
-                } else if let zz_checker::Type::Struct(inner) = fty {
+                } else if let zz_checker::Type::Struct(inner, _) = fty {
                     let child: Vec<(Vec<String>, &Expr)> = entries
                         .iter()
                         .filter(|(p, _)| p.len() > 1 && &p[0] == fname)
@@ -3152,6 +3998,107 @@ impl Lowerer {
             }
             obj_tmp
         }
+    }
+
+    /// Resolve a free function for `Field`-callee method syntax
+    /// (`recv.method()` where the receiver is not a bare local).
+    /// Mirrors the checker's `Struct(sname)` → `{ns}.{method}` fallback
+    /// order: bare name, `{ns}.{method}` (when the struct name is
+    /// namespaced), unique `*.{method}` suffix, bare native. Returns
+    /// `None` when nothing resolves — callers then keep the old
+    /// `(method, None)` fallthrough.
+    fn field_free_target(&self, method: &str, sname: Option<&str>) -> Option<String> {
+        // Bare names count only with a real definition: reachable_funcs
+        // can hold phantom short names (the callgraph records
+        // Field-callee method tails unqualified), and resolving to one
+        // drops the call to unit downstream where tp.funcs/native_impl
+        // know nothing under that spelling.
+        if self.tp.funcs.contains_key(method) {
+            return Some(method.to_string());
+        }
+        if let Some(s) = sname {
+            if let Some((ns, _)) = s.rsplit_once('.') {
+                let cand = format!("{ns}.{method}");
+                if self.reachable_funcs.contains(&cand) || self.tp.funcs.contains_key(&cand) {
+                    return Some(cand);
+                }
+            }
+        }
+        let suffix = format!(".{method}");
+        let mut hits: Vec<&String> = self
+            .reachable_funcs
+            .iter()
+            .filter(|f| f.ends_with(&suffix))
+            .collect();
+        for k in self.tp.funcs.keys() {
+            if k.ends_with(&suffix) && !hits.contains(&k) {
+                hits.push(k);
+            }
+        }
+        hits.sort_unstable();
+        hits.dedup();
+        if hits.len() == 1 {
+            return Some(hits[0].clone());
+        }
+        if self.reachable_natives.contains(method) || native_supported(method) {
+            return Some(method.to_string());
+        }
+        None
+    }
+
+    /// Box a resolved plain function as a first-class value, or `None`.
+    /// Only non-generic, non-extern, non-method functions with an emitted
+    /// definition qualify: generics are rejected by the checker, externs
+    /// need a C ABI and methods need a receiver, neither of which a value
+    /// can carry (both keep their existing behavior).
+    fn static_func_value(&self, name: &str) -> Option<String> {
+        let sig = self.tp.funcs.get(name)?;
+        if !sig.generics.is_empty() || sig.is_extern {
+            return None;
+        }
+        if self.is_impl_method(name) {
+            return None;
+        }
+        self.find_func_def(name)?;
+        Some(format!("zz_func_of_static(&zz_fn_{})", mangle(name)))
+    }
+
+    /// Resolve a bare function reference (`f := join`): selective-import
+    /// canonical first (plus its `std.`-stripped form, which is where
+    /// stdlib bodies live), then the bare spelling itself. First
+    /// body-backed hit wins.
+    fn static_func_value_ident(&self, name: &str) -> Option<String> {
+        let mut cands = Vec::new();
+        if let Some(canon) = self.import_fn_aliases.get(name) {
+            cands.push(canon.clone());
+            if let Some(stripped) = canon.strip_prefix("std.") {
+                cands.push(stripped.to_string());
+            }
+        }
+        cands.push(name.to_string());
+        cands.into_iter().find_map(|c| self.static_func_value(&c))
+    }
+
+    /// Resolve a path function reference (`f := ns.func`): the spelling
+    /// itself, then import-alias and `std.`-stripped canonicals — the
+    /// same candidate rule as call lowering (values have no receiver,
+    /// so no method dispatch applies). First body-backed hit wins.
+    fn static_func_value_path(&self, parts: &[String]) -> Option<String> {
+        let joined = parts.join(".");
+        let mut cands = vec![joined.clone()];
+        if parts.len() >= 2 {
+            if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                let resolved = format!("{head}.{}", parts[1..].join("."));
+                cands.push(resolved.clone());
+                if let Some(stripped) = resolved.strip_prefix("std.") {
+                    cands.push(stripped.to_string());
+                }
+            }
+            if let Some(stripped) = joined.strip_prefix("std.") {
+                cands.push(stripped.to_string());
+            }
+        }
+        cands.into_iter().find_map(|c| self.static_func_value(&c))
     }
 
     /// Box a struct field value for `zz_object_set_field` given the field
@@ -3172,6 +4119,163 @@ impl Lowerer {
                 box_scalar_operand(fexpr, names, &fval)
             }
             _ => fval,
+        }
+    }
+
+    /// Un-mangled struct name when `e` lowers to a raw (unboxed) C struct
+    /// value: struct literals of unboxed type plus Ident/Path/Field shapes
+    /// rooted at raw values (see `unboxed_struct_of_expr`). Calls, indexes,
+    /// arrays, blocks, etc. lower boxed and yield `None`.
+    fn struct_box_name(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+        if let Expr::StructInit { name, .. } = e {
+            if self.is_unboxed_struct(name) {
+                return Some(name.clone());
+            }
+            return None;
+        }
+        self.unboxed_struct_of_expr(e, names)
+    }
+
+    /// Box an already-emitted raw struct expression (`(v0)`, `(lit)`, …)
+    /// into a runtime `ZZ_OBJECT` so `zz_binop`/`zz_truthy` receive a
+    /// `zz_value`. Raw producers (locals, literals, field reads) are pure,
+    /// so reusing the emitted text per field is side-effect free. The
+    /// emitted operand itself is left untouched (no re-emission).
+    fn box_raw_struct(
+        &self,
+        sname: &str,
+        raw: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let sig_fields: Vec<(String, zz_checker::Type)> = self
+            .tp
+            .structs
+            .get(sname)
+            .map(|s| s.fields.clone())
+            .unwrap_or_default();
+        if sig_fields.is_empty() {
+            return "zz_unit()".to_string();
+        }
+        let n = sig_fields.len();
+        let obj_tmp = names.fresh("__eqobj");
+        let names_arr_tmp = names.fresh("__eqfields");
+        out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+        for (i, (fname, _)) in sig_fields.iter().enumerate() {
+            out.push_str(&format!(
+                "    {names_arr_tmp}[{i}] = zz_str_static(\"{fname}\");\n",
+            ));
+        }
+        out.push_str(&format!(
+            "    zz_value {obj_tmp} = zz_object_new(\"{sname}\", {names_arr_tmp}, {n});\n",
+        ));
+        for (fname, fty) in &sig_fields {
+            // Follow embedded promotion when the field lives in a base
+            // struct (`u.id` → `(u).Base.id`).
+            let chain = self
+                .resolve_access_chain(sname, std::slice::from_ref(fname))
+                .map(|(c, _)| c)
+                .unwrap_or_else(|| vec![fname.clone()]);
+            let mut acc = format!("({raw})");
+            for p in &chain {
+                acc = format!("({acc}).{p}");
+            }
+            let boxed = match fty {
+                zz_checker::Type::Int => format!("zz_int({acc})"),
+                zz_checker::Type::Float => format!("zz_float({acc})"),
+                zz_checker::Type::Bool => format!("zz_bool({acc})"),
+                zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner) => {
+                    self.box_raw_struct(inner, &acc, names, out)
+                }
+                _ => format!("zz_clone({acc})"),
+            };
+            out.push_str(&format!(
+                "    zz_object_set_field(&{obj_tmp}, \"{fname}\", {boxed});\n",
+            ));
+        }
+        obj_tmp
+    }
+
+    /// Unbox a boxed struct `zz_value` (`boxed`, a `zz_object`) into a raw
+    /// unboxed C struct lvalue (`raw`, e.g. `zz_struct_ns__Box`). Emits one
+    /// field extraction per declared field: `zz_object_get_field` yields an
+    /// owned `zz_value`, whose scalar payload (`.i`/`.f`/`.b`) fills the raw
+    /// field. Nested unboxed structs recurse through a field temp. Only
+    /// called for unboxed struct types (all fields scalar or nested
+    /// unboxed), so every field has a known scalar extraction.
+    pub(super) fn emit_unbox_struct(
+        &self,
+        sname: &str,
+        boxed: &str,
+        raw: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) {
+        let fields: Vec<(String, zz_checker::Type)> = self
+            .tp
+            .structs
+            .get(sname)
+            .map(|s| s.fields.clone())
+            .unwrap_or_default();
+        for (fname, fty) in &fields {
+            // Follow embedded promotion when the field lives in a base
+            // struct (`u.id` → `(u).Base.id`).
+            let chain = self
+                .resolve_access_chain(sname, std::slice::from_ref(fname))
+                .map(|(c, _)| c)
+                .unwrap_or_else(|| vec![fname.clone()]);
+            let mut acc = format!("({raw})");
+            for p in &chain {
+                acc = format!("({acc}).{p}");
+            }
+            match fty {
+                zz_checker::Type::Int => {
+                    out.push_str(&format!(
+                        "    {acc} = zz_object_get_field(&{boxed}, \"{fname}\").i;\n"
+                    ));
+                }
+                zz_checker::Type::Float => {
+                    out.push_str(&format!(
+                        "    {acc} = zz_object_get_field(&{boxed}, \"{fname}\").f;\n"
+                    ));
+                }
+                zz_checker::Type::Bool => {
+                    out.push_str(&format!(
+                        "    {acc} = zz_object_get_field(&{boxed}, \"{fname}\").b;\n"
+                    ));
+                }
+                zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner) => {
+                    let ftmp = names.fresh("_unbox_f");
+                    out.push_str(&format!(
+                        "    zz_value {ftmp} = zz_object_get_field(&{boxed}, \"{fname}\");\n"
+                    ));
+                    // Nested boxed object → raw nested struct temp, then copy.
+                    let ntmp = names.fresh("_unbox_n");
+                    let nctype = format!("zz_struct_{}", mangle(inner));
+                    out.push_str(&format!("    {nctype} {ntmp};\n"));
+                    self.emit_unbox_struct(inner, &ftmp, &ntmp, names, out);
+                    out.push_str(&format!("    {acc} = {ntmp};\n"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Box a binary operand that lowers to a raw unboxed struct into a
+    /// runtime object; pass through everything else unchanged. `emitted`
+    /// is the already scalar-boxed operand text (identity for structs).
+    fn box_struct_operand(
+        &self,
+        e: &Expr,
+        emitted: String,
+        raw: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        if let Some(sname) = self.struct_box_name(e, names) {
+            self.box_raw_struct(&sname, raw, names, out)
+        } else {
+            emitted
         }
     }
 
@@ -3254,6 +4358,18 @@ impl Lowerer {
                 };
                 return Some((impl_name, recv_expr));
             }
+            // Enum-typed local (`zz_value` erasure): resolve `Enum.method`
+            // the same way. No promotion: variants carry no embedded values.
+            if let Some(ename) = self.checker_enum_of(names, &matched_tail, None) {
+                if let Some(impl_name) = self.enum_method_target(&ename, &method) {
+                    let span = zz_frontend::span::Span::new(0, 0);
+                    let recv_expr = Expr::Ident {
+                        name: matched_tail,
+                        span,
+                    };
+                    return Some((impl_name, recv_expr));
+                }
+            }
         }
 
         // Strategy 2: type-name-as-receiver (static form).
@@ -3275,6 +4391,57 @@ impl Lowerer {
         }
 
         None
+    }
+
+    /// Append one array/tuple element, boxing it into a `zz_value` first.
+    /// Unboxed structs (raw C values: literals, locals, field reads) route
+    /// through `emit_boxed_value` instead of emitting; raw scalars box via
+    /// the operand helper; already-boxed expressions pass through unchanged.
+    /// Without this, `(int, UnboxedStruct)` tuples and `[Point{...}]`
+    /// arrays hand a raw C struct to `zz_vec_append(zz_value)` and the C
+    /// build fails.
+    ///
+    /// The boxed object is freshly constructed per element, and
+    /// `zz_vec_append` clones for store — so the temp is released right
+    /// after the append statement. Without the release, every iteration
+    /// of a loop building such tuples retains one object (~0.5KB/draw
+    /// for a 4-int struct). The release only fires for temp names
+    /// `emit_boxed_value` created (inline fallbacks like `zz_unit()` are
+    /// appended bare, and borrowed locals never reach this branch).
+    pub(super) fn append_container_item(
+        &self,
+        arr_var: &str,
+        item: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) {
+        let unboxed: Option<String> = match self.ty_at(names, item.span()) {
+            Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => Some(s.clone()),
+            _ => None,
+        };
+        if let Some(sname) = unboxed {
+            let tmp = self.emit_boxed_value(&sname, item, names, out);
+            if is_simple_ident(&tmp) {
+                out.push_str(&format!(
+                    "    {{ int _e = 0; zz_vec_append({arr_var}, {tmp}, &_e); zz_release(&{tmp}); }}\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "    {{ int _e = 0; zz_vec_append({arr_var}, {tmp}, &_e); }}\n"
+                ));
+            }
+            return;
+        }
+        let item_val = self.emit_expr(item, names, out);
+        // Auto-box if needed (historical Ident fast path, preserved).
+        let boxed = if let Expr::Ident { name: n, .. } = item {
+            auto_box(&item_val, names.lookup_type(n))
+        } else {
+            box_scalar_operand(item, names, &item_val)
+        };
+        out.push_str(&format!(
+            "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
+        ));
     }
 
     /// Box an index expression to a `zz_value` for `idx` arguments. Scalar
@@ -3300,6 +4467,50 @@ impl Lowerer {
             return format!("zz_bool({emitted})");
         }
         emitted
+    }
+
+    /// Box a raw-scalar index-store RHS to a `zz_value` before storing.
+    /// Extracted from the `obj[idx] = v` lowering so compound assignment
+    /// (`obj[idx] OP= v`) boxes identically.
+    pub(super) fn box_index_store_value(
+        &self,
+        value: &Expr,
+        val: String,
+        names: &NameCtx,
+    ) -> String {
+        let ast_says_scalar = super::expr_emits_raw_scalar(value);
+        let ident = match value {
+            Expr::Ident { name, .. } => Some(name.as_str()),
+            _ => None,
+        };
+        let val_is_actually_scalar =
+            crate::lower::context::emitted_is_raw_scalar(&val, names, ident)
+                || (ast_says_scalar && !val.starts_with("zz_"));
+        let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
+        if value_is_scalar {
+            if let Expr::Ident { name, .. } = value {
+                let name_str = name.clone();
+                auto_box(&val, names.lookup_type(&name_str))
+            } else if let Expr::Path { parts, .. } = value {
+                let joined = parts.join(".");
+                auto_box(&val, names.lookup_type(&joined))
+            } else if val.starts_with("(double)(") {
+                format!("zz_float({val})")
+            } else if val.starts_with("(bool)(") {
+                format!("zz_bool({val})")
+            } else if val_is_actually_scalar {
+                // Genuinely raw scalar (int ident/arithmetic):
+                // box it. (String concats over string idents
+                // trip the AST-only check above but lower to
+                // a zz_value — wrapping one in zz_int is a C
+                // type error.)
+                format!("zz_int({val})")
+            } else {
+                val
+            }
+        } else {
+            val
+        }
     }
 
     pub(super) fn emit_str_literal(&self, s: &str) -> String {
@@ -3557,6 +4768,43 @@ impl Lowerer {
                 0
             }
             Pattern::Variant { name, arg, .. } => {
+                // User-enum variants (anything outside the builtins)
+                // resolve to qualified object names via the HIR enum
+                // table; ambiguous short names chain `||` over every
+                // candidate (the checker already proved exactly one can
+                // match a well-typed scrutinee).
+                if !matches!(name.as_str(), "ok" | "err" | "some" | "none") {
+                    let cands = self.enum_candidates(name);
+                    if cands.is_empty() {
+                        return 0;
+                    }
+                    let cond = cands
+                        .iter()
+                        .map(|q| format!("zz_enum_is(&{scrut}, \"{q}\")"))
+                        .collect::<Vec<_>>()
+                        .join(" || ");
+                    out.push_str(&format!("        if ({cond}) {{\n"));
+                    let inner_open = if let Some(inner) = arg {
+                        let payload_tmp: String = if self.green_active() {
+                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!(
+                                "            {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
+                            ));
+                            deref
+                        } else {
+                            let payload_tmp = names.fresh("_payload");
+                            out.push_str(&format!(
+                                "            zz_value {payload_tmp} = zz_object_get_field(&{scrut}, \"value\");\n"
+                            ));
+                            payload_tmp
+                        };
+                        self.emit_pattern_bind(inner, &payload_tmp, names, out)
+                    } else {
+                        0
+                    };
+                    // Don't close this block yet — the arm body must be inside it.
+                    return 1 + inner_open;
+                }
                 let tag_check = match name.as_str() {
                     "ok" => "ZZ_RESULT_OK",
                     "err" => "ZZ_RESULT_ERR",
@@ -3591,6 +4839,297 @@ impl Lowerer {
                 1 + inner_open
             }
             _ => 0,
+        }
+    }
+
+    /// Qualified enum names (`Enum.Variant`) holding a variant `short`
+    /// (`.Variant` patterns name it short). Sorted for deterministic
+    /// codegen; usually exactly one candidate.
+    fn enum_candidates(&self, short: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .tp
+            .enums
+            .iter()
+            .filter(|(_, sig)| sig.variants.iter().any(|(v, _)| v == short))
+            .map(|(ename, _)| format!("{ename}.{short}"))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Emit a guard-visible payload declaration and return
+    /// `(name, cid, ctype)` for per-arm registration. The declaration
+    /// text lands wherever the caller emits it (before the arm chain);
+    /// registration happens per-arm via `bind_existing`. Returns `None`
+    /// for non-`Binding` patterns and in green closures.
+    fn emit_guard_hoist_decl(
+        &self,
+        extractor: &str,
+        pat: &Pattern,
+        scalar_ctype: Option<&str>,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<(String, String, String)> {
+        if self.green_active() {
+            return None;
+        }
+        let Pattern::Binding { name } = pat else {
+            return None;
+        };
+        let ctype = scalar_ctype.unwrap_or("zz_value");
+        let payload_tmp = names.fresh("_payload");
+        out.push_str(&format!("        zz_value {payload_tmp} = {extractor};\n"));
+        let cid = names.fresh("v");
+        out.push_str(&format!("        zz_value {cid} = {payload_tmp};\n"));
+        Some((name.name.clone(), cid, ctype.to_string()))
+    }
+
+    /// Per-arm guard-hoist planning (see [`Self::emit_guard_hoist_decl`]):
+    /// returns `(name, cid, ctype)` for guarded plain-`Binding` variant
+    /// arms, emitting the declaration text immediately. The caller emits
+    /// all of these BEFORE the arm chain and registers each one per-arm
+    /// (via `bind_existing`) just before its guard, so every arm
+    /// condition is in textual scope while lookup resolves the right
+    /// arm's binding.
+    fn guard_hoist_for_arm(
+        &self,
+        arm: &MatchArm,
+        scrutinee: &Expr,
+        scrut_tmp: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<(String, String, String)> {
+        arm.guard.as_ref()?;
+        let arg_pat = match &arm.pat {
+            Pattern::Variant { arg: Some(a), .. } => a.as_ref(),
+            _ => return None,
+        };
+        let Pattern::Variant { name, .. } = &arm.pat else {
+            return None;
+        };
+        // Enum variant: payload type from the scrutinee's enum.
+        if !matches!(name.as_str(), "ok" | "err" | "some" | "none") {
+            if self.enum_candidates(name).is_empty() {
+                return None;
+            }
+            let scalar = self.ty_at(names, scrutinee.span()).and_then(|t| match t {
+                zz_checker::Type::Enum(ename, eargs) => self
+                    .tp
+                    .enums
+                    .get(ename)
+                    .and_then(|sig| sig.variants.iter().find(|(v, _)| v == name))
+                    .and_then(|(_, p)| p.as_ref())
+                    .map(|pty| {
+                        // Substitute the scrutinee's arguments so generic
+                        // payloads (`V(T)` under `Box[int]`) unbox.
+                        let generics = self
+                            .tp
+                            .enums
+                            .get(ename)
+                            .map(|sig| sig.generics.clone())
+                            .unwrap_or_default();
+                        if generics.len() == eargs.len() {
+                            let map: std::collections::HashMap<String, zz_checker::Type> =
+                                generics.into_iter().zip(eargs.iter().cloned()).collect();
+                            zz_checker::subst_type(pty, &map)
+                        } else {
+                            pty.clone()
+                        }
+                    })
+                    .and_then(|t| match t {
+                        zz_checker::Type::Int => Some("int64_t"),
+                        zz_checker::Type::Float => Some("double"),
+                        zz_checker::Type::Bool => Some("bool"),
+                        _ => None,
+                    }),
+                _ => None,
+            });
+            return self.emit_guard_hoist_decl(
+                &format!("zz_object_get_field(&{scrut_tmp}, \"value\")"),
+                arg_pat,
+                scalar,
+                names,
+                out,
+            );
+        }
+        // Builtin variant: payload type from the scrutinee's Option/Result.
+        let (variant, extractor) = match name.as_str() {
+            "ok" => ("ok", format!("zz_match_ok({scrut_tmp})")),
+            "err" => ("err", format!("zz_match_err({scrut_tmp})")),
+            "some" => ("some", format!("zz_match_some({scrut_tmp})")),
+            _ => return None,
+        };
+        let scalar = self
+            .ty_at(names, scrutinee.span())
+            .and_then(|t| match (t, variant) {
+                (zz_checker::Type::Option(inner), "some") => Some(inner.as_ref()),
+                (zz_checker::Type::Result(ok, _), "ok") => Some(ok.as_ref()),
+                (zz_checker::Type::Result(_, err), "err") => Some(err.as_ref()),
+                _ => None,
+            })
+            .and_then(|t| match t {
+                zz_checker::Type::Int => Some("int64_t"),
+                zz_checker::Type::Float => Some("double"),
+                zz_checker::Type::Bool => Some("bool"),
+                _ => None,
+            });
+        self.emit_guard_hoist_decl(&extractor, arg_pat, scalar, names, out)
+    }
+
+    /// Flatten a (possibly nested) match pattern into a single
+    /// `&&`-joined C condition plus ordered `(name, payload-expr)`
+    /// bindings. A nested miss must fall through to the NEXT ARM —
+    /// nested `if`s cannot express that (a miss inside would skip the
+    /// whole else-if chain and silently yield unit), so every level's
+    /// test joins the top condition. Emits pure payload-temp
+    /// declarations into `out` (call before the arm's `if`); the caller
+    /// declares each bound name over its temp inside. Returns `false`
+    /// when the pattern can never match (unknown variant) — the caller
+    /// skips the arm. Tuple patterns keep their current shape (outer
+    /// tag only); or-patterns are pre-expanded and unreachable here.
+    fn flatten_match_pat(
+        &self,
+        pat: &Pattern,
+        scrut: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+        conds: &mut Vec<String>,
+        binds: &mut Vec<(String, String)>,
+    ) -> bool {
+        match pat {
+            Pattern::Binding { name } => {
+                binds.push((name.name.clone(), scrut.to_string()));
+                true
+            }
+            Pattern::Wildcard { .. } => true,
+            Pattern::Variant { name, arg, .. } => {
+                let vname = name.as_str();
+                // Builtin tag test + extractor.
+                let builtin = match vname {
+                    "ok" => Some(("ZZ_RESULT_OK", "zz_match_ok")),
+                    "err" => Some(("ZZ_RESULT_ERR", "zz_match_err")),
+                    "some" => Some(("ZZ_OPTION_SOME", "zz_match_some")),
+                    "none" => Some(("ZZ_OPTION_NONE", "")),
+                    _ => None,
+                };
+                if let Some((tag, extractor)) = builtin {
+                    conds.push(format!("{scrut}.tag == {tag}"));
+                    if tag == "ZZ_OPTION_NONE" {
+                        // `none` carries no payload (checker-enforced).
+                        return true;
+                    }
+                    if let Some(inner) = arg {
+                        if self.green_active() {
+                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!("        {deref} = {extractor}({scrut});\n"));
+                            return self.flatten_match_pat(inner, &deref, names, out, conds, binds);
+                        }
+                        let payload_tmp = names.fresh("_payload");
+                        out.push_str(&format!(
+                            "        zz_value {payload_tmp} = {extractor}({scrut});\n"
+                        ));
+                        return self.flatten_match_pat(
+                            inner,
+                            &payload_tmp,
+                            names,
+                            out,
+                            conds,
+                            binds,
+                        );
+                    }
+                    return true;
+                }
+                // User-enum tag test (possibly multi-candidate).
+                let cands = self.enum_candidates(vname);
+                if cands.is_empty() {
+                    return false;
+                }
+                let or = cands
+                    .iter()
+                    .map(|q| format!("zz_enum_is(&{scrut}, \"{q}\")"))
+                    .collect::<Vec<_>>()
+                    .join(" || ");
+                conds.push(format!("({or})"));
+                if let Some(inner) = arg {
+                    if self.green_active() {
+                        let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                        out.push_str(&format!(
+                            "        {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
+                        ));
+                        return self.flatten_match_pat(inner, &deref, names, out, conds, binds);
+                    }
+                    let payload_tmp = names.fresh("_payload");
+                    out.push_str(&format!(
+                        "        zz_value {payload_tmp} = zz_object_get_field(&{scrut}, \"value\");\n"
+                    ));
+                    return self.flatten_match_pat(inner, &payload_tmp, names, out, conds, binds);
+                }
+                true
+            }
+            Pattern::Literal { value, .. } => {
+                let lit_c = match value {
+                    zz_frontend::ast::Lit::Int(v) => format!("zz_int({v})"),
+                    zz_frontend::ast::Lit::Float(v) => {
+                        let s = if *v == v.floor() && v.abs() < 1e15 {
+                            format!("{v:.1}")
+                        } else {
+                            format!("{v}")
+                        };
+                        format!("zz_float({s})")
+                    }
+                    zz_frontend::ast::Lit::Bool(v) => {
+                        format!("zz_bool({})", if *v { "true" } else { "false" })
+                    }
+                    zz_frontend::ast::Lit::Str(v) => self.emit_str_literal(v),
+                };
+                conds.push(format!("zz_truthy(zz_binop(ZZOP_EQ, {scrut}, {lit_c}))"));
+                true
+            }
+            Pattern::Tuple { pats, .. } => {
+                // Tuples erase to arrays on every engine: check the tag
+                // and length, then bind element-wise (recursively, so
+                // nested enums inside tuples keep working).
+                //
+                // Extraction is guarded by the same tag+len test inline:
+                // flatten output runs up front for every arm (before any
+                // arm condition is tested), so an unguarded `zz_array_get`
+                // would dereference a non-array payload when the arm
+                // doesn't match (native SIGSEGV — e.g. `describe(IntLit)`
+                // running the `.Pair((a,b))` arm's unpack). The ternary
+                // only calls into the array when the guard holds;
+                // otherwise the temp is unit and the arm's conds fail.
+                let guard = format!(
+                    "({scrut}.tag == ZZ_ARRAY && zz_array_len({scrut}.arr) == {})",
+                    pats.len()
+                );
+                conds.push(guard.clone());
+                for (idx, p) in pats.iter().enumerate() {
+                    // Element temps back bindings (read in the body), so
+                    // they live in frame cells under green.
+                    let elem_tmp = if self.green_active() {
+                        let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                        let err_tmp = names.fresh("_e");
+                        out.push_str(&format!(
+                            "        int {err_tmp} = 0;\n        {deref} = ({guard} ? zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp}) : zz_unit());\n"
+                        ));
+                        deref
+                    } else {
+                        let elem_tmp = names.fresh("_tup");
+                        let err_tmp = names.fresh("_e");
+                        out.push_str(&format!("        int {err_tmp} = 0;\n"));
+                        out.push_str(&format!(
+                            "        zz_value {elem_tmp} = ({guard} ? zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp}) : zz_unit());\n"
+                        ));
+                        elem_tmp
+                    };
+                    if !self.flatten_match_pat(p, &elem_tmp, names, out, conds, binds) {
+                        return false;
+                    }
+                }
+                true
+            }
+            // Or-patterns are expanded before matching.
+            _ => true,
         }
     }
 
@@ -3694,6 +5233,52 @@ impl Lowerer {
             }
         }
 
+        // Guard-hoisted payload declarations (see helpers above):
+        // emitted here, before the arm chain, so every arm condition is
+        // in textual scope. Each arm registers its own binding just
+        // before its guard (via `bind_existing`); the scope pops after
+        // the chain.
+        names.push_scope();
+        let mut guard_hoists: Vec<Option<(String, String, String)>> =
+            Vec::with_capacity(flat.len());
+        for arm in flat.iter() {
+            guard_hoists.push(self.guard_hoist_for_arm(arm, scrutinee, &scrut_tmp, names, out));
+        }
+
+        // Flattened nested patterns (see helper): every level's test
+        // joins the arm condition so a nested miss falls through to the
+        // next arm (nested `if`s would swallow the miss). Payload temps
+        // are pure declarations, safe to emit up front; per-arm binding
+        // declarations stay inside. `skip` marks never-matching arms
+        // (unknown variant) exactly as before.
+        struct FlatPat {
+            conds: Vec<String>,
+            binds: Vec<(String, String)>,
+            skip: bool,
+        }
+        let mut flat_pats: Vec<FlatPat> = Vec::with_capacity(flat.len());
+        for arm in flat.iter() {
+            match &arm.pat {
+                Pattern::Variant { .. } => {
+                    let mut conds = Vec::new();
+                    let mut binds = Vec::new();
+                    let ok = self.flatten_match_pat(
+                        &arm.pat, &scrut_tmp, names, out, &mut conds, &mut binds,
+                    );
+                    flat_pats.push(FlatPat {
+                        conds,
+                        binds,
+                        skip: !ok,
+                    });
+                }
+                _ => flat_pats.push(FlatPat {
+                    conds: Vec::new(),
+                    binds: Vec::new(),
+                    skip: false,
+                }),
+            }
+        }
+
         for (i, arm) in flat.iter().enumerate() {
             let is_last_arm = i == flat.len() - 1;
             let arm_needs_else_prefix = i > 0;
@@ -3705,63 +5290,90 @@ impl Lowerer {
             };
 
             match &arm.pat {
-                Pattern::Variant { name, arg, .. } => {
+                Pattern::Variant { name, .. } => {
                     // Lexical scope for arm bindings (same push/pop_scope
                     // discipline as value blocks).
                     names.push_scope();
-                    let tag_check = match name.as_str() {
-                        "ok" => "ZZ_RESULT_OK",
-                        "err" => "ZZ_RESULT_ERR",
-                        "some" => "ZZ_OPTION_SOME",
-                        "none" => "ZZ_OPTION_NONE",
-                        _ => continue,
-                    };
-                    let extractor = match name.as_str() {
-                        "ok" => "zz_match_ok",
-                        "err" => "zz_match_err",
-                        "some" => "zz_match_some",
-                        _ => "",
-                    };
-
-                    let cond = format!("{scrut_tmp}.tag == {tag_check}");
+                    // Guard-hoisted payload binding for this arm (emitted
+                    // before the chain): register it so the guard below
+                    // resolves the right arm's declaration.
+                    if let Some(Some((bname, cid, ctype))) = guard_hoists.get(i) {
+                        names.bind_existing(bname, cid.clone(), ctype);
+                    }
+                    // User-enum variant: flattened conditions from the
+                    // pre-loop pass (nested misses fall through).
+                    if !matches!(name.as_str(), "ok" | "err" | "some" | "none") {
+                        let fp = &flat_pats[i];
+                        if fp.skip {
+                            names.pop_scope();
+                            continue;
+                        }
+                        let cond = fp.conds.join(" && ");
+                        let full_cond = if let Some(guard_expr) = &arm.guard {
+                            let guard_c =
+                                emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                            format!("{cond} && ({guard_c})")
+                        } else {
+                            cond
+                        };
+                        if arm_needs_else_prefix {
+                            out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
+                        } else {
+                            out.push_str(&format!("    if ({full_cond}) {{\n"));
+                        }
+                        // Declare the flattened bindings over their
+                        // pre-emitted payload temps.
+                        for (bname, pexpr) in &fp.binds {
+                            if self.green_active() {
+                                let (ptr, deref, n) =
+                                    self.green_cell(names, "zz_value", false, out);
+                                out.push_str(&format!("        {deref} = {pexpr};\n"));
+                                names.enter_cell(bname, &ptr, &deref, "zz_value", n);
+                            } else {
+                                let cid = names.enter(bname);
+                                out.push_str(&format!("        zz_value {cid} = {pexpr};\n"));
+                            }
+                        }
+                        let arm_val = self.emit_tail_value(&arm.body, names, out);
+                        out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                        names.pop_scope();
+                        if arm_closes_block {
+                            out.push_str("    }\n");
+                        }
+                        continue;
+                    }
+                    // Builtin variant: flattened conditions from the
+                    // pre-loop pass (nested misses fall through, same as
+                    // the enum arm above).
+                    let fp = &flat_pats[i];
+                    if fp.skip {
+                        names.pop_scope();
+                        continue;
+                    }
+                    let cond = fp.conds.join(" && ");
                     let full_cond = if let Some(guard_expr) = &arm.guard {
                         let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
-                        format!("{cond} && zz_truthy({guard_c})")
+                        format!("{cond} && ({guard_c})")
                     } else {
                         cond
                     };
-
                     if arm_needs_else_prefix {
                         out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
                     } else {
                         out.push_str(&format!("    if ({full_cond}) {{\n"));
                     }
-
-                    // Extract the payload from this variant arm, then
-                    // recursively handle the inner pattern (which may be
-                    // another variant pattern for nested matching).
-                    let mut inner_open = 0;
-                    if let Some(arg_pat) = arg {
-                        let payload_tmp: String = if self.green_active() {
-                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
-                            out.push_str(&format!("        {deref} = {extractor}({scrut_tmp});\n"));
-                            deref
+                    for (bname, pexpr) in &fp.binds {
+                        if self.green_active() {
+                            let (ptr, deref, n) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!("        {deref} = {pexpr};\n"));
+                            names.enter_cell(bname, &ptr, &deref, "zz_value", n);
                         } else {
-                            let payload_tmp = names.fresh("_payload");
-                            out.push_str(&format!(
-                                "        zz_value {payload_tmp} = {extractor}({scrut_tmp});\n"
-                            ));
-                            payload_tmp
-                        };
-                        inner_open = self.emit_pattern_bind(arg_pat, &payload_tmp, names, out);
+                            let cid = names.enter(bname);
+                            out.push_str(&format!("        zz_value {cid} = {pexpr};\n"));
+                        }
                     }
-
                     let arm_val = self.emit_tail_value(&arm.body, names, out);
                     out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
-                    // Close any nested pattern if-blocks.
-                    for _ in 0..inner_open {
-                        out.push_str("        }\n");
-                    }
                     names.pop_scope();
                     if arm_closes_block {
                         out.push_str("    }\n");
@@ -3849,7 +5461,7 @@ impl Lowerer {
                     let cond = format!("zz_truthy(zz_binop(ZZOP_EQ, {scrut_tmp}, {lit_c}))");
                     let full_cond = if let Some(guard_expr) = &arm.guard {
                         let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
-                        format!("{cond} && zz_truthy({guard_c})")
+                        format!("{cond} && ({guard_c})")
                     } else {
                         cond
                     };
@@ -3875,6 +5487,7 @@ impl Lowerer {
                 }
             }
         }
+        names.pop_scope();
         result_tmp
     }
 }

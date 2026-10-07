@@ -102,6 +102,12 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "sys.hostname" | "std.sys.hostname" => Some("zz_sys_hostname"),
         "sys.total_mem" | "std.sys.total_mem" => Some("zz_sys_total_mem"),
         "sys.avail_mem" | "std.sys.avail_mem" => Some("zz_sys_avail_mem"),
+        "term.enable_raw" | "std.term.enable_raw" => Some("zz_term_enable_raw"),
+        "term.disable_raw" | "std.term.disable_raw" => Some("zz_term_disable_raw"),
+        "term.read_key" | "std.term.read_key" => Some("zz_term_read_key"),
+        "term.get_size" | "std.term.get_size" => Some("zz_term_get_size"),
+        "term.is_tty" | "std.term.is_tty" => Some("zz_term_is_tty"),
+        "term.flush" | "std.term.flush" => Some("zz_term_flush"),
         // Raw argv shares the fixed `zz_env_args` symbol (one source of
         // truth for both spellings and both engines).
         "args.get_raw" | "std.args.get_raw" => Some("zz_env_args"),
@@ -180,6 +186,40 @@ pub fn needs_pg_link(natives: &HashSet<String>) -> bool {
     natives.iter().any(|n| is_sql_native(n))
 }
 
+/// True when reachable natives lower to C calls backed by libcurl
+/// (`zz_http_get/post/fetch/post_json` → `http_client_perform`).
+/// Only the outbound client needs curl; the server/route/test/dispatch
+/// surface is plain epoll + libc. `fetch_insecure` is included
+/// conservatively (currently VM-only, but a future C impl would also
+/// ride `http_client_perform`).
+pub fn needs_curl_link(natives: &HashSet<String>) -> bool {
+    natives.iter().any(|n| is_http_client_native(n))
+}
+
+/// ZZ spellings that lower to curl-backed C client calls, bare and
+/// `std.`-qualified. `http.post` is a prefix of `http.post_json`, so one
+/// entry covers both; listed explicitly for readability.
+fn is_http_client_native(name: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "http.get",
+        "http.post",
+        "http.fetch",
+        "std.http.get",
+        "std.http.post",
+        "std.http.fetch",
+    ];
+    PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// True when reachable natives lower to C calls backed by libsqlite3
+/// (`zz_db_*` → `sqlite3_*`). Any sqlz/db/pg reachability counts: the C
+/// handle dispatch references sqlite unconditionally (backend is chosen
+/// at runtime), including the inlined `db.transaction` path which emits
+/// `zz_db_exec_raw` directly.
+pub fn needs_sqlite_link(natives: &HashSet<String>) -> bool {
+    natives.iter().any(|n| is_sql_native(n))
+}
+
 /// Staticlib symbols to force-extract (`-u`) when [`needs_pg_link`].
 /// One per C-visible `zz_pg_*_raw` entry point; the linker then pulls
 /// their whole object (plus rustls) instead of leaving weak imports NULL.
@@ -189,6 +229,11 @@ pub const PG_LINK_SYMBOLS: &[&str] = &[
     "zz_pg_query_raw",
     "zz_pg_close_raw",
 ];
+
+/// Staticlib symbol to force-extract (`-u`) when the float-format gate
+/// fires: the C runtime references `zz_float_format_raw` weakly, and weak
+/// refs alone never pull archive members.
+pub const FLOAT_FMT_SYMBOL: &str = "zz_float_format_raw";
 
 /// `extern` declarations to inject into generated C: the handle-primitive
 /// header plus one declaration per used FFI symbol. Emits an empty string
@@ -299,6 +344,14 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_sys_hostname" => Some("zz_value zz_sys_hostname(zz_value unit, int *err);"),
         "zz_sys_total_mem" => Some("zz_value zz_sys_total_mem(zz_value unit, int *err);"),
         "zz_sys_avail_mem" => Some("zz_value zz_sys_avail_mem(zz_value unit, int *err);"),
+        "zz_term_enable_raw" => Some("zz_value zz_term_enable_raw(zz_value unit, int *err);"),
+        "zz_term_disable_raw" => {
+            Some("zz_value zz_term_disable_raw(zz_value unit, int *err);")
+        }
+        "zz_term_read_key" => Some("zz_value zz_term_read_key(zz_value unit, int *err);"),
+        "zz_term_get_size" => Some("zz_value zz_term_get_size(zz_value unit, int *err);"),
+        "zz_term_is_tty" => Some("zz_value zz_term_is_tty(zz_value unit, int *err);"),
+        "zz_term_flush" => Some("zz_value zz_term_flush(zz_value unit, int *err);"),
         "zz_args_parser" => Some("zz_value zz_args_parser(zz_value unit, int *err);"),
         "zz_args_str_flag" => {
             Some("zz_value zz_args_str_flag(zz_value h, zz_value name, zz_value def, int *err);")
@@ -571,6 +624,40 @@ mod tests {
         assert!(pre.contains("zz_value zz_regexp_compile(zz_value pat, int *err);"));
         assert!(pre.contains("zz_value zz_regexp_is_match(zz_value re, zz_value s, int *err);"));
         assert!(!pre.contains("zz_regexp_find"));
+    }
+
+    #[test]
+    fn system_lib_needs_follow_reachability() {
+        let set =
+            |names: &[&str]| -> HashSet<String> { names.iter().map(|s| s.to_string()).collect() };
+        // Plain programs need neither system lib.
+        let plain = set(&["println", "std.time.now_ms"]);
+        assert!(!needs_curl_link(&plain));
+        assert!(!needs_sqlite_link(&plain));
+        // Outbound client needs curl only (bare + std spellings).
+        for n in ["http.fetch", "std.http.fetch", "http.get", "std.http.post"] {
+            let s = set(&[n]);
+            assert!(needs_curl_link(&s), "{n} must need curl");
+            assert!(!needs_sqlite_link(&s), "{n} must not need sqlite");
+        }
+        // Queries need sqlite only (all handle spellings + transaction).
+        for n in [
+            "sqlz.open",
+            "std.sqlz.open",
+            "db.exec",
+            "std.db.query",
+            "db.transaction",
+            "pg.query",
+            "std.sqlz.postgres.connect",
+        ] {
+            let s = set(&[n]);
+            assert!(needs_sqlite_link(&s), "{n} must need sqlite");
+            assert!(!needs_curl_link(&s), "{n} must not need curl");
+        }
+        // Server-only HTTP surface needs neither (plain epoll + libc).
+        let server = set(&["http.server", "std.http.listen", "http.route_get"]);
+        assert!(!needs_curl_link(&server));
+        assert!(!needs_sqlite_link(&server));
     }
 
     #[test]

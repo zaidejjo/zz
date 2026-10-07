@@ -134,7 +134,12 @@ pub fn scan_for_zz_files(dir: &Path) -> Vec<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // Never follow symlinked directories (notably `vendor/<dep>`
+            // links into CAS checkouts and sibling repos): descending
+            // them makes initialize crawl entire foreign trees. Real
+            // files — including file links — are still indexed.
+            let is_real_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_real_dir {
                 // Skip hidden directories and target/.
                 let name = path
                     .file_name()
@@ -416,6 +421,27 @@ mod tests {
             elapsed
         );
         assert_eq!(index.entries.len(), 100);
+    }
+
+    #[test]
+    fn scan_skips_symlinked_dirs() {
+        // `vendor/<dep>` links must not pull whole foreign trees into the
+        // workspace scan (initialize latency). Real files still index.
+        let root = PathBuf::from("/tmp/scanlink_ws");
+        let _ = std::fs::remove_dir_all(&root);
+        let outside = PathBuf::from("/tmp/scanlink_outside");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(root.join("vendor")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("main.zz"), "x := 1\n").unwrap();
+        std::fs::write(outside.join("far.zz"), "y := 2\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("vendor").join("dep")).unwrap();
+        let files = scan_for_zz_files(&root);
+        assert_eq!(files.len(), 1, "only main.zz, got: {files:?}");
+        assert!(files[0].ends_with("main.zz"));
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]

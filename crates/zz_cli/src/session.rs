@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use zz_checker::{check_program_with_consts, FuncSig, StructSig, Type};
+use zz_checker::{check_program_with_consts, AliasSig, EnumSig, FuncSig, StructSig, Type};
 use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
@@ -36,6 +36,10 @@ pub struct Session {
     funcs: HashMap<String, FuncSig>,
     /// Struct definitions from previous snippets (checker seed).
     structs: HashMap<String, StructSig>,
+    /// Type alias definitions from previous snippets (checker seed).
+    aliases: HashMap<String, AliasSig>,
+    /// User enum definitions from previous snippets (checker seed).
+    enums: HashMap<String, EnumSig>,
     files: Files,
     file_id: usize,
     name: String,
@@ -73,6 +77,7 @@ impl Session {
                 &zz_prog.program,
                 std::sync::Arc::new(zz_prog.types.clone()),
                 zz_prog.structs.clone(),
+                zz_prog.enums.clone(),
             ) {
                 panic!("zz: pure-ZZ stdlib error: {e:?}");
             }
@@ -87,6 +92,8 @@ impl Session {
             consts: HashMap::new(),
             funcs,
             structs: HashMap::new(),
+            aliases: HashMap::new(),
+            enums: HashMap::new(),
             files,
             file_id,
             name,
@@ -119,6 +126,18 @@ impl Session {
     #[allow(dead_code)]
     pub fn structs(&self) -> &std::collections::HashMap<String, StructSig> {
         &self.structs
+    }
+
+    /// Get all type alias definitions.
+    #[allow(dead_code)]
+    pub fn aliases(&self) -> &std::collections::HashMap<String, AliasSig> {
+        &self.aliases
+    }
+
+    /// Get all user enum definitions.
+    #[allow(dead_code)]
+    pub fn enums(&self) -> &std::collections::HashMap<String, EnumSig> {
+        &self.enums
     }
 
     /// Get the runtime environment reference (for completion queries).
@@ -263,6 +282,8 @@ impl Session {
             self.bindings.clone(),
             self.funcs.clone(),
             self.structs.clone(),
+            self.aliases.clone(),
+            self.enums.clone(),
             self.consts.clone(),
         );
         let has_errors = checked
@@ -294,6 +315,8 @@ impl Session {
                 );
                 self.funcs.extend(checked.funcs);
                 self.structs.extend(checked.structs);
+                self.aliases.extend(checked.aliases);
+                self.enums.extend(checked.enums);
                 EvalOutput {
                     output: display_value(&v),
                     errors: None,
@@ -415,6 +438,18 @@ mod tests {
         let out2 = s.eval("id(7)");
         assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
         assert_eq!(out2.output, "7");
+    }
+
+    #[test]
+    fn enum_defined_in_one_snippet_used_in_next() {
+        let mut s = Session::new("<test>");
+        let out = s.eval("enum Token { Eof, IntLit(int) }");
+        assert!(out.errors.is_none(), "errors: {:?}", out.errors);
+        let out2 = s.eval("t := Token.IntLit(7)");
+        assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
+        let out3 = s.eval("match t { .Eof => 0, .IntLit(v) => v }");
+        assert!(out3.errors.is_none(), "errors: {:?}", out3.errors);
+        assert_eq!(out3.output, "7");
     }
 
     #[test]

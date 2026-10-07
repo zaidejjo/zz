@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 
-pub use zz_checker::{check_program_typed, FuncSig, SpanKey, StructSig, Type, TOP_SCOPE};
+pub use zz_checker::{
+    check_program_typed, AliasSig, EnumSig, FuncSig, SpanKey, StructSig, Type, TOP_SCOPE,
+};
 pub use zz_frontend::ast::{Block, Expr, Program, Stmt};
 pub use zz_frontend::span::Span;
 
@@ -45,6 +47,8 @@ pub struct TypedProgram {
     pub funcs: HashMap<String, FuncSig>,
     /// Top-level struct signatures.
     pub structs: HashMap<String, StructSig>,
+    /// Top-level user enum signatures (for VM construction detection).
+    pub enums: HashMap<String, EnumSig>,
     /// `try` site span → conversion function name (`None` = identity).
     /// Mirrors the checker's `try_converts`; consulted by native codegen
     /// to emit error-conversion calls on early return.
@@ -66,18 +70,29 @@ pub fn build_program(
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
 ) -> TypedResult {
     // Expand decorators before checking so the typed program (consumed by
     // codegen) contains the lowered `__inner` + wrapper functions. The
     // checker re-expands idempotently; diagnostics merge in order.
     let (expanded, mut diags) = zz_frontend::decorators::expand_program(program);
-    let (checked, span_types) =
-        check_program_typed(&expanded, initial_bindings, initial_funcs, initial_structs);
-    diags.extend(checked.errors.clone());
-    let bindings = checked.bindings.clone();
-    let funcs = checked.funcs.clone();
-    let structs = checked.structs.clone();
-    let try_converts = checked.try_converts.clone();
+    let (checked, span_types) = check_program_typed(
+        &expanded,
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        initial_aliases,
+        initial_enums,
+    );
+    // Move (never clone) the result maps: each is freshly built per compile
+    // (notably `funcs`, one entry per function) and used exactly once here.
+    diags.extend(checked.errors);
+    let bindings = checked.bindings;
+    let funcs = checked.funcs;
+    let structs = checked.structs;
+    let enums = checked.enums;
+    let try_converts = checked.try_converts;
     TypedResult {
         program: TypedProgram {
             program: expanded,
@@ -85,6 +100,7 @@ pub fn build_program(
             bindings,
             funcs,
             structs,
+            enums,
             try_converts,
         },
         diagnostics: diags,
@@ -120,6 +136,8 @@ pub fn build_source(
     initial_bindings: HashMap<String, Type>,
     initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
 ) -> Option<TypedResult> {
     let parsed = zz_frontend::parse(source);
     if !parsed.errors.is_empty() {
@@ -130,6 +148,8 @@ pub fn build_source(
         initial_bindings,
         initial_funcs,
         initial_structs,
+        initial_aliases,
+        initial_enums,
     ))
 }
 

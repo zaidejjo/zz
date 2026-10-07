@@ -6,10 +6,12 @@
 //! is required on standard systems (they ship with the OS toolchain).
 
 pub mod cache;
+pub mod chunk;
 pub mod compile;
 pub mod ffi;
 pub mod lower;
 
+pub use chunk::{build_module as build_chunk_module, coverage as chunk_coverage, ChunkError};
 pub use compile::{
     compile_and_run, compile_and_run_for_target, detect_clang, detect_clang_with,
     emit_c_plus_script, host_triple, is_macos_target, is_windows_target, validate, BuildError,
@@ -91,6 +93,19 @@ pub fn build_native(
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
     opts.pg_link = opts.pg_link || lowered.needs_pg_link;
+    opts.float_link = opts.float_link || lowered.needs_float_fmt;
+    opts.curl_link = opts.curl_link || lowered.needs_curl;
+    opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+    if opts.static_link && (opts.native_rt || opts.float_link) && opts.allow_static_downgrade {
+        // Default-static only: the program needs the Rust native runtime,
+        // which fully-static binaries cannot link (shared libstd). Fall
+        // back to dynamic with a note instead of failing the default
+        // build; explicit `--static` keeps the hard error in `compile`.
+        opts.static_link = false;
+        eprintln!(
+            "zz: note: static link unavailable (program needs the Rust native runtime); building dynamic"
+        );
+    }
     compile::build(&lowered.source, out_path, opts, target)?;
     Ok(lowered)
 }
@@ -116,6 +131,16 @@ pub fn build_native_with(
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
     opts.pg_link = opts.pg_link || lowered.needs_pg_link;
+    opts.float_link = opts.float_link || lowered.needs_float_fmt;
+    opts.curl_link = opts.curl_link || lowered.needs_curl;
+    opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+    if opts.static_link && (opts.native_rt || opts.float_link) && opts.allow_static_downgrade {
+        // Same default-static fallback as `build_native` (see above).
+        opts.static_link = false;
+        eprintln!(
+            "zz: note: static link unavailable (program needs the Rust native runtime); building dynamic"
+        );
+    }
     compile::build_with(&lowered.source, out_path, opts, target, clang)?;
     Ok(lowered)
 }

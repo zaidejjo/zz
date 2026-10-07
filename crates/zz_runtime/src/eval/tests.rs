@@ -61,9 +61,24 @@ fn undefined_variable_errors() {
 }
 
 #[test]
-fn integer_overflow_errors() {
-    let err = eval_src("9223372036854775807 + 1").unwrap_err();
-    assert_eq!(err.message, "integer overflow in addition");
+fn integer_arithmetic_wraps() {
+    // IR spec: + - * wrap in every profile, never trap.
+    assert_eq!(
+        eval_src("9223372036854775807 + 1").unwrap(),
+        Value::Int(-9223372036854775808)
+    );
+    assert_eq!(eval_src("9223372036854775807 * 2").unwrap(), Value::Int(-2));
+    assert_eq!(
+        eval_src("-9223372036854775807 - 2").unwrap(),
+        Value::Int(9223372036854775807)
+    );
+    assert_eq!(
+        eval_src("0 - 9223372036854775807 - 2").unwrap(),
+        Value::Int(9223372036854775807)
+    );
+    let min = eval_src("-9223372036854775807 - 1").unwrap();
+    assert_eq!(min, Value::Int(-9223372036854775808));
+    assert_eq!(eval_src("-(-9223372036854775808)").unwrap(), min);
 }
 
 #[test]
@@ -798,4 +813,170 @@ fn pipe_chain() {
     )
     .unwrap();
     assert_eq!(v, Value::Int(12));
+}
+
+#[test]
+fn bitwise_values() {
+    assert_eq!(eval_src("6 & 3").unwrap(), Value::Int(2));
+    assert_eq!(eval_src("6 | 3").unwrap(), Value::Int(7));
+    assert_eq!(eval_src("6 ^ 3").unwrap(), Value::Int(5));
+    assert_eq!(eval_src("~6").unwrap(), Value::Int(-7));
+    assert_eq!(eval_src("~0").unwrap(), Value::Int(-1));
+    assert_eq!(eval_src("1 << 10").unwrap(), Value::Int(1024));
+    assert_eq!(eval_src("1024 >> 3").unwrap(), Value::Int(128));
+    assert_eq!(eval_src("-8 >> 2").unwrap(), Value::Int(-2));
+}
+
+#[test]
+fn bitwise_precedence_evaluates() {
+    // & > ^ > |, shift between additive and &, comparisons loosest.
+    assert_eq!(eval_src("1 | 2 ^ 3 & 5").unwrap(), Value::Int(3));
+    assert_eq!(eval_src("1 + 2 << 3").unwrap(), Value::Int(24));
+    assert_eq!(eval_src("8 >> 1 + 1").unwrap(), Value::Int(2));
+    assert_eq!(eval_src("15 & 7 == 7").unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn shift_boundaries() {
+    assert_eq!(eval_src("1 << 63").unwrap(), Value::Int(i64::MIN));
+    // Counts mask to `& 63`: no panic, no UB.
+    assert_eq!(eval_src("1 << 64").unwrap(), Value::Int(1));
+    assert_eq!(eval_src("1 << 65").unwrap(), Value::Int(2));
+}
+
+#[test]
+fn negative_shift_errors() {
+    let err = eval_src("1 << -1").unwrap_err();
+    assert!(err.message.contains("negative shift"), "{err:?}");
+    let err = eval_src("1 >> -5").unwrap_err();
+    assert!(err.message.contains("negative shift"), "{err:?}");
+}
+
+#[test]
+fn rotl_round_trip() {
+    // Xoshiro-style rotate-left building block.
+    assert_eq!(
+        eval_src("func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(1, 1)")
+            .unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(
+        eval_src("func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(-1, 17)")
+            .unwrap(),
+        Value::Int(-1)
+    );
+}
+
+#[test]
+fn tuple_index_read_write_len() {
+    assert_eq!(
+        eval_src("t := (10, \"twenty\", 30)\nt[0]").unwrap(),
+        Value::Int(10)
+    );
+    assert_eq!(
+        eval_src("t := (10, \"twenty\", 30)\nt[1]").unwrap(),
+        Value::Str("twenty".to_string().into())
+    );
+    assert_eq!(
+        eval_src("t := (10, \"twenty\", 30)\nt[-1]").unwrap(),
+        Value::Int(30)
+    );
+    // NOTE: `len` is a stdlib native, unavailable in the bare unit-test
+    // interp — covered by the e2e fixture instead.
+    assert_eq!(
+        eval_src("t := (10, \"twenty\", 30)\nt[0] = 99\nt[0]").unwrap(),
+        Value::Int(99)
+    );
+}
+
+#[test]
+fn tuple_index_out_of_bounds_errors_at_runtime() {
+    let err = eval_src("t := (1, 2)\nt[7]").unwrap_err();
+    assert!(err.message.contains("out of bounds"), "{err:?}");
+}
+
+#[test]
+fn bare_destructure_evaluates() {
+    assert_eq!(eval_src("a, b := (7, 9)\na + b").unwrap(), Value::Int(16));
+    assert_eq!(eval_src("_, b := (7, 9)\nb").unwrap(), Value::Int(9));
+}
+
+#[test]
+fn compound_assign_equivalence() {
+    // `x OP= y` observes exactly `x = x OP y` for every operator.
+    for (op_eq, plain) in [
+        ("x += 7", "x = x + 7"),
+        ("x -= 7", "x = x - 7"),
+        ("x *= 7", "x = x * 7"),
+        ("x /= 7", "x = x / 7"),
+        ("x %= 7", "x = x % 7"),
+        ("x **= 3", "x = x ** 3"),
+        ("x &= 7", "x = x & 7"),
+        ("x |= 7", "x = x | 7"),
+        ("x ^= 7", "x = x ^ 7"),
+        ("x <<= 2", "x = x << 2"),
+        ("x >>= 2", "x = x >> 2"),
+    ] {
+        let a = eval_src(&format!("x := 100\n{op_eq}\nx")).unwrap();
+        let b = eval_src(&format!("x := 100\n{plain}\nx")).unwrap();
+        assert_eq!(a, b, "{op_eq} vs {plain}");
+    }
+    assert_eq!(eval_src("x := 100\nx += 7\nx").unwrap(), Value::Int(107));
+    assert_eq!(
+        eval_src("s := \"a\"\ns += \"b\"\ns").unwrap(),
+        Value::Str("ab".to_string().into())
+    );
+}
+
+#[test]
+fn compound_assign_single_evaluation() {
+    // Receiver and RHS each evaluate exactly once (shared counter).
+    let src = "n := 0
+func bump() -> int {
+    n = n + 1
+    n
+}
+arr := [10, 20, 30]
+arr[bump()] += bump()
+n * 100 + arr[1]";
+    // bump() runs exactly twice (index once, rhs once): n == 2,
+    // arr[1] == 20 + 2 == 22 → 2*100 + 22 == 222.
+    assert_eq!(eval_src(src).unwrap(), Value::Int(222));
+}
+
+#[test]
+fn compound_assign_keeps_value_semantics() {
+    // Mutating a parameter never escapes to the caller.
+    let src = "struct Rng { s0: int }
+func change(r: Rng) -> int {
+    r.s0 += 100
+    r.s0
+}
+rng := Rng{ s0: 10 }
+a := change(rng)
+a * 1000 + rng.s0";
+    assert_eq!(eval_src(src).unwrap(), Value::Int(110010));
+}
+
+#[test]
+fn compound_assign_shared_cow_safety() {
+    // Compound-assigning through one alias must not leak into another.
+    let src = "a := [1, 2, 3]
+b := a
+b[0] += 10
+a[0] * 100 + b[0]";
+    assert_eq!(eval_src(src).unwrap(), Value::Int(111));
+}
+
+#[test]
+fn generic_struct_value_semantics() {
+    // Type arguments erase at runtime; mutation never escapes.
+    let src = "struct Box<T> { v: T }\nfunc change<T>(b: Box<T>) -> T {\n b.v\n}\nb := Box{ v: 10 }\nchange(b) * 1000 + b.v";
+    assert_eq!(eval_src(src).unwrap(), Value::Int(10010));
+}
+
+#[test]
+fn generic_struct_nested_access() {
+    let src = "struct Box<T> { v: T }\nstruct Wrap<T> { inner: Box<T>, n: int }\nw := Wrap{ inner: Box{ v: 1 }, n: 5 }\nw.inner.v * 100 + w.n";
+    assert_eq!(eval_src(src).unwrap(), Value::Int(105));
 }

@@ -1,0 +1,3 @@
+// features: error-case, int-arith
+// E2E: edge — negative integer exponent traps on all legs.
+println(2 ** -1)

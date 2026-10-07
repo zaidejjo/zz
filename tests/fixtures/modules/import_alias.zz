@@ -1,3 +1,4 @@
+// features: func-call, import-alias, imports, locals, print, string-literal
 // Test: import ... as aliasing works correctly
 import std.str as console
 import math.utils as m

@@ -26,5 +26,5 @@ mod tests;
 
 pub use chunk::Chunk;
 pub use compiler::Compiler;
-pub use op::Op;
+pub use op::{Op, TakeHome};
 pub use runtime::Vm;

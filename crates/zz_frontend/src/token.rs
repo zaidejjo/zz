@@ -5,13 +5,19 @@
 //! preserves the original source text exactly — the foundation for the
 //! formatter later.
 
+use std::borrow::Cow;
+
 use crate::span::Span;
 
 /// Trivia: text that carries no syntax meaning but must be preserved.
+///
+/// The text borrows the source buffer — trivia is never rewritten, so no
+/// allocation is needed. This kills one heap allocation per whitespace run
+/// and comment (tens of thousands per large file).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Trivia {
+pub struct Trivia<'a> {
     pub kind: TriviaKind,
-    pub text: String,
+    pub text: &'a str,
     pub span: Span,
 }
 
@@ -23,12 +29,17 @@ pub enum TriviaKind {
 }
 
 /// A significant token.
+///
+/// `text` borrows the source for verbatim tokens (identifiers, numbers,
+/// keywords, operators) and owns only processed strings (escape expansion,
+/// triple-quote dedent). `Cow` keeps the common path allocation-free while
+/// `into_owned()` moves already-owned values into the AST without copying.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Token {
+pub struct Token<'a> {
     pub kind: TokenKind,
-    pub text: String,
+    pub text: Cow<'a, str>,
     pub span: Span,
-    pub leading: Vec<Trivia>,
+    pub leading: Vec<Trivia<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +103,24 @@ pub enum TokenKind {
     Pipe,
     PipeGt,
     Arrow,
+    Amp,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
+    // Compound assignment (`x += 1`). Lexed greedily: `**=`/`<<=`/`>>=`
+    // before their two-char prefixes; spaced `+ =` stays two tokens.
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    StarStarEq,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
     // Delimiters
     LParen,
     RParen,
@@ -160,6 +189,22 @@ impl TokenKind {
             TokenKind::Pipe => "`|`",
             TokenKind::PipeGt => "`|>`",
             TokenKind::Arrow => "`->`",
+            TokenKind::Amp => "`&`",
+            TokenKind::Caret => "`^`",
+            TokenKind::Tilde => "`~`",
+            TokenKind::Shl => "`<<`",
+            TokenKind::Shr => "`>>`",
+            TokenKind::PlusEq => "`+=`",
+            TokenKind::MinusEq => "`-=`",
+            TokenKind::StarEq => "`*=`",
+            TokenKind::SlashEq => "`/=`",
+            TokenKind::PercentEq => "`%=`",
+            TokenKind::StarStarEq => "`**=`",
+            TokenKind::AmpEq => "`&=`",
+            TokenKind::PipeEq => "`|=`",
+            TokenKind::CaretEq => "`^=`",
+            TokenKind::ShlEq => "`<<=`",
+            TokenKind::ShrEq => "`>>=`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
             TokenKind::LBrace => "`{`",

@@ -15,7 +15,14 @@ fn load(src: &str) -> (TypedProgram, String) {
         stmts,
         span: merged_span,
     };
-    let res = zz_hir::build_program(&merged, HashMap::new(), stdlib_funcs(), HashMap::new());
+    let res = zz_hir::build_program(
+        &merged,
+        HashMap::new(),
+        stdlib_funcs(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
     let main_key = "bench_memory_arena.main".to_string();
     let (pruned, _reach) = zz_hir::dce(&res.program, &main_key);
     (pruned, main_key)
