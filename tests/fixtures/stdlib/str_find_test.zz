@@ -1,0 +1,45 @@
+// features: imports, locals, print, std-str, string-literal
+// E2E: std.str.find/rfind — char offsets, clamps, empty patterns, unicode.
+import std.str
+
+
+func main() {
+    hay := "hello world, hello moon"
+    hello_pat := "hello"
+    moon_pat := "moon"
+    zzz_pat := "zzz"
+    empty_pat := ""
+    uni := "café constaté"
+    constat_pat := "constat"
+    caf_pat := "caf"
+    aa_pat := "aa"
+    aaa_str := "aaa"
+    println("find0={str.find(hay, hello_pat, 0)}")
+    println("find6={str.find(hay, hello_pat, 6)}")
+    println("findmiss={str.find(hay, zzz_pat, 0)}")
+    println("findpast={str.find(hay, moon_pat, 100)}")
+    println("findneg={str.find(hay, hello_pat, -5)}")
+    println("findempty={str.find(hay, empty_pat, 7)}")
+    println("findemptybig={str.find(hay, empty_pat, 999)}")
+    println("rfind0={str.rfind(hay, hello_pat, 24)}")
+    println("rfind6={str.rfind(hay, hello_pat, 6)}")
+    println("rfindmiss={str.rfind(hay, zzz_pat, 24)}")
+    println("rfindempty={str.rfind(hay, empty_pat, 7)}")
+    println("unifind={str.find(uni, constat_pat, 0)}")
+    println("unirfind={str.rfind(uni, caf_pat, 14)}")
+    println("swat0={str.starts_with_at(hay, hello_pat, 0)}")
+    println("swat1={str.starts_with_at(hay, hello_pat, 1)}")
+    println("swat13={str.starts_with_at(hay, hello_pat, 13)}")
+    println("swatmid={str.starts_with_at(uni, caf_pat, 1)}")
+    println("ewat5={str.ends_with_at(hay, hello_pat, 5)}")
+    println("ewat4={str.ends_with_at(hay, hello_pat, 4)}")
+    println("ewat18={str.ends_with_at(hay, hello_pat, 18)}")
+    tsp := str.trim_span("  hi  ", 0, 6)
+    println("trimspan={tsp[0]},{tsp[1]}")
+    nbsp_str := "  X  "
+    nsp := str.trim_span(nbsp_str, 0, 99)
+    println("nbspan={nsp[0]},{nsp[1]}")
+    println("overlap={str.find(aaa_str, aa_pat, 0)}")
+    println("stdspell={std.str.find(hay, moon_pat, 0)}")
+    println("str_find_ok")
+}

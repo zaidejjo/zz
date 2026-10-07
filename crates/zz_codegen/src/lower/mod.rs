@@ -915,6 +915,11 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "str.trim_end" | "std.str.trim_end" => Some("zz_str_trim_end"),
         "str.join" | "std.str.join" => Some("zz_str_join"),
         "str.split" | "std.str.split" => Some("zz_str_split"),
+        "str.find" | "std.str.find" => Some("zz_str_find"),
+        "str.rfind" | "std.str.rfind" => Some("zz_str_rfind"),
+        "str.starts_with_at" | "std.str.starts_with_at" => Some("zz_str_starts_with_at"),
+        "str.ends_with_at" | "std.str.ends_with_at" => Some("zz_str_ends_with_at"),
+        "str.trim_span" | "std.str.trim_span" => Some("zz_str_trim_span"),
         // math
         "math.abs" | "std.math.abs" => Some("zz_math_abs"),
         "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),

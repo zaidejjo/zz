@@ -226,6 +226,62 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: str_mod::str_contains,
         },
     );
+    m.insert(
+        "std.str.find".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_find,
+        },
+    );
+    m.insert(
+        "std.str.rfind".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_rfind,
+        },
+    );
+    m.insert(
+        "std.str.starts_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_starts_with_at,
+        },
+    );
+    m.insert(
+        "std.str.ends_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_ends_with_at,
+        },
+    );
+    m.insert(
+        "std.str.trim_span".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_trim_span,
+        },
+    );
+    m.insert(
+        "std.str.starts_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_starts_with_at,
+        },
+    );
+    m.insert(
+        "std.str.ends_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_ends_with_at,
+        },
+    );
+    m.insert(
+        "std.str.trim_span".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_trim_span,
+        },
+    );
     // Canonical `std.str.*` twins of the method-dispatch entries below.
     // Same implementations, qualified names — keeps selective imports
     // (`import std.str(trim)`) and the runtime registry in lockstep.
@@ -333,6 +389,62 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: str_mod::str_contains,
+        },
+    );
+    m.insert(
+        "str.find".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_find,
+        },
+    );
+    m.insert(
+        "str.rfind".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_rfind,
+        },
+    );
+    m.insert(
+        "str.starts_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_starts_with_at,
+        },
+    );
+    m.insert(
+        "str.ends_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_ends_with_at,
+        },
+    );
+    m.insert(
+        "str.trim_span".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_trim_span,
+        },
+    );
+    m.insert(
+        "str.starts_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_starts_with_at,
+        },
+    );
+    m.insert(
+        "str.ends_with_at".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_ends_with_at,
+        },
+    );
+    m.insert(
+        "str.trim_span".into(),
+        NativeEntry {
+            arity: 3,
+            f: str_mod::str_trim_span,
         },
     );
     m.insert(

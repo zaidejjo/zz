@@ -1429,7 +1429,159 @@ zz_value zz_str_contains(zz_value s, zz_value sub, int *err) {
     return (zz_value){ZZ_BOOL, {.b = false}};
 }
 
-// str.startswith(s, prefix)
+// Byte-offset search helpers. Contract is byte offsets (O(1) per call,
+// backend-identical on every input); matches can only start at char
+// boundaries, so non-boundary positions snap (ceil for find, floor for
+// rfind/tail checks) and empty patterns return the clamped position.
+static size_t snap_fwd(const char *p, size_t len, size_t pos) {
+    while (pos < len && ((unsigned char)p[pos] & 0xC0) == 0x80) pos++;
+    return pos;
+}
+
+static size_t snap_bwd(const char *p, size_t pos) {
+    while (pos > 0 && ((unsigned char)p[pos] & 0xC0) == 0x80) pos--;
+    return pos;
+}
+
+static int64_t find_from(zz_value s, zz_value sub, int64_t from) {
+    const char *src = zz_str_ptr(s.s);
+    size_t src_len = s.s->len;
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    int64_t start = from < 0 ? 0 : from;
+    if ((uint64_t)start > src_len) start = (int64_t)src_len;
+    size_t base = snap_fwd(src, src_len, (size_t)start);
+    if (needle_len == 0) return (int64_t)base;
+    if (base >= src_len) return -1;
+    for (size_t i = base; i + needle_len <= src_len; i++) {
+        if (memcmp(src + i, needle, needle_len) == 0) return (int64_t)i;
+    }
+    return -1;
+}
+
+static int64_t rfind_from(zz_value s, zz_value sub, int64_t from) {
+    const char *src = zz_str_ptr(s.s);
+    size_t src_len = s.s->len;
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    int64_t end_c = from < 0 ? 0 : from;
+    if ((uint64_t)end_c > src_len) end_c = (int64_t)src_len;
+    size_t end = snap_bwd(src, (size_t)end_c);
+    if (needle_len == 0) return (int64_t)end;
+    int64_t best = -1;
+    for (size_t i = 0; i + needle_len <= src_len; i++) {
+        if (i > end) break;
+        if (memcmp(src + i, needle, needle_len) == 0) best = (int64_t)i;
+    }
+    return best;
+}
+
+// str.find(s, sub, from) — first match at/after byte offset `from`.
+zz_value zz_str_find(zz_value s, zz_value sub, zz_value from, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR) return (zz_value){ZZ_INT, {.i = -1}};
+    int64_t f = from.tag == ZZ_INT ? from.i : 0;
+    return (zz_value){ZZ_INT, {.i = find_from(s, sub, f)}};
+}
+
+// str.rfind(s, sub, from) — last match starting at/before `from`.
+zz_value zz_str_rfind(zz_value s, zz_value sub, zz_value from, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR) return (zz_value){ZZ_INT, {.i = -1}};
+    int64_t f = from.tag == ZZ_INT ? from.i : 0;
+    return (zz_value){ZZ_INT, {.i = rfind_from(s, sub, f)}};
+}
+
+// str.starts_with_at(s, sub, pos) — match at byte offset, else false.
+// Both window edges must sit on char boundaries (a partial char can
+// never equal a valid pattern's bytes).
+zz_value zz_str_starts_with_at(zz_value s, zz_value sub, zz_value pos, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || pos.tag != ZZ_INT) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t n = sub.s->len;
+    if (n == 0) return (zz_value){ZZ_BOOL, {.b = false}};
+    if (pos.i < 0 || (uint64_t)pos.i + n > s.s->len) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t base = (size_t)pos.i;
+    const char *src = zz_str_ptr(s.s);
+    if (snap_bwd(src, base) != base || snap_bwd(src, base + n) != base + n)
+        return (zz_value){ZZ_BOOL, {.b = false}};
+    return (zz_value){ZZ_BOOL, {.b = memcmp(src + base, zz_str_ptr(sub.s), n) == 0}};
+}
+
+// str.ends_with_at(s, sub, pos) — match ending at byte offset `pos`.
+zz_value zz_str_ends_with_at(zz_value s, zz_value sub, zz_value pos, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR || pos.tag != ZZ_INT) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t n = sub.s->len;
+    if (n == 0) return (zz_value){ZZ_BOOL, {.b = false}};
+    if (pos.i < 0 || (uint64_t)pos.i > s.s->len || (uint64_t)pos.i < n) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t base = (size_t)pos.i - n;
+    const char *src = zz_str_ptr(s.s);
+    if (snap_bwd(src, base) != base || snap_bwd(src, (size_t)pos.i) != (size_t)pos.i)
+        return (zz_value){ZZ_BOOL, {.b = false}};
+    return (zz_value){ZZ_BOOL, {.b = memcmp(src + base, zz_str_ptr(sub.s), n) == 0}};
+}
+
+// Width of whitespace at d[pos] (0 if none): ASCII ws plus the
+// Unicode White_Space sequences. Explicit table so both backends agree
+// (never the host trim).
+static size_t ws_width_fwd(const unsigned char *d, size_t pos, size_t end) {
+    if (pos >= end) return 0;
+    unsigned char c = d[pos];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\x0b' || c == '\x0c' || c == '\r') return 1;
+    if (c == 0xC2 && pos + 1 < end && (d[pos + 1] == 0x85 || d[pos + 1] == 0xA0)) return 2;
+    if (c == 0xE1 && pos + 2 < end && d[pos + 1] == 0x9A && d[pos + 2] == 0x80) return 3;
+    if (c == 0xE2 && pos + 2 < end && d[pos + 1] == 0x80) {
+        unsigned char e = d[pos + 2];
+        if ((e >= 0x80 && e <= 0x8A) || e == 0xA8 || e == 0xA9 || e == 0xAF) return 3;
+    }
+    if (c == 0xE2 && pos + 2 < end && d[pos + 1] == 0x81 && d[pos + 2] == 0x9F) return 3;
+    if (c == 0xE3 && pos + 2 < end && d[pos + 1] == 0x80 && d[pos + 2] == 0x80) return 3;
+    return 0;
+}
+
+static size_t ws_width_bwd(const unsigned char *d, size_t s, size_t end) {
+    if (end <= s) return 0;
+    unsigned char c = d[end - 1];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\x0b' || c == '\x0c' || c == '\r') return 1;
+    if (end - 2 >= s && d[end - 2] == 0xC2 && (c == 0x85 || c == 0xA0)) return 2;
+    if (end - 3 >= s && d[end - 3] == 0xE1 && d[end - 2] == 0x9A && c == 0x80) return 3;
+    if (end - 3 >= s && d[end - 3] == 0xE2 && d[end - 2] == 0x80) {
+        if ((c >= 0x80 && c <= 0x8A) || c == 0xA8 || c == 0xA9 || c == 0xAF) return 3;
+    }
+    if (end - 3 >= s && d[end - 3] == 0xE2 && d[end - 2] == 0x81 && c == 0x9F) return 3;
+    if (end - 3 >= s && d[end - 3] == 0xE3 && d[end - 2] == 0x80 && c == 0x80) return 3;
+    return 0;
+}
+
+// str.trim_span(s, start, end) — trimmed [lo, hi] byte offsets. Unicode
+// White_Space on both backends (explicit table, never the host trim).
+zz_value zz_str_trim_span(zz_value s, zz_value start, zz_value end, int *err) {
+    (void)err;
+    zz_value arr = zz_array_new();
+    int sub_err = 0;
+    int64_t lo = 0, hi = 0;
+    if (s.tag == ZZ_STR) {
+        const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
+        size_t n = s.s->len;
+        int64_t a = start.tag == ZZ_INT ? start.i : 0;
+        int64_t b = end.tag == ZZ_INT ? end.i : 0;
+        if (a < 0) a = 0;
+        if ((uint64_t)a > n) a = (int64_t)n;
+        if (b < 0) b = 0;
+        if ((uint64_t)b > n) b = (int64_t)n;
+        lo = a;
+        hi = b > a ? b : a;
+        size_t w;
+        while ((size_t)lo < (size_t)hi && (w = ws_width_fwd(d, (size_t)lo, (size_t)hi)) != 0) lo += (int64_t)w;
+        while (hi > lo && (w = ws_width_bwd(d, (size_t)lo, (size_t)hi)) != 0) hi -= (int64_t)w;
+    }
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = lo}}, &sub_err);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = hi}}, &sub_err);
+    return arr;
+}
+
+// str.startswith(s, prefix)// str.startswith(s, prefix)
 zz_value zz_str_startswith(zz_value s, zz_value prefix, int *err) {
     (void)err;
     if (s.tag != ZZ_STR || prefix.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};

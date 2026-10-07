@@ -188,6 +188,41 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.str.contains".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
     );
+    m.insert(
+        "std.str.find".into(),
+        sig(
+            vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "std.str.rfind".into(),
+        sig(
+            vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "std.str.starts_with_at".into(),
+        sig(
+            vec![("s", Type::Str), ("sub", Type::Str), ("pos", Type::Int)],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "std.str.ends_with_at".into(),
+        sig(
+            vec![("s", Type::Str), ("sub", Type::Str), ("pos", Type::Int)],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "std.str.trim_span".into(),
+        sig(
+            vec![("s", Type::Str), ("start", Type::Int), ("end", Type::Int)],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
     // Canonical `std.str.*` twins of the method-dispatch entries below, so
     // selective imports (`import std.str(trim)`) and qualified calls
     // (`std.str.trim(s)`) resolve. Signatures mirror `str.*` exactly.
@@ -258,6 +293,41 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "str.contains".into(),
         sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
+    );
+    m.insert(
+        "str.find".into(),
+        sig(
+            vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "str.rfind".into(),
+        sig(
+            vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "str.starts_with_at".into(),
+        sig(
+            vec![("s", Type::Str), ("sub", Type::Str), ("pos", Type::Int)],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "str.ends_with_at".into(),
+        sig(
+            vec![("s", Type::Str), ("sub", Type::Str), ("pos", Type::Int)],
+            Type::Bool,
+        ),
+    );
+    m.insert(
+        "str.trim_span".into(),
+        sig(
+            vec![("s", Type::Str), ("start", Type::Int), ("end", Type::Int)],
+            Type::Array(Box::new(Type::Int)),
+        ),
     );
     m.insert(
         "str.replace".into(),
@@ -4144,10 +4214,20 @@ mod tests {
             "time.format_rfc3339",
             "std.time.add_days",
             "time.add_days",
+            "std.str.starts_with_at",
+            "str.starts_with_at",
+            "std.str.ends_with_at",
+            "str.ends_with_at",
+            "std.str.trim_span",
+            "str.trim_span",
+            "std.str.find",
+            "str.find",
+            "std.str.rfind",
+            "str.rfind",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 878);
+        assert_eq!(funcs.len(), 888);
     }
 
     #[test]
