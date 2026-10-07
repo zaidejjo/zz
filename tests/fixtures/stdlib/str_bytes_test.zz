@@ -1,0 +1,52 @@
+// features: imports, locals, match, print, std-str, std-bytes, string-literal
+// E2E: str.bytes / bytes.to_str / bytes.to_ints roundtrips + error paths.
+import std.str
+import std.bytes
+import std.encoding
+
+func main() {
+    b := str.bytes("ABC")
+    println("len={vec.len(b)}")
+    println("b0={b[0]},b2={b[2]}")
+    uni := str.bytes("é")
+    println("unilen={vec.len(uni)}")
+    println("uni0={uni[0]},uni1={uni[1]}")
+    match bytes.to_str(b) {
+        .ok(s) => println("roundtrip={s}"),
+        .err(_) => println("roundtrip_bad"),
+    }
+    match bytes.to_str(uni) {
+        .ok(s) => println("uniroundtrip={s}"),
+        .err(_) => println("uniroundtrip_bad"),
+    }
+    match bytes.to_str([104, 105]) {
+        .ok(s) => println("lit={s}"),
+        .err(_) => println("lit_bad"),
+    }
+    match bytes.to_str([300]) {
+        .ok(_) => println("range_bad"),
+        .err(e) => println("range_err={e}"),
+    }
+    match bytes.to_str([255, 254]) {
+        .ok(_) => println("invalid_bad"),
+        .err(e) => println("invalid_err={e}"),
+    }
+    match bytes.to_str([]) {
+        .ok(s) => {
+            empty_ok := s == ""
+            println("empty_ok={empty_ok}")
+        },
+        .err(_) => println("empty_bad"),
+    }
+    ab := std.str.bytes("AB")
+    println("stdspell={ab[1]}")
+    match encoding.base64_decode_bytes("aGk=") {
+        .ok(rb) => {
+            ints := bytes.to_ints(rb)
+            println("intslen={vec.len(ints)}")
+            println("ints0={ints[0]},ints1={ints[1]}")
+        },
+        .err(_) => println("b64_bad"),
+    }
+    println("str_bytes_ok")
+}

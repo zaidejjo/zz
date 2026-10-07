@@ -169,10 +169,52 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "str.bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_bytes,
+        },
+    );
+    m.insert(
+        "bytes.to_str".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_to_str,
+        },
+    );
+    m.insert(
+        "bytes.to_ints".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_to_ints,
+        },
+    );
+    m.insert(
         "std.bytes.len".into(),
         NativeEntry {
             arity: 1,
             f: iterators::len,
+        },
+    );
+    m.insert(
+        "std.str.bytes".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_bytes,
+        },
+    );
+    m.insert(
+        "std.bytes.to_str".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_to_str,
+        },
+    );
+    m.insert(
+        "std.bytes.to_ints".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_to_ints,
         },
     );
     m.insert(

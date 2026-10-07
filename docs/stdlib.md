@@ -84,6 +84,9 @@ import std.str
 | `str.starts_with_at` | `str.starts_with_at(s: str, sub: str, pos: int) -> bool` | Match at byte offset (empty never matches) |
 | `str.ends_with_at` | `str.ends_with_at(s: str, sub: str, pos: int) -> bool` | Match ending at byte offset `pos` |
 | `str.trim_span` | `str.trim_span(s: str, start: int, end: int) -> [int]` | Trimmed `[lo, hi]` byte offsets (Unicode ws, both backends) |
+| `str.bytes` | `str.bytes(s: str) -> [int]` | UTF-8 bytes as plain ints (one copy) |
+| `bytes.to_str` | `bytes.to_str(vs: [int]) -> Result<str>` | Strict UTF-8 decode; range/invalid input is `.err` on both backends |
+| `bytes.to_ints` | `bytes.to_ints(b: bytes) -> [int]` | Opaque byte buffer as plain ints |
 
 Offsets are bytes (O(1) per call, O(n) streaming total; matches Rust
 `str::find` semantics). `length`/slicing stay char-oriented — convert
@@ -108,6 +111,9 @@ str.rfind("hello world", "o", 10) // 7
 str.starts_with_at("hello", "ell", 1) // true
 str.ends_with_at("hello", "ell", 4)   // true
 str.trim_span("  hi  ", 0, 6)          // [2, 4]
+str.bytes("AB")                    // [65, 66]
+bytes.to_str([104, 105])           // .ok("hi")
+bytes.to_ints(b)[0]                // first byte as int
 ```
 
 ### Method Call Syntax

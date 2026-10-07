@@ -1,4 +1,4 @@
-use crate::natives::{arg, expect_int, expect_str};
+use crate::natives::{arg, expect_array, expect_int, expect_str};
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 pub(crate) fn str_length(
@@ -106,6 +106,72 @@ fn byte_rfind(s: &str, sub: &str, from: i64) -> i64 {
         });
     }
     best.unwrap_or(-1)
+}
+
+// str.bytes(s) — UTF-8 bytes as plain ints. One O(n) copy; the
+// result composes with every [int] API (indexing, snapshots, the
+// bytes.* builder vocabulary). The bridge find/rfind/trim_span need.
+pub(crate) fn str_bytes(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "std.str.bytes")?;
+    Ok(Value::Array(Box::new(
+        s.as_bytes().iter().map(|b| Value::Int(*b as i64)).collect(),
+    )))
+}
+
+// bytes.to_str(vs) — strict UTF-8 decode; invalid sequences and
+// out-of-range values are .err (identical on VM and AOT).
+pub(crate) fn bytes_to_str(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let vs = expect_array(args, 0, "bytes.to_str")?;
+    let mut buf = Vec::with_capacity(vs.len());
+    for v in &vs {
+        match v {
+            Value::Int(n) => {
+                if !(0..=255).contains(n) {
+                    return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
+                        "bytes.to_str: value {n} out of range 0-255"
+                    )))))));
+                }
+                buf.push(*n as u8);
+            }
+            other => {
+                return Err(EvalError::new(
+                    format!("`bytes.to_str` expects an array of integers, found `{other}`"),
+                    zz_runtime::Span::new(0, 0),
+                ));
+            }
+        }
+    }
+    match String::from_utf8(buf) {
+        Ok(s) => Ok(Value::Result(Box::new(Ok(Value::Str(Box::new(s)))))),
+        Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(Box::new(
+            "bytes.to_str: invalid UTF-8".to_string(),
+        )))))),
+    }
+}
+
+// bytes.to_ints(b) — opaque byte buffer as plain ints (zero-copy read).
+pub(crate) fn bytes_to_ints(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    match super::arg(args, 0, "bytes.to_ints")? {
+        Value::Bytes(b) => Ok(Value::Array(Box::new(
+            b.as_slice().iter().map(|x| Value::Int(*x as i64)).collect(),
+        ))),
+        other => Err(EvalError::new(
+            format!("`bytes.to_ints` expects bytes, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
 }
 
 pub(crate) fn str_starts_with_at(
