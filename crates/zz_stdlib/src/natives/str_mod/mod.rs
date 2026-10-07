@@ -193,7 +193,12 @@ pub(crate) fn str_find_in(
     let sub = expect_str(args, 1, "std.str.find_in")?;
     let start = expect_int(args, 2, "std.str.find_in")?;
     let end = expect_int(args, 3, "std.str.find_in")?;
-    Ok(Value::Int(find_in(s.as_bytes(), sub.as_bytes(), start, end)))
+    Ok(Value::Int(find_in(
+        s.as_bytes(),
+        sub.as_bytes(),
+        start,
+        end,
+    )))
 }
 
 pub(crate) fn str_rfind_in(
@@ -205,7 +210,12 @@ pub(crate) fn str_rfind_in(
     let sub = expect_str(args, 1, "std.str.rfind_in")?;
     let start = expect_int(args, 2, "std.str.rfind_in")?;
     let end = expect_int(args, 3, "std.str.rfind_in")?;
-    Ok(Value::Int(rfind_in(s.as_bytes(), sub.as_bytes(), start, end)))
+    Ok(Value::Int(rfind_in(
+        s.as_bytes(),
+        sub.as_bytes(),
+        start,
+        end,
+    )))
 }
 
 pub(crate) fn str_count_in(
@@ -217,7 +227,12 @@ pub(crate) fn str_count_in(
     let sub = expect_str(args, 1, "std.str.count_in")?;
     let start = expect_int(args, 2, "std.str.count_in")?;
     let end = expect_int(args, 3, "std.str.count_in")?;
-    Ok(Value::Int(count_in(s.as_bytes(), sub.as_bytes(), start, end)))
+    Ok(Value::Int(count_in(
+        s.as_bytes(),
+        sub.as_bytes(),
+        start,
+        end,
+    )))
 }
 
 // Bounded byte-window scans: the scan never reads past `end`, so per-line
@@ -318,7 +333,7 @@ fn starts_at(s: &str, sub: &str, pos: i64) -> bool {
     // No boundary checks: a valid pattern's first byte (ASCII or lead)
     // can never equal a continuation byte, so mid-char starts cannot
     // match. Byte windows panic on nothing, on any input.
-    &bytes[base..base + sub.as_bytes().len()] == sub.as_bytes()
+    &bytes[base..base + sub.len()] == sub.as_bytes()
 }
 
 // True when `sub` ends at byte offset `pos` (exclusive end).
