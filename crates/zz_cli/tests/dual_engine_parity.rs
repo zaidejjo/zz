@@ -1137,6 +1137,11 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_str_find_test, "stdlib", "str_find_test.zz");
 parity_strict!(parity_stdlib_str_bytes_test, "stdlib", "str_bytes_test.zz");
+parity_strict!(
+    parity_stdlib_str_classify_test,
+    "stdlib",
+    "str_classify_test.zz"
+);
 parity_strict!(parity_stdlib_console, "stdlib", "console.zz");
 parity_strict!(parity_stdlib_envmod, "stdlib", "envmod.zz");
 parity_strict!(parity_stdlib_env_test, "stdlib", "env_test.zz");

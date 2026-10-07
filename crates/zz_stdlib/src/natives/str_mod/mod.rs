@@ -251,9 +251,7 @@ fn needs_blank(line: &[u8], markers: &[&[u8]], has_open: bool) -> bool {
             return false;
         }
     }
-    line.contains(&b'\"')
-        || line.contains(&b'\'')
-        || line.contains(&b'`')
+    line.contains(&b'\"') || line.contains(&b'\'') || line.contains(&b'`')
 }
 
 fn classify_bytes(
@@ -315,16 +313,14 @@ fn classify_bytes(
         }
         if in_block {
             let mut owned: Vec<u8> = Vec::new();
-            let cl: &[u8] = if !bstart.is_empty()
+            // Either gate (block-open present, or a line marker seen)
+            // forces the same string blanking, so one condition covers
+            // both — the bodies were identical by construction.
+            let gate = (!bstart.is_empty()
                 && memchr::memmem::find(raw, bstart).is_some()
-                && needs_blank(raw, markers, true)
-            {
-                owned.extend_from_slice(raw);
-                blank_q_b(&mut owned, b'"');
-                blank_q_b(&mut owned, b'`');
-                blank_q_b(&mut owned, b'\'');
-                &owned
-            } else if needs_blank(raw, markers, false) {
+                && needs_blank(raw, markers, true))
+                || needs_blank(raw, markers, false);
+            let cl: &[u8] = if gate {
                 owned.extend_from_slice(raw);
                 blank_q_b(&mut owned, b'"');
                 blank_q_b(&mut owned, b'`');

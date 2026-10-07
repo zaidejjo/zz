@@ -1225,8 +1225,8 @@ impl<'a> Emitter<'a> {
         argc: u16,
         out: &mut String,
     ) -> Result<(), ChunkError> {
-        if argc > 5 {
-            return Err(ChunkError::op("native call with >5 args"));
+        if argc > 6 {
+            return Err(ChunkError::op("native call with >6 args"));
         }
         let takes = impl_name.ends_with("_take") || impl_name.ends_with("_take_arena");
         out.push_str("    {\n");
@@ -1244,7 +1244,8 @@ impl<'a> Emitter<'a> {
             2 => format!("zz_call_native2({impl_name}, {args})"),
             3 => format!("zz_call_native3({impl_name}, {args})"),
             4 => format!("zz_call_native4({impl_name}, {args})"),
-            _ => format!("zz_call_native5({impl_name}, {args})"),
+            5 => format!("zz_call_native5({impl_name}, {args})"),
+            _ => format!("zz_call_native6({impl_name}, {args})"),
         };
         out.push_str(&format!("    st[sp++] = {call};\n"));
         if !takes {

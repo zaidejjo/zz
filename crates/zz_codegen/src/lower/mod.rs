@@ -924,6 +924,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "str.find_in" | "std.str.find_in" => Some("zz_str_find_in"),
         "str.rfind_in" | "std.str.rfind_in" => Some("zz_str_rfind_in"),
         "str.count_in" | "std.str.count_in" => Some("zz_str_count_in"),
+        "str.classify" | "std.str.classify" => Some("zz_str_classify"),
         "str.bytes" | "std.str.bytes" => Some("zz_str_bytes"),
         "bytes.to_str" | "std.bytes.to_str" => Some("zz_bytes_to_str"),
         "bytes.to_ints" | "std.bytes.to_ints" => Some("zz_bytes_to_ints"),

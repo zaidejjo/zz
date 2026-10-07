@@ -1780,6 +1780,370 @@ zz_value zz_bytes_to_ints(zz_value b, int *err) {
     return arr;
 }
 
+// ---- comment-aware line classifier (str.classify) --------------------
+// Byte-oriented with ASCII-4 trim ({space, \t, \n, \r}), mirroring the
+// split/trim/starts_with native semantics exactly. The ZZ-level reference
+// implementation lives in zcc's counter; differential fixtures pin them.
+static int cl_is_ws(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+// Blank string spans for quote q (blank_quote semantics).
+static void cl_blank_q(unsigned char *buf, size_t s, size_t e, unsigned char q) {
+    size_t i = s;
+    int inside = 0;
+    while (i < e) {
+        unsigned char c = buf[i];
+        if (c == '\\' && i + 1 < e && (buf[i + 1] == '\\' || buf[i + 1] == q)) {
+            buf[i] = ' ';
+            buf[i + 1] = ' ';
+            i += 2;
+            continue;
+        }
+        if (c == q) {
+            inside = !inside;
+            i++;
+            continue;
+        }
+        if (inside) buf[i] = ' ';
+        i++;
+    }
+}
+
+zz_value zz_str_classify(zz_value text, zz_value markers, zz_value bstart, zz_value bend, zz_value nested, zz_value whole, int *err) {
+    (void)err;
+    int64_t lines = 0, code = 0, comments = 0, blanks = 0;
+    zz_value arr = zz_array_new();
+    int sub_err = 0;
+    if (text.tag != ZZ_STR) goto done;
+    {
+        const unsigned char *d = (const unsigned char *)zz_str_ptr(text.s);
+        size_t n = text.s->len;
+        // Collect marker strings.
+        size_t nm = 0;
+        const char *mbuf[32];
+        size_t mlen[32];
+        if (markers.tag == ZZ_ARRAY) {
+            for (size_t i = 0; i < markers.arr->len && nm < 32; i++) {
+                zz_value v = markers.arr->items[i];
+                if (v.tag == ZZ_STR) {
+                    mbuf[nm] = zz_str_ptr(v.s);
+                    mlen[nm] = v.s->len;
+                    nm++;
+                }
+            }
+        }
+        const char *bs = "";
+        size_t bsl = 0;
+        const char *be = "";
+        size_t bel = 0;
+        if (bstart.tag == ZZ_STR) {
+            bs = zz_str_ptr(bstart.s);
+            bsl = bstart.s->len;
+        }
+        if (bend.tag == ZZ_STR) {
+            be = zz_str_ptr(bend.s);
+            bel = bend.s->len;
+        }
+        int isnested = (nested.tag == ZZ_INT && nested.i != 0) || (nested.tag == ZZ_BOOL && nested.b);
+        int iswhole = (whole.tag == ZZ_INT && whole.i != 0) || (whole.tag == ZZ_BOOL && whole.b);
+        // Line starts.
+        // Fast path: no comment syntax at all.
+        int nocomment = (bsl == 0);
+        for (size_t k = 0; k < nm && nocomment; k++) {
+            if (mlen[k] > 0) nocomment = 0;
+        }
+        size_t pos = 0;
+        int in_block = 0;
+        int64_t depth = 0;
+        // Scratch line buffer, grown as needed.
+        unsigned char *scratch = NULL;
+        size_t scratch_cap = 0;
+        while (pos <= n) {
+            if (pos >= n && pos > 0) break;
+            size_t le = n;
+            for (size_t i = pos; i < n; i++) {
+                if (d[i] == '\n') {
+                    le = i;
+                    break;
+                }
+            }
+            // Empty span only when pos == n (handled above) — count it
+            // only as the trailing artifact drop: break, don't count.
+            if (pos >= n) break;
+            lines++;
+            size_t tls = pos;
+            while (tls < le && cl_is_ws(d[tls])) tls++;
+            size_t the = le;
+            while (the > tls && cl_is_ws(d[the - 1])) the--;
+            if (tls >= the) {
+                blanks++;
+            } else if (nocomment) {
+                code++;
+            } else if (iswhole) {
+                int is_bs = (the - tls == bsl && bsl > 0 && memcmp(d + tls, bs, bsl) == 0);
+                int is_be = (the - tls == bel && bel > 0 && memcmp(d + tls, be, bel) == 0);
+                if (is_bs) {
+                    in_block = 1;
+                    comments++;
+                } else if (is_be) {
+                    in_block = 0;
+                    comments++;
+                } else if (in_block) {
+                    comments++;
+                } else {
+                    int sw = 0;
+                    for (size_t k = 0; k < nm && !sw; k++) {
+                        if (mlen[k] > 0 && the - tls >= mlen[k] && memcmp(d + tls, mbuf[k], mlen[k]) == 0) sw = 1;
+                    }
+                    if (sw) comments++;
+                    else code++;
+                }
+            } else if (in_block) {
+                // Build cleaned window (blank strings when gated).
+                int has_open = (bsl > 0);
+                if (has_open) {
+                    has_open = 0;
+                    for (size_t i = pos; i + bsl <= le; i++) {
+                        if (memcmp(d + i, bs, bsl) == 0) {
+                            has_open = 1;
+                            break;
+                        }
+                    }
+                }
+                int need = 0;
+                if (has_open) {
+                    for (size_t i = pos; i < le && !need; i++) {
+                        unsigned char c = d[i];
+                        if (c == '"' || c == '\'' || c == '`') need = 1;
+                    }
+                } else {
+                    for (size_t k = 0; k < nm && !need; k++) {
+                        if (mlen[k] == 0) continue;
+                        for (size_t i = pos; i + mlen[k] <= le; i++) {
+                            if (memcmp(d + i, mbuf[k], mlen[k]) == 0) {
+                                need = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (need) {
+                        need = 0;
+                        for (size_t i = pos; i < le; i++) {
+                            unsigned char c = d[i];
+                            if (c == '"' || c == '\'' || c == '`') {
+                                need = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                const unsigned char *cb = d;
+                size_t cs = pos, ce = le;
+                if (need) {
+                    size_t ln = le > pos ? le - pos : 0;
+                    if (ln + 1 > scratch_cap) {
+                        scratch_cap = ln + 1;
+                        scratch = (unsigned char *)realloc(scratch, scratch_cap);
+                    }
+                    if (!scratch) break;
+                    memcpy(scratch, d + pos, ln);
+                    cl_blank_q(scratch, 0, ln, '"');
+                    cl_blank_q(scratch, 0, ln, '`');
+                    cl_blank_q(scratch, 0, ln, '\'');
+                    cb = scratch;
+                    cs = 0;
+                    ce = ln;
+                }
+                if (isnested) {
+                    int64_t si = 0, ei = 0;
+                    if (bsl > 0) {
+                        for (size_t i = cs; i + bsl <= ce; i++) {
+                            if (memcmp(cb + i, bs, bsl) == 0) {
+                                si++;
+                                i += bsl - 1;
+                            }
+                        }
+                    }
+                    if (bel > 0) {
+                        for (size_t i = cs; i + bel <= ce; i++) {
+                            if (memcmp(cb + i, be, bel) == 0) {
+                                ei++;
+                                i += bel - 1;
+                            }
+                        }
+                    }
+                    depth += si - ei;
+                    if (depth <= 0) {
+                        in_block = 0;
+                        depth = 0;
+                    }
+                } else if (bel > 0) {
+                    int found = 0;
+                    size_t last = 0;
+                    for (size_t i = cs; i + bel <= ce; i++) {
+                        if (memcmp(cb + i, be, bel) == 0) {
+                            found = 1;
+                            last = i;
+                        }
+                    }
+                    if (found) {
+                        in_block = 0;
+                        size_t t = last + bel;
+                        while (t < ce && cl_is_ws(cb[t])) t++;
+                        if (t < ce) {
+                            int tsw = 0;
+                            for (size_t k = 0; k < nm && !tsw; k++) {
+                                if (mlen[k] > 0 && the - tls >= mlen[k]) {
+                                    // t-check runs on the RAW line,
+                                    // bounded by the trimmed end (never
+                                    // reads into the next line).
+                                    size_t r = tls;
+                                    if (r + mlen[k] <= the && memcmp(d + r, mbuf[k], mlen[k]) == 0) tsw = 1;
+                                }
+                            }
+                            if (!tsw) {
+                                code++;
+                                goto nextline;
+                            }
+                        }
+                    }
+                }
+                comments++;
+            } else {
+                int sw = 0;
+                for (size_t k = 0; k < nm && !sw; k++) {
+                    if (mlen[k] > 0 && the - tls >= mlen[k] && memcmp(d + tls, mbuf[k], mlen[k]) == 0) sw = 1;
+                }
+                if (sw) {
+                    comments++;
+                } else if (bsl > 0) {
+                    int has = 0;
+                    for (size_t i = pos; i + bsl <= le; i++) {
+                        if (memcmp(d + i, bs, bsl) == 0) {
+                            has = 1;
+                            break;
+                        }
+                    }
+                    if (!has) {
+                        code++;
+                    } else {
+                        // Clean + classify (mirror of the in_block gate).
+                        int need = 0;
+                        for (size_t i = pos; i < le && !need; i++) {
+                            unsigned char c = d[i];
+                            if (c == '"' || c == '\'' || c == '`') need = 1;
+                        }
+                        const unsigned char *cb = d;
+                        size_t cs = pos, ce = le;
+                        if (need) {
+                            size_t ln = le > pos ? le - pos : 0;
+                            if (ln + 1 > scratch_cap) {
+                                scratch_cap = ln + 1;
+                                scratch = (unsigned char *)realloc(scratch, scratch_cap);
+                            }
+                            if (!scratch) break;
+                            memcpy(scratch, d + pos, ln);
+                            cl_blank_q(scratch, 0, ln, '"');
+                            cl_blank_q(scratch, 0, ln, '`');
+                            cl_blank_q(scratch, 0, ln, '\'');
+                            cb = scratch;
+                            cs = 0;
+                            ce = ln;
+                        }
+                        int still = 0;
+                        for (size_t i = cs; i + bsl <= ce; i++) {
+                            if (memcmp(cb + i, bs, bsl) == 0) {
+                                still = 1;
+                                break;
+                            }
+                        }
+                        if (!still) {
+                            code++;
+                        } else {
+                            size_t bi = cs;
+                            for (; bi + bsl <= ce; bi++) {
+                                if (memcmp(cb + bi, bs, bsl) == 0) break;
+                            }
+                            size_t bl = cs;
+                            while (bl < bi && cl_is_ws(cb[bl])) bl++;
+                            size_t bh = bi;
+                            while (bh > bl && cl_is_ws(cb[bh - 1])) bh--;
+                            int commented = 0, commented_code = 0;
+                            for (size_t k = 0; k < nm; k++) {
+                                if (mlen[k] == 0) continue;
+                                int fi = -1;
+                                for (size_t i = bl; i + mlen[k] <= bh; i++) {
+                                    if (memcmp(cb + i, mbuf[k], mlen[k]) == 0) {
+                                        fi = (int)i;
+                                        break;
+                                    }
+                                }
+                                if (fi >= 0) {
+                                    commented = 1;
+                                    size_t st = (size_t)fi;
+                                    while (st > bl && cl_is_ws(cb[st - 1])) st--;
+                                    size_t ss = bl;
+                                    while (ss < st && cl_is_ws(cb[ss])) ss++;
+                                    if (ss < st) commented_code = 1;
+                                }
+                            }
+                            if (commented) {
+                                if (commented_code) code++;
+                                else comments++;
+                            } else if (bel > 0) {
+                                int inl = 0;
+                                for (size_t i = cs; i + bel <= ce; i++) {
+                                    if (memcmp(cb + i, be, bel) == 0) {
+                                        inl = 1;
+                                        break;
+                                    }
+                                }
+                                if (inl) {
+                                    if (bl >= bh) comments++;
+                                    else code++;
+                                } else {
+                                    in_block = 1;
+                                    depth = 1;
+                                    int tsw = 0;
+                                    for (size_t k = 0; k < nm && !tsw; k++) {
+                                        if (mlen[k] > 0 && the - tls >= mlen[k] && memcmp(d + tls, mbuf[k], mlen[k]) == 0)
+                                            tsw = 1;
+                                    }
+                                    if (bl >= bh || tsw) comments++;
+                                    else code++;
+                                }
+                            } else {
+                                in_block = 1;
+                                depth = 1;
+                                int tsw = 0;
+                                for (size_t k = 0; k < nm && !tsw; k++) {
+                                    if (mlen[k] > 0 && the - tls >= mlen[k] && memcmp(d + tls, mbuf[k], mlen[k]) == 0)
+                                        tsw = 1;
+                                }
+                                if (bl >= bh || tsw) comments++;
+                                else code++;
+                            }
+                        }
+                    }
+                } else {
+                    code++;
+                }
+            }
+        nextline:
+            if (le >= n) break;
+            pos = le + 1;
+        }
+        free(scratch);
+    }
+done:
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = lines}}, &sub_err);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = code}}, &sub_err);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = comments}}, &sub_err);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = blanks}}, &sub_err);
+    return arr;
+}
+
 // str.trim_span(s, start, end) — trimmed [lo, hi] byte offsets. Unicode
 // White_Space on both backends (explicit table, never the host trim).
 zz_value zz_str_trim_span(zz_value s, zz_value start, zz_value end, int *err) {
