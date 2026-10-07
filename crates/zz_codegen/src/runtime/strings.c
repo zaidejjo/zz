@@ -1414,6 +1414,46 @@ zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err) {
     return (zz_value){ZZ_STR, {.s = out}};
 }
 
+// memchr-skip search core: jump to the next first-needle-byte, then
+// verify with memcmp. Portable C89 + memchr, near-memmem speed for
+// short needles (the common case).
+static const char *scan_skip(const char *h, const char *hend, char first) {
+    const char *p = h;
+    while (p < hend) {
+        const char *hit = (const char *)memchr(p, first, (size_t)(hend - p));
+        if (!hit) return hend;
+        p = hit;
+        return p;
+    }
+    return hend;
+}
+
+// str.count(s, sub) — non-overlapping occurrences, no allocation.
+// Empty sub counts chars+1 (matches the split-based version it replaces).
+zz_value zz_str_count(zz_value s, zz_value sub, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || sub.tag != ZZ_STR) return (zz_value){ZZ_INT, {.i = 0}};
+    const char *src = zz_str_ptr(s.s);
+    size_t src_len = s.s->len;
+    const char *needle = zz_str_ptr(sub.s);
+    size_t needle_len = sub.s->len;
+    if (needle_len == 0) return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(s.s) + 1}};
+    int64_t n = 0;
+    const char *p = src;
+    const char *end = src + src_len;
+    while (p + needle_len <= end) {
+        p = scan_skip(p, end, needle[0]);
+        if (p + needle_len > end) break;
+        if (memcmp(p, needle, needle_len) == 0) {
+            n++;
+            p += needle_len;
+        } else {
+            p++;
+        }
+    }
+    return (zz_value){ZZ_INT, {.i = n}};
+}
+
 // str.contains(s, sub) — check if s contains sub.
 zz_value zz_str_contains(zz_value s, zz_value sub, int *err) {
     (void)err;
@@ -1423,8 +1463,13 @@ zz_value zz_str_contains(zz_value s, zz_value sub, int *err) {
     const char *needle = zz_str_ptr(sub.s);
     size_t needle_len = sub.s->len;
     if (needle_len == 0) return (zz_value){ZZ_BOOL, {.b = true}};
-    for (size_t i = 0; i + needle_len <= src_len; i++) {
-        if (memcmp(src + i, needle, needle_len) == 0) return (zz_value){ZZ_BOOL, {.b = true}};
+    const char *end = src + src_len;
+    const char *p = src;
+    while (p + needle_len <= end) {
+        p = scan_skip(p, end, needle[0]);
+        if (p + needle_len > end) break;
+        if (memcmp(p, needle, needle_len) == 0) return (zz_value){ZZ_BOOL, {.b = true}};
+        p++;
     }
     return (zz_value){ZZ_BOOL, {.b = false}};
 }
@@ -1453,8 +1498,13 @@ static int64_t find_from(zz_value s, zz_value sub, int64_t from) {
     size_t base = snap_fwd(src, src_len, (size_t)start);
     if (needle_len == 0) return (int64_t)base;
     if (base >= src_len) return -1;
-    for (size_t i = base; i + needle_len <= src_len; i++) {
-        if (memcmp(src + i, needle, needle_len) == 0) return (int64_t)i;
+    const char *end = src + src_len;
+    const char *p = src + base;
+    while (p + needle_len <= end) {
+        p = scan_skip(p, end, needle[0]);
+        if (p + needle_len > end) break;
+        if (memcmp(p, needle, needle_len) == 0) return (int64_t)(p - src);
+        p++;
     }
     return -1;
 }
@@ -1469,9 +1519,14 @@ static int64_t rfind_from(zz_value s, zz_value sub, int64_t from) {
     size_t end = snap_bwd(src, (size_t)end_c);
     if (needle_len == 0) return (int64_t)end;
     int64_t best = -1;
-    for (size_t i = 0; i + needle_len <= src_len; i++) {
-        if (i > end) break;
-        if (memcmp(src + i, needle, needle_len) == 0) best = (int64_t)i;
+    const char *fin = src + src_len;
+    const char *p = src;
+    while (p + needle_len <= fin) {
+        p = scan_skip(p, fin, needle[0]);
+        if (p + needle_len > fin) break;
+        if ((size_t)(p - src) > end) break;
+        if (memcmp(p, needle, needle_len) == 0) best = (int64_t)(p - src);
+        p++;
     }
     return best;
 }

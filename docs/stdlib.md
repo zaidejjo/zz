@@ -73,6 +73,7 @@ import std.str
 | `str.length` | `str.length(s: str) -> int` | String length |
 | `str.split` | `str.split(s: str, sep: str) -> [str]` | Split by separator |
 | `str.contains` | `str.contains(s: str, sub: str) -> bool` | Check substring |
+| `str.count` | `str.count(s: str, sub: str) -> int` | Non-overlapping occurrences (empty `sub` counts chars+1) |
 | `str.trim` | `str.trim(s: str) -> str` | Trim whitespace |
 | `str.to_upper` | `str.to_upper(s: str) -> str` | Uppercase |
 | `str.to_lower` | `str.to_lower(s: str) -> str` | Lowercase |

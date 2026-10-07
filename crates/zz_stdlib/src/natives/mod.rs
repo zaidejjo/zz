@@ -269,6 +269,13 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.str.count".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_mod::str_count,
+        },
+    );
+    m.insert(
         "std.str.find".into(),
         NativeEntry {
             arity: 3,
@@ -431,6 +438,13 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: str_mod::str_contains,
+        },
+    );
+    m.insert(
+        "str.count".into(),
+        NativeEntry {
+            arity: 2,
+            f: str_mod::str_count,
         },
     );
     m.insert(

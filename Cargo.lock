@@ -3765,6 +3765,7 @@ dependencies = [
  "crossbeam-deque",
  "httparse",
  "libc",
+ "memchr",
  "rcgen",
  "reqwest",
  "rusqlite",
