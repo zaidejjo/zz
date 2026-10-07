@@ -1168,3 +1168,72 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
 pub fn native_supported(name: &str) -> bool {
     native_impl(name).is_some() || crate::ffi_impl(name).is_some()
 }
+
+/// Required value-count for a stdlib native (params minus trailing
+/// defaults), from the checker's lockstep signature table. Used to
+/// disambiguate untyped-receiver method dispatch: the call passed
+/// checking with N values, so among same-named natives in different
+/// namespaces the arity-compatible one is the checker's choice
+/// (e.g. 2-value `ph.find(x)` is `regexp.find`, not 3-value
+/// `str.find`). `None` when the name isn't a known native.
+pub(crate) fn native_arity(name: &str) -> Option<usize> {
+    let funcs = zz_stdlib::funcs::stdlib_funcs_cached();
+    let sig = funcs
+        .get(name)
+        .or_else(|| funcs.get(&format!("std.{name}")))?;
+    let mut required = sig.params.len();
+    for defaulted in sig.has_default.iter().rev() {
+        if *defaulted {
+            required -= 1;
+        } else {
+            break;
+        }
+    }
+    Some(required)
+}
+
+/// Choose a method namespace from an ordered candidate list, preferring
+/// the candidate whose required arity matches the call's value count
+/// (receiver + args). Falls back to the first supported candidate, so
+/// behavior is unchanged when nothing matches by arity. Only ever
+/// *changes* selection away from a candidate that could not have
+/// compiled (C natives take a fixed value count).
+pub(crate) fn pick_method_ns<'a, I>(namespaces: I, method: &str, nvalues: usize) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut fallback: Option<String> = None;
+    for ns in namespaces {
+        let candidate = format!("{ns}.{method}");
+        if !native_supported(&candidate) {
+            continue;
+        }
+        if fallback.is_none() {
+            fallback = Some(ns.to_string());
+        }
+        if native_arity(&candidate) == Some(nvalues) {
+            return Some(ns.to_string());
+        }
+    }
+    fallback
+}
+
+/// Prefer the arity-matching candidate; else the first with unknown
+/// arity (can't judge — old behavior); else `None`: every candidate is
+/// provably wrong, so leave resolution to a later stage (another
+/// fallback site, or a loud lowering error) instead of emitting a
+/// guaranteed C type error.
+pub(crate) fn pick_arity<'a, I>(namespaces: I, method: &str, nvalues: usize) -> Option<&'a str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut unknown: Option<&'a str> = None;
+    for ns in namespaces {
+        match native_arity(&format!("{ns}.{method}")) {
+            Some(a) if a == nvalues => return Some(ns),
+            None if unknown.is_none() => unknown = Some(ns),
+            _ => {}
+        }
+    }
+    unknown
+}
