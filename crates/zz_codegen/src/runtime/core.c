@@ -6141,6 +6141,13 @@ zz_value zz_call_native5(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, z
     zz_value r = f(a, b, c, d, e, &err);
     return r;
 }
+// 6-arg natives (e.g. str.classify/text+markers+bstart+bend+nested+whole).
+// Same err discipline as the other shims.
+zz_value zz_call_native6(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e, zz_value g) {
+    int err = 0;
+    zz_value r = f(a, b, c, d, e, g, &err);
+    return r;
+}
 // Spawn-closure-literal fuse (`task.spawn(|...| ...)`): the lowerer passes
 // the capture arrays straight through instead of building an intermediate
 // closure value first. Same err discipline as the other shims (ignored:

@@ -767,6 +767,7 @@ zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, z
 zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c);
 zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d);
 zz_value zz_call_native5(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e);
+zz_value zz_call_native6(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e, zz_value g);
 zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
                               const unsigned char *kinds, const size_t *sizes,
                               size_t nenv, int is_green);

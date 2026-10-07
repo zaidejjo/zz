@@ -614,6 +614,11 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_str_find_test, "stdlib", "str_find_test.zz");
 e2e_success_test!(e2e_stdlib_str_bytes_test, "stdlib", "str_bytes_test.zz");
+e2e_success_test!(
+    e2e_stdlib_str_classify_test,
+    "stdlib",
+    "str_classify_test.zz"
+);
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 e2e_success_test!(e2e_stdlib_input_chained, "stdlib", "input_chained.zz");
 e2e_success_test!(e2e_stdlib_http_client_test, "stdlib", "http_client_test.zz");

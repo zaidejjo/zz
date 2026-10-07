@@ -121,6 +121,309 @@ pub(crate) fn str_count(
     ))
 }
 
+// str.classify(text, markers, bstart, bend, nested, whole) —
+// comment-aware line classification in one native call: returns
+// [lines, code, comments, blanks]. Byte-oriented with ASCII-4 trim,
+// mirroring the split/trim/starts_with native semantics exactly.
+// `markers` is the line-comment list, `bstart`/`bend` the block pair
+// ("" = none), `nested` enables Rust-style nesting depth, `whole`
+// selects whole-line blocks (Ruby =begin / Perl =cut).
+pub(crate) fn str_classify(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let text = expect_str(args, 0, "std.str.classify")?;
+    let raw_markers = super::expect_array(args, 1, "std.str.classify")?;
+    let bstart = expect_str(args, 2, "std.str.classify")?;
+    let bend = expect_str(args, 3, "std.str.classify")?;
+    let nested = match super::arg(args, 4, "std.str.classify")? {
+        Value::Bool(b) => *b,
+        other => {
+            return Err(EvalError::new(
+                format!("`std.str.classify` expects booleans, found `{other}`"),
+                zz_runtime::Span::new(0, 0),
+            ));
+        }
+    };
+    let whole = match super::arg(args, 5, "std.str.classify")? {
+        Value::Bool(b) => *b,
+        other => {
+            return Err(EvalError::new(
+                format!("`std.str.classify` expects booleans, found `{other}`"),
+                zz_runtime::Span::new(0, 0),
+            ));
+        }
+    };
+    let mut markers: Vec<&[u8]> = Vec::with_capacity(raw_markers.len());
+    for m in &raw_markers {
+        match m {
+            Value::Str(s) => markers.push(s.as_bytes()),
+            other => {
+                return Err(EvalError::new(
+                    format!("`std.str.classify` expects marker strings, found `{other}`"),
+                    zz_runtime::Span::new(0, 0),
+                ));
+            }
+        }
+    }
+    let (lines, code, comments, blanks) = classify_bytes(
+        text.as_bytes(),
+        &markers,
+        bstart.as_bytes(),
+        bend.as_bytes(),
+        nested,
+        whole,
+    );
+    Ok(Value::Array(Box::new(vec![
+        Value::Int(lines),
+        Value::Int(code),
+        Value::Int(comments),
+        Value::Int(blanks),
+    ])))
+}
+
+fn is_btrim(b: u8) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn trim_span_b(line: &[u8]) -> (usize, usize) {
+    let mut s = 0;
+    let mut e = line.len();
+    while s < e && is_btrim(line[s]) {
+        s += 1;
+    }
+    while e > s && is_btrim(line[e - 1]) {
+        e -= 1;
+    }
+    (s, e)
+}
+
+fn starts_with_any_b(line: &[u8], tls: usize, markers: &[&[u8]]) -> bool {
+    for m in markers {
+        if !m.is_empty() && line[tls..].starts_with(m) {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_b(hay: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && memchr::memmem::find(hay, needle).is_some()
+}
+
+// Blank string spans for quote q (blank_quote semantics): backslash
+// pairs `\\` and `\q` erased first, then toggle on q.
+fn blank_q_b(buf: &mut [u8], q: u8) {
+    let n = buf.len();
+    let mut i = 0;
+    let mut inside = false;
+    while i < n {
+        let c = buf[i];
+        if c == 92 && i + 1 < n && (buf[i + 1] == 92 || buf[i + 1] == q) {
+            buf[i] = 32;
+            buf[i + 1] = 32;
+            i += 2;
+            continue;
+        }
+        if c == q {
+            inside = !inside;
+            i += 1;
+            continue;
+        }
+        if inside {
+            buf[i] = 32;
+        }
+        i += 1;
+    }
+}
+
+fn needs_blank(line: &[u8], markers: &[&[u8]], has_open: bool) -> bool {
+    if !has_open {
+        let mut found = false;
+        for m in markers {
+            if !m.is_empty() && contains_b(line, m) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    line.contains(&b'\"') || line.contains(&b'\'') || line.contains(&b'`')
+}
+
+fn classify_bytes(
+    text: &[u8],
+    markers: &[&[u8]],
+    bstart: &[u8],
+    bend: &[u8],
+    nested: bool,
+    whole: bool,
+) -> (i64, i64, i64, i64) {
+    let no_comment = markers.iter().all(|m| m.is_empty()) && bstart.is_empty();
+    let mut lines = 0i64;
+    let mut code = 0i64;
+    let mut comments = 0i64;
+    let mut blanks = 0i64;
+    // Split on \n, drop one trailing artifact (mirrors split_lines).
+    let mut parts: Vec<&[u8]> = text.split(|&c| c == 10).collect();
+    if parts.last().is_some_and(|l| l.is_empty()) {
+        parts.pop();
+    }
+    let mut in_block = false;
+    let mut depth = 0i64;
+    for raw in parts {
+        lines += 1;
+        if raw.is_empty() {
+            blanks += 1;
+            continue;
+        }
+        let (tls, the) = trim_span_b(raw);
+        if tls >= the {
+            blanks += 1;
+            continue;
+        }
+        if no_comment {
+            code += 1;
+            continue;
+        }
+        if whole {
+            if !bstart.is_empty() && raw.get(tls..the) == Some(bstart) {
+                in_block = true;
+                comments += 1;
+                continue;
+            }
+            if !bend.is_empty() && raw.get(tls..the) == Some(bend) {
+                in_block = false;
+                comments += 1;
+                continue;
+            }
+            if in_block {
+                comments += 1;
+                continue;
+            }
+            if starts_with_any_b(raw, tls, markers) {
+                comments += 1;
+            } else {
+                code += 1;
+            }
+            continue;
+        }
+        if in_block {
+            let mut owned: Vec<u8> = Vec::new();
+            // Either gate (block-open present, or a line marker seen)
+            // forces the same string blanking, so one condition covers
+            // both — the bodies were identical by construction.
+            let gate = (!bstart.is_empty()
+                && memchr::memmem::find(raw, bstart).is_some()
+                && needs_blank(raw, markers, true))
+                || needs_blank(raw, markers, false);
+            let cl: &[u8] = if gate {
+                owned.extend_from_slice(raw);
+                blank_q_b(&mut owned, b'"');
+                blank_q_b(&mut owned, b'`');
+                blank_q_b(&mut owned, b'\'');
+                &owned
+            } else {
+                raw
+            };
+            if nested {
+                let si = count_occ(cl, bstart);
+                let ei = count_occ(cl, bend);
+                depth += si - ei;
+                if depth <= 0 {
+                    in_block = false;
+                    depth = 0;
+                }
+            } else if !bend.is_empty() && memchr::memmem::find(cl, bend).is_some() {
+                in_block = false;
+                let tail = match memchr::memmem::rfind(cl, bend) {
+                    Some(bpos) => &cl[bpos + bend.len()..],
+                    None => b"",
+                };
+                let (ttl, tth) = trim_span_b(tail);
+                if ttl < tth && !starts_with_any_b(raw, tls, markers) {
+                    code += 1;
+                    continue;
+                }
+            }
+            comments += 1;
+            continue;
+        }
+        if starts_with_any_b(raw, tls, markers) {
+            comments += 1;
+            continue;
+        }
+        if !bstart.is_empty() && memchr::memmem::find(raw, bstart).is_some() {
+            let mut owned: Vec<u8> = Vec::new();
+            let cl: &[u8] = if needs_blank(raw, markers, true) {
+                owned.extend_from_slice(raw);
+                blank_q_b(&mut owned, b'"');
+                blank_q_b(&mut owned, b'`');
+                blank_q_b(&mut owned, b'\'');
+                &owned
+            } else {
+                raw
+            };
+            if memchr::memmem::find(cl, bstart).is_none() {
+                code += 1;
+                continue;
+            }
+            let bi = memchr::memmem::find(cl, bstart).unwrap_or(cl.len());
+            let (bl, bh) = trim_span_b(&cl[..bi]);
+            let mut commented = false;
+            let mut commented_code = false;
+            for m in markers {
+                if m.is_empty() {
+                    continue;
+                }
+                if let Some(fi) = memchr::memmem::find(&cl[bl..bh], m) {
+                    commented = true;
+                    let (stl, sth) = trim_span_b(&cl[bl..bl + fi]);
+                    if stl < sth {
+                        commented_code = true;
+                    }
+                }
+            }
+            if commented {
+                if commented_code {
+                    code += 1;
+                } else {
+                    comments += 1;
+                }
+                continue;
+            }
+            if !bend.is_empty() && memchr::memmem::find(cl, bend).is_some() {
+                if bl >= bh {
+                    comments += 1;
+                } else {
+                    code += 1;
+                }
+                continue;
+            }
+            in_block = true;
+            depth = 1;
+            if bl >= bh || starts_with_any_b(raw, tls, markers) {
+                comments += 1;
+            } else {
+                code += 1;
+            }
+            continue;
+        }
+        code += 1;
+    }
+    (lines, code, comments, blanks)
+}
+
+fn count_occ(hay: &[u8], needle: &[u8]) -> i64 {
+    if needle.is_empty() {
+        return 0;
+    }
+    memchr::memmem::find_iter(hay, needle).count() as i64
+}
+
 pub(crate) fn str_bytes(
     _interp: &mut Interp,
     args: &mut Vec<Value>,

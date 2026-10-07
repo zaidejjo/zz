@@ -91,6 +91,7 @@ import std.str
 | `str.bytes` | `str.bytes(s: str) -> [int]` | UTF-8 bytes as plain ints (one copy) |
 | `bytes.to_str` | `bytes.to_str(vs: [int]) -> Result<str>` | Strict UTF-8 decode; range/invalid input is `.err` on both backends |
 | `bytes.to_ints` | `bytes.to_ints(b: bytes) -> [int]` | Opaque byte buffer as plain ints |
+| `str.classify` | `str.classify(text, markers, bstart, bend, nested, whole) -> [int]` | Comment-aware line counts `[lines, code, comments, blanks]`; `markers` line list, `bstart`/`bend` block pair (`""` = none), `nested` Rust-style depth, `whole` whole-line blocks |
 
 Offsets are bytes (O(1) per call, O(n) streaming total; matches Rust
 `str::find` semantics). Empty `sub`: `find`/`rfind` return the clamped

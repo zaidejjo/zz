@@ -207,6 +207,20 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
     );
     m.insert(
+        "std.str.classify".into(),
+        sig(
+            vec![
+                ("text", Type::Str),
+                ("markers", Type::Array(Box::new(Type::Str))),
+                ("bstart", Type::Str),
+                ("bend", Type::Str),
+                ("nested", Type::Bool),
+                ("whole", Type::Bool),
+            ],
+            Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
         "std.str.starts_with_at".into(),
         sig(
             vec![("s", Type::Str), ("sub", Type::Str), ("pos", Type::Int)],
@@ -351,6 +365,20 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "str.bytes".into(),
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
+    );
+    m.insert(
+        "str.classify".into(),
+        sig(
+            vec![
+                ("text", Type::Str),
+                ("markers", Type::Array(Box::new(Type::Str))),
+                ("bstart", Type::Str),
+                ("bend", Type::Str),
+                ("nested", Type::Bool),
+                ("whole", Type::Bool),
+            ],
+            Type::Array(Box::new(Type::Int)),
+        ),
     );
     m.insert(
         "str.starts_with_at".into(),
@@ -4333,6 +4361,8 @@ mod tests {
             "std.bytes.to_str",
             "bytes.to_str",
             "std.bytes.to_ints",
+            "std.str.classify",
+            "str.classify",
             "bytes.to_ints",
             "std.str.find",
             "str.find",
@@ -4341,7 +4371,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 900);
+        assert_eq!(funcs.len(), 902);
     }
 
     #[test]
