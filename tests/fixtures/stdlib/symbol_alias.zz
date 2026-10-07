@@ -1,4 +1,4 @@
-// features: import-alias, imports, known-divergence, locals, print, selective-import, std-math, string-literal
+// features: import-alias, imports, locals, print, selective-import, std-math, string-literal
 // E2E: symbol alias from stdlib
 import std.math(PI as pi, abs as absolute)
 

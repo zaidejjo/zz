@@ -307,9 +307,10 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "extension_methods" => {
             Some("DEFERRED to HIR->IR lowering: extension-method call results missing + spurious conflict diagnostics on stderr")
         }
-        "selective_import" | "multi_selective" | "symbol_alias" | "wildcard_import" => {
-            Some("DEFERRED to HIR->IR lowering: imported const binding prints empty (call results are fine)")
-        }
+        // NOTE: `selective_import`, `multi_selective`, `symbol_alias`,
+        // and `wildcard_import` were listed here (imported const binding
+        // printed empty natively) but the sweep reports FIXED — native
+        // matches the VM, so they run as strict parity.
 
         // NOTE: `http_tls_cert`, `main_result_err`, and
         // `pg_connect_refused` used to be listed here (native exited 0
