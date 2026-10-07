@@ -64,17 +64,14 @@ pub(crate) fn str_rfind(
 fn byte_find(s: &str, sub: &str, from: i64) -> i64 {
     let bytes = s.as_bytes();
     let n = bytes.len() as i64;
-    let mut start = from.clamp(0, n) as usize;
-    while start < bytes.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
+    let start = from.clamp(0, n) as usize;
     if sub.is_empty() {
-        return start.min(bytes.len()) as i64;
+        return start as i64;
     }
     if start >= bytes.len() {
         return -1;
     }
-    match s[start..].find(sub) {
+    match memchr::memmem::find(&bytes[start..], sub.as_bytes()) {
         Some(rel) => start as i64 + rel as i64,
         None => -1,
     }
@@ -83,23 +80,17 @@ fn byte_find(s: &str, sub: &str, from: i64) -> i64 {
 fn byte_rfind(s: &str, sub: &str, from: i64) -> i64 {
     let bytes = s.as_bytes();
     let n = bytes.len() as i64;
-    let mut end = from.clamp(0, n) as usize;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = from.clamp(0, n) as usize;
     if sub.is_empty() {
         return end as i64;
     }
-    // A match starting exactly at `end` may extend past it.
-    let mut window = end + sub.len();
-    if window > bytes.len() {
-        window = bytes.len();
-    }
-    while window > end && !s.is_char_boundary(window) {
-        window -= 1;
-    }
-    let mut best: Option<i64> = s[..window].rfind(sub).map(|b| b as i64);
-    if s.is_char_boundary(end) && end + sub.len() <= bytes.len() && s[end..].starts_with(sub) {
+    // Last match starting at/before `end`, plus the explicit end-start
+    // check (it may extend past the window). Matches can only start at
+    // char boundaries, so no snapping is needed for byte-exact results.
+    let window = (end + sub.len()).min(bytes.len());
+    let mut best: Option<i64> =
+        memchr::memmem::rfind(&bytes[..window], sub.as_bytes()).map(|b| b as i64);
+    if end + sub.len() <= bytes.len() && &bytes[end..end + sub.len()] == sub.as_bytes() {
         best = Some(match best {
             Some(prev) => prev.max(end as i64),
             None => end as i64,
@@ -182,7 +173,7 @@ pub(crate) fn bytes_to_ints(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    match super::arg(args, 0, "bytes.to_ints")? {
+    match arg(args, 0, "bytes.to_ints")? {
         Value::Bytes(b) => Ok(Value::Array(Box::new(
             b.as_slice().iter().map(|x| Value::Int(*x as i64)).collect(),
         ))),
@@ -191,6 +182,94 @@ pub(crate) fn bytes_to_ints(
             zz_runtime::Span::new(0, 0),
         )),
     }
+}
+
+pub(crate) fn str_find_in(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "std.str.find_in")?;
+    let sub = expect_str(args, 1, "std.str.find_in")?;
+    let start = expect_int(args, 2, "std.str.find_in")?;
+    let end = expect_int(args, 3, "std.str.find_in")?;
+    Ok(Value::Int(find_in(s.as_bytes(), sub.as_bytes(), start, end)))
+}
+
+pub(crate) fn str_rfind_in(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "std.str.rfind_in")?;
+    let sub = expect_str(args, 1, "std.str.rfind_in")?;
+    let start = expect_int(args, 2, "std.str.rfind_in")?;
+    let end = expect_int(args, 3, "std.str.rfind_in")?;
+    Ok(Value::Int(rfind_in(s.as_bytes(), sub.as_bytes(), start, end)))
+}
+
+pub(crate) fn str_count_in(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "std.str.count_in")?;
+    let sub = expect_str(args, 1, "std.str.count_in")?;
+    let start = expect_int(args, 2, "std.str.count_in")?;
+    let end = expect_int(args, 3, "std.str.count_in")?;
+    Ok(Value::Int(count_in(s.as_bytes(), sub.as_bytes(), start, end)))
+}
+
+// Bounded byte-window scans: the scan never reads past `end`, so per-line
+// use stays O(line) and whole-file loops stay O(n). Empty `sub` returns
+// the clamped start (find/rfind) or 0 (count).
+fn clamp_span(len: i64, start: i64, end: i64) -> (usize, usize) {
+    let s = start.clamp(0, len);
+    let mut e = end.clamp(0, len);
+    if e < s {
+        e = s;
+    }
+    (s as usize, e as usize)
+}
+
+fn find_in(hay: &[u8], needle: &[u8], start: i64, end: i64) -> i64 {
+    let (s, e) = clamp_span(hay.len() as i64, start, end);
+    if needle.is_empty() {
+        return s as i64;
+    }
+    match memchr::memmem::find(&hay[s..e], needle) {
+        Some(rel) => s as i64 + rel as i64,
+        None => -1,
+    }
+}
+
+fn rfind_in(hay: &[u8], needle: &[u8], start: i64, end: i64) -> i64 {
+    let (s, e) = clamp_span(hay.len() as i64, start, end);
+    if needle.is_empty() {
+        return s as i64;
+    }
+    match memchr::memmem::rfind(&hay[s..e], needle) {
+        Some(rel) => s as i64 + rel as i64,
+        None => -1,
+    }
+}
+
+fn count_in(hay: &[u8], needle: &[u8], start: i64, end: i64) -> i64 {
+    let (mut s, e) = clamp_span(hay.len() as i64, start, end);
+    if needle.is_empty() {
+        return 0;
+    }
+    let mut n = 0;
+    while s + needle.len() <= e {
+        match memchr::memmem::find(&hay[s..e], needle) {
+            Some(rel) => {
+                n += 1;
+                s += rel + needle.len();
+            }
+            None => break,
+        }
+    }
+    n
 }
 
 pub(crate) fn str_starts_with_at(
@@ -236,12 +315,10 @@ fn starts_at(s: &str, sub: &str, pos: i64) -> bool {
         return false;
     }
     let base = pos as usize;
-    // Floor: a match may only start at a char boundary, and the window
-    // must end at one too (slicing panics mid-char).
-    if !s.is_char_boundary(base) || !s.is_char_boundary(base + sub.len()) {
-        return false;
-    }
-    &s[base..base + sub.len()] == sub
+    // No boundary checks: a valid pattern's first byte (ASCII or lead)
+    // can never equal a continuation byte, so mid-char starts cannot
+    // match. Byte windows panic on nothing, on any input.
+    &bytes[base..base + sub.as_bytes().len()] == sub.as_bytes()
 }
 
 // True when `sub` ends at byte offset `pos` (exclusive end).
@@ -250,19 +327,18 @@ fn ends_at(s: &str, sub: &str, pos: i64) -> bool {
         return false;
     }
     let bytes = s.as_bytes();
-    if pos < 0 || pos as usize > bytes.len() || (pos as usize) < sub.len() {
+    if pos < 0 {
         return false;
     }
-    let base = (pos as usize) - sub.len();
-    if !s.is_char_boundary(base) || !s.is_char_boundary(pos as usize) {
+    let end = pos as usize;
+    let sub_b = sub.as_bytes();
+    if end > bytes.len() || end < sub_b.len() {
         return false;
     }
-    &s[base..pos as usize] == sub
+    let base = end - sub_b.len();
+    &bytes[base..end] == sub_b
 }
 
-// Trimmed span of s[start..end] as byte offsets. Unicode White_Space on
-// BOTH backends (explicit table, not the host trim): new API, no
-// back-compat baggage, and backend-identical by construction.
 fn trim_span(s: &str, start: i64, end: i64) -> (i64, i64) {
     let bytes = s.as_bytes();
     let n = bytes.len() as i64;

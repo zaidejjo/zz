@@ -227,6 +227,42 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Array(Box::new(Type::Int)),
         ),
     );
+    m.insert(
+        "std.str.find_in".into(),
+        sig(
+            vec![
+                ("s", Type::Str),
+                ("sub", Type::Str),
+                ("start", Type::Int),
+                ("end", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "std.str.rfind_in".into(),
+        sig(
+            vec![
+                ("s", Type::Str),
+                ("sub", Type::Str),
+                ("start", Type::Int),
+                ("end", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "std.str.count_in".into(),
+        sig(
+            vec![
+                ("s", Type::Str),
+                ("sub", Type::Str),
+                ("start", Type::Int),
+                ("end", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
     // Canonical `std.str.*` twins of the method-dispatch entries below, so
     // selective imports (`import std.str(trim)`) and qualified calls
     // (`std.str.trim(s)`) resolve. Signatures mirror `str.*` exactly.
@@ -335,6 +371,42 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(
             vec![("s", Type::Str), ("start", Type::Int), ("end", Type::Int)],
             Type::Array(Box::new(Type::Int)),
+        ),
+    );
+    m.insert(
+        "str.find_in".into(),
+        sig(
+            vec![
+                ("s", Type::Str),
+                ("sub", Type::Str),
+                ("start", Type::Int),
+                ("end", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "str.rfind_in".into(),
+        sig(
+            vec![
+                ("s", Type::Str),
+                ("sub", Type::Str),
+                ("start", Type::Int),
+                ("end", Type::Int),
+            ],
+            Type::Int,
+        ),
+    );
+    m.insert(
+        "str.count_in".into(),
+        sig(
+            vec![
+                ("s", Type::Str),
+                ("sub", Type::Str),
+                ("start", Type::Int),
+                ("end", Type::Int),
+            ],
+            Type::Int,
         ),
     );
     m.insert(
@@ -4250,6 +4322,12 @@ mod tests {
             "str.ends_with_at",
             "std.str.trim_span",
             "str.trim_span",
+            "std.str.find_in",
+            "str.find_in",
+            "std.str.rfind_in",
+            "str.rfind_in",
+            "std.str.count_in",
+            "str.count_in",
             "std.str.bytes",
             "str.bytes",
             "std.bytes.to_str",
@@ -4263,7 +4341,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 894);
+        assert_eq!(funcs.len(), 900);
     }
 
     #[test]

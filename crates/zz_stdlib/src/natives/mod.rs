@@ -311,6 +311,27 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.str.find_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_find_in,
+        },
+    );
+    m.insert(
+        "std.str.rfind_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_rfind_in,
+        },
+    );
+    m.insert(
+        "std.str.count_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_count_in,
+        },
+    );
+    m.insert(
         "std.str.starts_with_at".into(),
         NativeEntry {
             arity: 3,
@@ -480,6 +501,27 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 3,
             f: str_mod::str_trim_span,
+        },
+    );
+    m.insert(
+        "str.find_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_find_in,
+        },
+    );
+    m.insert(
+        "str.rfind_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_rfind_in,
+        },
+    );
+    m.insert(
+        "str.count_in".into(),
+        NativeEntry {
+            arity: 4,
+            f: str_mod::str_count_in,
         },
     );
     m.insert(
