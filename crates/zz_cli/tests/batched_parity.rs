@@ -308,10 +308,21 @@ fn batched_native_parity() {
     for (b, idxs) in per_batch_idx.iter().enumerate() {
         let driver = sandbox.join(format!("driver_{b}.zz"));
         let mut src = String::new();
+        // All imports first (bodies run at import, in order), then one
+        // blank line: an import body may end with `print` (no trailing
+        // newline — e.g. syntax/destructuring), which would otherwise
+        // glue onto the first ZZBEGIN marker and break demux prefix
+        // matching. The blank line is marker-free so demux ignores it,
+        // and norm keeps it identically on both engines.
         for (i, idx) in idxs.iter().enumerate() {
-            let (modname, has_main, _cat, _file) = &staged[*idx];
+            let (modname, _, _, _) = &staged[*idx];
             let alias = format!("c{i}");
             src.push_str(&format!("import {modname} as {alias}\n"));
+        }
+        src.push_str("println(\"\")\n");
+        for (i, idx) in idxs.iter().enumerate() {
+            let (_, has_main, _, _) = &staged[*idx];
+            let alias = format!("c{i}");
             src.push_str(&format!("println(\"ZZBEGIN {alias}\")\n"));
             if *has_main {
                 src.push_str(&format!("{alias}.main()\n"));
