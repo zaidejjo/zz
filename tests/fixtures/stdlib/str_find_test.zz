@@ -14,6 +14,8 @@ func main() {
     caf_pat := "caf"
     aa_pat := "aa"
     aaa_str := "aaa"
+    abc3 := "abc"
+    aaaa4 := "aaaa"
     println("find0={str.find(hay, hello_pat, 0)}")
     println("find6={str.find(hay, hello_pat, 6)}")
     println("findmiss={str.find(hay, zzz_pat, 0)}")
@@ -41,5 +43,11 @@ func main() {
     println("nbspan={nsp[0]},{nsp[1]}")
     println("overlap={str.find(aaa_str, aa_pat, 0)}")
     println("stdspell={std.str.find(hay, moon_pat, 0)}")
+    aaa3 := "aaa"
+    println("count1={str.count(aaa3, aa_pat)}")
+    println("countempty={str.count(abc3, empty_pat)}")
+    println("countboth={str.count(empty_pat, empty_pat)}")
+    println("countnohay={str.count(empty_pat, moon_pat)}")
+    println("countfour={str.count(aaaa4, aa_pat)}")
     println("str_find_ok")
 }

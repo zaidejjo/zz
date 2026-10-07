@@ -191,6 +191,7 @@ zz_value zz_str_length(zz_value s, int *err);
 zz_value zz_str_lower(zz_value s, int *err);
 zz_value zz_str_upper(zz_value s, int *err);
 zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err);
+zz_value zz_str_count(zz_value s, zz_value sub, int *err);
 zz_value zz_str_contains(zz_value s, zz_value sub, int *err);
 zz_value zz_str_startswith(zz_value s, zz_value prefix, int *err);
 zz_value zz_str_endswith(zz_value s, zz_value suffix, int *err);

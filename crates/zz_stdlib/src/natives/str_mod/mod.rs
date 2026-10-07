@@ -111,6 +111,25 @@ fn byte_rfind(s: &str, sub: &str, from: i64) -> i64 {
 // str.bytes(s) — UTF-8 bytes as plain ints. One O(n) copy; the
 // result composes with every [int] API (indexing, snapshots, the
 // bytes.* builder vocabulary). The bridge find/rfind/trim_span need.
+// str.count(s, sub) — non-overlapping occurrences, no allocation.
+// Edge semantics mirror the old split-based version exactly:
+// empty sub counts chars(s)+1 (split inserts between every char plus
+// both ends: "abc" -> 4, "" -> 1).
+pub(crate) fn str_count(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "std.str.count")?;
+    let sub = expect_str(args, 1, "std.str.count")?;
+    if sub.is_empty() {
+        return Ok(Value::Int(s.chars().count() as i64 + 1));
+    }
+    Ok(Value::Int(
+        memchr::memmem::find_iter(s.as_bytes(), sub.as_bytes()).count() as i64,
+    ))
+}
+
 pub(crate) fn str_bytes(
     _interp: &mut Interp,
     args: &mut Vec<Value>,

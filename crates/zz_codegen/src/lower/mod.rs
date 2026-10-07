@@ -903,6 +903,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "str.to_lower" | "std.str.to_lower" | "str.lower" | "std.str.lower" => Some("zz_str_lower"),
         "str.to_upper" | "std.str.to_upper" | "str.upper" | "std.str.upper" => Some("zz_str_upper"),
         "str.replace" | "std.str.replace" => Some("zz_str_replace"),
+        "str.count" | "std.str.count" => Some("zz_str_count"),
         "str.contains" | "std.str.contains" => Some("zz_str_contains"),
         "str.starts_with" | "std.str.starts_with" | "str.startswith" | "std.str.startswith" => {
             Some("zz_str_startswith")

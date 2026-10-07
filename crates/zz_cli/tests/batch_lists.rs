@@ -47,6 +47,8 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "vec_nested_str_parity.zz", true),
     ("stdlib", "console.zz", false),
     ("stdlib", "str_extended_test.zz", false),
+    ("stdlib", "str_find_test.zz", true),
+    ("stdlib", "str_bytes_test.zz", true),
     ("syntax", "match.zz", false),
     ("syntax", "match_assign.zz", true),
     ("syntax", "return_in_loops.zz", false),
