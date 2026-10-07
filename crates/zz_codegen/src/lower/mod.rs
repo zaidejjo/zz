@@ -920,6 +920,9 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "str.starts_with_at" | "std.str.starts_with_at" => Some("zz_str_starts_with_at"),
         "str.ends_with_at" | "std.str.ends_with_at" => Some("zz_str_ends_with_at"),
         "str.trim_span" | "std.str.trim_span" => Some("zz_str_trim_span"),
+        "str.bytes" | "std.str.bytes" => Some("zz_str_bytes"),
+        "bytes.to_str" | "std.bytes.to_str" => Some("zz_bytes_to_str"),
+        "bytes.to_ints" | "std.bytes.to_ints" => Some("zz_bytes_to_ints"),
         // math
         "math.abs" | "std.math.abs" => Some("zz_math_abs"),
         "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),

@@ -203,6 +203,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert(
+        "std.str.bytes".into(),
+        sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
+    );
+    m.insert(
         "std.str.starts_with_at".into(),
         sig(
             vec![("s", Type::Str), ("sub", Type::Str), ("pos", Type::Int)],
@@ -307,6 +311,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
             Type::Int,
         ),
+    );
+    m.insert(
+        "str.bytes".into(),
+        sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
     );
     m.insert(
         "str.starts_with_at".into(),
@@ -948,6 +956,28 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.bytes.len".into(),
         sig(vec![("v", Type::Bytes)], Type::Int),
+    );
+    m.insert(
+        "bytes.to_str".into(),
+        sig(
+            vec![("vs", Type::Array(Box::new(Type::Int)))],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.bytes.to_str".into(),
+        sig(
+            vec![("vs", Type::Array(Box::new(Type::Int)))],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "bytes.to_ints".into(),
+        sig(vec![("b", Type::Bytes)], Type::Array(Box::new(Type::Int))),
+    );
+    m.insert(
+        "std.bytes.to_ints".into(),
+        sig(vec![("b", Type::Bytes)], Type::Array(Box::new(Type::Int))),
     );
     m.insert(
         "vec.push".into(),
@@ -4220,6 +4250,12 @@ mod tests {
             "str.ends_with_at",
             "std.str.trim_span",
             "str.trim_span",
+            "std.str.bytes",
+            "str.bytes",
+            "std.bytes.to_str",
+            "bytes.to_str",
+            "std.bytes.to_ints",
+            "bytes.to_ints",
             "std.str.find",
             "str.find",
             "std.str.rfind",
@@ -4227,7 +4263,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 888);
+        assert_eq!(funcs.len(), 894);
     }
 
     #[test]

@@ -1554,6 +1554,96 @@ static size_t ws_width_bwd(const unsigned char *d, size_t s, size_t end) {
     return 0;
 }
 
+// str.bytes(s) — UTF-8 bytes as plain ints (one copy).
+zz_value zz_str_bytes(zz_value s, int *err) {
+    (void)err;
+    zz_value arr = zz_array_new();
+    if (s.tag != ZZ_STR) return arr;
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
+    int sub_err = 0;
+    for (size_t i = 0; i < s.s->len; i++) {
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = (int64_t)d[i]}}, &sub_err);
+    }
+    return arr;
+}
+
+// bytes.to_str(vs) — strict UTF-8 decode; out-of-range values and
+// invalid sequences are .err, identically on VM and AOT.
+zz_value zz_bytes_to_str(zz_value vs, int *err) {
+    if (vs.tag != ZZ_ARRAY) {
+        if (err) *err = 1;
+        return zz_unit();
+    }
+    size_t n = vs.arr->len;
+    unsigned char *buf = (unsigned char *)malloc(n > 0 ? n : 1);
+    if (!buf) {
+        return zz_variant_err(zz_str_static("bytes.to_str: out of memory"));
+    }
+    for (size_t i = 0; i < n; i++) {
+        zz_value v = vs.arr->items[i];
+        if (v.tag != ZZ_INT) {
+            free(buf);
+            if (err) *err = 1;
+            return zz_unit();
+        }
+        if (v.i < 0 || v.i > 255) {
+            free(buf);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "bytes.to_str: value %lld out of range 0-255", (long long)v.i);
+            return zz_variant_err(zz_str_new(msg, strlen(msg)));
+        }
+        buf[i] = (unsigned char)v.i;
+    }
+    // Strict validation: reject overlongs, surrogates, > U+10FFFF.
+    size_t i = 0;
+    int ok = 1;
+    while (i < n) {
+        unsigned char c = buf[i];
+        size_t want = 1;
+        if (c < 0x80) want = 1;
+        else if (c >= 0xC2 && c <= 0xDF) want = 2;
+        else if (c >= 0xE0 && c <= 0xEF) want = 3;
+        else if (c >= 0xF0 && c <= 0xF4) want = 4;
+        else { ok = 0; break; }
+        if (i + want > n) { ok = 0; break; }
+        for (size_t k = 1; k < want; k++) {
+            if ((buf[i + k] & 0xC0) != 0x80) { ok = 0; break; }
+        }
+        if (!ok) break;
+        if (want == 3) {
+            if (c == 0xE0 && buf[i + 1] < 0xA0) { ok = 0; break; }
+            if (c == 0xED && buf[i + 1] > 0x9F) { ok = 0; break; }
+        }
+        if (want == 4) {
+            if (c == 0xF0 && buf[i + 1] < 0x90) { ok = 0; break; }
+            if (c == 0xF4 && buf[i + 1] > 0x8F) { ok = 0; break; }
+        }
+        i += want;
+    }
+    if (!ok) {
+        free(buf);
+        return zz_variant_err(zz_str_static("bytes.to_str: invalid UTF-8"));
+    }
+    zz_value out = zz_str_new((const char *)buf, n);
+    free(buf);
+    return zz_variant_ok(out);
+}
+
+// bytes.to_ints(b) — opaque byte buffer as plain ints.
+zz_value zz_bytes_to_ints(zz_value b, int *err) {
+    (void)err;
+    zz_value arr = zz_array_new();
+    if (b.tag != ZZ_BYTES) return arr;
+    const unsigned char *d;
+    size_t n;
+    zz_bytes_view(b, &d, &n);
+    int sub_err = 0;
+    for (size_t i = 0; i < n; i++) {
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = (int64_t)d[i]}}, &sub_err);
+    }
+    return arr;
+}
+
 // str.trim_span(s, start, end) — trimmed [lo, hi] byte offsets. Unicode
 // White_Space on both backends (explicit table, never the host trim).
 zz_value zz_str_trim_span(zz_value s, zz_value start, zz_value end, int *err) {
