@@ -7154,6 +7154,36 @@ static const char *zz_fs_cstr(zz_value v) {
 }
 
 // fs.read_to_string(path) → Result<str>
+//
+// Strict UTF-8, matching the VM (`std::fs::read_to_string` rejects invalid
+// UTF-8 with `invalid_input`). Previously the native accepted any bytes,
+// so binary detection / config loaders behaved differently per backend
+// with zero diagnostics (issue #277). Invalid content now reports
+// `fs:read:invalid_input: <path>`, identical in shape to the VM.
+static int zz_is_valid_utf8(const char *d, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned char b = (unsigned char)d[i];
+        size_t want = 0;
+        int min = 0;
+        if (b < 0x80) { i++; continue; }
+        else if ((b & 0xE0) == 0xC0) { want = 2; min = 0x80; }
+        else if ((b & 0xF0) == 0xE0) { want = 3; min = 0x800; }
+        else if ((b & 0xF8) == 0xF0) { want = 4; min = 0x10000; }
+        else return 0;
+        if (i + want > n) return 0;
+        int c = b & ((1 << (8 - want - 1)) - 1);
+        for (size_t k = 1; k < want; k++) {
+            unsigned char t = (unsigned char)d[i + k];
+            if ((t & 0xC0) != 0x80) return 0;
+            c = (c << 6) | (t & 0x3F);
+        }
+        if (c < min || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) return 0;
+        i += want;
+    }
+    return 1;
+}
+
 zz_value zz_fs_read(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
@@ -7173,6 +7203,11 @@ zz_value zz_fs_read(zz_value path, int *err) {
         zz_value leak = (zz_value){ZZ_STR, {.s = out}};
         zz_release(&leak);
         return zz_fs_err1("read", p, EIO);
+    }
+    if (!zz_is_valid_utf8(zz_str_ptr(out), n)) {
+        zz_value leak = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&leak);
+        return zz_fs_err1("read", p, EINVAL);
     }
     zz_str_ptr(out)[n] = '\0';
     out->len = n;

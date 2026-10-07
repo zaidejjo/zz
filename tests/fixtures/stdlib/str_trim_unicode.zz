@@ -1,0 +1,27 @@
+// features: imports, locals, print, std-str, string-literal, string-ops
+// tests/fixtures/stdlib/str_trim_unicode.zz — trim() Unicode parity.
+// str.trim strips Unicode White_Space (NBSP, EM SPACE, NEL, VT/FF, ...),
+// matching the VM's Rust str::trim (issue #277: native kept them).
+import std.str
+
+func main() {
+  nbsp := str.trim(" ")
+  nbsp_len := len(nbsp)
+  println("nbsp_len={nbsp_len}")
+  emsp := str.trim(" hi ")
+  println("emsp={emsp}")
+  vt := str.trim("\x0bhi\x0c")
+  println("vt={vt}")
+  nel := str.trim("\x85hi\x85")
+  println("nel={nel}")
+  mixed := str.trim(" \t  \nx　 \t ")
+  println("mixed={mixed}")
+  empty := str.trim("   ")
+  empty_len := len(empty)
+  println("empty_len={empty_len}")
+  lead := str.trim_start("  ab  ")
+  println("lead={lead}")
+  trail := str.trim_end("  ab  ")
+  println("trail={trail}")
+  println("str_trim_unicode_ok")
+}

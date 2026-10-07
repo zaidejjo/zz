@@ -1,0 +1,30 @@
+// features: closures, hof, locals, print
+// E2E: zero-arg closures spelled `|| body` (issue #261).
+// `||` in operand position opens an empty parameter list; after a left
+// operand every spacing still parses as boolean-or.
+
+// Basic zero-arg closure
+f := || 42
+println(f())
+
+// With return type annotation
+g := || -> int 7
+println(g())
+
+// Thunk passed as a callback
+func run(thunk: func() -> int) -> int {
+    thunk()
+}
+println(run(|| 99))
+
+// Boolean-or keeps working at every spacing
+println(true || false)
+println(true||false)
+println(true ||false)
+println(true|| false)
+x := 1
+y := 2
+println(x == 1 || y == 3)
+println(x == 9 || y == 2)
+
+println("closure_zero_arg_ok")

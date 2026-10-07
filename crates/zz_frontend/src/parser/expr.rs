@@ -860,6 +860,14 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace => self.parse_dict_or_block(),
             TokenKind::LBracket => self.parse_array_literal(),
             TokenKind::Pipe => self.parse_closure(),
+            // Zero-arg closure spelled `|| body`: the lexer always emits a
+            // single `OrOr` token for `||`, so the parser never sees two
+            // pipes. In operand position (start of a primary expression)
+            // `||` cannot be binary-or — there is no left operand — so
+            // treat it as the empty parameter list opener. Binary `a || b`
+            // still parses via `parse_or`, which only runs after a left
+            // side has been parsed.
+            TokenKind::OrOr => self.parse_empty_closure(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => {
                 let w = self.advance();
@@ -1073,6 +1081,30 @@ impl<'a> Parser<'a> {
         let span = pipe_tok.span.join(body.span());
         Expr::Closure {
             params,
+            ret_ty,
+            body: Box::new(body),
+            span,
+        }
+    }
+
+    /// Zero-argument closure spelled `|| body` (issue #261).
+    ///
+    /// The lexer emits one `OrOr` token for `||`, so `parse_closure` (which
+    /// expects two `Pipe` tokens) can never trigger. This consumes the
+    /// `OrOr` as the empty parameter list and parses the body identically.
+    /// Only called from `parse_primary`, i.e. operand position where binary
+    /// `a || b` is impossible because no left operand exists.
+    pub(crate) fn parse_empty_closure(&mut self) -> Expr {
+        let pipes = self.advance(); // `||`
+        let ret_ty = if self.eat(TokenKind::Arrow) {
+            Some(self.parse_type())
+        } else {
+            None
+        };
+        let body = self.parse_expr();
+        let span = pipes.span.join(body.span());
+        Expr::Closure {
+            params: Vec::new(),
             ret_ty,
             body: Box::new(body),
             span,

@@ -1445,37 +1445,112 @@ zz_value zz_str_endswith(zz_value s, zz_value suffix, int *err) {
     return (zz_value){ZZ_BOOL, {.b = memcmp(zz_str_ptr(s.s) + s.s->len - suffix.s->len, zz_str_ptr(suffix.s), suffix.s->len) == 0}};
 }
 
-// str.trim(s) — strip leading/trailing whitespace
+// Unicode White_Space (matches Rust `char::is_whitespace`, i.e. what VM
+// `str.trim` uses via `str::trim`). Native previously stripped ASCII-only
+// `{space,\t,\n,\r}`, diverging on NBSP, NEL, U+2000..U+200A, etc.
+// (issue #277). Keep this table in sync with Rust semantics.
+static int zz_is_space_cp(int cp) {
+    if (cp == 0x20 || (cp >= 0x09 && cp <= 0x0D)) return 1;
+    switch (cp) {
+    case 0x85: case 0xA0: case 0x1680:
+    case 0x2028: case 0x2029: case 0x202F: case 0x205F: case 0x3000:
+        return 1;
+    default:
+        return cp >= 0x2000 && cp <= 0x200A;
+    }
+}
+
+// Decode one UTF-8 sequence at `d[pos..len]`. Returns byte length (1-4), or
+// 0 for invalid/ truncated. Never reads past `len`.
+static size_t zz_utf8_decode_at(const char *d, size_t len, size_t pos, int *cp) {
+    if (pos >= len) return 0;
+    unsigned char b0 = (unsigned char)d[pos];
+    if (b0 < 0x80) { *cp = b0; return 1; }
+    size_t want = 0;
+    int min = 0, c = 0;
+    if ((b0 & 0xE0) == 0xC0) { want = 2; c = b0 & 0x1F; min = 0x80; }
+    else if ((b0 & 0xF0) == 0xE0) { want = 3; c = b0 & 0x0F; min = 0x800; }
+    else if ((b0 & 0xF8) == 0xF0) { want = 4; c = b0 & 0x07; min = 0x10000; }
+    else return 0;
+    if (pos + want > len) return 0;
+    for (size_t i = 1; i < want; i++) {
+        unsigned char b = (unsigned char)d[pos + i];
+        if ((b & 0xC0) != 0x80) return 0;
+        c = (c << 6) | (b & 0x3F);
+    }
+    if (c < min || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) return 0;
+    *cp = c;
+    return want;
+}
+
+// Byte length of the UTF-8 sequence ending just before `end` (end > start).
+// Returns 0 when the trailing bytes are not a valid sequence.
+static size_t zz_utf8_len_before(const char *d, size_t start, size_t end, int *cp) {
+    size_t s = end - 1;
+    while (s > start && (((unsigned char)d[s] & 0xC0) == 0x80)) s--;
+    int c = 0;
+    size_t n = zz_utf8_decode_at(d, end, s, &c);
+    if (n == 0 || s + n != end) return 0;
+    *cp = c;
+    return n;
+}
+
+// str.trim(s) — strip leading/trailing Unicode whitespace
+// str.trim(s) — strip leading/trailing Unicode whitespace (see above)
 zz_value zz_str_trim(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
     const char *d = zz_str_ptr(s.s);
     size_t len = s.s->len;
     size_t start = 0, end = len;
-    while (start < end && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
-    while (end > start && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
+    while (start < end) {
+        int cp = 0;
+        size_t n = zz_utf8_decode_at(d, len, start, &cp);
+        if (n == 0) break; // invalid byte: keep, never strip
+        if (!zz_is_space_cp(cp)) break;
+        start += n;
+    }
+    while (end > start) {
+        int cp = 0;
+        size_t n = zz_utf8_len_before(d, start, end, &cp);
+        if (n == 0) break;
+        if (!zz_is_space_cp(cp)) break;
+        end -= n;
+    }
     return zz_str_new(d + start, end - start);
 }
 
-// str.trim_start(s) — strip leading whitespace
+// str.trim_start(s) — strip leading Unicode whitespace
 zz_value zz_str_trim_start(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
     const char *d = zz_str_ptr(s.s);
     size_t len = s.s->len;
     size_t start = 0;
-    while (start < len && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
+    while (start < len) {
+        int cp = 0;
+        size_t n = zz_utf8_decode_at(d, len, start, &cp);
+        if (n == 0) break;
+        if (!zz_is_space_cp(cp)) break;
+        start += n;
+    }
     return zz_str_new(d + start, len - start);
 }
 
-// str.trim_end(s) — strip trailing whitespace
+// str.trim_end(s) — strip trailing Unicode whitespace
 zz_value zz_str_trim_end(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
     const char *d = zz_str_ptr(s.s);
     size_t len = s.s->len;
     size_t end = len;
-    while (end > 0 && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
+    while (end > 0) {
+        int cp = 0;
+        size_t n = zz_utf8_len_before(d, 0, end, &cp);
+        if (n == 0) break;
+        if (!zz_is_space_cp(cp)) break;
+        end -= n;
+    }
     return zz_str_new(d, end);
 }
 

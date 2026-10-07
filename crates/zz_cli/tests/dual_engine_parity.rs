@@ -725,6 +725,11 @@ parity_strict!(parity_syntax_elif_chain, "syntax", "elif_chain.zz");
 parity_strict!(parity_syntax_top_level_elif, "syntax", "top_level_elif.zz");
 parity_strict!(parity_syntax_chained_calls, "syntax", "chained_calls.zz");
 parity_strict!(
+    parity_syntax_closure_zero_arg,
+    "syntax",
+    "closure_zero_arg.zz"
+);
+parity_strict!(
     parity_syntax_range_var_bounds,
     "syntax",
     "range_var_bounds.zz"
@@ -1129,6 +1134,11 @@ parity_strict!(
     parity_stdlib_str_utf8_parity,
     "stdlib",
     "str_utf8_parity.zz"
+);
+parity_strict!(
+    parity_stdlib_str_trim_unicode,
+    "stdlib",
+    "str_trim_unicode.zz"
 );
 parity_strict!(
     parity_stdlib_vec_nested_str_parity,

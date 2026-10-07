@@ -223,6 +223,7 @@ e2e_success_test!(e2e_syntax_scalar_copy, "syntax", "scalar_copy.zz");
 e2e_success_test!(e2e_syntax_elif_chain, "syntax", "elif_chain.zz");
 e2e_success_test!(e2e_syntax_top_level_elif, "syntax", "top_level_elif.zz");
 e2e_success_test!(e2e_syntax_chained_calls, "syntax", "chained_calls.zz");
+e2e_success_test!(e2e_syntax_closure_zero_arg, "syntax", "closure_zero_arg.zz");
 e2e_success_test!(e2e_syntax_empty_infer, "syntax", "empty_infer.zz");
 e2e_success_test!(
     e2e_syntax_closure_annotations,
@@ -612,6 +613,7 @@ e2e_success_test!(
     "stdlib",
     "str_extended_test.zz"
 );
+e2e_success_test!(e2e_stdlib_str_trim_unicode, "stdlib", "str_trim_unicode.zz");
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 e2e_success_test!(e2e_stdlib_input_chained, "stdlib", "input_chained.zz");
 e2e_success_test!(e2e_stdlib_http_client_test, "stdlib", "http_client_test.zz");
