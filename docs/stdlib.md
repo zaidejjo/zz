@@ -85,6 +85,9 @@ import std.str
 | `str.starts_with_at` | `str.starts_with_at(s: str, sub: str, pos: int) -> bool` | Match at byte offset (empty never matches) |
 | `str.ends_with_at` | `str.ends_with_at(s: str, sub: str, pos: int) -> bool` | Match ending at byte offset `pos` |
 | `str.trim_span` | `str.trim_span(s: str, start: int, end: int) -> [int]` | Trimmed `[lo, hi]` byte offsets (Unicode ws, both backends) |
+| `str.find_in` | `str.find_in(s: str, sub: str, start: int, end: int) -> int` | First match in `[start, end)` (-1 on miss) |
+| `str.rfind_in` | `str.rfind_in(s: str, sub: str, start: int, end: int) -> int` | Last match in `[start, end)` (-1 on miss) |
+| `str.count_in` | `str.count_in(s: str, sub: str, start: int, end: int) -> int` | Non-overlapping matches in `[start, end)` |
 | `str.bytes` | `str.bytes(s: str) -> [int]` | UTF-8 bytes as plain ints (one copy) |
 | `bytes.to_str` | `bytes.to_str(vs: [int]) -> Result<str>` | Strict UTF-8 decode; range/invalid input is `.err` on both backends |
 | `bytes.to_ints` | `bytes.to_ints(b: bytes) -> [int]` | Opaque byte buffer as plain ints |
