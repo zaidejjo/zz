@@ -45,7 +45,9 @@ async fn initialize_returns_capabilities() {
     assert!(caps.document_symbol_provider.is_some());
     assert!(caps.workspace_symbol_provider.is_some());
     assert!(caps.rename_provider.is_some());
+    assert!(caps.references_provider.is_some());
     assert!(caps.document_highlight_provider.is_some());
+    assert!(caps.inlay_hint_provider.is_some());
     assert!(caps.completion_provider.is_some());
     assert!(caps.signature_help_provider.is_some());
 }

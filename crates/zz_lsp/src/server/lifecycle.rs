@@ -45,6 +45,7 @@ pub(crate) async fn handle_initialize(
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
             rename_provider: Some(OneOf::Left(true)),
+            references_provider: Some(OneOf::Left(true)),
             document_highlight_provider: Some(OneOf::Left(true)),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
@@ -57,6 +58,7 @@ pub(crate) async fn handle_initialize(
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             }),
             document_formatting_provider: Some(OneOf::Left(true)),
+            inlay_hint_provider: Some(OneOf::Left(true)),
             folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
             semantic_tokens_provider: Some(
                 SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
