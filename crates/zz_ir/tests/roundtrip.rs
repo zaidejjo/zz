@@ -640,3 +640,83 @@ fn vartab_records_loop_var_slots() {
     let err = verify::verify(&bad).expect_err("vartab mismatch accepted");
     assert!(err.message.contains("vartab"), "wrong error: {err}");
 }
+
+#[test]
+fn nested_for_loops_verify() {
+    // #311: any `for` nested inside any loop was rejected with
+    // `join depth mismatch` — the depth model gave loop exits
+    // setup_depth+1, but `ForNext` exhaustion truncates to the result
+    // placeholder (setup_depth-1). Single loops never noticed
+    // (single-predecessor exits); the outer back-edge exposed it.
+    // Covers for-for and for-in-while (same signature, also failed).
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    sigs.insert("m".to_string(), int_sig(0));
+    for src in [
+        "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n s = s + 1\n }\n }\n s\n}\nm()",
+        "func m() {\n s := 0\n j := 0\n while j < 3 {\n for k in 0..3 {\n s = s + 1\n }\n j = j + 1\n }\n s\n}\nm()",
+    ] {
+        let module = lower_typed_spanmap(src, &sigs);
+        // lower_typed runs max_stack_for + full verify internally, so a
+        // clean return is the regression assertion; re-verify explicitly
+        // to pin the module state too.
+        verify::verify(&module).expect("nested loops must verify");
+    }
+}
+
+#[test]
+fn verify_accepts_error_declared_iterable() {
+    // Slot reused across disjoint lifetimes widens to `Error`
+    // (genuinely polymorphic): the verifier must wildcard-accept it at
+    // iterable/bool/int positions instead of rejecting the program —
+    // backends never unbox `Error` and dispatch guards fail closed.
+    // Hand-built loop over an `Error`-declared slot (no allocator
+    // dependence): must verify. Before the fix this failed with
+    // `cannot iterate non-iterable` (the loop_mutate fixture hit it
+    // via a dead int loop-var slot reused by an array binding).
+    use zz_ir::{FuncDef, FuncSig, Module, Op, Span};
+    let module = Module {
+        types: vec![
+            zz_ir::IrType::Unknown,
+            zz_ir::IrType::Error,
+            zz_ir::IrType::Unit,
+        ],
+        strings: vec!["m".to_string()],
+        consts: vec![zz_ir::Const::Unit],
+        funcs: vec![FuncDef {
+            name: zz_ir::StrId(0),
+            arity: 0,
+            params: vec![],
+            sig: FuncSig {
+                params: vec![],
+                ret: zz_ir::TypeId(0),
+            },
+            toplevel_slots: vec![],
+            vartab: vec![vec![]],
+            locals: vec![zz_ir::TypeId(1)],
+            // [push result placeholder, load Error slot, setup,
+            // header, empty body, back-edge, exit pop].
+            code: vec![
+                Op::PushConst(zz_ir::ConstId(0)),
+                Op::LoadSlot(0),
+                Op::ForSetup {
+                    exit: 6,
+                    header: 4,
+                    num_vars: 0,
+                },
+                Op::Safepoint,
+                Op::ForNext {
+                    vars: vec![],
+                    exit: 6,
+                    in_env: false,
+                },
+                Op::Jump(4),
+                Op::Pop,
+            ],
+            spans: vec![Span::new(0, 0); 7],
+            max_stack: 3,
+        }],
+        entry: zz_ir::FuncId(0),
+    };
+    verify::verify(&module).expect("Error-declared iterable rejected");
+}

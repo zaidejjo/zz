@@ -359,9 +359,16 @@ fn simulate(code: &[Op], spans: &[Span]) -> Result<u32, IrError> {
     }
     depth_at[0] = Some(0);
     let mut max_depth: i64 = 0;
-    // Loop-exit pcs mapped to their expected depth. Every loop exit
-    // truncates the stack to (setup depth + 1) at runtime, so all edges
-    // into an exit must carry exactly that — never the local `after`.
+    // Loop-exit pcs mapped to their expected depth. `ForNext`
+    // exhaustion pops the index/vars AND the iterable, then truncates
+    // to the result placeholder (`stack_base + 1`): the exit edge
+    // carries setup_depth - 1 ([..., PH]). `WhileCond` exhaustion
+    // truncates to its base with no pop: the exit carries setup_depth,
+    // and the historical +1 there is load-bearing for while-emission
+    // shapes — do not "fix" it without re-verifying every while
+    // fixture. (A uniform +1 used to cover both; harmless for
+    // unnested loops whose exits have a single predecessor, but it
+    // poisoned outer back-edges around nested `for` loops: #311.)
     let mut loop_exits: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
     while let Some(pc) = work.pop() {
         let depth = depth_at[pc].expect("verifier worklist");
@@ -370,7 +377,9 @@ fn simulate(code: &[Op], spans: &[Span]) -> Result<u32, IrError> {
         if matches!(op, Op::Swap) && depth < 2 {
             return Err(IrError::spanned("swap needs two stack values", span_at(pc)));
         }
-        if let Op::ForSetup { exit, .. } | Op::WhileSetup { exit, .. } = op {
+        if let Op::ForSetup { exit, .. } = op {
+            loop_exits.entry(*exit as usize).or_insert(depth - 1);
+        } else if let Op::WhileSetup { exit, .. } = op {
             loop_exits.entry(*exit as usize).or_insert(depth + 1);
         }
         // `Pop` on an empty stack is a runtime no-op (type aliases emit
@@ -1016,7 +1025,11 @@ fn infer_func(
     };
     let check_exact_bool = |v: TV, what: &str, span: Span| -> Result<(), IrError> {
         if let TV::T(t) = &v {
-            if *t != IrType::Bool {
+            // `Error` is the slot-reuse top (disjoint lifetimes sharing
+            // one frame slot): genuinely polymorphic, never unboxed —
+            // accept, dispatch guards fail closed at runtime. Every
+            // other concrete mismatch is still a compiler bug.
+            if *t != IrType::Bool && *t != IrType::Error {
                 return Err(IrError::spanned(format!("type mismatch: {what}"), span));
             }
         }
@@ -1024,7 +1037,8 @@ fn infer_func(
     };
     let check_exact_int = |v: TV, what: &str, span: Span| -> Result<(), IrError> {
         if let TV::T(t) = &v {
-            if *t != IrType::Int {
+            // Same reuse-top exemption as above.
+            if *t != IrType::Int && *t != IrType::Error {
                 return Err(IrError::spanned(format!("type mismatch: {what}"), span));
             }
         }
@@ -1036,7 +1050,8 @@ fn infer_func(
             .ok_or_else(|| IrError::spanned(format!("stack underflow at {pc}"), span_at(pc)))
     };
     // Loop-exit truncation depths (mirrors the depth simulation's
-    // relative rule: setup entry length + 1).
+    // split rule: `for` exits carry setup length - 1, `while` exits
+    // keep the historical + 1).
     let mut loop_exits: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     let mut states: Vec<Option<Vec<TV>>> = vec![None; n];
     let mut work = vec![0usize];
@@ -1048,7 +1063,11 @@ fn infer_func(
         };
         let op = &func.code[pc];
         let span = span_at(pc);
-        if let Op::ForSetup { exit, .. } | Op::WhileSetup { exit, .. } = op {
+        if let Op::ForSetup { exit, .. } = op {
+            // Never underflow on hostile input: the verifier rejects,
+            // never panics (spec §8).
+            loop_exits.insert(*exit as usize, st.len().saturating_sub(1));
+        } else if let Op::WhileSetup { exit, .. } = op {
             loop_exits.insert(*exit as usize, st.len() + 1);
         }
         match op {
@@ -1164,6 +1183,11 @@ fn infer_func(
                         | IrType::Array(_)
                         | IrType::Bytes
                         | IrType::Dict(_, _) => {}
+                        // Slot-reuse top (see check_exact_bool): a frame
+                        // slot shared across disjoint lifetimes widens to
+                        // `Error`; backends never unbox it and loop
+                        // dispatch guards fail closed at runtime.
+                        IrType::Error => {}
                         _ => {
                             return Err(IrError::spanned(
                                 "type mismatch: cannot iterate non-iterable".to_string(),
@@ -1593,8 +1617,9 @@ fn infer_func(
                 continue;
             }
             if is_loop_exit(op, t) {
-                // Loop exits truncate (mirror depth rule): setup depth + 1
-                // entries survive; the top (loop result) is admitted
+                // Loop exits truncate (mirror depth rule): a `for` exit
+                // keeps setup length - 1 entries, a `while` exit the
+                // historical + 1; the top (loop result) is admitted
                 // Unknown, which downstream checks absorb.
                 match loop_exits.get(&t) {
                     Some(want) => {

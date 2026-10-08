@@ -790,6 +790,13 @@ impl BuildOptions {
             a.bytes.hash(&mut h);
         }
         target.unwrap_or("host").hash(&mut h);
+        // Hash the sanitizer list: flipping ZZ_SANITIZE must not serve
+        // a binary built under the other setting. A stale uninstrumented
+        // binary on a warm cache made sanitizer runs pass vacuously
+        // (the UAF in loop_mutate only reproduced on cold caches).
+        for s in sanitize_list() {
+            s.hash(&mut h);
+        }
         h.finish()
     }
 }
