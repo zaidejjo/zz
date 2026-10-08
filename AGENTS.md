@@ -1,129 +1,108 @@
 # AGENTS.md — ZZ Language Repository
 
-## Build & Test Commands
+The ZZ programming language toolchain: a compiled language with a
+tree-walker interpreter, bytecode VM, and AOT backends (direct C + chunk→C),
+a growing async stdlib, LSP, package manager, and plugin system.
+
+## Quick Start
 
 ```bash
-# Install the CLI
-cargo install --path crates/zz_cli
+cargo install --path crates/zz_cli   # install the `zz` binary
+zz run main.zz                        # run (VM)
+zz run --native main.zz               # run (AOT-compiled)
+zz test                               # Zhunit-style tests in .zz files
+```
 
-# Run all tests (CI equivalent — slow: native builds + plugin projects)
-cargo test --all
+## Build, Test, Lint (CI gates all three)
 
-# Fast iteration suite (skips native legs + plugin_e2e, minutes faster)
-./scripts/test-fast.sh
-
-# Parity VM leg only (skips per-fixture `zz run --native` C builds)
+```bash
+cargo test --all                                   # full CI equivalent (slow: native legs + plugins)
+./scripts/test-fast.sh                             # fast loop (VM legs only, skips natives + plugin_e2e)
 ZZ_PARITY_VM_ONLY=1 cargo test -p zz_cli --test dual_engine_parity
-
-# Run tests for a single crate
-cargo test -p zz_frontend
-cargo test -p zz_checker
-cargo test -p zz_cli
-
-# Lint (CI enforces zero warnings)
-cargo clippy --all-targets -- -D warnings
-
-# Format check (CI enforces)
-cargo fmt --check
+cargo test -p zz_frontend | -p zz_checker | -p zz_cli | -p zz_runtime | -p zz_stdlib | -p zz_codegen
+cargo clippy --all-targets -- -D warnings          # zero warnings enforced
+cargo fmt --check                                  # rustfmt enforced (run `cargo fmt` first)
 ```
 
-## Architecture
+Long commands (>2 min: full parity, `--all`): run in background and
+continue working; never block polling. Never prefix `timeout`.
 
-6 crates in a linear pipeline:
+## Architecture (linear pipeline)
 
 ```
-zz_frontend → zz_checker → zz_stdlib → zz_cli
-                 |                       |
-                 v                       v
-           zz_runtime ──────────────→ zz_lsp
+zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen } → zz_cli
+                                  zz_stdlib ─┘                ↓
+                          zz_arena, zz_fmt, zz_native_rt, zz_plugin, zz_pm, zz_lsp
 ```
 
-- **zz_frontend**: Lexer, parser, AST, lossless formatter, diagnostics
-- **zz_checker**: Unification-based type checker with inference
-- **zz_runtime**: Tree-walker interpreter + bytecode VM
-- **zz_stdlib**: 70+ native functions (two registries: `stdlib_funcs` for checker, `stdlib_natives` for runtime)
-- **zz_cli**: Binary `zz` — REPL, run, check, fix, fmt
-- **zz_lsp**: Language server binary `zz-lsp`
+- **zz_frontend**: lexer, parser, AST, lossless formatter, diagnostics
+- **zz_checker**: unification type checker with inference (spans everywhere,
+  Levenshtein typo suggestions, fix-it hints with safety levels)
+- **zz_hir / zz_ir**: typed HIR, portable IR (codec + disassembler), callgraph + DCE
+- **zz_runtime**: tree-walker interpreter + bytecode VM + C-ABI bridge (`c_abi.rs`)
+- **zz_codegen**: AOT backends — HIR→C (`lower/`) and chunk→C (`chunk.rs`) + Clang driver, PGO, cross targets
+- **zz_stdlib**: 900+ natives (VM registry + C twins + Rust staticlib via `ffi.rs`)
+- **zz_cli** (`zz`): run/build/test/check/fix/fmt, REPL, loader with module cache, doctor, upgrade
+- **zz_lsp** (`zz-lsp`), **zz_pm** (registry), **zz_plugin**, **zz_fmt**, **zz_arena**
 
-Binary entrypoints:
-- `crates/zz_cli/src/main.rs` → `zz` binary
-- `crates/zz_lsp/src/main.rs` → `zz-lsp` binary
+## How Work Lands (no exceptions)
+
+1. New branch off `dev` (`feat/...`, `fix/...`, `chore/...`).
+2. Small reviewable commits, present tense (`fix(codegen): ...`).
+3. `cargo fmt`, zero clippy warnings, relevant tests green **locally**.
+4. PR **to `dev`** → green CI → merge. Never push to `dev`/`main`
+   directly. `main` advances via `dev`→`main` PRs only (releases cut from `main`).
+
+## Adding a Stdlib Native (five locksteps — miss one and CI fails)
+
+1. `zz_stdlib/src/funcs.rs` — checker signature (+ count assertion).
+2. `zz_stdlib/src/natives/` — Rust VM implementation.
+3. `zz_codegen/src/runtime/*.c` + `.h` — C twin (byte-identical semantics).
+4. `zz_codegen/src/lower/mod.rs` (`native_impl`) — AOT name mapping.
+5. Fixture `tests/fixtures/stdlib/<name>_test.zz` + registration in
+   `e2e.rs` + `dual_engine_parity.rs` (+ `batch_lists.rs`, or `EXCLUDED`
+   with reason).
+
+Contracts for search/byte natives: byte offsets (O(1)), backend-identical,
+matching Rust `str::find` edge semantics. New compiler work needs
+`cargo install --path crates/zz_cli` before dogfooding.
 
 ## Testing Conventions
 
-### Unit tests
-- `zz_frontend/src/tests/` — parser, lexer, AST tests
-- `zz_checker/tests/type_check_tests.rs` — 900+ type-check tests using `check_src()` helper
+- Unit: `zz_frontend/src/tests/`, `zz_checker/tests/type_check_tests.rs`
+  (`check_src()` helper), per-crate `#[test]` modules.
+- E2E (`zz_cli/tests/e2e.rs`): fixture must exit 0 with a non-empty last
+  line (success fixtures) or exit 1 with "error" on stderr (errors/).
+- Parity (`dual_engine_parity.rs`): VM-vs-native strict equality;
+  `parity_strict!(...)` per fixture; the sweep (`parity_discover_all_fixtures`)
+  fails on any unexpected result — fix the code or, for genuine gaps, file
+  an issue and list in `known_native_failures()` (the sweep also shouts
+  `FIXED!` when a listing goes stale — remove it the same day).
+- Batched parity (`batched_parity.rs` + `batch_lists.rs`): every strict
+  fixture must be batched or `EXCLUDED` with reason (inventory test enforces).
+- Tests must be order-independent: libtest runs in parallel — never rely
+  on another test's global registration; re-register idempotently.
 
-### End-to-end tests (`crates/zz_cli/tests/e2e.rs`)
-- Discovers `.zz` fixture files under `tests/fixtures/`
-- **Success fixtures** (`syntax/`, `types/`, `stdlib/`): must exit 0, last stdout line contains success marker
-- **Error fixtures** (`errors/`): must exit 1, stderr contains "error"
-- Each fixture must print a final line with a success marker (e.g., `declarations_ok`)
-- Tests use `e2e_success_test!` and `e2e_error_test!` macros — register new fixtures in `e2e.rs`
+## Shell Gotchas (this repo bites here)
 
-### Fixture structure
-```
-tests/fixtures/
-├── syntax/     # Parser/syntax features (23 fixtures)
-├── types/      # Type system features (4 fixtures)
-├── stdlib/     # Standard library tests (19 fixtures)
-└── errors/     # Expected compile/runtime errors
-```
+- zsh: never `echo ===`, never bare `==` in commands (glob/parse errors).
+- `zz test <file>` resolves imports relative to the importing file only.
+- `zz check <dir>` module blind spot: N errors usually share one root cause.
+- Arrays/structs are values (mutating a param mutates a copy).
+- `zz` binary name is globally safe; AUR/prebuilt zips need no sources,
+  but native builds outside a checkout need `ZZ_NATIVE_RT_DIR`.
 
-## Key Patterns
+## Work Preservation (absolute)
 
-### Stdlib registration (lockstep)
-Two registries must be kept in sync when adding stdlib functions:
-1. `zz_stdlib/src/funcs.rs` — type signatures for the checker
-2. `zz_stdlib/src/natives.rs` — Rust implementations for the runtime
+1. Commit every completed unit immediately; never end work dirty.
+2. NEVER `reset --hard` / `checkout -- .` / `clean -fd` on a non-clean
+   tree (`git status --porcelain` first). Stash (named) to switch context.
+3. User branches are read-only: never commit to, reset, or delete them.
+4. End of session: tree clean, everything committed and pushed.
 
-Module namespaces: `import std.io` copies `std.io.*` entries to `io.*` via `register_module_namespace()`.
+## Releases
 
-### Known stdlib modules
-`io`, `str`, `vec`, `json`, `http`, `fs`, `env`, `math`, `time`, `encoding`, `net`
-
-### Diagnostics
-- Spans everywhere — all errors are spanned
-- Levenshtein suggestions for typos
-- Fix-it hints with safety levels (Safe / Ambiguous)
-- `codespan-reporting` for rendering
-
-## CI - ITS NOW IN TODO NOT NOW
-
-`.github/workflows/ci.yml` runs on push to main and all PRs:
-1. `cargo fmt --check`
-2. `cargo clippy --all-targets -- -D warnings`
-3. `cargo test --all`
-
-Matrix: ubuntu-latest, macos-latest, windows-latest.
-
-## Gotchas
-
-- `examples/` and `plans/` are gitignored
-- `--fix` mode has three safety levels: auto (safe only), `--hard` (all), `-i` (interactive)
-- The `zz` binary name collides with nothing in the workspace — safe to install globally
-
-## Work Preservation (NEVER lose user or agent work)
-
-Uncommitted work has been destroyed before by `git reset --hard` on a
-dirty tree. These rules are absolute:
-
-1. **Commit early and often.** Every completed unit (feature, fix,
-   passing tests) gets its own commit on the feature branch immediately —
-   never batch hours of work into one commit, never end a work block with
-   a dirty tree.
-2. **NEVER `git reset --hard`, `git checkout -- .`, or `git clean -fd`**
-   on a tree that is not provably clean (`git status --porcelain` empty).
-   No exceptions, including "rescue" situations.
-3. **Moving work between branches:** commit first, then cherry-pick or
-   merge. If the tree is dirty and you must switch context, `git stash`
-   (named: `git stash push -m "..."`) — then verify the stash entry
-   exists before touching anything.
-4. **User branches are read-only territory.** Never commit to, reset,
-   or delete a branch you did not create. Work on your own feature
-   branches only.
-5. **Before any destructive git command**, run `git status --porcelain`
-   and `git stash list`, and confirm there is nothing to lose.
-6. End of session: tree must be clean or every change committed and
-   pushed (or the user explicitly told where uncommitted work lives).
+Version lives in workspace `Cargo.toml`; releases cut from `main` via
+`.github/workflows/release.yml` (per-arch zips incl. `lib/` native
+runtime). Downstream (`zcc` pin in `packaging/zz.version`, AUR) follows
+the published tag — never point at moving branches.
