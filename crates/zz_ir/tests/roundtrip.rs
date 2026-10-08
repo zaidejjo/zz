@@ -153,6 +153,7 @@ fn verify_rejects_join_mismatch() {
                 ret: zz_ir::TypeId(0),
             },
             toplevel_slots: vec![],
+            locals: vec![],
             // arm 1 pushes two values, arm 2 pushes one → join mismatch.
             code: vec![
                 Op::PushConst(zz_ir::ConstId(0)),
@@ -262,4 +263,332 @@ fn typed_signatures_populate() {
     let bytes = codec::encode(&module);
     let loaded = codec::decode(&bytes).expect("decode failed");
     assert_eq!(codec::encode(&loaded), bytes);
+}
+
+fn check_typed(
+    src: &str,
+) -> (
+    std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>,
+    zz_frontend::ast::Program,
+) {
+    use std::collections::HashMap;
+    let parsed = zz_frontend::parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (result, spanmap) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    assert!(
+        result.errors.is_empty(),
+        "check errors: {:?}",
+        result.errors
+    );
+    (spanmap, parsed.program)
+}
+
+fn int_sig(params: usize) -> zz_checker::FuncSig {
+    zz_checker::FuncSig {
+        generics: vec![],
+        bounds: vec![],
+        params: (0..params)
+            .map(|i| (format!("p{i}"), zz_checker::Type::Int))
+            .collect(),
+        has_default: vec![false; params],
+        ret: zz_checker::Type::Int,
+        is_extern: false,
+        extern_c_symbol: None,
+    }
+}
+
+fn lower_typed_spanmap(
+    src: &str,
+    sigs: &std::collections::HashMap<String, zz_checker::FuncSig>,
+) -> zz_ir::Module {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    let (spanmap, program) = check_typed(src);
+    let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+        &program,
+        Arc::new(spanmap),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(std::collections::HashSet::new()),
+    );
+    zz_ir::lower::lower_typed(&chunk, sigs).expect("lower_typed failed")
+}
+
+fn local_types(module: &zz_ir::Module, fname: &str) -> Vec<String> {
+    let f = module
+        .funcs
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| module.strings.get(f.name.0 as usize).map(String::as_str) == Some(fname))
+        // The entry chunk ("main") shadows a user `func main`: prefer
+        // the non-entry function.
+        .find(|(i, _)| zz_ir::FuncId(*i as u32) != module.entry)
+        .map(|(_, f)| f)
+        .unwrap_or_else(|| panic!("{fname} lifted"));
+    verify::verify(module).expect("verify failed");
+    f.locals
+        .iter()
+        .map(|id| {
+            module
+                .types
+                .get(id.0 as usize)
+                .map(|t| format!("{t:?}"))
+                .unwrap_or_else(|| "?".to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn locals_declare_int_slots() {
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    sigs.insert("f".to_string(), int_sig(1));
+    let module = lower_typed_spanmap(
+        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n s\n}\nf(1)",
+        &sigs,
+    );
+    // Slot 0 = param n (Int from sig), slot 1 = s (Int recorded).
+    assert_eq!(local_types(&module, "f"), vec!["Int".to_string(); 2]);
+}
+
+#[test]
+fn locals_declare_loop_and_array_slots() {
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    sigs.insert("m".to_string(), int_sig(0));
+    let module = lower_typed_spanmap(
+        "func m() {\n a := [1, 2]\n a[0] = 3\n s := 0\n for v in a {\n s = s + v\n }\n s\n}\nm()",
+        &sigs,
+    );
+    let locals = local_types(&module, "m");
+    // a = Array(Int) (literal carries element types), s/v = Int.
+    assert!(
+        locals.iter().any(|t| t.starts_with("Array(")),
+        "array slot missing: {locals:?}"
+    );
+    assert!(
+        locals.iter().filter(|t| *t == "Int").count() >= 2,
+        "int slots missing: {locals:?}"
+    );
+    // No slot may be *wrongly* typed here (Unknown tolerated only for
+    // machine temps, never a named local).
+    assert!(
+        !locals.iter().any(|t| t == "Bool" || t == "Str"),
+        "wrong slot type: {locals:?}"
+    );
+}
+
+#[test]
+fn locals_reuse_conflicts_box() {
+    use std::collections::HashMap;
+    let sigs = HashMap::new();
+    let module = lower_typed_spanmap(
+        "func main() {\n { s := 0\n s = s + 1 }\n { s := \"x\"\n s = s }\n}\n",
+        &sigs,
+    );
+    let locals = local_types(&module, "main");
+    // One slot holds Int then Str across disjoint scopes: genuinely
+    // polymorphic, so the table honestly reports the "unknown" top
+    // (`Error`, wildcard-accept + never unboxed). A `Union` here would
+    // poison every load into member-typed stores.
+    assert!(
+        locals.iter().any(|t| t == "Error"),
+        "reuse did not box: {locals:?}"
+    );
+}
+
+#[test]
+fn verify_rejects_slot_store_mismatch() {
+    use zz_ir::{FuncDef, FuncSig, Module, Op, Span};
+    // Hand-built corrupt module: slot 0 declared Int, stores Bool.
+    let u = zz_ir::TypeId(0);
+    let int = zz_ir::TypeId(1);
+    let module = Module {
+        types: vec![
+            zz_ir::IrType::Unknown,
+            zz_ir::IrType::Int,
+            zz_ir::IrType::Bool,
+        ],
+        strings: vec!["f".to_string()],
+        consts: vec![zz_ir::Const::Bool(true)],
+        funcs: vec![FuncDef {
+            name: zz_ir::StrId(0),
+            arity: 0,
+            params: vec![],
+            sig: FuncSig {
+                params: vec![],
+                ret: u,
+            },
+            locals: vec![int],
+            toplevel_slots: vec![],
+            code: vec![Op::PushConst(zz_ir::ConstId(0)), Op::StoreSlot(0)],
+            spans: vec![Span::new(0, 0); 2],
+            max_stack: 1,
+        }],
+        entry: zz_ir::FuncId(0),
+    };
+    let err = verify::verify(&module).expect_err("store mismatch accepted");
+    assert!(err.message.contains("type mismatch"), "wrong error: {err}");
+}
+
+#[test]
+fn verify_rejects_bad_call() {
+    use zz_ir::{FuncDef, FuncSig, Module, Op, Span, StrId, TypeId};
+    // callee g(x: int) -> int; caller passes a bool.
+    let u = TypeId(0);
+    let int = TypeId(1);
+    let caller = FuncDef {
+        name: StrId(0),
+        arity: 0,
+        params: vec![],
+        sig: FuncSig {
+            params: vec![],
+            ret: u,
+        },
+        locals: vec![],
+        toplevel_slots: vec![],
+        code: vec![
+            Op::PushConst(zz_ir::ConstId(0)),
+            Op::CallPath {
+                parts: vec![StrId(1)],
+                argc: 1,
+                pspan: Span::new(0, 0),
+            },
+        ],
+        spans: vec![Span::new(0, 0); 2],
+        max_stack: 1,
+    };
+    let g_sig = FuncSig {
+        params: vec![int],
+        ret: int,
+    };
+    let callee = FuncDef {
+        name: StrId(1),
+        arity: 1,
+        params: vec![zz_ir::Param {
+            name: StrId(2),
+            default: None,
+        }],
+        sig: g_sig,
+        locals: vec![int],
+        toplevel_slots: vec![],
+        code: vec![Op::LoadSlot(0)],
+        spans: vec![Span::new(0, 0); 1],
+        max_stack: 1,
+    };
+    let module = Module {
+        types: vec![
+            zz_ir::IrType::Unknown,
+            zz_ir::IrType::Int,
+            zz_ir::IrType::Bool,
+        ],
+        strings: vec!["f".to_string(), "g".to_string(), "x".to_string()],
+        consts: vec![zz_ir::Const::Bool(true)],
+        funcs: vec![caller, callee],
+        entry: zz_ir::FuncId(0),
+    };
+    let err = verify::verify(&module).expect_err("bad call accepted");
+    assert!(
+        err.message.contains("argument type mismatch"),
+        "wrong error: {err}"
+    );
+}
+
+#[test]
+fn decode_rejects_v1() {
+    // v1 bytes (same framing, version field 1) must be rejected with a
+    // version error, never decoded.
+    let parsed = zz_frontend::parse("1 + 2").program;
+    let chunk = zz_runtime::vm::Compiler::compile_program(&parsed);
+    let module = lower::lower(&chunk).expect("lower failed");
+    let mut bytes = codec::encode(&module);
+    assert!(bytes.len() > 8);
+    // Version field sits right after magic[4].
+    bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+    let err = codec::decode(&bytes).expect_err("v1 accepted");
+    assert!(err.message.contains("version"), "wrong error for v1: {err}");
+}
+
+#[test]
+fn annot_section_is_removable() {
+    // ANNOT carries hints only: a module with a non-empty ANNOT section
+    // decodes, verifies, and raises identically to one without. Proves
+    // the strip-annotations differential (spec §9) by construction.
+    let parsed = zz_frontend::parse("x := 1 + 2\nx").program;
+    let chunk = zz_runtime::vm::Compiler::compile_program(&parsed);
+    let module = lower::lower(&chunk).expect("lower failed");
+    let plain = codec::encode(&module);
+    let mut doctored = plain.clone();
+    let nsec = u32::from_le_bytes(doctored[8..12].try_into().unwrap()) as usize;
+    let mut annot_off = None;
+    let mut annot_len = None;
+    for i in 0..nsec {
+        let base = 12 + i * 12;
+        let tag = u32::from_le_bytes(doctored[base..base + 4].try_into().unwrap());
+        if tag == 7 {
+            annot_off =
+                Some(u32::from_le_bytes(doctored[base + 4..base + 8].try_into().unwrap()) as usize);
+            annot_len = Some(
+                u32::from_le_bytes(doctored[base + 8..base + 12].try_into().unwrap()) as usize,
+            );
+        }
+    }
+    let (off, len) = (
+        annot_off.expect("annot section"),
+        annot_len.expect("annot len"),
+    );
+    assert_eq!(len, 4, "v2 test assumes empty annot section");
+    // Replace the 4-byte zero-count with count=1 + one 3-byte entry.
+    // Payload grows by 7 bytes: ANNOT is last in practice; assert that
+    // instead of handling the general splice.
+    assert_eq!(off + len, doctored.len(), "annot must be last");
+    doctored.truncate(off);
+    doctored.extend_from_slice(&1u32.to_le_bytes());
+    doctored.extend_from_slice(&3u32.to_le_bytes());
+    doctored.extend_from_slice(b"abc");
+    // Fix the section header length.
+    let mut hdr_off = None;
+    for i in 0..nsec {
+        let base = 12 + i * 12;
+        if u32::from_le_bytes(doctored[base..base + 4].try_into().unwrap()) == 7 {
+            hdr_off = Some(base);
+        }
+    }
+    let hb = hdr_off.unwrap();
+    let new_len = (doctored.len() - off) as u32;
+    doctored[hb + 8..hb + 12].copy_from_slice(&new_len.to_le_bytes());
+    // Decodes and verifies exactly like the plain module.
+    let loaded = codec::decode(&doctored).expect("annot decode failed");
+    verify::verify(&loaded).expect("annot verify failed");
+    let plain_loaded = codec::decode(&plain).expect("plain decode failed");
+    assert_eq!(
+        format!("{:?}", loaded),
+        format!("{:?}", plain_loaded),
+        "annot changed the module"
+    );
+}
+
+#[test]
+fn dis_shows_locals_and_v2() {
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    sigs.insert("f".to_string(), int_sig(1));
+    let module = lower_typed_spanmap(
+        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n s\n}\nf(1)",
+        &sigs,
+    );
+    let text = zz_ir::dis::disassemble(&module);
+    assert!(text.contains("; zzcz v2"), "missing v2 header:\n{text}");
+    assert!(text.contains("locals=[int"), "missing locals:\n{text}");
 }
