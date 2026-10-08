@@ -308,6 +308,31 @@ fn verify_func(
             )));
         }
     }
+    // vartab coherence: kth entry ↔ kth `ForNext`, arity matches.
+    // Content is compiler-attested (like `locals`); shape is checked so
+    // hand-built tables fail closed instead of misaligning the emitter.
+    let nfornext = func
+        .code
+        .iter()
+        .filter(|op| matches!(op, Op::ForNext { .. }))
+        .count();
+    if func.vartab.len() != nfornext {
+        return Err(IrError::new(format!(
+            "vartab length mismatch: table has {}, code has {nfornext} for-loops",
+            func.vartab.len()
+        )));
+    }
+    let mut vit = func.vartab.iter();
+    for op in &func.code {
+        if let Op::ForNext { vars, .. } = op {
+            match vit.next() {
+                Some(entry) if entry.len() == vars.len() => {}
+                _ => {
+                    return Err(IrError::new("vartab entry arity mismatch"));
+                }
+            }
+        }
+    }
     // Typed inference + checks (never trusts annotations: none exist).
     infer_func(module, func_idx, funcs_by_name, prim_ids(module))?;
     Ok(observed)

@@ -68,29 +68,39 @@ fn clang_id(clang: &Clang) -> String {
 
 /// Compile-flag generation for the cached runtime archive. Bump on ANY
 /// change to `build_compile_flags` (the key does not hash flags).
-const RT_CACHE_VERSION: &str = "rt4";
+const RT_CACHE_VERSION: &str = "rt6";
 
 /// Assemble the 6-field cache key.
 ///
-/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{pin}-{rt_version}`
+/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{pin}-{rt_version}-{san}`
 /// `pin` is the managed-toolchain pin (`nopin` when none): switching the
 /// `zz toolchain` pin must never reuse an archive built by another
 /// toolchain, even when the resolved `clang_id` hash collides in theory.
 /// (`clang_id` already covers provider path + version output; the pin
 /// additionally keeps cache dirs human-grepable per toolchain.)
+/// `san` is the requested sanitizer set (`nosan` normally): a
+/// sanitizer-instrumented archive must never satisfy a plain link (or
+/// vice versa).
 pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String {
     let fallback_triple = crate::compile::host_triple();
     let triple = target.unwrap_or(&fallback_triple);
     let mode = if optimize { "rel" } else { "dev" };
     let pin = crate::compile::toolchain_pin().unwrap_or_else(|| "nopin".to_string());
+    let san = crate::compile::sanitize_list().join("+");
+    let san = if san.is_empty() {
+        "nosan".to_string()
+    } else {
+        san
+    };
     format!(
-        "{}-{}-{}-{}-{}-{}",
+        "{}-{}-{}-{}-{}-{}-{}",
         triple,
         mode,
         runtime_src_hash(),
         clang_id(clang),
         pin,
-        RT_CACHE_VERSION
+        RT_CACHE_VERSION,
+        san,
     )
 }
 
@@ -258,7 +268,14 @@ fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String>
     flags.push("-fdata-sections".to_string());
     if opts.optimize {
         flags.push("-O3".to_string());
-        flags.push("-flto=thin".to_string());
+        // NO `-flto=thin` here by design (rt6): the archive must hold
+        // native objects, never LLVM bitcode. Bitcode members depend on
+        // the gold plugin + ar/ld bitcode literacy at link time, which
+        // varies by toolchain (CI's binutils 2.42 cannot index them and
+        // its links fail with `undefined reference to main` while local
+        // 2.47 works). Native objects link everywhere; ThinLTO still
+        // applies to program code at the final link. Stale bitcode
+        // archives are cut off by the rt6 key bump.
         // Parity contract (mirrors `clang_flags`): defined wrapping and
         // conservative aliasing; no host-specific and no unsafe-FP flags.
         // Keep in sync with `clang_flags()` and bump RT_CACHE_VERSION.
@@ -273,5 +290,8 @@ fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String>
     if let Some(t) = target {
         flags.push(format!("--target={t}"));
     }
+    // Sanitizer leg: the archive must be instrumented with the same
+    // flags as the program, or ASan/UBSan miss every runtime bug.
+    flags.extend(crate::compile::sanitize_flags());
     flags
 }

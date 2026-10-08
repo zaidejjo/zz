@@ -373,6 +373,7 @@ impl<'a> Lowerer<'a> {
             },
             toplevel_slots: Vec::new(),
             locals: Vec::new(),
+            vartab: Vec::new(),
             code: Vec::new(),
             spans: Vec::new(),
             max_stack: 0,
@@ -422,6 +423,30 @@ impl<'a> Lowerer<'a> {
         f.max_stack = max_stack;
         f.toplevel_slots = toplevel_slots;
         f.locals = locals;
+        // vartab: kth `ForNext` VmOp ↔ kth recorded slot vec, in chunk
+        // order (nested lifts carry their own tables, so order is stable
+        // within one lift). Count mismatch is a compiler bug: fail here,
+        // never silently misalign.
+        let mut vartab = Vec::new();
+        let mut slots = chunk.fornext_slots.iter();
+        for op in &chunk.code {
+            if matches!(op, zz_runtime::vm::Op::ForNext { .. }) {
+                match slots.next() {
+                    Some(v) => vartab.push(v.clone()),
+                    None => {
+                        return Err(IrError::new(format!(
+                            "cannot lower {name}: fornext_slots shorter than ForNext ops"
+                        )));
+                    }
+                }
+            }
+        }
+        if slots.next().is_some() {
+            return Err(IrError::new(format!(
+                "cannot lower {name}: fornext_slots longer than ForNext ops"
+            )));
+        }
+        f.vartab = vartab;
         Ok(id)
     }
 

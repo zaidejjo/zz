@@ -153,6 +153,7 @@ fn verify_rejects_join_mismatch() {
                 ret: zz_ir::TypeId(0),
             },
             toplevel_slots: vec![],
+            vartab: vec![],
             locals: vec![],
             // arm 1 pushes two values, arm 2 pushes one → join mismatch.
             code: vec![
@@ -432,6 +433,7 @@ fn verify_rejects_slot_store_mismatch() {
             },
             locals: vec![int],
             toplevel_slots: vec![],
+            vartab: vec![],
             code: vec![Op::PushConst(zz_ir::ConstId(0)), Op::StoreSlot(0)],
             spans: vec![Span::new(0, 0); 2],
             max_stack: 1,
@@ -458,6 +460,7 @@ fn verify_rejects_bad_call() {
         },
         locals: vec![],
         toplevel_slots: vec![],
+        vartab: vec![],
         code: vec![
             Op::PushConst(zz_ir::ConstId(0)),
             Op::CallPath {
@@ -483,6 +486,7 @@ fn verify_rejects_bad_call() {
         sig: g_sig,
         locals: vec![int],
         toplevel_slots: vec![],
+        vartab: vec![],
         code: vec![Op::LoadSlot(0)],
         spans: vec![Span::new(0, 0); 1],
         max_stack: 1,
@@ -591,4 +595,48 @@ fn dis_shows_locals_and_v2() {
     let text = zz_ir::dis::disassemble(&module);
     assert!(text.contains("; zzcz v2"), "missing v2 header:\n{text}");
     assert!(text.contains("locals=[int"), "missing locals:\n{text}");
+}
+
+#[test]
+fn vartab_records_loop_var_slots() {
+    use std::collections::HashMap;
+    use zz_ir::Op;
+    let mut sigs = HashMap::new();
+    sigs.insert("m".to_string(), int_sig(0));
+    let module = lower_typed_spanmap(
+        "func m() {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n s\n}\nm()",
+        &sigs,
+    );
+    verify::verify(&module).expect("verify failed");
+    let f = module
+        .funcs
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| module.strings.get(f.name.0 as usize).map(String::as_str) == Some("m"))
+        .find(|(i, _)| zz_ir::FuncId(*i as u32) != module.entry)
+        .map(|(_, f)| f)
+        .expect("m lifted");
+    // Exactly one for-loop with one var; the recorded slot must agree
+    // with the slot the loop body loads (the disassembly shows the
+    // body's `loadslot`).
+    assert_eq!(f.vartab.len(), 1, "one loop expected: {:?}", f.vartab);
+    assert_eq!(f.vartab[0].len(), 1, "one var expected");
+    let vslot = f.vartab[0][0];
+    assert_ne!(vslot, u16::MAX, "loop var must be slot-bound");
+    assert!(
+        f.code
+            .iter()
+            .any(|op| matches!(op, Op::LoadSlot(s) if *s == vslot)),
+        "body never loads vartab slot {vslot}"
+    );
+    // A vartab/ForNext count mismatch must fail closed.
+    let mut bad = module.clone();
+    let mf = bad
+        .funcs
+        .iter_mut()
+        .find(|f| bad.strings.get(f.name.0 as usize).map(String::as_str) == Some("m"))
+        .expect("m");
+    mf.vartab.push(vec![0]);
+    let err = verify::verify(&bad).expect_err("vartab mismatch accepted");
+    assert!(err.message.contains("vartab"), "wrong error: {err}");
 }

@@ -31,6 +31,13 @@ pub struct Chunk {
     /// holds. Lowering carries this into the IR locals table;
     /// behavior-neutral (never read by the VM).
     pub slot_types: Vec<Option<zz_checker::Type>>,
+    /// Loop-variable frame slots per `ForNext` op, in chunk order (kth
+    /// entry ↔ kth `ForNext`): the slot each pushed loop value lands in
+    /// (`u16::MAX` for env-captured vars, which bind in the environment).
+    /// Lowering carries this into the IR vartab; behavior-neutral (the
+    /// VM resolves by name). Lets AOT loop peels write the shadow slot
+    /// directly instead of re-deriving positions.
+    pub fornext_slots: Vec<Vec<u16>>,
 }
 
 impl Chunk {
@@ -42,6 +49,7 @@ impl Chunk {
             spans: Vec::new(),
             toplevel_slots: Vec::new(),
             slot_types: Vec::new(),
+            fornext_slots: Vec::new(),
         }
     }
 

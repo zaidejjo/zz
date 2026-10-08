@@ -249,6 +249,13 @@ fn encode_funcs(module: &Module, ranges: &[(u32, u32)]) -> Vec<u8> {
         for id in &f.locals {
             put_u32(&mut v, id.0);
         }
+        put_u32(&mut v, f.vartab.len() as u32);
+        for entry in &f.vartab {
+            put_u32(&mut v, entry.len() as u32);
+            for s in entry {
+                put_u16(&mut v, *s);
+            }
+        }
         put_u32(&mut v, *off);
         put_u32(&mut v, *len);
         put_u32(&mut v, f.max_stack);
@@ -910,6 +917,22 @@ fn decode_funcs(bytes: &[u8]) -> Result<FuncTable, IrError> {
         for _ in 0..nl {
             locals.push(TypeId(r.u32()?));
         }
+        let nv = r.u32()? as usize;
+        if nv > 100_000 {
+            return Err(IrError::new("absurd .zzc vartab count"));
+        }
+        let mut vartab = Vec::with_capacity(nv.min(64));
+        for _ in 0..nv {
+            let ns = r.u32()? as usize;
+            if ns > 256 {
+                return Err(IrError::new("absurd .zzc vartab entry"));
+            }
+            let mut entry = Vec::with_capacity(ns);
+            for _ in 0..ns {
+                entry.push(r.u16()?);
+            }
+            vartab.push(entry);
+        }
         let off = r.u32()?;
         let len = r.u32()?;
         let max_stack = r.u32()?;
@@ -925,6 +948,7 @@ fn decode_funcs(bytes: &[u8]) -> Result<FuncTable, IrError> {
             params,
             sig,
             locals,
+            vartab,
             toplevel_slots,
             code: Vec::new(),
             spans: Vec::new(),
