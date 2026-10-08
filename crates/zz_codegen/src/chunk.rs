@@ -1632,7 +1632,6 @@ impl<'a> Emitter<'a> {
             let cx = OpCx {
                 callee: callee_owned.as_ref(),
                 fuse_slot: fused.get(&pc).copied(),
-                frame,
                 ufuse: ufused.get(&pc).copied(),
                 peel: peels.get(&pc).cloned(),
             };
@@ -1644,9 +1643,14 @@ impl<'a> Emitter<'a> {
             out.push_str(&format!("L{}:;\n", f.code.len()));
         }
         // Implicit return of the top value (function bodies fall off).
-        out.push_str(&format!(
-            "    {{ zz_value _r = st[--sp]; for (int _i = 0; _i < {frame}; _i++) {{ if (_i != sp) zz_release(&st[_i]); }} return _r; }}\n"
-        ));
+        // Release only the live prefix below it: positions at/above sp
+        // are dead (stale aliases of already-released values — the VM
+        // truncates them away, but the C frame keeps the bits). A
+        // whole-frame sweep double-releases those aliases (UAF when the
+        // object was freed since, silent count corruption otherwise).
+        out.push_str(
+            "    {{ zz_value _r = st[--sp]; for (int _i = 0; _i < sp; _i++) zz_release(&st[_i]); return _r; }}\n",
+        );
         out.push_str("}\n");
         Ok(())
     }
@@ -2063,13 +2067,11 @@ impl<'a> Emitter<'a> {
     }
 }
 
-/// Per-op emission context: the precomputed `Call` callee (if any),
-/// the [`fuse_scan`] slot for a fusing `StoreIndexOp`, and the frame
-/// size for the `Return` release sweep.
+/// Per-op emission context: the precomputed `Call` callee (if any)
+/// and the [`fuse_scan`] slot for a fusing `StoreIndexOp`.
 struct OpCx<'x> {
     callee: Option<&'x Callee>,
     fuse_slot: Option<u16>,
-    frame: usize,
     /// Fused int window starting at this pc, if any: (total length, tail).
     /// See [`int_fuse`]. Window matching already consulted the int-slot
     /// set; emission re-walks the ops.
@@ -2105,7 +2107,7 @@ impl<'a> Emitter<'a> {
         cx: &OpCx<'_>,
         out: &mut String,
     ) -> Result<(), ChunkError> {
-        let (callee, fuse_slot, frame) = (cx.callee, cx.fuse_slot, cx.frame);
+        let (callee, fuse_slot) = (cx.callee, cx.fuse_slot);
         // Peeled counted loop (see `peel_scan`): raw C loop over the
         // fused body, then the exit edge. The `ForSetup` emission stands
         // (placeholders + `_lbase`), so exit accounting is untouched.
@@ -2276,9 +2278,11 @@ impl<'a> Emitter<'a> {
                 ));
             }
             Op::Return => {
-                out.push_str(&format!(
-                    "    {{ zz_value _r = st[--sp]; for (int _i = 0; _i < {frame}; _i++) {{ if (_i != sp) zz_release(&st[_i]); }} return _r; }}\n"
-                ));
+                // Live-prefix sweep, like the implicit return: never the
+                // whole frame (dead slots above sp hold stale aliases).
+                out.push_str(
+                    "    {{ zz_value _r = st[--sp]; for (int _i = 0; _i < sp; _i++) zz_release(&st[_i]); return _r; }}\n",
+                );
             }
             Op::Safepoint => {
                 // Cooperative yield check in the VM; a no-op in AOT
