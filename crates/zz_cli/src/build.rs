@@ -1119,8 +1119,9 @@ pub fn build_release(
     }
     if rel.verbose {
         eprintln!(
-            "zz: {} {}",
+            "zz: {} {} {}",
             clang.label,
+            clang.version(),
             zz_codegen::compile::clang_flags(&opts, target).join(" ")
         );
     }

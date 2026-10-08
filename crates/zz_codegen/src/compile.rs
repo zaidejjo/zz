@@ -99,6 +99,81 @@ pub struct Clang {
     pub label: &'static str,
 }
 
+impl Clang {
+    /// One-line compiler version for build logs (`clang version 19.1.2
+    /// ...` / `0.14.0` for zig; `unknown` when the probe fails). Used by
+    /// the sanitizer CI leg to pin + log the exact toolchain.
+    pub fn version(&self) -> String {
+        let mut cmd = std::process::Command::new(&self.path);
+        if self.zig {
+            cmd.arg("version");
+        } else {
+            cmd.arg("--version");
+        }
+        cmd.output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+                    .filter(|l| !l.is_empty())
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+/// Pinned Clang major version from `ZZ_CLANG_VERSION` (e.g. `19` → probe
+/// `clang-19` first). Set in CI so every sanitizer/bench build uses one
+/// logged toolchain; unset locally (any detected provider works).
+/// Returns the raw value when non-empty; callers validate the shape.
+pub fn clang_pin() -> Option<String> {
+    std::env::var("ZZ_CLANG_VERSION")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Sanitizer list from `ZZ_SANITIZE` (comma-separated, allowlist:
+/// `address`, `undefined`), e.g. `address,undefined`. Empty/unset =
+/// no sanitizers. Unknown tokens are dropped with a stderr warning —
+/// silently running *without* a requested sanitizer would be worse than
+/// noise, but there is no error channel here (`clang_flags` returns
+/// flags, and failing a build over a typo'd env var would break
+/// unrelated flows).
+pub fn sanitize_list() -> Vec<String> {
+    const ALLOWED: &[&str] = &["address", "undefined"];
+    let raw = std::env::var("ZZ_SANITIZE").unwrap_or_default();
+    let mut out = Vec::new();
+    for tok in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        if ALLOWED.contains(&tok) {
+            if !out.iter().any(|t: &String| t == tok) {
+                out.push(tok.to_string());
+            }
+        } else {
+            eprintln!("zz: warning: ignoring unknown sanitizer `{tok}` (want address,undefined)");
+        }
+    }
+    out
+}
+
+/// Extra C flags implied by [`sanitize_list`]: instrument + halt on any
+/// report (UBSan recovers by default — without
+/// `-fno-sanitize-recover=all` violations would print and continue with
+/// exit 0, silently passing the leg).
+pub fn sanitize_flags() -> Vec<String> {
+    let list = sanitize_list();
+    if list.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        format!("-fsanitize={}", list.join(",")),
+        "-fno-sanitize-recover=all".to_string(),
+        // Symbolized, frame-pointer-complete traces.
+        "-fno-omit-frame-pointer".to_string(),
+        "-g".to_string(),
+    ]
+}
+
 /// Probe whether fully-static linking works with `clang` (static
 /// `libcurl`/`libsqlite3` present). Only the libraries the program
 /// actually needs are probed: with conditional linking, programs that
@@ -262,6 +337,23 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
     }
     let allow_clang = matches!(provider, ClangProvider::Any | ClangProvider::Clang);
     let allow_zig = matches!(provider, ClangProvider::Any | ClangProvider::Zig);
+    // Pinned version wins when present (`ZZ_CLANG_VERSION=19` probes
+    // `clang-19` first). Missing pin falls back to the normal order with
+    // a warning — the sanitizer test asserts the match, so CI stays
+    // strict while local builds never break over env leakage.
+    if allow_clang {
+        if let Some(pin) = clang_pin() {
+            let name = format!("clang-{pin}");
+            if let Some(path) = which(&name) {
+                return Some(Clang {
+                    path,
+                    zig: false,
+                    label: "clang",
+                });
+            }
+            eprintln!("zz: warning: pinned clang `{name}` not found; falling back");
+        }
+    }
     // Explicit opt-in wins: a pinned managed toolchain outranks everything
     // on PATH (`--cc=clang` / `--cc=zig` still force their provider).
     if provider == ClangProvider::Any {
@@ -797,6 +889,10 @@ pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
         }
         PgoMode::None => {}
     }
+    // Sanitizer leg (`ZZ_SANITIZE=address,undefined`): instrument +
+    // halt. Appended late so `-fno-omit-frame-pointer` wins over the
+    // release `-fomit-frame-pointer` above.
+    flags.extend(sanitize_flags());
     if let Some(t) = target {
         flags.push(format!("--target={t}"));
         // The system linker may not understand foreign triples.

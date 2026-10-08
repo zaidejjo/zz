@@ -17,6 +17,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned Clang major for every native build below (`zz` probes
+  # `clang-<ver>` first via ZZ_CLANG_VERSION; the sanitizer leg asserts
+  # the match and logs the exact version).
+  ZZ_CLANG_VERSION: "18"
 
 jobs:
   test:
@@ -32,7 +36,11 @@ jobs:
         # Native codegen links -lcurl -lsqlite3 and compiles with clang.
         # Runner images don't guarantee the headers — install explicitly
         # so the --native test legs don't fail with `curl/curl.h not found`.
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev
+        # Clang is version-pinned (matches ZZ_CLANG_VERSION above) so
+        # sanitizer/bench builds never drift with the runner image.
+        run: sudo apt-get update && sudo apt-get install -y clang-18 libcurl4-openssl-dev libsqlite3-dev
+      - name: log pinned toolchain
+        run: clang-18 --version
       - name: fmt check
         run: cargo fmt --check
       - name: clippy
@@ -47,6 +55,13 @@ jobs:
         # (same programs, same flags, demuxed per file). Individuals run
         # VM-only inside test-fast.sh above.
         run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
+      - name: 'test (PR: ASan+UBSan AOT leg)'
+        if: runner.os != 'Windows' && github.event_name == 'pull_request'
+        # Instrumented HIR→C and Chunk→C builds of the diff corpus + small
+        # programs (reports are fatal). Asserts the ZZ_CLANG_VERSION pin
+        # and logs the exact toolchain. Not in test-fast.sh: clang builds
+        # are minutes, not seconds.
+        run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
       - name: 'test (merge: full suite, strict natives via batch)'
         if: runner.os != 'Windows' && github.event_name != 'pull_request'
         # `ZZ_BATCH_NATIVE=1`: strict-success natives run batched
