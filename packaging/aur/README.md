@@ -1,6 +1,6 @@
-# AUR packaging for `zz-lang` (`zz` follows after adoption)
+# AUR packaging for `zz` + `zz-lang` (same files, mutually conflicting names)
 
-`yay -S zz-lang` installs a **prebuilt binary** — no compilation.
+`yay -S zz` (or `zz-lang`) installs a **prebuilt binary** — no compilation.
 Each GitHub Release carries two zips built by CI:
 `zz-<ver>-linux-x86_64.zip` + `zz-<ver>-linux-aarch64.zip`
 (each with `zz`, `zz-lsp`, `LICENSE`, `README.md`).
@@ -9,9 +9,8 @@ The AUR package downloads the right zip and installs:
 - `/usr/bin/zz` — compiler / REPL / runner (`zz run main.zz`, `zz check`, `zz build`)
 - `/usr/bin/zz-lsp` — language server
 
-It `conflicts=('zz')` so only one of the two names is installed at a time.
-(`zz` pushes are paused until the AUR package is adopted — orphan request
-accepted, adoption click still pending. Template already renders both.)
+It `conflicts=('zz-lang')` (or `conflicts=('zz')`) so only one of the two
+names is installed at a time.
 
 ## Files
 
@@ -53,8 +52,8 @@ changes: it reads `[workspace.package] version`, and if tag `vX.Y.Z` does
 not exist yet, creates the tag + GitHub Release with auto-generated notes.
 So cutting a release is just: bump the version, merge to `main`.
 
-`.github/workflows/aur-publish.yml` then runs on **Release published** (pushes
-`zz-lang` only for now):
+`.github/workflows/aur-publish.yml` then runs on **Release published**
+(pushes both `zz` and `zz-lang`):
 
 1. Tag `vX.Y.Z` must equal `[workspace.package] version` in `Cargo.toml`.
 2. CI downloads the tag tarball, computes sha256, renders both PKGBUILDs,
