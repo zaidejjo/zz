@@ -2331,6 +2331,8 @@ fn listen_inner(
     interp.spawn_funcs_cache = None;
     interp.spawn_keep_cache = None;
     // SAFETY: same as the per-request trim below (arena lock only).
+    // glibc-only: macOS/Windows allocators return pages on their own.
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::malloc_trim(0);
     }
@@ -2792,6 +2794,8 @@ fn handle_one_request<S: std::io::Read + std::io::Write>(
     if content_length > 8 * 1024 * 1024 {
         // SAFETY: `malloc_trim` is async-signal-safe w.r.t. the allocator
         // (it takes the arena lock like `free`); no ZZ state is touched.
+        // glibc-only (see above).
+        #[cfg(target_os = "linux")]
         unsafe {
             libc::malloc_trim(0);
         }
