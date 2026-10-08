@@ -1359,8 +1359,10 @@ fn run_native(
 ///
 /// Default (`zz build`): static self-contained binary (ThinLTO, DCE,
 /// stripped). Falls back to dynamic with a note where static is
-/// impossible (macOS targets, programs needing the Rust native
-/// runtime); explicit `--static` errors there instead.
+/// impossible (macOS targets, missing static system libraries);
+/// explicit `--static` errors there instead. The Rust native runtime
+/// links statically too (rlib, no RUNPATH — #303), so FFI programs
+/// stay static.
 /// `-p/--release/-O3` selects the dynamic optimized build; `--dynamic`
 /// selects the fast dynamic debug build (`-O0 -g`).
 /// Both paths are real binaries in `bin/` — never VM execution.
@@ -1463,9 +1465,8 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     // follow `--`); -p is the dynamic optimized build, --dynamic the
     // fast dynamic debug build. --static/--pgo select their own option
     // sets. Guards (PGO-cross, explicit-static-macOS) in validate()
-    // apply uniformly; default-static downgrade paths (macOS, Rust
-    // native runtime, missing static syslibs) fall back to dynamic
-    // with a note instead.
+    // apply uniformly; default-static downgrade paths (macOS, missing
+    // static syslibs) fall back to dynamic with a note instead.
     let mode = if is_pgo {
         build::BuildMode::Pgo
     } else if is_static {
