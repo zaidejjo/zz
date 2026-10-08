@@ -20,7 +20,7 @@ env:
   # Pinned Clang major for every native build below (`zz` probes
   # `clang-<ver>` first via ZZ_CLANG_VERSION; the sanitizer leg asserts
   # the match and logs the exact version).
-  ZZ_CLANG_VERSION: "18"
+  ZZ_CLANG_VERSION: "23"
 
 jobs:
   test:
@@ -32,15 +32,21 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install LLVM 23 repo
+        # Noble's archive tops out at clang-18; the pin needs clang-23,
+        # so add apt.llvm.org (verified: llvm-toolchain-noble-23 exists).
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-23 main" | sudo tee /etc/apt/sources.list.d/llvm-23.list > /dev/null
       - name: install native deps
         # Native codegen links -lcurl -lsqlite3 and compiles with clang.
         # Runner images don't guarantee the headers — install explicitly
         # so the --native test legs don't fail with `curl/curl.h not found`.
         # Clang is version-pinned (matches ZZ_CLANG_VERSION above) so
         # sanitizer/bench builds never drift with the runner image.
-        run: sudo apt-get update && sudo apt-get install -y clang-18 libcurl4-openssl-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y clang-23 libcurl4-openssl-dev libsqlite3-dev
       - name: log pinned toolchain
-        run: clang-18 --version
+        run: clang-23 --version
       - name: fmt check
         run: cargo fmt --check
       - name: clippy

@@ -39,7 +39,7 @@ impl std::fmt::Display for BuildError {
         match self {
             BuildError::NoClang => write!(
                 f,
-                "no clang found (tried clang, clang-22, zig); \
+                "no clang found (tried clang, clang-23, clang-22, zig); \
                  install clang 18+ or zig for -p builds"
             ),
             BuildError::PgoCross => {
@@ -67,7 +67,7 @@ impl From<std::io::Error> for BuildError {
 /// Provider preference for Clang detection (`--cc` flag).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClangProvider {
-    /// Probe `clang`, then `clang-22`, then `zig`.
+    /// Probe `clang`, then `clang-23`, `clang-22`, then `zig`.
     #[default]
     Any,
     /// Only accept a `clang*` binary.
@@ -323,7 +323,7 @@ pub fn managed_zig_path() -> Option<PathBuf> {
 /// Probe PATH for a Clang provider.
 ///
 /// Order: managed `zig` (an explicit `zz toolchain install` pin always
-/// wins), then `clang`, `clang-22`, then PATH `zig`. Test hook: when the
+/// wins), then `clang`, `clang-23`, `clang-22`, then PATH `zig`. Test hook: when the
 /// environment variable `ZZ_TEST_HIDE_CLANG` is set, detection pretends
 /// nothing is installed (used by the missing-toolchain fallback tests).
 pub fn detect_clang() -> Option<Clang> {
@@ -366,7 +366,7 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
         }
     }
     if allow_clang {
-        for name in ["clang", "clang-22"] {
+        for name in ["clang", "clang-23", "clang-22"] {
             if let Some(path) = which(name) {
                 return Some(Clang {
                     path,
@@ -1393,8 +1393,13 @@ mod toolchain_tests {
     /// Hermetic toolchain root: unique temp dir + env override, restored
     /// on drop so parallel tests never observe it afterwards. Mirrors the
     /// existing `ZZ_TEST_HIDE_CLANG` pattern (set, assert, restore fast).
+    /// Also shells ambient toolchain pins (`ZZ_CLANG_VERSION`): CI sets it
+    /// workflow-globally and `detect_clang_with` honors it ahead of the
+    /// managed toolchain, so a leaked pin would make the managed-wins
+    /// test env-dependent (passed locally, failed in CI).
     struct HermeticRoot {
         dir: PathBuf,
+        saved_pin: Option<String>,
     }
 
     impl HermeticRoot {
@@ -1407,7 +1412,9 @@ mod toolchain_tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("ZZ_TOOLCHAIN_ROOT", &dir);
-            HermeticRoot { dir }
+            let saved_pin = std::env::var("ZZ_CLANG_VERSION").ok();
+            std::env::remove_var("ZZ_CLANG_VERSION");
+            HermeticRoot { dir, saved_pin }
         }
 
         fn pin(&self, version: &str) {
@@ -1436,13 +1443,40 @@ mod toolchain_tests {
     impl Drop for HermeticRoot {
         fn drop(&mut self) {
             std::env::remove_var("ZZ_TOOLCHAIN_ROOT");
+            match self.saved_pin.take() {
+                Some(pin) => std::env::set_var("ZZ_CLANG_VERSION", pin),
+                None => std::env::remove_var("ZZ_CLANG_VERSION"),
+            }
             let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Lock the process-global env for hermetic tests. Poison-tolerant: a
+    /// panicking test must fail alone, never cascade `PoisonError` into
+    /// every sibling (which masks the real assertion).
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Sets `ZZ_TEST_HIDE_CLANG` for a scope, restoring (removing) it on
+    /// drop — panic-safe, so a failing assert cannot leak the hook into
+    /// later tests.
+    struct HideClang;
+    impl HideClang {
+        fn new() -> Self {
+            std::env::set_var("ZZ_TEST_HIDE_CLANG", "1");
+            HideClang
+        }
+    }
+    impl Drop for HideClang {
+        fn drop(&mut self) {
+            std::env::remove_var("ZZ_TEST_HIDE_CLANG");
         }
     }
 
     #[test]
     fn unpinned_has_no_managed_zig() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let _root = HermeticRoot::new();
         assert!(toolchain_pin().is_none());
         assert!(managed_zig_path().is_none());
@@ -1450,7 +1484,7 @@ mod toolchain_tests {
 
     #[test]
     fn garbage_pin_is_unpinned_not_fatal() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let root = HermeticRoot::new();
         for bad in ["", ".", "..", "../evil", "0.17.0\nrm -rf", "v0.17.0-rc1!"] {
             std::fs::write(root.dir.join("pin"), bad).unwrap();
@@ -1461,7 +1495,7 @@ mod toolchain_tests {
 
     #[test]
     fn pin_without_install_is_not_managed() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let root = HermeticRoot::new();
         root.pin("0.17.0");
         assert_eq!(toolchain_pin().as_deref(), Some("0.17.0"));
@@ -1470,7 +1504,7 @@ mod toolchain_tests {
 
     #[test]
     fn managed_zig_wins_probe_and_hide_covers_it() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let root = HermeticRoot::new();
         let fake = root.fake_zig("0.17.0");
         root.pin("0.17.0");
@@ -1480,20 +1514,23 @@ mod toolchain_tests {
         assert!(found.zig);
         assert_eq!(found.path, fake);
         // `--cc=clang` still forces the system provider.
-        if which("clang").or_else(|| which("clang-22")).is_some() {
+        if which("clang")
+            .or_else(|| which("clang-23"))
+            .or_else(|| which("clang-22"))
+            .is_some()
+        {
             let c = detect_clang_with(ClangProvider::Clang).expect("system clang present");
             assert!(!c.zig);
         }
         // The test hook hides the managed toolchain too.
-        std::env::set_var("ZZ_TEST_HIDE_CLANG", "1");
+        let _hide = HideClang::new();
         assert!(detect_clang().is_none());
         assert!(managed_zig_path().is_none());
-        std::env::remove_var("ZZ_TEST_HIDE_CLANG");
     }
 
     #[test]
     fn cache_key_follows_the_pin() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let root = HermeticRoot::new();
         let clang = Clang {
             path: PathBuf::from("/usr/bin/clang"),
