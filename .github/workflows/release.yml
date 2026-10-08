@@ -178,9 +178,6 @@ jobs:
           - os: macos
             arch: aarch64
             runner: macos-14
-          - os: macos
-            arch: x86_64
-            runner: macos-13
     steps:
       - uses: actions/checkout@v4
         with:
@@ -270,8 +267,6 @@ jobs:
             || { echo "error: linux aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
           test -f "zz-${{ needs.cut.outputs.pkgver }}-macos-aarch64.zip" \
             || { echo "error: macos aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
-          test -f "zz-${{ needs.cut.outputs.pkgver }}-macos-x86_64.zip" \
-            || { echo "error: macos x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
           gh release create "$TAG" \
             --target "main" \
             --title "$TAG" \
