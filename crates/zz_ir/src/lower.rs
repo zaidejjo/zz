@@ -326,6 +326,9 @@ impl<'a> Lowerer<'a> {
 
     /// Signature for a lifted function: HIR lookup by dotted name,
     /// `Unknown` when absent (closures, entry, untyped compiles).
+    /// Sealing also stamps the locals table's param slots from the
+    /// signature (params are authoritative for calls; the recorded
+    /// entries can only agree on valid code).
     fn seal_sig(&mut self, id: FuncId, name: Option<&str>) {
         let arity = self.funcs[id.0 as usize].params.len();
         let found = name.and_then(|n| self.func_sigs.get(n).cloned());
@@ -345,6 +348,13 @@ impl<'a> Lowerer<'a> {
         let f = &mut self.funcs[id.0 as usize];
         f.sig = sig;
         f.arity = arity as u32;
+        // Seed param slots from the sealed signature.
+        let seeded: Vec<TypeId> = f.sig.params.clone();
+        for (i, t) in seeded.into_iter().enumerate() {
+            if i < f.locals.len() {
+                f.locals[i] = t;
+            }
+        }
     }
 
     /// Lift one VM chunk (plus everything nested inside it) into the
@@ -362,6 +372,7 @@ impl<'a> Lowerer<'a> {
                 ret: TypeId(u32::MAX),
             },
             toplevel_slots: Vec::new(),
+            locals: Vec::new(),
             code: Vec::new(),
             spans: Vec::new(),
             max_stack: 0,
@@ -381,6 +392,28 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|(n, s)| (self.intern(n), *s))
             .collect();
+        // Locals table: intern the compiler-recorded slot types, sized
+        // to one past the highest referenced slot id (params are seeded
+        // from the signature later, in `seal_sig`).
+        let mut max_slot: Option<usize> = None;
+        for op in &code {
+            match op {
+                Op::LoadSlot(s) | Op::StoreSlot(s) => {
+                    max_slot = Some(max_slot.map_or(*s as usize, |m: usize| m.max(*s as usize)));
+                }
+                _ => {}
+            }
+        }
+        for (_, s) in chunk.toplevel_slots.iter() {
+            max_slot = Some(max_slot.map_or(*s as usize, |m: usize| m.max(*s as usize)));
+        }
+        let unknown = self.unknown();
+        let mut locals = vec![unknown; max_slot.map_or(0, |m| m + 1)];
+        for (i, recorded) in chunk.slot_types.iter().enumerate() {
+            if let (Some(dst), Some(ty)) = (locals.get_mut(i), recorded) {
+                *dst = self.intern_type(ty);
+            }
+        }
         let name_id = self.intern(name);
         let f = &mut self.funcs[id.0 as usize];
         f.name = name_id;
@@ -388,6 +421,7 @@ impl<'a> Lowerer<'a> {
         f.spans = spans;
         f.max_stack = max_stack;
         f.toplevel_slots = toplevel_slots;
+        f.locals = locals;
         Ok(id)
     }
 

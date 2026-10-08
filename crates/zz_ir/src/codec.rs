@@ -1,20 +1,23 @@
-//! `.zzc` binary codec (spec §8).
+//! `.zzc` binary codec (spec §8, v2).
 //!
 //! Little-endian throughout. Layout:
 //!
 //! ```text
-//! magic[4] = "ZZC1", version u32, section-count u32,
+//! magic[4] = "ZZC1", version u32 (=2), section-count u32,
 //! per section: tag u32, offset u32, length u32,
 //! TYPES | STRINGS | CONSTS | FUNCS | CODE | SPANS | ANNOT payloads
 //! ```
 //!
 //! Section tags: `TYPES=1 STRINGS=2 CONSTS=3 FUNCS=4 CODE=5 SPANS=6
 //! ANNOT=7`. `FUNCS` entries reference (offset, length) ranges into the
-//! concatenated `CODE`/`SPANS` streams, in function order. The encoder
-//! is deterministic: decoding then re-encoding yields identical bytes.
+//! concatenated `CODE`/`SPANS` streams, in function order, and carry the
+//! locals type table (v2; mandatory semantics, NOT annotations). The
+//! encoder is deterministic: decoding then re-encoding yields identical
+//! bytes.
 //!
 //! Decoding never panics: every read is bounds-checked and every id is
 //! range-checked, so fuzzed inputs surface as [`IrError`], never a crash.
+//! Only version 2 decodes; v1 files are rejected (re-emit them).
 
 use crate::op::{BinOp, UnOp};
 use crate::ty::IrType;
@@ -242,6 +245,10 @@ fn encode_funcs(module: &Module, ranges: &[(u32, u32)]) -> Vec<u8> {
             put_u32(&mut v, id.0);
         }
         put_u32(&mut v, f.sig.ret.0);
+        put_u32(&mut v, f.locals.len() as u32);
+        for id in &f.locals {
+            put_u32(&mut v, id.0);
+        }
         put_u32(&mut v, *off);
         put_u32(&mut v, *len);
         put_u32(&mut v, f.max_stack);
@@ -895,6 +902,14 @@ fn decode_funcs(bytes: &[u8]) -> Result<FuncTable, IrError> {
             params: sig_params,
             ret: TypeId(r.u32()?),
         };
+        let nl = r.u32()? as usize;
+        if nl > 100_000 {
+            return Err(IrError::new("absurd .zzc locals count"));
+        }
+        let mut locals = Vec::with_capacity(nl.min(1024));
+        for _ in 0..nl {
+            locals.push(TypeId(r.u32()?));
+        }
         let off = r.u32()?;
         let len = r.u32()?;
         let max_stack = r.u32()?;
@@ -909,6 +924,7 @@ fn decode_funcs(bytes: &[u8]) -> Result<FuncTable, IrError> {
             arity,
             params,
             sig,
+            locals,
             toplevel_slots,
             code: Vec::new(),
             spans: Vec::new(),

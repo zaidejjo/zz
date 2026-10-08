@@ -197,10 +197,16 @@ its own number rendering on both engines; float→int saturation is §5.
 
 ## 8. The `.zzc` format (M1 implementation target)
 
-- Little-endian. Magic `ZZC1`, `u32` version (this spec = 1),
+- Little-endian. Magic `ZZC1`, `u32` version (this spec = 2),
   section table: `TYPES`, `STRINGS` (interned names), `CONSTS` (value pool),
-  `FUNCS` (name, arity, signature, entry block), `CODE` (blocks + typed ops),
+  `FUNCS` (name, arity, signature, locals type table, entry block),
+  `CODE` (blocks + typed ops),
   `SPANS` (op → source span), `ANNOT` (performance hints, §9).
+- v2 adds the per-function locals table: one type id per frame slot
+  (params seeded from the signature; conflicts widen to the "unknown"
+  top). Types are mandatory semantics, NOT annotations — the verifier
+  checks every store/call/return against them, and `dis` shows them.
+  The v2 decoder rejects v1 files (re-emit with `zz build --emit-ir`).
 - Constants pool holds all literals (including string-literal
   markers for `print` — the M2 subset needs no string machinery
   beyond this).

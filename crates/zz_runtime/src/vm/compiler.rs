@@ -574,6 +574,75 @@ impl Compiler {
             .and_then(|t| t.get(&zz_checker::SpanKey::new(self.type_scope.as_str(), span)))
     }
 
+    /// Record a named slot's declared type (see `Chunk::slot_types`).
+    /// No-ops without type info; joins on reuse (conflicts widen to the
+    /// `Error` top), so every entry over-approximates all values its slot
+    /// ever holds. Only named bindings call this — temps, desugar
+    /// interiors, and env-captured bindings never do.
+    fn record_slot(&mut self, slot: usize, ty: Option<zz_checker::Type>) {
+        let Some(ty) = ty else { return };
+        // Inference leftovers and the bottom type carry no usable layout:
+        // skip rather than record (absence = Unknown = boxed downstream).
+        // Skipping only ever loses precision, never soundness.
+        if matches!(ty, zz_checker::Type::Var(_) | zz_checker::Type::Never) {
+            return;
+        }
+        if self.chunk.slot_types.len() <= slot {
+            self.chunk.slot_types.resize(slot + 1, None);
+        }
+        let entry = &mut self.chunk.slot_types[slot];
+        *entry = Some(match entry.take() {
+            None => ty,
+            Some(prev) => Self::join_recorded(prev, ty),
+        });
+    }
+
+    /// Element types for a `for` loop's variables from the iterable's
+    /// resolved type. `None` means "leave Unknown" (dynamic iterables,
+    /// non-iterables, exotic arities — all soundly boxed downstream).
+    fn iter_elems(ty: &zz_checker::Type, nvars: usize) -> Option<Vec<zz_checker::Type>> {
+        use zz_checker::Type as T;
+        match ty {
+            T::Array(t) => Some(vec![(**t).clone(); nvars]),
+            T::Range(_) => {
+                if nvars <= 1 {
+                    Some(vec![T::Int; nvars])
+                } else {
+                    None
+                }
+            }
+            T::Dict(k, v) => match nvars {
+                1 => Some(vec![(**k).clone()]),
+                2 => Some(vec![(**k).clone(), (**v).clone()]),
+                _ => None,
+            },
+            // Bytes iterate ints; multi-var bytes loops are rejected by
+            // the checker, but recording Ints here stays sound anyway
+            // (unreachable on valid code).
+            T::Bytes => Some(vec![T::Int; nvars]),
+            _ => None,
+        }
+    }
+
+    /// Join two recorded slot types: identical stays, ANY conflict widens to
+    /// [`zz_checker::Type::Error`] — the record lattice's top ("statically
+    /// unknown, suppress cascading errors"). A slot reused across disjoint
+    /// lifetimes with different types (e.g. sequential `for i` / `for name`
+    /// loops sharing one frame slot) is genuinely polymorphic: no single
+    /// exact type describes it, and a `Union` entry would poison every load
+    /// into downstream member-typed stores (`found = i` would
+    /// false-reject). `Error` lowers to `IrType::Error`, which the verifier
+    /// wildcard-accepts and no backend ever unboxes — so all it ever costs
+    /// is boxing, which an unboxer couldn't avoid there anyway. Absorbing:
+    /// any later join with `Error` stays `Error`.
+    fn join_recorded(a: zz_checker::Type, b: zz_checker::Type) -> zz_checker::Type {
+        if a == b {
+            a
+        } else {
+            zz_checker::Type::Error
+        }
+    }
+
     /// Match `x = x + y` / `x = y + x` where `x` and `y` both resolve to
     /// local slots. Returns `(dst, src)` so the VM can fuse the load/add/
     /// store into a single in-place `SlotAddInt`.
@@ -1655,6 +1724,7 @@ impl Compiler {
                     } else {
                         let slot = self.promoted_slots[&name.name];
                         self.emit(Op::StoreSlot(slot as u16));
+                        self.record_slot(slot, self.type_of(value.span()).cloned());
                         // Sync back to env at frame exit so later chunks
                         // (REPL statements, other modules) can read it.
                         self.chunk
@@ -1670,6 +1740,9 @@ impl Compiler {
                         StmtValue::None
                     }
                 } else if self.declare_local(&name.name) {
+                    // Named local: the init value sits on top; record its
+                    // resolved type for the IR locals table.
+                    self.record_slot(self.stack_height - 1, self.type_of(value.span()).cloned());
                     StmtValue::Keep
                 } else {
                     StmtValue::Discard
@@ -1774,8 +1847,19 @@ impl Compiler {
                 // Push locals for each var — last var at highest slot,
                 // first at lowest
                 let num_vars = vars.len();
+                // Declared loop-variable types for the IR locals table:
+                // element types of the iterable (skipped for env-captured
+                // vars, which bind in the environment, and for dynamics).
+                let elem_tys = self
+                    .type_of(iter.span())
+                    .and_then(|t| Self::iter_elems(t, num_vars));
                 for (i, v) in vars.iter().enumerate().rev() {
                     let in_env = self.captured.contains(&v.name);
+                    if !in_env {
+                        if let Some(tys) = elem_tys.as_ref().and_then(|e| e.get(i).cloned()) {
+                            self.record_slot(self.stack_height - num_vars + i, Some(tys));
+                        }
+                    }
                     self.locals.push(Local {
                         name: v.name.clone(),
                         slot: self.stack_height - num_vars + i,
