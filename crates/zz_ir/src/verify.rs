@@ -1025,7 +1025,11 @@ fn infer_func(
     };
     let check_exact_bool = |v: TV, what: &str, span: Span| -> Result<(), IrError> {
         if let TV::T(t) = &v {
-            if *t != IrType::Bool {
+            // `Error` is the slot-reuse top (disjoint lifetimes sharing
+            // one frame slot): genuinely polymorphic, never unboxed —
+            // accept, dispatch guards fail closed at runtime. Every
+            // other concrete mismatch is still a compiler bug.
+            if *t != IrType::Bool && *t != IrType::Error {
                 return Err(IrError::spanned(format!("type mismatch: {what}"), span));
             }
         }
@@ -1033,7 +1037,8 @@ fn infer_func(
     };
     let check_exact_int = |v: TV, what: &str, span: Span| -> Result<(), IrError> {
         if let TV::T(t) = &v {
-            if *t != IrType::Int {
+            // Same reuse-top exemption as above.
+            if *t != IrType::Int && *t != IrType::Error {
                 return Err(IrError::spanned(format!("type mismatch: {what}"), span));
             }
         }
@@ -1178,6 +1183,11 @@ fn infer_func(
                         | IrType::Array(_)
                         | IrType::Bytes
                         | IrType::Dict(_, _) => {}
+                        // Slot-reuse top (see check_exact_bool): a frame
+                        // slot shared across disjoint lifetimes widens to
+                        // `Error`; backends never unbox it and loop
+                        // dispatch guards fail closed at runtime.
+                        IrType::Error => {}
                         _ => {
                             return Err(IrError::spanned(
                                 "type mismatch: cannot iterate non-iterable".to_string(),

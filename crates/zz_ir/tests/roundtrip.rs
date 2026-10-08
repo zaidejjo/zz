@@ -663,3 +663,60 @@ fn nested_for_loops_verify() {
         verify::verify(&module).expect("nested loops must verify");
     }
 }
+
+#[test]
+fn verify_accepts_error_declared_iterable() {
+    // Slot reused across disjoint lifetimes widens to `Error`
+    // (genuinely polymorphic): the verifier must wildcard-accept it at
+    // iterable/bool/int positions instead of rejecting the program —
+    // backends never unbox `Error` and dispatch guards fail closed.
+    // Hand-built loop over an `Error`-declared slot (no allocator
+    // dependence): must verify. Before the fix this failed with
+    // `cannot iterate non-iterable` (the loop_mutate fixture hit it
+    // via a dead int loop-var slot reused by an array binding).
+    use zz_ir::{FuncDef, FuncSig, Module, Op, Span};
+    let module = Module {
+        types: vec![
+            zz_ir::IrType::Unknown,
+            zz_ir::IrType::Error,
+            zz_ir::IrType::Unit,
+        ],
+        strings: vec!["m".to_string()],
+        consts: vec![zz_ir::Const::Unit],
+        funcs: vec![FuncDef {
+            name: zz_ir::StrId(0),
+            arity: 0,
+            params: vec![],
+            sig: FuncSig {
+                params: vec![],
+                ret: zz_ir::TypeId(0),
+            },
+            toplevel_slots: vec![],
+            vartab: vec![vec![]],
+            locals: vec![zz_ir::TypeId(1)],
+            // [push result placeholder, load Error slot, setup,
+            // header, empty body, back-edge, exit pop].
+            code: vec![
+                Op::PushConst(zz_ir::ConstId(0)),
+                Op::LoadSlot(0),
+                Op::ForSetup {
+                    exit: 6,
+                    header: 4,
+                    num_vars: 0,
+                },
+                Op::Safepoint,
+                Op::ForNext {
+                    vars: vec![],
+                    exit: 6,
+                    in_env: false,
+                },
+                Op::Jump(4),
+                Op::Pop,
+            ],
+            spans: vec![Span::new(0, 0); 7],
+            max_stack: 3,
+        }],
+        entry: zz_ir::FuncId(0),
+    };
+    verify::verify(&module).expect("Error-declared iterable rejected");
+}
