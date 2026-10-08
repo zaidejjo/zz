@@ -498,9 +498,25 @@ fn find_bundled_libdir() -> Option<PathBuf> {
         .find(|d| d.join(lib_file_name()).is_file())
 }
 
+/// Shipped static libstd in a release lib dir (`libstd-<hash>.rlib`).
+/// Same newest-wins pick as the rustc-libdir scan. `None` when the dir
+/// ships none (old releases shipped only the shared object).
+fn find_shipped_std_rlib(libdir: &std::path::Path) -> Option<String> {
+    let entries = std::fs::read_dir(libdir).ok()?;
+    let mut found: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("libstd-") && n.ends_with(".rlib"))
+        .collect();
+    found.sort();
+    found.pop()
+}
+
 /// Shipped shared libstd in a release lib dir (`libstd-<hash>.so`,
 /// `.dylib` on macOS), newest pick like the rustc-libdir scan.
 /// `None` when the dir ships none (dev target dirs never do).
+/// Kept as a fallback for pre-#303 releases that shipped only the
+/// shared object; new releases ship the static rlib instead.
 fn find_shipped_libstd(libdir: &std::path::Path) -> Option<String> {
     let (prefix, suffix) = if cfg!(target_os = "macos") {
         ("libstd-", ".dylib")
@@ -602,11 +618,33 @@ fn lib_file_name() -> &'static str {
     }
 }
 
-/// `rustc`'s platform library directory (home of `libstd-*.so`).
-fn rustc_libdir() -> Result<PathBuf, FfiError> {
-    let out = Command::new("rustc")
-        .arg("--print")
-        .arg("target-libdir")
+/// System libraries appended after the Rust archives on every link.
+///
+/// Linux/macOS keep the historical set (`-lpthread -ldl -lm`). The BSDs
+/// ship `dlopen` in libc — there is no `libdl`, and passing `-ldl`
+/// breaks the link — so they get `-lpthread -lm` only. The rlib name
+/// (`libstd-*.rlib`) and the `.so` fallback suffix are identical on
+/// Linux and the BSDs; only macOS differs (`.dylib`, `@loader_path`).
+fn sys_link_libs() -> &'static [&'static str] {
+    if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
+        &["-lpthread", "-ldl", "-lm"]
+    } else {
+        // FreeBSD / OpenBSD / NetBSD / DragonFly: no libdl.
+        &["-lpthread", "-lm"]
+    }
+}
+
+/// `rustc`'s platform library directory (home of `libstd-*.rlib`).
+/// With `target`, the target's libdir (`--target <triple>`); otherwise
+/// the host's. Cross builds needing the native runtime must have the
+/// target's std installed (`rustup target add <triple>`).
+fn rustc_libdir_for_target(target: Option<&str>) -> Result<PathBuf, FfiError> {
+    let mut cmd = Command::new("rustc");
+    cmd.arg("--print").arg("target-libdir");
+    if let Some(t) = target {
+        cmd.arg("--target").arg(t);
+    }
+    let out = cmd
         .output()
         .map_err(|e| FfiError(format!("cannot run rustc: {e}")))?;
     if !out.status.success() {
@@ -617,8 +655,31 @@ fn rustc_libdir() -> Result<PathBuf, FfiError> {
     ))
 }
 
+/// Exact `libstd` static archive file name in `libdir`
+/// (`libstd-<hash>.rlib`, same on every platform). The rlib links
+/// directly through `cc` like a normal archive (verified: `clang
+/// main.c libstd-<hash>.rlib` yields no `libstd` NEEDED entry), so AOT
+/// binaries carry no libstd dependency and no RUNPATH.
+fn find_std_rlib(libdir: &std::path::Path) -> Result<String, FfiError> {
+    let entries =
+        std::fs::read_dir(libdir).map_err(|e| FfiError(format!("cannot read {libdir:?}: {e}")))?;
+    let mut found: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("libstd-") && n.ends_with(".rlib"))
+        .collect();
+    found.sort();
+    found.pop().ok_or_else(|| {
+        FfiError(format!(
+            "no libstd-*.rlib in {} (rustc libdir); native FFI link needs the static libstd",
+            libdir.display()
+        ))
+    })
+}
+
 /// Exact `libstd` shared-object file name in `libdir` (`-l:` needs the full
 /// name because rustc hashes it: `libstd-<hash>.so`).
+/// Fallback for pre-#303 toolchains that shipped only the shared object.
 fn find_libstd(libdir: &std::path::Path) -> Result<String, FfiError> {
     let (prefix, suffix) = if cfg!(target_os = "macos") {
         ("libstd-", ".dylib")
@@ -642,12 +703,21 @@ fn find_libstd(libdir: &std::path::Path) -> Result<String, FfiError> {
 }
 
 /// Extra `cc` flags to link the native runtime: the static library, the
-/// shared libstd (with rpath so AOT binaries run without `LD_LIBRARY_PATH`),
-/// and thread/dl helpers.
+/// static libstd archive (no NEEDED entry, no RUNPATH — #303), and
+/// thread/dl helpers.
 ///
 /// Returned flags are appended after the program object on the `cc` command
 /// line. Fails on Windows (MSVC import-library story is unimplemented).
 pub fn link_args(release: bool) -> Result<(Vec<String>, PathBuf), FfiError> {
+    link_args_for_target(release, None)
+}
+
+/// [`link_args`] scoped to a `--target=<triple>` cross triple: the
+/// target's std rlib is used so cross builds never mix host objects in.
+pub fn link_args_for_target(
+    release: bool,
+    target: Option<&str>,
+) -> Result<(Vec<String>, PathBuf), FfiError> {
     if cfg!(windows) {
         return Err(FfiError(
             "native FFI link is not implemented on Windows yet".into(),
@@ -658,43 +728,80 @@ pub fn link_args(release: bool) -> Result<(Vec<String>, PathBuf), FfiError> {
         .parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| FfiError(format!("static library has no parent: {}", lib.display())))?;
-    // Release installs ship libstd next to the archive: link it by
-    // filename and let stage_shared_libs() sidecar it next to the output
-    // (`$ORIGIN` rpath) — no rustc, no absolute build-machine paths.
-    if let Some(shipped) = find_shipped_libstd(&libdir) {
-        return Ok((
-            vec![
-                format!("-L{}", libdir.display()),
-                "-lzz_native_rt".to_string(),
-                format!("-L{}", libdir.display()),
-                format!("-l:{shipped}"),
-                "-lpthread".to_string(),
-                "-ldl".to_string(),
-                "-lm".to_string(),
-            ],
-            lib,
-        ));
+    // Base flags shared by every branch: the archive search path, the
+    // native runtime itself, then the platform system libs
+    // (`-ldl` omitted on the BSDs — `dlopen` lives in libc there).
+    let mut base = vec![
+        format!("-L{}", libdir.display()),
+        "-lzz_native_rt".to_string(),
+    ];
+    base.extend(sys_link_libs().iter().map(|s| s.to_string()));
+    // Release installs ship the static libstd next to the archive: link
+    // it by absolute path — no rustc, no RUNPATH, no sidecar. The `ldd`
+    // output shows no `libstd` line (glibc/libm dynamic is fine).
+    // Native-only: cross builds must resolve the target's sysroot below
+    // (a host archive in the libdir would silently mix architectures).
+    if target.is_none() {
+        if let Some(shipped) = find_shipped_std_rlib(&libdir) {
+            let mut flags = base.clone();
+            flags.insert(2, libdir.join(&shipped).display().to_string());
+            return Ok((flags, lib));
+        }
     }
-    let rustc_dir = rustc_libdir()?;
-    let libstd = find_libstd(&rustc_dir)?;
-    Ok((
-        vec![
-            format!("-L{}", libdir.display()),
-            "-lzz_native_rt".to_string(),
-            format!("-L{}", rustc_dir.display()),
-            format!("-l:{libstd}"),
-            format!("-Wl,-rpath,{}", rustc_dir.display()),
-            "-lpthread".to_string(),
-            "-ldl".to_string(),
-            "-lm".to_string(),
-        ],
-        lib,
-    ))
+    if let Ok(rustc_dir) = rustc_libdir_for_target(target) {
+        if let Ok(rlib) = find_std_rlib(&rustc_dir) {
+            let mut flags = base.clone();
+            flags.insert(2, rustc_dir.join(&rlib).display().to_string());
+            return Ok((flags, lib));
+        }
+    }
+    // Fallback: pre-#303 layout with only the shared object (old release
+    // zips, or a toolchain without rlibs). Native-only like the static
+    // shipped path above — cross builds error loudly on the target
+    // sysroot instead of mixing host objects.
+    if target.is_none() {
+        if let Some(shipped) = find_shipped_libstd(&libdir) {
+            let mut flags = base.clone();
+            flags.insert(2, format!("-L{}", libdir.display()));
+            flags.insert(3, format!("-l:{shipped}"));
+            return Ok((flags, lib));
+        }
+    }
+    let rustc_dir = rustc_libdir_for_target(target).map_err(|e| {
+        FfiError(format!(
+            "{e}{}",
+            target
+                .map(|t| format!(" (`rustup target add {t}` for --target {t})"))
+                .unwrap_or_default()
+        ))
+    })?;
+    // Static rlib preferred; shared object only as a last resort.
+    if let Ok(rlib) = find_std_rlib(&rustc_dir) {
+        let mut flags = base.clone();
+        flags.insert(2, rustc_dir.join(&rlib).display().to_string());
+        return Ok((flags, lib));
+    }
+    if let Ok(libstd) = find_libstd(&rustc_dir) {
+        let mut flags = base;
+        flags.insert(2, format!("-L{}", rustc_dir.display()));
+        flags.insert(3, format!("-l:{libstd}"));
+        flags.insert(4, format!("-Wl,-rpath,{}", rustc_dir.display()));
+        return Ok((flags, lib));
+    }
+    Err(FfiError(format!(
+        "no libstd-*.rlib in {} (rustc libdir); native FFI link needs the static libstd{}",
+        rustc_dir.display(),
+        target
+            .map(|t| format!(" for --target {t} (`rustup target add {t}`)"))
+            .unwrap_or_default()
+    )))
 }
 
 /// Copy shipped shared libs next to the output binary and return the
-/// loader path flag. No-op when the staticlib dir ships none (dev
-/// checkouts keep the rustc rpath from [`link_args`]).
+/// loader path flag. Static links (#303 default) stage nothing — there
+/// is no shared object to sidecar. Only the legacy shared-libstd
+/// fallback produces a sidecar; dev checkouts keep the rustc rpath from
+/// [`link_args`] in that fallback.
 #[cfg(not(windows))]
 pub fn stage_shared_libs(
     lib_path: &std::path::Path,
@@ -775,12 +882,21 @@ mod tests {
         ));
         let libdir = base.join("lib");
         std::fs::create_dir_all(&libdir).expect("mkdir");
-        // Empty dir: no shipped libstd.
+        // Empty dir: no shipped libstd of either kind.
+        assert_eq!(find_shipped_std_rlib(&libdir), None);
         assert_eq!(find_shipped_libstd(&libdir), None);
         // Archive alone: still no shared objects.
         std::fs::write(libdir.join(lib_file_name()), b"fake-archive").expect("write");
+        assert_eq!(find_shipped_std_rlib(&libdir), None);
         assert_eq!(find_shipped_libstd(&libdir), None);
-        // Shipped libstd detected, newest wins.
+        // Shipped static rlib detected, newest wins (#303 default).
+        std::fs::write(libdir.join("libstd-aaa.rlib"), b"old").expect("write");
+        std::fs::write(libdir.join("libstd-zzz.rlib"), b"new").expect("write");
+        assert_eq!(
+            find_shipped_std_rlib(&libdir),
+            Some("libstd-zzz.rlib".to_string())
+        );
+        // Legacy shared object still detected as a fallback.
         let (prefix, suffix) = if cfg!(target_os = "macos") {
             ("libstd-", ".dylib")
         } else {
@@ -793,6 +909,25 @@ mod tests {
             Some(format!("{prefix}zzz{suffix}"))
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn static_link_prefers_rlib_without_rpath() {
+        // The #303 contract: static libstd, no `-l:`, no RUNPATH.
+        let (args, _lib) = link_args(false).expect("link_args");
+        let joined = args.join(" ");
+        assert!(
+            joined.contains(".rlib"),
+            "static link must pass the rlib path: {joined}"
+        );
+        assert!(
+            !joined.contains("-l:"),
+            "static link must not use -l:libstd.so: {joined}"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("-rpath")),
+            "static link must emit no rpath: {joined}"
+        );
     }
 
     #[test]

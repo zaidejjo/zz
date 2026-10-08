@@ -10,8 +10,10 @@
 #   /usr/bin/zz      -> `zz run main.zz`, `zz check`, `zz build`, REPL
 #   /usr/bin/zz-lsp  -> language server
 #   /usr/lib/zz/     -> prebuilt native runtime (libzz_native_rt.a +
-#                       shared libstd) so `zz build` works with no sources
-#                       and no Rust toolchain
+#                       static libstd rlib) so `zz build` links with no
+#                       sources and no Rust toolchain. AOT outputs carry
+#                       no libstd dependency and no RUNPATH (#303), so
+#                       downstream packages ship no lib/ dir.
 
 pkgname=@PKGNAME@
 pkgver=@PKGVER@
@@ -40,7 +42,7 @@ package() {
   install -Dm755 zz "$pkgdir/usr/bin/zz"
   install -Dm755 zz-lsp "$pkgdir/usr/bin/zz-lsp"
   install -Dm644 lib/libzz_native_rt.a "$pkgdir/usr/lib/zz/libzz_native_rt.a"
-  install -Dm644 lib/libstd-* "$pkgdir/usr/lib/zz/"
+  install -Dm644 lib/libstd-*.rlib "$pkgdir/usr/lib/zz/"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }
