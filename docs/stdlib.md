@@ -597,6 +597,9 @@ if fs.exists("config.toml") {
 import std.env
 ```
 
+Reads (`env.get`, `env.get_var`, `env.var`, `env.vars`) work with no
+import — shell variables are readable by default. Writes need the import.
+
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `env.get` | `env.get(key: str) -> str?` | Value or `.none` |

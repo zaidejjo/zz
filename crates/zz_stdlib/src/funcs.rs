@@ -2930,6 +2930,25 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.env.vars".into(),
         sig(vec![], Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
     );
+    // Bare env.* reads work without `import std.env` (shell variables by
+    // default). Writes (set/remove/unset/cwd/args/…) still need the
+    // import — mutating the process environment stays opt-in.
+    m.insert(
+        "env.get_var".into(),
+        sig(vec![("name", Type::Str)], Type::Option(Box::new(Type::Str))),
+    );
+    m.insert(
+        "env.var".into(),
+        sig(
+            vec![("name", Type::Str)],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert("env.get".into(), sig(vec![("key", Type::Str)], opt_str()));
+    m.insert(
+        "env.vars".into(),
+        sig(vec![], Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
+    );
     m.insert("std.env.cwd".into(), sig(vec![], res_str()));
     m.insert(
         "std.env.set_cwd".into(),
@@ -4368,10 +4387,14 @@ mod tests {
             "str.find",
             "std.str.rfind",
             "str.rfind",
+            "env.get_var",
+            "env.var",
+            "env.get",
+            "env.vars",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 902);
+        assert_eq!(funcs.len(), 906);
     }
 
     #[test]

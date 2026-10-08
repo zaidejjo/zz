@@ -100,6 +100,10 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("stdlib/envmod.zz", "reads env/argv (shared in batch)"),
     ("stdlib/env_test.zz", "reads env/argv (shared in batch)"),
     ("stdlib/env_full.zz", "reads env/argv (shared in batch)"),
+    (
+        "stdlib/env_noimport_test.zz",
+        "reads env/argv (shared in batch)",
+    ),
     ("stdlib/concurrency_spawn_test.zz", "spawn/timing-sensitive"),
     ("stdlib/channel_test.zz", "spawn/timing-sensitive"),
     ("stdlib/concurrency_tasks_test.zz", "spawn/timing-sensitive"),

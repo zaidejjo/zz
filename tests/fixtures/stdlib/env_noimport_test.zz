@@ -1,0 +1,16 @@
+// features: locals, match, option-result, print, std-env, string-literal
+// E2E: env reads work with NO import (shell variables by default).
+// NOTE: no `import std.env` on purpose — this fixture proves the
+// import-free reads. Writes (set/remove) still need the import.
+func main() {
+    match env.var("HOME") {
+        .ok(_) => println("has_home")
+        .err(_) => println("no_home")
+    }
+    v := env.get("HOME") ?? "none"
+    if v == "none" {
+        println("env_noimport_missing")
+    } else {
+        println("env_noimport_ok")
+    }
+}

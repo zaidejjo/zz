@@ -2061,15 +2061,33 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: env::env_args,
         },
     );
+    // Bare env.* reads (no import needed — see funcs.rs). Writes stay
+    // import-gated.
+    m.insert(
+        "env.get_var".into(),
+        NativeEntry {
+            arity: 1,
+            f: env::env_get_var,
+        },
+    );
+    m.insert(
+        "env.var".into(),
+        NativeEntry {
+            arity: 1,
+            f: env::env_var,
+        },
+    );
     // std.env — cross-platform environment + OS identity (see
     // `natives/env/mod.rs`). Short `env.*` spellings resolve through the
     // module namespace like every other stdlib module.
     for (name, arity, func) in [
         ("std.env.get", 1_usize, env::env_get as zz_runtime::NativeFn),
+        ("env.get", 1_usize, env::env_get as zz_runtime::NativeFn),
         ("std.env.set", 2, env::env_set),
         ("std.env.remove", 1, env::env_remove),
         ("std.env.unset", 1, env::env_remove),
         ("std.env.vars", 0, env::env_vars),
+        ("env.vars", 0, env::env_vars),
         ("std.env.cwd", 0, env::env_cwd),
         ("std.env.set_cwd", 1, env::env_set_cwd),
         ("std.env.exe_path", 0, env::env_exe_path),
