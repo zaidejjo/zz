@@ -170,13 +170,39 @@ const CASES: &[(&str, &str)] = &[
 /// non-clang providers (zig) — the pin only constrains clang.
 fn parse_clang_major(verbose_stderr: &str) -> Option<String> {
     for line in verbose_stderr.lines() {
-        let rest = line.strip_prefix("zz: clang ")?;
-        let mut words = rest.split_whitespace();
-        if words.next() == Some("clang") && words.next() == Some("version") {
-            return words.next()?.split('.').next().map(str::to_string);
+        let Some(rest) = line.strip_prefix("zz: clang ") else {
+            continue;
+        };
+        // Vendor infixes exist (`Ubuntu clang version 23.1.2 (...)`,
+        // `Apple clang version ...`): scan for the `clang version X`
+        // triple anywhere in the line, not just at the start.
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        for w in words.windows(3) {
+            if w[0] == "clang" && w[1] == "version" {
+                return w[2].split('.').next().map(str::to_string);
+            }
         }
     }
     None
+}
+
+#[test]
+fn clang_major_parses_plain_and_vendor_strings() {
+    // Plain `clang version X` (local toolchains).
+    assert_eq!(
+        parse_clang_major("zz: clang clang version 23.1.1 -fwrapv"),
+        Some("23".to_string())
+    );
+    // Vendor infix (`apt.llvm.org` Ubuntu build) with leading noise
+    // lines: the old parser aborted on the first non-matching line
+    // (`?` on `strip_prefix`) and required the pair at word 0.
+    assert_eq!(
+        parse_clang_major(
+            "building /tmp/x/probe.zz (dev)\nzz: clang Ubuntu clang version 23.1.2 (++20260919103626+4b1925210476-1~exp1~20260919223755.77) -O3"
+        ),
+        Some("23".to_string())
+    );
+    assert_eq!(parse_clang_major("nothing to parse here"), None);
 }
 
 #[test]
