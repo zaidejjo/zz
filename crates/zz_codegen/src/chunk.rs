@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use zz_ir::{Const, ConstId, FuncDef, FuncId, Module, Op, StrId};
+use zz_ir::{Const, ConstId, FuncDef, FuncId, IrType, Module, Op, StrId};
 
 use super::lower::mangle;
 
@@ -267,6 +267,441 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
         }
     }
     out
+}
+
+/// Static jump targets of one op (mirrors the verifier's edge set; used
+/// for label collection and peel region checks).
+fn jump_targets(op: &Op) -> Vec<u32> {
+    match op {
+        Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfFalseBool(t) => {
+            vec![*t]
+        }
+        Op::ForSetup { exit, header, .. } => vec![*exit, *header],
+        Op::ForNext { exit, .. } | Op::WhileSetup { exit, .. } | Op::WhileCond { exit } => {
+            vec![*exit]
+        }
+        Op::MatchArm { next, .. } | Op::MatchGuard { next, .. } => vec![*next],
+        Op::IfLetMatch { els, .. } => vec![*els],
+        _ => Vec::new(),
+    }
+}
+
+/// Int-declared frame slots eligible for fusion windows in one function:
+/// `locals` entries that are exactly `Int`. Windows only read slots
+/// through int guards (fail-closed), so take homes and reused slots need
+/// no exclusion here — the take-push tail matches structurally in
+/// [`int_fuse`] instead.
+fn int_slots(module: &Module, f: &FuncDef) -> HashSet<u16> {
+    let mut out = HashSet::new();
+    for (i, id) in f.locals.iter().enumerate() {
+        if i > u16::MAX as usize {
+            break;
+        }
+        if matches!(module.types.get(id.0 as usize), Some(IrType::Int)) {
+            out.insert(i as u16);
+        }
+    }
+    out
+}
+
+/// Scan for fusable unboxed-int windows (see [`FusedTail`]). Runs after
+/// [`fuse_scan`]: pcs it already claimed, and any window interior that is
+/// a jump target, are left alone (entering mid-window would skip emission).
+/// Shape: a straight-line int expression (loads of int slots, int consts,
+/// int-closed arithmetic) terminated by an int store or a take-push tail.
+/// Expression ops are capped (12) so matching stays linear; longest match
+/// wins and the walk advances past it.
+/// A peelable counted loop: `for v in <range|[int]>` with a straight-line
+/// fused body. The peel replaces `[ForNext..exit]` with a raw C loop;
+/// `ForSetup` keeps its boxed emission (placeholder pushes + `_lbase`
+/// bookkeeping), so exit stack accounting is untouched.
+#[derive(Debug, Clone)]
+struct Peel {
+    /// Exit pc (stays visible; peel jumps here when exhausted).
+    exit: usize,
+    /// Iteration variable slot (never `u16::MAX` — env vars bail).
+    var: u16,
+    /// Fused body window start + length (from [`int_fuse`]).
+    body: usize,
+    body_len: usize,
+    body_tail: FusedTail,
+    /// What is iterated (producer-gated at match time).
+    source: PeelSource,
+    /// Int slots promoted to C locals for the loop (see below): every
+    /// int slot the body loads or stores, except the iteration variable
+    /// (which substitutes separately). Ints cannot alias, so entry
+    /// unbox + exit write-back brackets all body accesses transparently:
+    /// entry guards only loaded slots (a store-only slot keeps boxed
+    /// exactness — no new traps), write-back releases the old value
+    /// (sound for any old content).
+    promo_loads: Vec<u16>,
+    promo_stores: Vec<u16>,
+}
+
+/// Source a peeled loop iterates: int bounds from a range box (whose
+/// producer is an adjacent `MakeRange` — our own emission, so the tag
+/// is proven), or an int-element array slot (tag-checked at runtime).
+#[derive(Debug, Clone, Copy)]
+enum PeelSource {
+    Range,
+    Array,
+}
+
+/// Scan for peelable loops (see [`Peel`]). Strict shapes only — anything
+/// else stays boxed:
+/// - `ForSetup{E,H,1 var}` with an adjacent producer (`MakeRange`, or
+///   `LoadSlot` of an array-declared slot), `Safepoint`s only between
+///   setup and `ForNext{E}!in_env` at/below the header;
+/// - body = one fused window plus optional safepoints and an optional
+///   `[PushConst unit, SetLoopResult]` tail, then `Jump(H)`;
+/// - no calls, jumps (other than the back-edge), breaks, nesting, or
+///   indexing anywhere in `[S..E]`; no outside targets into `(S,E)`.
+fn peel_scan(
+    f: &FuncDef,
+    module: &Module,
+    ints: &HashSet<u16>,
+    targets: &HashSet<u32>,
+    fused: &HashMap<usize, (usize, FusedTail)>,
+) -> (HashMap<usize, Peel>, HashSet<usize>) {
+    let mut peels = HashMap::new();
+    let mut skip = HashSet::new();
+    let code = &f.code;
+    let is_array_slot = |s: u16| -> bool {
+        match f
+            .locals
+            .get(s as usize)
+            .and_then(|id| module.types.get(id.0 as usize))
+        {
+            Some(IrType::Array(e)) => matches!(module.types.get(e.0 as usize), Some(IrType::Int)),
+            _ => false,
+        }
+    };
+    // kth ForNext ↔ kth vartab entry.
+    for (spc, op) in code.iter().enumerate() {
+        let (exit, header) = match op {
+            Op::ForSetup {
+                exit,
+                header,
+                num_vars,
+            } if *num_vars == 1 => (*exit as usize, *header as usize),
+            Op::ForSetup { .. } => continue,
+            _ => continue,
+        };
+        if spc == 0 || exit <= spc || header > spc + 2 || header <= spc {
+            // `header` sits at/below the `ForNext`, right after setup
+            // (only `Safepoint`s between — anything else bails).
+            if !(header == spc + 1
+                || (header == spc + 2 && matches!(code.get(spc + 1), Some(Op::Safepoint))))
+            {
+                continue;
+            }
+        }
+        // Producer immediately before setup: range bounds or int array.
+        // `MakeRange` adjacency proves a range box (our own emission is
+        // range-or-trap); an array slot is tag-checked at runtime.
+        let (source, arr_slot) = match (spc.checked_sub(1), code.get(spc.wrapping_sub(1))) {
+            (Some(_), Some(Op::MakeRange)) => (PeelSource::Range, None),
+            (Some(_), Some(Op::LoadSlot(a))) if is_array_slot(*a) => (PeelSource::Array, Some(*a)),
+            _ => continue,
+        };
+        // `ForNext` at/below the header with a matching exit.
+        let mut fpc = None;
+        for p in header..header + 2 {
+            match code.get(p) {
+                Some(Op::ForNext {
+                    exit: e, in_env, ..
+                }) if *e as usize == exit && !in_env => {
+                    fpc = Some(p);
+                    break;
+                }
+                Some(Op::Safepoint) => continue,
+                _ => break,
+            }
+        }
+        let fpc = match fpc {
+            Some(p) => p,
+            None => continue,
+        };
+        // vartab entry for this `ForNext` (kth in function order).
+        let k = code[..fpc]
+            .iter()
+            .filter(|o| matches!(o, Op::ForNext { .. }))
+            .count();
+        let var = match f.vartab.get(k).and_then(|e| e.first()) {
+            Some(v) if *v != u16::MAX => *v,
+            _ => continue,
+        };
+        // Body: safepoints, one fused window, optional unit-result tail,
+        // then the back-edge jump. Nothing else.
+        let mut p = fpc + 1;
+        while matches!(code.get(p), Some(Op::Safepoint)) {
+            p += 1;
+        }
+        let (body, body_len, body_tail) = match fused.get(&p) {
+            Some((len, tail)) => (p, *len, *tail),
+            None => continue,
+        };
+        p += body_len;
+        while matches!(code.get(p), Some(Op::Safepoint)) {
+            p += 1;
+        }
+        let has_tail = matches!(
+            (code.get(p), code.get(p + 1)),
+            (Some(Op::PushConst(c)), Some(Op::SetLoopResult))
+                if matches!(module.consts.get(c.0 as usize), Some(Const::Unit))
+        );
+        if has_tail {
+            p += 2;
+        }
+        match code.get(p) {
+            Some(Op::Jump(h)) if *h as usize == header => {}
+            _ => continue,
+        }
+        let jmp = p;
+        if exit <= jmp {
+            continue;
+        }
+        // No outside targets into the peeled region (the back-edge to the
+        // header is the only interior edge): entering mid-loop would run
+        // the raw body without the setup state the boxed shape provides.
+        let mut ok = true;
+        for t in targets {
+            let t = *t as usize;
+            if t > spc && t < exit && t != header {
+                ok = false;
+                break;
+            }
+        }
+        // The header itself is only reachable via fall-through and the
+        // back-edge: any other jump into it bails (same reason).
+        if ok {
+            for (jpc, op) in code.iter().enumerate() {
+                if jpc >= spc && jpc <= jmp {
+                    continue;
+                }
+                if jump_targets(op).contains(&(header as u32)) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        // Array peel must not rebind or index-mutate its iterable
+        // mid-loop (`len` is hoisted): take tails and stores to the array
+        // slot bail out (boxed handles them).
+        if let Some(a) = arr_slot {
+            if matches!(source, PeelSource::Array) {
+                if let FusedTail::Take(t) = body_tail {
+                    if t == a {
+                        continue;
+                    }
+                }
+                // No rebinding the iterable slot anywhere in the body.
+                if code[body..body + body_len]
+                    .iter()
+                    .any(|o| matches!(o, Op::StoreSlot(s) if *s == a))
+                {
+                    continue;
+                }
+            }
+        }
+        // Body windows must be net-zero on the stack (peeled bodies do no
+        // stack traffic): store tails qualify; take tails only with a
+        // fused expression prefix (bare take pops the stack element).
+        match body_tail {
+            FusedTail::Store(_) => {}
+            FusedTail::Take(_) if body_len > 6 => {}
+            FusedTail::Take(_) => continue,
+        }
+        // The body must not write the iteration variable: an explicit
+        // `StoreSlot(var)` (or take-append into it) would corrupt the
+        // raw counter the peel substitutes, while boxed code discards
+        // such stores at the next `ForNext`. Bail to boxed.
+        let writes_var = code[body..body + body_len]
+            .iter()
+            .any(|o| matches!(o, Op::StoreSlot(s) if *s == var))
+            || matches!(body_tail, FusedTail::Take(t) if t == var);
+        if writes_var {
+            continue;
+        }
+        // Promotion set: every int slot the body loads or stores (except
+        // the iteration variable, which substitutes separately). Split
+        // loads (entry-guarded) from stores (write-back only) so trap
+        // behavior matches boxed code exactly.
+        let mut promo_loads = Vec::new();
+        let mut promo_stores = Vec::new();
+        for op in &code[body..body + body_len] {
+            match op {
+                Op::LoadSlot(s) if ints.contains(s) && *s != var && !promo_loads.contains(s) => {
+                    promo_loads.push(*s);
+                }
+                Op::StoreSlot(d) if ints.contains(d) && *d != var && !promo_stores.contains(d) => {
+                    promo_stores.push(*d);
+                }
+                _ => {}
+            }
+        }
+        // Claim [fornext..exit]: the peel emits at `fpc`, `exit` stays.
+        for q in fpc + 1..exit {
+            skip.insert(q);
+        }
+        peels.insert(
+            fpc,
+            Peel {
+                exit,
+                var,
+                body,
+                body_len,
+                body_tail,
+                source,
+                promo_loads,
+                promo_stores,
+            },
+        );
+    }
+    (peels, skip)
+}
+
+fn int_fuse(
+    f: &FuncDef,
+    consts: &[Const],
+    ints: &HashSet<u16>,
+    targets: &HashSet<u32>,
+    taken: &HashSet<usize>,
+) -> (HashMap<usize, (usize, FusedTail)>, HashSet<usize>) {
+    /// Expression-op effect on the ministack, or `None` when the op can
+    /// never be part of an int expression.
+    fn expr_effect(ints: &HashSet<u16>, consts: &[Const], op: &Op) -> Option<i32> {
+        match op {
+            Op::LoadSlot(s) if ints.contains(s) => Some(1),
+            Op::PushConst(c) => match consts.get(c.0 as usize) {
+                Some(Const::Int(_)) => Some(1),
+                _ => None,
+            },
+            Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => Some(-1),
+            Op::IntNeg => Some(0),
+            Op::BinOp(zz_ir::op::BinOp::Add | zz_ir::op::BinOp::Sub | zz_ir::op::BinOp::Mul) => {
+                Some(-1)
+            }
+            Op::BinOp(_) => None,
+            _ => None,
+        }
+    }
+    /// Take-push tail at `t` for array slot `a`: `[loadslot a, unit,
+    /// storeslot a, swap, arraypush, storeslot a]`. The element arrives
+    /// either on the stack (bare six-op tail) or from a fused prefix
+    /// expression — both handled at emission.
+    fn take_tail(code: &[Op], consts: &[Const], t: usize) -> Option<u16> {
+        if t + 5 >= code.len() {
+            return None;
+        }
+        let is_unit = matches!(&code[t + 1], Op::PushConst(c) if matches!(consts.get(c.0 as usize), Some(Const::Unit)));
+        if let (Op::LoadSlot(a), Op::StoreSlot(b), Op::StoreSlot(c)) =
+            (&code[t], &code[t + 2], &code[t + 5])
+        {
+            if a == b
+                && b == c
+                && is_unit
+                && matches!(&code[t + 3], Op::Swap)
+                && matches!(&code[t + 4], Op::ArrayPush)
+            {
+                return Some(*a);
+            }
+        }
+        None
+    }
+    let mut fused = HashMap::new();
+    let mut skip = HashSet::new();
+    let code = &f.code;
+    let mut pc = 0usize;
+    while pc < code.len() {
+        if taken.contains(&pc) {
+            pc += 1;
+            continue;
+        }
+        let mut placed: Option<(usize, FusedTail)> = None;
+        // Latest expression end first (longest match wins); expression
+        // itself is capped so the scan stays linear.
+        let latest = (pc + 13).min(code.len());
+        let mut t = latest;
+        while t > pc {
+            // Interior [pc+1..t] must be free (window starts at `pc`,
+            // which may itself be targeted).
+            if (pc + 1..t).any(|p| targets.contains(&(p as u32)) || taken.contains(&p)) {
+                t -= 1;
+                continue;
+            }
+            // Expression [pc..t] must balance 0 → 1.
+            let mut depth = 0i32;
+            let mut ok = true;
+            for op in &code[pc..t] {
+                match expr_effect(ints, consts, op) {
+                    Some(e) => {
+                        depth += e;
+                        if depth < 1 && op_needs_value(op) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && depth == 1 {
+                // Terminator at `t`: int store, or take-push tail.
+                if t < code.len() {
+                    if let Op::StoreSlot(d) = &code[t] {
+                        if ints.contains(d) && !targets.contains(&(t as u32)) && !taken.contains(&t)
+                        {
+                            placed = Some((t - pc + 1, FusedTail::Store(*d)));
+                            break;
+                        }
+                    }
+                }
+                if let Some(a) = take_tail(code, consts, t) {
+                    if !(t..t + 6).any(|p| targets.contains(&(p as u32)) || taken.contains(&p)) {
+                        placed = Some((t - pc + 6, FusedTail::Take(a)));
+                        break;
+                    }
+                }
+            }
+            t -= 1;
+        }
+        // Bare take-push tail with the element already on the stack.
+        if placed.is_none() {
+            if let Some(a) = take_tail(code, consts, pc) {
+                if !(pc + 1..pc + 6).any(|p| targets.contains(&(p as u32)) || taken.contains(&p)) {
+                    placed = Some((6, FusedTail::Take(a)));
+                }
+            }
+        }
+        if let Some((len, tail)) = placed {
+            // Skip the window tail: the fused statement emits at `pc`,
+            // so `pc` itself stays visible to the walk.
+            for p in pc + 1..pc + len {
+                skip.insert(p);
+            }
+            fused.insert(pc, (len, tail));
+            pc += len;
+        } else {
+            pc += 1;
+        }
+    }
+    (fused, skip)
+}
+
+/// True when `op` consumes ministack values (underflow-checked by the
+/// matcher): binary ops need depth ≥ 2, negation ≥ 1, producers never
+/// underflow.
+fn op_needs_value(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem | Op::IntNeg | Op::BinOp(_)
+    )
 }
 
 /// Store-index fusion: `LoadSlot(s) … StoreIndexOp StoreSlot(s)` with a
@@ -914,6 +1349,13 @@ fn ctrap(msg: &str) -> String {
     format!("{{ fprintf(stderr, \"zz error: {msg}\\n\"); exit(1); }}")
 }
 
+/// Cold-trap call for fused/peel guards: identical stderr bytes + exit 1
+/// as [`ctrap`], but the abort block lives out of line (`zz_ftrap` in the
+/// preamble) so hot loops stay tight for icache and unrolling.
+fn ftrap(msg: &str) -> String {
+    format!("zz_ftrap(\"{msg}\")")
+}
+
 fn binop_const(op: &zz_ir::op::BinOp) -> Option<&'static str> {
     use zz_ir::op::BinOp as B;
     Some(match op {
@@ -1131,6 +1573,8 @@ impl<'a> Emitter<'a> {
         ));
         out.push_str(&format!("    int sp = {nparams};\n"));
         out.push_str("    int _lbase[256];\n    int _ldepth = 0;\n");
+        // Int-declared slots eligible for fused windows (see `int_slots`).
+        let uint = int_slots(self.module, f);
         if nparams > 0 {
             out.push_str(&format!(
                 "    if (argc != {nparams}) {trap};\n",
@@ -1143,30 +1587,30 @@ impl<'a> Emitter<'a> {
         // Jump targets get labels.
         let mut targets: HashSet<u32> = HashSet::new();
         for op in &f.code {
-            match op {
-                Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfFalseBool(t) => {
-                    targets.insert(*t);
-                }
-                Op::ForSetup { exit, header, .. } => {
-                    targets.insert(*exit);
-                    targets.insert(*header);
-                }
-                Op::ForNext { exit, .. } | Op::WhileSetup { exit, .. } | Op::WhileCond { exit } => {
-                    targets.insert(*exit);
-                }
-                Op::MatchArm { next, .. } | Op::MatchGuard { next, .. } => {
-                    targets.insert(*next);
-                }
-                Op::IfLetMatch { els, .. } => {
-                    targets.insert(*els);
-                }
-                _ => {}
+            for t in jump_targets(op) {
+                targets.insert(t);
             }
         }
         let origins_empty: Vec<Vec<Callee>> = Vec::new();
         let org = origins_map.get(&(id.0 as usize)).unwrap_or(&origins_empty);
         // Store-index fusion (in-place slot stores; see `fuse_scan`).
         let (fused, skip) = fuse_scan(&f.code);
+        let (ufused, uskip) = int_fuse(f, &self.module.consts, &uint, &targets, &skip);
+        let mut skip = skip;
+        skip.extend(uskip);
+        // Fused windows emit at their start pc: a start must never be
+        // skipped (that would drop the ops silently — see arraysum).
+        debug_assert!(
+            ufused.keys().all(|k| !skip.contains(k)),
+            "fused window start in skip set"
+        );
+        // Loop peels (see `peel_scan`): claim `[fornext..exit]`.
+        let (peels, pskip) = peel_scan(f, self.module, &uint, &targets, &ufused);
+        skip.extend(pskip);
+        debug_assert!(
+            peels.keys().all(|k| !skip.contains(k)),
+            "peel start in skip set"
+        );
         for (pc, op) in f.code.iter().enumerate() {
             if skip.contains(&pc) {
                 continue;
@@ -1186,6 +1630,8 @@ impl<'a> Emitter<'a> {
                 callee: callee_owned.as_ref(),
                 fuse_slot: fused.get(&pc).copied(),
                 frame,
+                ufuse: ufused.get(&pc).copied(),
+                peel: peels.get(&pc).cloned(),
             };
             self.emit_op(id, pc, op, &cx, out)?;
         }
@@ -1204,6 +1650,336 @@ impl<'a> Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
+    /// Emit one peeled counted loop (see [`Peel`]): pop the `ForSetup`
+    /// placeholders, hoist promoted int slots to C locals (entry-guarded
+    /// once), run a raw C loop over the fused body, write promotions back,
+    /// then take the exit edge exactly as the boxed exhaustion path would
+    /// (releases, `_ldepth--`, `sp` already at the exit position, `goto
+    /// exit`). Body var/slot loads substitute their C locals directly (no
+    /// guard, no box): proven-int by entry guard or construction.
+    fn emit_peeled(module: &Module, code: &[Op], peel: &Peel, out: &mut String) {
+        let v = peel.var;
+        out.push_str("    {\n");
+        // Pop the placeholders `ForSetup` pushed (iterable, index, var):
+        // `sp` returns to the setup level, which IS the exit position
+        // (`_lbase+1`), so no padding is ever needed.
+        out.push_str("      zz_value _pit = st[sp-3];\n");
+        out.push_str("      zz_release(&st[sp-2]);\n");
+        out.push_str("      zz_release(&st[sp-1]);\n");
+        out.push_str("      sp -= 3;\n");
+        // Promotions: entry-guard loaded slots once; declare store-only
+        // slots (defined by their first body store).
+        let mut seen = HashSet::new();
+        for s in &peel.promo_loads {
+            if seen.insert(*s) {
+                out.push_str(&format!(
+                    "      zz_value _bp{s} = st[{s}]; if (_bp{s}.tag != ZZ_INT) {}; int64_t _ps{s} = _bp{s}.i;\n",
+                    ftrap("int slot loaded non-int value")
+                ));
+            }
+        }
+        for s in &peel.promo_stores {
+            if seen.insert(*s) {
+                // Store-only: no entry guard (boxed exactness — the old
+                // value is simply overwritten at write-back). Zero-init
+                // for determinism; the straight-line body always assigns
+                // before any read.
+                out.push_str(&format!("      int64_t _ps{s} = 0;\n"));
+            }
+        }
+        // Substitution map for the fused body: the iteration variable
+        // (proven-int counter/element) plus every promoted slot. Reads
+        // compile to the C local directly — no guard, no box.
+        let mut subs: HashMap<u16, String> = HashMap::new();
+        for s in peel.promo_loads.iter().chain(peel.promo_stores.iter()) {
+            subs.entry(*s).or_insert_with(|| format!("_ps{s}"));
+        }
+        match peel.source {
+            PeelSource::Range => {
+                // Proven range: the adjacent `MakeRange` producer is our
+                // own emission (range-or-trap, step hardcodes to 1 like
+                // the VM and HIR), so no tag check and a plain
+                // zero-trip-correct `<` loop (rule 5: no guards in
+                // proved code).
+                out.push_str("      zz_crange *_pr = (zz_crange*)_pit.payload;\n");
+                out.push_str("      for (int64_t _pv = _pr->start; _pv < _pr->end; _pv++) {\n");
+                subs.insert(v, "_pv".to_string());
+                Self::emit_fused_window(
+                    module,
+                    code,
+                    peel.body,
+                    peel.body_len,
+                    peel.body_tail,
+                    &subs,
+                    out,
+                );
+                subs.remove(&v);
+                out.push_str("      }\n");
+            }
+            PeelSource::Array => {
+                // Slot-proven array shape, runtime tag gate (the slot may
+                // hold a non-array on adversarial modules; valid programs
+                // always hold the declared array). Mirrors `ForSetup`'s
+                // dispatch refusal message.
+                out.push_str("      if (_pit.tag != ZZ_ARRAY) ");
+                out.push_str(&format!("{};\n", ftrap("cannot iterate this value")));
+                out.push_str("      size_t _pn = _pit.arr->len;\n");
+                out.push_str("      for (size_t _pk = 0; _pk < _pn; _pk++) {\n");
+                // Element boundary (fail-closed): valid programs hold
+                // ints here (checker-vetted); anything else traps
+                // instead of misreading bits as an int.
+                out.push_str(
+                    "        zz_value _pe = _pit.arr->items[_pk]; if (_pe.tag != ZZ_INT) ",
+                );
+                out.push_str(&format!("{};\n", ftrap("array element is not an int")));
+                subs.insert(v, "_pe.i".to_string());
+                Self::emit_fused_window(
+                    module,
+                    code,
+                    peel.body,
+                    peel.body_len,
+                    peel.body_tail,
+                    &subs,
+                    out,
+                );
+                subs.remove(&v);
+                out.push_str("      }\n");
+            }
+        }
+        // Write promotions back (release-then-move: sound for any old
+        // content, exact for ints), then the exit edge.
+        for s in &peel.promo_stores {
+            out.push_str(&format!("      zz_release(&st[{s}]);\n"));
+            out.push_str(&format!("      st[{s}] = zz_int(_ps{s});\n"));
+        }
+        // Mirror the exhaustion path releases, then the exit edge.
+        out.push_str("      zz_release(&_pit);\n");
+        out.push_str("      _ldepth--;\n");
+        out.push_str(&format!("      goto L{};\n", peel.exit));
+        out.push_str("    }\n");
+    }
+
+    /// Render one fused unboxed-int window at `pc` (see [`FusedTail`]):
+    /// the int expression over `len - taillen` ops compiles to C temps,
+    /// then the tail consumes the result temp. No stack traffic, no shadow
+    /// state: operands read the authoritative boxed slot (int guard,
+    /// fail-closed); the result moves into the slot after releasing its
+    /// old value (fresh immediates carry no refs, so no clone/release
+    /// pair). `var_sub` substitutes loop-var loads with a proven-int C
+    /// expression (peeled counters/elements): no guard, no box.
+    /// Division carries the spec traps with the boxed path's messages
+    /// (elided when a constant divisor rules them out); wrapping follows
+    /// `-fwrapv`, like the boxed fast paths. Safe constant folding applies
+    /// to trapping-free add/sub/mul/neg (`-k` via `wrapping_neg`: `MIN`
+    /// must not panic the host compiler).
+    fn emit_fused_window(
+        module: &Module,
+        code: &[Op],
+        pc: usize,
+        len: usize,
+        tail: FusedTail,
+        subs: &HashMap<u16, String>,
+        out: &mut String,
+    ) {
+        let taillen = match tail {
+            FusedTail::Store(_) => 1,
+            FusedTail::Take(_) => 6,
+        };
+        out.push_str("    {\n");
+        // Expression prefix: straight-line int ops into window temps.
+        // Each temp tracks a known constant value, if any.
+        let mut tstack: Vec<(String, Option<i64>)> = Vec::new();
+        for (tmp, op) in code[pc..pc + len - taillen].iter().enumerate() {
+            let t = format!("_ft{tmp}");
+            match op {
+                Op::LoadSlot(s) => {
+                    if let Some(expr) = subs.get(s) {
+                        out.push_str(&format!("      int64_t {t} = {expr};\n"));
+                        tstack.push((t, None));
+                        continue;
+                    }
+                    out.push_str(&format!(
+                        "      zz_value _b{t} = st[{s}]; if (_b{t}.tag != ZZ_INT) {};\n",
+                        ftrap("int slot loaded non-int value")
+                    ));
+                    out.push_str(&format!("      int64_t {t} = _b{t}.i;\n"));
+                    tstack.push((t, None));
+                }
+                Op::PushConst(c) => {
+                    let k = match module.consts.get(c.0 as usize) {
+                        Some(Const::Int(k)) => *k,
+                        // Unreachable: the matcher only admits int consts.
+                        _ => return,
+                    };
+                    out.push_str(&format!("      int64_t {t} = {};\n", c_int(k)));
+                    tstack.push((t, Some(k)));
+                }
+                Op::IntAdd | Op::BinOp(zz_ir::op::BinOp::Add) => {
+                    let (b, bv) = tstack.pop().unwrap_or_default();
+                    let (a, av) = tstack.pop().unwrap_or_default();
+                    match (av, bv) {
+                        (Some(x), Some(y)) => {
+                            let r = x.wrapping_add(y);
+                            out.push_str(&format!("      int64_t {t} = {};\n", c_int(r)));
+                            tstack.push((t, Some(r)));
+                        }
+                        _ => {
+                            out.push_str(&format!("      int64_t {t} = {a} + {b};\n"));
+                            tstack.push((t, None));
+                        }
+                    }
+                }
+                Op::IntSub | Op::BinOp(zz_ir::op::BinOp::Sub) => {
+                    let (b, bv) = tstack.pop().unwrap_or_default();
+                    let (a, av) = tstack.pop().unwrap_or_default();
+                    match (av, bv) {
+                        (Some(x), Some(y)) => {
+                            let r = x.wrapping_sub(y);
+                            out.push_str(&format!("      int64_t {t} = {};\n", c_int(r)));
+                            tstack.push((t, Some(r)));
+                        }
+                        _ => {
+                            out.push_str(&format!("      int64_t {t} = {a} - {b};\n"));
+                            tstack.push((t, None));
+                        }
+                    }
+                }
+                Op::IntMul | Op::BinOp(zz_ir::op::BinOp::Mul) => {
+                    let (b, bv) = tstack.pop().unwrap_or_default();
+                    let (a, av) = tstack.pop().unwrap_or_default();
+                    match (av, bv) {
+                        (Some(x), Some(y)) => {
+                            let r = x.wrapping_mul(y);
+                            out.push_str(&format!("      int64_t {t} = {};\n", c_int(r)));
+                            tstack.push((t, Some(r)));
+                        }
+                        _ => {
+                            out.push_str(&format!("      int64_t {t} = {a} * {b};\n"));
+                            tstack.push((t, None));
+                        }
+                    }
+                }
+                Op::IntDiv => {
+                    let (b, bv) = tstack.pop().unwrap_or_default();
+                    let (a, _) = tstack.pop().unwrap_or_default();
+                    // Elide provably-dead traps: a nonzero const divisor
+                    // can never be zero; anything but -1 can never be
+                    // `MIN / -1`. (Dead-code traps keep their runtime
+                    // form — folding them away would change semantics.)
+                    match bv {
+                        // Zero divisor always traps: keep the check.
+                        Some(0) => {
+                            out.push_str(&format!(
+                                "      {{ if ({b} == 0) {}; }}\n",
+                                ftrap("division by zero")
+                            ));
+                        }
+                        // -1 can only trap via `MIN`.
+                        Some(-1) => {
+                            out.push_str(&format!(
+                                "      {{ if ({a} == INT64_MIN) {}; }}\n",
+                                ftrap("integer overflow in division")
+                            ));
+                        }
+                        // Any other constant traps never.
+                        Some(_) => {}
+                        None => {
+                            out.push_str(&format!(
+                                "      {{ if ({b} == 0) {}; if ({a} == INT64_MIN && {b} == -1) {}; }}\n",
+                                ftrap("division by zero"),
+                                ftrap("integer overflow in division")
+                            ));
+                        }
+                    }
+                    out.push_str(&format!("      int64_t {t} = {a} / {b};\n"));
+                    tstack.push((t, None));
+                }
+                Op::IntRem => {
+                    let (b, bv) = tstack.pop().unwrap_or_default();
+                    let (a, _) = tstack.pop().unwrap_or_default();
+                    match bv {
+                        Some(0) => {
+                            out.push_str(&format!(
+                                "      {{ if ({b} == 0) {}; }}\n",
+                                ftrap("modulo by zero")
+                            ));
+                        }
+                        Some(-1) => {
+                            out.push_str(&format!(
+                                "      {{ if ({a} == INT64_MIN) {}; }}\n",
+                                ftrap("integer overflow in modulo")
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            out.push_str(&format!(
+                                "      {{ if ({b} == 0) {}; if ({a} == INT64_MIN && {b} == -1) {}; }}\n",
+                                ftrap("modulo by zero"),
+                                ftrap("integer overflow in modulo")
+                            ));
+                        }
+                    }
+                    out.push_str(&format!("      int64_t {t} = {a} % {b};\n"));
+                    tstack.push((t, None));
+                }
+                Op::IntNeg => {
+                    let (a, av) = tstack.pop().unwrap_or_default();
+                    match av {
+                        Some(x) => {
+                            let r = x.wrapping_neg();
+                            out.push_str(&format!("      int64_t {t} = {};\n", c_int(r)));
+                            tstack.push((t, Some(r)));
+                        }
+                        None => {
+                            out.push_str(&format!("      int64_t {t} = -{a};\n"));
+                            tstack.push((t, None));
+                        }
+                    }
+                }
+                // Unreachable: the matcher only admits the above.
+                _ => return,
+            }
+        }
+        match tail {
+            FusedTail::Store(d) => {
+                let (v, _) = tstack.pop().unwrap_or_default();
+                if let Some(local) = subs.get(&d) {
+                    // Promoted slot: assign the C local (write-back at
+                    // loop exit keeps the slot authoritative).
+                    out.push_str(&format!("      {local} = {v};\n"));
+                } else {
+                    // Release-then-move: the old slot value is owned
+                    // (release it); the fresh immediate carries no refs
+                    // (no clone or source release needed). Equivalent to
+                    // `zz_cstore` on immediates, minus two dispatches.
+                    out.push_str(&format!("      zz_release(&st[{d}]);\n"));
+                    out.push_str(&format!("      st[{d}] = zz_int({v});\n"));
+                }
+            }
+            FusedTail::Take(a) => {
+                // Element arrives either fused (expression temp) or on the
+                // stack (bare six-op tail: the value was pushed before).
+                if let Some((v, _)) = tstack.pop() {
+                    out.push_str(&format!("      zz_value _rv = zz_int({v});\n"));
+                } else {
+                    out.push_str("      zz_value _rv = st[--sp];\n");
+                }
+                // Push straight into the slotted array: no park, no move.
+                // Uniqueness never changed hands (nothing was cloned), so
+                // the slot keeps its share throughout; the shared dup path
+                // mirrors `ArrayPush` exactly (dup the buffer, release the
+                // slot's old share, install the dup).
+                out.push_str(&format!("      zz_value _av = st[{a}];\n"));
+                out.push_str("      if (_av.tag != ZZ_ARRAY) ");
+                out.push_str(&format!("{};\n", ftrap("ArrayPush: expected array")));
+                out.push_str("      if (_av.arr->refs != 1) { zz_value _d = zz_array_dup(_av.arr); zz_release(&_av); _av = _d; ");
+                out.push_str(&format!("st[{a}] = _av; }}\n"));
+                out.push_str("      zz_array_push(_av.arr, _rv);\n");
+            }
+        }
+        out.push_str("    }\n");
+    }
+
     /// Record a referenced native impl for link-flag computation.
     fn note_native(&mut self, impl_name: &'static str, needs_rt: bool, dotted: &str) {
         if !self.used_natives.iter().any(|(n, _, _)| n == dotted) {
@@ -1291,19 +2067,65 @@ struct OpCx<'x> {
     callee: Option<&'x Callee>,
     fuse_slot: Option<u16>,
     frame: usize,
+    /// Fused int window starting at this pc, if any: (total length, tail).
+    /// See [`int_fuse`]. Window matching already consulted the int-slot
+    /// set; emission re-walks the ops.
+    ufuse: Option<(usize, FusedTail)>,
+    /// Peeled loop starting at this pc, if any (see [`peel_scan`]).
+    peel: Option<Peel>,
+}
+
+/// One fused unboxed-int window: a straight-line int expression over
+/// int-declared slots and int consts, terminated by an int store or a
+/// take-push tail. Compiles to guarded raw `int64_t` traffic with no
+/// stack touches and no shadow state: operands read the authoritative
+/// boxed slot (int guard, fail-closed — every read sees the current
+/// value, so loop vars rewritten by `ForNext` and take homes are safe
+/// by construction), the result writes back through `zz_cstore`, keeping
+/// the slot authoritative for later boxed readers. Division carries the
+/// spec traps with the boxed path's messages; wrapping follows `-fwrapv`.
+#[derive(Debug, Clone, Copy)]
+enum FusedTail {
+    /// `d = <expr>`: int store terminator.
+    Store(u16),
+    /// `a = vec.push(a, <expr>)`: take-push tail (see below).
+    Take(u16),
 }
 
 impl<'a> Emitter<'a> {
     /// Emit one boxed op (see [`OpCx`]).
     fn emit_op(
         &mut self,
-        _id: FuncId,
-        _pc: usize,
+        id: FuncId,
+        pc: usize,
         op: &Op,
         cx: &OpCx<'_>,
         out: &mut String,
     ) -> Result<(), ChunkError> {
         let (callee, fuse_slot, frame) = (cx.callee, cx.fuse_slot, cx.frame);
+        // Peeled counted loop (see `peel_scan`): raw C loop over the
+        // fused body, then the exit edge. The `ForSetup` emission stands
+        // (placeholders + `_lbase`), so exit accounting is untouched.
+        if let Some(peel) = &cx.peel {
+            let f = self
+                .module
+                .funcs
+                .get(id.0 as usize)
+                .ok_or_else(|| ChunkError::op("func id"))?;
+            Self::emit_peeled(self.module, &f.code, peel, out);
+            return Ok(());
+        }
+        // Fused unboxed-int window (see `int_fuse`): single statement,
+        // no per-op emission.
+        if let Some((len, tail)) = cx.ufuse {
+            let f = self
+                .module
+                .funcs
+                .get(id.0 as usize)
+                .ok_or_else(|| ChunkError::op("func id"))?;
+            Self::emit_fused_window(self.module, &f.code, pc, len, tail, &HashMap::new(), out);
+            return Ok(());
+        }
         match op {
             Op::PushConst(c) => {
                 let e = self.emit_const_new(*c, out)?;
@@ -1471,8 +2293,14 @@ impl<'a> Emitter<'a> {
                 out.push_str(&format!("{};\n", ctrap("cannot iterate this value")));
                 out.push_str("      if (_ldepth >= 256) ");
                 out.push_str(&format!("{};\n", ctrap("loop nesting too deep")));
-                out.push_str("      if (_it.tag == ZZ_ARRAY) { zz_value _d = zz_array_dup(_it.arr); zz_release(&_it); _it = _d; }\n");
-                out.push_str("      if (_it.tag == ZZ_DICT) { zz_value _d = zz_dict_dup_value(_it.dict); zz_release(&_it); _it = _d; }\n");
+                // NOTE: no dup of the iterable (arrays/dicts share like the
+                // VM and HIR: `it.clone()` bumps the share, nothing more).
+                // A deep copy here would cost O(n) per loop setup (16MB
+                // memcpy for 1M arrays) AND diverge from VM iteration
+                // semantics under mid-loop mutation (snapshot vs shared).
+                // Sharing is safe: the iterator holds its own share, so
+                // the buffer cannot be freed mid-loop; growth reallocs
+                // the items (struct stable) and lengths re-read per step.
                 out.push_str("      _lbase[_ldepth++] = sp - 1;\n");
                 out.push_str("      st[sp++] = _it;\n");
                 // Index placeholder; var placeholders pushed by count
@@ -1961,12 +2789,20 @@ impl<'a> Emitter<'a> {
     }
 }
 
-/// Chunk-local preamble: store helper + immortal range boxes.
+/// Chunk-local preamble: store helper, cold guard trap, immortal range boxes.
 const CHUNK_PREAMBLE: &str = r#"
 static inline void zz_cstore(zz_value *dst, zz_value v) {
     zz_release(dst);
     *dst = zz_clone(v);
     zz_release(&v);
+}
+
+// Cold trap for fused/peel guards: keeps abort blocks out of hot loops
+// (icache + unrolling). Same bytes on stderr + exit 1 as inline traps.
+// `__attribute__((cold))` places it with other cold code.
+__attribute__((cold)) static void zz_ftrap(const char *msg) {
+    fprintf(stderr, "zz error: %s\n", msg);
+    exit(1);
 }
 
 // IR ranges box (start, end, step). The C runtime's range is a
