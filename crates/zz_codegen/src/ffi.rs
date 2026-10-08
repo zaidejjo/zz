@@ -403,30 +403,6 @@ impl std::fmt::Display for FfiError {
 
 impl std::error::Error for FfiError {}
 
-/// Workspace root (directory containing the top-level `Cargo.toml`).
-///
-/// Resolution order: `$ZZ_NATIVE_RT_DIR` (used as the target-profile
-/// directory's parent explicitly), otherwise the compile-time workspace
-/// layout (`crates/zz_codegen` → two levels up). Installed binaries running
-/// outside a checkout must set `ZZ_NATIVE_RT_DIR`.
-fn workspace_root() -> Result<PathBuf, FfiError> {
-    if let Some(dir) = std::env::var_os("ZZ_NATIVE_RT_DIR") {
-        return Ok(PathBuf::from(dir));
-    }
-    let baked = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf());
-    match baked {
-        Some(root) if root.join("Cargo.toml").is_file() => Ok(root),
-        _ => Err(FfiError(
-            "cannot locate workspace (no Cargo.toml above zz_codegen); \
-             set ZZ_NATIVE_RT_DIR to the workspace root"
-                .to_string(),
-        )),
-    }
-}
-
 /// Target directory honoring `CARGO_TARGET_DIR` (else `<root>/target`).
 fn target_dir(root: &std::path::Path) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
@@ -441,9 +417,110 @@ fn target_dir(root: &std::path::Path) -> PathBuf {
 /// file under `crates/zz_native_rt/src/`, skip `cargo build` entirely.
 /// This turns the common case (lib already built) from 0.5-50s → ~0ms.
 pub fn ensure_staticlib(release: bool) -> Result<PathBuf, FfiError> {
-    let root = workspace_root()?;
-    let profile = if release { "release" } else { "debug" };
-    let lib = target_dir(&root).join(profile).join(lib_file_name());
+    resolve_staticlib(release).map(|(lib, _)| lib)
+}
+
+/// How [`ensure_staticlib`] found the archive: workspace sources get a
+/// (cached, incremental) cargo build; release installs use the shipped
+/// archive directly — no cargo, no sources, no Rust toolchain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtSource {
+    Cargo,
+    Prebuilt,
+}
+
+fn resolve_staticlib(release: bool) -> Result<(PathBuf, RtSource), FfiError> {
+    // 1. Explicit `$ZZ_NATIVE_RT_DIR`: Cargo.toml → cargo build, bare
+    // archive → use directly. Anything else is a loud misconfiguration.
+    if let Some(dir) = std::env::var_os("ZZ_NATIVE_RT_DIR").map(PathBuf::from) {
+        if dir.join("Cargo.toml").is_file() {
+            return Ok((build_staticlib(&dir, release)?, RtSource::Cargo));
+        }
+        let prebuilt = dir.join(lib_file_name());
+        if prebuilt.is_file() {
+            return Ok((prebuilt, RtSource::Prebuilt));
+        }
+        return Err(FfiError(format!(
+            "ZZ_NATIVE_RT_DIR={} has neither Cargo.toml nor {}; \
+             point it at the workspace root or a dir with the prebuilt archive",
+            dir.display(),
+            lib_file_name()
+        )));
+    }
+    // 2. Dev checkout (compile-time baked layout).
+    if let Some(root) = checkout_root() {
+        return Ok((build_staticlib(&root, release)?, RtSource::Cargo));
+    }
+    // 3. Release install: archive shipped next to the binaries.
+    if let Some(dir) = find_bundled_libdir() {
+        return Ok((dir.join(lib_file_name()), RtSource::Prebuilt));
+    }
+    Err(FfiError(
+        "cannot locate workspace (no Cargo.toml above zz_codegen); \
+         set ZZ_NATIVE_RT_DIR to the workspace root or install a release \
+         toolchain (which ships the prebuilt native runtime)"
+            .to_string(),
+    ))
+}
+
+/// Compile-time workspace root when it exists on disk (dev checkouts).
+/// Release-installed binaries carry a stale baked path — absence is not
+/// an error here, just "not a checkout".
+fn checkout_root() -> Option<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?
+        .to_path_buf();
+    root.join("Cargo.toml").is_file().then_some(root)
+}
+
+/// Release-install library directories: `<exe>/lib` (manual unzip) and
+/// `<exe>/../lib/zz` (AUR `/usr` layout), plus the absolute AUR path.
+/// A dir qualifies by containing the archive — version skew is
+/// impossible (the archive ships with the binaries that use it).
+fn bundled_lib_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join("lib"));
+            if let Some(parent) = dir.parent() {
+                out.push(parent.join("lib").join("zz"));
+            }
+        }
+    }
+    out.push(PathBuf::from("/usr/lib/zz"));
+    out
+}
+
+fn find_bundled_libdir() -> Option<PathBuf> {
+    bundled_lib_candidates()
+        .into_iter()
+        .find(|d| d.join(lib_file_name()).is_file())
+}
+
+/// Shipped shared libstd in a release lib dir (`libstd-<hash>.so`,
+/// `.dylib` on macOS), newest pick like the rustc-libdir scan.
+/// `None` when the dir ships none (dev target dirs never do).
+fn find_shipped_libstd(libdir: &std::path::Path) -> Option<String> {
+    let (prefix, suffix) = if cfg!(target_os = "macos") {
+        ("libstd-", ".dylib")
+    } else {
+        ("libstd-", ".so")
+    };
+    let entries = std::fs::read_dir(libdir).ok()?;
+    let mut found: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(prefix) && n.ends_with(suffix))
+        .collect();
+    found.sort();
+    found.pop()
+}
+
+fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, FfiError> {
+    let lib = target_dir(root)
+        .join(if release { "release" } else { "debug" })
+        .join(lib_file_name());
 
     // Fast-path: skip cargo build when the archive is already up-to-date.
     if lib.is_file() {
@@ -570,29 +647,89 @@ fn find_libstd(libdir: &std::path::Path) -> Result<String, FfiError> {
 ///
 /// Returned flags are appended after the program object on the `cc` command
 /// line. Fails on Windows (MSVC import-library story is unimplemented).
-pub fn link_args(release: bool) -> Result<Vec<String>, FfiError> {
+pub fn link_args(release: bool) -> Result<(Vec<String>, PathBuf), FfiError> {
     if cfg!(windows) {
         return Err(FfiError(
             "native FFI link is not implemented on Windows yet".into(),
         ));
     }
-    let lib = ensure_staticlib(release)?;
+    let (lib, _source) = resolve_staticlib(release)?;
     let libdir = lib
         .parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| FfiError(format!("static library has no parent: {}", lib.display())))?;
+    // Release installs ship libstd next to the archive: link it by
+    // filename and let stage_shared_libs() sidecar it next to the output
+    // (`$ORIGIN` rpath) — no rustc, no absolute build-machine paths.
+    if let Some(shipped) = find_shipped_libstd(&libdir) {
+        return Ok((
+            vec![
+                format!("-L{}", libdir.display()),
+                "-lzz_native_rt".to_string(),
+                format!("-L{}", libdir.display()),
+                format!("-l:{shipped}"),
+                "-lpthread".to_string(),
+                "-ldl".to_string(),
+                "-lm".to_string(),
+            ],
+            lib,
+        ));
+    }
     let rustc_dir = rustc_libdir()?;
     let libstd = find_libstd(&rustc_dir)?;
-    Ok(vec![
-        format!("-L{}", libdir.display()),
-        "-lzz_native_rt".to_string(),
-        format!("-L{}", rustc_dir.display()),
-        format!("-l:{libstd}"),
-        format!("-Wl,-rpath,{}", rustc_dir.display()),
-        "-lpthread".to_string(),
-        "-ldl".to_string(),
-        "-lm".to_string(),
-    ])
+    Ok((
+        vec![
+            format!("-L{}", libdir.display()),
+            "-lzz_native_rt".to_string(),
+            format!("-L{}", rustc_dir.display()),
+            format!("-l:{libstd}"),
+            format!("-Wl,-rpath,{}", rustc_dir.display()),
+            "-lpthread".to_string(),
+            "-ldl".to_string(),
+            "-lm".to_string(),
+        ],
+        lib,
+    ))
+}
+
+/// Copy shipped shared libs next to the output binary and return the
+/// loader path flag. No-op when the staticlib dir ships none (dev
+/// checkouts keep the rustc rpath from [`link_args`]).
+#[cfg(not(windows))]
+pub fn stage_shared_libs(
+    lib_path: &std::path::Path,
+    out_bin: &std::path::Path,
+) -> Result<Vec<String>, FfiError> {
+    let Some(libdir) = lib_path.parent() else {
+        return Ok(vec![]);
+    };
+    let Some(shipped) = find_shipped_libstd(libdir) else {
+        return Ok(vec![]);
+    };
+    let Some(out_dir) = out_bin.parent() else {
+        return Ok(vec![]);
+    };
+    let dest = out_dir.join(&shipped);
+    let copy = match (
+        std::fs::metadata(libdir.join(&shipped)),
+        std::fs::metadata(&dest),
+    ) {
+        (Ok(src), Ok(dst)) => src.len() != dst.len(),
+        _ => true,
+    };
+    if copy {
+        std::fs::copy(libdir.join(&shipped), &dest)
+            .map_err(|e| FfiError(format!("cannot stage {}: {e}", dest.display())))?;
+    }
+    // `$ORIGIN` (Linux) / `@loader_path` (macOS): the binary finds its
+    // sidecar wherever the user puts the pair. No LD_LIBRARY_PATH, no
+    // absolute toolchain paths.
+    let token = if cfg!(target_os = "macos") {
+        "@loader_path"
+    } else {
+        "$ORIGIN"
+    };
+    Ok(vec![format!("-Wl,-rpath,{token}")])
 }
 
 #[cfg(test)]
@@ -624,6 +761,77 @@ mod tests {
         assert!(pre.contains("zz_value zz_regexp_compile(zz_value pat, int *err);"));
         assert!(pre.contains("zz_value zz_regexp_is_match(zz_value re, zz_value s, int *err);"));
         assert!(!pre.contains("zz_regexp_find"));
+    }
+
+    #[test]
+    fn bundled_libdir_detection() {
+        let base = std::env::temp_dir().join(format!(
+            "zz-ffi-bundled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let libdir = base.join("lib");
+        std::fs::create_dir_all(&libdir).expect("mkdir");
+        // Empty dir: no shipped libstd.
+        assert_eq!(find_shipped_libstd(&libdir), None);
+        // Archive alone: still no shared objects.
+        std::fs::write(libdir.join(lib_file_name()), b"fake-archive").expect("write");
+        assert_eq!(find_shipped_libstd(&libdir), None);
+        // Shipped libstd detected, newest wins.
+        let (prefix, suffix) = if cfg!(target_os = "macos") {
+            ("libstd-", ".dylib")
+        } else {
+            ("libstd-", ".so")
+        };
+        std::fs::write(libdir.join(format!("{prefix}aaa{suffix}")), b"old").expect("write");
+        std::fs::write(libdir.join(format!("{prefix}zzz{suffix}")), b"new").expect("write");
+        assert_eq!(
+            find_shipped_libstd(&libdir),
+            Some(format!("{prefix}zzz{suffix}"))
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn stage_shared_libs_sidecars() {
+        let base = std::env::temp_dir().join(format!(
+            "zz-ffi-stage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let libdir = base.join("lib");
+        let outdir = base.join("out");
+        std::fs::create_dir_all(&libdir).expect("mkdir");
+        std::fs::create_dir_all(&outdir).expect("mkdir");
+        std::fs::write(libdir.join(lib_file_name()), b"fake-archive").expect("write");
+        let (prefix, suffix) = if cfg!(target_os = "macos") {
+            ("libstd-", ".dylib")
+        } else {
+            ("libstd-", ".so")
+        };
+        let so = format!("{prefix}zzz{suffix}");
+        std::fs::write(libdir.join(&so), b"fake-so").expect("write");
+        let out_bin = outdir.join("prog");
+        let flags = stage_shared_libs(&libdir.join(lib_file_name()), &out_bin).expect("stage");
+        assert!(outdir.join(&so).is_file(), "sidecar copied");
+        if cfg!(target_os = "macos") {
+            assert_eq!(flags, vec!["-Wl,-rpath,@loader_path".to_string()]);
+        } else {
+            assert_eq!(flags, vec!["-Wl,-rpath,$ORIGIN".to_string()]);
+        }
+        // No shipped objects: empty flags, nothing copied.
+        std::fs::remove_file(libdir.join(&so)).ok();
+        std::fs::remove_file(outdir.join(&so)).ok();
+        let flags = stage_shared_libs(&libdir.join(lib_file_name()), &out_bin).expect("stage");
+        assert!(flags.is_empty());
+        assert!(!outdir.join(&so).is_file());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -682,7 +890,7 @@ mod tests {
     /// across the language boundary.
     #[test]
     fn link_staticlib_from_c() {
-        let mut args = match link_args(false) {
+        let (mut args, _rt_lib) = match link_args(false) {
             Ok(a) => a,
             Err(e) => panic!("link_args failed: {e}"),
         };
