@@ -1866,6 +1866,21 @@ impl Compiler {
                         in_env,
                     });
                 }
+                // Loop-var slots for the IR vartab, in var order
+                // (`u16::MAX` = env-captured, no slot): lets AOT peels
+                // address the pushed values without re-deriving positions.
+                self.chunk.fornext_slots.push(
+                    (0..num_vars)
+                        .map(|i| {
+                            let v = &vars[i];
+                            if self.captured.contains(&v.name) {
+                                u16::MAX
+                            } else {
+                                (self.stack_height - num_vars + i) as u16
+                            }
+                        })
+                        .collect(),
+                );
                 let body_needs_env = self.scope_declares_captured(body);
                 if body_needs_env {
                     self.emit(Op::EnterScope);
@@ -3446,6 +3461,12 @@ impl Compiler {
                     slot: self.stack_height - 1,
                     in_env,
                 });
+                // vartab entry (see the `for` site above): single var.
+                self.chunk.fornext_slots.push(vec![if in_env {
+                    u16::MAX
+                } else {
+                    (self.stack_height - 1) as u16
+                }]);
                 if let Some(f) = filter {
                     self.compile_expr(f);
                     self.emit(Op::JumpIfFalse(header));

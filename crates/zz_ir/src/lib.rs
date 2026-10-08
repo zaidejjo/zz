@@ -113,6 +113,12 @@ pub struct FuncDef {
     /// verifier checks every store against its entry; backends decide
     /// representation from entries (never from inference).
     pub locals: Vec<TypeId>,
+    /// Loop-variable slots per `ForNext` op, in function order (kth entry
+    /// ↔ kth `ForNext`): `u16::MAX` marks env-captured vars (no slot).
+    /// Carried from `vm::Chunk::fornext_slots`; lets AOT loop peels write
+    /// the iteration shadow directly. Verified for coherence (counts and
+    /// arity); content is compiler-attested like `locals`.
+    pub vartab: Vec<Vec<u16>>,
     /// Top-level vars promoted to frame slots, synced back to the
     /// environment at frame exit (REPL/multi-chunk flows).
     pub toplevel_slots: Vec<(StrId, u16)>,
