@@ -210,11 +210,25 @@ jobs:
           else
             strip target/release/zz target/release/zz-lsp
           fi
+          # Native-runtime archive + shared libstd for the prebuilt link:
+          # AOT programs built by this toolchain resolve them with no
+          # sources and no Rust toolchain (see ffi.rs resolve_staticlib).
+          cargo build --release --locked -p zz_native_rt
+          RT_A="$(ls target/release/libzz_native_rt.a)"
+          LIBDIR="$(rustc --print target-libdir)"
+          RT_SO=""
+          for f in "$LIBDIR"/libstd-*.so "$LIBDIR"/libstd-*.dylib; do
+            [ -e "$f" ] || continue
+            RT_SO="$f"
+          done
+          test -n "$RT_SO"
+          echo "native rt: $RT_A + $RT_SO"
           ZIP="zz-$PKGVER-${{ matrix.os }}-${{ matrix.arch }}.zip"
           rm -rf dist "$ZIP"
-          mkdir -p dist
+          mkdir -p dist dist/lib
           cp target/release/zz target/release/zz-lsp LICENSE README.md dist/
-          (cd dist && zip -9 "../$ZIP" zz zz-lsp LICENSE README.md)
+          cp "$RT_A" "$RT_SO" dist/lib/
+          (cd dist && zip -9 -r "../$ZIP" zz zz-lsp LICENSE README.md lib)
           unzip -l "$ZIP"
       - name: upload zip artifact
         uses: actions/upload-artifact@v4

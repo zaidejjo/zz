@@ -904,8 +904,19 @@ pub fn build_with(
                     .to_string(),
             });
         }
-        let extra = crate::ffi::link_args(opts.optimize)
+        let (extra, rt_lib) = crate::ffi::link_args(opts.optimize)
             .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
+        // Release installs: sidecar the shipped shared libs next to the
+        // output binary (`$ORIGIN` rpath) so it runs with no toolchain.
+        // No-op for dev checkouts (rustc rpath above already applies).
+        #[cfg(not(windows))]
+        {
+            let rpath = crate::ffi::stage_shared_libs(&rt_lib, output_path)
+                .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
+            for a in &rpath {
+                cmd.arg(a);
+            }
+        }
         // Postgres backend: the C dispatcher references the symbols
         // weakly (so sqlite-only programs link cleanly without the
         // staticlib); force-extract the objects whenever the gate fired.

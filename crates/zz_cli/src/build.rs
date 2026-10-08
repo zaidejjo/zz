@@ -1302,6 +1302,23 @@ fn publish_to_bin(
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+    // Native-runtime sidecars (`libstd-*` staged next to the built binary
+    // by the codegen link step): carry them next to the published binary
+    // so `$ORIGIN` rpath resolves wherever `-o` put it.
+    if res.is_ok() {
+        if let (Some(from_dir), Some(to_dir)) = (cached.parent(), dest.parent()) {
+            if let Ok(entries) = std::fs::read_dir(from_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let is_sidecar = name.starts_with("libstd-")
+                        && (name.ends_with(".so") || name.ends_with(".dylib"));
+                    if is_sidecar && !to_dir.join(&name).is_file() {
+                        let _ = std::fs::copy(entry.path(), to_dir.join(&name));
+                    }
+                }
+            }
+        }
+    }
     res.map(|()| dest)
 }
 
