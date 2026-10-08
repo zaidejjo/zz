@@ -1,8 +1,9 @@
 name: aur-publish
 
-# Publishes the ZZ toolchain to the `zz-lang` AUR package when a GitHub
-# Release is published. `yay -S zz-lang` installs a PREBUILT binary
-# (no compilation).
+# Publishes the ZZ toolchain to the `zz` + `zz-lang` AUR packages when a
+# GitHub Release is published. `yay -S zz` (or `zz-lang`) installs a
+# PREBUILT binary (no compilation). Both packages install the same files
+# (`/usr/bin/zz` + `/usr/bin/zz-lsp`) and conflict with each other.
 #
 # Two jobs, strict order:
 #   publish      — Arch container: download the release zips (built once
@@ -19,16 +20,11 @@ name: aur-publish
 #
 # Installs `/usr/bin/zz` (so `zz run main.zz` works) plus `/usr/bin/zz-lsp`.
 #
-# NOTE: the sibling `zz` package is intentionally NOT pushed yet — its AUR
-# orphan request was accepted but the package still needs to be adopted on
-# aur.archlinux.org (one click while orphaned) before CI can push to it.
-# After adopting, re-add `zz` to the push step below.
-#
 # Required repo secret: `AUR_SSH_PRIVATE_KEY` (AUR account SSH private key;
 # public key registered at https://aur.archlinux.org/account).
 #
 # Flow: release zips (built once by `release.yml`) -> resolve shas ->
-# render PKGBUILD -> makepkg --printsrcinfo (.SRCINFO) -> push zz-lang.git.
+# render PKGBUILD -> makepkg --printsrcinfo (.SRCINFO) -> push zz.git + zz-lang.git.
 # Re-running the same Release re-renders + skips the AUR push when it is
 # already current. This workflow runs no tests and builds nothing: the
 # Release it consumes was cut from a green main.
@@ -57,7 +53,7 @@ concurrency:
 
 jobs:
   publish:
-    name: publish zz-lang to AUR
+    name: publish zz + zz-lang to AUR
     runs-on: ubuntu-latest
     # makepkg --printsrcinfo is canonical for .SRCINFO; it only exists on Arch.
     container:
@@ -131,31 +127,32 @@ jobs:
 
       - name: generate .SRCINFO + namcap lint
         run: |
-          pkg=zz-lang
-          rm -rf "/tmp/build-$pkg"
-          mkdir -p "/tmp/build-$pkg"
-          cp "/tmp/aur-out/$pkg/PKGBUILD" "/tmp/build-$pkg/PKGBUILD"
-          chown -R builder:builder "/tmp/build-$pkg"
-          su builder -c "cd /tmp/build-$pkg && makepkg --printsrcinfo > .SRCINFO"
-          cp "/tmp/build-$pkg/.SRCINFO" "/tmp/aur-out/$pkg/.SRCINFO"
-          # Artifact upload skips dotfiles: also stage it under a plain
-          # name. The push job renames it back to `.SRCINFO` (AUR requires
-          # the dot name in-repo).
-          cp "/tmp/build-$pkg/.SRCINFO" "/tmp/aur-out/$pkg/SRCINFO"
-          echo "--- $pkg/.SRCINFO ---"
-          cat "/tmp/aur-out/$pkg/.SRCINFO"
-          echo "--- namcap $pkg/PKGBUILD ---"
-          su builder -c "cd /tmp/build-$pkg && namcap PKGBUILD" || true
+          for pkg in zz zz-lang; do
+            rm -rf "/tmp/build-$pkg"
+            mkdir -p "/tmp/build-$pkg"
+            cp "/tmp/aur-out/$pkg/PKGBUILD" "/tmp/build-$pkg/PKGBUILD"
+            chown -R builder:builder "/tmp/build-$pkg"
+            su builder -c "cd /tmp/build-$pkg && makepkg --printsrcinfo > .SRCINFO"
+            cp "/tmp/build-$pkg/.SRCINFO" "/tmp/aur-out/$pkg/.SRCINFO"
+            # Artifact upload skips dotfiles: also stage it under a plain
+            # name. The push job renames it back to `.SRCINFO` (AUR requires
+            # the dot name in-repo).
+            cp "/tmp/build-$pkg/.SRCINFO" "/tmp/aur-out/$pkg/SRCINFO"
+            echo "--- $pkg/.SRCINFO ---"
+            cat "/tmp/aur-out/$pkg/.SRCINFO"
+            echo "--- namcap $pkg/PKGBUILD ---"
+            su builder -c "cd /tmp/build-$pkg && namcap PKGBUILD" || true
+          done
 
       - name: upload AUR files
         uses: actions/upload-artifact@v4
         with:
-          name: aur-zz-lang
-          path: /tmp/aur-out/zz-lang/
+          name: aur-pkgs
+          path: /tmp/aur-out/
           if-no-files-found: error
 
   push-aur:
-    name: push zz-lang to AUR
+    name: push zz + zz-lang to AUR
     # SSH pushes run on plain ubuntu-latest (not the Arch container):
     # stock OpenSSH there is the ecosystem standard for AUR publishing.
     needs: [publish]
@@ -170,8 +167,8 @@ jobs:
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
-          name: aur-zz-lang
-          path: /tmp/aur-pkg/
+          name: aur-pkgs
+          path: /tmp/aur-pkgs/
       - name: setup AUR ssh
         run: |
           # Resolve HOME from the passwd db for whoever we actually are.
@@ -241,26 +238,29 @@ jobs:
           esac
           ls -la ~/.ssh
           echo "--- AUR package files ---"
-          ls -la /tmp/aur-pkg/
+          ls -la /tmp/aur-pkgs/
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
-      - name: push zz-lang to AUR
+      - name: push zz + zz-lang to AUR
         run: |
           PKGVER="${{ needs.publish.outputs.pkgver }}"
           PKGREL="${{ needs.publish.outputs.pkgrel }}"
-          pkg=zz-lang
-          echo "=== $pkg ($PKGVER-$PKGREL) ==="
-          rm -rf "/tmp/aur-$pkg"
-          git clone "ssh://aur@aur.archlinux.org/$pkg.git" "/tmp/aur-$pkg"
-          cp /tmp/aur-pkg/PKGBUILD "/tmp/aur-$pkg/PKGBUILD"
-          cp /tmp/aur-pkg/SRCINFO "/tmp/aur-$pkg/.SRCINFO"
-          cd "/tmp/aur-$pkg"
-          git add PKGBUILD .SRCINFO
-          if git diff --cached --quiet; then
-            echo "$pkg already at $PKGVER-$PKGREL, skipping push"
-            exit 0
-          fi
-          git commit -m "upgpkg: $pkg $PKGVER-$PKGREL"
-          git push origin HEAD:master
-          echo "pushed $pkg $PKGVER-$PKGREL"
+          for pkg in zz zz-lang; do
+            echo "=== $pkg ($PKGVER-$PKGREL) ==="
+            rm -rf "/tmp/aur-$pkg"
+            git clone "ssh://aur@aur.archlinux.org/$pkg.git" "/tmp/aur-$pkg"
+            cp /tmp/aur-pkgs/$pkg/PKGBUILD "/tmp/aur-$pkg/PKGBUILD"
+            cp /tmp/aur-pkgs/$pkg/SRCINFO "/tmp/aur-$pkg/.SRCINFO"
+            cd "/tmp/aur-$pkg"
+            git add PKGBUILD .SRCINFO
+            if git diff --cached --quiet; then
+              echo "$pkg already at $PKGVER-$PKGREL, skipping push"
+              cd /tmp
+              continue
+            fi
+            git commit -m "upgpkg: $pkg $PKGVER-$PKGREL"
+            git push origin HEAD:master
+            echo "pushed $pkg $PKGVER-$PKGREL"
+            cd /tmp
+          done
