@@ -1,3 +1,4 @@
+// features: arrays, dicts, for-loop, func-call, if-else, int-arith, locals, print, string-literal, vec-push
 // Loop-iteration snapshot semantics: a `for`-in loop over an array
 // (or dict) iterates the entry snapshot. The iterator shares the
 // entry buffer; writes through other bindings detach (COW) and MUST
