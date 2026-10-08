@@ -47,21 +47,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang-23 libcurl4-openssl-dev libsqlite3-dev
       - name: log pinned toolchain
         run: clang-23 --version
-      - name: diagnose clang-23 native link (TEMP, revert after #312 green)
-        # bug_hunter native legs fail ONLY in CI with
-        # `Scrt1.o: undefined reference to main` (sole undefined symbol).
-        # Local clang-23 (warm and cold cache, pin set/unset) is green, so
-        # capture the CI-only variables: plugin, archive contents, link line.
-        run: |
-          clang-23 --version || true
-          ld --version || true
-          ls /usr/lib/llvm-23/lib/LLVMgold* /usr/lib/LLVMgold* 2>&1 || true
-          env | grep -iE '^(ZZ_|CC|CFLAGS)' || true
-          cargo build -p zz_cli 2>&1 | tail -1
-          printf 'func main() {\n println(1)\n}\n' > /tmp/diag.zz
-          ./target/debug/zz build --verbose /tmp/diag.zz -o /tmp/diag 2>&1 | tail -8 || true
-          /tmp/diag || true
-          for d in ~/.zz/cache/*rel-*-rt5-nosan/; do echo "RT=$d"; ar t "$d/libzz_rt.a" 2>&1 | head -3; nm "$d/libzz_rt.a" 2>&1 | grep -E ' T main$' || echo NO-MAIN-IN-ARCHIVE; done
       - name: fmt check
         run: cargo fmt --check
       - name: clippy
