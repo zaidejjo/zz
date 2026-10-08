@@ -22,6 +22,22 @@ pub struct Chunk {
     /// The VM syncs these values into the environment at frame exit so
     /// later chunks (REPL statements, other modules) can still read them.
     pub toplevel_slots: Vec<(String, u16)>,
+    /// Declared type per frame slot, recorded at typed compile time from
+    /// named bindings (lets, reassignments, loop variables) via the
+    /// checker's expression types. `None` (or short length) means unknown:
+    /// temps, untyped compiles, and anything the recorder skipped.
+    /// Entries join on reuse (conflicts become `Error`, the "unknown"
+    /// top), so every entry over-approximates all values its slot ever
+    /// holds. Lowering carries this into the IR locals table;
+    /// behavior-neutral (never read by the VM).
+    pub slot_types: Vec<Option<zz_checker::Type>>,
+    /// Loop-variable frame slots per `ForNext` op, in chunk order (kth
+    /// entry ↔ kth `ForNext`): the slot each pushed loop value lands in
+    /// (`u16::MAX` for env-captured vars, which bind in the environment).
+    /// Lowering carries this into the IR vartab; behavior-neutral (the
+    /// VM resolves by name). Lets AOT loop peels write the shadow slot
+    /// directly instead of re-deriving positions.
+    pub fornext_slots: Vec<Vec<u16>>,
 }
 
 impl Chunk {
@@ -32,6 +48,8 @@ impl Chunk {
             params: Vec::new(),
             spans: Vec::new(),
             toplevel_slots: Vec::new(),
+            slot_types: Vec::new(),
+            fornext_slots: Vec::new(),
         }
     }
 

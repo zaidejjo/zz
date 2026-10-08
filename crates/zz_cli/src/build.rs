@@ -1119,8 +1119,9 @@ pub fn build_release(
     }
     if rel.verbose {
         eprintln!(
-            "zz: {} {}",
+            "zz: {} {} {}",
             clang.label,
+            clang.version(),
             zz_codegen::compile::clang_flags(&opts, target).join(" ")
         );
     }
@@ -1184,12 +1185,6 @@ pub fn build_release(
         opts.float_link = opts.float_link || lowered.needs_float_fmt;
         opts.curl_link = opts.curl_link || lowered.needs_curl;
         opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
-        if opts.static_link && (opts.native_rt || opts.float_link) && opts.allow_static_downgrade {
-            opts.static_link = false;
-            eprintln!(
-                "zz: note: static link unavailable (program needs the Rust native runtime); building dynamic"
-            );
-        }
         if let Err(e) = zz_codegen::compile::build_with(&lowered.source, &tmp, opts, target, &clang)
         {
             let _ = std::fs::remove_file(&tmp);

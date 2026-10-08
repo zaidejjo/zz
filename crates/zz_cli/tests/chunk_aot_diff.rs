@@ -126,6 +126,72 @@ func main() {
 }
 "#;
 
+// Loop-iteration snapshot (mirrors
+// tests/fixtures/regression/loop_iter_snapshot.zz): push / index-write /
+// rebind inside the body must not affect visited elements or trip
+// count (VM ground truth: 3/60/4/99, 3/60/200, 3/60/2/7/8).
+const LOOP_MUTATE: &str = r#"
+func main() {
+    a := [10, 20, 30]
+    n := 0
+    s1 := 0
+    for v in a {
+        n = n + 1
+        s1 = s1 + v
+        if n == 1 {
+            a = vec.push(a, 99)
+        }
+    }
+    println(n)
+    println(s1)
+    println(len(a))
+    println(a[3])
+    b := [10, 20, 30]
+    s := 0
+    m := 0
+    for v in b {
+        m = m + 1
+        s = s + v
+        if m == 1 {
+            b[1] = 200
+        }
+    }
+    println(m)
+    println(s)
+    println(b[1])
+    c := [10, 20, 30]
+    t := 0
+    k := 0
+    for v in c {
+        k = k + 1
+        t = t + v
+        if k == 1 {
+            c = [7, 8]
+        }
+    }
+    println(k)
+    println(t)
+    println(len(c))
+    println(c[0])
+    println(c[1])
+    d := {"a": 10, "b": 20, "c": 30}
+    n2 := 0
+    s2 := 0
+    for _k, v in d {
+        n2 = n2 + 1
+        s2 = s2 + v
+        if n2 == 1 {
+            d["b"] = 200
+            d["z"] = 99
+        }
+    }
+    println(n2)
+    println(s2)
+    println(d["b"])
+    println(len(d))
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -133,6 +199,7 @@ const CASES: &[(&str, &str)] = &[
     ("while_nested", WHILE_NESTED),
     ("str_concat", STR_CONCAT),
     ("tak", TAK),
+    ("loop_mutate", LOOP_MUTATE),
 ];
 
 #[test]

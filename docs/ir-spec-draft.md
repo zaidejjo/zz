@@ -195,12 +195,33 @@ its own number rendering on both engines; float→int saturation is §5.
 - Calls push a frame; `RET` returns the top of stack. `defer` runs LIFO
   at scope exit (existing semantics preserved verbatim).
 
+### 7.1 Loop-iteration snapshot (MUST; PROPOSED — recorded VM ground truth, pending review)
+
+- A `for`-in loop over an array or dict iterates the **entry snapshot**:
+  the elements visited and the trip count are fixed by the collection
+  value at loop entry. The iterator MAY share the entry buffer (§1.2);
+  writes through other bindings then detach (COW) and MUST NOT affect
+  the elements visited or the trip count; rebinding the iterated
+  variable MUST NOT affect iteration either.
+- Observable behavior is exactly iteration over the entry snapshot;
+  sharing the entry buffer is allowed iff unobservable (§1.2).
+- Pinned by `loop_iter_snapshot` (strict on VM, HIR AOT, chunk AOT,
+  ASan): push / index-write / rebind inside the body — trip counts
+  stay 3/3/3, sums stay 60/60/60, post-loop bindings show the writes
+  (4/99, 200, [7, 8}); dict update + insert likewise: 3/60/200/4.
+
 ## 8. The `.zzc` format (M1 implementation target)
 
-- Little-endian. Magic `ZZC1`, `u32` version (this spec = 1),
+- Little-endian. Magic `ZZC1`, `u32` version (this spec = 2),
   section table: `TYPES`, `STRINGS` (interned names), `CONSTS` (value pool),
-  `FUNCS` (name, arity, signature, entry block), `CODE` (blocks + typed ops),
+  `FUNCS` (name, arity, signature, locals type table, entry block),
+  `CODE` (blocks + typed ops),
   `SPANS` (op → source span), `ANNOT` (performance hints, §9).
+- v2 adds the per-function locals table: one type id per frame slot
+  (params seeded from the signature; conflicts widen to the "unknown"
+  top). Types are mandatory semantics, NOT annotations — the verifier
+  checks every store/call/return against them, and `dis` shows them.
+  The v2 decoder rejects v1 files (re-emit with `zz build --emit-ir`).
 - Constants pool holds all literals (including string-literal
   markers for `print` — the M2 subset needs no string machinery
   beyond this).

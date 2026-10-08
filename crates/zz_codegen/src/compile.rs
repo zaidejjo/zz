@@ -39,7 +39,7 @@ impl std::fmt::Display for BuildError {
         match self {
             BuildError::NoClang => write!(
                 f,
-                "no clang found (tried clang, clang-22, zig); \
+                "no clang found (tried clang, clang-23, clang-22, zig); \
                  install clang 18+ or zig for -p builds"
             ),
             BuildError::PgoCross => {
@@ -67,7 +67,7 @@ impl From<std::io::Error> for BuildError {
 /// Provider preference for Clang detection (`--cc` flag).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClangProvider {
-    /// Probe `clang`, then `clang-22`, then `zig`.
+    /// Probe `clang`, then `clang-23`, `clang-22`, then `zig`.
     #[default]
     Any,
     /// Only accept a `clang*` binary.
@@ -97,6 +97,81 @@ pub struct Clang {
     pub zig: bool,
     /// Human-readable label for build output (`clang` / `zig cc`).
     pub label: &'static str,
+}
+
+impl Clang {
+    /// One-line compiler version for build logs (`clang version 19.1.2
+    /// ...` / `0.14.0` for zig; `unknown` when the probe fails). Used by
+    /// the sanitizer CI leg to pin + log the exact toolchain.
+    pub fn version(&self) -> String {
+        let mut cmd = std::process::Command::new(&self.path);
+        if self.zig {
+            cmd.arg("version");
+        } else {
+            cmd.arg("--version");
+        }
+        cmd.output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+                    .filter(|l| !l.is_empty())
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+/// Pinned Clang major version from `ZZ_CLANG_VERSION` (e.g. `19` → probe
+/// `clang-19` first). Set in CI so every sanitizer/bench build uses one
+/// logged toolchain; unset locally (any detected provider works).
+/// Returns the raw value when non-empty; callers validate the shape.
+pub fn clang_pin() -> Option<String> {
+    std::env::var("ZZ_CLANG_VERSION")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Sanitizer list from `ZZ_SANITIZE` (comma-separated, allowlist:
+/// `address`, `undefined`), e.g. `address,undefined`. Empty/unset =
+/// no sanitizers. Unknown tokens are dropped with a stderr warning —
+/// silently running *without* a requested sanitizer would be worse than
+/// noise, but there is no error channel here (`clang_flags` returns
+/// flags, and failing a build over a typo'd env var would break
+/// unrelated flows).
+pub fn sanitize_list() -> Vec<String> {
+    const ALLOWED: &[&str] = &["address", "undefined"];
+    let raw = std::env::var("ZZ_SANITIZE").unwrap_or_default();
+    let mut out = Vec::new();
+    for tok in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        if ALLOWED.contains(&tok) {
+            if !out.iter().any(|t: &String| t == tok) {
+                out.push(tok.to_string());
+            }
+        } else {
+            eprintln!("zz: warning: ignoring unknown sanitizer `{tok}` (want address,undefined)");
+        }
+    }
+    out
+}
+
+/// Extra C flags implied by [`sanitize_list`]: instrument + halt on any
+/// report (UBSan recovers by default — without
+/// `-fno-sanitize-recover=all` violations would print and continue with
+/// exit 0, silently passing the leg).
+pub fn sanitize_flags() -> Vec<String> {
+    let list = sanitize_list();
+    if list.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        format!("-fsanitize={}", list.join(",")),
+        "-fno-sanitize-recover=all".to_string(),
+        // Symbolized, frame-pointer-complete traces.
+        "-fno-omit-frame-pointer".to_string(),
+        "-g".to_string(),
+    ]
 }
 
 /// Probe whether fully-static linking works with `clang` (static
@@ -248,7 +323,7 @@ pub fn managed_zig_path() -> Option<PathBuf> {
 /// Probe PATH for a Clang provider.
 ///
 /// Order: managed `zig` (an explicit `zz toolchain install` pin always
-/// wins), then `clang`, `clang-22`, then PATH `zig`. Test hook: when the
+/// wins), then `clang`, `clang-23`, `clang-22`, then PATH `zig`. Test hook: when the
 /// environment variable `ZZ_TEST_HIDE_CLANG` is set, detection pretends
 /// nothing is installed (used by the missing-toolchain fallback tests).
 pub fn detect_clang() -> Option<Clang> {
@@ -262,6 +337,23 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
     }
     let allow_clang = matches!(provider, ClangProvider::Any | ClangProvider::Clang);
     let allow_zig = matches!(provider, ClangProvider::Any | ClangProvider::Zig);
+    // Pinned version wins when present (`ZZ_CLANG_VERSION=19` probes
+    // `clang-19` first). Missing pin falls back to the normal order with
+    // a warning — the sanitizer test asserts the match, so CI stays
+    // strict while local builds never break over env leakage.
+    if allow_clang {
+        if let Some(pin) = clang_pin() {
+            let name = format!("clang-{pin}");
+            if let Some(path) = which(&name) {
+                return Some(Clang {
+                    path,
+                    zig: false,
+                    label: "clang",
+                });
+            }
+            eprintln!("zz: warning: pinned clang `{name}` not found; falling back");
+        }
+    }
     // Explicit opt-in wins: a pinned managed toolchain outranks everything
     // on PATH (`--cc=clang` / `--cc=zig` still force their provider).
     if provider == ClangProvider::Any {
@@ -274,7 +366,7 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
         }
     }
     if allow_clang {
-        for name in ["clang", "clang-22"] {
+        for name in ["clang", "clang-23", "clang-22"] {
             if let Some(path) = which(name) {
                 return Some(Clang {
                     path,
@@ -698,6 +790,13 @@ impl BuildOptions {
             a.bytes.hash(&mut h);
         }
         target.unwrap_or("host").hash(&mut h);
+        // Hash the sanitizer list: flipping ZZ_SANITIZE must not serve
+        // a binary built under the other setting. A stale uninstrumented
+        // binary on a warm cache made sanitizer runs pass vacuously
+        // (the UAF in loop_mutate only reproduced on cold caches).
+        for s in sanitize_list() {
+            s.hash(&mut h);
+        }
         h.finish()
     }
 }
@@ -797,6 +896,10 @@ pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
         }
         PgoMode::None => {}
     }
+    // Sanitizer leg (`ZZ_SANITIZE=address,undefined`): instrument +
+    // halt. Appended late so `-fno-omit-frame-pointer` wins over the
+    // release `-fomit-frame-pointer` above.
+    flags.extend(sanitize_flags());
     if let Some(t) = target {
         flags.push(format!("--target={t}"));
         // The system linker may not understand foreign triples.
@@ -894,21 +997,16 @@ pub fn build_with(
         }
     }
     // Unified Rust native runtime: link the static library providing FFI
-    // natives. Fully-static binaries cannot use it (shared libstd), so fail
-    // early with a clear message instead of a cryptic `ld` error.
+    // natives. libstd links statically (rlib, #303), so fully-static
+    // binaries work wherever the static system libs exist — no RUNPATH,
+    // no sidecar, no Rust toolchain on the target.
     if opts.native_rt || opts.float_link {
-        if opts.static_link {
-            return Err(BuildError::NativeRt {
-                reason: "fully-static builds cannot link the Rust native runtime \
-                         (it needs the shared libstd); use `zz build` or `zz build -p`"
-                    .to_string(),
-            });
-        }
-        let (extra, rt_lib) = crate::ffi::link_args(opts.optimize)
+        let (extra, rt_lib) = crate::ffi::link_args_for_target(opts.optimize, target)
             .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
-        // Release installs: sidecar the shipped shared libs next to the
-        // output binary (`$ORIGIN` rpath) so it runs with no toolchain.
-        // No-op for dev checkouts (rustc rpath above already applies).
+        // Pre-#303 fallback (shared libstd): sidecar the shipped shared
+        // libs next to the output binary (`$ORIGIN` rpath) so it runs
+        // with no toolchain. No-op for static links (nothing to stage)
+        // and for dev checkouts (rustc rpath above already applies).
         #[cfg(not(windows))]
         {
             let rpath = crate::ffi::stage_shared_libs(&rt_lib, output_path)
@@ -1041,11 +1139,44 @@ pub fn emit_c_plus_script(
         syslibs.push_str(" -Wl,--no-as-needed");
     }
 
+    // Native runtime: mirror `build_with` so FFI programs also build by
+    // hand. `-u` symbols precede the archives that satisfy them (linker
+    // order, same as the real build). Resolved paths are absolute to
+    // this machine's toolchain — the script header says so.
+    let mut rt_link = String::new();
+    let mut rt_note = String::new();
+    if opts.native_rt || opts.float_link {
+        if opts.pg_link {
+            for sym in crate::ffi::PG_LINK_SYMBOLS {
+                rt_link.push_str(" -u ");
+                rt_link.push_str(sym);
+            }
+        }
+        if opts.float_link {
+            rt_link.push_str(" -u ");
+            rt_link.push_str(crate::ffi::FLOAT_FMT_SYMBOL);
+        }
+        match crate::ffi::link_args_for_target(opts.optimize, target) {
+            Ok((args, _)) => {
+                for a in &args {
+                    rt_link.push(' ');
+                    rt_link.push_str(a);
+                }
+                rt_note = "# NOTE: native-runtime paths below are absolute to the machine that ran `zz build`; adjust -L/path entries when building elsewhere.\n".to_string();
+            }
+            Err(e) => {
+                rt_note = format!(
+                    "# NOTE: native runtime link unavailable here ({e}); install the Rust toolchain or a release zz toolchain, then re-run `zz build`.\n"
+                );
+            }
+        }
+    }
+
     let sh = dir.join("build.sh");
     std::fs::write(
         &sh,
         format!(
-            "#!/bin/sh\n# Generated by `zz build`. Requires clang 18+ (or: replace `clang` with `zig cc -target <triple>`).\nset -e\ncd \"$(dirname \"$0\")\"\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs} -DZZ_HAS_SQLITE3\n"
+            "#!/bin/sh\n# Generated by `zz build`. Requires clang 18+ (or: replace `clang` with `zig cc -target <triple>`).\n{rt_note}set -e\ncd \"$(dirname \"$0\")\"\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs}{rt_link} -DZZ_HAS_SQLITE3\n"
         ),
     )?;
     #[cfg(unix)]
@@ -1059,10 +1190,12 @@ pub fn emit_c_plus_script(
     }
 
     let bat = dir.join("build.bat");
+    // Batch comment marker differs (`REM`), so the note is reworded.
+    let bat_note = rt_note.replace("# NOTE:", "REM NOTE:");
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nREM Generated by `zz build`. Requires clang (LLVM) on PATH.\r\ncd /d %~dp0\r\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs} -DZZ_HAS_SQLITE3\r\n"
+            "@echo off\r\nREM Generated by `zz build`. Requires clang (LLVM) on PATH.\r\n{bat_note}cd /d %~dp0\r\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs}{rt_link} -DZZ_HAS_SQLITE3\r\n"
         ),
     )?;
     Ok((app_c, sh, bat))
@@ -1283,6 +1416,49 @@ mod tests {
         assert!(text.contains("clang"), "script must use clang: {text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn emit_script_links_native_runtime() {
+        // FFI programs must be hand-buildable: the script carries the
+        // same native-runtime tail as the real build (static rlib, `-u`
+        // force-extracts). Plain programs stay free of it.
+        let dir = transient_dir("zz-emit-rt-test");
+        let mut opts = release_opts();
+        opts.native_rt = true;
+        opts.float_link = true;
+        let (_c, sh, bat) =
+            emit_c_plus_script("int main(){return 0;}", &dir, None, &opts).expect("emit");
+        let text = std::fs::read_to_string(&sh).expect("read sh");
+        assert!(
+            text.contains("-lzz_native_rt"),
+            "script must link the native runtime: {text}"
+        );
+        assert!(
+            text.contains(".rlib"),
+            "script must link the static libstd: {text}"
+        );
+        assert!(
+            text.contains(crate::ffi::FLOAT_FMT_SYMBOL),
+            "script must force-extract the float formatter: {text}"
+        );
+        let bat_text = std::fs::read_to_string(&bat).expect("read bat");
+        assert!(
+            bat_text.contains("-lzz_native_rt"),
+            "batch script must link the native runtime too"
+        );
+        // Non-FFI programs: no runtime tail at all.
+        let dir2 = transient_dir("zz-emit-plain-test");
+        let plain = release_opts();
+        let (_c, sh2, _) =
+            emit_c_plus_script("int main(){return 0;}", &dir2, None, &plain).expect("emit");
+        let text2 = std::fs::read_to_string(&sh2).expect("read sh");
+        assert!(
+            !text2.contains("-lzz_native_rt"),
+            "plain script must not link the native runtime: {text2}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
 }
 
 #[cfg(test)]
@@ -1297,8 +1473,13 @@ mod toolchain_tests {
     /// Hermetic toolchain root: unique temp dir + env override, restored
     /// on drop so parallel tests never observe it afterwards. Mirrors the
     /// existing `ZZ_TEST_HIDE_CLANG` pattern (set, assert, restore fast).
+    /// Also shells ambient toolchain pins (`ZZ_CLANG_VERSION`): CI sets it
+    /// workflow-globally and `detect_clang_with` honors it ahead of the
+    /// managed toolchain, so a leaked pin would make the managed-wins
+    /// test env-dependent (passed locally, failed in CI).
     struct HermeticRoot {
         dir: PathBuf,
+        saved_pin: Option<String>,
     }
 
     impl HermeticRoot {
@@ -1311,7 +1492,9 @@ mod toolchain_tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("ZZ_TOOLCHAIN_ROOT", &dir);
-            HermeticRoot { dir }
+            let saved_pin = std::env::var("ZZ_CLANG_VERSION").ok();
+            std::env::remove_var("ZZ_CLANG_VERSION");
+            HermeticRoot { dir, saved_pin }
         }
 
         fn pin(&self, version: &str) {
@@ -1340,13 +1523,40 @@ mod toolchain_tests {
     impl Drop for HermeticRoot {
         fn drop(&mut self) {
             std::env::remove_var("ZZ_TOOLCHAIN_ROOT");
+            match self.saved_pin.take() {
+                Some(pin) => std::env::set_var("ZZ_CLANG_VERSION", pin),
+                None => std::env::remove_var("ZZ_CLANG_VERSION"),
+            }
             let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Lock the process-global env for hermetic tests. Poison-tolerant: a
+    /// panicking test must fail alone, never cascade `PoisonError` into
+    /// every sibling (which masks the real assertion).
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Sets `ZZ_TEST_HIDE_CLANG` for a scope, restoring (removing) it on
+    /// drop — panic-safe, so a failing assert cannot leak the hook into
+    /// later tests.
+    struct HideClang;
+    impl HideClang {
+        fn new() -> Self {
+            std::env::set_var("ZZ_TEST_HIDE_CLANG", "1");
+            HideClang
+        }
+    }
+    impl Drop for HideClang {
+        fn drop(&mut self) {
+            std::env::remove_var("ZZ_TEST_HIDE_CLANG");
         }
     }
 
     #[test]
     fn unpinned_has_no_managed_zig() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let _root = HermeticRoot::new();
         assert!(toolchain_pin().is_none());
         assert!(managed_zig_path().is_none());
@@ -1354,7 +1564,7 @@ mod toolchain_tests {
 
     #[test]
     fn garbage_pin_is_unpinned_not_fatal() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let root = HermeticRoot::new();
         for bad in ["", ".", "..", "../evil", "0.17.0\nrm -rf", "v0.17.0-rc1!"] {
             std::fs::write(root.dir.join("pin"), bad).unwrap();
@@ -1365,7 +1575,7 @@ mod toolchain_tests {
 
     #[test]
     fn pin_without_install_is_not_managed() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let root = HermeticRoot::new();
         root.pin("0.17.0");
         assert_eq!(toolchain_pin().as_deref(), Some("0.17.0"));
@@ -1374,7 +1584,7 @@ mod toolchain_tests {
 
     #[test]
     fn managed_zig_wins_probe_and_hide_covers_it() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let root = HermeticRoot::new();
         let fake = root.fake_zig("0.17.0");
         root.pin("0.17.0");
@@ -1384,20 +1594,23 @@ mod toolchain_tests {
         assert!(found.zig);
         assert_eq!(found.path, fake);
         // `--cc=clang` still forces the system provider.
-        if which("clang").or_else(|| which("clang-22")).is_some() {
+        if which("clang")
+            .or_else(|| which("clang-23"))
+            .or_else(|| which("clang-22"))
+            .is_some()
+        {
             let c = detect_clang_with(ClangProvider::Clang).expect("system clang present");
             assert!(!c.zig);
         }
         // The test hook hides the managed toolchain too.
-        std::env::set_var("ZZ_TEST_HIDE_CLANG", "1");
+        let _hide = HideClang::new();
         assert!(detect_clang().is_none());
         assert!(managed_zig_path().is_none());
-        std::env::remove_var("ZZ_TEST_HIDE_CLANG");
     }
 
     #[test]
     fn cache_key_follows_the_pin() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock();
         let root = HermeticRoot::new();
         let clang = Clang {
             path: PathBuf::from("/usr/bin/clang"),

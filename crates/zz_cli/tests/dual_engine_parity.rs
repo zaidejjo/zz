@@ -871,6 +871,14 @@ parity_strict!(
     "regression",
     "edge_dict_alias.zz"
 );
+// Loop-iteration snapshot (cond-1): push / index-write / rebind inside
+// the body must not affect the visited elements or trip count.
+// VM ground truth: 3/60/4/99, 3/60/200, 3/60/2/7/8.
+parity_strict!(
+    parity_regression_loop_iter_snapshot,
+    "regression",
+    "loop_iter_snapshot.zz"
+);
 parity_strict!(
     parity_regression_edge_temp_index_drop,
     "regression",

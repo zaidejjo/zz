@@ -210,14 +210,26 @@ jobs:
           else
             strip target/release/zz target/release/zz-lsp
           fi
-          # Native-runtime archive + shared libstd for the prebuilt link:
+          # Native-runtime archive + static libstd for the prebuilt link:
           # AOT programs built by this toolchain resolve them with no
           # sources and no Rust toolchain (see ffi.rs resolve_staticlib).
+          # Static rlib (#303): linked AOT binaries carry no libstd
+          # dependency and no RUNPATH — no sidecar next to outputs.
           cargo build --release --locked -p zz_native_rt
           RT_A="$(ls target/release/libzz_native_rt.a)"
+          # Strip debug symbols from the archive before shipping: the
+          # workspace release profile keeps debuginfo (184M); stripped
+          # it is ~32M and zips to ~12M with the rlib. Final AOT links
+          # are unaffected (only referenced objects are pulled).
+          # GNU strip uses -g, BSD (macos) uses -S for the same.
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            strip -S "$RT_A"
+          else
+            strip -g "$RT_A"
+          fi
           LIBDIR="$(rustc --print target-libdir)"
           RT_SO=""
-          for f in "$LIBDIR"/libstd-*.so "$LIBDIR"/libstd-*.dylib; do
+          for f in "$LIBDIR"/libstd-*.rlib; do
             [ -e "$f" ] || continue
             RT_SO="$f"
           done

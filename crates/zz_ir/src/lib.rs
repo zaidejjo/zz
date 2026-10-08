@@ -31,8 +31,10 @@ use std::fmt;
 
 /// Magic bytes opening every `.zzc` file (spec §8).
 pub const MAGIC: [u8; 4] = *b"ZZC1";
-/// Format version this crate reads and writes (spec §8: this spec = 1).
-pub const VERSION: u32 = 1;
+/// Format version this crate reads and writes (spec §8: this spec = 2).
+/// v2 adds the per-function locals type table (`FUNCS` records); v1
+/// files are rejected (re-emit with `zz build --emit-ir`).
+pub const VERSION: u32 = 2;
 
 /// Interned-string reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,6 +104,21 @@ pub struct FuncDef {
     pub arity: u32,
     pub params: Vec<Param>,
     pub sig: FuncSig,
+    /// Declared type per frame slot: params/locals recorded at typed
+    /// compile time (see `vm::Chunk::slot_types`), params seeded from
+    /// the signature. Length is one past the highest referenced slot id
+    /// (empty when slotless). Entries over-approximate every value their
+    /// slot ever holds (conflicts widen to `Error`, the "unknown" top);
+    /// `Unknown` means "no information" (temps, untyped compiles). The
+    /// verifier checks every store against its entry; backends decide
+    /// representation from entries (never from inference).
+    pub locals: Vec<TypeId>,
+    /// Loop-variable slots per `ForNext` op, in function order (kth entry
+    /// ↔ kth `ForNext`): `u16::MAX` marks env-captured vars (no slot).
+    /// Carried from `vm::Chunk::fornext_slots`; lets AOT loop peels write
+    /// the iteration shadow directly. Verified for coherence (counts and
+    /// arity); content is compiler-attested like `locals`.
+    pub vartab: Vec<Vec<u16>>,
     /// Top-level vars promoted to frame slots, synced back to the
     /// environment at frame exit (REPL/multi-chunk flows).
     pub toplevel_slots: Vec<(StrId, u16)>,

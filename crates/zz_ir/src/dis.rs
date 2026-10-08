@@ -232,7 +232,7 @@ fn sig_text(module: &Module, sig: &crate::FuncSig) -> String {
 }
 
 /// Render a type with names resolved where cheap; nested ids inline.
-fn type_text(module: &Module, t: &crate::IrType) -> String {
+pub(crate) fn type_text(module: &Module, t: &crate::IrType) -> String {
     use crate::IrType as T;
     match t {
         T::Unknown => "unknown".to_string(),
@@ -332,12 +332,17 @@ pub fn disassemble(module: &Module) -> String {
             ""
         };
         out.push_str(&format!(
-            "func f{i} {} arity={}{} max_stack={} sig={}\n",
+            "func f{i} {} arity={}{} max_stack={} sig={} locals=[{}]\n",
             str_text(module, f.name),
             f.arity,
             entry,
             f.max_stack,
-            sig_text(module, &f.sig)
+            sig_text(module, &f.sig),
+            f.locals
+                .iter()
+                .map(|id| short_type(module, *id))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         for (pc, op) in f.code.iter().enumerate() {
             let span = f.spans.get(pc).copied().unwrap_or(crate::Span::new(0, 0));
