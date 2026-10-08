@@ -68,7 +68,7 @@ fn clang_id(clang: &Clang) -> String {
 
 /// Compile-flag generation for the cached runtime archive. Bump on ANY
 /// change to `build_compile_flags` (the key does not hash flags).
-const RT_CACHE_VERSION: &str = "rt5";
+const RT_CACHE_VERSION: &str = "rt6";
 
 /// Assemble the 6-field cache key.
 ///
@@ -268,7 +268,14 @@ fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String>
     flags.push("-fdata-sections".to_string());
     if opts.optimize {
         flags.push("-O3".to_string());
-        flags.push("-flto=thin".to_string());
+        // NO `-flto=thin` here by design (rt6): the archive must hold
+        // native objects, never LLVM bitcode. Bitcode members depend on
+        // the gold plugin + ar/ld bitcode literacy at link time, which
+        // varies by toolchain (CI's binutils 2.42 cannot index them and
+        // its links fail with `undefined reference to main` while local
+        // 2.47 works). Native objects link everywhere; ThinLTO still
+        // applies to program code at the final link. Stale bitcode
+        // archives are cut off by the rt6 key bump.
         // Parity contract (mirrors `clang_flags`): defined wrapping and
         // conservative aliasing; no host-specific and no unsafe-FP flags.
         // Keep in sync with `clang_flags()` and bump RT_CACHE_VERSION.
