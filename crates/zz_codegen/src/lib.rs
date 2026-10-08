@@ -96,16 +96,6 @@ pub fn build_native(
     opts.float_link = opts.float_link || lowered.needs_float_fmt;
     opts.curl_link = opts.curl_link || lowered.needs_curl;
     opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
-    if opts.static_link && (opts.native_rt || opts.float_link) && opts.allow_static_downgrade {
-        // Default-static only: the program needs the Rust native runtime,
-        // which fully-static binaries cannot link (shared libstd). Fall
-        // back to dynamic with a note instead of failing the default
-        // build; explicit `--static` keeps the hard error in `compile`.
-        opts.static_link = false;
-        eprintln!(
-            "zz: note: static link unavailable (program needs the Rust native runtime); building dynamic"
-        );
-    }
     compile::build(&lowered.source, out_path, opts, target)?;
     Ok(lowered)
 }
@@ -134,13 +124,6 @@ pub fn build_native_with(
     opts.float_link = opts.float_link || lowered.needs_float_fmt;
     opts.curl_link = opts.curl_link || lowered.needs_curl;
     opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
-    if opts.static_link && (opts.native_rt || opts.float_link) && opts.allow_static_downgrade {
-        // Same default-static fallback as `build_native` (see above).
-        opts.static_link = false;
-        eprintln!(
-            "zz: note: static link unavailable (program needs the Rust native runtime); building dynamic"
-        );
-    }
     compile::build_with(&lowered.source, out_path, opts, target, clang)?;
     Ok(lowered)
 }
