@@ -95,6 +95,7 @@ pub fn supported(op: &Op) -> bool {
             | Op::SetLoopResult
             | Op::Safepoint
             | Op::MakeArray(_)
+            | Op::MakeDict(_)
             | Op::ArrayPush
             | Op::IndexOp
             | Op::StoreIndexOp
@@ -171,6 +172,7 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Op::SetLoopResult => (1, 0),
             Op::Safepoint => (0, 0),
             Op::MakeArray(n) => (*n as usize, 1),
+            Op::MakeDict(n) => (2 * *n as usize, 1),
             Op::ArrayPush => (2, 1),
             Op::IndexOp => (2, 1),
             Op::StoreIndexOp => (3, 1),
@@ -748,6 +750,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
             Op::SetLoopResult => (1, 0),
             Op::Safepoint => (0, 0),
             Op::MakeArray(n) => (*n as usize, 1),
+            Op::MakeDict(n) => (2 * *n as usize, 1),
             Op::ArrayPush => (2, 1),
             Op::IndexOp => (2, 1),
             Op::StoreIndexOp => (3, 1),
@@ -2447,6 +2450,22 @@ impl<'a> Emitter<'a> {
             Op::MakeArray(n) => {
                 out.push_str(&format!(
                     "    {{ zz_value _a = zz_array_new(); for (int _k = 0; _k < {n}; _k++) {{ zz_value _e = st[sp-{n}+_k]; zz_array_push(_a.arr, zz_clone(_e)); }} for (int _k = 0; _k < {n}; _k++) zz_release(&st[sp-{n}+_k]); sp -= {n}; st[sp++] = _a; }}\n"
+                ));
+            }
+            Op::MakeDict(n) => {
+                // Stack holds [k0, v0, k1, v1, …] (key first per pair,
+                // program order). Fresh dict (refs == 1): the detach
+                // check inside `zz_index_set` never fires — the same
+                // call HIR emits per pair, so dup-key last-wins matches
+                // HIR (the VM keeps dup pairs; pathological input only).
+                // Ownership mirrors Const::Dict: keys retained (release
+                // our share), values adopted (never release — the dict
+                // owns them now, so the stack window is dropped, not
+                // swept). Non-string keys are ignored by `zz_dict_set`
+                // exactly like HIR (checker-valid programs never do).
+                let m = 2 * (*n as usize);
+                out.push_str(&format!(
+                    "    {{ zz_value _d = zz_dict_new_sized({n}); for (int _k = 0; _k < {n}; _k++) {{ zz_value _kk = st[sp-{m}+2*_k]; zz_value _vv = st[sp-{m}+2*_k+1]; int _de = 0; zz_index_set(&_d, _kk, _vv, &_de); zz_release(&_kk); }} sp -= {m}; st[sp++] = _d; }}\n"
                 ));
             }
             Op::ArrayPush => {
