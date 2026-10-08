@@ -203,6 +203,21 @@ func main() {
     println(len(c))
     println(c[0])
     println(c[1])
+    d := {"a": 10, "b": 20, "c": 30}
+    n2 := 0
+    s2 := 0
+    for _k, v in d {
+        n2 = n2 + 1
+        s2 = s2 + v
+        if n2 == 1 {
+            d["b"] = 200
+            d["z"] = 99
+        }
+    }
+    println(n2)
+    println(s2)
+    println(d["b"])
+    println(len(d))
 }
 "#;
 

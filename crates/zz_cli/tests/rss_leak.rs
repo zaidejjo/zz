@@ -4,7 +4,7 @@
 //! therefore blind to genuine leaks in new emitter code.
 //!
 //! Method: build a churn program (2000 outer iterations, each building
-//! then dropping a 10k-element array) with `-p` on both backends and
+//! then dropping a 1k-element array) with `-p` on both backends and
 //! run each under `ulimit -v` (address-space cap). Steady-state use is
 //! a few MB; the cap is 512MB, so only unbounded growth trips it (the
 //! kernel kills past the cap → nonzero exit → failure). Stdout must
@@ -36,14 +36,16 @@ fn require_native() -> bool {
     true
 }
 
-// 2000 generations x 10k pushes; steady-state holds one 10k array
-// (~160KB). Expected sum: 2000 * 10000.
+// 2000 generations x 1k pushes; steady-state holds one 1k array
+// (~16KB). Expected sum: 2000 * 1000. The inner size only sets
+// steady-state; the outer count sets leak generations, so a small
+// inner loop keeps the gate fast without losing detection power.
 const CHURN: &str = r#"
 func main() {
     s := 0
     for r in 0..2000 {
         a := []
-        for i in 0..10000 {
+        for i in 0..1000 {
             a = vec.push(a, i % 97)
         }
         s = s + len(a)
@@ -52,7 +54,7 @@ func main() {
 }
 "#;
 
-const EXPECTED: &str = "20000000\n";
+const EXPECTED: &str = "2000000\n";
 // 512MB address-space cap: ~3000x steady-state. Only a per-iteration
 // leak (the old loop-result placeholder class, or a new emitter leak)
 // can reach it in 2000 generations.

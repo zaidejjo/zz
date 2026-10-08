@@ -1,8 +1,8 @@
 // Loop-iteration snapshot semantics: a `for`-in loop over an array
-// iterates the entry snapshot. The iterator shares the entry buffer;
-// writes through other bindings detach (COW) and MUST NOT affect the
-// elements visited or the trip count; rebinding the iterated variable
-// MUST NOT affect iteration either.
+// (or dict) iterates the entry snapshot. The iterator shares the
+// entry buffer; writes through other bindings detach (COW) and MUST
+// NOT affect the elements visited or the trip count; rebinding the
+// iterated variable MUST NOT affect iteration either.
 //
 // Spec: §1.1 (value language) + §1.2 (sharing allowed iff
 // unobservable — COW detach makes the snapshot observable); §7.1
@@ -58,5 +58,23 @@ func main() {
     println(len(c))
     println(c[0])
     println(c[1])
+    // Dicts follow the same rule (VM ground truth: 3/60/200/4):
+    // value-update and key-insert inside the body are invisible to
+    // the ongoing iteration, visible afterwards.
+    d := {"a": 10, "b": 20, "c": 30}
+    n2 := 0
+    s2 := 0
+    for _k, v in d {
+        n2 = n2 + 1
+        s2 = s2 + v
+        if n2 == 1 {
+            d["b"] = 200
+            d["z"] = 99
+        }
+    }
+    println(n2)
+    println(s2)
+    println(d["b"])
+    println(len(d))
     println("loop_iter_snapshot_ok")
 }

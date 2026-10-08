@@ -176,6 +176,7 @@ its own number rendering on both engines; float→int saturation is §5.
   write on a missing value traps `Type`.
 
 ## 7. Evaluation order and control flow (MUST)
+
 - Operands evaluate left-to-right. Call: callee, then args
   left-to-right. `&&`/`||` short-circuit; Elvis/`??`/`?` evaluate the
   RHS at most once, exactly once iff needed. Probed and agreed on both
@@ -207,7 +208,7 @@ its own number rendering on both engines; float→int saturation is §5.
 - Pinned by `loop_iter_snapshot` (strict on VM, HIR AOT, chunk AOT,
   ASan): push / index-write / rebind inside the body — trip counts
   stay 3/3/3, sums stay 60/60/60, post-loop bindings show the writes
-  (4/99, 200, [7, 8]).
+  (4/99, 200, [7, 8}); dict update + insert likewise: 3/60/200/4.
 
 ## 8. The `.zzc` format (M1 implementation target)
 
