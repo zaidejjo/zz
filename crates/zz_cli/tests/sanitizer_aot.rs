@@ -156,12 +156,63 @@ func main() {
 }
 "#;
 
+// Loop-iteration snapshot (mirrors
+// tests/fixtures/regression/loop_iter_snapshot.zz): push / index-write /
+// rebind inside the body must not affect visited elements or trip count.
+const LOOP_MUTATE: &str = r#"
+func main() {
+    a := [10, 20, 30]
+    n := 0
+    s1 := 0
+    for v in a {
+        n = n + 1
+        s1 = s1 + v
+        if n == 1 {
+            a = vec.push(a, 99)
+        }
+    }
+    println(n)
+    println(s1)
+    println(len(a))
+    println(a[3])
+    b := [10, 20, 30]
+    s := 0
+    m := 0
+    for v in b {
+        m = m + 1
+        s = s + v
+        if m == 1 {
+            b[1] = 200
+        }
+    }
+    println(m)
+    println(s)
+    println(b[1])
+    c := [10, 20, 30]
+    t := 0
+    k := 0
+    for v in c {
+        k = k + 1
+        t = t + v
+        if k == 1 {
+            c = [7, 8]
+        }
+    }
+    println(k)
+    println(t)
+    println(len(c))
+    println(c[0])
+    println(c[1])
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
     ("array_io", ARRAY_IO),
     ("str_concat", STR_CONCAT),
     ("tak", TAK),
+    ("loop_mutate", LOOP_MUTATE),
 ];
 
 /// Parse the clang major version out of a `zz build --verbose` stderr

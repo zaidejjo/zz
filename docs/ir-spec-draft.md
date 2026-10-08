@@ -176,7 +176,6 @@ its own number rendering on both engines; float→int saturation is §5.
   write on a missing value traps `Type`.
 
 ## 7. Evaluation order and control flow (MUST)
-
 - Operands evaluate left-to-right. Call: callee, then args
   left-to-right. `&&`/`||` short-circuit; Elvis/`??`/`?` evaluate the
   RHS at most once, exactly once iff needed. Probed and agreed on both
@@ -194,6 +193,21 @@ its own number rendering on both engines; float→int saturation is §5.
   at the header (cooperative yield point, stack-neutral).
 - Calls push a frame; `RET` returns the top of stack. `defer` runs LIFO
   at scope exit (existing semantics preserved verbatim).
+
+### 7.1 Loop-iteration snapshot (MUST; PROPOSED — recorded VM ground truth, pending review)
+
+- A `for`-in loop over an array or dict iterates the **entry snapshot**:
+  the elements visited and the trip count are fixed by the collection
+  value at loop entry. The iterator MAY share the entry buffer (§1.2);
+  writes through other bindings then detach (COW) and MUST NOT affect
+  the elements visited or the trip count; rebinding the iterated
+  variable MUST NOT affect iteration either.
+- Observable behavior is exactly iteration over the entry snapshot;
+  sharing the entry buffer is allowed iff unobservable (§1.2).
+- Pinned by `loop_iter_snapshot` (strict on VM, HIR AOT, chunk AOT,
+  ASan): push / index-write / rebind inside the body — trip counts
+  stay 3/3/3, sums stay 60/60/60, post-loop bindings show the writes
+  (4/99, 200, [7, 8]).
 
 ## 8. The `.zzc` format (M1 implementation target)
 

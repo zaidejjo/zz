@@ -1,0 +1,62 @@
+// Loop-iteration snapshot semantics: a `for`-in loop over an array
+// iterates the entry snapshot. The iterator shares the entry buffer;
+// writes through other bindings detach (COW) and MUST NOT affect the
+// elements visited or the trip count; rebinding the iterated variable
+// MUST NOT affect iteration either.
+//
+// Spec: §1.1 (value language) + §1.2 (sharing allowed iff
+// unobservable — COW detach makes the snapshot observable); §7.1
+// (proposed) states the iteration rule explicitly. VM is ground
+// truth; HIR AOT, chunk AOT, and ASan builds must print byte-identical
+// output (see chunk_aot_diff LOOP_MUTATE + sanitizer_aot LOOP_MUTATE).
+func main() {
+    // Push inside the loop: trip count stays at entry length (3), the
+    // push lands in `a` (visible after, via detach).
+    a := [10, 20, 30]
+    n := 0
+    s1 := 0
+    for v in a {
+        n = n + 1
+        s1 = s1 + v
+        if n == 1 {
+            a = vec.push(a, 99)
+        }
+    }
+    println(n)
+    println(s1)
+    println(len(a))
+    println(a[3])
+    // Element write inside the loop detaches: later iterations still
+    // see the entry values (s = 10+20+30, not 10+200+30).
+    b := [10, 20, 30]
+    s := 0
+    m := 0
+    for v in b {
+        m = m + 1
+        s = s + v
+        if m == 1 {
+            b[1] = 200
+        }
+    }
+    println(m)
+    println(s)
+    println(b[1])
+    // Rebinding the iterated variable mid-loop: iteration continues
+    // over the old array.
+    c := [10, 20, 30]
+    t := 0
+    k := 0
+    for v in c {
+        k = k + 1
+        t = t + v
+        if k == 1 {
+            c = [7, 8]
+        }
+    }
+    println(k)
+    println(t)
+    println(len(c))
+    println(c[0])
+    println(c[1])
+    println("loop_iter_snapshot_ok")
+}
