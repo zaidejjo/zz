@@ -559,6 +559,16 @@ mod tests {
 
     #[test]
     fn type_mismatch_is_call_site_error() {
+        // Self-sufficient: the global registry persists across tests in
+        // one process but libtest runs tests in parallel — never rely on
+        // another test's registration (same for native_value_carries_arity
+        // below). Re-registering is an idempotent overwrite.
+        reg(
+            "cabi_t_add",
+            t_add as *mut c_void,
+            vec![CParam::Int, CParam::Int],
+            CRet::Int,
+        );
         let mut args = vec![Value::Str(Box::new("x".to_string())), Value::Int(2)];
         let out = call("cabi_t_add", &mut args, span()).expect("registered");
         assert!(out.is_err());
@@ -590,6 +600,13 @@ mod tests {
 
     #[test]
     fn native_value_carries_arity() {
+        // Self-sufficient registration (see type_mismatch_is_call_site_error).
+        reg(
+            "cabi_t_add",
+            t_add as *mut c_void,
+            vec![CParam::Int, CParam::Int],
+            CRet::Int,
+        );
         match native_value("cabi_t_add") {
             Some(Value::Native(nf)) => assert_eq!(nf.arity, 2),
             other => panic!("expected native, got {other:?}"),

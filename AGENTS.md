@@ -103,3 +103,27 @@ Matrix: ubuntu-latest, macos-latest, windows-latest.
 - `examples/` and `plans/` are gitignored
 - `--fix` mode has three safety levels: auto (safe only), `--hard` (all), `-i` (interactive)
 - The `zz` binary name collides with nothing in the workspace — safe to install globally
+
+## Work Preservation (NEVER lose user or agent work)
+
+Uncommitted work has been destroyed before by `git reset --hard` on a
+dirty tree. These rules are absolute:
+
+1. **Commit early and often.** Every completed unit (feature, fix,
+   passing tests) gets its own commit on the feature branch immediately —
+   never batch hours of work into one commit, never end a work block with
+   a dirty tree.
+2. **NEVER `git reset --hard`, `git checkout -- .`, or `git clean -fd`**
+   on a tree that is not provably clean (`git status --porcelain` empty).
+   No exceptions, including "rescue" situations.
+3. **Moving work between branches:** commit first, then cherry-pick or
+   merge. If the tree is dirty and you must switch context, `git stash`
+   (named: `git stash push -m "..."`) — then verify the stash entry
+   exists before touching anything.
+4. **User branches are read-only territory.** Never commit to, reset,
+   or delete a branch you did not create. Work on your own feature
+   branches only.
+5. **Before any destructive git command**, run `git status --porcelain`
+   and `git stash list`, and confirm there is nothing to lose.
+6. End of session: tree must be clean or every change committed and
+   pushed (or the user explicitly told where uncommitted work lives).
