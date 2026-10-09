@@ -653,8 +653,8 @@ fn nested_for_loops_verify() {
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     for src in [
-        "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n s = s + 1\n }\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n j := 0\n while j < 3 {\n for k in 0..3 {\n s = s + 1\n }\n j = j + 1\n }\n s\n}\nm()",
+        "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n s = s + i + j\n }\n }\n s\n}\nm()",
+        "func m() {\n s := 0\n j := 0\n while j < 3 {\n for k in 0..3 {\n s = s + j + k\n }\n j = j + 1\n }\n s\n}\nm()",
     ] {
         let module = lower_typed_spanmap(src, &sigs);
         // lower_typed runs max_stack_for + full verify internally, so a
