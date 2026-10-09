@@ -89,6 +89,8 @@ import std.str
 | `str.rfind_in` | `str.rfind_in(s: str, sub: str, start: int, end: int) -> int` | Last match in `[start, end)` (-1 on miss) |
 | `str.count_in` | `str.count_in(s: str, sub: str, start: int, end: int) -> int` | Non-overlapping matches in `[start, end)` |
 | `str.bytes` | `str.bytes(s: str) -> [int]` | UTF-8 bytes as plain ints (one copy) |
+| `ord` / `str.ord` | `ord(ch: str) -> int` | Codepoint of a single-character string (empty/multi-char is a runtime error) |
+| `chr` / `str.chr` | `chr(cp: int) -> str` | 1-char string for a scalar value (surrogates, negatives, >0x10FFFF are runtime errors) |
 | `bytes.to_str` | `bytes.to_str(vs: [int]) -> Result<str>` | Strict UTF-8 decode; range/invalid input is `.err` on both backends |
 | `bytes.to_ints` | `bytes.to_ints(b: bytes) -> [int]` | Opaque byte buffer as plain ints |
 | `str.classify` | `str.classify(text, markers, bstart, bend, nested, whole) -> [int]` | Comment-aware line counts `[lines, code, comments, blanks]`; `markers` line list, `bstart`/`bend` block pair (`""` = none), `nested` Rust-style depth, `whole` whole-line blocks |
@@ -119,6 +121,9 @@ str.starts_with_at("hello", "ell", 1) // true
 str.ends_with_at("hello", "ell", 4)   // true
 str.trim_span("  hi  ", 0, 6)          // [2, 4]
 str.bytes("AB")                    // [65, 66]
+ord("A")                           // 65
+chr(233)                           // "é"
+chr(ord("Z"))                      // "Z"
 bytes.to_str([104, 105])           // .ok("hi")
 bytes.to_ints(b)[0]                // first byte as int
 ```

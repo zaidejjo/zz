@@ -128,6 +128,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert("len".into(), sig_t(vec![("v", t.clone())], Type::Int));
+    // Unicode scalar conversions (#276, #263): `ord` reads the codepoint of
+    // a single-character string, `chr` builds one (both reject bad input at
+    // runtime). Bare like `len`; `str.*` forms below enable method syntax.
+    m.insert("ord".into(), sig(vec![("ch", Type::Str)], Type::Int));
+    m.insert("chr".into(), sig(vec![("cp", Type::Int)], Type::Str));
     // Union of array-of-T and range-of-T so T stays as element type.
     let iterable_t = Type::Union(vec![
         Type::Array(Box::new(t.clone())),
@@ -205,6 +210,14 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.str.bytes".into(),
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
+    );
+    m.insert(
+        "std.str.ord".into(),
+        sig(vec![("ch", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.str.chr".into(),
+        sig(vec![("cp", Type::Int)], Type::Str),
     );
     m.insert(
         "std.str.classify".into(),
@@ -366,6 +379,8 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "str.bytes".into(),
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
     );
+    m.insert("str.ord".into(), sig(vec![("ch", Type::Str)], Type::Int));
+    m.insert("str.chr".into(), sig(vec![("cp", Type::Int)], Type::Str));
     m.insert(
         "str.classify".into(),
         sig(
@@ -4368,10 +4383,16 @@ mod tests {
             "str.find",
             "std.str.rfind",
             "str.rfind",
+            "ord",
+            "str.ord",
+            "std.str.ord",
+            "chr",
+            "str.chr",
+            "std.str.chr",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 902);
+        assert_eq!(funcs.len(), 908);
     }
 
     #[test]

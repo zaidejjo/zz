@@ -435,6 +435,51 @@ pub(crate) fn str_bytes(
     )))
 }
 
+// ord(ch) — codepoint of a single-character string (#276, #263).
+// Empty and multi-character inputs are hard errors (a programming bug,
+// like a negative shift count — not routine input like bytes.to_str).
+pub(crate) fn str_ord(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "ord")?;
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Ok(Value::Int(c as i64)),
+        (None, _) => Err(EvalError::new(
+            "`ord` expects a single-character string, found an empty string",
+            span,
+        )),
+        _ => Err(EvalError::new(
+            format!(
+                "`ord` expects a single-character string, found {} characters",
+                s.chars().count()
+            ),
+            span,
+        )),
+    }
+}
+
+// chr(cp) — 1-char string for a Unicode scalar value (#263). Surrogates,
+// negatives, and values above 0x10FFFF are hard errors on both backends.
+pub(crate) fn str_chr(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let cp = expect_int(args, 0, "chr")?;
+    match u32::try_from(cp).ok().and_then(char::from_u32) {
+        Some(c) => Ok(Value::Str(Box::new(c.to_string()))),
+        None => Err(EvalError::new(
+            format!(
+                "`chr` expects a Unicode scalar value (0-0x10FFFF, no surrogates), found `{cp}`"
+            ),
+            span,
+        )),
+    }
+}
+
 // bytes.to_str(vs) — strict UTF-8 decode; invalid sequences and
 // out-of-range values are .err (identical on VM and AOT).
 pub(crate) fn bytes_to_str(

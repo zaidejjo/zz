@@ -1703,6 +1703,78 @@ zz_value zz_str_bytes(zz_value s, int *err) {
     return arr;
 }
 
+// ord(ch) — codepoint of a single-character string (#276, #263).
+// Empty and multi-character inputs are hard errors, mirroring the VM.
+// Invalid bytes decode to their byte value (unreachable from valid
+// strings — the VM's strings are always valid UTF-8 — but never crash).
+zz_value zz_ord(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || !s.s) {
+        fprintf(stderr, "zz error: `ord` expects a string\n");
+        exit(1);
+    }
+    size_t nchars = zz_str_char_len(s.s);
+    if (nchars != 1) {
+        if (nchars == 0) {
+            fprintf(stderr, "zz error: `ord` expects a single-character string, found an empty string\n");
+        } else {
+            fprintf(stderr, "zz error: `ord` expects a single-character string, found %zu characters\n", nchars);
+        }
+        exit(1);
+    }
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
+    size_t l = zz_utf8_seq_len(d, s.s->len);
+    uint32_t cp;
+    if (l == 1) {
+        cp = d[0];
+    } else {
+        // Strict prefix decode (overlongs/surrogates cannot occur in
+        // valid strings; decode the well-formed prefix deterministically).
+        static const uint32_t masks[] = {0, 0x7F, 0x1F, 0x0F, 0x07};
+        cp = d[0] & masks[l];
+        for (size_t k = 1; k < l; k++) cp = (cp << 6) | (d[k] & 0x3F);
+    }
+    return zz_int((int64_t)cp);
+}
+
+// chr(cp) — 1-char string for a Unicode scalar value (#263). Surrogates,
+// negatives, and values above 0x10FFFF are hard errors on both backends.
+zz_value zz_chr(zz_value cp, int *err) {
+    (void)err;
+    if (cp.tag != ZZ_INT) {
+        fprintf(stderr, "zz error: `chr` expects an integer codepoint\n");
+        exit(1);
+    }
+    int64_t n = cp.i;
+    if (n < 0 || n > 0x10FFFF || (n >= 0xD800 && n <= 0xDFFF)) {
+        fprintf(stderr, "zz error: `chr` expects a Unicode scalar value (0-0x10FFFF, no surrogates), found `%lld`\n", (long long)n);
+        exit(1);
+    }
+    uint32_t u = (uint32_t)n;
+    char buf[4];
+    size_t len;
+    if (u < 0x80) {
+        buf[0] = (char)u;
+        len = 1;
+    } else if (u < 0x800) {
+        buf[0] = (char)(0xC0 | (u >> 6));
+        buf[1] = (char)(0x80 | (u & 0x3F));
+        len = 2;
+    } else if (u < 0x10000) {
+        buf[0] = (char)(0xE0 | (u >> 12));
+        buf[1] = (char)(0x80 | ((u >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (u & 0x3F));
+        len = 3;
+    } else {
+        buf[0] = (char)(0xF0 | (u >> 18));
+        buf[1] = (char)(0x80 | ((u >> 12) & 0x3F));
+        buf[2] = (char)(0x80 | ((u >> 6) & 0x3F));
+        buf[3] = (char)(0x80 | (u & 0x3F));
+        len = 4;
+    }
+    return zz_str_new(buf, len);
+}
+
 // bytes.to_str(vs) — strict UTF-8 decode; out-of-range values and
 // invalid sequences are .err, identically on VM and AOT.
 zz_value zz_bytes_to_str(zz_value vs, int *err) {

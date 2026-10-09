@@ -160,6 +160,21 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: iterators::len,
         },
     );
+    // Unicode scalar conversions (#276, #263) — bare like `len`.
+    m.insert(
+        "ord".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_ord,
+        },
+    );
+    m.insert(
+        "chr".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_chr,
+        },
+    );
     // bytes.* methods (for method dispatch: `b.len()` on byte buffers).
     m.insert(
         "bytes.len".into(),
@@ -176,10 +191,17 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "str.classify".into(),
+        "str.ord".into(),
         NativeEntry {
-            arity: 6,
-            f: str_mod::str_classify,
+            arity: 1,
+            f: str_mod::str_ord,
+        },
+    );
+    m.insert(
+        "str.chr".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_chr,
         },
     );
     m.insert(
@@ -215,6 +237,20 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: str_mod::str_bytes,
+        },
+    );
+    m.insert(
+        "std.str.ord".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_ord,
+        },
+    );
+    m.insert(
+        "std.str.chr".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::str_chr,
         },
     );
     m.insert(
