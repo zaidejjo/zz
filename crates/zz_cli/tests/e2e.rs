@@ -1490,3 +1490,44 @@ fn e2e_package_map_test_runner() {
         "`zz test` of tests/ file importing src/ should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}",
     );
 }
+
+/// Run `zz` with explicit argv + cwd, returning (exit, stdout, stderr).
+/// Used to prove package mapping is file-anchored, not cwd-anchored (#288).
+fn run_zz_in(cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz {args:?}` in {cwd:?}: {e}"));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn e2e_package_map_cwd_independent() {
+    // Same project file resolves identically no matter where the
+    // command runs from: unrelated cwd with absolute path, project
+    // root with relative path, and filesystem root with `zz test`.
+    // No nested manifests, no symlinks, no `tests/src/` involved.
+    let (dir, test_file, run_file) = write_package_map_project();
+    let run_abs = run_file.display().to_string();
+    let test_abs = test_file.display().to_string();
+
+    let (exit, stdout, stderr) = run_zz_in(
+        Path::new("/tmp"),
+        &["run", run_abs.as_str()],
+    );
+    assert_eq!(exit, 0, "abs path from /tmp should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.lines().last().unwrap_or("").contains("42"));
+
+    let (exit, stdout, stderr) = run_zz_in(&dir, &["run", "tests/run_check.zz"]);
+    assert_eq!(exit, 0, "rel path from root should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.lines().last().unwrap_or("").contains("42"));
+
+    let (exit, stdout, stderr) = run_zz_in(Path::new("/"), &["test", test_abs.as_str()]);
+    assert_eq!(exit, 0, "`zz test` from / should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+}
