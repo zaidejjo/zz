@@ -1582,6 +1582,18 @@ pub fn update(args: &[String]) -> Result<(), String> {
                                 println!("    {name}: {current} → {picked}");
                             } else {
                                 println!("    {name} is up to date ({current})");
+                                // #295: a newer release exists but the manifest
+                                // requirement excludes it — name the blocker
+                                // instead of no-op silence that contradicts
+                                // `zz outdated`.
+                                if !info.metadata.latest.is_empty()
+                                    && info.metadata.latest != picked
+                                {
+                                    println!(
+                                        "    note: {} exists but requirement `{req}` excludes it — edit zz.toml to widen it",
+                                        info.metadata.latest
+                                    );
+                                }
                             }
                         }
                         Err(e) => eprintln!("    warning: {e}"),
@@ -1679,6 +1691,24 @@ fn locked_dep_manifest(
     None
 }
 
+/// Pure status for one `zz outdated` row (#295): `locked` is the pinned
+/// version, `wanted` the newest satisfying the manifest requirement,
+/// `latest` the newest on the registry.
+fn outdated_status(locked: &str, wanted_ver: &str, latest: &str) -> &'static str {
+    if wanted_ver == "∅" {
+        "no match"
+    } else if locked == latest {
+        "up to date"
+    } else if locked != wanted_ver {
+        // A newer version satisfies the requirement: `zz update` moves here.
+        "update available"
+    } else {
+        // Locked == wanted but latest is newer: the requirement itself
+        // blocks the update — `zz update` cannot move here.
+        "outside requirement"
+    }
+}
+
 /// Handle `zz outdated`: locked vs wanted vs latest per registry dep.
 pub fn outdated(args: &[String]) -> Result<(), String> {
     let (_dir, manifest, lock) = load_manifest_and_lock()?;
@@ -1739,15 +1769,7 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
         let wanted_ver = zz_pm::remote::pick_version(&info.metadata.versions, req)
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "∅".to_string());
-        let status = if wanted_ver == "∅" {
-            "no match"
-        } else if locked == latest {
-            "up to date"
-        } else if locked == wanted_ver {
-            "update available"
-        } else {
-            "behind requirement"
-        };
+        let status = outdated_status(&locked, &wanted_ver, &latest);
         rows.push((
             (*name).clone(),
             locked,
@@ -1759,11 +1781,24 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
     print!("{}", format_outdated_table(&rows));
     if rows.iter().any(|r| r.4 == "no match") {
         println!("hint: `zz info <pkg>` lists the available versions");
-    } else if rows
-        .iter()
-        .any(|r| r.4 == "update available" || r.4 == "behind requirement")
-    {
-        println!("hint: run `zz update [pkg]` to re-resolve, then `zz install`");
+    } else {
+        let blocked: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.4 == "outside requirement")
+            .map(|r| r.0.as_str())
+            .collect();
+        if !blocked.is_empty() {
+            println!(
+                "hint: {} {} pinned by {} requirement — edit zz.toml to widen {}, then run `zz update`",
+                blocked.join(", "),
+                if blocked.len() == 1 { "is" } else { "are" },
+                if blocked.len() == 1 { "its" } else { "their" },
+                if blocked.len() == 1 { "it" } else { "them" },
+            );
+        }
+        if rows.iter().any(|r| r.4 == "update available") {
+            println!("hint: run `zz update [pkg]` to re-resolve, then `zz install`");
+        }
     }
     Ok(())
 }
@@ -2227,6 +2262,22 @@ mod tests {
         // Aligned: status column starts at the same offset.
         let status_off = |l: &str| l.find("update available").or_else(|| l.find("up to date"));
         assert_eq!(status_off(lines[1]), status_off(lines[2]));
+    }
+
+    #[test]
+    fn outdated_status_distinguishes_blocked_updates() {
+        // #295: locked == wanted != latest is not "update available" — the
+        // requirement itself blocks it and `zz update` cannot move.
+        assert_eq!(outdated_status("0.4.1", "0.4.1", "0.4.1"), "up to date");
+        assert_eq!(
+            outdated_status("0.2.0", "0.2.5", "0.4.1"),
+            "update available"
+        );
+        assert_eq!(
+            outdated_status("0.2.0", "0.2.0", "0.4.1"),
+            "outside requirement"
+        );
+        assert_eq!(outdated_status("0.2.0", "∅", "0.4.1"), "no match");
     }
 
     #[test]
