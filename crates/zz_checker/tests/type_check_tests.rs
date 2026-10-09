@@ -519,6 +519,54 @@ fn calling_closure() {
 }
 
 #[test]
+fn zero_arg_closure_no_space() {
+    // #261: `|| body` parses as a zero-arg closure (no space needed).
+    let r = check_src("f := || 42\ny := f()");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["y"], Type::Int);
+}
+
+#[test]
+fn or_op_spacing_variants_stay_boolean_or() {
+    // #261: every spacing of `||` after an operand stays boolean-or.
+    for src in ["a||b", "a ||b", "a|| b", "a || b"] {
+        let prog = format!("a := true\nb := false\nc := {src}");
+        let r = check_src(&prog);
+        assert!(!has_errors(&r), "{src}: {:?}", r.errors);
+        assert_eq!(r.bindings["c"], Type::Bool, "{src}");
+    }
+}
+
+#[test]
+fn unused_tuple_binding_span_points_at_binding() {
+    // #293: an unused destructured binding points at its own site, not 1:1.
+    let src = "func pair() -> (int, int) {\n    return (1, 2)\n}\nfunc main() {\n    m, n := pair()\n    println(n)\n}\n";
+    let r = check_src(src);
+    let warn = r
+        .errors
+        .iter()
+        .find(|d| d.message.contains("unused variable `m`"))
+        .expect("expected unused-`m` warning");
+    let span = warn.span.expect("warning must carry a span");
+    assert_eq!(&src[span.to_range()], "m", "span {span:?} must cover `m`");
+}
+
+#[test]
+fn unused_for_loop_var_span_points_at_binding() {
+    // #293 (same class): unused loop variables point at their own site.
+    let src = "func main() {\n    total := 0\n    for i, x in [(1, 10), (2, 20)] {\n        total = total + x\n    }\n}\n";
+    let r = check_src(src);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let warn = r
+        .errors
+        .iter()
+        .find(|d| d.message.contains("unused variable `i`"))
+        .expect("expected unused-`i` warning");
+    let span = warn.span.expect("warning must carry a span");
+    assert_eq!(&src[span.to_range()], "i", "span {span:?} must cover `i`");
+}
+
+#[test]
 fn match_option() {
     let r = check_src("v := .some(1)\nx := match v { .some(n) => n, .none => 0 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);

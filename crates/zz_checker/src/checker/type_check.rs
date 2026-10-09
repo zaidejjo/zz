@@ -321,7 +321,7 @@ impl Checker {
                             }
                         };
                         self.push_scope();
-                        self.define(&vars[0].name, elem);
+                        self.define_at(&vars[0].name, elem, vars[0].span);
                         self.loop_depth += 1;
                         self.check_block(body);
                         self.loop_depth -= 1;
@@ -334,8 +334,8 @@ impl Checker {
                         match it {
                             Type::Dict(k, v) => {
                                 self.push_scope();
-                                self.define(&vars[0].name, *k);
-                                self.define(&vars[1].name, *v);
+                                self.define_at(&vars[0].name, *k, vars[0].span);
+                                self.define_at(&vars[1].name, *v, vars[1].span);
                                 self.loop_depth += 1;
                                 self.check_block(body);
                                 self.loop_depth -= 1;
@@ -345,8 +345,16 @@ impl Checker {
                                 match self.unifier.resolve(&elem) {
                                     Type::Tuple(pair) if pair.len() == 2 => {
                                         self.push_scope();
-                                        self.define(&vars[0].name, pair[0].clone());
-                                        self.define(&vars[1].name, pair[1].clone());
+                                        self.define_at(
+                                            &vars[0].name,
+                                            pair[0].clone(),
+                                            vars[0].span,
+                                        );
+                                        self.define_at(
+                                            &vars[1].name,
+                                            pair[1].clone(),
+                                            vars[1].span,
+                                        );
                                         self.loop_depth += 1;
                                         self.check_block(body);
                                         self.loop_depth -= 1;
@@ -359,8 +367,8 @@ impl Checker {
                                         let k_var = self.unifier.fresh_var();
                                         let v_var = self.unifier.fresh_var();
                                         self.push_scope();
-                                        self.define(&vars[0].name, k_var);
-                                        self.define(&vars[1].name, v_var);
+                                        self.define_at(&vars[0].name, k_var, vars[0].span);
+                                        self.define_at(&vars[1].name, v_var, vars[1].span);
                                         self.loop_depth += 1;
                                         self.check_block(body);
                                         self.loop_depth -= 1;
@@ -374,8 +382,8 @@ impl Checker {
                                             *span,
                                         ));
                                         self.push_scope();
-                                        self.define(&vars[0].name, Type::Unit);
-                                        self.define(&vars[1].name, Type::Unit);
+                                        self.define_at(&vars[0].name, Type::Unit, vars[0].span);
+                                        self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                         self.loop_depth += 1;
                                         self.check_block(body);
                                         self.loop_depth -= 1;
@@ -389,8 +397,8 @@ impl Checker {
                                     *span,
                                 ));
                                 self.push_scope();
-                                self.define(&vars[0].name, Type::Unit);
-                                self.define(&vars[1].name, Type::Unit);
+                                self.define_at(&vars[0].name, Type::Unit, vars[0].span);
+                                self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                 self.loop_depth += 1;
                                 self.check_block(body);
                                 self.loop_depth -= 1;
@@ -404,8 +412,8 @@ impl Checker {
                                     *span,
                                 ));
                                 self.push_scope();
-                                self.define(&vars[0].name, Type::Unit);
-                                self.define(&vars[1].name, Type::Unit);
+                                self.define_at(&vars[0].name, Type::Unit, vars[0].span);
+                                self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                 self.loop_depth += 1;
                                 self.check_block(body);
                                 self.loop_depth -= 1;
@@ -1258,7 +1266,7 @@ impl Checker {
                     }
                 };
                 self.push_scope();
-                self.define(&var.name, elem);
+                self.define_at(&var.name, elem, var.span);
                 if let Some(f) = filter {
                     let ft = self.check_expr(f);
                     let ft = self.unifier.resolve(&ft);
@@ -2904,7 +2912,7 @@ impl Checker {
                     }
                 }
             };
-            self.define(&p.name.name, ty.clone());
+            self.define_at(&p.name.name, ty.clone(), p.name.span);
             ptypes.push(ty);
         }
         // Allow `return` inside closures — same semantics as named functions.
@@ -3272,7 +3280,7 @@ impl Checker {
         match pat {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
-                self.define(&name.name, ty.clone());
+                self.define_at(&name.name, ty.clone(), name.span);
                 // Top-level destructured names are module globals (like
                 // top-level `Decl`): record them for `tp.bindings` so
                 // downstream passes (native globals collection) can type

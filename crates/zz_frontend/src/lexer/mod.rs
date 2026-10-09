@@ -284,7 +284,16 @@ impl<'a> Lexer<'a> {
                 '^' => self.emit_significant(TokenKind::Caret, self.pos, self.pos + 1),
                 '~' => self.emit_significant(TokenKind::Tilde, self.pos, self.pos + 1),
                 '|' if self.peek_char_at(1) == Some('|') => {
-                    self.emit_significant(TokenKind::OrOr, self.pos, self.pos + 2)
+                    // Zero-arg closure `|| body` vs boolean-or (#261): after
+                    // an operand `||` is `||`; anywhere an expression can
+                    // start it opens a closure, so emit two pipes and let
+                    // `parse_closure` take the empty-param path.
+                    if Self::ends_operand(self.prev_sig) {
+                        self.emit_significant(TokenKind::OrOr, self.pos, self.pos + 2)
+                    } else {
+                        self.emit_significant(TokenKind::Pipe, self.pos, self.pos + 1);
+                        self.emit_significant(TokenKind::Pipe, self.pos, self.pos + 1)
+                    }
                 }
                 '|' if self.peek_char_at(1) == Some('>') => {
                     self.emit_significant(TokenKind::PipeGt, self.pos, self.pos + 2)
@@ -439,6 +448,30 @@ impl<'a> Lexer<'a> {
     }
 
     // --- significant tokens ----------------------------------------------
+
+    /// True if the previous significant token ends an operand, so a following
+    /// `||` is boolean-or rather than a zero-arg closure opener (#261).
+    /// Literals, names, and closing delimiters end operands; everything else
+    /// (operators, openers, separators, keywords, statement starts) leaves
+    /// the lexer in operand position. Spacing is irrelevant: `a||b` and
+    /// `a || b` are both or-ops, `|| body` and `f(|| x)` both closures.
+    fn ends_operand(prev: Option<TokenKind>) -> bool {
+        matches!(
+            prev,
+            Some(
+                TokenKind::Ident
+                    | TokenKind::Int
+                    | TokenKind::Float
+                    | TokenKind::Str
+                    | TokenKind::StrFmt
+                    | TokenKind::True
+                    | TokenKind::False
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::RBrace
+            )
+        )
+    }
 
     /// True if the previous significant token implies the current line
     /// continues (Go-style: newline after an operator or `=` is dropped).
@@ -1375,6 +1408,44 @@ mod tests {
             }
         }
         false
+    }
+
+    /// Token-kind sequence for `src`, assertion shorthand for the tests below.
+    fn kinds_of(src: &str) -> Vec<TokenKind> {
+        lex(src).tokens.iter().map(|t| t.kind).collect()
+    }
+
+    #[test]
+    fn double_pipe_splits_after_non_operand() {
+        // #261: `|| body` opens a zero-arg closure — two pipes, no OrOr.
+        for src in ["f := || 42", "f :=|| 42", "retry(|| fetch())", "|| 42"] {
+            let kinds = kinds_of(src);
+            assert!(
+                !kinds.contains(&TokenKind::OrOr),
+                "{src:?} must not lex OrOr: {kinds:?}"
+            );
+            assert!(
+                kinds.iter().filter(|k| **k == TokenKind::Pipe).count() >= 2,
+                "{src:?} must lex two pipes: {kinds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn double_pipe_stays_or_or_after_operand() {
+        // #261: every spacing of `a || b` stays boolean-or.
+        for src in ["a||b", "a ||b", "a|| b", "a || b", "x := a||b"] {
+            let kinds = kinds_of(src);
+            assert_eq!(
+                kinds.iter().filter(|k| **k == TokenKind::OrOr).count(),
+                1,
+                "{src:?} must lex one OrOr: {kinds:?}"
+            );
+            assert!(
+                !kinds.contains(&TokenKind::Pipe),
+                "{src:?} must not lex Pipe: {kinds:?}"
+            );
+        }
     }
 
     #[test]
