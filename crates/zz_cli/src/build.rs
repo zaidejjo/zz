@@ -1128,7 +1128,14 @@ pub fn build_release(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let t_front = std::time::Instant::now();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
+    if rel.verbose {
+        eprintln!(
+            "zz: timing load_check_hir_dce={}ms",
+            t_front.elapsed().as_millis()
+        );
+    }
     // Project-owned sources publish under `<root>/bin/` — make sure the
     // root ignores it even when the project predates the redesign (new
     // projects get this from `init`/`new`). Append-only, idempotent,
@@ -1139,6 +1146,7 @@ pub fn build_release(
     }
     let mut opts = opts_for(mode);
     opts.allow_static_downgrade = rel.allow_static_downgrade;
+    opts.verbose = rel.verbose;
     let target = rel.target_opt();
     // Default-static fallback for macOS (static linking is rejected
     // there): downgrade to dynamic with a note instead of failing the
@@ -1296,9 +1304,13 @@ pub fn build_release(
     // Chunk backend: lower from the unified IR, then compile the
     // emitted source with the same option/flag flow as `build_native`.
     if rel.chunk {
+        let t_chunk = std::time::Instant::now();
         let (module, main_key) = chunk_module_for(path)?;
         let lowered =
             zz_codegen::build_chunk_module(&module, &main_key).map_err(|e| e.to_string())?;
+        if rel.verbose {
+            eprintln!("zz: timing chunk_lower={}ms", t_chunk.elapsed().as_millis());
+        }
         opts.native_rt = opts.native_rt || lowered.needs_native_rt;
         opts.pg_link = opts.pg_link || lowered.needs_pg_link;
         opts.float_link = opts.float_link || lowered.needs_float_fmt;

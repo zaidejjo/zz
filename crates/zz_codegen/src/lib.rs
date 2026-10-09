@@ -80,6 +80,8 @@ pub fn build_native(
     target: Option<&str>,
     out_path: &std::path::Path,
 ) -> Result<LoweredC, BuildError> {
+    let verbose = opts.verbose;
+    let t_lower = std::time::Instant::now();
     let mut lowerer = Lowerer::new(
         reach.funcs.clone(),
         reach.natives.clone(),
@@ -88,6 +90,9 @@ pub fn build_native(
     );
     lowerer.set_precompiled(true);
     let lowered = lowerer.lower();
+    if verbose {
+        eprintln!("zz: timing lower={}ms", t_lower.elapsed().as_millis());
+    }
     // Programs calling Rust-staticlib natives need the native runtime link
     // even when the caller did not opt in explicitly.
     let mut opts = opts;
@@ -96,7 +101,11 @@ pub fn build_native(
     opts.float_link = opts.float_link || lowered.needs_float_fmt;
     opts.curl_link = opts.curl_link || lowered.needs_curl;
     opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+    let t_cc = std::time::Instant::now();
     compile::build(&lowered.source, out_path, opts, target)?;
+    if verbose {
+        eprintln!("zz: timing clang_link={}ms", t_cc.elapsed().as_millis());
+    }
     Ok(lowered)
 }
 
@@ -110,6 +119,8 @@ pub fn build_native_with(
     clang: &Clang,
     out_path: &std::path::Path,
 ) -> Result<LoweredC, BuildError> {
+    let verbose = opts.verbose;
+    let t_lower = std::time::Instant::now();
     let mut lowerer = Lowerer::new(
         reach.funcs.clone(),
         reach.natives.clone(),
@@ -118,13 +129,20 @@ pub fn build_native_with(
     );
     lowerer.set_precompiled(true);
     let lowered = lowerer.lower();
+    if verbose {
+        eprintln!("zz: timing lower={}ms", t_lower.elapsed().as_millis());
+    }
     let mut opts = opts;
     opts.native_rt = opts.native_rt || lowered.needs_native_rt;
     opts.pg_link = opts.pg_link || lowered.needs_pg_link;
     opts.float_link = opts.float_link || lowered.needs_float_fmt;
     opts.curl_link = opts.curl_link || lowered.needs_curl;
     opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+    let t_cc = std::time::Instant::now();
     compile::build_with(&lowered.source, out_path, opts, target, clang)?;
+    if verbose {
+        eprintln!("zz: timing clang_link={}ms", t_cc.elapsed().as_millis());
+    }
     Ok(lowered)
 }
 

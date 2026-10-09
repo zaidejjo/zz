@@ -583,6 +583,11 @@ pub struct BuildOptions {
     /// tables + a static initializer calling `zz_embed_register`, served
     /// at runtime through `fs.embedfs()`. Empty = no embedding.
     pub embed_assets: Vec<EmbedAsset>,
+    /// Verbose phase timings (`--verbose`): print load/check/lower/compile
+    /// wall times to stderr. Display-only: never affects clang flags and
+    /// deliberately excluded from the cache fingerprint, so timed builds
+    /// share cache entries with silent ones.
+    pub verbose: bool,
 }
 
 impl BuildOptions {
@@ -606,6 +611,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -629,6 +635,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -652,6 +659,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -675,6 +683,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -699,6 +708,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -722,6 +732,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -745,6 +756,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 }
@@ -1376,6 +1388,26 @@ mod tests {
         assert!(win.iter().any(|f| f == "-lws2_32"));
         let native = clang_flags(&release_opts(), None);
         assert!(!native.iter().any(|f| f == "-lws2_32"));
+    }
+
+    #[test]
+    fn verbose_excluded_from_fingerprint() {
+        // Display-only flag: timed and silent builds must share cache
+        // entries, or --verbose would force full rebuilds.
+        let mut a = BuildOptions::release();
+        let mut b = BuildOptions::release();
+        a.verbose = true;
+        assert!(
+            !clang_flags(&a, None).iter().any(|f| f.contains("verbose")),
+            "verbose must not leak into clang flags"
+        );
+        assert_eq!(
+            a.fingerprint(),
+            b.fingerprint(),
+            "verbose must not bust the cache"
+        );
+        b.verbose = true;
+        assert_eq!(a.fingerprint(), b.fingerprint());
     }
 
     #[test]
