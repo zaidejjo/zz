@@ -64,11 +64,11 @@ hello
 ()
 ```
 
-### `zz build [FLAGS] <file.zz>`
+### `zz build [FLAGS] [<file.zz>]`
 
 Single Clang backend. Every `zz build` produces a real native binary and
 requires `clang` (18+) or `zig` on PATH. (`zz run` without `--native` is
-the only VM path.)
+the only VM path, and it leaves no build artifacts.)
 
 ```bash
 # Static (default): self-contained -O3 -flto=thin, stripped, DCE.
@@ -78,7 +78,9 @@ the only VM path.)
 # static syslibs required; fetch/query programs need libcurl.a /
 # libsqlite3.a for explicit `--static`, otherwise the default build
 # downgrades to dynamic with a note.
-zz build main.zz
+zz build main.zz                # standalone: produces ./main
+zz build                        # inside a project: builds src/main.zz
+                                # (then main.zz) to <root>/bin/<pkg-name>
 
 # Release: native Clang -O3 -flto=thin, stripped, dynamic, cached under ~/.zz/cache
 zz build -p main.zz
@@ -87,7 +89,7 @@ zz build -p --full main.zz
 zz build -p --full main.zz -- fast representative workload
 zz build --static main.zz        # self-contained, explicit (not on macOS)
 zz build --dynamic main.zz       # fast dynamic debug build -O0 -g
-zz build -o server main.zz       # name the output binary (bin/server)
+zz build -o server main.zz       # name the output binary (project bin/server or ./server)
 zz build --pgo main.zz           # profile-guided, native host only
 zz build --target aarch64-unknown-linux-gnu main.zz   # cross (implies -p)
 zz build -p --cc zig main.zz     # use `zig cc` as the provider
@@ -112,14 +114,26 @@ match fs.embedfs() {
 }
 ```
 
-Asset edits invalidate the build cache (content-hashed), and `bin/app.c`
+Asset edits invalidate the build cache (content-hashed), and `app.c`
 manual builds include the same tables.
 
-All artifacts live in `bin/` next to the source: `bin/app`,
-`bin/app.exe` (Windows), or `bin/app-<triple>[.exe]` for `--target`
-builds, plus `bin/app.c`, `bin/build.sh`, `bin/build.bat` (reproducible
-manual build with a single clang line). `-o <name>` renames the binary
-(a bare name stays in `bin/`, a path is used as-is, go-like).
+Output paths (authoritative — no legacy duplicates): standalone builds
+place `./<stem>`, `./<stem>.exe` (Windows), or `./<stem>-<triple>[.exe]`
+for `--target` builds in the current working directory. Project builds
+(any source under a project, or `zz build` with no argument inside one)
+publish to `<project-root>/bin/`, named after `[package] name` for the
+conventional entry (`src/main.zz`, then `main.zz`) or the file stem for
+explicit non-entry files — never `src/bin/`. Sidecars (`app.c`,
+`build.sh`, `build.bat`: reproducible manual build with a single clang
+line) sit next to the binary. `-o <name>` renames the binary (a bare
+name stays in the resolved output directory, a path is used as-is
+relative to the current directory, go-like).
+
+Project discovery: `zz build` with no argument discovers the project
+from the current working directory. With an explicit source path, the
+file's owning project (nearest ancestor holding `zz.toml`) decides the
+output directory — even when invoked from another directory. A file
+outside any project builds standalone into the current directory.
 
 Cross-compilation rules:
 
@@ -135,14 +149,17 @@ and `-fno-strict-aliasing`, and without `-ffast-math` or
 `-march=native`: VM and native binaries must agree bit-for-bit on
 integers and floats (see the IR spec). If no Clang provider is
 installed,
-the build (debug or release) fails after still emitting `bin/app.c` +
-build scripts so the program can be built manually on a machine with
-Clang.
+the build (debug or release) fails after still emitting `app.c` +
+build scripts next to the planned destination so the program can be
+built manually on a machine with Clang.
 
-### `zz run --native <file.zz>`
+### `zz run [--native] [<file.zz>]`
 
-Transient release compile → execute → cleanup (uses the same Clang
-release pipeline as `zz build -p`).
+`zz run` executes through the VM and leaves no build artifacts.
+`zz run --native` builds through the cached Clang pipeline (publishing
+to the same authoritative destination as `zz build`) and executes the
+binary. The file argument defaults to the project entry inside a
+project.
 
 ### `zz toolchain <install|use|uninstall|status>`
 

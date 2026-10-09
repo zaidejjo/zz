@@ -180,7 +180,7 @@ func main() {
 ## 7. Verify both engines (required, not optional)
 
 ```bash
-zz build src/main.zz && ./src/bin/main   # AOT: static link
+zz build src/main.zz && ./bin/main   # AOT: static link (project root bin/)
 zz run src/main.zz                        # VM: dlopen + register
 ```
 

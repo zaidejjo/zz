@@ -43,7 +43,7 @@ ASan "leaks only" = constant 3×64KB arenas + handles (known-benign, identical t
 baseline). No heap-use-after-free / overflow / double-free in any passing shape. au12 under ASan
 shows **zero memory errors before the hang** — its hang is pure lost-wakeup.
 
-Repro: `zz build -p bench/audit/auN_*.zz && ./bin/auN_*` (au1/au8/au12 fail/hang as noted).
+Repro: `zz build -p bench/audit/auN_*.zz && ./auN_*` (au1/au8/au12 fail/hang as noted).
 
 ## 2. Findings
 
