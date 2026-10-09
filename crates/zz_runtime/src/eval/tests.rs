@@ -212,6 +212,38 @@ fn match_result() {
 }
 
 #[test]
+fn match_bare_result_patterns_match_own_variant_only() {
+    // Bare `.ok`/`.err` is rejected by the checker on typed code, but the
+    // runtime must still answer tag-only (parity with the AOT backend) —
+    // never the opposite variant (regression: bare `.ok` used to hit
+    // `Err` and bare `.err` used to hit `Ok`).
+    assert_eq!(
+        eval_src("v := .ok(1)\nmatch v { .ok => 1, _ => 0 }").unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        eval_src("v := .ok(1)\nmatch v { .err => 1, _ => 0 }").unwrap(),
+        Value::Int(0)
+    );
+    assert_eq!(
+        eval_src("v := .err(\"x\")\nmatch v { .err => 1, _ => 0 }").unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        eval_src("v := .err(\"x\")\nmatch v { .ok => 1, _ => 0 }").unwrap(),
+        Value::Int(0)
+    );
+    assert_eq!(
+        eval_src("v := .some(1)\nmatch v { .some => 1, .none => 0 }").unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        eval_src("v := .none\nmatch v { .some => 1, .none => 0 }").unwrap(),
+        Value::Int(0)
+    );
+}
+
+#[test]
 fn match_or_pattern() {
     assert_eq!(
         eval_src("match 2 { 1 | 2 => 10, _ => 0 }").unwrap(),
