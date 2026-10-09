@@ -781,6 +781,10 @@ pub fn install(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())?
             {
                 println!("path dependency content changed, re-resolving...");
+            } else if !zz_pm::link::links_valid(&dir, &manifest, lock) {
+                // #323: resolved but not materialized (fresh clone, wiped
+                // vendor/, GC'd CAS) — fall through to fetch + link.
+                println!("vendor links missing or stale, fetching and linking...");
             } else {
                 println!("dependencies unchanged (lockfile is up to date)");
                 return Ok(());
@@ -798,6 +802,10 @@ pub fn install(args: &[String]) -> Result<(), String> {
     let opts = zz_pm::resolve::ResolveOptions::remote(&registry_base_from(args));
     let resolved = zz_pm::resolve::resolve_with(&manifest, existing_lock.as_ref(), &dir, &opts)
         .map_err(|e| e.to_string())?;
+    // #266: surface manifest-wins source decisions (stale cross-source pins).
+    for note in &resolved.notes {
+        println!("note: {note}");
+    }
 
     // Build new lockfile
     let mut lock = zz_pm::lock::Lockfile::new();

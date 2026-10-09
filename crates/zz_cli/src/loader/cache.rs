@@ -177,6 +177,45 @@ fn cache_path(key: &str) -> PathBuf {
     cache_dir().join(format!("{key}.json"))
 }
 
+/// In-process memo of check outcomes, keyed exactly like the disk cache
+/// (same key, same value semantics). A multi-entry `zz check`/`zz test`
+/// run restores shared dependencies once per entry from disk (JSON parse
+/// of every pub table, every time); the memo serves repeats from memory.
+/// Disk stays the cross-process cache: reads populate it, writes fill both.
+///
+/// Bounded by total retained bytes ([`MAX_MEM_BYTES`]): past the cap the
+/// table resets (eviction only costs future hits, never correctness).
+/// Mutex-guarded: cache tests run in parallel threads and share it; keys
+/// are content hashes so identical content always agrees.
+const MAX_MEM_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct MemTable {
+    map: HashMap<String, CachedModule<'static>>,
+    bytes: usize,
+}
+
+static MEM_CACHE: std::sync::OnceLock<std::sync::Mutex<MemTable>> = std::sync::OnceLock::new();
+
+fn mem_cache() -> &'static std::sync::Mutex<MemTable> {
+    MEM_CACHE.get_or_init(|| std::sync::Mutex::new(MemTable::default()))
+}
+
+fn mem_get(key: &str) -> Option<CachedModule<'static>> {
+    mem_cache().lock().ok()?.map.get(key).cloned()
+}
+
+fn mem_insert(key: &str, module: CachedModule<'static>, serialized_len: usize) {
+    if let Ok(mut table) = mem_cache().lock() {
+        if table.bytes + serialized_len > MAX_MEM_BYTES {
+            table.map.clear();
+            table.bytes = 0;
+        }
+        table.bytes += serialized_len;
+        table.map.insert(key.to_string(), module);
+    }
+}
+
 /// Isolated cache dir + serialized env for cache-behavior tests.
 ///
 /// Parallel tests share the process env, so XDG flips must be mutually
@@ -254,17 +293,23 @@ impl<'a> CachedModule<'a> {
     }
 }
 
-/// Read a cached module. `None` on any failure (absent, corrupt, unreadable
+/// Read a cached module. Memory first, then disk (which populates
+/// memory). `None` on any failure (absent, corrupt, unreadable
 /// dir) — the caller checks normally.
 pub fn read_cached(key: &str) -> Option<CachedModule<'static>> {
     if !cache_enabled() {
         return None;
     }
+    if let Some(m) = mem_get(key) {
+        return Some(m);
+    }
     let data = std::fs::read(cache_path(key)).ok()?;
     // Deserialized maps are always `Owned` (HashMaps cannot borrow);
     // `into_owned` below is a no-op move in that case.
     let m: CachedModule<'_> = serde_json::from_slice(&data).ok()?;
-    Some(m.into_owned())
+    let m = m.into_owned();
+    mem_insert(key, m.clone(), data.len());
+    Some(m)
 }
 
 /// Store a module outcome. Failures are silent (cache is best-effort).
@@ -275,6 +320,7 @@ pub fn write_cached(key: &str, module: &CachedModule) {
     let Ok(data) = serde_json::to_vec(module) else {
         return;
     };
+    mem_insert(key, module.clone().into_owned(), data.len());
     let path = cache_path(key);
     if std::fs::create_dir_all(path.parent().expect("cache file has parent")).is_err() {
         return;
@@ -289,6 +335,7 @@ pub fn write_cached(key: &str, module: &CachedModule) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
 
     #[test]
     fn dep_keys_differ_by_source_and_deps() {
@@ -345,6 +392,62 @@ mod tests {
             write_cached(&key, &m);
             let back = read_cached(&key);
             assert!(back.is_some(), "roundtrip");
+            let _ = std::fs::remove_file(cache_path(&key));
+        });
+    }
+
+    fn empty_module() -> CachedModule<'static> {
+        CachedModule {
+            funcs: Cow::Owned(HashMap::new()),
+            pub_funcs: Cow::Owned(HashMap::new()),
+            structs: Cow::Owned(HashMap::new()),
+            pub_structs: Cow::Owned(HashMap::new()),
+            aliases: Cow::Owned(HashMap::new()),
+            pub_aliases: Cow::Owned(HashMap::new()),
+            enums: Cow::Owned(HashMap::new()),
+            pub_enums: Cow::Owned(HashMap::new()),
+            bindings: Cow::Owned(HashMap::new()),
+            pub_bindings: Cow::Owned(HashMap::new()),
+            diags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mem_memo_serves_after_disk_delete() {
+        super::with_isolated_cache(|| {
+            // Unique key: the memory memo is process-global (shared by
+            // parallel tests), only the disk dir is isolated.
+            let key = format!("zz-unit-mem-{}", std::process::id());
+            let m = empty_module();
+            write_cached(&key, &m);
+            assert!(read_cached(&key).is_some(), "disk hit");
+            std::fs::remove_file(cache_path(&key)).unwrap();
+            assert!(
+                read_cached(&key).is_some(),
+                "memory memo must serve after the disk entry is gone"
+            );
+            let _ = std::fs::remove_file(cache_path(&key));
+        });
+    }
+
+    #[test]
+    fn mem_memo_serves_big_entries_after_disk_delete() {
+        // The memo is bounded by total bytes (not per-entry size): even a
+        // 2250-pub monster entry must serve from memory.
+        super::with_isolated_cache(|| {
+            let key = format!("zz-unit-big-{}", std::process::id());
+            let mut m = empty_module();
+            for i in 0..20000 {
+                m.bindings
+                    .to_mut()
+                    .insert(format!("var_{i}_padding_padding"), Type::Int);
+            }
+            write_cached(&key, &m);
+            std::fs::remove_file(cache_path(&key)).unwrap();
+            assert!(
+                read_cached(&key).is_some(),
+                "big entries must serve from memory after the disk entry is gone"
+            );
             let _ = std::fs::remove_file(cache_path(&key));
         });
     }

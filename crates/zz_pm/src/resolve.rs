@@ -134,6 +134,34 @@ pub struct ResolvedDeps {
     pub path_deps: Vec<PathDep>,
     /// Content hashes for path deps (for staleness detection in lockfile).
     pub path_hashes: HashMap<String, String>,
+    /// Human-readable source decisions (#266): entries where the manifest
+    /// disagreed with a stale lock pin and the manifest won.
+    pub notes: Vec<String>,
+}
+
+/// Source kind of one dependency, manifest side or lock side (#266).
+/// Fine-grained URLs/versions do not matter here — only which provider
+/// owns the name, since that decides where the bytes come from.
+fn spec_source_kind(spec: &DepSpec) -> &'static str {
+    match spec {
+        DepSpec::Version(_) => "registry",
+        DepSpec::Git(_) => "git",
+        DepSpec::Path(_) => "path",
+    }
+}
+
+/// Source kind of a lock entry. Unknown/legacy tags report as `"other"`
+/// (never equal to a manifest kind, so they always re-resolve).
+fn lock_source_kind(source: &str) -> &'static str {
+    if source == "path" {
+        "path"
+    } else if source.starts_with("registry+") {
+        "registry"
+    } else if source.starts_with("git+") {
+        "git"
+    } else {
+        "other"
+    }
 }
 
 /// Resolve all dependencies declared in the manifest.
@@ -165,9 +193,23 @@ pub fn resolve_with(
     let mut locked = Vec::new();
     let mut path_deps = Vec::new();
     let mut path_hashes = HashMap::new();
+    let mut notes = Vec::new();
 
     // Phase 2: Resolve each dependency
     for (name, spec) in &manifest.dependencies {
+        // #266 precedence rule: the manifest declaration always wins. A lock
+        // pin from another source (e.g. registry, left over from before the
+        // manifest flipped to a path dep) is stale by definition — record
+        // the decision and resolve from the manifest, never from the pin.
+        if let Some(pinned) = lockfile.and_then(|l| l.find(name)) {
+            let want = spec_source_kind(spec);
+            let have = lock_source_kind(&pinned.source);
+            if want != have {
+                notes.push(format!(
+                    "{name}: manifest declares {want}, ignoring stale {have} pin"
+                ));
+            }
+        }
         match spec {
             DepSpec::Version(version_req) => match &opts.registry {
                 RegistrySource::Offline => {
@@ -202,6 +244,7 @@ pub fn resolve_with(
         locked,
         path_deps,
         path_hashes,
+        notes,
     })
 }
 
@@ -218,7 +261,10 @@ fn resolve_git_dep(
     if let Some(lock) = lockfile {
         if let Some(pinned) = lock.find(name) {
             // Verify the pinned version still matches the requested version
-            if pinned.version == git_dep.version {
+            // AND the pin came from git (#266: a registry pin with an equal
+            // version string must not satisfy a git declaration — the
+            // manifest source always wins).
+            if pinned.source.starts_with("git+") && pinned.version == git_dep.version {
                 return Ok(pinned.clone());
             }
         }
@@ -570,6 +616,107 @@ mod tests {
         assert!(!version_satisfies("2.0.0", "^1.0"));
         assert!(!version_satisfies("not-a-version", "*"));
         assert!(!version_satisfies("1.0.0", "bogus-req[[["));
+    }
+
+    #[test]
+    fn source_kinds_classify() {
+        // #266: only the provider matters for staleness, not URLs/versions.
+        assert_eq!(
+            spec_source_kind(&DepSpec::Version("^1.0".to_string())),
+            "registry"
+        );
+        assert_eq!(
+            spec_source_kind(&DepSpec::Git(GitDep {
+                version: "1.0.0".to_string(),
+                git: "https://example.com/r.git".to_string(),
+                rev: "main".to_string(),
+            })),
+            "git"
+        );
+        assert_eq!(
+            spec_source_kind(&DepSpec::Path(PathDep {
+                path: "../x".to_string(),
+            })),
+            "path"
+        );
+        assert_eq!(lock_source_kind("path"), "path");
+        assert_eq!(lock_source_kind("registry+https://r/x#1.0.0"), "registry");
+        assert_eq!(lock_source_kind("git+https://r.git#main"), "git");
+        assert_eq!(lock_source_kind("registry"), "other");
+        assert_eq!(lock_source_kind(""), "other");
+    }
+
+    #[test]
+    fn manifest_path_wins_over_stale_registry_pin() {
+        // #266: manifest declares path, lock still pins registry — resolve
+        // from the manifest (offline) and record the decision.
+        let d = tmp();
+        let dep_dir = d.join("mylib");
+        fs::create_dir_all(&dep_dir).unwrap();
+        fs::write(dep_dir.join("zz.toml"), "[package]\nname=\"mylib\"\n").unwrap();
+
+        let mut manifest = Manifest::default();
+        manifest.dependencies.insert(
+            "mylib".to_string(),
+            DepSpec::Path(PathDep {
+                path: "mylib".to_string(),
+            }),
+        );
+
+        let mut lock = Lockfile::new();
+        lock.upsert(LockedDep {
+            name: "mylib".to_string(),
+            version: "1.0.0".to_string(),
+            source: "registry+https://example.com/mylib#1.0.0".to_string(),
+            hash: "abc123".to_string(),
+            commit: None,
+            native: None,
+        });
+
+        let resolved = resolve(&manifest, Some(&lock), &d).unwrap();
+        assert_eq!(resolved.path_deps.len(), 1);
+        assert_eq!(
+            resolved.notes,
+            vec!["mylib: manifest declares path, ignoring stale registry pin".to_string()]
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn git_spec_rejects_registry_pin_with_equal_version() {
+        // #266: a registry pin whose version string equals the git
+        // declaration must not satisfy it — resolution falls through to
+        // git (which fails fast offline here, proving non-reuse).
+        let d = tmp();
+        let mut manifest = Manifest::default();
+        manifest.dependencies.insert(
+            "mylib".to_string(),
+            DepSpec::Git(GitDep {
+                version: "1.0.0".to_string(),
+                git: "file:///tmp/zz-pm-nonexistent-repo".to_string(),
+                rev: "main".to_string(),
+            }),
+        );
+
+        let mut lock = Lockfile::new();
+        lock.upsert(LockedDep {
+            name: "mylib".to_string(),
+            version: "1.0.0".to_string(),
+            source: "registry+https://example.com/mylib#1.0.0".to_string(),
+            hash: "abc123".to_string(),
+            commit: None,
+            native: None,
+        });
+
+        let err = resolve(&manifest, Some(&lock), &d).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ResolveError::GitFetchFailed { .. } | ResolveError::GitRevNotFound { .. }
+            ),
+            "stale registry pin must not satisfy git decl, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
