@@ -1021,6 +1021,13 @@ pub(crate) struct Checker {
     /// variable" error.  Used by `check_call` to suppress the secondary
     /// "cannot call a value of type unit" cascading error.
     pub(crate) had_undefined_var: bool,
+    /// Whether a block tail in the current position is the block's
+    /// *value* (implicit return) rather than a discard. `false` at the
+    /// top level and inside loop bodies (their values are discarded),
+    /// `true` inside function/closure bodies. `check_block` ANDs this
+    /// with tail position, so `-> Result` tails never warn while loop
+    /// tails that drop errors do. Saved/restored across nested blocks.
+    pub(crate) tail_is_value: bool,
     /// Imported namespaces: (alias, span). Used to detect unused imports.
     pub(crate) imports: Vec<(String, zz_frontend::span::Span)>,
     /// Selective-import aliases: bare name → qualified `ns.sym`, from
@@ -1092,6 +1099,7 @@ impl Checker {
             pub_names: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
+            tail_is_value: false,
             imports: Vec::new(),
             import_aliases: HashMap::new(),
             module_aliases: HashMap::new(),
