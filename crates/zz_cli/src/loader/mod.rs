@@ -231,7 +231,7 @@ fn load_program_impl(
     plugin_funcs: &[(String, FuncSig)],
     use_cache: bool,
 ) -> Result<LoadResult, String> {
-    let entry = main_path.canonicalize().map_err(|e| {
+    let entry = cache::canon(main_path).map_err(|e| {
         format!(
             "cannot read entry file `{}`: {e}\n\
                  hint: check that the file exists and the path is correct",
@@ -293,21 +293,25 @@ fn load_program_impl(
 /// the nearest ancestor (or self) holding `zz.toml`.
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     // Canonicalize so relative starts (e.g. `src/main.zz` with cwd at
-    // the project root) walk up through real ancestors.
-    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    let mut dir = if canonical.is_file() {
-        canonical.parent()?.to_path_buf()
-    } else {
-        canonical
-    };
-    loop {
-        if dir.join("zz.toml").exists() {
-            return Some(dir);
+    // the project root) walk up through real ancestors. Both the
+    // canonicalization and the walk memoize process-wide (#233): every
+    // bare import otherwise re-walks per entry file.
+    let canonical = cache::canon(start).unwrap_or_else(|_| start.to_path_buf());
+    cache::project_root_memo(&canonical, || {
+        let mut dir = if canonical.is_file() {
+            canonical.parent()?.to_path_buf()
+        } else {
+            canonical.clone()
+        };
+        loop {
+            if dir.join("zz.toml").exists() {
+                return Some(dir);
+            }
+            if !dir.pop() {
+                return None;
+            }
         }
-        if !dir.pop() {
-            return None;
-        }
-    }
+    })
 }
 
 /// Normalize a package name for import matching: `-` and `_` spellings
@@ -338,8 +342,9 @@ fn package_target(root: &Path, rest: &[String]) -> PathBuf {
 /// or `<dep>.zz`). Prefers the `vendor/<dep>` link when present, else the
 /// CAS entry recorded in `zz.lock`. Returns the ENTRY FILE path.
 fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
-    let manifest = zz_pm::manifest::Manifest::load(&project_root.join("zz.toml")).ok()?;
-    let lock = zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")).ok()?;
+    // Manifest+lock parse once per root process-wide (#233); mtimes
+    // revalidate so concurrent edits reload instead of serving stale deps.
+    let (manifest, lock) = cache::manifest_lock(project_root)?;
     let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
     // Path deps resolve against the manifest path (same as plugins).
     if locked.source == "path" {
@@ -375,32 +380,33 @@ fn entry_in(pkg_dir: &Path, dep_name: &str) -> Option<PathBuf> {
 /// The nearest root of a vendored file is the dependency itself (which
 /// has no lock); outer roots must also be tried for transitive deps.
 fn ancestor_roots(start: &Path) -> Vec<PathBuf> {
-    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    let mut dir = if canonical.is_file() {
-        match canonical.parent() {
-            Some(p) => p.to_path_buf(),
-            None => return Vec::new(),
+    let canonical = cache::canon(start).unwrap_or_else(|_| start.to_path_buf());
+    cache::ancestor_roots_memo(&canonical, || {
+        let mut dir = if canonical.is_file() {
+            match canonical.parent() {
+                Some(p) => p.to_path_buf(),
+                None => return Vec::new(),
+            }
+        } else {
+            canonical.clone()
+        };
+        let mut roots = Vec::new();
+        loop {
+            if dir.join("zz.toml").exists() {
+                roots.push(dir.clone());
+            }
+            if !dir.pop() {
+                break;
+            }
         }
-    } else {
-        canonical
-    };
-    let mut roots = Vec::new();
-    loop {
-        if dir.join("zz.toml").exists() {
-            roots.push(dir.clone());
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    roots
+        roots
+    })
 }
 /// Resolve a plugin dependency's package directory for `import <dep>`.
 /// Returns the package dir only when the dep exists in `zz.lock` and
 /// ships a `plugin.zzi` manifest.
 fn resolve_plugin_pkg(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
-    let manifest = zz_pm::manifest::Manifest::load(&project_root.join("zz.toml")).ok()?;
-    let lock = zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")).ok()?;
+    let (manifest, lock) = cache::manifest_lock(project_root)?;
     let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
     let pkg_dir = if locked.source == "path" {
         match manifest.dependencies.get(dep_name) {
@@ -501,8 +507,10 @@ impl Loader {
         if let Some(cached) = self.pkg_cache.get(&root) {
             return cached.clone();
         }
-        let entry = zz_pm::manifest::Manifest::load(&root.join("zz.toml"))
-            .ok()
+        // Manifest parses once per root process-wide (#233); the
+        // per-Loader pkg_cache keeps first-load ordering semantics.
+        // Lockless projects (manifest, no lock) resolve too.
+        let entry = cache::manifest_of(&root)
             .filter(|m| !m.package.name.is_empty())
             .map(|m| (m.package.name.clone(), root.clone()));
         self.pkg_cache.insert(root, entry.clone());
@@ -521,7 +529,7 @@ impl Loader {
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
     fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
-        let canon = path.canonicalize().map_err(|e| {
+        let canon = cache::canon(path).map_err(|e| {
             format!(
                 "cannot read imported file `{}`: {e}\n\
                      hint: check that the file exists relative to the importing module",
@@ -554,38 +562,46 @@ impl Loader {
                 path.display()
             )
         })?;
-        let parsed = parse(&source);
-        if !parsed.errors.is_empty() {
-            self.errors.push(LoadError {
-                name: path.display().to_string(),
-                source,
-                diags: parsed.errors,
-            });
-            return Ok(());
-        }
+        // Shared parse memo (#327): every entry file re-parses its whole
+        // dependency closure; serve repeats from memory. Keyed by content
+        // hash (edits, including `--fix` writes mid-run, miss soundly).
+        // The memoized program is pre-namespace: each consumer clones it
+        // and namespace-rewrites below with its own alias.
+        let hash = cache::source_hash(&source);
+        let program = match cache::parsed_get(&canon, &hash) {
+            Some(program) => program,
+            None => {
+                let parsed = parse(&source);
+                if !parsed.errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source,
+                        diags: parsed.errors,
+                    });
+                    return Ok(());
+                }
 
-        // Expand explicit decorators before import scanning and namespacing
-        // so decorator references are ordinary call expressions when the
-        // namespace rewriter runs.
-        let (expanded_program, decorator_errors) =
-            zz_frontend::decorators::expand_program(&parsed.program);
-        if !decorator_errors.is_empty() {
-            self.errors.push(LoadError {
-                name: path.display().to_string(),
-                source,
-                diags: decorator_errors,
-            });
-            return Ok(());
-        }
-        let parsed = zz_frontend::Parsed {
-            program: expanded_program,
-            errors: Vec::new(),
+                // Expand explicit decorators before import scanning and namespacing
+                // so decorator references are ordinary call expressions when the
+                // namespace rewriter runs.
+                let (expanded_program, decorator_errors) =
+                    zz_frontend::decorators::expand_program(&parsed.program);
+                if !decorator_errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source,
+                        diags: decorator_errors,
+                    });
+                    return Ok(());
+                }
+                cache::parsed_insert(&canon, &hash, &expanded_program, source.len());
+                expanded_program
+            }
         };
 
         self.visiting.insert(canon.clone());
 
-        let imports: Vec<(Vec<String>, Option<String>, Vec<ImportItem>)> = parsed
-            .program
+        let imports: Vec<(Vec<String>, Option<String>, Vec<ImportItem>)> = program
             .stmts
             .iter()
             .filter_map(|s| match s {
@@ -715,7 +731,7 @@ impl Loader {
                     });
                     // Report cycles at the import site, against the
                     // importer's source (mirrors the relative branch).
-                    if let Ok(dep) = candidate.canonicalize() {
+                    if let Ok(dep) = cache::canon(&candidate) {
                         if self.visiting.contains(&dep) {
                             self.errors.push(LoadError {
                                  name: path.display().to_string(),
@@ -758,7 +774,7 @@ impl Loader {
                     self.load_file(&candidate, effective_alias.as_deref())?;
                     // S1 dep edge (package file). Re-canonicalize
                     // defensively (filesystem cache hot).
-                    if let Ok(dep) = candidate.canonicalize() {
+                    if let Ok(dep) = cache::canon(&candidate) {
                         Self::record_edge(&mut self.dep_edges, &canon, &dep);
                     }
                     if is_selective {
@@ -869,7 +885,7 @@ impl Loader {
                         Self::record_edge(
                             &mut self.dep_edges,
                             &canon,
-                            &entry.canonicalize().unwrap_or(entry.clone()),
+                            &cache::canon(&entry).unwrap_or(entry.clone()),
                         );
                         if is_selective {
                             // Deferred to finish(): seed holds `alias.sym`,
@@ -892,7 +908,7 @@ impl Loader {
                 .unwrap_or_else(|| Path::new("."))
                 .join(format!("{}.zz", imp.join("/")));
             // Report cycles at the import site, against the importer's source.
-            if let Ok(rel_canon) = rel.canonicalize() {
+            if let Ok(rel_canon) = cache::canon(&rel) {
                 if self.visiting.contains(&rel_canon) {
                     self.errors.push(LoadError {
                          name: path.display().to_string(),
@@ -935,7 +951,7 @@ impl Loader {
             self.load_file(&rel, imp_alias.as_deref())?;
             // S1 dep edge (local file). `rel_canon` was verified above;
             // re-canonicalize defensively (filesystem cache hot).
-            if let Ok(dep) = rel.canonicalize() {
+            if let Ok(dep) = cache::canon(&rel) {
                 Self::record_edge(&mut self.dep_edges, &canon, &dep);
             }
             if is_selective {
@@ -961,7 +977,7 @@ impl Loader {
         let ns = module_ns(alias, &canon);
         let src = self.sources[&canon].clone();
         if self.register_ns(&ns, &canon, path, &src) {
-            let mut program = parsed.program;
+            let mut program = program;
             namespace_program(&mut program, &ns);
             self.programs.insert(canon.clone(), program);
             self.order.push(canon);
@@ -1850,30 +1866,33 @@ impl Loader {
                 .any(|e| e.severity == zz_frontend::diag::Severity::Error);
             // Restore seeds BEFORE error enrichment (it reads the seeds).
             // Each checked table splits into seed-owned entries (keys known
-            // before the check — move back untouched) and module-owned
-            // entries. On error the module contributes nothing, exactly as
+            // before the check) and module-owned entries. Seeds stay in
+            // place (`extract_if` pulls only the module-owned entries out),
+            // so no rehash of the ~1k seed entries per module — the old
+            // partition-into-two-fresh-maps rebuilt them every time.
+            // On error the module contributes nothing, exactly as
             // before (seeds were never mutated: registration is insert-only
             // under namespace-qualified keys).
-            let (seeded_funcs, own_funcs): (HashMap<String, FuncSig>, HashMap<String, FuncSig>) =
-                std::mem::take(&mut checked.funcs)
-                    .into_iter()
-                    .partition(|(k, _)| self.seed_func_keys.contains(k));
-            let (seeded_structs, own_structs): (
-                HashMap<String, StructSig>,
-                HashMap<String, StructSig>,
-            ) = std::mem::take(&mut checked.structs)
-                .into_iter()
-                .partition(|(k, _)| self.seed_struct_keys.contains(k));
-            let (seeded_aliases, own_aliases): (
-                HashMap<String, AliasSig>,
-                HashMap<String, AliasSig>,
-            ) = std::mem::take(&mut checked.aliases)
-                .into_iter()
-                .partition(|(k, _)| self.seed_alias_keys.contains(k));
-            let (seeded_enums, own_enums): (HashMap<String, EnumSig>, HashMap<String, EnumSig>) =
-                std::mem::take(&mut checked.enums)
-                    .into_iter()
-                    .partition(|(k, _)| self.seed_enum_keys.contains(k));
+            let mut checked_funcs = std::mem::take(&mut checked.funcs);
+            let own_funcs: HashMap<String, FuncSig> = checked_funcs
+                .extract_if(|k, _| !self.seed_func_keys.contains(k))
+                .collect();
+            let seeded_funcs = checked_funcs;
+            let mut checked_structs = std::mem::take(&mut checked.structs);
+            let own_structs: HashMap<String, StructSig> = checked_structs
+                .extract_if(|k, _| !self.seed_struct_keys.contains(k))
+                .collect();
+            let seeded_structs = checked_structs;
+            let mut checked_aliases = std::mem::take(&mut checked.aliases);
+            let own_aliases: HashMap<String, AliasSig> = checked_aliases
+                .extract_if(|k, _| !self.seed_alias_keys.contains(k))
+                .collect();
+            let seeded_aliases = checked_aliases;
+            let mut checked_enums = std::mem::take(&mut checked.enums);
+            let own_enums: HashMap<String, EnumSig> = checked_enums
+                .extract_if(|k, _| !self.seed_enum_keys.contains(k))
+                .collect();
+            let seeded_enums = checked_enums;
             self.funcs = seeded_funcs;
             self.structs = seeded_structs;
             self.aliases = seeded_aliases;
