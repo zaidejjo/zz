@@ -1517,17 +1517,23 @@ fn e2e_package_map_cwd_independent() {
     let run_abs = run_file.display().to_string();
     let test_abs = test_file.display().to_string();
 
-    let (exit, stdout, stderr) = run_zz_in(
-        Path::new("/tmp"),
-        &["run", run_abs.as_str()],
+    let (exit, stdout, stderr) = run_zz_in(Path::new("/tmp"), &["run", run_abs.as_str()]);
+    assert_eq!(
+        exit, 0,
+        "abs path from /tmp should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert_eq!(exit, 0, "abs path from /tmp should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.lines().last().unwrap_or("").contains("42"));
 
     let (exit, stdout, stderr) = run_zz_in(&dir, &["run", "tests/run_check.zz"]);
-    assert_eq!(exit, 0, "rel path from root should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        exit, 0,
+        "rel path from root should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(stdout.lines().last().unwrap_or("").contains("42"));
 
     let (exit, stdout, stderr) = run_zz_in(Path::new("/"), &["test", test_abs.as_str()]);
-    assert_eq!(exit, 0, "`zz test` from / should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        exit, 0,
+        "`zz test` from / should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 }
