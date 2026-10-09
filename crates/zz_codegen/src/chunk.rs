@@ -217,6 +217,14 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
     let n = code.len();
     let mut out: Vec<Vec<Callee>> = vec![Vec::new(); n];
     let mut state: Vec<Option<Vec<Callee>>> = vec![None; n];
+    // Loop-exit prefix lengths, mirroring the verifier: `ForNext`
+    // exhaustion pops the index/vars AND the iterable, so a loop-exit
+    // edge carries only the setup-entry prefix (length L-1); a
+    // `WhileCond` exit carries L. Without this, abstract stacks grow by
+    // the inner frame on every lap around a nested loop and the walk
+    // never stabilizes (single loops terminate only because no setup
+    // sits inside their cycle).
+    let mut exit_lens: HashMap<usize, usize> = HashMap::new();
     let mut work = vec![0usize];
     if n == 0 {
         return out;
@@ -227,6 +235,23 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Some(st) => st,
             None => continue,
         };
+        // Record loop-entry prefix lengths before applying the op (the
+        // state still holds the setup prologue: [..., PH, iterable]).
+        // `saturating_sub` keeps hostile input panic-free (a wrong
+        // length only degrades precision to Unknown downstream).
+        // Setups dominate their exits on compiler output, so the entry
+        // is always recorded before any exit edge reads it.
+        match &code[pc] {
+            Op::ForSetup { exit, .. } => {
+                exit_lens
+                    .entry(*exit as usize)
+                    .or_insert(st.len().saturating_sub(1));
+            }
+            Op::WhileSetup { exit, .. } => {
+                exit_lens.entry(*exit as usize).or_insert(st.len());
+            }
+            _ => {}
+        }
         // Entry state (what the op observes — what `Call` needs).
         out[pc] = st.clone();
         let next = apply(&code[pc], pc, st, resolve);
@@ -239,20 +264,32 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
                 succs.push(t as usize);
             }
         }
+        // Loop-exhaustion edges carry the setup-entry prefix, not the
+        // end-of-body stack (see above).
+        let exit_of = match &code[pc] {
+            Op::ForNext { exit, .. } | Op::WhileCond { exit } => Some(*exit as usize),
+            _ => None,
+        };
         for s in succs {
+            let mut edge = next.clone();
+            if exit_of == Some(s) {
+                if let Some(want) = exit_lens.get(&s) {
+                    edge.truncate(*want);
+                }
+            }
             match &state[s] {
                 None => {
-                    state[s] = Some(next.clone());
+                    state[s] = Some(edge);
                     work.push(s);
                 }
                 Some(cur) => {
                     let mut merged = Vec::new();
-                    let len = cur.len().max(next.len());
+                    let len = cur.len().max(edge.len());
                     let mut changed = false;
                     for i in 0..len {
                         let (a, b) = (
                             cur.get(i).unwrap_or(&Callee::Unknown),
-                            next.get(i).unwrap_or(&Callee::Unknown),
+                            edge.get(i).unwrap_or(&Callee::Unknown),
                         );
                         let m = if a == b { a.clone() } else { Callee::Unknown };
                         if Some(&m) != cur.get(i) {
