@@ -3307,15 +3307,29 @@ impl Checker {
                     (Type::Option(inner), "some") => match arg {
                         Some(p) => Some((p.as_ref().clone(), (**inner).clone())),
                         None => {
-                            self.errors
-                                .push(error_at("`.some` pattern requires an argument", *span));
+                            self.errors.push(
+                                error_at("`.some` pattern requires an argument", *span)
+                                    .with_note(
+                                        "`.some` always carries a value — write `.some(v)` to use it or `.some(_)` to ignore it",
+                                    )
+                                    .with_note("run `zz fix` to rewrite this automatically")
+                                    .with_fixit(FixIt::safe(
+                                        *span,
+                                        ".some(_)",
+                                        "add wildcard payload",
+                                    )),
+                            );
                             None
                         }
                     },
                     (Type::Option(_), "none") => {
                         if arg.is_some() {
-                            self.errors
-                                .push(error_at("`.none` pattern takes no argument", *span));
+                            self.errors.push(
+                                error_at("`.none` pattern takes no argument", *span)
+                                    .with_note("`.none` carries no value — write `.none`")
+                                    .with_note("run `zz fix` to rewrite this automatically")
+                                    .with_fixit(FixIt::safe(*span, ".none", "drop payload")),
+                            );
                         }
                         None
                     }
@@ -3323,13 +3337,16 @@ impl Checker {
                         Some(p) => Some((p.as_ref().clone(), (**t).clone())),
                         None => {
                             self.errors.push(
-                                error_at(
-                                    "`.ok` pattern requires an argument (Result ok always carries a value)",
-                                    *span,
-                                )
+                                error_at("`.ok` pattern requires an argument", *span)
                                 .with_note(
-                                    "use `.ok(v)` to bind it or `.ok(_)` to ignore it",
-                                ),
+                                    "`.ok` always carries a value — write `.ok(v)` to use it or `.ok(_)` to ignore it",
+                                )
+                                .with_note("run `zz fix` to rewrite this automatically")
+                                .with_fixit(FixIt::safe(
+                                    *span,
+                                    ".ok(_)",
+                                    "add wildcard payload",
+                                )),
                             );
                             None
                         }
@@ -3338,13 +3355,16 @@ impl Checker {
                         Some(p) => Some((p.as_ref().clone(), (**e).clone())),
                         None => {
                             self.errors.push(
-                                error_at(
-                                    "`.err` pattern requires an argument (Result err always carries a value)",
-                                    *span,
-                                )
+                                error_at("`.err` pattern requires an argument", *span)
                                 .with_note(
-                                    "use `.err(e)` to bind it or `.err(_)` to ignore it",
-                                ),
+                                    "`.err` always carries a value — write `.err(e)` to use it or `.err(_)` to ignore it",
+                                )
+                                .with_note("run `zz fix` to rewrite this automatically")
+                                .with_fixit(FixIt::safe(
+                                    *span,
+                                    ".err(_)",
+                                    "add wildcard payload",
+                                )),
                             );
                             None
                         }

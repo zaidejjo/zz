@@ -586,6 +586,14 @@ fn match_bare_ok_on_result_errors() {
         "v: Result<int, str> = .ok(1)\nmatch v { .ok => 1, .err(e) => 0 }",
         "`.ok` pattern requires an argument",
     );
+    let r = check_src("v: Result<int, str> = .ok(1)\nmatch v { .ok => 1, .err(e) => 0 }");
+    let fix = r
+        .errors
+        .iter()
+        .flat_map(|d| d.fixits.iter())
+        .find(|f| f.replacement == ".ok(_)")
+        .expect("expected safe `.ok(_)` fixit");
+    assert_eq!(fix.message, "add wildcard payload");
 }
 
 #[test]
@@ -593,6 +601,29 @@ fn match_bare_err_on_result_errors() {
     errors_contain(
         "v: Result<int, str> = .err(\"x\")\nmatch v { .ok(n) => n, .err => 0 }",
         "`.err` pattern requires an argument",
+    );
+    let r = check_src("v: Result<int, str> = .err(\"x\")\nmatch v { .ok(n) => n, .err => 0 }");
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".err(_)"),
+        "expected safe `.err(_)` fixit, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn match_bare_some_suggests_fixit() {
+    let r = check_src("v := .some(1)\nmatch v { .some => 1, .none => 0 }");
+    assert!(has_errors(&r), "expected error, got: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".some(_)"),
+        "expected safe `.some(_)` fixit, got: {:?}",
+        r.errors
     );
 }
 
