@@ -13,3 +13,4 @@ zz_runtime = { path = "../zz_runtime" }
 zz_stdlib = { path = "../zz_stdlib" }
 zz_native_rt = { path = "../zz_native_rt" }
 zz_pm = { path = "../zz_pm" }
+rayon = "1"

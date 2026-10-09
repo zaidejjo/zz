@@ -1106,6 +1106,34 @@ fn push_link_inputs(
 /// the same inputs as [`build_with`]. `units` are (namespace, code) pairs;
 /// `header` is prepended to every TU. Link-only flags (`-s`, `-Wl,*`,
 /// `-static`) are withheld from the `-c` steps and applied at link.
+/// Unique file stem for a unit namespace: sanitized, with a numeric
+/// suffix on collision (`a-b` and `a_b` both sanitize to `a_b`).
+pub fn unit_file_stem(ns: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let base: String = ns
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let base = if base.is_empty() {
+        "_unit".to_string()
+    } else {
+        base
+    };
+    let mut stem = base.clone();
+    let mut n = 1u32;
+    while used.contains(&stem) {
+        n += 1;
+        stem = format!("{base}_{n}");
+    }
+    used.insert(stem.clone());
+    stem
+}
+
 pub fn compile_units(
     header: &str,
     units: &[(String, String)],
@@ -1121,52 +1149,68 @@ pub fn compile_units(
     let tmpdir = std::env::temp_dir().join(format!("zz-units-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmpdir)?;
     let dump_dir = std::env::var("ZZ_DUMP_C").ok().map(PathBuf::from);
-    let mut objs: Vec<PathBuf> = Vec::new();
+    // Stage every TU first (filenames assigned serially for stable,
+    // collision-free stems), then compile objects in parallel.
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (ns, code) in units {
-        let safe_ns: String = ns
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let stem = unit_file_stem(ns, &mut used);
         let tu = crate::lower::strip_quoted_includes(&format!("{header}\n{code}"));
-        let src_path = tmpdir.join(format!("{safe_ns}.c"));
+        let src_path = tmpdir.join(format!("{stem}.c"));
         std::fs::write(&src_path, &tu)?;
         if let Some(dir) = &dump_dir {
-            let _ = std::fs::write(dir.join(format!("{safe_ns}.c")), &tu);
+            let _ = std::fs::write(dir.join(format!("{stem}.c")), &tu);
         }
-        let obj = tmpdir.join(format!("{safe_ns}.o"));
-        let mut cmd = Command::new(&clang.path);
-        if clang.zig {
-            cmd.arg("cc");
-            if let Some(t) = target {
-                cmd.arg("-target").arg(t);
-            }
-        }
-        for flag in clang_flags(opts, if clang.zig { None } else { target }) {
-            if clang.zig && flag.starts_with("--target=") {
-                continue;
-            }
-            if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
-                continue;
-            }
-            cmd.arg(flag);
-        }
-        cmd.arg("-c")
-            .arg(&src_path)
-            .arg("-o")
-            .arg(&obj)
-            .arg("-DZZ_HAS_SQLITE3");
-        let out = cmd.output().map_err(BuildError::Io)?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            return Err(BuildError::CompileFailed { stderr });
-        }
-        objs.push(obj);
+        staged.push((src_path, tmpdir.join(format!("{stem}.o"))));
+    }
+    // Bounded pool: clang -O3 TUs are memory-heavy; uncapped rayon on big
+    // CI machines would OOM. 8 caps parallelism while keeping all
+    // mainstream machines saturated.
+    let jobs = std::cmp::min(staged.len(), 8);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs.max(1))
+        .thread_name(|i| format!("zz-cc-{i}"))
+        .build()
+        .map_err(|e| BuildError::Io(std::io::Error::other(format!("{e}"))))?;
+    let cflags = clang_flags(opts, if clang.zig { None } else { target });
+    let results: Vec<Result<PathBuf, BuildError>> = pool.install(|| {
+        use rayon::prelude::*;
+        staged
+            .par_iter()
+            .map(|(src_path, obj)| {
+                let mut cmd = Command::new(&clang.path);
+                if clang.zig {
+                    cmd.arg("cc");
+                    if let Some(t) = target {
+                        cmd.arg("-target").arg(t);
+                    }
+                }
+                for flag in &cflags {
+                    if clang.zig && flag.starts_with("--target=") {
+                        continue;
+                    }
+                    if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
+                        continue;
+                    }
+                    cmd.arg(flag);
+                }
+                cmd.arg("-c")
+                    .arg(src_path)
+                    .arg("-o")
+                    .arg(obj)
+                    .arg("-DZZ_HAS_SQLITE3");
+                let out = cmd.output().map_err(BuildError::Io)?;
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                    return Err(BuildError::CompileFailed { stderr });
+                }
+                Ok(obj.clone())
+            })
+            .collect()
+    });
+    let mut objs: Vec<PathBuf> = Vec::with_capacity(results.len());
+    for r in results {
+        objs.push(r?);
     }
     let mut cmd = Command::new(&clang.path);
     if clang.zig {
@@ -1515,6 +1559,17 @@ mod tests {
         );
         b.verbose = true;
         assert_eq!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn unit_file_stems_are_unique_and_sanitized() {
+        use std::collections::HashSet;
+        let mut used = HashSet::new();
+        assert_eq!(unit_file_stem("walker", &mut used), "walker");
+        // `a-b` and `a_b` sanitize identically: suffix on collision.
+        assert_eq!(unit_file_stem("a-b", &mut used), "a_b");
+        assert_eq!(unit_file_stem("a_b", &mut used), "a_b_2");
+        assert_eq!(unit_file_stem("", &mut used), "_unit");
     }
 
     #[test]
