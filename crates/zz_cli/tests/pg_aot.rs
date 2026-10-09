@@ -184,6 +184,7 @@ fn assert_vm_aot_parity(cl: &Cluster, name: &str, src: &str) {
     let build = Command::new(zz_bin())
         .arg("build")
         .arg(&zz_path)
+        .current_dir(&dir)
         .output()
         .expect("spawn zz build");
     assert!(
@@ -191,7 +192,7 @@ fn assert_vm_aot_parity(cl: &Cluster, name: &str, src: &str) {
         "AOT build {name} failed:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let bin = dir.join("bin").join(name);
+    let bin = dir.join(name);
     let run_aot = Command::new(&bin)
         .env("ZZ_PG_URL", &url)
         .output()
@@ -216,6 +217,7 @@ fn assert_aot_only(cl: &Cluster, name: &str, src: &str, expected: &str) {
     let build = Command::new(zz_bin())
         .arg("build")
         .arg(&zz_path)
+        .current_dir(&dir)
         .output()
         .expect("spawn zz build");
     assert!(
@@ -223,7 +225,7 @@ fn assert_aot_only(cl: &Cluster, name: &str, src: &str, expected: &str) {
         "AOT build {name} failed:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let bin = dir.join("bin").join(name);
+    let bin = dir.join(name);
     let run_aot = Command::new(&bin)
         .env("ZZ_PG_URL", pg_url(cl.port))
         .output()
@@ -428,6 +430,7 @@ func main() {
     let build = Command::new(zz_bin())
         .arg("build")
         .arg(&zz_path)
+        .current_dir(&dir)
         .output()
         .expect("spawn zz build");
     assert!(
@@ -435,7 +438,7 @@ func main() {
         "AOT build pgrefused failed:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let bin = dir.join("bin").join("pgrefused");
+    let bin = dir.join("pgrefused");
     let run_aot = Command::new(&bin).output().expect("spawn AOT case");
     assert!(
         !run_aot.status.success(),

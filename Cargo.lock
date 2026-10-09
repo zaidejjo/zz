@@ -3629,6 +3629,7 @@ dependencies = [
  "zz_hir",
  "zz_ir",
  "zz_native_rt",
+ "zz_pm",
  "zz_runtime",
  "zz_stdlib",
 ]

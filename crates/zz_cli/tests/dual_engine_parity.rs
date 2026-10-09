@@ -80,6 +80,26 @@ fn run_zz_with_input_env(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    // Standalone native outputs publish to the invocation dir, so the
+    // `--native` legs name a unique `-o` destination per fixture inside
+    // an isolated temp dir: parallel fixtures never share (and race on)
+    // one destination, and the repo stays litter-free. CWD stays at the
+    // workspace root — fixtures read repo-root-relative paths
+    // (`tests/fixtures/.../data/*`), so moving CWD would break them.
+    // The VM leg writes nothing. The temp dir is reaped after the leg
+    // (reaping a still-running timeout orphan is safe: the exec handle
+    // keeps it alive on unix; on Windows the removal just fails).
+    let native_tmp: Option<PathBuf> = if args.contains(&"--native") {
+        let dir = native_cwd(file);
+        let stem = file
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "zz_out".to_string());
+        cmd.arg("-o").arg(dir.join(&stem));
+        Some(dir)
+    } else {
+        None
+    };
     if let Some(t) = token {
         cmd.env("ZZ_SWEEP_TOKEN", t);
         // Sweep fast paths (test-only, never production):
@@ -127,6 +147,9 @@ fn run_zz_with_input_env(
                          {ZZ_CHILD_TIMEOUT_SECS}s and was killed",
                         file.display()
                     );
+                    if let Some(dir) = &native_tmp {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
                     return (
                         ZZ_CHILD_TIMEOUT_EXIT,
                         String::from_utf8_lossy(&output.stdout).to_string(),
@@ -141,6 +164,9 @@ fn run_zz_with_input_env(
     let output = child
         .wait_with_output()
         .unwrap_or_else(|e| panic!("failed to wait `zz {args:?} {file:?}`: {e}"));
+    if let Some(dir) = native_tmp {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     (
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stdout).to_string(),
@@ -170,6 +196,23 @@ fn run_zz_vm_token(file: &Path, token: &str) -> (i32, String, String) {
 fn run_zz_native_token(file: &Path, token: &str) -> (i32, String, String) {
     let input = stdin_for(file);
     run_zz_with_input_env(&["run", "--native"], file, &input, Some(token))
+}
+
+/// `-o` parent dir for `--native` legs: a unique temp dir per fixture
+/// (path hash + stem), created on demand. CWD itself stays at the
+/// workspace root (fixtures read repo-root-relative paths); only the
+/// published binary moves aside. See the call-site comment.
+fn native_cwd(file: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    file.to_string_lossy().hash(&mut h);
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "zz".to_string());
+    let dir = std::env::temp_dir().join(format!("zz-parity-native-{:016x}-{stem}", h.finish()));
+    std::fs::create_dir_all(&dir).expect("native CWD tmpdir");
+    dir
 }
 
 /// Strip lines that are purely numeric (timestamps, memory addresses).
@@ -1529,6 +1572,20 @@ fn run_quad_leg(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    // Same standalone-destination rule as above: `--native` legs run
+    // from a unique temp dir per fixture (the VM writes nothing),
+    // reaped after the leg (see above for orphan safety).
+    let native_tmp: Option<PathBuf> = if native {
+        let dir = native_cwd(file);
+        let stem = file
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "zz_out".to_string());
+        cmd.arg("-o").arg(dir.join(&stem));
+        Some(dir)
+    } else {
+        None
+    };
     cmd.env("ZZ_SWEEP_TOKEN", token);
     cmd.env("ZZ_CRYPTO_FAST", "1");
     if dev {
@@ -1552,6 +1609,9 @@ fn run_quad_leg(
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let output = child.wait_with_output().expect("reap quad leg");
+                    if let Some(dir) = &native_tmp {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
                     return (
                         ZZ_CHILD_TIMEOUT_EXIT,
                         String::from_utf8_lossy(&output.stdout).to_string(),
@@ -1568,6 +1628,9 @@ fn run_quad_leg(
         }
     }
     let output = child.wait_with_output().expect("wait quad leg");
+    if let Some(dir) = native_tmp {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     (
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stdout).to_string(),

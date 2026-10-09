@@ -53,15 +53,18 @@ zz — the ZZ programming language
 USAGE:
     zz                            start the interactive REPL
     zz eval <source>              evaluate source and print the result
-    zz run <file.zz>              type-check and run a file
-    zz run --bytecode <file>      run via .zzc bytecode (compiles .zz, or
+    zz run [<file.zz>]            type-check and run a file (defaults to the
+                                   project entry when omitted inside a project)
+    zz run --bytecode [<file>]    run via .zzc bytecode (compiles .zz, or
                                   loads .zzc directly with no frontend)
-    zz dis <file.zzc|file.zz>     disassemble bytecode to stable text
+    zz dis [<file.zzc|file.zz>]   disassemble bytecode to stable text
     zz test <file.zz | dir>       run @test-annotated functions
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
-    zz build [FLAGS] <file.zz>    compile a native binary (cached)
+    zz build [FLAGS] [<file.zz>]  compile a native binary (cached; defaults
+                                   to the project entry when omitted inside
+                                   a project)
     zz build --emit-ir -o <f.zzc> emit .zzc bytecode instead of a binary
 
 PACKAGE MANAGER:
@@ -106,7 +109,7 @@ BUILD MODES (single Clang backend, always a native binary):
      zz build -p --full <file.zz> max optimization (full LTO + DCE + strip); with `-- <args>` adds PGO training
      zz build --static <file.zz>  static build, explicit (same as the default; errors where static is impossible)
      zz build --pgo <file.zz>     PGO build (profile-guided, native host only)
-     zz profile <file.zz> [-- args]
+     zz profile [<file.zz>] [-- args]
                                   PGO end to end: instrument → train → optimize
      zz build --target <triple> <file.zz>
                                   cross build via clang --target= (drops -march=native)
@@ -125,7 +128,9 @@ FLAGS:
     --static           with build, static self-contained binary (the default; explicit use errors where static is impossible)
     --dynamic          with build, dynamic debug build (-O0 -g, fast); falls back automatically where static is impossible
     --full             with build, max optimization: full LTO (-O3, DCE, stripped); with `-- <args>` runs PGO training first
-    -o, --output <name> with build, name the output binary (bare name stays in bin/, path is used as-is)
+    -o, --output <name> with build/run --native, name the output binary
+                          (bare name stays in the project bin/ or standalone
+                          CWD; path is used as-is)
     --pgo              with build, profile-guided optimization build (native host only)
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
@@ -227,11 +232,24 @@ fn main() -> ExitCode {
             let native = rest.iter().any(|a| a == "--native");
             let bytecode = rest.iter().any(|a| a == "--bytecode");
             let embed = parse_flag_value(rest, "--embed").map(std::path::PathBuf::from);
+            // `-o` / `--output` names the published binary, `--native`
+            // only: VM runs forward everything after the file to the
+            // script untouched.
+            let output = if native {
+                parse_flag_value(rest, "--output")
+                    .or_else(|| parse_flag_value(rest, "-o"))
+                    .map(std::path::PathBuf::from)
+            } else {
+                None
+            };
             // Strip `--embed <dir>` / `--embed=<dir>` (and `--native` /
-            // `--bytecode`) so neither the loader nor the script sees
-            // them as paths/args.
+            // `--bytecode`, plus `-o <name>` for native) so neither the
+            // loader nor the script sees them as paths/args.
             let mut args: Vec<String> = strip_flag_value(rest, "--embed", "--native");
             args.retain(|a| a != "--bytecode");
+            if native {
+                args = strip_output_flag(&args);
+            }
             let script_args = args.get(1..).unwrap_or(&[]).to_vec();
             let file = args.iter().find(|a| !a.starts_with('-'));
             if native && bytecode {
@@ -239,7 +257,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             if native {
-                match run_native(file, &script_args, embed) {
+                match run_native(file, &script_args, embed, output) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -1045,14 +1063,11 @@ fn run_bytecode(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let path = path
-        .ok_or_else(|| {
-            "missing file argument\n\n\
-             usage: zz run --bytecode <file.zz|file.zzc>\n\
-             hint: provide a .zz file (round-trips through bytecode) or a .zzc file (loads directly)"
-                .to_string()
-        })?
-        .clone();
+    let path = resolve_run_entry(
+        path,
+        "zz run --bytecode [<file.zz|file.zzc>]",
+        "provide a .zz file (round-trips through bytecode) or a .zzc file (loads directly)",
+    )?;
     if path.ends_with(".zzc") {
         run_bytecode_file(&path, script_args)
     } else {
@@ -1161,14 +1176,11 @@ fn run_bytecode_file(path: &str, script_args: &[String]) -> Result<(), String> {
 /// `zz dis <file>`: disassemble `.zzc` bytes (or a `.zz` program lowered
 /// in memory) to stable text.
 fn dis_file(path: Option<&String>) -> Result<(), String> {
-    let path = path
-        .ok_or_else(|| {
-            "missing file argument\n\n\
-             usage: zz dis <file.zzc|file.zz>\n\
-             hint: provide a .zzc file or a .zz file to disassemble"
-                .to_string()
-        })?
-        .clone();
+    let path = resolve_run_entry(
+        path,
+        "zz dis [<file.zzc|file.zz>]",
+        "provide a .zzc file or a .zz file to disassemble",
+    )?;
     if path.ends_with(".zzc") {
         let bytes = std::fs::read(&path).map_err(|e| format!("zz: cannot read {path}: {e}"))?;
         let module = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
@@ -1276,17 +1288,43 @@ fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the entry file for `run` / `run --native` / `build` when the
+/// file argument is omitted: the conventional project entry (`src/main.zz`,
+/// then `main.zz`) under the project discovered from the current working
+/// directory. An explicit argument is returned unchanged (its owning
+/// project — resolved from the source path itself — decides the output
+/// destination; see [`build::planned_dest_for`]).
+fn resolve_default_entry(usage: &str, hint: &str) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let Some(root) = loader::find_project_root(&cwd) else {
+        return Err(format!(
+            "missing file argument\n\nusage: {usage}\nhint: {hint}"
+        ));
+    };
+    // resolve_entry carries actionable hints for every failure shape.
+    Ok(build::resolve_entry(&root)?.to_string_lossy().into_owned())
+}
+
+/// Resolve the entry file for `run` / `run --native`: explicit argument
+/// wins, otherwise [`resolve_default_entry`].
+fn resolve_run_entry(path: Option<&String>, usage: &str, hint: &str) -> Result<String, String> {
+    match path {
+        Some(p) => Ok(p.clone()),
+        None => resolve_default_entry(usage, hint),
+    }
+}
+
 fn run_file(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let path = path.ok_or_else(|| {
-        "missing file argument\n\n\
-             usage: zz run <file.zz>\n\
-             hint: provide the path to a .zz file to execute"
-            .to_string()
-    })?;
+    let resolved = resolve_run_entry(
+        path,
+        "zz run [<file.zz>]",
+        "provide the path to a .zz file to execute",
+    )?;
+    let path = &resolved;
 
     let mut prep = prepare_run(path, script_args, embed)?;
     let mut last = Value::Unit;
@@ -1317,18 +1355,22 @@ fn run_file(
     )
 }
 
-/// `zz run --native <file>`: compile to a temp location, execute, cleanup.
+/// `zz run --native [<file>]`: build (cached, published to the
+/// authoritative output destination, `-o` overrides like `build`) and
+/// execute. The file argument defaults to the project entry inside a
+/// project.
 fn run_native(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    output: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let path = path.ok_or_else(|| {
-        "missing file argument\n\n\
-             usage: zz run --native <file.zz>\n\
-             hint: provide the path to a .zz file to compile and execute"
-            .to_string()
-    })?;
+    let resolved = resolve_run_entry(
+        path,
+        "zz run --native [<file.zz>]",
+        "provide the path to a .zz file to compile and execute",
+    )?;
+    let path = &resolved;
     let p = std::path::Path::new(path);
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(p)?;
@@ -1342,10 +1384,22 @@ fn run_native(
     };
     let rel = build::ReleaseOptions {
         embed,
+        output,
         ..Default::default()
     };
-    let cached = build::build_release(p, mode, &rel)?;
-    let code = build::exec_binary(&cached, script_args)?;
+    // Publish through the normal destination, then execute a private
+    // staged copy: concurrent same-named publishes can never swap the
+    // binary mid-exec.
+    let built = build::build_release(p, mode, &rel)?;
+    let (bin, cleanup) = build::stage_exec_copy(&built)?;
+    let code = match build::exec_binary(&bin, script_args) {
+        Ok(code) => code,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    cleanup();
     if code != 0 {
         return Err(format!(
             "native program exited with code {code}\n\
@@ -1355,7 +1409,7 @@ fn run_native(
     Ok(())
 }
 
-/// `zz build [FLAGS] <file>`: always a native Clang binary.
+/// `zz build [FLAGS] [<file>]`: always a native Clang binary.
 ///
 /// Default (`zz build`): static self-contained binary (ThinLTO, DCE,
 /// stripped). Falls back to dynamic with a note where static is
@@ -1365,8 +1419,14 @@ fn run_native(
 /// stay static.
 /// `-p/--release/-O3` selects the dynamic optimized build; `--dynamic`
 /// selects the fast dynamic debug build (`-O0 -g`).
-/// Both paths are real binaries in `bin/` — never VM execution.
-/// (`zz run` is the only command that executes through the VM.)
+/// Output (authoritative, no legacy duplicates): standalone builds place
+/// `./<stem>` in the current working directory; project builds (file
+/// omitted inside a project, or any source under a project) publish to
+/// `<project-root>/bin/` named after `[package] name` (entry) or the
+/// file stem (non-entry files). Bare `-o` renames inside that directory;
+/// path-like `-o` is used as-is relative to the current directory.
+/// (`zz run` without `--native` is the only command that executes
+/// through the VM, leaving no build artifacts.)
 fn build_cmd(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--emit-ir") {
         return emit_ir_cmd(args);
@@ -1429,9 +1489,10 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     }
     // Positional path: first non-flag arg, skipping values consumed by
     // `--target <triple>` / `--cc <name>` / `--embed <dir>` /
-    // `-o <name>` (space form).
+    // `-o <name>` (space form). Omitted inside a project: build the
+    // conventional entry (`src/main.zz`, then `main.zz`).
     let mut skip_next = false;
-    let path = flag_args
+    let path: String = match flag_args
         .iter()
         .find(|a| {
             if skip_next {
@@ -1449,12 +1510,14 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             }
             !a.starts_with('-')
         })
-        .ok_or_else(|| {
-            "missing file argument\n\n\
-             usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [-o <name>] <file.zz>\n\
-             hint: provide the path to a .zz file to build"
-                .to_string()
-        })?;
+        .cloned() {
+        Some(p) => p,
+        None => resolve_default_entry(
+            "zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [-o <name>] [<file.zz>]",
+            "provide the path to a .zz file to build (or run inside a project)",
+        )?,
+    };
+    let path = path.as_str();
     let p = std::path::Path::new(path);
 
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
@@ -1667,7 +1730,7 @@ fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
     }
 }
 
-/// `zz profile <file.zz> [-- args]`: PGO end to end.
+/// `zz profile [<file.zz>] [-- args]`: PGO end to end.
 ///
 /// Phase 1 instruments (`-fprofile-generate`), the training run executes
 /// with the given args, `llvm-profdata` merges coverage, and phase 2
@@ -1675,12 +1738,13 @@ fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
 /// success; on failure they are left in place with a hint.
 fn profile_cmd(args: &[String]) -> Result<(), String> {
     let (left, train_args) = split_train_args(args);
-    let path = left.iter().find(|a| !a.starts_with('-')).ok_or_else(|| {
-        "missing file argument\n\n\
-              usage: zz profile <file.zz> [-- args]\n\
-              hint: args after `--` run the training workload"
-            .to_string()
-    })?;
+    let path: String = match left.iter().find(|a| !a.starts_with('-')).cloned() {
+        Some(p) => p,
+        None => resolve_default_entry(
+            "zz profile [<file.zz>] [-- args]",
+            "provide the path to a .zz file to profile (or run inside a project)",
+        )?,
+    };
     if left.iter().any(|a| a.starts_with('-')) {
         return Err("zz profile takes no build flags\n\
             hint: instrument + optimize modes are fixed; use `zz build` for custom flags"
@@ -1698,7 +1762,7 @@ fn profile_cmd(args: &[String]) -> Result<(), String> {
             hint: install LLVM tools (apt: llvm, brew: llvm) to use `zz profile`"
             .to_string());
     }
-    let p = std::path::Path::new(path);
+    let p = std::path::Path::new(path.as_str());
     let rel = build::ReleaseOptions::default();
 
     crate::ui::header(&format!("profiling {path}"));
@@ -1831,6 +1895,30 @@ fn strip_flag_value(args: &[String], flag: &str, bare: &str) -> Vec<String> {
             continue;
         }
         if a == bare {
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
+/// Strip `-o <name>` / `--output <name>` (and `=` forms): `run --native`
+/// consumes the output flag itself, so the script and the positional
+/// file search must never see it or its value.
+fn strip_output_flag(args: &[String]) -> Vec<String> {
+    const FLAGS: [&str; 2] = ["-o", "--output"];
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if FLAGS.contains(&a.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        if FLAGS.iter().any(|f| a.starts_with(&format!("{f}="))) {
             continue;
         }
         out.push(a.clone());

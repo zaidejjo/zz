@@ -209,7 +209,22 @@ fn run_driver(driver: &Path, native: bool) -> (i32, String, String) {
     cmd.arg(driver)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    // Native builds publish standalone outputs to the invocation dir:
+    // name a unique `-o` destination per driver inside its sandbox so
+    // parallel drivers never share (and race on) one destination. CWD
+    // stays at the workspace root — staged cases can read
+    // repo-root-relative paths exactly like the VM leg does.
+    if native {
+        if let Some(parent) = driver.parent() {
+            let stem = driver
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "zz_out".to_string());
+            cmd.arg("-o").arg(parent.join(&stem));
+        }
+    }
     let mut child = cmd.spawn().expect("spawn zz");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {

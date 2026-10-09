@@ -34,7 +34,7 @@ pub fn init(args: &[String]) -> Result<(), String> {
 
     println!("initialized project `{}` in {}", name, dir.display());
     println!("  zz.toml: created");
-    println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
+    println!("  .gitignore: ensured (vendor/, build/, bin/)");
     if !dir.join("src/main.zz").exists() {
         println!("  src/main.zz: created");
     }
@@ -85,7 +85,7 @@ pub fn new(args: &[String]) -> Result<(), String> {
     println!("created project `{name}` at {}", project_dir.display());
     println!("  zz.toml: created");
     println!("  src/main.zz: created");
-    println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
+    println!("  .gitignore: ensured (vendor/, build/, bin/)");
 
     if no_git {
         return Ok(());
@@ -363,11 +363,36 @@ fn pascal_case(name: &str) -> String {
 
 /// Handle `zz clean [--deps]`: remove build outputs (`bin/`, `build/`,
 /// `src/bin/`); with `--deps` also `vendor/` + `zz.lock`. Explicit flags
-/// only — never prompts, script-safe.
+/// only — never prompts, script-safe. Operates on the project root when
+/// invoked inside one (outputs live at the root regardless of the
+/// invocation subdir); standalone otherwise.
 pub fn clean(args: &[String]) -> Result<(), String> {
     let with_deps = args.iter().any(|a| a == "--deps");
-    let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
-    clean_in(&dir, with_deps)
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let dir = crate::loader::find_project_root(&cwd).unwrap_or(cwd);
+    clean_in(&dir, with_deps)?;
+    print_global_cache_hint();
+    Ok(())
+}
+
+/// One-line global cache status so `zz clean` never looks like a no-op
+/// while the build cache holds real weight: size plus the reclaim
+/// command. Silent when the cache is absent or empty.
+fn print_global_cache_hint() {
+    let cache_dir = zz_pm::paths::build_cache_dir();
+    if !cache_dir.exists() {
+        return;
+    }
+    let (entries, bytes) = zz_pm::paths::dir_usage(&cache_dir);
+    if entries == 0 {
+        return;
+    }
+    println!(
+        "global build cache: {} in {entries} entries ({})",
+        crate::ui::human_bytes(bytes),
+        cache_dir.display()
+    );
+    println!("hint: `zz cache clean` reclaims it (rebuilds on demand)");
 }
 
 /// `zz clean` in an explicit directory (split for tests — no cwd games).
@@ -997,6 +1022,11 @@ fn project_from_dir(target: &std::path::Path) -> Result<(PathBuf, PathBuf, Strin
     })?;
     let name = manifest.package.name.clone();
     check_bin_name(&name)?;
+    // Configured `[package] entry` wins (validated loudly); otherwise the
+    // conventional entry, with install-flavored guidance when absent.
+    if let Some(entry) = manifest.entry_path(target)? {
+        return Ok((target.to_path_buf(), entry, name));
+    }
     let entry = ["src/main.zz", "main.zz"]
         .iter()
         .map(|c| target.join(c))
@@ -1004,7 +1034,7 @@ fn project_from_dir(target: &std::path::Path) -> Result<(PathBuf, PathBuf, Strin
         .ok_or_else(|| {
             format!(
                 "no entry file in `{}`\n\
-                  hint: expected src/main.zz or main.zz",
+                  hint: expected src/main.zz or main.zz (or set [package] entry)",
                 target.display()
             )
         })?;
@@ -1246,12 +1276,18 @@ pub fn cache(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("clean") | Some("clear") => {
-            let cache_dir = zz_pm::paths::cache_objects_dir();
+            // The whole build-cache tree: native binary entries, precompiled
+            // runtime archives, and per-module objects — all rebuildable.
+            let cache_dir = zz_pm::paths::build_cache_dir();
             if cache_dir.exists() {
-                let count = count_entries(&cache_dir);
+                let (entries, bytes) = zz_pm::paths::dir_usage(&cache_dir);
                 std::fs::remove_dir_all(&cache_dir)
                     .map_err(|e| format!("cannot remove cache: {e}"))?;
-                println!("cleared {count} cache entries from {}", cache_dir.display());
+                println!(
+                    "cleared build cache: {entries} entries, freed {} ({})",
+                    crate::ui::human_bytes(bytes),
+                    cache_dir.display()
+                );
             } else {
                 println!("no cache to clear");
             }
@@ -2217,13 +2253,6 @@ fn template_content(template: Option<&str>) -> &'static str {
             "func main() {\n    println(\"Hello, ZZ!\")\n}\n"
         }
     }
-}
-
-/// Count entries in a directory (non-recursive).
-fn count_entries(dir: &Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).count())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
