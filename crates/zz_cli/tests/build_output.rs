@@ -122,6 +122,18 @@ fn run_without_arg_outside_project_requires_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn profile_without_arg_outside_project_requires_file() {
+    let (dir, _) = standalone_dir();
+    let (code, _, stderr) = run(&dir, &["profile"], &[]);
+    assert_ne!(code, 0, "bare profile outside a project must fail");
+    assert!(
+        stderr.contains("missing file argument"),
+        "needs missing-file error, got:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- No-clang fallback destinations (deterministic everywhere) ---
 
 #[test]

@@ -109,7 +109,7 @@ BUILD MODES (single Clang backend, always a native binary):
      zz build -p --full <file.zz> max optimization (full LTO + DCE + strip); with `-- <args>` adds PGO training
      zz build --static <file.zz>  static build, explicit (same as the default; errors where static is impossible)
      zz build --pgo <file.zz>     PGO build (profile-guided, native host only)
-     zz profile <file.zz> [-- args]
+     zz profile [<file.zz>] [-- args]
                                   PGO end to end: instrument → train → optimize
      zz build --target <triple> <file.zz>
                                   cross build via clang --target= (drops -march=native)
@@ -1286,13 +1286,11 @@ fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
 /// directory. An explicit argument is returned unchanged (its owning
 /// project — resolved from the source path itself — decides the output
 /// destination; see [`build::planned_dest_for`]).
-fn resolve_default_entry(usage: &str) -> Result<String, String> {
+fn resolve_default_entry(usage: &str, hint: &str) -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
     let Some(root) = loader::find_project_root(&cwd) else {
         return Err(format!(
-            "missing file argument\n\n\
-             usage: {usage}\n\
-             hint: provide the path to a .zz file"
+            "missing file argument\n\nusage: {usage}\nhint: {hint}"
         ));
     };
     let entry = build::project_entry(&root);
@@ -1308,10 +1306,10 @@ fn resolve_default_entry(usage: &str) -> Result<String, String> {
 
 /// Resolve the entry file for `run` / `run --native`: explicit argument
 /// wins, otherwise [`resolve_default_entry`].
-fn resolve_run_entry(path: Option<&String>, usage: &str) -> Result<String, String> {
+fn resolve_run_entry(path: Option<&String>, usage: &str, hint: &str) -> Result<String, String> {
     match path {
         Some(p) => Ok(p.clone()),
-        None => resolve_default_entry(usage),
+        None => resolve_default_entry(usage, hint),
     }
 }
 
@@ -1320,7 +1318,11 @@ fn run_file(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let resolved = resolve_run_entry(path, "zz run [<file.zz>]")?;
+    let resolved = resolve_run_entry(
+        path,
+        "zz run [<file.zz>]",
+        "provide the path to a .zz file to execute",
+    )?;
     let path = &resolved;
 
     let mut prep = prepare_run(path, script_args, embed)?;
@@ -1360,7 +1362,11 @@ fn run_native(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let resolved = resolve_run_entry(path, "zz run --native [<file.zz>]")?;
+    let resolved = resolve_run_entry(
+        path,
+        "zz run --native [<file.zz>]",
+        "provide the path to a .zz file to compile and execute",
+    )?;
     let path = &resolved;
     let p = std::path::Path::new(path);
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
@@ -1493,13 +1499,8 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         Some(p) => p,
         None => resolve_default_entry(
             "zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [-o <name>] [<file.zz>]",
-        )
-        .map_err(|e| {
-            e.replace(
-                "hint: provide the path to a .zz file",
-                "hint: provide the path to a .zz file to build (or run inside a project)",
-            )
-        })?,
+            "provide the path to a .zz file to build (or run inside a project)",
+        )?,
     };
     let path = path.as_str();
     let p = std::path::Path::new(path);
@@ -1714,7 +1715,7 @@ fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
     }
 }
 
-/// `zz profile <file.zz> [-- args]`: PGO end to end.
+/// `zz profile [<file.zz>] [-- args]`: PGO end to end.
 ///
 /// Phase 1 instruments (`-fprofile-generate`), the training run executes
 /// with the given args, `llvm-profdata` merges coverage, and phase 2
@@ -1722,12 +1723,13 @@ fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
 /// success; on failure they are left in place with a hint.
 fn profile_cmd(args: &[String]) -> Result<(), String> {
     let (left, train_args) = split_train_args(args);
-    let path = left.iter().find(|a| !a.starts_with('-')).ok_or_else(|| {
-        "missing file argument\n\n\
-              usage: zz profile <file.zz> [-- args]\n\
-              hint: args after `--` run the training workload"
-            .to_string()
-    })?;
+    let path: String = match left.iter().find(|a| !a.starts_with('-')).cloned() {
+        Some(p) => p,
+        None => resolve_default_entry(
+            "zz profile [<file.zz>] [-- args]",
+            "provide the path to a .zz file to profile (or run inside a project)",
+        )?,
+    };
     if left.iter().any(|a| a.starts_with('-')) {
         return Err("zz profile takes no build flags\n\
             hint: instrument + optimize modes are fixed; use `zz build` for custom flags"
@@ -1745,7 +1747,7 @@ fn profile_cmd(args: &[String]) -> Result<(), String> {
             hint: install LLVM tools (apt: llvm, brew: llvm) to use `zz profile`"
             .to_string());
     }
-    let p = std::path::Path::new(path);
+    let p = std::path::Path::new(path.as_str());
     let rel = build::ReleaseOptions::default();
 
     crate::ui::header(&format!("profiling {path}"));
