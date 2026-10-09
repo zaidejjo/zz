@@ -812,6 +812,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
                 println!("vendor links missing or stale, fetching and linking...");
             } else {
                 println!("dependencies unchanged (lockfile is up to date)");
+                crate::prewarm_run_cache(&dir);
                 return Ok(());
             }
         }
@@ -963,6 +964,10 @@ pub fn install(args: &[String]) -> Result<(), String> {
         println!("native audit recorded in zz.lock");
     }
     println!("hint: run `zz build` to compile");
+    // Cargo-style: compile the entry now so the first `zz run` hits the
+    // run cache instead of paying parse+check+compile (even-cold speed).
+    // Best-effort and silent when warm; never fails the install.
+    crate::prewarm_run_cache(&dir);
     Ok(())
 }
 

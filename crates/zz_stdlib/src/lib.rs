@@ -17,7 +17,10 @@ pub mod zz_std;
 
 pub use funcs::{stdlib_funcs, stdlib_funcs_cached};
 pub use natives::{stdlib_natives, stdlib_natives_cached};
-pub use zz_std::{define_canonical_purezz_aliases, zz_stdlib_programs};
+pub use zz_std::{
+    define_canonical_purezz_aliases, stdlib_program_closure, zz_stdlib_program_at,
+    zz_stdlib_program_count, zz_stdlib_programs,
+};
 
 /// Math constants registered as static float values (not zero-arg functions).
 /// Keys are fully-qualified names like `"std.math.PI"`.

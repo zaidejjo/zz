@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 
 /// Cache format version: bump when `meta.json` or the module layout changes.
 /// Old entries are never read (safe: cold rebuild once, aged out via LRU).
-const CACHE_VERSION: &str = "v1";
+/// v2 adds scoped-stdlib metadata (imported modules + selective/wildcard
+/// replays); v1 entries lack it and must not execute.
+const CACHE_VERSION: &str = "v2";
 /// Upper bound on retained run entries (LRU by mtime, best-effort).
 const MAX_ENTRIES: usize = 256;
 
@@ -42,6 +44,17 @@ pub struct RunMeta {
     /// `(module, alias)` pairs for `import std.X as alias` mirrors.
     #[serde(default)]
     pub stdlib_aliases: Vec<(String, String)>,
+    /// Sorted union of stdlib modules imported anywhere in the closure.
+    /// Scopes pure-ZZ execution and natives on hits (see
+    /// `zz_stdlib::stdlib_program_closure`).
+    #[serde(default)]
+    pub stdlib_modules: Vec<String>,
+    /// Selective imports replayed for bare-name natives on hits.
+    #[serde(default)]
+    pub stdlib_selectives: crate::loader::StdlibSelectives,
+    /// Wildcard imports replayed for bare-name natives on hits.
+    #[serde(default)]
+    pub stdlib_wildcards: Vec<String>,
 }
 
 /// A cache hit: raw IR bytes per module (execution order) plus meta.
@@ -129,17 +142,253 @@ pub fn run_key(
 ) -> Result<String, String> {
     let src = std::fs::read_to_string(entry)
         .map_err(|e| format!("zz: cannot read {}: {e}", entry.display()))?;
-    let mut key = zz_pm::cache_key::CacheKey::compute(
-        entry,
-        &src,
-        vm_fingerprint(plugin_funcs),
-        Some("vm-run"),
-        None,
-    )?;
+    let fp = vm_fingerprint(plugin_funcs);
+    // Fast path: stat-only closure check against the fingerprint sidecar
+    // (no source reads on no-change runs). Falls back to the canonical
+    // full hash on any doubt; manifest errors propagate like `compute`.
+    if let Some(slug) = fp_lookup(entry, &src, fp, embed)? {
+        return Ok(slug);
+    }
+    let mut key = zz_pm::cache_key::CacheKey::compute(entry, &src, fp, Some("vm-run"), None)?;
     if let Some(dir) = embed {
         key.artifact_hash = crate::build::embed_sig(dir);
     }
+    fp_store(entry, &key);
     Ok(key.to_slug())
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprint fast path: stat-based closure validation.
+//
+// `CacheKey::compute` re-reads and re-hashes every source on every run
+// (tens of ms at table scale, on the hot path). The sidecar records, per
+// project root, the file set with (mtime, size) plus the last combined
+// hashes. A no-change run validates with stats only and reuses the
+// combined hashes bit-for-bit (same `to_slug` inputs as `compute`, so
+// slugs are interchangeable). Any new/removed/changed/recent file falls
+// back to the canonical full hash, which also refreshes the sidecar.
+// Trust rule per file: (mtime, size) must match AND mtime must be older
+// than one second (same-tick guard: an edit and a run landing in the
+// same timestamp tick always re-hashes).
+// ---------------------------------------------------------------------------
+
+/// One file's stat signature: seconds + nanos + size. Unknown (unstatable)
+/// never validates — the caller falls back to the full hash.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct FileStat {
+    secs: u64,
+    nanos: u32,
+    size: u64,
+}
+
+/// One hashed scope (the project tree or one path-dep dir): the validated
+/// file set plus the combined hash `compute` produced for it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ScopeFp {
+    files: HashMap<String, FileStat>,
+    combined: String,
+}
+
+/// Sidecar per project root: sources scope plus one scope per path dep
+/// (keyed by dep name) with the dep dir it was recorded for (a remapped
+/// path invalidates the scope).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ProjectFp {
+    sources: ScopeFp,
+    deps: HashMap<String, ScopeFp>,
+    dep_dirs: HashMap<String, String>,
+}
+
+fn fp_path(root: &Path) -> PathBuf {
+    let h = zz_pm::hash::hash_bytes(root.to_string_lossy().as_bytes());
+    run_cache_dir().join(format!("fp-{}.json", &h[..16.min(h.len())]))
+}
+
+/// Enumerate `.zz` files under `dir`, mirroring `hash_zz_sources` set
+/// semantics (hidden dirs, `target/`, `bin/`, `node_modules/` skipped;
+/// symlinks followed like `Path::is_dir`). Order is irrelevant; callers
+/// sort. Errors are ignored per-entry, like the canonical walk.
+fn crawl_zz(dir: &Path) -> Vec<PathBuf> {
+    const SKIP_DIRS: &[&str] = &["target", "bin", "node_modules"];
+    let mut out = Vec::new();
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+        if depth > 32 {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                walk(&path, out, depth + 1);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("zz") {
+                out.push(path);
+            }
+        }
+    }
+    walk(dir, &mut out, 0);
+    out.sort();
+    out
+}
+
+fn stat_now(path: &Path) -> Option<FileStat> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    let d = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(FileStat {
+        secs: d.as_secs(),
+        nanos: d.subsec_nanos(),
+        size: meta.len(),
+    })
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Validate one scope: identical file set, every stat matches, every
+/// mtime older than the granularity guard. Pure function of the sidecar
+/// and the current tree — no reads.
+fn scope_clean(scope: &ScopeFp, files: &[PathBuf], now: u64) -> bool {
+    if scope.files.len() != files.len() {
+        return false;
+    }
+    for path in files {
+        let key = path.to_string_lossy().into_owned();
+        let (Some(recorded), Some(current)) = (scope.files.get(&key), stat_now(path)) else {
+            return false;
+        };
+        if recorded.secs != current.secs
+            || recorded.nanos != current.nanos
+            || recorded.size != current.size
+        {
+            return false;
+        }
+        if recorded.secs + 1 >= now {
+            return false;
+        }
+    }
+    // Set equality: same length + every crawled file found above.
+    // (HashMap lookup per file already proved membership both ways.)
+    true
+}
+
+/// Fast-path key: `Some(slug)` when the sidecar validates the whole
+/// closure with stats only; `None` on any doubt (caller runs `compute`);
+/// `Err` only when the manifest is unloadable (same failure `compute`
+/// reports — the run then surfaces the real error uncached).
+fn fp_lookup(
+    entry: &Path,
+    src: &str,
+    fp: u64,
+    embed: Option<&Path>,
+) -> Result<Option<String>, String> {
+    let root = zz_pm::cache_key::CacheKey::project_dir_for(entry);
+    let sidecar = std::fs::read(fp_path(&root)).ok();
+    let Some(bytes) = sidecar else {
+        return Ok(None);
+    };
+    let saved: ProjectFp = serde_json::from_slice(&bytes).ok().unwrap_or_default();
+    // An empty sidecar (fresh default) never validates: the sources scope
+    // always crawls ≥1 file (the entry itself).
+    let files = crawl_zz(&root);
+    let now = now_secs();
+    if !scope_clean(&saved.sources, &files, now) {
+        return Ok(None);
+    }
+    let deps = zz_pm::cache_key::path_dep_dirs(&root)?;
+    if deps.len() != saved.deps.len() {
+        return Ok(None);
+    }
+    let mut dep_hashes = HashMap::new();
+    for (name, dir) in &deps {
+        let dir_str = dir.to_string_lossy().into_owned();
+        if saved.dep_dirs.get(name).map(String::as_str) != Some(dir_str.as_str()) {
+            return Ok(None);
+        }
+        let Some(scope) = saved.deps.get(name) else {
+            return Ok(None);
+        };
+        if !scope_clean(scope, &crawl_zz(dir), now) {
+            return Ok(None);
+        }
+        dep_hashes.insert(name.clone(), scope.combined.clone());
+    }
+    let canonical_entry = entry.canonicalize().unwrap_or_else(|_| entry.to_path_buf());
+    let key = zz_pm::cache_key::CacheKey {
+        source_hash: zz_pm::hash::hash_bytes(src.as_bytes()),
+        source_path: canonical_entry.to_string_lossy().into_owned(),
+        dep_hashes,
+        build_fingerprint: fp,
+        target: "vm-run".to_string(),
+        runtime_mtime: None,
+        sources_hash: saved.sources.combined.clone(),
+        artifact_hash: String::new(),
+        artifact_flags: String::new(),
+        native_build_sig: String::new(),
+    };
+    let mut key = key;
+    if let Some(dir) = embed {
+        key.artifact_hash = crate::build::embed_sig(dir);
+    }
+    Ok(Some(key.to_slug()))
+}
+
+/// Refresh the sidecar from a freshly computed key (best-effort; failures
+/// are silent — the next run simply recomputes).
+fn fp_store(entry: &Path, key: &zz_pm::cache_key::CacheKey) {
+    let root = zz_pm::cache_key::CacheKey::project_dir_for(entry);
+    let files = crawl_zz(&root);
+    let mut sources = ScopeFp {
+        files: HashMap::new(),
+        combined: key.sources_hash.clone(),
+    };
+    for path in &files {
+        if let Some(st) = stat_now(path) {
+            sources
+                .files
+                .insert(path.to_string_lossy().into_owned(), st);
+        }
+    }
+    let mut fp = ProjectFp {
+        sources,
+        deps: HashMap::new(),
+        dep_dirs: HashMap::new(),
+    };
+    if let Ok(deps) = zz_pm::cache_key::path_dep_dirs(&root) {
+        for (name, dir) in &deps {
+            let mut scope = ScopeFp {
+                files: HashMap::new(),
+                combined: key.dep_hashes.get(name).cloned().unwrap_or_default(),
+            };
+            for path in &crawl_zz(dir) {
+                if let Some(st) = stat_now(path) {
+                    scope.files.insert(path.to_string_lossy().into_owned(), st);
+                }
+            }
+            fp.dep_dirs
+                .insert(name.clone(), dir.to_string_lossy().into_owned());
+            fp.deps.insert(name.clone(), scope);
+        }
+    }
+    if let Ok(bytes) = serde_json::to_vec(&fp) {
+        let path = fp_path(&root);
+        if std::fs::create_dir_all(path.parent().expect("fp file has parent")).is_ok() {
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, &bytes).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
 }
 
 /// Look up a slug. `None` on any failure (absent, corrupt, unreadable) —
@@ -205,6 +454,13 @@ pub fn store(slug: &str, modules: &[Vec<u8>], meta: &RunMeta) {
         let _ = std::fs::remove_dir_all(&tmp);
         return;
     }
+    // One-time upgrade: v1 entries lack scoped-stdlib metadata and must
+    // never execute. Drop the whole legacy tree (rebuilds on demand;
+    // `zz cache clean` covers the parent either way).
+    static UPGRADED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    UPGRADED.get_or_init(|| {
+        let _ = std::fs::remove_dir_all(base.join("run-v1"));
+    });
     // Rename wins atomically; a concurrent writer's rename is equally
     // valid (same key ⇒ same bytes), so errors are ignored.
     if std::fs::rename(&tmp, &dir).is_err() {
@@ -272,6 +528,36 @@ fn touch(dir: &Path) {
 pub(crate) fn log_hit(slug: &str) {
     if verbose() {
         eprintln!("zz: run cache hit {}", &slug[..8.min(slug.len())]);
+    }
+}
+
+/// Per-stage wall timer for startup profiling. Prints
+/// `zz: t=<ms since last stage> <label>` under `ZZ_VERBOSE=1` only;
+/// zero overhead otherwise (one `Instant::now` per stage). Permanent:
+/// startup regressions show up here first.
+pub(crate) struct StageTimer {
+    last: std::time::Instant,
+    active: bool,
+}
+
+impl StageTimer {
+    pub fn start() -> Self {
+        Self {
+            last: std::time::Instant::now(),
+            active: verbose(),
+        }
+    }
+
+    pub fn stage(&mut self, label: &str) {
+        if !self.active {
+            return;
+        }
+        let now = std::time::Instant::now();
+        eprintln!(
+            "zz: t={:>5}ms {label}",
+            now.duration_since(self.last).as_millis()
+        );
+        self.last = now;
     }
 }
 
@@ -387,11 +673,14 @@ mod tests {
                     .into_iter()
                     .collect(),
                 stdlib_aliases: vec![("math".to_string(), "mm".to_string())],
+                stdlib_modules: vec!["math".to_string()],
+                ..Default::default()
             };
             store(slug, &[b"ZZC1-fake-module-0".to_vec()], &meta);
             let hit = lookup(slug).expect("stored entry must hit");
             assert_eq!(hit.modules.len(), 1);
             assert_eq!(hit.meta.consts.get("pi"), Some(&3.0));
+            assert_eq!(hit.meta.stdlib_modules, vec!["math".to_string()]);
             // Corrupt the module bytes: lookup still returns bytes (raw),
             // but the caller-side decode must fail — here assert the
             // bytes round-trip exactly so corruption is detectable.
@@ -420,6 +709,54 @@ mod tests {
             store("other", &[b"ZZC1-y".to_vec()], &meta);
             std::env::remove_var("ZZ_RUN_CACHE");
             assert!(lookup("other").is_none(), "ZZ_RUN_CACHE=0 must not store");
+        });
+    }
+
+    /// The fingerprint sidecar must return the identical slug with stats
+    /// only (no source reads), and bust on any content change.
+    #[test]
+    fn fp_sidecar_reuses_and_busts() {
+        with_isolated_home(|| {
+            let proj = write_proj(&[
+                ("zz.toml", "[package]\nname = \"fp\"\nversion = \"0.1.0\"\n"),
+                ("main.zz", "func main() {\n    println(1)\n}\n"),
+                ("lib/help.zz", "pub func aid() -> int { 1 }\n"),
+            ]);
+            // Backdate mtimes past the granularity guard (fresh files
+            // always take the canonical path — that is the safe default).
+            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+            for rel in ["main.zz", "lib/help.zz", "zz.toml"] {
+                let p = proj.join(rel);
+                std::fs::File::options()
+                    .write(true)
+                    .open(&p)
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+            }
+            let entry = proj.join("main.zz");
+            let k1 = run_key(&entry, &[], None).unwrap();
+            // Sidecar must exist now (canonical path refreshes it).
+            let root = zz_pm::cache_key::CacheKey::project_dir_for(&entry);
+            assert!(
+                std::fs::read(fp_path(&root)).is_ok(),
+                "canonical run_key must write the sidecar"
+            );
+            // Second call: same slug (fast path interchangeable).
+            let k2 = run_key(&entry, &[], None).unwrap();
+            assert_eq!(k1, k2, "sidecar slug must equal canonical slug");
+            // Same-size edit with a fresh mtime (the rapid edit+run case):
+            // the mtime mismatch busts even though the size matches.
+            // (Deliberately forged old mtimes are trusted, like cargo —
+            // the granularity guard only covers real clock ticks.)
+            std::fs::write(&entry, "func main() {\n    println(2)\n}\n").unwrap();
+            let k3 = run_key(&entry, &[], None).unwrap();
+            assert_ne!(k1, k3, "edited source must bust the sidecar");
+            // New file: must bust (set change invalidates).
+            let newf = proj.join("lib").join("extra.zz");
+            std::fs::write(&newf, "pub func e() -> int { 2 }\n").unwrap();
+            let k4 = run_key(&entry, &[], None).unwrap();
+            assert_ne!(k3, k4, "added file must bust the sidecar");
         });
     }
 }
