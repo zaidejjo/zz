@@ -117,6 +117,11 @@ struct Loader {
     /// Only the `zz check` entry point enables it: `run`/`build` need
     /// span types and codegen inputs the cache does not store.
     use_cache: bool,
+    /// Project manifests cached per project root (`None` = no `zz.toml`
+    /// or unloadable manifest): backs implicit package mapping
+    /// (`import app.x` → `<root>/src/x.zz`, issue #288) without
+    /// re-parsing the manifest per import.
+    pkg_cache: HashMap<PathBuf, Option<(String, PathBuf)>>,
     /// Plugin function names, for the cache genesis hash.
     plugin_names: Vec<String>,
     /// File dependency edges (importer → imported canonical paths) for S1
@@ -228,6 +233,7 @@ fn load_program_impl(
         seed_enum_keys: HashSet::new(),
         contributed_seeds: false,
         use_cache,
+        pkg_cache: HashMap::new(),
         plugin_names: Vec::new(),
         dep_edges: HashMap::new(),
         all_funcs: HashMap::new(),
@@ -273,6 +279,28 @@ pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
         if !dir.pop() {
             return None;
         }
+    }
+}
+
+/// Normalize a package name for import matching: `-` and `_` spellings
+/// agree (`my-app` in `zz.toml` matches `import my_app.x`), since `-`
+/// is not a valid identifier character in import paths.
+fn normalize_pkg(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+/// Resolve `<pkg>.<rest...>` against a project root: `<rest...>` maps to
+/// `<root>/src/<rest...>.zz` (dot-separated → path). A bare `<pkg>`
+/// (empty `rest`) maps to `<root>/src/main.zz`.
+fn package_target(root: &Path, rest: &[String]) -> PathBuf {
+    if rest.is_empty() {
+        root.join("src").join("main.zz")
+    } else {
+        let mut p = root.join("src");
+        for seg in rest {
+            p = p.join(seg);
+        }
+        p.with_extension("zz")
     }
 }
 
@@ -431,6 +459,22 @@ fn resolve_module_key(
 }
 
 impl Loader {
+    /// Project name + root owning `canon` (nearest `zz.toml`), cached per
+    /// root. `None` outside any project or when the manifest cannot load
+    /// (callers fall back to legacy relative resolution, never hard-error).
+    fn package_of(&mut self, canon: &Path) -> Option<(String, PathBuf)> {
+        let root = find_project_root(canon)?;
+        if let Some(cached) = self.pkg_cache.get(&root) {
+            return cached.clone();
+        }
+        let entry = zz_pm::manifest::Manifest::load(&root.join("zz.toml"))
+            .ok()
+            .filter(|m| !m.package.name.is_empty())
+            .map(|m| (m.package.name.clone(), root.clone()));
+        self.pkg_cache.insert(root, entry.clone());
+        entry
+    }
+
     /// Record an importer → imported edge (deduped). Small vecs; linear
     /// scan is cheaper than a second map.
     fn record_edge(edges: &mut HashMap<PathBuf, Vec<PathBuf>>, importer: &Path, dep: &Path) {
@@ -589,6 +633,114 @@ impl Loader {
                     self.stdlib_aliases.push((module.clone(), ns.clone()));
                 }
                 continue;
+            }
+            // Implicit package mapping (`import app.math`, issue #288):
+            // the first segment matches `package.name` in the nearest
+            // `zz.toml` → `<root>/src/...`. Precedence: std (above) >
+            // self-package (here) > registry/plugin (below) > relative
+            // file (bottom). No manifest or no name match → fall through
+            // to the legacy branches untouched.
+            if let Some((pkg_name, root)) = self.package_of(&canon) {
+                if normalize_pkg(&pkg_name) == imp[0] {
+                    let candidate = package_target(&root, &imp[1..]);
+                    if !candidate.is_file() {
+                        let want = if imp.len() == 1 {
+                            "src/main.zz".to_string()
+                        } else {
+                            format!("src/{}.zz", imp[1..].join("/"))
+                        };
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(
+                                format!(
+                                    "package `{}` resolved to `{}`: file not found\n\
+                                     hint: `{}` maps to `{want}` under the project root; check the `src/` layout",
+                                    imp[0],
+                                    candidate.display(),
+                                    imp.join("."),
+                                ),
+                                Span::new(0, 0),
+                            )],
+                        });
+                        continue;
+                    }
+                    // Bare `import app` binds `src/main.zz` under the
+                    // package name itself (not the `main` file stem) so
+                    // selective imports (`import app(x)`) and qualified
+                    // calls (`app.x()`) agree. Deeper paths bind under
+                    // their file stem (or `as` alias), mirroring
+                    // relative imports.
+                    let effective_alias = imp_alias.clone().or_else(|| {
+                        if imp.len() == 1 {
+                            Some(imp[0].clone())
+                        } else {
+                            None
+                        }
+                    });
+                    // Report cycles at the import site, against the
+                    // importer's source (mirrors the relative branch).
+                    if let Ok(dep) = candidate.canonicalize() {
+                        if self.visiting.contains(&dep) {
+                            self.errors.push(LoadError {
+                                 name: path.display().to_string(),
+                                 source: source.clone(),
+                                 diags: vec![error_at(
+                                     format!(
+                                         "circular import: `{}` imports `{}`, which (transitively) imports `{}`\n\
+                                          hint: circular imports are not allowed; consider restructuring your code to break the cycle",
+                                         path.display(),
+                                         candidate.display(),
+                                         path.display()
+                                     ),
+                                     Span::new(0, 0),
+                                 )],
+                             });
+                            continue;
+                        }
+                        // A module already loaded under a different
+                        // namespace cannot be re-imported under another one.
+                        if let Some(existing) = self.ns_of.get(&dep) {
+                            let want = module_ns(effective_alias.as_deref(), &candidate);
+                            if existing != &want {
+                                self.errors.push(LoadError {
+                                     name: path.display().to_string(),
+                                     source: source.clone(),
+                                     diags: vec![error_at(
+                                         format!(
+                                             "`{}` is imported under two namespaces: `{existing}` and `{want}`\n\
+                                              hint: each file can only be imported under one namespace; \
+                                              consider using an alias to avoid the conflict",
+                                             candidate.display()
+                                         ),
+                                         Span::new(0, 0),
+                                     )],
+                                 });
+                                continue;
+                            }
+                        }
+                    }
+                    self.load_file(&candidate, effective_alias.as_deref())?;
+                    // S1 dep edge (package file). Re-canonicalize
+                    // defensively (filesystem cache hot).
+                    if let Ok(dep) = candidate.canonicalize() {
+                        Self::record_edge(&mut self.dep_edges, &canon, &dep);
+                    }
+                    if is_selective {
+                        // Effective namespace (`as` alias, package name
+                        // for bare imports), matching the registry branch:
+                        // seeds hold `ns.sym`.
+                        let mut sel_path = imp.clone();
+                        if let Some(a) = effective_alias.as_deref() {
+                            if let Some(last) = sel_path.last_mut() {
+                                *last = a.to_string();
+                            }
+                        }
+                        self.selective_imports
+                            .push((canon.clone(), sel_path, imp_items, false));
+                    }
+                    continue;
+                }
             }
             // Plugin dependency import (`import zimg`): the dep ships a
             // `plugin.zzi` manifest. Merge its signatures under their
