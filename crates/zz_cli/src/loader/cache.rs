@@ -8,14 +8,14 @@
 //!
 //! v1 scope: the `zz check` path only (`zz run`/`build`/`test` bypass and
 //! recompute — they need span types and codegen inputs this cache does not
-//! store). Parse still runs (import discovery needs the AST); only the
-//! check is skipped on hit. `ZZ_CHECK_CACHE=0` disables entirely.
+//! store). `ZZ_CHECK_CACHE=0` disables entirely.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 use zz_checker::{AliasSig, EnumSig, FuncSig, StructSig, Type};
+use zz_frontend::ast::Program;
 use zz_frontend::diag::RawDiag;
 
 /// What one module contributes on a cache hit: everything `finish()` needs
@@ -213,6 +213,55 @@ fn mem_insert(key: &str, module: CachedModule<'static>, serialized_len: usize) {
         }
         table.bytes += serialized_len;
         table.map.insert(key.to_string(), module);
+    }
+}
+
+/// In-process memo of parsed+expanded programs (pre-namespace), keyed by
+/// (canonical path, source content hash). A multi-entry `zz check` run
+/// re-parses every dependency closure per entry file; the memo serves
+/// repeats from memory (one clone) instead of lex+parse+decorator
+/// expansion. Namespace rewriting still runs per consumer on the clone,
+/// so the same file under different aliases stays distinct (#290):
+/// the memoized program is namespace-agnostic by construction.
+///
+/// Bounded by entry count ([`MAX_PARSED_PROGRAMS`]): past the cap the
+/// table resets (eviction only costs future hits, never correctness).
+/// Content-hash keys make stale hits impossible: edited files hash
+/// differently (including across `--fix` writes inside one run).
+/// Mutex-guarded like the outcome memo above.
+const MAX_PARSED_PROGRAMS: usize = 512;
+
+static PARSED_PROGRAMS: std::sync::OnceLock<std::sync::Mutex<HashMap<(PathBuf, String), Program>>> =
+    std::sync::OnceLock::new();
+
+fn parsed_table() -> &'static std::sync::Mutex<HashMap<(PathBuf, String), Program>> {
+    PARSED_PROGRAMS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Content hash for program memo keys (SHA-256 hex, like module keys).
+pub(crate) fn source_hash(source: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(source.as_bytes());
+    hex_of(h)
+}
+
+/// Fetch a memoized program. Cloned per caller: consumers namespace-rewrite
+/// in place, so sharing the stored value would corrupt later hits.
+pub(crate) fn parsed_get(canon: &std::path::Path, hash: &str) -> Option<Program> {
+    parsed_table()
+        .lock()
+        .ok()?
+        .get(&(canon.to_path_buf(), hash.to_string()))
+        .cloned()
+}
+
+/// Store a parsed+expanded (pre-namespace) program for reuse.
+pub(crate) fn parsed_insert(canon: &std::path::Path, hash: &str, program: &Program) {
+    if let Ok(mut table) = parsed_table().lock() {
+        if table.len() >= MAX_PARSED_PROGRAMS {
+            table.clear();
+        }
+        table.insert((canon.to_path_buf(), hash.to_string()), program.clone());
     }
 }
 
@@ -450,5 +499,46 @@ mod tests {
             );
             let _ = std::fs::remove_file(cache_path(&key));
         });
+    }
+
+    fn parse_program(src: &str) -> Program {
+        let parsed = zz_frontend::parse(src);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        parsed.program
+    }
+
+    #[test]
+    fn parsed_memo_roundtrip() {
+        // Process-global like the outcome memo: unique path per test only
+        // needs unique content (keys are content hashes).
+        let canon = PathBuf::from(format!("/tmp/zz-unit-parsed-{}", std::process::id()));
+        let src = "pub func answer() -> int {\n 41\n}\n";
+        let hash = source_hash(src);
+        assert!(parsed_get(&canon, &hash).is_none(), "cold miss");
+        let program = parse_program(src);
+        parsed_insert(&canon, &hash, &program);
+        let back = parsed_get(&canon, &hash).expect("warm hit");
+        assert_eq!(back, program, "memo must serve identical AST");
+    }
+
+    #[test]
+    fn parsed_memo_content_sensitive() {
+        let canon = PathBuf::from(format!(
+            "/tmp/zz-unit-parsed-sensitive-{}",
+            std::process::id()
+        ));
+        let program = parse_program("pub func v() -> int {\n 1\n}\n");
+        let h1 = source_hash("pub func v() -> int {\n 1\n}\n");
+        parsed_insert(&canon, &h1, &program);
+        let h2 = source_hash("pub func v() -> int {\n 2\n}\n");
+        assert!(
+            parsed_get(&canon, &h2).is_none(),
+            "edited content must miss"
+        );
+        let other = PathBuf::from(format!("/tmp/zz-unit-parsed-other-{}", std::process::id()));
+        assert!(
+            parsed_get(&other, &h1).is_none(),
+            "different path must miss"
+        );
     }
 }
