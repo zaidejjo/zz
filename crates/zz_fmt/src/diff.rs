@@ -6,6 +6,27 @@
 
 use crate::FmtError;
 use similar::{ChangeTag, TextDiff};
+use std::time::Duration;
+
+/// Upper bound for Myers diff computation inside `unified_diff`.
+///
+/// Diff text is display-only (exit codes and formatted output never depend
+/// on it), so a totally-rewritten file must not stall `--check`: without a
+/// deadline, Myers is O(N*D) and a 2250-function machine-generated file
+/// (every line changed) burns seconds. On timeout Myers still returns a
+/// usable divide-and-conquer diff, just possibly coarser. Normal small
+/// diffs finish in microseconds and never notice this.
+const DIFF_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Maximum hunks rendered into one diff. A whole-file rewrite yields
+/// thousands of hunks nobody reads; truncate with a note instead of
+/// flooding the terminal / CI log.
+const MAX_HUNKS: usize = 50;
+
+/// Maximum diff body lines rendered into one diff. When Myers gives up
+/// early (deadline), the whole file can collapse into a single giant
+/// hunk — the hunk cap above never fires, so bound the lines too.
+const MAX_DIFF_LINES: usize = 200;
 
 /// Old-side start index and length covered by `op`.
 fn op_old_range(op: &similar::DiffOp) -> (usize, usize) {
@@ -43,13 +64,19 @@ pub fn unified_diff(path: &str, original: &str, formatted: &str) -> Result<Strin
         return Ok(String::new());
     }
 
-    let diff = TextDiff::from_lines(original, formatted);
+    let diff = TextDiff::configure()
+        .timeout(DIFF_TIMEOUT)
+        .diff_lines(original, formatted);
     let mut out = String::new();
     out.push_str(&format!("--- {path}\n+++ {path}\n"));
 
     // `grouped_ops(3)` returns a list of hunks, each a list of
     // line-level DiffOps with up to 3 lines of context.
-    for (idx, hunk) in diff.grouped_ops(3).iter().enumerate() {
+    let hunks = diff.grouped_ops(3);
+    let total_hunks = hunks.len();
+    let mut lines_emitted = 0usize;
+    let mut truncated = total_hunks > MAX_HUNKS;
+    for (idx, hunk) in hunks.iter().take(MAX_HUNKS).enumerate() {
         if idx > 0 {
             out.push('\n');
         }
@@ -74,6 +101,10 @@ pub fn unified_diff(path: &str, original: &str, formatted: &str) -> Result<Strin
             // the op. We re-emit each one with the right sign and
             // ANSI color.
             for change in diff.iter_changes(op) {
+                if lines_emitted >= MAX_DIFF_LINES {
+                    truncated = true;
+                    break;
+                }
                 let (sign, prefix) = match change.tag() {
                     ChangeTag::Equal => (' ', "\x1b[0m"),
                     ChangeTag::Insert => ('+', "\x1b[32m"), // green
@@ -86,8 +117,18 @@ pub fn unified_diff(path: &str, original: &str, formatted: &str) -> Result<Strin
                     out.push('\n');
                 }
                 out.push_str("\x1b[0m");
+                lines_emitted += 1;
+            }
+            if lines_emitted >= MAX_DIFF_LINES {
+                truncated = true;
+                break;
             }
         }
+    }
+    if truncated {
+        out.push_str(&format!(
+            "\n... (diff truncated: {total_hunks} hunks, run `zz fmt` to apply)\n",
+        ));
     }
 
     Ok(out)
@@ -164,5 +205,36 @@ mod tests {
         assert!(d.contains("@@"));
         let hunk_count = d.matches("@@").count();
         assert!(hunk_count >= 2, "got {hunk_count} hunks in: {d}");
+    }
+
+    #[test]
+    fn small_diff_has_no_truncation_note() {
+        let d = unified_diff("a.zz", "x := 1\n", "x := 2\n").unwrap();
+        assert!(!d.contains("truncated"), "unexpected truncation: {d}");
+    }
+
+    #[test]
+    fn whole_file_rewrite_diffs_fast_and_truncates() {
+        // #326: a totally-rewritten file (every line changed) sent Myers
+        // O(N*D) into seconds. The deadline bounds computation and the
+        // hunk cap bounds rendering; the partial diff stays usable.
+        let original: String = (0..2400)
+            .map(|i| format!("pub func f{i}(x: int) -> int {{ x + 1 }}\n"))
+            .collect();
+        let formatted: String = (0..2400)
+            .map(|i| format!("pub func f{i}(x: int) -> int {{\n    x + 1\n}}\n"))
+            .collect();
+        let start = std::time::Instant::now();
+        let d = unified_diff("big.zz", &original, &formatted).unwrap();
+        let elapsed = start.elapsed();
+        assert!(!d.is_empty(), "rewrite must produce a diff");
+        assert!(
+            d.contains("diff truncated"),
+            "huge diff must carry truncation note"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "diff took too long: {elapsed:?}"
+        );
     }
 }
