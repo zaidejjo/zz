@@ -224,18 +224,25 @@ fn mem_insert(key: &str, module: CachedModule<'static>, serialized_len: usize) {
 /// so the same file under different aliases stays distinct (#290):
 /// the memoized program is namespace-agnostic by construction.
 ///
-/// Bounded by entry count ([`MAX_PARSED_PROGRAMS`]): past the cap the
-/// table resets (eviction only costs future hits, never correctness).
+/// Bounded by retained source bytes ([`MAX_PARSED_BYTES`]): past the cap
+/// the table resets (eviction only costs future hits, never correctness).
+/// Source length proxies AST size without measuring it.
 /// Content-hash keys make stale hits impossible: edited files hash
 /// differently (including across `--fix` writes inside one run).
 /// Mutex-guarded like the outcome memo above.
-const MAX_PARSED_PROGRAMS: usize = 512;
+const MAX_PARSED_BYTES: usize = 64 * 1024 * 1024;
 
-static PARSED_PROGRAMS: std::sync::OnceLock<std::sync::Mutex<HashMap<(PathBuf, String), Program>>> =
+#[derive(Default)]
+struct ParsedTable {
+    map: HashMap<(PathBuf, String), Program>,
+    bytes: usize,
+}
+
+static PARSED_PROGRAMS: std::sync::OnceLock<std::sync::Mutex<ParsedTable>> =
     std::sync::OnceLock::new();
 
-fn parsed_table() -> &'static std::sync::Mutex<HashMap<(PathBuf, String), Program>> {
-    PARSED_PROGRAMS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+fn parsed_table() -> &'static std::sync::Mutex<ParsedTable> {
+    PARSED_PROGRAMS.get_or_init(|| std::sync::Mutex::new(ParsedTable::default()))
 }
 
 /// Content hash for program memo keys (SHA-256 hex, like module keys).
@@ -251,18 +258,203 @@ pub(crate) fn parsed_get(canon: &std::path::Path, hash: &str) -> Option<Program>
     parsed_table()
         .lock()
         .ok()?
+        .map
         .get(&(canon.to_path_buf(), hash.to_string()))
         .cloned()
 }
 
 /// Store a parsed+expanded (pre-namespace) program for reuse.
-pub(crate) fn parsed_insert(canon: &std::path::Path, hash: &str, program: &Program) {
+/// `source_len` accounts the entry against the byte cap.
+pub(crate) fn parsed_insert(
+    canon: &std::path::Path,
+    hash: &str,
+    program: &Program,
+    source_len: usize,
+) {
     if let Ok(mut table) = parsed_table().lock() {
-        if table.len() >= MAX_PARSED_PROGRAMS {
-            table.clear();
+        if table.bytes + source_len > MAX_PARSED_BYTES {
+            table.map.clear();
+            table.bytes = 0;
         }
-        table.insert((canon.to_path_buf(), hash.to_string()), program.clone());
+        table.bytes += source_len;
+        table
+            .map
+            .insert((canon.to_path_buf(), hash.to_string()), program.clone());
     }
+}
+
+/// Process-wide memos for import resolution (#233).
+///
+/// Every bare `import foo` otherwise re-walks ancestors (canonicalize +
+/// `exists()` probes per level), re-parses `zz.toml` + `zz.lock` (TOML),
+/// and re-stats candidate entries — per import, per entry file. These
+/// memoize the pure lookups. Nothing they observe changes mid-run:
+/// discovery enumerates files upfront and `--fix` only rewrites `.zz`
+/// files (manifest/lock reads additionally revalidate mtimes, so even a
+/// concurrent manifest edit can only cause a reload, never a stale hit).
+///
+/// All tables are clear-on-overflow capped (eviction costs hits only)
+/// and mutex-guarded like the memos above.
+const MAX_FS_ENTRIES: usize = 4096;
+const MAX_MANIFEST_ENTRIES: usize = 1024;
+
+static CANON_MEMO: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, Result<PathBuf, String>>>,
+> = std::sync::OnceLock::new();
+static ROOT_MEMO: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
+    std::sync::OnceLock::new();
+static ROOTS_MEMO: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Vec<PathBuf>>>> =
+    std::sync::OnceLock::new();
+
+fn memo_capped_insert<K: std::hash::Hash + Eq, V>(map: &mut HashMap<K, V>, cap: usize, k: K, v: V) {
+    if map.len() >= cap {
+        map.clear();
+    }
+    map.insert(k, v);
+}
+
+/// Memoized `path.canonicalize()`. Errors memoize too (absent paths stay
+/// absent within a run; discovery is upfront). The io error string is
+/// retained so callers render byte-identical diagnostics.
+pub(crate) fn canon(path: &std::path::Path) -> Result<PathBuf, String> {
+    if let Some(hit) = CANON_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|m| m.get(path).cloned())
+    {
+        return hit;
+    }
+    let v = path.canonicalize().map_err(|e| e.to_string());
+    if let Ok(mut m) = CANON_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        memo_capped_insert(&mut m, MAX_FS_ENTRIES, path.to_path_buf(), v.clone());
+    }
+    v
+}
+
+/// Memoized project-root walk (nearest ancestor holding `zz.toml`).
+/// `walk` computes it on miss; `None` (outside any project) memoizes too.
+pub(crate) fn project_root_memo(
+    canon_path: &std::path::Path,
+    walk: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(hit) = ROOT_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|m| m.get(canon_path).cloned())
+    {
+        return hit;
+    }
+    let v = walk();
+    if let Ok(mut m) = ROOT_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        memo_capped_insert(&mut m, MAX_FS_ENTRIES, canon_path.to_path_buf(), v.clone());
+    }
+    v
+}
+
+/// Memoized ancestor-roots walk (nearest-first `zz.toml` holders).
+pub(crate) fn ancestor_roots_memo(
+    canon_path: &std::path::Path,
+    walk: impl FnOnce() -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    if let Some(hit) = ROOTS_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|m| m.get(canon_path).cloned())
+    {
+        return hit;
+    }
+    let v = walk();
+    if let Ok(mut m) = ROOTS_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        memo_capped_insert(&mut m, MAX_FS_ENTRIES, canon_path.to_path_buf(), v.clone());
+    }
+    v
+}
+
+/// Memoized manifest+lock loads per project root, validated by both
+/// files' mtimes on every hit. Partial states memoize too (manifest
+/// without lock is the common lockless-project shape): any file
+/// appearing, disappearing, or changing busts the mtime match and
+/// reloads. Miss cost only, never stale data.
+type ManifestEntry = (
+    Option<zz_pm::manifest::Manifest>,
+    Option<zz_pm::lock::Lockfile>,
+    Option<std::time::SystemTime>,
+    Option<std::time::SystemTime>,
+);
+
+static MANIFEST_MEMO: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, ManifestEntry>>> =
+    std::sync::OnceLock::new();
+
+/// Memoized manifest alone (no lockfile required). `package_of` resolves
+/// package names for projects that never generated a lock.
+pub(crate) fn manifest_of(root: &std::path::Path) -> Option<zz_pm::manifest::Manifest> {
+    manifest_entry(root).0
+}
+
+/// Shared manifest+lock load with mtime validation.
+fn manifest_entry(
+    root: &std::path::Path,
+) -> (
+    Option<zz_pm::manifest::Manifest>,
+    Option<zz_pm::lock::Lockfile>,
+) {
+    let toml = root.join("zz.toml");
+    let lock = root.join("zz.lock");
+    let mt_toml = file_mtime(&toml);
+    let mt_lock = file_mtime(&lock);
+    if let Some((man, lck, h_toml, h_lock)) = MANIFEST_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|m| m.get(root).cloned())
+    {
+        if h_toml == mt_toml && h_lock == mt_lock {
+            return (man, lck);
+        }
+        // Changed under us: fall through and reload.
+    }
+    let man = zz_pm::manifest::Manifest::load(&toml).ok();
+    let lck = zz_pm::lock::Lockfile::load(&lock).ok();
+    if let Ok(mut m) = MANIFEST_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        memo_capped_insert(
+            &mut m,
+            MAX_MANIFEST_ENTRIES,
+            root.to_path_buf(),
+            (man.clone(), lck.clone(), mt_toml, mt_lock),
+        );
+    }
+    (man, lck)
+}
+
+fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Memoized `(Manifest, Lockfile)` per project root. Both files must
+/// parse; entries revalidate both files' mtimes on every hit (a
+/// concurrent manifest/lock edit reloads instead of serving stale deps:
+/// miss cost, never wrong data). Callers needing only the manifest
+/// (no lock required) use [`manifest_of`].
+pub(crate) fn manifest_lock(
+    root: &std::path::Path,
+) -> Option<(zz_pm::manifest::Manifest, zz_pm::lock::Lockfile)> {
+    let (man, lck) = manifest_entry(root);
+    Some((man?, lck?))
 }
 
 /// Isolated cache dir + serialized env for cache-behavior tests.
@@ -516,7 +708,7 @@ mod tests {
         let hash = source_hash(src);
         assert!(parsed_get(&canon, &hash).is_none(), "cold miss");
         let program = parse_program(src);
-        parsed_insert(&canon, &hash, &program);
+        parsed_insert(&canon, &hash, &program, src.len());
         let back = parsed_get(&canon, &hash).expect("warm hit");
         assert_eq!(back, program, "memo must serve identical AST");
     }
@@ -529,7 +721,7 @@ mod tests {
         ));
         let program = parse_program("pub func v() -> int {\n 1\n}\n");
         let h1 = source_hash("pub func v() -> int {\n 1\n}\n");
-        parsed_insert(&canon, &h1, &program);
+        parsed_insert(&canon, &h1, &program, 28);
         let h2 = source_hash("pub func v() -> int {\n 2\n}\n");
         assert!(
             parsed_get(&canon, &h2).is_none(),
@@ -540,5 +732,54 @@ mod tests {
             parsed_get(&other, &h1).is_none(),
             "different path must miss"
         );
+    }
+
+    #[test]
+    fn canon_memo_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("zz-unit-canon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("m.zz");
+        std::fs::write(&file, b"x := 1\n").unwrap();
+        let direct = file.canonicalize().expect("setup");
+        assert_eq!(canon(&file), Ok(direct.clone()), "hit must equal raw");
+        assert_eq!(canon(&file), Ok(direct), "repeat must serve memoized");
+        let missing = dir.join("nope.zz");
+        assert!(canon(&missing).is_err(), "absent path errors");
+        assert!(canon(&missing).is_err(), "negative hit stays error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_lock_negative_memo() {
+        let dir = std::env::temp_dir().join(format!("zz-unit-manneg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(manifest_lock(&dir).is_none(), "no manifest/lock -> None");
+        assert!(manifest_lock(&dir).is_none(), "negative hit stands");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_lock_positive_memo() {
+        let dir = std::env::temp_dir().join(format!("zz-unit-manpos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("zz.toml"),
+            "[package]\nname = \"memo-test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("zz.lock"),
+            "version = 1\ndeps = []\nchecksum = \"\"\n",
+        )
+        .unwrap();
+        let first = manifest_lock(&dir).expect("both files present");
+        assert_eq!(first.0.package.name, "memo-test");
+        assert!(first.1.deps.is_empty());
+        let second = manifest_lock(&dir).expect("mtime-validated hit");
+        assert_eq!(second.0.package.name, "memo-test");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
