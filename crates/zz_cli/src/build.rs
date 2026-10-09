@@ -1322,8 +1322,8 @@ pub fn build_release(
             return Err(e.to_string());
         }
     } else if std::env::var("ZZ_CODEGEN_UNITS").is_ok_and(|v| v == "1") {
-        // Rollout gate for per-module translation units (serial compile
-        // for now; parallel fan-out follows): same binary out, split TUs.
+        // Rollout gate for per-module translation units (parallel
+        // clang fan-out, serial link): same binary out, split TUs.
         if let Err(e) = zz_codegen::build_native_units_with(
             &pruned, &reach, &main_key, opts, target, &clang, &tmp,
         ) {

@@ -3624,6 +3624,7 @@ dependencies = [
 name = "zz_codegen"
 version = "0.2.2"
 dependencies = [
+ "rayon",
  "zz_checker",
  "zz_frontend",
  "zz_hir",
