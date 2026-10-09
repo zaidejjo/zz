@@ -7186,6 +7186,73 @@ zz_value zz_fs_read(zz_value path, int *err) {
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
 }
 
+// fs.scan_counts(path, markers, bstart, bend, nested, whole) →
+// Result<[lines, code, comments, blanks, binary]>: fused read +
+// binary-sniff + line classification in one call (one native crossing
+// per file instead of read + NUL check + classify). `binary` is 1 when
+// a NUL byte is present (counts zeroed, caller skips — mirrors the
+// read_to_string + has_nul + classify composition). Missing/unreadable
+// files and invalid UTF-8 are `.err` (`fs:scan_counts:<code>: <path>`,
+// same codes as `read_to_string`).
+zz_value zz_fs_scan_counts(
+    zz_value path,
+    zz_value markers,
+    zz_value bstart,
+    zz_value bend,
+    zz_value nested,
+    zz_value whole,
+    int *err
+) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) return zz_fs_err1("scan_counts", p, errno);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    zz_str *out = str_alloc((size_t)sz);
+    size_t n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
+    int ferr = ferror(f);
+    fclose(f);
+    if (ferr) {
+        zz_value leak = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&leak);
+        return zz_fs_err1("scan_counts", p, EIO);
+    }
+    zz_str_ptr(out)[n] = '\0';
+    out->len = n;
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(out);
+    // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
+    if (memchr(d, 0, n) != NULL) {
+        zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&gone);
+        int sub_err = 0;
+        zz_value arr = zz_array_new();
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 1}}, &sub_err);
+        return zz_variant_ok(arr);
+    }
+    // Strict UTF-8 like `read_to_string`: non-UTF8 is unreadable
+    // (EINVAL maps to `invalid_input`, matching the VM's InvalidData).
+    if (!zz_utf8_valid(d, n)) {
+        zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&gone);
+        return zz_fs_err1("scan_counts", p, EINVAL);
+    }
+    zz_value text = (zz_value){ZZ_STR, {.s = out}};
+    int sub_err = 0;
+    zz_value arr = zz_str_classify(text, markers, bstart, bend, nested, whole, &sub_err);
+    zz_release(&text);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+    return zz_variant_ok(arr);
+}
+
 // fs.read_bytes(path) → Result<bytes> (contiguous buffer, ~1x RSS).
 zz_value zz_fs_read_bytes(zz_value path, int *err) {
     (void)err;

@@ -254,7 +254,7 @@ fn needs_blank(line: &[u8], markers: &[&[u8]], has_open: bool) -> bool {
     line.contains(&b'\"') || line.contains(&b'\'') || line.contains(&b'`')
 }
 
-fn classify_bytes(
+pub(crate) fn classify_bytes(
     text: &[u8],
     markers: &[&[u8]],
     bstart: &[u8],

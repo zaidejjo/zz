@@ -51,6 +51,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "str_bytes_test.zz", true),
     ("stdlib", "str_ord_chr_test.zz", true),
     ("stdlib", "str_classify_test.zz", true),
+    ("stdlib", "fs_scan_counts_test.zz", false),
     ("syntax", "match.zz", false),
     ("syntax", "match_assign.zz", true),
     ("syntax", "return_in_loops.zz", false),

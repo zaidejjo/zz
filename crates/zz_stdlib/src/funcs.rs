@@ -2654,6 +2654,12 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         )
     };
     let result_bytes = || Type::Result(Box::new(Type::Bytes), Box::new(Type::Str));
+    let result_int_arr = || {
+        Type::Result(
+            Box::new(Type::Array(Box::new(Type::Int))),
+            Box::new(Type::Str),
+        )
+    };
     let result_stat = || {
         Type::Result(
             Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
@@ -2735,6 +2741,18 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_str_arr(),
         ),
         ("std.fs.stat", vec![("path", Type::Str)], result_stat()),
+        (
+            "std.fs.scan_counts",
+            vec![
+                ("path", Type::Str),
+                ("markers", Type::Array(Box::new(Type::Str))),
+                ("bstart", Type::Str),
+                ("bend", Type::Str),
+                ("nested", Type::Bool),
+                ("whole", Type::Bool),
+            ],
+            result_int_arr(),
+        ),
         (
             "std.fs.open",
             vec![("path", Type::Str), ("mode", Type::Str)],
@@ -4378,6 +4396,7 @@ mod tests {
             "std.bytes.to_ints",
             "std.str.classify",
             "str.classify",
+            "std.fs.scan_counts",
             "bytes.to_ints",
             "std.str.find",
             "str.find",
@@ -4392,7 +4411,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 908);
+        assert_eq!(funcs.len(), 909);
     }
 
     #[test]

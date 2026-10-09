@@ -1,0 +1,85 @@
+// features: arrays, comparison, imports, locals, match, option-result, print, std-env, std-fs, std-process, std-str, string-literal
+// E2E: fs.scan_counts — fused read + binary-sniff + classify, one crossing.
+import std.env
+import std.fs
+import std.process
+import std.str
+
+tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+base := "/tmp/zz_scan_counts_{process.pid()}_{tok}"
+
+src_path := base + "_rust.zz"
+code_text := "// hello\nlet x = 1;\n\n/* block\nmore */\nx + 1\n"
+match fs.write(src_path, code_text) {
+    .ok(_) => println("write_ok")
+    .err(e) => println("write_err: {e}")
+}
+
+// Fused scan must equal the read + classify composition.
+match fs.scan_counts(src_path, ["//"], "/*", "*/", false, false) {
+    .ok(r) => match fs.read_to_string(src_path) {
+        .ok(text) => {
+            c := str.classify(text, ["//"], "/*", "*/", false, false)
+            same := r[0] == c[0] && r[1] == c[1] && r[2] == c[2] && r[3] == c[3] && r[4] == 0
+            println("rust={r[0]},{r[1]},{r[2]},{r[3]},{r[4]} match={same}")
+        }
+        .err(_) => println("reread_bad")
+    }
+    .err(e) => println("scan_err: {e}")
+}
+
+// No-comment fast path agrees too.
+plain_path := base + "_plain.txt"
+match fs.write(plain_path, "a\n\nb\n") {
+    .ok(_) => println("write_ok")
+    .err(e) => println("write_err: {e}")
+}
+match fs.scan_counts(plain_path, [], "", "", false, false) {
+    .ok(r) => println("plain={r[0]},{r[1]},{r[2]},{r[3]},{r[4]}")
+    .err(e) => println("scan_err: {e}")
+}
+
+// NUL byte marks binary with zeroed counts (same skip as has_nul).
+bin_path := base + "_bin.dat"
+match fs.write(bin_path, "ab\x00cd\nef\n") {
+    .ok(_) => println("write_ok")
+    .err(e) => println("write_err: {e}")
+}
+match fs.scan_counts(bin_path, ["//"], "/*", "*/", false, false) {
+    .ok(r) => println("binary={r[0]},{r[1]},{r[2]},{r[3]},{r[4]}")
+    .err(e) => println("scan_err: {e}")
+}
+
+// Missing file is .err (same skip as read_to_string).
+match fs.scan_counts(base + "_missing.zz", ["//"], "/*", "*/", false, false) {
+    .ok(_) => println("missing_bad")
+    .err(_) => println("missing_err_ok")
+}
+
+// Invalid UTF-8 is .err invalid_input (strict like read_to_string).
+raw_path := base + "_raw.bin"
+sh_body := "printf '\\xff\\xfe\\n' > {raw_path}"
+match process.run("sh", ["-c", sh_body]) {
+    .ok(_) => println("printf_ok")
+    .err(_) => println("printf_bad")
+}
+match fs.scan_counts(raw_path, ["//"], "/*", "*/", false, false) {
+    .ok(_) => println("raw_bad")
+    .err(e) => {
+        pinned := str.contains(e, "invalid_input")
+        println("raw_err_ok: {pinned}")
+    }
+}
+
+// Empty file classifies to all zeros, not binary.
+empty_path := base + "_empty.txt"
+match fs.write(empty_path, "") {
+    .ok(_) => println("write_ok")
+    .err(e) => println("write_err: {e}")
+}
+match fs.scan_counts(empty_path, ["//"], "/*", "*/", false, false) {
+    .ok(r) => println("empty={r[0]},{r[1]},{r[2]},{r[3]},{r[4]}")
+    .err(e) => println("scan_err: {e}")
+}
+
+println("fs_scan_counts_ok")
