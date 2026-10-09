@@ -1588,9 +1588,8 @@ impl Lowerer {
         // capture). Names resolving to nothing here (plain function
         // names, namespaces) are skipped.
         let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
-        let globals = self.global_name_set();
         let mut caps: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
-        for fv in zz_hir::closure_free_vars(&param_names, body, &globals) {
+        for fv in zz_hir::closure_free_vars(&param_names, body, &self.global_set) {
             // A captured name may be mutated through the shared cell
             // after this point: drop index forwarding for it (plus any
             // literal mentioning it) so later reads stay truthful.
