@@ -614,6 +614,7 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_str_find_test, "stdlib", "str_find_test.zz");
 e2e_success_test!(e2e_stdlib_str_bytes_test, "stdlib", "str_bytes_test.zz");
+e2e_success_test!(e2e_stdlib_str_ord_chr_test, "stdlib", "str_ord_chr_test.zz");
 e2e_success_test!(
     e2e_stdlib_str_classify_test,
     "stdlib",
@@ -849,6 +850,8 @@ e2e_error_test!(e2e_err_assign_in_condition, "assign_in_condition.zz");
 e2e_error_test!(e2e_err_generic_bracket_params, "generic_bracket_params.zz");
 e2e_error_test!(e2e_err_bitwise_float, "bitwise_float.zz");
 e2e_error_test!(e2e_err_bitwise_neg_shift, "bitwise_neg_shift.zz");
+e2e_error_test!(e2e_err_str_ord_multi_char, "str_ord_err.zz");
+e2e_error_test!(e2e_err_str_chr_surrogate, "str_chr_err.zz");
 e2e_error_test!(e2e_err_tuple_index_oob, "tuple_index_oob.zz");
 e2e_error_test!(e2e_err_tuple_index_dynamic, "tuple_index_dynamic.zz");
 e2e_error_test!(e2e_err_compound_type_mismatch, "compound_type_mismatch.zz");

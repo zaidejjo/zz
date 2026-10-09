@@ -870,6 +870,8 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         // Debug print preserving Option wrappers; returns its argument.
         "dbg" => Some("zz_dbg"),
         "len" => Some("zz_len"),
+        "ord" | "str.ord" | "std.str.ord" => Some("zz_ord"),
+        "chr" | "str.chr" | "std.str.chr" => Some("zz_chr"),
         "map" | "vec.map" | "std.vec.map" => Some("zz_iter_map"),
         "filter" | "vec.filter" | "std.vec.filter" => Some("zz_iter_filter"),
         "enumerate" | "vec.enumerate" | "std.vec.enumerate" => Some("zz_iter_enumerate"),

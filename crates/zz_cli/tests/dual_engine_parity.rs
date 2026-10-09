@@ -1147,6 +1147,11 @@ parity_strict!(
 parity_strict!(parity_stdlib_str_find_test, "stdlib", "str_find_test.zz");
 parity_strict!(parity_stdlib_str_bytes_test, "stdlib", "str_bytes_test.zz");
 parity_strict!(
+    parity_stdlib_str_ord_chr_test,
+    "stdlib",
+    "str_ord_chr_test.zz"
+);
+parity_strict!(
     parity_stdlib_str_classify_test,
     "stdlib",
     "str_classify_test.zz"
@@ -1214,6 +1219,8 @@ parity_strict_error!(parity_err_div_by_zero, "div_by_zero.zz");
 // M0 edge corpus: both engines fail (messages differ; error parity
 // requires failure on both sides, not identical diagnostics).
 parity_strict_error!(parity_err_edge_neg_shift, "edge_neg_shift_err.zz");
+parity_strict_error!(parity_err_str_ord_multi_char, "str_ord_err.zz");
+parity_strict_error!(parity_err_str_chr_surrogate, "str_chr_err.zz");
 parity_strict_error!(parity_err_edge_rem_zero, "edge_rem_zero_err.zz");
 parity_strict_error!(parity_err_unknown_field, "unknown_field.zz");
 parity_strict_error!(parity_err_struct_init_assign, "struct_init_assign_error.zz");

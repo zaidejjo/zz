@@ -49,6 +49,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "str_extended_test.zz", false),
     ("stdlib", "str_find_test.zz", true),
     ("stdlib", "str_bytes_test.zz", true),
+    ("stdlib", "str_ord_chr_test.zz", true),
     ("stdlib", "str_classify_test.zz", true),
     ("syntax", "match.zz", false),
     ("syntax", "match_assign.zz", true),
