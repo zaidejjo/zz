@@ -749,6 +749,11 @@ match .ok(5) {
 }
 ```
 
+`.ok`, `.err`, and `.some` always carry a payload, so their patterns
+require an argument — a bare `.ok` / `.err` is a type error. Use `_`
+to ignore the payload (`.ok(_)`, `.err(e)`). Only payloadless
+variants (`.none`) match bare.
+
 ### Nested Patterns
 
 ```zz

@@ -499,7 +499,7 @@ import std.fs
 | `fs.read_chunk_bytes` | `(f, n)` | Binary-safe chunk as `bytes` (empty at EOF) |
 | `fs.write_chunk` / `fs.seek` / `fs.flush` / `fs.close` | | Handle ops |
 | `fs.normalize` | `(path) -> str` | Lexical normalize (OS separators, `.`/`..`, roots/UNC) |
-| `fs.join` | `(a, b) -> str` | Join + normalize (`b` wins when absolute) |
+| `fs.join` | `(a, b) -> str` | Join + normalize (`b` wins when absolute, like Python/Rust — use `join(dir, "file.txt")`, not `join(dir, "/file.txt")`) |
 | `fs.basename` / `fs.dirname` | `(path) -> str` | Final segment / directory part |
 | `fs.is_absolute` | `(path) -> bool` | Rooted (`/x`, `C:\x`, `\\unc\…`) |
 | `fs.extension` | `(path) -> str` | Extension without dot |

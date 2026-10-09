@@ -1568,18 +1568,32 @@ impl Interp {
             }
             Pattern::Literal { value: lit, .. } => value_matches_lit(value, lit),
             Pattern::Variant { name, arg, .. } => {
-                let inner = match (name.as_str(), value) {
-                    ("some", Value::Option(Some(v))) => Some(v.as_ref()),
-                    ("none", Value::Option(None)) => None,
+                // Tag-first matching: a bare pattern (no payload) is a
+                // tag-only test (parity with the AOT backend, which checks
+                // `tag == ZZ_RESULT_OK/ERR`). The checker rejects bare
+                // `.ok`/`.err`/`.some` on typed code, but the runtime must
+                // still answer sanely — never the *opposite* variant. The
+                // old `(None, None) => true` encoding conflated "wrong
+                // variant" with "right variant, no payload" and matched
+                // inverted (bare `.ok` hit `Err`, bare `.err` hit `Ok`).
+                match (name.as_str(), value) {
+                    ("some", Value::Option(opt)) => match (arg.as_deref(), opt.as_deref()) {
+                        (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
+                        (None, Some(_)) => true,
+                        _ => false,
+                    },
+                    ("none", Value::Option(opt)) => arg.is_none() && opt.is_none(),
                     #[allow(clippy::manual_ok_err)]
-                    ("ok", Value::Result(r)) => match &**r {
-                        Ok(v) => Some(v),
-                        Err(_) => None,
+                    ("ok", Value::Result(r)) => match (&**r, arg.as_deref()) {
+                        (Ok(v), Some(p)) => Self::match_pattern(p, v, scope),
+                        (Ok(_), None) => true,
+                        _ => false,
                     },
                     #[allow(clippy::manual_ok_err)]
-                    ("err", Value::Result(r)) => match &**r {
-                        Err(e) => Some(e),
-                        Ok(_) => None,
+                    ("err", Value::Result(r)) => match (&**r, arg.as_deref()) {
+                        (Err(e), Some(p)) => Self::match_pattern(p, e, scope),
+                        (Err(_), None) => true,
+                        _ => false,
                     },
                     // User enums erase to qualified `Object`s
                     // (`Token.IntLit`): the pattern names the variant
@@ -1589,16 +1603,19 @@ impl Interp {
                     (vname, Value::Object(obj))
                         if obj.name.rsplit('.').next().unwrap_or("") == vname =>
                     {
-                        obj.fields
-                            .iter()
-                            .find(|(k, _)| k == "value")
-                            .map(|(_, v)| v)
+                        match (
+                            arg.as_deref(),
+                            obj.fields
+                                .iter()
+                                .find(|(k, _)| k == "value")
+                                .map(|(_, v)| v),
+                        ) {
+                            (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
+                            (None, None) => true,
+                            (None, Some(_)) => true,
+                            _ => false,
+                        }
                     }
-                    _ => return false,
-                };
-                match (arg.as_deref(), inner) {
-                    (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
-                    (None, None) => true,
                     _ => false,
                 }
             }

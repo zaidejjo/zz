@@ -3319,12 +3319,36 @@ impl Checker {
                         }
                         None
                     }
-                    (Type::Result(t, _), "ok") => {
-                        arg.as_ref().map(|p| (p.as_ref().clone(), (**t).clone()))
-                    }
-                    (Type::Result(_, e), "err") => {
-                        arg.as_ref().map(|p| (p.as_ref().clone(), (**e).clone()))
-                    }
+                    (Type::Result(t, _), "ok") => match arg {
+                        Some(p) => Some((p.as_ref().clone(), (**t).clone())),
+                        None => {
+                            self.errors.push(
+                                error_at(
+                                    "`.ok` pattern requires an argument (Result ok always carries a value)",
+                                    *span,
+                                )
+                                .with_note(
+                                    "use `.ok(v)` to bind it or `.ok(_)` to ignore it",
+                                ),
+                            );
+                            None
+                        }
+                    },
+                    (Type::Result(_, e), "err") => match arg {
+                        Some(p) => Some((p.as_ref().clone(), (**e).clone())),
+                        None => {
+                            self.errors.push(
+                                error_at(
+                                    "`.err` pattern requires an argument (Result err always carries a value)",
+                                    *span,
+                                )
+                                .with_note(
+                                    "use `.err(e)` to bind it or `.err(_)` to ignore it",
+                                ),
+                            );
+                            None
+                        }
+                    },
                     (Type::Enum(ename, eargs), vname) => {
                         match self.enum_variant_payload(ename, vname, *span) {
                             Some(Some(pty)) => {

@@ -581,6 +581,22 @@ fn match_result() {
 }
 
 #[test]
+fn match_bare_ok_on_result_errors() {
+    errors_contain(
+        "v: Result<int, str> = .ok(1)\nmatch v { .ok => 1, .err(e) => 0 }",
+        "`.ok` pattern requires an argument",
+    );
+}
+
+#[test]
+fn match_bare_err_on_result_errors() {
+    errors_contain(
+        "v: Result<int, str> = .err(\"x\")\nmatch v { .ok(n) => n, .err => 0 }",
+        "`.err` pattern requires an argument",
+    );
+}
+
+#[test]
 fn match_nonexhaustive_errors() {
     errors_contain("v := .some(1)\nmatch v { .some(n) => n }", "non-exhaustive");
 }
