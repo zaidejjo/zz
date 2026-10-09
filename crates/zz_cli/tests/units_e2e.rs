@@ -22,13 +22,22 @@ func main() {
     println(startup)
     println(helper.add1(41))
     println(triple(14))
+    println(helper.origin().sum())
     inc := |x| x + 1
     println(inc(9))
     println("units_ok")
 }
 "#;
 
-const HELPER_ZZ: &str = r#"pub func greet(name: str) -> str {
+const HELPER_ZZ: &str = r#"pub struct Point {x: int, y: int}
+
+impl Point {
+    pub func sum(self) -> int {
+        self.x + self.y
+    }
+}
+
+pub func greet(name: str) -> str {
     "hi {name}"
 }
 
@@ -40,6 +49,10 @@ greeting := greet("init")
 
 pub func get_greeting() -> str {
     greeting
+}
+
+pub func origin() -> Point {
+    Point{x: 3, y: 4}
 }
 "#;
 
