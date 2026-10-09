@@ -802,6 +802,25 @@ import std.str
 println(str.to_upper("hello"))    // "HELLO"
 ```
 
+### Package Imports
+
+Inside a project (a directory tree with `zz.toml`), the package name
+maps to `src/` from any file — so `tests/` can import `src/` modules
+without fragile `../src/...` paths:
+
+```zz
+import app.math               // <project-root>/src/math.zz, used as math.*
+import app.math(add as f)     // selective: bare `f`
+import app.utils.string_helpers as sh
+import app                     // <project-root>/src/main.zz, used as app.*
+```
+
+Rules: precedence is `std` > package > registry dependency >
+relative file; `-` and `_` spellings agree (`my-app` ⇔ `my_app`).
+One file keeps one namespace: importing the same file as both
+`app.utils` and a relative `utils` in one program is an error —
+migrate all importers to the `app.*` form.
+
 ## Blocks as Expressions
 
 Blocks evaluate to their last expression:

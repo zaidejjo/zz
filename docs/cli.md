@@ -319,6 +319,13 @@ project/
 - `import std.*` loads from the built-in standard library
 - `import .name` loads from the current directory
 - `import utils.helper` loads `utils/helper.zz` relative to the source file
+- `import <package>.path` (package name from the nearest `zz.toml`)
+  loads `<project-root>/src/path.zz`, from anywhere in the project —
+  including `tests/` files importing `src/` modules. A bare
+  `import <package>` loads `<project-root>/src/main.zz` under the
+  package name. Resolution precedence: `std` > package > registry
+  dependency > relative file. `-` and `_` spellings of the package
+  name both match (`my-app` ⇔ `my_app`).
 
 ### Circular imports
 
