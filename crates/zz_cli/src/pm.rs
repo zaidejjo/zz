@@ -34,7 +34,7 @@ pub fn init(args: &[String]) -> Result<(), String> {
 
     println!("initialized project `{}` in {}", name, dir.display());
     println!("  zz.toml: created");
-    println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
+    println!("  .gitignore: ensured (vendor/, build/, bin/)");
     if !dir.join("src/main.zz").exists() {
         println!("  src/main.zz: created");
     }
@@ -85,7 +85,7 @@ pub fn new(args: &[String]) -> Result<(), String> {
     println!("created project `{name}` at {}", project_dir.display());
     println!("  zz.toml: created");
     println!("  src/main.zz: created");
-    println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
+    println!("  .gitignore: ensured (vendor/, build/, bin/)");
 
     if no_git {
         return Ok(());

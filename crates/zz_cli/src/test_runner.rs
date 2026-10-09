@@ -1950,17 +1950,17 @@ fn build_aot_harness(
     Ok((harness_path, bin))
 }
 
-/// Remove harness sources and their published `bin/` copies.
+/// Remove harness sources and their published binaries.
 /// The content cache under `~/.zz/cache` is kept for fast reruns.
 fn cleanup_aot(bins: &mut BTreeMap<PathBuf, (PathBuf, PathBuf)>) {
     for (_, (harness, bin)) in std::mem::take(bins) {
         let _ = std::fs::remove_file(&harness);
-        // Only the `bin/` copy next to the harness goes away; the cache
+        // Only the published copy goes away; the cache
         // entry stays. Never delete anything outside the harness dir.
         if let Some(name) = harness.file_stem().and_then(|s| s.to_str()) {
             if name.starts_with(AOT_HARNESS_PREFIX) {
                 let _ = std::fs::remove_file(&bin);
-                // Drop the now-empty `bin/` dir; keep it if others use it.
+                // Drop the now-empty output dir; keep it if others use it.
                 if let Some(dir) = bin.parent() {
                     let _ = std::fs::remove_dir(dir);
                 }
@@ -2655,8 +2655,8 @@ fn collect_zz_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
                 // holds symlinks into the CAS (often self-referential via
                 // path deps), which would recurse forever. Matches the
                 // skip sets in `zz_pm::hash` / `zz_pm::cas` and the
-                // scaffolded `.gitignore` (vendor/, build/, src/bin/).
-                // `bin/` holds published AOT artifacts next to sources.
+                // scaffolded `.gitignore` (vendor/, build/, bin/).
+                // `bin/` holds published AOT artifacts at the project root.
                 if name.starts_with('.')
                     || name == "target"
                     || name == "vendor"

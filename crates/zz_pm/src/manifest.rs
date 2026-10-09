@@ -705,7 +705,10 @@ impl Manifest {
     /// outputs, and compiled binaries. `zz.toml` and `zz.lock` are
     /// deliberately absent — both are committed (lockfile = reproducibility
     /// source of truth, same convention as Cargo).
-    const GITIGNORE_ENTRIES: &[&str] = &["vendor/", "build/", "src/bin/"];
+    /// `src/bin/` is a legacy entry from when builds published next to the
+    /// source file; builds now publish to `<root>/bin/`. It stays until
+    /// existing checkouts are migrated, then gets removed.
+    const GITIGNORE_ENTRIES: &[&str] = &["vendor/", "build/", "bin/", "src/bin/"];
 
     /// Create `.gitignore` if absent, or append missing ZZ entries if
     /// present. Existing content is never removed or reordered.
@@ -948,6 +951,7 @@ foo = "^1.0"
         let content = fs::read_to_string(d.join(".gitignore")).unwrap();
         assert!(content.contains("vendor/"));
         assert!(content.contains("build/"));
+        assert!(content.lines().any(|l| l.trim() == "bin/"));
         assert!(content.contains("src/bin/"));
         assert!(!content.contains("zz.toml"));
         assert!(!content.contains("zz.lock"));
@@ -963,6 +967,7 @@ foo = "^1.0"
         assert!(content.contains("target/"));
         assert_eq!(content.matches("vendor/").count(), 1);
         assert!(content.contains("build/"));
+        assert!(content.lines().any(|l| l.trim() == "bin/"));
         assert!(content.contains("src/bin/"));
         // Idempotent: second run changes nothing.
         Manifest::ensure_gitignore(&d).unwrap();
