@@ -14,7 +14,7 @@
 //! and produce a cache miss.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::hash;
 use crate::manifest::{DepSpec, Manifest};
@@ -67,6 +67,27 @@ pub struct CacheKey {
 }
 
 impl CacheKey {
+    /// Project directory for key purposes: nearest ancestor (or self) of
+    /// the source file holding `zz.toml`, canonicalized; the source
+    /// directory when no manifest is found. Shared with the run-cache
+    /// fingerprint fast path so both agree on the closure root.
+    pub fn project_dir_for(source_path: &Path) -> PathBuf {
+        let start_dir = source_path.parent().unwrap_or(Path::new("."));
+        let canonical = start_dir
+            .canonicalize()
+            .unwrap_or_else(|_| start_dir.to_path_buf());
+        let mut project_dir = canonical.clone();
+        loop {
+            if project_dir.join("zz.toml").exists() {
+                return project_dir;
+            }
+            if !project_dir.pop() {
+                break;
+            }
+        }
+        start_dir.to_path_buf()
+    }
+
     /// Compute a cache key for the given source file and build options.
     ///
     /// This reads the manifest (if present) to discover path dependencies,
@@ -92,24 +113,7 @@ impl CacheKey {
         // the project root that holds `zz.toml`). Canonicalize first so
         // relative starts walk through real ancestors. Falls back to the
         // source directory when no manifest is found.
-        let start_dir = source_path.parent().unwrap_or(Path::new("."));
-        let canonical = start_dir
-            .canonicalize()
-            .unwrap_or_else(|_| start_dir.to_path_buf());
-        let mut project_dir = canonical.clone();
-        let mut found = false;
-        loop {
-            if project_dir.join("zz.toml").exists() {
-                found = true;
-                break;
-            }
-            if !project_dir.pop() {
-                break;
-            }
-        }
-        if !found {
-            project_dir = start_dir.to_path_buf();
-        }
+        let project_dir = Self::project_dir_for(source_path);
         let dep_hashes = compute_dep_hashes(&project_dir)?;
         let sources_hash = hash_zz_sources(&project_dir);
 
@@ -277,26 +281,35 @@ fn hash_zz_sources(project_dir: &Path) -> String {
     format!("{:016x}", h.finish())
 }
 
-fn compute_dep_hashes(project_dir: &Path) -> Result<HashMap<String, String>, String> {
+/// Path dependencies of a project: (name, live directory), from the
+/// manifest at `project_dir/zz.toml`. Missing manifest or manifest-dirs
+/// yield an empty/partial list exactly like [`compute`] treats them
+/// (nonexistent dep paths are skipped, not errors).
+pub fn path_dep_dirs(project_dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let toml_path = project_dir.join("zz.toml");
     if !toml_path.exists() {
-        return Ok(HashMap::new());
+        return Ok(Vec::new());
     }
-
     let manifest = Manifest::load(&toml_path)?;
-    let mut hashes = HashMap::new();
-
+    let mut out = Vec::new();
     for (name, spec) in &manifest.dependencies {
         if let DepSpec::Path(path_dep) = spec {
             let dep_path = project_dir.join(&path_dep.path);
             if dep_path.exists() {
-                let hash_opts = hash::HashOptions::default();
-                let content_hash = hash::hash_dir(&dep_path, &hash_opts)?;
-                hashes.insert(name.clone(), content_hash);
+                out.push((name.clone(), dep_path));
             }
         }
     }
+    Ok(out)
+}
 
+fn compute_dep_hashes(project_dir: &Path) -> Result<HashMap<String, String>, String> {
+    let mut hashes = HashMap::new();
+    for (name, dep_path) in path_dep_dirs(project_dir)? {
+        let hash_opts = hash::HashOptions::default();
+        let content_hash = hash::hash_dir(&dep_path, &hash_opts)?;
+        hashes.insert(name, content_hash);
+    }
     Ok(hashes)
 }
 

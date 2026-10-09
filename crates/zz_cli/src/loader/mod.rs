@@ -44,6 +44,11 @@ pub struct LoadError {
     pub diags: Vec<RawDiag>,
 }
 
+/// A selective stdlib import replayed for bare-name natives on scoped
+/// runs: (module, [(name, alias)]). Alias for the nested vec (clippy
+/// `type_complexity` would otherwise fire at every use site).
+pub type StdlibSelectives = Vec<(String, Vec<(String, Option<String>)>)>;
+
 /// A fully loaded program: all modules in dependency order (imports first,
 /// the entry file last), plus the accumulated checker seed.
 #[derive(Debug)]
@@ -87,6 +92,15 @@ pub struct LoadResult {
     pub import_aliases: HashMap<String, String>,
     /// Check-pipeline counters for `zz check --stats`.
     pub stats: LoadStats,
+    /// Sorted union of every stdlib module imported anywhere in the load
+    /// closure (any import kind). Scoped runs execute only these modules'
+    /// pure-ZZ programs plus their runtime deps (see
+    /// `zz_stdlib::stdlib_program_closure`).
+    pub stdlib_modules: Vec<String>,
+    /// Selective imports replayed for bare-name natives on scoped runs.
+    pub stdlib_selectives: StdlibSelectives,
+    /// Wildcard imports replayed for bare-name natives on scoped runs.
+    pub stdlib_wildcards: Vec<String>,
 }
 
 struct Loader {
@@ -156,6 +170,17 @@ struct Loader {
     selected_consts: HashMap<String, f64>,
     /// Mirrors LoadResult::stdlib_aliases while loading.
     stdlib_aliases: Vec<(String, String)>,
+    /// Every stdlib module touched by any import kind (full, selective,
+    /// wildcard), across all loaded modules including vendor deps. Drives
+    /// scoped pure-ZZ stdlib execution and scoped natives on run-cache
+    /// hits — unimported stdlib code is unreachable by checked programs.
+    stdlib_modules: std::collections::HashSet<String>,
+    /// Selective imports to replay for runtime natives on scoped runs:
+    /// (module, [(name, alias)]). Bare-name natives exist only through
+    /// these (and wildcards); full-module registration is qualified-only.
+    stdlib_selectives: StdlibSelectives,
+    /// Wildcard-imported stdlib modules, replayed like selectives on hits.
+    stdlib_wildcards: Vec<String>,
     /// S1 check-cache outcomes for `--stats` observability (#248).
     cache_hits: usize,
     cache_misses: usize,
@@ -248,6 +273,9 @@ fn load_program_impl(
         selective_imports: Vec::new(),
         selected_consts: HashMap::new(),
         stdlib_aliases: Vec::new(),
+        stdlib_modules: std::collections::HashSet::new(),
+        stdlib_selectives: Vec::new(),
+        stdlib_wildcards: Vec::new(),
         cache_hits: 0,
         cache_misses: 0,
     };
@@ -637,6 +665,7 @@ impl Loader {
                     }
                     self.register_std_ns(&ns, &module, path, &source);
                     self.stdlib_aliases.push((module.clone(), ns.clone()));
+                    self.stdlib_modules.insert(module.clone());
                 }
                 continue;
             }
@@ -1266,6 +1295,8 @@ impl Loader {
                                         }
                                     }
                                 }
+                                self.stdlib_modules.insert(module.clone());
+                                self.stdlib_wildcards.push(module.clone());
                             }
                         }
                     } else {
@@ -1333,6 +1364,8 @@ impl Loader {
                                 self.selected_consts.insert(target.clone(), val);
                             }
                         }
+                        self.stdlib_modules.insert(module.clone());
+                        self.stdlib_selectives.push((module.clone(), name_aliases));
                     }
                 } else {
                     // Local file selective import — items are in seed as ns.name.
@@ -2076,6 +2109,13 @@ impl Loader {
                 cache_misses: self.cache_misses,
                 seed_funcs: self.seed_func_keys.len(),
             },
+            stdlib_modules: {
+                let mut v: Vec<String> = self.stdlib_modules.into_iter().collect();
+                v.sort();
+                v
+            },
+            stdlib_selectives: self.stdlib_selectives,
+            stdlib_wildcards: self.stdlib_wildcards,
         }
     }
 }

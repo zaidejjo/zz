@@ -720,3 +720,42 @@ fn verify_accepts_error_declared_iterable() {
     };
     verify::verify(&module).expect("Error-declared iterable rejected");
 }
+
+#[test]
+fn verify_short_locals_fails_closed() {
+    // Regression: `func.sig.params` longer than `func.locals` (closure /
+    // spawn shapes from lowering) panicked with index-OOB instead of
+    // failing closed. Broke 29 e2e fixtures once `zz run` lowered on the
+    // miss path for the run cache. Must return Err, never panic.
+    use zz_ir::{FuncDef, FuncId, FuncSig, IrType, Module, Param, StrId, TypeId};
+    let module = Module {
+        types: vec![IrType::Unknown],
+        strings: vec!["f".to_string()],
+        consts: vec![],
+        funcs: vec![FuncDef {
+            name: StrId(0),
+            arity: 1,
+            params: vec![Param {
+                name: StrId(0),
+                default: None,
+            }],
+            sig: FuncSig {
+                params: vec![TypeId(0)],
+                ret: TypeId(0),
+            },
+            locals: vec![],
+            vartab: vec![],
+            toplevel_slots: vec![],
+            code: vec![],
+            spans: vec![],
+            max_stack: 0,
+        }],
+        entry: FuncId(0),
+    };
+    let err = verify::verify(&module).expect_err("short locals must fail closed");
+    assert!(
+        err.message.contains("fewer slots"),
+        "unexpected error: {}",
+        err.message
+    );
+}

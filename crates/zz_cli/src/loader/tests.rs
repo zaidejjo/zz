@@ -1805,3 +1805,35 @@ fn package_import_resolves_from_nested_tests_dir() {
     assert_eq!(result.bindings["check.x"], Type::Int);
     assert_eq!(result.bindings["check.y"], Type::Int);
 }
+
+#[test]
+fn stdlib_import_kinds_recorded_for_scoped_runs() {
+    // Full + selective + wildcard + aliased imports across two modules:
+    // scoped run-cache hits must replay exactly this set.
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import std.math\nimport std.str(length)\nimport dep.help\nfunc main() {\n    println(math.abs(0 - 1))\n    println(length(\"hey\"))\n    println(help.run())\n}\n",
+        ),
+        (
+            "dep/help.zz",
+            "import std.vec as v\nimport std.map(*)\npub func run() -> int {\n    v.len([1]) + 0\n}\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.stdlib_modules, vec!["map", "math", "str", "vec"]);
+    assert_eq!(
+        result.stdlib_selectives,
+        vec![("str".to_string(), vec![("length".to_string(), None)])]
+    );
+    assert_eq!(result.stdlib_wildcards, vec!["map".to_string()]);
+    // Aliased full import keeps its (module, alias) pair for mirrors.
+    assert!(
+        result
+            .stdlib_aliases
+            .contains(&("vec".to_string(), "v".to_string())),
+        "aliases: {:?}",
+        result.stdlib_aliases
+    );
+}
