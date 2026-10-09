@@ -540,6 +540,10 @@ pub struct Lowerer {
     /// Scalar-specialized callees as (name, C ret, arity), computed once
     /// (was: refiltered from `specialized` per emitted function).
     pub(crate) scalar_fn_list: Vec<(String, &'static str, usize)>,
+    /// Unit-emission mode: definitions/prototypes use external linkage so
+    /// per-module translation units link together. Off = single-TU
+    /// `static` (byte-identical legacy output).
+    pub(crate) unit_mode: std::cell::Cell<bool>,
 }
 
 impl Lowerer {
@@ -574,6 +578,7 @@ impl Lowerer {
             global_list: Vec::new(),
             global_set: std::collections::HashSet::new(),
             scalar_fn_list: Vec::new(),
+            unit_mode: std::cell::Cell::new(false),
         };
         lowerer.specialized = lowerer.compute_specialized();
         lowerer.global_list = lowerer.collect_globals();
@@ -594,6 +599,16 @@ impl Lowerer {
             }
         }
         out
+    }
+
+    /// Linkage keyword for emitted definitions/prototypes: `static` for
+    /// the single-TU path, empty (external linkage) for per-module units.
+    pub(crate) fn link_kw(&self) -> &'static str {
+        if self.unit_mode.get() {
+            ""
+        } else {
+            "static"
+        }
     }
 
     /// Enable precompiled runtime mode: the generated C omits `RUNTIME_C`
@@ -1131,7 +1146,7 @@ impl Lowerer {
     }
 
     /// C identifier for a module-level global: `zz_global_<mangled>`.
-    pub(super) fn global_cid(zz_name: &str) -> String {
+    pub(crate) fn global_cid(zz_name: &str) -> String {
         format!("zz_global_{}", mangle(zz_name))
     }
 

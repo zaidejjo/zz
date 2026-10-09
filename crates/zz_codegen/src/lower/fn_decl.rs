@@ -26,9 +26,15 @@ impl Lowerer {
             None
         };
         let signature = if let Some(ref sct) = first_struct_type {
-            format!("static zz_value {cname}({sct} *self, zz_value *args, size_t argc) {{\n")
+            format!(
+                "{} zz_value {cname}({sct} *self, zz_value *args, size_t argc) {{\n",
+                self.link_kw()
+            )
         } else {
-            format!("static zz_value {cname}(zz_value *args, size_t argc) {{\n")
+            format!(
+                "{} zz_value {cname}(zz_value *args, size_t argc) {{\n",
+                self.link_kw()
+            )
         };
         o.push_str(&signature);
         o.push_str("    (void)argc;\n");
@@ -237,7 +243,10 @@ impl Lowerer {
         } else {
             pdecls.join(", ")
         };
-        o.push_str(&format!("static {ret_c} {cname}_u({psig}) {{\n"));
+        o.push_str(&format!(
+            "{} {ret_c} {cname}_u({psig}) {{\n",
+            self.link_kw()
+        ));
         let mut names = NameCtx::new();
         names.current_scope = fname.to_string();
         self.seed_globals(&mut names);
@@ -263,7 +272,8 @@ impl Lowerer {
 
         // --- Boxed entry point: unbox args, delegate, box result. ---
         o.push_str(&format!(
-            "static zz_value {cname}(zz_value *args, size_t argc) {{\n"
+            "{} zz_value {cname}(zz_value *args, size_t argc) {{\n",
+            self.link_kw()
         ));
         o.push_str("    (void)argc;\n");
         let unboxes: Vec<String> = ptypes
