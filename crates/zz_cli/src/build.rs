@@ -976,6 +976,28 @@ pub fn project_entry(root: &Path) -> PathBuf {
     src_main
 }
 
+/// Authoritative entry point of a project root: the configured
+/// `[package] entry` when present (validated — a bad value is a loud
+/// error), else the conventional [`project_entry`], which must exist.
+pub fn resolve_entry(root: &Path) -> Result<PathBuf, String> {
+    // Configured entries validate loudly; an unloadable manifest falls
+    // through to conventional discovery (other layers report it).
+    if let Ok(manifest) = zz_pm::manifest::Manifest::load(&root.join("zz.toml")) {
+        if let Some(entry) = manifest.entry_path(root)? {
+            return Ok(entry);
+        }
+    }
+    let entry = project_entry(root);
+    if entry.is_file() {
+        return Ok(entry);
+    }
+    Err(format!(
+        "no entry file in `{}`\n\
+         hint: expected src/main.zz or main.zz (or set [package] entry)",
+        root.display()
+    ))
+}
+
 /// Binary name configured for a project root: `[package] name` when
 /// present and a safe file name, else `None` (callers fall back to the
 /// entry file stem).
@@ -998,12 +1020,14 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Default binary stem for `src`: the package name when `src` is its
-/// project's conventional entry point, else the file stem (`"app"`
+/// project's resolved entry point, else the file stem (`"app"`
 /// fallback). Never reads CWD: only the source path and its owning
 /// project matter.
 pub fn default_stem_for(src: &Path) -> String {
     if let Some(root) = crate::loader::find_project_root(src) {
-        let entry = project_entry(&root);
+        let entry = resolve_entry(&root)
+            .ok()
+            .unwrap_or_else(|| project_entry(&root));
         if same_file(src, &entry) {
             if let Some(name) = package_bin_name(&root) {
                 return name;
@@ -1382,8 +1406,103 @@ fn publish_to_bin(
                 }
             }
         }
+        reap_legacy_twin(src, &dest);
     }
     res.map(|()| dest)
+}
+
+/// Migration: drop a byte-identical legacy twin (`src/bin/<name>`, where
+/// pre-redesign publishes landed) so upgrades never accumulate
+/// duplicates. Only byte-identical files are ever removed — anything
+/// else is left alone, and the empty legacy dir goes with it.
+fn reap_legacy_twin(src: &Path, dest: &Path) {
+    let Some(name) = dest.file_name() else {
+        return;
+    };
+    let Some(parent) = src.parent() else {
+        return;
+    };
+    if parent.as_os_str().is_empty() {
+        return;
+    }
+    let legacy = parent.join("bin").join(name);
+    if same_file(&legacy, dest) || !legacy.is_file() {
+        return;
+    }
+    if files_identical(&legacy, dest) {
+        let _ = std::fs::remove_file(&legacy);
+        if let Some(dir) = legacy.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// Byte-identical files (size fast-path, then full read). Best effort:
+/// unreadable sides compare unequal.
+fn files_identical(a: &Path, b: &Path) -> bool {
+    let meta = match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => (x, y),
+        _ => return false,
+    };
+    if meta.0.len() != meta.1.len() {
+        return false;
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Stage a published binary for execution under a unique temp path plus
+/// neighboring `libstd-*` sidecars (same `$ORIGIN` rule as publishing).
+///
+/// Concurrent `run --native` invocations for same-named sources share
+/// one published destination; executing a private copy means a parallel
+/// publish can never swap the binary mid-exec. Returns the staged path
+/// and a best-effort cleanup closure.
+#[allow(clippy::type_complexity)]
+pub fn stage_exec_copy(built: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), String> {
+    static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "zz-native-exec-{}-{}",
+        std::process::id(),
+        STAGE_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create tmp: {e}"))?;
+    let name = built
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "zz_out".to_string());
+    let staged = dir.join(&name);
+    std::fs::copy(built, &staged).map_err(|e| format!("cannot stage binary: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&staged) {
+            let mut perms = meta.permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            let _ = std::fs::set_permissions(&staged, perms);
+        }
+    }
+    if let Some(from_dir) = built.parent() {
+        if let Ok(entries) = std::fs::read_dir(from_dir) {
+            for entry in entries.flatten() {
+                let side = entry.file_name().to_string_lossy().into_owned();
+                let is_sidecar = side.starts_with("libstd-")
+                    && (side.ends_with(".so") || side.ends_with(".dylib"));
+                if is_sidecar {
+                    let _ = std::fs::copy(entry.path(), dir.join(&side));
+                }
+            }
+        }
+    }
+    Ok((
+        staged.clone(),
+        Box::new(move || {
+            let _ = std::fs::remove_dir_all(&dir);
+        }),
+    ))
 }
 
 /// Build a native binary for `path` in release `mode` with default options.
@@ -1543,6 +1662,47 @@ mod tests {
             planned_dest_for(&entry, Some(Path::new("out/server")), None),
             PathBuf::from("out/server")
         );
+        // Cross targets tag the triple (Windows triples add .exe) in
+        // every destination shape — exercised on any host.
+        let win = Some("x86_64-pc-windows-gnu");
+        assert_eq!(
+            planned_dest_for(&entry, None, win),
+            root.join("bin").join("demo-pkg-x86_64-pc-windows-gnu.exe")
+        );
+        assert_eq!(
+            planned_dest_for(&src, None, win),
+            cwd.join("no-such-file-x86_64-pc-windows-gnu.exe")
+        );
+        assert_eq!(
+            planned_dest_for(&entry, Some(Path::new("out/srv")), win),
+            PathBuf::from("out/srv.exe")
+        );
+        // Configured `[package] entry` wins over the conventional one —
+        // for resolution, naming, and destination alike.
+        let cfg = base.join("cfgproj");
+        std::fs::create_dir_all(cfg.join("src")).unwrap();
+        std::fs::write(
+            cfg.join("zz.toml"),
+            "[package]\nname = \"cfg-pkg\"\nversion = \"0.1.0\"\nentry = \"src/cli.zz\"\n",
+        )
+        .unwrap();
+        let cli = cfg.join("src").join("cli.zz");
+        std::fs::write(&cli, "println(\"hi\")\n").unwrap();
+        assert_eq!(resolve_entry(&cfg).unwrap(), cli);
+        assert_eq!(default_stem_for(&cli), "cfg-pkg");
+        assert_eq!(
+            planned_dest_for(&cli, None, None),
+            cfg.join("bin").join(bin_name("cfg-pkg", None))
+        );
+        // A configured-but-missing entry is a loud error, not a silent
+        // conventional fallback.
+        std::fs::write(
+            cfg.join("zz.toml"),
+            "[package]\nname = \"cfg-pkg\"\nversion = \"0.1.0\"\nentry = \"src/gone.zz\"\n",
+        )
+        .unwrap();
+        let err = resolve_entry(&cfg).expect_err("missing configured entry must fail");
+        assert!(err.contains("does not exist"), "got:\n{err}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

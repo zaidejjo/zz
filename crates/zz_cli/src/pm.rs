@@ -1014,6 +1014,11 @@ fn project_from_dir(target: &std::path::Path) -> Result<(PathBuf, PathBuf, Strin
     })?;
     let name = manifest.package.name.clone();
     check_bin_name(&name)?;
+    // Configured `[package] entry` wins (validated loudly); otherwise the
+    // conventional entry, with install-flavored guidance when absent.
+    if let Some(entry) = manifest.entry_path(target)? {
+        return Ok((target.to_path_buf(), entry, name));
+    }
     let entry = ["src/main.zz", "main.zz"]
         .iter()
         .map(|c| target.join(c))
@@ -1021,7 +1026,7 @@ fn project_from_dir(target: &std::path::Path) -> Result<(PathBuf, PathBuf, Strin
         .ok_or_else(|| {
             format!(
                 "no entry file in `{}`\n\
-                  hint: expected src/main.zz or main.zz",
+                  hint: expected src/main.zz or main.zz (or set [package] entry)",
                 target.display()
             )
         })?;
