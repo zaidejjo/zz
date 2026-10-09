@@ -277,7 +277,15 @@ impl Checker {
                     }
                 }
             }
-            Stmt::Expr(e) => self.check_expr(e),
+            Stmt::Expr(e) => {
+                let t = self.check_expr(e);
+                // Sherlock: a discarded `Result`/`Option` silently drops
+                // errors — unless this tail is the block's value.
+                if !self.tail_is_value {
+                    self.warn_if_discarded(e, &t);
+                }
+                t
+            }
             Stmt::Struct { .. } => Type::Unit,
             // Aliases are collected and resolved in pass 1a; checking
             // the declaration itself is a no-op (uses resolve on demand).
@@ -323,7 +331,7 @@ impl Checker {
                         self.push_scope();
                         self.define_at(&vars[0].name, elem, vars[0].span);
                         self.loop_depth += 1;
-                        self.check_block(body);
+                        self.check_block_discarded(body);
                         self.loop_depth -= 1;
                         self.pop_scope();
                     }
@@ -337,7 +345,7 @@ impl Checker {
                                 self.define_at(&vars[0].name, *k, vars[0].span);
                                 self.define_at(&vars[1].name, *v, vars[1].span);
                                 self.loop_depth += 1;
-                                self.check_block(body);
+                                self.check_block_discarded(body);
                                 self.loop_depth -= 1;
                                 self.pop_scope();
                             }
@@ -356,7 +364,7 @@ impl Checker {
                                             vars[1].span,
                                         );
                                         self.loop_depth += 1;
-                                        self.check_block(body);
+                                        self.check_block_discarded(body);
                                         self.loop_depth -= 1;
                                         self.pop_scope();
                                     }
@@ -370,7 +378,7 @@ impl Checker {
                                         self.define_at(&vars[0].name, k_var, vars[0].span);
                                         self.define_at(&vars[1].name, v_var, vars[1].span);
                                         self.loop_depth += 1;
-                                        self.check_block(body);
+                                        self.check_block_discarded(body);
                                         self.loop_depth -= 1;
                                         self.pop_scope();
                                     }
@@ -385,7 +393,7 @@ impl Checker {
                                         self.define_at(&vars[0].name, Type::Unit, vars[0].span);
                                         self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                         self.loop_depth += 1;
-                                        self.check_block(body);
+                                        self.check_block_discarded(body);
                                         self.loop_depth -= 1;
                                         self.pop_scope();
                                     }
@@ -400,7 +408,7 @@ impl Checker {
                                 self.define_at(&vars[0].name, Type::Unit, vars[0].span);
                                 self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                 self.loop_depth += 1;
-                                self.check_block(body);
+                                self.check_block_discarded(body);
                                 self.loop_depth -= 1;
                                 self.pop_scope();
                             }
@@ -415,7 +423,7 @@ impl Checker {
                                 self.define_at(&vars[0].name, Type::Unit, vars[0].span);
                                 self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                 self.loop_depth += 1;
-                                self.check_block(body);
+                                self.check_block_discarded(body);
                                 self.loop_depth -= 1;
                                 self.pop_scope();
                             }
@@ -449,7 +457,9 @@ impl Checker {
                     self.errors
                         .push(error_at("`defer` outside of a function", *span));
                 }
-                self.check_expr(expr);
+                let t = self.check_expr(expr);
+                // Deferred results still vanish — same must-use rule.
+                self.warn_if_discarded(expr, &t);
                 Type::Unit
             }
             Stmt::Destructure {
@@ -752,14 +762,21 @@ impl Checker {
         // runs — warn once per statement instead of checking dead code
         // into confusing cascades.
         let mut diverged: Option<&'static str> = None;
-        for stmt in &block.stmts {
+        let last = block.stmts.len().saturating_sub(1);
+        for (i, stmt) in block.stmts.iter().enumerate() {
             if let Some(how) = diverged {
                 self.errors.push(warning_at(
                     format!("unreachable code after diverging {how}"),
                     stmt.span(),
                 ));
             }
+            // The tail expression is the block's value — unless the
+            // block itself is discarded (loop bodies) or top-level code.
+            let outer_tail_is_value = self.tail_is_value;
+            let prev_tail =
+                std::mem::replace(&mut self.tail_is_value, (i == last) && outer_tail_is_value);
             result = self.check_stmt(stmt);
+            self.tail_is_value = prev_tail;
             // A bare `return` types as `unit` (not `Never`), so track
             // syntactic divergence too — it still never falls through.
             let syntactic = matches!(
@@ -783,6 +800,65 @@ impl Checker {
         }
         self.pop_scope();
         result
+    }
+
+    /// Check a block whose value is discarded (loop bodies): tail
+    /// expressions are discards, so must-use warnings apply to them.
+    pub(crate) fn check_block_discarded(&mut self, block: &Block) -> Type {
+        let prev = std::mem::replace(&mut self.tail_is_value, false);
+        let t = self.check_block(block);
+        self.tail_is_value = prev;
+        t
+    }
+
+    /// Check a function/closure body: its tail is the return value even
+    /// when nested inside a discarded block (e.g. a `func` declared in
+    /// a loop body).
+    pub(crate) fn check_fn_body_block(&mut self, block: &Block) -> Type {
+        let prev = std::mem::replace(&mut self.tail_is_value, true);
+        let t = self.check_block(block);
+        self.tail_is_value = prev;
+        t
+    }
+
+    /// Sherlock: warn when a value-position expression discards a
+    /// `Result`/`Option`. Structural expressions (if/match/blocks) flow
+    /// from their inner statements, which are checked on their own.
+    /// Tail exemption lives with the caller: only `Stmt::Expr` tails
+    /// are block values (`defer` tails are not — its value is `unit`).
+    pub(crate) fn warn_if_discarded(&mut self, e: &Expr, t: &Type) {
+        if matches!(
+            e,
+            Expr::If { .. }
+                | Expr::While { .. }
+                | Expr::Match { .. }
+                | Expr::IfLet { .. }
+                | Expr::Block(_)
+        ) {
+            return;
+        }
+        match self.unifier.resolve(t) {
+            Type::Result(_, _) => {
+                self.errors.push(
+                    warning_at("unused `Result` — errors are silently discarded", e.span())
+                        .with_note(
+                            "use `?` to propagate, `match` to handle, or `_ :=` to ignore it explicitly",
+                        ),
+                );
+            }
+            Type::Option(_) => {
+                self.errors.push(
+                    warning_at(
+                        "unused `Option` — a missing value is silently discarded",
+                        e.span(),
+                    )
+                    .with_note(
+                        "use `?` to propagate, `match` to handle, or `_ :=` to ignore it explicitly",
+                    ),
+                );
+            }
+            _ => {}
+        }
     }
 
     // --- expressions ------------------------------------------------------
@@ -1178,7 +1254,7 @@ impl Checker {
                 let ct = self.check_expr(cond);
                 self.ensure_bool(ct, cond.span());
                 self.loop_depth += 1;
-                self.check_block(body);
+                self.check_block_discarded(body);
                 self.loop_depth -= 1;
                 Type::Unit
             }
@@ -2926,7 +3002,9 @@ impl Checker {
         }
         let ret_var = self.unifier.fresh_var();
         let prev_ret = self.current_ret.replace(ret_var.clone());
+        let prev_tail = std::mem::replace(&mut self.tail_is_value, true);
         let bt = self.check_expr(body);
+        self.tail_is_value = prev_tail;
         self.current_ret = prev_ret;
         self.pop_scope();
         // Unify body type with the return var (from any `return` statements).
@@ -2953,6 +3031,33 @@ impl Checker {
         let st = self.check_expr(scrutinee);
         let st = self.unifier.resolve(&st);
         self.check_exhaustive(&st, arms, span);
+        // Sherlock: arms after a catch-all arm can never run. A guard
+        // disqualifies the catch-all (it may fail and fall through), so
+        // only guard-free `_`/binding patterns count. Warning, not error:
+        // the program still runs, but the arm is dead code.
+        fn pat_is_catchall(pat: &zz_frontend::ast::Pattern) -> bool {
+            match pat {
+                zz_frontend::ast::Pattern::Wildcard { .. } => true,
+                zz_frontend::ast::Pattern::Binding { .. } => true,
+                zz_frontend::ast::Pattern::Or { pats, .. } => pats.iter().any(pat_is_catchall),
+                _ => false,
+            }
+        }
+        let mut seen_catchall = false;
+        for arm in arms {
+            if seen_catchall {
+                self.errors.push(
+                    warning_at(
+                        "unreachable match arm — a previous arm matches everything",
+                        arm.pat.span(),
+                    )
+                    .with_note("remove this arm or move it above the catch-all arm"),
+                );
+            }
+            if arm.guard.is_none() && pat_is_catchall(&arm.pat) {
+                seen_catchall = true;
+            }
+        }
         let mut result: Option<Type> = None;
         let mut saw_arm = false;
         for arm in arms {
@@ -3302,6 +3407,24 @@ impl Checker {
                 }
             }
             Pattern::Variant { name, arg, span } => {
+                // Sherlock: a builtin pattern constrains an uninferred
+                // scrutinee — `.ok`/`.err` proves `Result`, `.some`/`.none`
+                // proves `Option`. A later arm from the other family then
+                // reports a real mismatch instead of passing silently, and
+                // payloads bind to known types instead of fresh vars.
+                if let Type::Var(id) = self.unifier.resolve(ty) {
+                    let constrained = match name.as_str() {
+                        "ok" | "err" => Some(Type::Result(
+                            Box::new(self.unifier.fresh_var()),
+                            Box::new(self.unifier.fresh_var()),
+                        )),
+                        "some" | "none" => Some(Type::Option(Box::new(self.unifier.fresh_var()))),
+                        _ => None,
+                    };
+                    if let Some(ct) = constrained {
+                        self.unifier.bind(id, ct);
+                    }
+                }
                 let rt = self.unifier.resolve(ty);
                 let inner = match (&rt, name.as_str()) {
                     (Type::Option(inner), "some") => match arg {

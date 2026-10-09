@@ -755,6 +755,26 @@ to ignore the payload (`.ok(_)`, `.err(e)`). Only payloadless
 variants (`.none`) match bare. `zz fix` rewrites bare patterns
 automatically.
 
+### Must-use Results
+
+A `Result` or `Option` used as a bare statement is a warning, not an
+error — the value (and any error) is silently discarded:
+
+```zz
+fs.write(path, data)   // warning: unused `Result`
+```
+
+Handle it (`match`), propagate it (`?`), or ignore it explicitly
+(`_ := fs.write(path, data)`). Block tails are values, not discards,
+so `-> Result` function bodies never warn. Loop-body tails and
+`defer` expressions do warn — their values are discarded too.
+
+### Dead Arms
+
+Arms after a catch-all arm (`_` or a bare binding) can never run and
+warn as unreachable. A guarded catch-all (`_ if cond =>`) does not
+count — the guard may fail and fall through.
+
 ### Nested Patterns
 
 ```zz

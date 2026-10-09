@@ -165,7 +165,7 @@ impl Checker {
             &mut self.current_bounds,
             sig.bounds.iter().cloned().collect(),
         );
-        let body_t = self.check_block(body);
+        let body_t = self.check_fn_body_block(body);
         self.current_ret = prev_ret;
         self.current_generics = prev_gen;
         self.current_bounds = prev_bounds;

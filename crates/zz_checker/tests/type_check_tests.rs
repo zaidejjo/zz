@@ -628,6 +628,167 @@ fn match_bare_some_suggests_fixit() {
 }
 
 #[test]
+fn unused_result_statement_warns() {
+    let r = check_src(".ok(1)");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Result`")),
+        "expected unused-Result warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_option_statement_warns() {
+    let r = check_src(".some(1)");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Option`")),
+        "expected unused-Option warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn handled_result_statement_does_not_warn() {
+    let r = check_src("v := .ok(1)\nmatch v { .ok(n) => n, .err(_) => 0 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors.iter().any(|d| d.message.contains("unused")),
+        "unexpected unused warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn block_tail_result_is_a_value_not_a_discard() {
+    // Tail expressions are the block's value (implicit return) — warning
+    // here would be a false positive on `-> Result` functions.
+    let r = check_src("func f() -> Result<int, str> { .ok(1) }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors.iter().any(|d| d.message.contains("unused")),
+        "tail value must not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn loop_body_tail_result_warns() {
+    // Loop bodies discard their value every iteration — a tail `Result`
+    // there drops errors just like a statement does.
+    let r = check_src("for x in [1] { .ok(x) }");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Result`")),
+        "expected unused-Result warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn func_nested_in_loop_tail_does_not_warn() {
+    // A function boundary resets the discard context: the inner tail is
+    // a return value even inside a loop body (closures: named nested
+    // functions are not supported, so this uses closure syntax).
+    let r = check_src("for x in [1] { _c := |y: int| -> Result<int, str> { .ok(y) } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Result`")),
+        "nested closure tail must not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn builtin_pattern_constrains_uninferred_scrutinee() {
+    // `.ok`/`.err` proves `Result`: no errors, payloads get real types.
+    let r = check_src("func f(x) { match x { .ok(v) => v, .err(_) => 0 } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn cross_family_arm_after_inference_errors() {
+    // Once `.ok` pins the scrutinee to `Result`, a `.some` arm is a
+    // genuine mismatch — not silent acceptance.
+    let r = check_src("func f(x) { match x { .ok(v) => v, .some(n) => n, _ => 0 } }");
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("does not match")),
+        "expected cross-family mismatch, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn deferred_result_warns() {
+    let r = check_src("func f() { defer .ok(1) }");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Result`")),
+        "expected unused-Result warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn dead_arm_after_wildcard_warns() {
+    let r = check_src("match 1 { _ => 0, 1 => 1 }");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unreachable match arm")),
+        "expected dead-arm warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn guarded_catchall_does_not_kill_next_arm() {
+    let r = check_src("match 1 { _ if 1 > 0 => 0, 1 => 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|d| d.message.contains("unreachable match arm")),
+        "guarded catch-all must not mark next arm dead, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn match_nonexhaustive_errors() {
     errors_contain("v := .some(1)\nmatch v { .some(n) => n }", "non-exhaustive");
 }
