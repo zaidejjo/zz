@@ -1427,3 +1427,66 @@ fn e2e_input_reads_piped_line() {
     assert_eq!(exit, 0, "exit {exit}. stderr: {stderr}");
     assert_eq!(stdout.trim_end(), "got:hello", "stdout: {stdout:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Implicit package mapping (#288): temp project with `zz.toml` + `src/`
+// served to both engines. A file under `tests/` imports `src/` via the
+// package name — no fragile `../src/...` relative path.
+// ---------------------------------------------------------------------------
+
+/// Build a temp project for #288: package `app`, `src/math.zz` exporting
+/// `add`, a `tests/` @test file importing it, and a `src/`-adjacent
+/// runnable entry importing it too. Returns (dir, test_file, run_file).
+fn write_package_map_project() -> (PathBuf, PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("zz-e2e-pkgmap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(
+        dir.join("zz.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/math.zz"),
+        "pub func add(a: int, b: int) -> int { a + b }\n",
+    )
+    .unwrap();
+    let test_file = dir.join("tests/math_test.zz");
+    std::fs::write(
+        &test_file,
+        "import app.math(add as f)\n\n@test\nfunc test_pkg_add() {\n    assert_eq(f(20, 22), 42)\n    println(\"pkgmap ok\")\n}\n",
+    )
+    .unwrap();
+    let run_file = dir.join("tests/run_check.zz");
+    std::fs::write(
+        &run_file,
+        "import app.math\nfunc main() {\n    println(math.add(20, 22))\n}\n",
+    )
+    .unwrap();
+    (dir, test_file, run_file)
+}
+
+#[test]
+fn e2e_package_map_run_from_tests_dir() {
+    let (_dir, _test_file, run_file) = write_package_map_project();
+    let (exit, stdout, stderr) = run_zz(&run_file);
+    assert_eq!(
+        exit, 0,
+        "`zz run` of tests/ file importing src/ should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+    assert!(
+        stdout.lines().last().unwrap_or("").contains("42"),
+        "expected 42 in output. stdout: {stdout:?}",
+    );
+}
+
+#[test]
+fn e2e_package_map_test_runner() {
+    let (_dir, test_file, _run_file) = write_package_map_project();
+    let (exit, stdout, stderr) = run_zz_test(&test_file);
+    assert_eq!(
+        exit, 0,
+        "`zz test` of tests/ file importing src/ should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+}
