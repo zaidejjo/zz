@@ -7206,6 +7206,12 @@ zz_value zz_fs_scan_counts(
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    // A NUL inside the path can never name a file: Rust's `std::fs::read`
+    // rejects it with `InvalidInput`, so report `invalid_input` here too
+    // instead of opening the truncated prefix (never stale, never surprising).
+    if (path.s && strlen(p) != path.s->len) {
+        return zz_fs_err1("scan_counts", p, EINVAL);
+    }
     zz_fs_top_up();
     FILE *f = fopen(p, "rb");
     if (!f) return zz_fs_err1("scan_counts", p, errno);
@@ -7213,14 +7219,62 @@ zz_value zz_fs_scan_counts(
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz < 0) sz = 0;
-    zz_str *out = str_alloc((size_t)sz);
-    size_t n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
-    int ferr = ferror(f);
-    fclose(f);
-    if (ferr) {
-        zz_value leak = (zz_value){ZZ_STR, {.s = out}};
-        zz_release(&leak);
-        return zz_fs_err1("scan_counts", p, EIO);
+    zz_str *out;
+    size_t n;
+    if (sz > 0) {
+        // Regular files: one sized allocation, one read (same shape as
+        // `zz_fs_read`, so steady-state throughput is identical).
+        out = str_alloc((size_t)sz);
+        n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            zz_value leak = (zz_value){ZZ_STR, {.s = out}};
+            zz_release(&leak);
+            // Reading a directory fails here (Linux: EISDIR). The VM's
+            // `IsADirectory` kind falls through to `io_error`, so
+            // translate rather than reporting `invalid_input`.
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("scan_counts", p, e ? e : EIO);
+        }
+    } else {
+        // Pipes / procfs / sysfs / empty files report size 0: grow to EOF
+        // (same shape as `zz_fs_read_bytes`), then land in one `zz_str`.
+        size_t cap = 65536;
+        unsigned char *buf = (unsigned char *)malloc(cap > 0 ? cap : 1);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("scan_counts", p, ENOMEM);
+        }
+        n = 0;
+        size_t got;
+        int ferr = 0;
+        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                size_t ncap = cap * 2;
+                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
+                if (!nbuf) {
+                    free(buf);
+                    fclose(f);
+                    return zz_fs_err1("scan_counts", p, ENOMEM);
+                }
+                buf = nbuf;
+                cap = ncap;
+            }
+        }
+        ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("scan_counts", p, e ? e : EIO);
+        }
+        out = str_alloc(n);
+        if (n > 0) memcpy(zz_str_ptr(out), buf, n);
+        free(buf);
     }
     zz_str_ptr(out)[n] = '\0';
     out->len = n;
