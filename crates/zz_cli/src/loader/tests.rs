@@ -1505,3 +1505,206 @@ fn later_module_selective_reaches_all_funcs() {
         "plain selective const must survive into all_funcs"
     );
 }
+
+/// Manifest helper for package-mapping tests (#288).
+fn pkg_manifest(name: &str) -> String {
+    format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n")
+}
+
+#[test]
+fn package_import_resolves_from_tests_dir() {
+    // `tests/` file imports `src/` module via the package name: the
+    // core acceptance case of #288 (no fragile `../src/...` path).
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        ("tests/check.zz", "import app.math\nx := math.add(1, 2)"),
+    ]);
+    let result = load_program(&dir.join("tests/check.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.programs.len(), 2);
+    assert_eq!(result.bindings["check.x"], Type::Int);
+}
+
+#[test]
+fn package_selective_and_alias_imports() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        (
+            "src/other.zz",
+            "pub func mul(a: int, b: int) -> int { a * b }",
+        ),
+        (
+            "tests/sel.zz",
+            "import app.math(add as f)\nimport app.other as m\nx := f(1, 2)\ny := m.mul(3, 4)",
+        ),
+    ]);
+    let result = load_program(&dir.join("tests/sel.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["sel.x"], Type::Int);
+    assert_eq!(result.bindings["sel.y"], Type::Int);
+}
+
+#[test]
+fn package_wildcard_import() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        ("tests/wc.zz", "import app.math(*)\nx := add(1, 2)"),
+    ]);
+    let result = load_program(&dir.join("tests/wc.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["wc.x"], Type::Int);
+}
+
+#[test]
+fn package_bare_import_binds_package_name() {
+    // Bare `import app` loads `src/main.zz` under the `app` namespace
+    // (not the `main` file stem) so `app.x()` and `import app(x)`
+    // agree with each other.
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("src/main.zz", "pub base := 41"),
+        ("main.zz", "import app\nx := app.base + 1"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+}
+
+#[test]
+fn package_bare_selective_uses_package_ns() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("src/main.zz", "pub func who() -> int { 7 }"),
+        ("main.zz", "import app(who as w)\nx := w()"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+}
+
+#[test]
+fn package_missing_file_diagnostic() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        ("tests/bad.zz", "import app.nope\n1"),
+    ]);
+    let result = load_program(&dir.join("tests/bad.zz")).unwrap();
+    let texts = diag_texts(&result);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("resolved to") && t.contains("src/nope.zz")),
+        "expected mapping diagnostic, got: {texts:?}",
+    );
+}
+
+#[test]
+fn package_bare_missing_main_diagnostic() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[("zz.toml", manifest.as_str()), ("main.zz", "import app\n1")]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    let texts = diag_texts(&result);
+    assert!(
+        texts.iter().any(|t| t.contains("src/main.zz")),
+        "expected src/main.zz hint, got: {texts:?}",
+    );
+}
+
+#[test]
+fn package_hyphen_name_matches_underscore_import() {
+    // `package.name = "my-app"` is importable as `my_app.*`.
+    let manifest = pkg_manifest("my-app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        ("tests/check.zz", "import my_app.math\nx := math.add(1, 2)"),
+    ]);
+    let result = load_program(&dir.join("tests/check.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["check.x"], Type::Int);
+}
+
+#[test]
+fn package_mapping_beats_relative_lookalike() {
+    // A relative `./app.zz` must not shadow the package mapping: bare
+    // `import app` resolves to `src/main.zz` (precedence from #288).
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("app.zz", "pub marker := 1"),
+        ("src/main.zz", "pub base := 41"),
+        ("main.zz", "import app\nx := app.base + 1"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(
+        result.files.iter().any(|(n, _)| n.ends_with("src/main.zz")),
+        "expected src/main.zz in load set, got: {:?}",
+        result.files.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+    );
+    assert!(
+        !result.files.iter().any(|(n, _)| n.ends_with("/app.zz")),
+        "relative ./app.zz must not load, got: {:?}",
+        result.files.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn package_cycle_reported_at_import_site() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("src/a.zz", "import app.b\npub func fa() -> int { 1 }"),
+        ("src/b.zz", "import app.a\npub func fb() -> int { 2 }"),
+        ("tests/e.zz", "import app.a\n1"),
+    ]);
+    let result = load_program(&dir.join("tests/e.zz")).unwrap();
+    assert!(
+        result.errors.iter().any(|e| e
+            .diags
+            .iter()
+            .any(|d| d.message.contains("circular import"))),
+        "expected circular import error, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn non_matching_import_still_resolves_relatively() {
+    // A manifest in scope must not reroute imports whose first segment
+    // is not the package name (regression guard for #288 fallback).
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("helper.zz", "pub base := 41"),
+        ("main.zz", "import helper\nx := helper.base + 1"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+}
