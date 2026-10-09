@@ -1382,10 +1382,30 @@ fn run_native(
     } else {
         build::BuildMode::Release
     };
+    let auto_output = output.is_none();
     let rel = build::ReleaseOptions {
         embed,
         output,
         ..Default::default()
+    };
+    // Publish through a private destination when the user gave no `-o`:
+    // parallel same-named runs (e.g. the parity suites) shared one
+    // published binary, so a build could stage a sibling's program between
+    // publish and stage — rotating VM-vs-native mismatches. An explicit
+    // `-o` keeps today's shared destination (user's choice, user's race).
+    // auto_tmp tracks the private dir for best-effort cleanup below.
+    let mut auto_tmp: Option<std::path::PathBuf> = None;
+    let rel = if auto_output {
+        static RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let uniq = RUN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!("zz-run-native-{}-{uniq}", std::process::id()));
+        auto_tmp = Some(tmp.clone());
+        build::ReleaseOptions {
+            output: Some(tmp.join("zz_out")),
+            ..rel
+        }
+    } else {
+        rel
     };
     // Publish through the normal destination, then execute a private
     // staged copy: concurrent same-named publishes can never swap the
@@ -1400,6 +1420,11 @@ fn run_native(
         }
     };
     cleanup();
+    // Best-effort removal of the private publish dir (never the user's
+    // explicit `-o`): `run` must not litter temp or CWD.
+    if let Some(dir) = auto_tmp {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     if code != 0 {
         return Err(format!(
             "native program exited with code {code}\n\
