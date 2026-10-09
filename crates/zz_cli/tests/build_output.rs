@@ -294,6 +294,62 @@ fn clean_from_subdir_cleans_project_root() {
 }
 
 #[test]
+fn clean_deps_from_subdir_cleans_project_root() {
+    let dir = project_dir();
+    std::fs::create_dir_all(dir.join("bin")).expect("bin");
+    std::fs::write(dir.join("bin/app.c"), "x").expect("seed");
+    std::fs::create_dir_all(dir.join("vendor/some")).expect("vendor");
+    std::fs::write(dir.join("zz.lock"), "version = 1\n").expect("lock");
+    let (code, _, stderr) = run(&dir.join("src"), &["clean", "--deps"], &[]);
+    assert_eq!(code, 0, "clean --deps must pass.\nstderr:\n{stderr}");
+    assert!(!dir.join("bin").exists(), "root bin/ must be cleaned");
+    assert!(!dir.join("vendor").exists(), "vendor/ must be cleaned");
+    assert!(!dir.join("zz.lock").exists(), "zz.lock must be cleaned");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn configured_project(entry_value: &str, files: &[&str]) -> PathBuf {
+    let dir = fresh_root("cfgproj");
+    std::fs::write(
+        dir.join("zz.toml"),
+        format!("[package]\nname = \"{PKG}\"\nversion = \"0.1.0\"\nentry = \"{entry_value}\"\n"),
+    )
+    .expect("manifest");
+    for f in files {
+        let p = dir.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).expect("parent");
+        std::fs::write(&p, PROG).expect("fixture");
+    }
+    dir
+}
+
+#[test]
+fn configured_entry_wins_over_conventional() {
+    // No src/main.zz at all: the configured entry is the only candidate.
+    let dir = configured_project("src/cli.zz", &["src/cli.zz"]);
+    let Some(_) = happy_or_skip(&dir, &["build"]) else {
+        return;
+    };
+    let bin = dir.join("bin").join(PKG);
+    assert!(bin.is_file(), "bin/{PKG} missing");
+    let out = Command::new(&bin).output().expect("run binary");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "output_ok\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn invalid_configured_entry_errors_loudly() {
+    let dir = configured_project("src/gone.zz", &["src/main.zz"]);
+    let (code, _, stderr) = run(&dir, &["build"], &[]);
+    assert_ne!(code, 0, "missing configured entry must fail");
+    assert!(
+        stderr.contains("does not exist"),
+        "needs missing-entry error, got:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn no_clang_bare_output_stays_in_resolved_dir() {
     let dir = project_dir();
     let (code, _, stderr) = run(&dir, &["build", "-o", "server", "src/main.zz"], &no_clang());
@@ -454,6 +510,53 @@ fn absolute_path_from_other_dir_builds_owning_project() {
     assert!(!dir.join("src/bin").exists(), "legacy src/bin/ written");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&elsewhere);
+}
+
+#[test]
+fn run_native_output_flag_names_binary() {
+    let (dir, _) = standalone_dir();
+    let Some(_) = happy_or_skip(&dir, &["run", "--native", "-o", "out/app", "hello.zz"]) else {
+        return;
+    };
+    // No assertion on stdout here: happy_or_skip already asserted success;
+    // what matters is the published destination.
+    assert!(dir.join("out/app").is_file(), "out/app missing");
+    assert!(
+        !dir.join("hello").exists(),
+        "-o must redirect the published binary"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Bare `-o` in a project publishes into the project bin/ and executes.
+    let pdir = project_dir();
+    let (code, stdout, stderr) = run(&pdir, &["run", "--native", "-o", "server"], &[]);
+    if code != 0 && stderr.contains("no clang found") {
+        eprintln!("SKIP: no clang on PATH");
+        let _ = std::fs::remove_dir_all(&pdir);
+        return;
+    }
+    assert_eq!(code, 0, "native run -o must pass.\nstderr:\n{stderr}");
+    assert_eq!(stdout, "output_ok\n");
+    assert!(pdir.join("bin/server").is_file(), "bin/server missing");
+    assert!(
+        !pdir.join("src/bin").exists(),
+        "legacy src/bin/ must never be written"
+    );
+    let _ = std::fs::remove_dir_all(&pdir);
+}
+
+#[test]
+fn run_native_output_value_never_becomes_file_or_arg() {
+    // `-o hello.zz` with no positional: stripped entirely → missing-file
+    // error. If the value leaked, `hello.zz` would build and run (exit 0).
+    let (dir, _) = standalone_dir();
+    let (code, _, stderr) = run(&dir, &["run", "--native", "-o", "hello.zz"], &[]);
+    assert_ne!(code, 0, "-o value must not be treated as the file");
+    assert!(
+        stderr.contains("missing file argument"),
+        "needs missing-file error, got:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

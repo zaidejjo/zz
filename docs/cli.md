@@ -122,12 +122,18 @@ place `./<stem>`, `./<stem>.exe` (Windows), or `./<stem>-<triple>[.exe]`
 for `--target` builds in the current working directory. Project builds
 (any source under a project, or `zz build` with no argument inside one)
 publish to `<project-root>/bin/`, named after `[package] name` for the
-conventional entry (`src/main.zz`, then `main.zz`) or the file stem for
-explicit non-entry files — never `src/bin/`. Sidecars (`app.c`,
-`build.sh`, `build.bat`: reproducible manual build with a single clang
-line) sit next to the binary. `-o <name>` renames the binary (a bare
-name stays in the resolved output directory, a path is used as-is
-relative to the current directory, go-like).
+entry point or the file stem for explicit non-entry files — never
+`src/bin/`. Byte-identical `src/bin/` twins left by previous versions
+are reaped on publish; anything else there is left alone. Sidecars
+(`app.c`, `build.sh`, `build.bat`: reproducible manual build with a
+single clang line) sit next to the binary. `-o <name>` renames the
+binary (a bare name stays in the resolved output directory, a path is
+used as-is relative to the current directory, go-like).
+
+Entry point: `src/main.zz`, then `main.zz` — or `[package] entry` to
+override (e.g. `entry = "src/cli.zz"`; must stay inside the package
+and exist, else the build fails loudly). The entry also decides the
+default binary name (`[package] name`).
 
 Project discovery: `zz build` with no argument discovers the project
 from the current working directory. With an explicit source path, the
@@ -137,6 +143,11 @@ outside any project builds standalone into the current directory.
 `zz clean` operates on the discovered project root too. Builds into a
 project root ensure `bin/` is gitignored (append-only, silent), so
 pre-redesign checkouts stay clean.
+
+Concurrent builds to one destination publish atomically (last writer
+wins, never a half-written binary); `zz run --native` executes a
+private staged copy, so a parallel publish can never swap the binary
+mid-exec.
 
 Cross-compilation rules:
 
@@ -160,9 +171,9 @@ built manually on a machine with Clang.
 
 `zz run` executes through the VM and leaves no build artifacts.
 `zz run --native` builds through the cached Clang pipeline (publishing
-to the same authoritative destination as `zz build`) and executes the
-binary. The file argument defaults to the project entry inside a
-project.
+to the same authoritative destination as `zz build`, `-o` overrides
+like `build`) and executes the binary. The file argument defaults to
+the project entry inside a project.
 
 ### `zz clean` / `zz cache`
 

@@ -55,9 +55,9 @@ USAGE:
     zz eval <source>              evaluate source and print the result
     zz run [<file.zz>]            type-check and run a file (defaults to the
                                    project entry when omitted inside a project)
-    zz run --bytecode <file>      run via .zzc bytecode (compiles .zz, or
+    zz run --bytecode [<file>]    run via .zzc bytecode (compiles .zz, or
                                   loads .zzc directly with no frontend)
-    zz dis <file.zzc|file.zz>     disassemble bytecode to stable text
+    zz dis [<file.zzc|file.zz>]   disassemble bytecode to stable text
     zz test <file.zz | dir>       run @test-annotated functions
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
@@ -128,8 +128,9 @@ FLAGS:
     --static           with build, static self-contained binary (the default; explicit use errors where static is impossible)
     --dynamic          with build, dynamic debug build (-O0 -g, fast); falls back automatically where static is impossible
     --full             with build, max optimization: full LTO (-O3, DCE, stripped); with `-- <args>` runs PGO training first
-    -o, --output <name> with build, name the output binary (bare name stays in
-                          the project bin/ or standalone CWD; path is used as-is)
+    -o, --output <name> with build/run --native, name the output binary
+                          (bare name stays in the project bin/ or standalone
+                          CWD; path is used as-is)
     --pgo              with build, profile-guided optimization build (native host only)
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
@@ -231,11 +232,24 @@ fn main() -> ExitCode {
             let native = rest.iter().any(|a| a == "--native");
             let bytecode = rest.iter().any(|a| a == "--bytecode");
             let embed = parse_flag_value(rest, "--embed").map(std::path::PathBuf::from);
+            // `-o` / `--output` names the published binary, `--native`
+            // only: VM runs forward everything after the file to the
+            // script untouched.
+            let output = if native {
+                parse_flag_value(rest, "--output")
+                    .or_else(|| parse_flag_value(rest, "-o"))
+                    .map(std::path::PathBuf::from)
+            } else {
+                None
+            };
             // Strip `--embed <dir>` / `--embed=<dir>` (and `--native` /
-            // `--bytecode`) so neither the loader nor the script sees
-            // them as paths/args.
+            // `--bytecode`, plus `-o <name>` for native) so neither the
+            // loader nor the script sees them as paths/args.
             let mut args: Vec<String> = strip_flag_value(rest, "--embed", "--native");
             args.retain(|a| a != "--bytecode");
+            if native {
+                args = strip_output_flag(&args);
+            }
             let script_args = args.get(1..).unwrap_or(&[]).to_vec();
             let file = args.iter().find(|a| !a.starts_with('-'));
             if native && bytecode {
@@ -243,7 +257,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             if native {
-                match run_native(file, &script_args, embed) {
+                match run_native(file, &script_args, embed, output) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -1049,14 +1063,11 @@ fn run_bytecode(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let path = path
-        .ok_or_else(|| {
-            "missing file argument\n\n\
-             usage: zz run --bytecode <file.zz|file.zzc>\n\
-             hint: provide a .zz file (round-trips through bytecode) or a .zzc file (loads directly)"
-                .to_string()
-        })?
-        .clone();
+    let path = resolve_run_entry(
+        path,
+        "zz run --bytecode [<file.zz|file.zzc>]",
+        "provide a .zz file (round-trips through bytecode) or a .zzc file (loads directly)",
+    )?;
     if path.ends_with(".zzc") {
         run_bytecode_file(&path, script_args)
     } else {
@@ -1165,14 +1176,11 @@ fn run_bytecode_file(path: &str, script_args: &[String]) -> Result<(), String> {
 /// `zz dis <file>`: disassemble `.zzc` bytes (or a `.zz` program lowered
 /// in memory) to stable text.
 fn dis_file(path: Option<&String>) -> Result<(), String> {
-    let path = path
-        .ok_or_else(|| {
-            "missing file argument\n\n\
-             usage: zz dis <file.zzc|file.zz>\n\
-             hint: provide a .zzc file or a .zz file to disassemble"
-                .to_string()
-        })?
-        .clone();
+    let path = resolve_run_entry(
+        path,
+        "zz dis [<file.zzc|file.zz>]",
+        "provide a .zzc file or a .zz file to disassemble",
+    )?;
     if path.ends_with(".zzc") {
         let bytes = std::fs::read(&path).map_err(|e| format!("zz: cannot read {path}: {e}"))?;
         let module = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
@@ -1293,15 +1301,8 @@ fn resolve_default_entry(usage: &str, hint: &str) -> Result<String, String> {
             "missing file argument\n\nusage: {usage}\nhint: {hint}"
         ));
     };
-    let entry = build::project_entry(&root);
-    if !entry.is_file() {
-        return Err(format!(
-            "no entry file in `{}`\n\
-             hint: expected src/main.zz or main.zz",
-            root.display()
-        ));
-    }
-    Ok(entry.to_string_lossy().into_owned())
+    // resolve_entry carries actionable hints for every failure shape.
+    Ok(build::resolve_entry(&root)?.to_string_lossy().into_owned())
 }
 
 /// Resolve the entry file for `run` / `run --native`: explicit argument
@@ -1355,12 +1356,14 @@ fn run_file(
 }
 
 /// `zz run --native [<file>]`: build (cached, published to the
-/// authoritative output destination) and execute. The file argument
-/// defaults to the project entry inside a project.
+/// authoritative output destination, `-o` overrides like `build`) and
+/// execute. The file argument defaults to the project entry inside a
+/// project.
 fn run_native(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    output: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
     let resolved = resolve_run_entry(
         path,
@@ -1381,10 +1384,22 @@ fn run_native(
     };
     let rel = build::ReleaseOptions {
         embed,
+        output,
         ..Default::default()
     };
-    let cached = build::build_release(p, mode, &rel)?;
-    let code = build::exec_binary(&cached, script_args)?;
+    // Publish through the normal destination, then execute a private
+    // staged copy: concurrent same-named publishes can never swap the
+    // binary mid-exec.
+    let built = build::build_release(p, mode, &rel)?;
+    let (bin, cleanup) = build::stage_exec_copy(&built)?;
+    let code = match build::exec_binary(&bin, script_args) {
+        Ok(code) => code,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    cleanup();
     if code != 0 {
         return Err(format!(
             "native program exited with code {code}\n\
@@ -1880,6 +1895,30 @@ fn strip_flag_value(args: &[String], flag: &str, bare: &str) -> Vec<String> {
             continue;
         }
         if a == bare {
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
+/// Strip `-o <name>` / `--output <name>` (and `=` forms): `run --native`
+/// consumes the output flag itself, so the script and the positional
+/// file search must never see it or its value.
+fn strip_output_flag(args: &[String]) -> Vec<String> {
+    const FLAGS: [&str; 2] = ["-o", "--output"];
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if FLAGS.contains(&a.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        if FLAGS.iter().any(|f| a.starts_with(&format!("{f}="))) {
             continue;
         }
         out.push(a.clone());
