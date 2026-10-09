@@ -530,6 +530,16 @@ pub struct Lowerer {
     /// functions). `Return` and tail-value emitters consult it to emit raw
     /// scalar returns instead of boxed `zz_value`s.
     pub(crate) unboxed_ret: std::cell::RefCell<Option<&'static str>>,
+    /// Module globals computed once in `new` (was: rescanned from all
+    /// top-level statements per emitted function — O(F·S)). Same data as
+    /// [`Self::collect_globals`], shared by seeding and partitioning.
+    pub(crate) global_list: Vec<(String, String, String, Option<zz_checker::Type>)>,
+    /// Global ZZ names as a set, computed once (was: rebuilt per function
+    /// and per closure literal for capture analysis).
+    pub(crate) global_set: std::collections::HashSet<String>,
+    /// Scalar-specialized callees as (name, C ret, arity), computed once
+    /// (was: refiltered from `specialized` per emitted function).
+    pub(crate) scalar_fn_list: Vec<(String, &'static str, usize)>,
 }
 
 impl Lowerer {
@@ -561,9 +571,29 @@ impl Lowerer {
             stmt_direct: std::cell::Cell::new(false),
             green: std::cell::RefCell::new(None),
             precompiled: false,
+            global_list: Vec::new(),
+            global_set: std::collections::HashSet::new(),
+            scalar_fn_list: Vec::new(),
         };
         lowerer.specialized = lowerer.compute_specialized();
+        lowerer.global_list = lowerer.collect_globals();
+        lowerer.global_set = lowerer.tp.bindings.keys().cloned().collect();
+        lowerer.scalar_fn_list = lowerer.compute_scalar_fn_list();
         lowerer
+    }
+
+    /// (name, C ret, arity) for every specialized function. Pure function
+    /// of `specialized` + checker sigs; hoisted out of per-function seeding.
+    fn compute_scalar_fn_list(&self) -> Vec<(String, &'static str, usize)> {
+        let mut out = Vec::new();
+        for fname in &self.specialized {
+            if let Some(sig) = self.tp.funcs.get(fname) {
+                if let Some(ret) = Self::scalar_ctype(&sig.ret) {
+                    out.push((fname.clone(), ret, sig.params.len()));
+                }
+            }
+        }
+        out
     }
 
     /// Enable precompiled runtime mode: the generated C omits `RUNTIME_C`
@@ -737,14 +767,8 @@ impl Lowerer {
     /// `scalar_operand_type` recognizes specialized calls anywhere
     /// (function bodies, top-level code, closures).
     pub(super) fn seed_scalar_fns(&self, names: &mut NameCtx) {
-        for fname in &self.specialized {
-            if let Some(sig) = self.tp.funcs.get(fname) {
-                if let Some(ret) = Self::scalar_ctype(&sig.ret) {
-                    names
-                        .scalar_fn_sigs
-                        .insert(fname.clone(), (ret, sig.params.len()));
-                }
-            }
+        for (fname, ret, arity) in &self.scalar_fn_list {
+            names.scalar_fn_sigs.insert(fname.clone(), (*ret, *arity));
         }
     }
 
@@ -1113,10 +1137,6 @@ impl Lowerer {
 
     /// Names visible as C globals (module-level bindings). Closure free
     /// variables matching these need no environment cell.
-    pub(super) fn global_name_set(&self) -> std::collections::HashSet<String> {
-        self.tp.bindings.keys().cloned().collect()
-    }
-
     /// Names in `block` captured by a nested closure literal: bindings for
     /// these must be heap-cell-allocated so environments share them.
     pub(super) fn body_capture_set(
@@ -1124,8 +1144,7 @@ impl Lowerer {
         params: &[String],
         block: &zz_frontend::ast::Block,
     ) -> std::collections::HashSet<String> {
-        let globals = self.global_name_set();
-        zz_hir::captured_in_block(params, block, &globals)
+        zz_hir::captured_in_block(params, block, &self.global_set)
     }
 
     /// Same as [`body_capture_set`](Self::body_capture_set) for closure
@@ -1135,8 +1154,7 @@ impl Lowerer {
         params: &[String],
         body: &zz_frontend::ast::Expr,
     ) -> std::collections::HashSet<String> {
-        let globals = self.global_name_set();
-        zz_hir::captured_in_expr(params, body, &globals)
+        zz_hir::captured_in_expr(params, body, &self.global_set)
     }
 
     /// Emit a heap cell allocation + initialization for a captured binding.
@@ -1220,8 +1238,8 @@ impl Lowerer {
 
     /// Seed a NameCtx with all module-level globals.
     pub(super) fn seed_globals(&self, names: &mut NameCtx) {
-        for (zz_name, cid, ctype, checker_ty) in self.collect_globals() {
-            names.insert_global(&zz_name, &cid, &ctype, checker_ty);
+        for (zz_name, cid, ctype, checker_ty) in &self.global_list {
+            names.insert_global(zz_name, cid, ctype, checker_ty.clone());
         }
     }
 
