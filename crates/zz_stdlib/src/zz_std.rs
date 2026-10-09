@@ -51,6 +51,53 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
 /// Compiled pure-ZZ stdlib programs, computed once.
 static COMPILED: OnceLock<Vec<TypedProgram>> = OnceLock::new();
 
+/// Per-program lazy slots: scoped runs compile only the programs in the
+/// import closure instead of all fifteen (each `compile_one` is
+/// independent — same global seeds, no cross-program state). Full-access
+/// paths (`zz_stdlib_programs`, codegen) still compile everything once.
+const fn new_slot() -> OnceLock<TypedProgram> {
+    OnceLock::new()
+}
+static SLOTS: [OnceLock<TypedProgram>; 15] = [
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+    new_slot(),
+];
+
+const _: () = assert!(
+    ZZ_SOURCES.len() == 15,
+    "SLOTS must cover every embedded stdlib source"
+);
+
+/// Compile (once) and borrow one embedded program by `ZZ_SOURCES` index.
+fn program_at(idx: usize) -> &'static TypedProgram {
+    let (name, source) = ZZ_SOURCES[idx];
+    SLOTS[idx].get_or_init(|| {
+        match compile_one(
+            name,
+            source,
+            &HashMap::new(),
+            crate::funcs::stdlib_funcs_cached(),
+            &HashMap::new(),
+        ) {
+            Ok(tp) => tp,
+            Err(e) => panic!("pure-ZZ stdlib compilation failed: {e}"),
+        }
+    })
+}
+
 /// Parse, type-check, and build a [`TypedProgram`] from embedded `.zz` source.
 ///
 /// `initial_funcs` and `initial_structs` provide the stdlib signatures so the
@@ -102,28 +149,9 @@ fn compile_one(
 /// type map. The VM executes them to populate the environment with the
 /// compiled functions; AOT codegen lowers them to C.
 fn compile_all() -> Vec<TypedProgram> {
-    let initial_funcs = crate::funcs::stdlib_funcs();
-    let initial_structs: HashMap<String, StructSig> = HashMap::new();
-    let initial_bindings: HashMap<String, Type> = HashMap::new();
-
-    let mut programs = Vec::new();
-    for (name, source) in ZZ_SOURCES {
-        match compile_one(
-            name,
-            source,
-            &initial_bindings,
-            &initial_funcs,
-            &initial_structs,
-        ) {
-            Ok(tp) => programs.push(tp),
-            Err(e) => {
-                // During development, panic on compile errors so they are
-                // surfaced immediately rather than silently swallowed.
-                panic!("pure-ZZ stdlib compilation failed: {e}");
-            }
-        }
-    }
-    programs
+    (0..ZZ_SOURCES.len())
+        .map(|idx| program_at(idx).clone())
+        .collect()
 }
 
 /// Get the compiled pure-ZZ stdlib programs.
@@ -132,6 +160,122 @@ fn compile_all() -> Vec<TypedProgram> {
 /// Each element corresponds to one embedded `.zz` file, in compilation order.
 pub fn zz_stdlib_programs() -> &'static [TypedProgram] {
     COMPILED.get_or_init(compile_all)
+}
+
+/// Borrow one compiled program by `ZZ_SOURCES` index (compiles it on
+/// first use). Scoped runs resolve indices via [`stdlib_program_closure`]
+/// and touch only the needed slots — an import-free program compiles zero
+/// stdlib sources.
+pub fn zz_stdlib_program_at(idx: usize) -> &'static TypedProgram {
+    program_at(idx)
+}
+
+/// Number of embedded pure-ZZ sources (indices `0..LEN` are valid).
+pub fn zz_stdlib_program_count() -> usize {
+    ZZ_SOURCES.len()
+}
+
+/// Direct runtime dependencies between pure-ZZ stdlib programs, by index
+/// into [`ZZ_SOURCES`]: `PROGRAM_DEPS[P]` lists programs whose runtime
+/// definitions P may call (e.g. `bytes` defines `str.*` helpers on top of
+/// `vec` natives and `str` helpers).
+///
+/// Keep in sync with the sources: `stdlib_program_closure_covers_cross_calls`
+/// extracts every dotted call from each source and fails on any edge this
+/// table misses (over-inclusion is safe, under-inclusion breaks scoped runs).
+const PROGRAM_DEPS: &[&[usize]] = &[
+    &[],  // 0 str/mod.zz
+    &[],  // 1 math/mod.zz
+    &[],  // 2 collections/vec.zz
+    &[],  // 3 json/mod.zz
+    &[],  // 4 regexp/mod.zz
+    &[],  // 5 time/mod.zz
+    &[],  // 6 args/mod.zz
+    &[],  // 7 colors/mod.zz
+    &[],  // 8 path/mod.zz
+    &[],  // 9 http/mod.zz
+    &[],  // 10 collections/map.zz
+    &[],  // 11 collections/set.zz
+    &[],  // 12 dec/mod.zz
+    &[],  // 13 bytes/mod.zz
+    &[3], // 14 csv/mod.zz (csv.to_json via json.parse_or_null)
+];
+
+/// Loader modules each program serves, by `ZZ_SOURCES` index. Used by
+/// [`stdlib_program_closure`] WITHOUT compiling anything — compiling to
+/// learn ownership would defeat scoped runs. Almost always the namespaces
+/// the file declares (`bytes` also serves `str` builders; `args` serves
+/// its module via the `ArgsParser` impl block).
+/// `stdlib_program_ownership_table_exact` asserts every declared dotted
+/// namespace is served and every served name is a real loader module.
+const PROGRAM_MODULES: &[&[&str]] = &[
+    &["str"],          // 0 str/mod.zz
+    &["math"],         // 1 math/mod.zz
+    &["vec"],          // 2 collections/vec.zz
+    &["json"],         // 3 json/mod.zz
+    &["regexp"],       // 4 regexp/mod.zz
+    &["time"],         // 5 time/mod.zz
+    &["args"],         // 6 args/mod.zz
+    &["colors"],       // 7 colors/mod.zz
+    &["path"],         // 8 path/mod.zz
+    &["http"],         // 9 http/mod.zz
+    &["map"],          // 10 collections/map.zz
+    &["set"],          // 11 collections/set.zz
+    &["dec"],          // 12 dec/mod.zz
+    &["bytes", "str"], // 13 bytes/mod.zz (also defines str builders)
+    &["csv"],          // 14 csv/mod.zz
+];
+
+/// Dotted short names one program declares (`ns.name`), test oracle for
+/// the cross-call audit and the serves-table check.
+#[cfg(test)]
+fn own_func_names(tp: &TypedProgram) -> Vec<String> {
+    tp.program
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            zz_frontend::ast::Stmt::Func { name, .. } => Some(name.join(".")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Programs that must execute to serve the given loader-module namespaces:
+/// every program defining one of the namespaces, plus the [`PROGRAM_DEPS`]
+/// fixpoint (a program's runtime callees must run too). Sorted indices.
+/// Unknown modules (native-only like `sqlz`) contribute nothing — natives
+/// are always registered.
+pub fn stdlib_program_closure(modules: &[String]) -> Vec<usize> {
+    // Module → defining programs via the static ownership table (no
+    // compilation — calling `zz_stdlib_programs()` here would compile all
+    // fifteen sources on every run, defeating scoped execution).
+    let mut need = vec![false; PROGRAM_MODULES.len()];
+    for (idx, namespaces) in PROGRAM_MODULES.iter().enumerate() {
+        if namespaces.iter().any(|ns| modules.iter().any(|m| m == ns)) {
+            need[idx] = true;
+        }
+    }
+    // Fixpoint over direct deps (15 nodes — trivial loop, no worklist).
+    loop {
+        let mut changed = false;
+        for (idx, deps) in PROGRAM_DEPS.iter().enumerate() {
+            if need[idx] {
+                for &d in *deps {
+                    if d < need.len() && !need[d] {
+                        need[d] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    need.iter()
+        .enumerate()
+        .filter_map(|(i, n)| n.then_some(i))
+        .collect()
 }
 
 /// Define `std.*` canonical aliases for pure-ZZ stdlib functions.
@@ -149,7 +293,7 @@ pub fn define_canonical_purezz_aliases(
     env: &mut zz_runtime::EnvLink,
     funcs: &mut HashMap<String, zz_runtime::FuncValue>,
 ) {
-    let sigs = crate::funcs::stdlib_funcs();
+    let sigs = crate::funcs::stdlib_funcs_cached();
     let flat = env.flatten();
     for (k, v) in &flat {
         if !k.contains('.') || k.starts_with("std.") {
@@ -544,6 +688,158 @@ mod tests {
                 colors_prog.funcs.contains_key(name),
                 "{name} should be defined"
             );
+        }
+    }
+
+    /// `ns.name(` call sites in one source (best-effort tokenizer for the
+    /// audit below — false positives only over-include, never unsound).
+    fn dotted_calls(src: &str) -> Vec<(String, String)> {
+        let b = src.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let is_head = |c: u8| c.is_ascii_alphabetic() || c == b'_';
+        while i < b.len() {
+            if !is_head(b[i]) {
+                i += 1;
+                continue;
+            }
+            let mut parts = Vec::new();
+            loop {
+                let s = i;
+                while i < b.len() && is_ident(b[i]) {
+                    i += 1;
+                }
+                parts.push(src[s..i].to_string());
+                if i + 1 < b.len() && b[i] == b'.' && is_head(b[i + 1]) {
+                    i += 1;
+                    continue;
+                }
+                break;
+            }
+            let mut k = i;
+            while k < b.len() && matches!(b[k], b' ' | b'\t' | b'\n' | b'\r') {
+                k += 1;
+            }
+            // Call position: `(` directly, or generic args `<T>(`.
+            let is_call = k < b.len()
+                && (b[k] == b'(' || (b[k] == b'<' && k + 1 < b.len() && is_head(b[k + 1])));
+            if is_call && parts.len() >= 2 {
+                let name = parts.pop().unwrap();
+                out.push((parts.join("."), name));
+            }
+        }
+        out
+    }
+
+    /// The [`super::PROGRAM_DEPS`] table must cover every pure-ZZ
+    /// cross-program call: if program P calls `ns.name` and `ns.name` is
+    /// defined by program Q, the closure of {P} must contain Q. Scoped
+    /// `zz run` executions rely on this — update the table when stdlib
+    /// sources gain cross-module helpers (this test names the missing edge).
+    #[test]
+    fn stdlib_program_closure_covers_cross_calls() {
+        let programs = zz_stdlib_programs();
+        // Fully-qualified pure-ZZ func → defining program, from OWN
+        // declarations (funcs maps carry the seed — see own_func_names).
+        let mut definer: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (idx, tp) in programs.iter().enumerate() {
+            for key in super::own_func_names(tp) {
+                definer.insert(key.clone(), idx);
+                definer.insert(format!("std.{key}"), idx);
+            }
+        }
+        // Own namespaces per program (for the closure request below).
+        let own_ns: Vec<Vec<String>> = programs
+            .iter()
+            .map(|tp| {
+                let mut v: Vec<String> = super::own_func_names(tp)
+                    .iter()
+                    .map(|k| k.split('.').next().unwrap_or("").to_string())
+                    .collect();
+                v.sort();
+                v.dedup();
+                v
+            })
+            .collect();
+        let mut missing = Vec::new();
+        for (idx, (src_name, src)) in ZZ_SOURCES.iter().enumerate() {
+            for (ns, name) in dotted_calls(src) {
+                let norm = ns.strip_prefix("std.").unwrap_or(&ns);
+                let key = format!("{norm}.{name}");
+                let Some(&q) = definer.get(&key) else {
+                    continue;
+                }; // native/unknown
+                if q == idx {
+                    continue;
+                }
+                // Value-method lookalikes (`x.len(` where x is a local):
+                // conservative — still demand the edge (safe direction).
+                let closure = super::stdlib_program_closure(&own_ns[idx]);
+                if !closure.contains(&q) {
+                    missing.push(format!(
+                        "{src_name} calls {key} (program {q}): add it to PROGRAM_DEPS[{idx}]"
+                    ));
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "PROGRAM_DEPS misses {} edge(s):\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
+    /// Spot-check the closure shape: requesting one leaf module pulls its
+    /// runtime deps but not the world; unknown (native-only) modules pull
+    /// nothing.
+    #[test]
+    fn stdlib_program_closure_shape() {
+        let only_str = super::stdlib_program_closure(&["str".to_string()]);
+        // str helpers live in str/mod.zz (0) and bytes/mod.zz (13).
+        assert_eq!(only_str, vec![0, 13], "str closure, got {only_str:?}");
+        let none = super::stdlib_program_closure(&["sqlz".to_string()]);
+        assert!(none.is_empty(), "native-only modules need no programs");
+        let empty = super::stdlib_program_closure(&[]);
+        assert!(empty.is_empty(), "no imports need no programs");
+    }
+
+    /// The static [`super::PROGRAM_MODULES`] table must cover every dotted
+    /// namespace the sources declare, and name only real loader modules:
+    /// the runtime closure never compiles, so a missing entry silently
+    /// drops executable code on scoped runs (extra entries only cost time).
+    /// Non-dotted declarations (impl methods like `ArgsParser.new`) ride
+    /// with their file's module — reachable only through its import.
+    #[test]
+    fn stdlib_program_ownership_table_exact() {
+        let programs = zz_stdlib_programs();
+        assert_eq!(
+            programs.len(),
+            super::PROGRAM_MODULES.len(),
+            "SLOTS/table must cover every source"
+        );
+        let valid: std::collections::HashSet<&str> =
+            crate::STDLIB_MODULES.iter().copied().collect();
+        for (idx, tp) in programs.iter().enumerate() {
+            for key in super::own_func_names(tp) {
+                if let Some((ns, _)) = key.split_once('.') {
+                    assert!(
+                        super::PROGRAM_MODULES[idx].contains(&ns),
+                        "program {idx} declares {key} but serves {:?}",
+                        super::PROGRAM_MODULES[idx]
+                    );
+                }
+            }
+            for served in super::PROGRAM_MODULES[idx] {
+                assert!(
+                    valid.contains(served),
+                    "program {idx} serves unknown module {served}"
+                );
+            }
         }
     }
 }

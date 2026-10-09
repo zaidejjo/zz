@@ -744,6 +744,12 @@ struct PreparedRun {
     consts: std::collections::HashMap<String, f64>,
     import_aliases: std::collections::HashMap<String, String>,
     stdlib_aliases: Vec<(String, String)>,
+    /// Scoped-stdlib inputs: every stdlib module imported anywhere in the
+    /// closure (any import kind) + selective/wildcard replays for bare-name
+    /// natives. Hits execute only these modules' pure-ZZ programs.
+    stdlib_modules: Vec<String>,
+    stdlib_selectives: crate::loader::StdlibSelectives,
+    stdlib_wildcards: Vec<String>,
 }
 
 /// Seed an interpreter: native dispatch, math constants, pure-ZZ
@@ -759,6 +765,13 @@ fn setup_interp(
     plugin_funcs: &[(String, zz_checker::FuncSig)],
     script_args: &[String],
     embed: Option<&std::path::Path>,
+    mut timer: Option<&mut run_cache::StageTimer>,
+    // Scoped pure-ZZ stdlib: loader-module namespaces to execute
+    // (`None` = all, for the `.zzc` loader which lacks import info).
+    // Unimported stdlib code is unreachable by checked programs; the
+    // runtime dependency closure comes from
+    // `zz_stdlib::stdlib_program_closure`.
+    stdlib_filter: Option<&[String]>,
 ) -> Result<Interp, String> {
     let mut natives = natives;
     let first_try = match crate::load_vm_plugins(project_root, &mut natives, plugin_funcs) {
@@ -773,6 +786,10 @@ fn setup_interp(
         if let Err(e) = crate::load_vm_plugins(project_root, &mut natives, plugin_funcs) {
             eprintln!("zz: warning: {e}");
         }
+    }
+
+    if let Some(t) = timer.as_mut() {
+        t.stage("vm plugins");
     }
 
     let mut interp = Interp::with_natives(natives);
@@ -817,11 +834,18 @@ fn setup_interp(
         interp.env.define(name, Value::Float(*val));
     }
 
-    // Run compiled pure-ZZ stdlib programs. These populate the environment
-    // with functions written in ZZ (e.g. vec.map, math.sum) that extend
-    // the native stdlib. Must happen before user code so the functions are
-    // available when user modules reference them.
-    for zz_prog in zz_stdlib::zz_stdlib_programs() {
+    // Run the needed pure-ZZ stdlib programs (scoped by imports when
+    // known). These populate the environment with functions written in
+    // ZZ (e.g. vec.map, math.sum) that extend the native stdlib. Must
+    // happen before user code so the functions are available when user
+    // modules reference them. Programs compile lazily per slot, so an
+    // import-free program compiles zero stdlib sources.
+    let wanted: Vec<usize> = match stdlib_filter {
+        Some(modules) => zz_stdlib::stdlib_program_closure(modules),
+        None => (0..zz_stdlib::zz_stdlib_program_count()).collect(),
+    };
+    for idx in wanted {
+        let zz_prog = zz_stdlib::zz_stdlib_program_at(idx);
         if let Err(e) = interp.run_typed(
             &zz_prog.program,
             std::sync::Arc::new(zz_prog.types.clone()),
@@ -831,6 +855,9 @@ fn setup_interp(
             eprintln!("zz: pure-ZZ stdlib error: {e:?}");
             return Err("stdlib initialization failed".to_string());
         }
+    }
+    if let Some(t) = timer {
+        t.stage("pure-ZZ stdlib");
     }
     // Canonical `std.*` aliases for pure-ZZ helpers: sources declare short
     // names (`json.is_null`) while the checker advertises both spellings.
@@ -934,6 +961,9 @@ fn prepare_run(
         errors: _,
         stdlib_aliases,
         import_aliases,
+        stdlib_modules,
+        stdlib_selectives,
+        stdlib_wildcards,
         ..
     } = loaded;
     let typed = zz_hir::build_program(
@@ -953,6 +983,8 @@ fn prepare_run(
         &plugin_funcs,
         script_args,
         embed.as_deref(),
+        None,
+        Some(&stdlib_modules),
     )?;
     Ok(PreparedRun {
         interp,
@@ -966,11 +998,84 @@ fn prepare_run(
         consts,
         import_aliases,
         stdlib_aliases,
+        stdlib_modules,
+        stdlib_selectives,
+        stdlib_wildcards,
     })
 }
 
-/// Render an execution error against its source. Empty sources (`.zzc`
-/// loads carry none) render plainly — the span renderer would panic.
+/// Compile a prepared program's modules to IR bytes for the run cache.
+/// `None` when any module fails to lower (caller skips storing).
+/// Note: `run_typed` recompiles internally, so miss runs compile twice;
+/// the execution path stays byte-identical to the uncached pipeline by
+/// design (a hit-only `run_loaded_chunk` would risk execution divergence
+/// where it matters least — cold runs).
+fn compile_prep(prep: &PreparedRun) -> Option<Vec<Vec<u8>>> {
+    let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(prep.interp.natives.keys().cloned().collect());
+    let mut modules: Vec<Vec<u8>> = Vec::with_capacity(prep.programs.len());
+    for program in &prep.programs {
+        let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+            program,
+            prep.types.clone(),
+            prep.structs.clone(),
+            prep.enums.clone(),
+            native_names.clone(),
+        );
+        match zz_ir::lower::lower_typed(&chunk, &prep.funcs) {
+            Ok(module) => modules.push(zz_ir::codec::encode(&module)),
+            Err(_) => return None,
+        }
+    }
+    Some(modules)
+}
+
+/// Run-cache metadata from a prepared program: interpreter inputs that
+/// cannot be derived from `.zzc` bytes.
+fn meta_from_prep(prep: &PreparedRun) -> run_cache::RunMeta {
+    run_cache::RunMeta {
+        consts: prep.consts.clone(),
+        import_aliases: prep.import_aliases.clone(),
+        stdlib_aliases: prep.stdlib_aliases.clone(),
+        stdlib_modules: prep.stdlib_modules.clone(),
+        stdlib_selectives: prep.stdlib_selectives.clone(),
+        stdlib_wildcards: prep.stdlib_wildcards.clone(),
+    }
+}
+
+/// Pre-compile the project entry into the run cache (install-time
+/// prewarming, cargo-style): after this, the first `zz run` hits instead
+/// of paying parse+check+compile — even-cold runs go warm speed.
+/// Best-effort: lookup hits and disabled caches return silently; one line
+/// prints only when compilation actually happened. Never runs user code
+/// (`prepare_run` loads, checks and seeds — execution stays in `run`).
+/// Never fails: any error means `zz run` will surface it properly there.
+pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
+    if !run_cache::cache_enabled() {
+        return;
+    }
+    let entry = match crate::build::resolve_entry(root) {
+        Ok(p) => p,
+        Err(_) => return, // no entry (lib-only package): nothing to warm
+    };
+    let plugin_funcs = crate::build::discover_plugin_manifests(&entry);
+    let slug = match run_cache::run_key(&entry, &plugin_funcs, None) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if run_cache::lookup(&slug).is_some() {
+        return;
+    }
+    let path = entry.to_string_lossy().into_owned();
+    let prep = match prepare_run(&path, &[], None) {
+        Ok(p) => p,
+        Err(_) => return, // check errors: `zz run` reports them
+    };
+    if let Some(modules) = compile_prep(&prep) {
+        run_cache::store(&slug, &modules, &meta_from_prep(&prep));
+        println!("pre-compiled entry cache for instant runs");
+    }
+}
 fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> String {
     if source.is_empty() {
         eprintln!(
@@ -1166,6 +1271,8 @@ fn run_bytecode_file(path: &str, script_args: &[String]) -> Result<(), String> {
         &[],
         script_args,
         None,
+        None,
+        None,
     )?;
     let last = match interp.run_loaded_chunk(&chunk) {
         Ok(v) => v,
@@ -1339,9 +1446,13 @@ fn run_file(
     // whole closure, so a hit executes cached IR with no frontend work.
     // Plugin discovery is cheap (manifest scan) and must precede the key.
     let entry_path = std::path::Path::new(path);
+    let mut timer = run_cache::StageTimer::start();
     let plugin_funcs = crate::build::discover_plugin_manifests(entry_path);
+    timer.stage("plugin discovery");
     if let Ok(slug) = run_cache::run_key(entry_path, &plugin_funcs, embed.as_deref()) {
+        timer.stage("run key");
         if let Some(hit) = run_cache::lookup(&slug) {
+            timer.stage("lookup");
             run_cache::log_hit(&slug);
             match run_cached(
                 &slug,
@@ -1350,6 +1461,7 @@ fn run_file(
                 script_args,
                 embed.as_deref(),
                 &plugin_funcs,
+                &mut timer,
             ) {
                 Ok(()) => return Ok(()),
                 // Stale or corrupt entry (e.g. toolchain drift the key
@@ -1369,27 +1481,10 @@ fn run_file(
         // Miss: full pipeline, then store the compiled IR for next time.
         let mut prep = prepare_run(path, script_args, embed.clone())?;
         let mut last = Value::Unit;
-        // Compile each module to IR bytes alongside the typed execution.
-        // Note: `run_typed` recompiles internally, so a miss compiles
-        // twice; the miss path stays byte-identical to the uncached
-        // pipeline by design (a hit-only `run_loaded_chunk` would risk
-        // execution divergence where it matters least — cold runs).
-        let native_names: std::sync::Arc<std::collections::HashSet<String>> =
-            std::sync::Arc::new(prep.interp.natives.keys().cloned().collect());
-        let mut cached_modules: Vec<Vec<u8>> = Vec::with_capacity(prep.programs.len());
-        let mut store_ok = true;
+        // Compile each module to IR bytes alongside the typed execution
+        // (shared with install-time prewarming below).
+        let cached_modules = compile_prep(&prep);
         for (i, program) in prep.programs.iter().enumerate() {
-            let chunk = zz_runtime::vm::Compiler::compile_program_typed(
-                program,
-                prep.types.clone(),
-                prep.structs.clone(),
-                prep.enums.clone(),
-                native_names.clone(),
-            );
-            match zz_ir::lower::lower_typed(&chunk, &prep.funcs) {
-                Ok(module) => cached_modules.push(zz_ir::codec::encode(&module)),
-                Err(_) => store_ok = false,
-            }
             match prep.interp.run_typed(
                 program,
                 prep.types.clone(),
@@ -1407,13 +1502,8 @@ fn run_file(
                 }
             }
         }
-        if store_ok {
-            let meta = run_cache::RunMeta {
-                consts: prep.consts.clone(),
-                import_aliases: prep.import_aliases.clone(),
-                stdlib_aliases: prep.stdlib_aliases.clone(),
-            };
-            run_cache::store(&slug, &cached_modules, &meta);
+        if let Some(modules) = cached_modules {
+            run_cache::store(&slug, &modules, &meta_from_prep(&prep));
         }
         return run_entry_main(
             &mut prep.interp,
@@ -1465,6 +1555,7 @@ fn run_cached(
     script_args: &[String],
     embed: Option<&std::path::Path>,
     plugin_funcs: &[(String, zz_checker::FuncSig)],
+    timer: &mut run_cache::StageTimer,
 ) -> Result<(), String> {
     let path = std::path::Path::new(entry_path);
     let project_root = loader::find_project_root(path).unwrap_or_else(|| {
@@ -1473,13 +1564,15 @@ fn run_cached(
             .to_path_buf()
     });
     enforce_project_zz(path)?;
-    // Natives: stdlib under every default namespace, plus replays for
-    // `import std.X as alias` pairs (the miss path registers those via
-    // the loader; without them aliased native calls would miss).
+    // Natives scoped to the recorded imports (== the miss path's loader
+    // natives exactly): full-module registrations under default namespaces,
+    // alias replays, selective bare names, and wildcard bare names. The
+    // base table's canonical `std.*` keys are always present; scoped-out
+    // modules are unreachable by checked programs.
     let mut natives = zz_stdlib::natives::stdlib_natives();
     {
         let mut funcs = std::collections::HashMap::new();
-        for module in zz_stdlib::STDLIB_MODULES {
+        for module in &hit.meta.stdlib_modules {
             let ns = module.rsplit('.').next().unwrap_or(module);
             let _ = zz_stdlib::register_module_namespace(module, ns, &mut funcs, &mut natives);
         }
@@ -1487,7 +1580,15 @@ fn run_cached(
             let short = module.strip_prefix("std.").unwrap_or(module);
             let _ = zz_stdlib::register_module_namespace(short, ns, &mut funcs, &mut natives);
         }
+        for (module, items) in &hit.meta.stdlib_selectives {
+            let _ =
+                zz_stdlib::register_selective_namespace(module, items, &mut funcs, &mut natives);
+        }
+        for module in &hit.meta.stdlib_wildcards {
+            let _ = zz_stdlib::register_wildcard_namespace(module, &mut funcs, &mut natives);
+        }
     }
+    timer.stage("natives rebuild");
     let mut interp = setup_interp(
         natives,
         &hit.meta.consts,
@@ -1497,27 +1598,36 @@ fn run_cached(
         plugin_funcs,
         script_args,
         embed,
+        Some(timer),
+        Some(&hit.meta.stdlib_modules),
     )?;
+    timer.stage("interp seed");
     let mut last = Value::Unit;
     for bytes in &hit.modules {
         let loaded = zz_ir::codec::decode(bytes).map_err(|e| format!("invalid .zzc: {e}"))?;
+        timer.stage("ir decode");
         zz_ir::verify::verify(&loaded).map_err(|e| format!(".zzc verify failed: {e}"))?;
         let chunk = zz_ir::raise::raise(&loaded).map_err(|e| format!("ir raise failed: {e}"))?;
+        timer.stage("ir verify+raise");
         match interp.run_loaded_chunk(&chunk) {
             Ok(v) => last = v,
             Err(e) => {
                 return Err(render_eval_error(&e, entry_path, ""));
             }
         }
+        timer.stage("chunk exec");
     }
+    timer.stage("modules exec");
     let _ = slug;
-    run_entry_main(
+    let r = run_entry_main(
         &mut interp,
         last,
         entry_path,
         script_args,
         &[(entry_path.to_string(), String::new())],
-    )
+    );
+    timer.stage("main + total");
+    r
 }
 
 /// `zz run --native [<file>]`: build (cached, published to the
