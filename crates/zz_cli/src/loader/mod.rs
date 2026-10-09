@@ -28,7 +28,7 @@ use zz_stdlib::{
     stdlib_funcs, stdlib_natives, STDLIB_MODULES,
 };
 
-mod cache;
+pub(crate) mod cache;
 mod rewrite;
 
 #[cfg(test)]
@@ -426,13 +426,14 @@ fn push_private_note(d: &mut RawDiag, name: &str, template: &str) {
 }
 
 /// Resolve one module's S1 cache key over in-memory sources (no IO):
-/// `H(genesis, source, sorted(dep path, dep key)...)`, memoized.
+/// `H(genesis, namespace, source, sorted(dep path, dep key)...)`, memoized.
 /// Returns `None` when unresolvable (missing source, cycle) — the caller
 /// treats it as a cache miss and checks normally.
 fn resolve_module_key(
     genesis: &str,
     sources: &HashMap<PathBuf, String>,
     edges: &HashMap<PathBuf, Vec<PathBuf>>,
+    namespaces: &HashMap<PathBuf, String>,
     path: &Path,
     memo: &mut HashMap<PathBuf, String>,
     stack: &mut Vec<PathBuf>,
@@ -448,12 +449,17 @@ fn resolve_module_key(
     let mut deps = Vec::new();
     if let Some(edge_list) = edges.get(path) {
         for dep in edge_list {
-            let dep_key = resolve_module_key(genesis, sources, edges, dep, memo, stack)?;
+            let dep_key =
+                resolve_module_key(genesis, sources, edges, namespaces, dep, memo, stack)?;
             deps.push((dep.display().to_string(), dep_key));
         }
     }
     stack.pop();
-    let key = cache::module_key(genesis, source, &deps);
+    // #290: the importing namespace is part of the key — cached pubs are
+    // stored already-namespaced, so sharing one entry across namespaces
+    // restores the wrong qualifier set.
+    let ns: &str = namespaces.get(path).map(String::as_str).unwrap_or("");
+    let key = cache::module_key(genesis, source, &deps, ns);
     memo.insert(path.to_path_buf(), key.clone());
     Some(key)
 }
@@ -1128,6 +1134,36 @@ impl Loader {
         None
     }
 
+    /// If diagnostic message `msg` is cascade noise from a failed dependency
+    /// (#274) — a reference to namespace `ns` whose module failed to check —
+    /// return `ns`. The failed module contributed no pubs, so every use of
+    /// `ns` or `ns.item` in an importer is a follow-on of the same root
+    /// cause, reported once at the dependency itself (calls `ns.f()` and
+    /// struct literals `ns.T{}` included). The importer's own
+    /// namespace never counts (its references are genuine).
+    fn failed_dep_ns(failed: &HashSet<String>, own_ns: &str, msg: &str) -> Option<String> {
+        failed.iter().find_map(|ns| {
+            if ns == own_ns {
+                return None;
+            }
+            let bare = format!("undefined variable `{ns}`");
+            let dotted = format!("undefined variable `{ns}.");
+            let called = format!("unknown function `{ns}");
+            let structured = format!("unknown struct `{ns}");
+            let unused = format!("unused import `{ns}`");
+            if msg == bare
+                || msg.starts_with(&dotted)
+                || msg.starts_with(&called)
+                || msg.starts_with(&structured)
+                || msg == unused
+            {
+                Some(ns.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     /// The item kind if `name` exists in the private universe (all items of
     /// already-loaded modules) but is missing from the pub export seed.
     fn private_item_kind(&self, name: &str) -> Option<&'static str> {
@@ -1161,6 +1197,7 @@ impl Loader {
                 &genesis,
                 &self.sources,
                 &self.dep_edges,
+                &self.ns_of,
                 path,
                 &mut key_memo,
                 &mut stack,
@@ -1169,6 +1206,11 @@ impl Loader {
             }
         }
 
+        // Namespaces of modules that failed to check (#274): `order` is
+        // dependency-first, so a failed dependency is recorded before its
+        // importers are processed and their cascade noise can be collapsed
+        // to one targeted error each.
+        let mut failed_ns: HashSet<String> = HashSet::new();
         for path in &self.order {
             let name = path.display().to_string();
             let source = self.sources.remove(path).unwrap_or_default();
@@ -1343,17 +1385,30 @@ impl Loader {
                                     found = true;
                                 }
                                 if !found {
+                                    // #274: the symbol is missing because the
+                                    // dependency itself failed — say so
+                                    // instead of misdirecting toward `pub`.
+                                    let missing = if failed_ns.contains(ns) {
+                                        let dep_path = self
+                                            .namespaces
+                                            .get(ns)
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| ns.to_string());
+                                        format!(
+                                            "cannot use `{prefix}{sym_name}`: dependency `{dep_path}` failed to check\n\
+                                             hint: fix the errors in `{dep_path}` first"
+                                        )
+                                    } else {
+                                        format!(
+                                            "symbol `{sym_name}` not found or not public in `{}`\n\
+                                             hint: ensure the symbol is declared with `pub` in the imported module",
+                                            imp_path.join(".")
+                                        )
+                                    };
                                     self.errors.push(LoadError {
                                         name: name.clone(),
                                         source: source.clone(),
-                                        diags: vec![error_at(
-                                            format!(
-                                                "symbol `{sym_name}` not found or not public in `{}`\n\
-                                                 hint: ensure the symbol is declared with `pub` in the imported module",
-                                                imp_path.join(".")
-                                            ),
-                                            Span::new(0, 0),
-                                        )],
+                                        diags: vec![error_at(missing, Span::new(0, 0))],
                                     });
                                 }
                             }
@@ -1835,14 +1890,59 @@ impl Loader {
                         })
                     });
                 }
+                // When the root cause is a failed dependency, collapse the
+                // cascade: every `ns` / `ns.item` follow-on becomes one
+                // targeted error naming the broken dependency (#274). The
+                // dependency's own failure is already reported at its source.
+                let own_ns: String = self.ns_of.get(path).cloned().unwrap_or_default();
+                let mut collapsed: Vec<String> = Vec::new();
+                diags.retain(
+                    |d| match Self::failed_dep_ns(&failed_ns, &own_ns, &d.message) {
+                        Some(ns) => {
+                            if !collapsed.contains(&ns) {
+                                collapsed.push(ns);
+                            }
+                            false
+                        }
+                        None => true,
+                    },
+                );
+                collapsed.sort();
+                for ns in &collapsed {
+                    let dep_path = self
+                        .namespaces
+                        .get(ns)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| ns.clone());
+                    diags.push(error_at(
+                        format!(
+                            "cannot use `{ns}`: dependency `{dep_path}` failed to check\n\
+                             hint: fix the errors in `{dep_path}` first"
+                        ),
+                        Span::new(0, 0),
+                    ));
+                }
                 self.errors.push(LoadError {
                     name: name.clone(),
                     source: source.clone(),
                     diags,
                 });
+                // Record the failure BEFORE the next module is processed:
+                // importers come later in `order` and collapse references
+                // to this namespace into one targeted error (#274).
+                if let Some(own) = self.ns_of.get(path).cloned() {
+                    failed_ns.insert(own);
+                }
             } else {
                 // Propagate warnings (even if there are no hard errors)
-                // so they can be displayed to the user.
+                // so they can be displayed to the user. Drop the `unused
+                // import` warning for a failed dependency (#274): the import
+                // is unused only because the dependency contributed nothing.
+                if !failed_ns.is_empty() {
+                    let own_ns: String = self.ns_of.get(path).cloned().unwrap_or_default();
+                    diags
+                        .retain(|d| Self::failed_dep_ns(&failed_ns, &own_ns, &d.message).is_none());
+                }
                 if !diags.is_empty() {
                     self.errors.push(LoadError {
                         name: name.clone(),

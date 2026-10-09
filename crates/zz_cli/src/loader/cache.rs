@@ -74,7 +74,7 @@ fn genesis(plugin_names: &[String]) -> String {
     let mut names = plugin_names.to_vec();
     names.sort();
     format!(
-        "zz-check-cache-v4|cli={}|git={}|plugins={}",
+        "zz-check-cache-v5|cli={}|git={}|plugins={}",
         env!("CARGO_PKG_VERSION"),
         git_hash().as_deref().unwrap_or("nogit"),
         names.join(","),
@@ -113,16 +113,30 @@ fn git_hash() -> Option<String> {
     .clone()
 }
 
-/// Dependency-aware key for one module: `H(genesis, source, dep_keys...)`
-/// with deps sorted by path. Only TRUE dependents recheck on an edit
-/// (editing a leaf rechecks the leaf + its importers, not everything
-/// after it in load order). Any change anywhere in the transitive closure
-/// changes the key; a miss is exactly today's behavior (always sound).
-pub fn module_key(genesis: &str, source: &str, deps: &[(String, String)]) -> String {
+/// Dependency-aware key for one module:
+/// `H(genesis, namespace, source, dep_keys...)` with deps sorted by path.
+/// Only TRUE dependents recheck on an edit (editing a leaf rechecks the
+/// leaf + its importers, not everything after it in load order). Any change
+/// anywhere in the transitive closure changes the key; a miss is exactly
+/// today's behavior (always sound).
+///
+/// The namespace is part of the key (#290): cached pubs are stored
+/// already-namespaced (`ar.foo` vs `area.foo`), so the same file checked
+/// under two namespaces (e.g. `import area as ar` in one entry, plain
+/// `import area` in another) must not share one cache entry — the second
+/// entry would restore the winner's namespace and poison its own.
+pub fn module_key(
+    genesis: &str,
+    source: &str,
+    deps: &[(String, String)],
+    namespace: &str,
+) -> String {
     let mut sorted: Vec<(&String, &String)> = deps.iter().map(|(p, k)| (p, k)).collect();
     sorted.sort();
     let mut h = Sha256::new();
     h.update(genesis.as_bytes());
+    h.update(b"|ns|");
+    h.update(namespace.as_bytes());
     h.update(b"|src|");
     h.update(source.as_bytes());
     for (path, key) in sorted {
@@ -187,7 +201,10 @@ pub(crate) fn with_isolated_cache<T>(f: impl FnOnce() -> T) -> T {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::env::set_var("XDG_CACHE_HOME", &dir);
-    let r = f();
+    // Catch panics so process env is always restored and the lock never
+    // poisons: one failing test must not cascade into opaque `PoisonError`
+    // failures in every other cache test.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     match prev_xdg {
         Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
         None => std::env::remove_var("XDG_CACHE_HOME"),
@@ -197,7 +214,10 @@ pub(crate) fn with_isolated_cache<T>(f: impl FnOnce() -> T) -> T {
         None => std::env::remove_var("ZZ_CHECK_CACHE"),
     }
     let _ = std::fs::remove_dir_all(&dir);
-    r
+    match r {
+        Ok(v) => v,
+        Err(e) => std::panic::resume_unwind(e),
+    }
 }
 
 /// Entry count (test observability: proves hits happened).
@@ -273,26 +293,31 @@ mod tests {
     #[test]
     fn dep_keys_differ_by_source_and_deps() {
         let g = genesis_key(&[]);
-        let leaf_a = module_key(&g, "pub base := 41", &[]);
-        let leaf_a2 = module_key(&g, "pub base := 41", &[]);
-        let leaf_b = module_key(&g, "pub base := 42", &[]);
+        let leaf_a = module_key(&g, "pub base := 41", &[], "config");
+        let leaf_a2 = module_key(&g, "pub base := 41", &[], "config");
+        let leaf_b = module_key(&g, "pub base := 42", &[], "config");
+        let leaf_ns = module_key(&g, "pub base := 41", &[], "cfg");
         let mid_a = module_key(
             &g,
             "import config",
             &[("config.zz".to_string(), leaf_a.clone())],
+            "main",
         );
         let mid_b = module_key(
             &g,
             "import config",
             &[("config.zz".to_string(), leaf_b.clone())],
+            "main",
         );
         let mid_c = module_key(
             &g,
             "import config",
             &[("other.zz".to_string(), leaf_a.clone())],
+            "main",
         );
         assert_eq!(leaf_a, leaf_a2, "deterministic");
         assert_ne!(leaf_a, leaf_b, "source sensitivity");
+        assert_ne!(leaf_a, leaf_ns, "namespace sensitivity (#290)");
         assert_ne!(mid_a, mid_b, "dep content sensitivity");
         assert_ne!(mid_a, mid_c, "dep path sensitivity");
         assert_eq!(leaf_a.len(), 64, "sha256 hex");

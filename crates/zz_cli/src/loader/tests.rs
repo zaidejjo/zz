@@ -1444,6 +1444,78 @@ fn check_cache_disabled_via_env() {
 }
 
 #[test]
+fn check_cache_namespaces_do_not_poison() {
+    // #290: the same module imported under two namespaces across entries
+    // (`import area as ar` vs plain `import area`) must not share one
+    // cache entry — cached pubs are stored already-namespaced, so the
+    // second entry would restore the winner's qualifier set and report
+    // spurious `undefined variable` errors.
+    super::cache::with_isolated_cache(|| {
+        let dir = temp_project(&[
+            ("area.zz", "pub func doc_new(t: str) -> str { t }\n"),
+            ("a.zz", "import area as ar\nx := ar.doc_new(\"hi\")\n"),
+            ("b.zz", "import area\ny := area.doc_new(\"hi\")\n"),
+        ]);
+        let first = load_check(&dir.join("a.zz"));
+        assert!(no_errors(&first), "aliased errors: {:?}", first.errors);
+        let second = load_check(&dir.join("b.zz"));
+        assert!(no_errors(&second), "plain errors: {:?}", second.errors);
+        // Reverse order poisons nothing either (warm cache, other winner).
+        let third = load_check(&dir.join("a.zz"));
+        assert!(no_errors(&third), "re-aliased errors: {:?}", third.errors);
+    });
+}
+
+#[test]
+fn failed_dependency_collapses_cascade() {
+    // #274: a broken dependency reports once at its source; each importer
+    // gets one targeted error instead of N `undefined variable` /
+    // `unknown function` follow-ons.
+    let dir = temp_project(&[
+        ("cache.zz", "pub func save(root: str) -> int { root + 1 }\n"),
+        (
+            "main.zz",
+            "import cache\nfunc main() {\n    a := cache.save(\"x\")\n    b := cache.save(\"y\")\n    println(a)\n    println(b)\n}\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    // Root cause still reported once at the dependency itself.
+    let dep_errs: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| e.name.ends_with("cache.zz"))
+        .collect();
+    assert_eq!(dep_errs.len(), 1, "dep must fail once: {:?}", result.errors);
+    // Importer fails once with the collapsed error, not the cascade.
+    let imp_errs: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| e.name.ends_with("main.zz"))
+        .collect();
+    assert_eq!(
+        imp_errs.len(),
+        1,
+        "importer must fail once: {:?}",
+        result.errors
+    );
+    let texts: Vec<String> = imp_errs[0]
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|m| m.contains("failed to check") && m.contains("cache")),
+        "expected collapsed import-failed error: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|m| m.contains("`cache.")),
+        "cascade not collapsed: {texts:?}"
+    );
+}
+
+#[test]
 fn selective_std_call_marks_import_used() {
     // Regression: the loader rewrites `pow(2, 3)` to the canonical
     // `std.math.pow(2, 3)`, while the census only knew the short
