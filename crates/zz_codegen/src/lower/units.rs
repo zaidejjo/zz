@@ -416,12 +416,15 @@ impl Lowerer {
 }
 
 /// Per-namespace string buffer (registers namespace in encounter order).
+/// Dedup is on the shared `order` (not the map): a namespace first seen
+/// via inits and later via bodies must still produce exactly one unit —
+/// per-map dedup emitted the module twice (duplicate definitions at link).
 fn buf_for<'a>(
     ns: &str,
     order: &mut Vec<String>,
     map: &'a mut HashMap<String, String>,
 ) -> &'a mut String {
-    if !map.contains_key(ns) {
+    if !order.contains(&ns.to_string()) {
         order.push(ns.to_string());
     }
     map.entry(ns.to_string()).or_default()

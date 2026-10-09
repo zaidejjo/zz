@@ -1134,6 +1134,48 @@ pub fn unit_file_stem(ns: &str, used: &mut std::collections::HashSet<String>) ->
     stem
 }
 
+/// Cache slug for one unit object: runtime/toolchain base + full option
+/// fingerprint + header + unit code. Same bytes in, same object out —
+/// shared across projects; any signature change alters the header and
+/// misses (correctness over hit rate, matching whole-program behavior).
+fn unit_obj_slug(rt_base: &str, flags_hash: u64, header: &str, code: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rt_base.hash(&mut h);
+    flags_hash.hash(&mut h);
+    header.hash(&mut h);
+    code.hash(&mut h);
+    format!("u{:016x}", h.finish())
+}
+
+/// A cached object is usable when it is a non-empty file.
+fn is_usable_object(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
+}
+
+/// Store a fresh object into the cache (atomic tmp + rename; best effort —
+/// a failed store only costs a recompile next time, never correctness).
+fn store_object(cached: &Path, obj: &Path) {
+    let Some(parent) = cached.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let tmp = parent.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        cached
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    if std::fs::copy(obj, &tmp).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&tmp, cached);
+}
+
 pub fn compile_units(
     header: &str,
     units: &[(String, String)],
@@ -1149,19 +1191,34 @@ pub fn compile_units(
     let tmpdir = std::env::temp_dir().join(format!("zz-units-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmpdir)?;
     let dump_dir = std::env::var("ZZ_DUMP_C").ok().map(PathBuf::from);
-    // Stage every TU first (filenames assigned serially for stable,
-    // collision-free stems), then compile objects in parallel.
-    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Per-unit object cache (`~/.zz/cache/objects/units/<slug>/`): a TU's
+    // object depends only on header + unit code + flags + toolchain, so
+    // unchanged modules skip clang entirely — shared across projects when
+    // the bytes match. Body-only edits keep the header identical, so only
+    // edited units miss; any signature/struct change alters the header and
+    // conservatively rebuilds everything (same as today's whole-program
+    // behavior, never stale). Cleared with the rest of the tree by
+    // `zz cache clean`.
+    let obj_base = zz_pm::paths::cache_objects_dir().join("units");
+    let rt_base = crate::cache::cache_key(target, opts.optimize, clang);
+    let flags_hash = opts.fingerprint_with(target);
+    let mut staged: Vec<(PathBuf, PathBuf, Option<PathBuf>)> = Vec::new();
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (ns, code) in units {
         let stem = unit_file_stem(ns, &mut used);
         let tu = crate::lower::strip_quoted_includes(&format!("{header}\n{code}"));
+        let slug = unit_obj_slug(&rt_base, flags_hash, header, code);
+        let cached = obj_base.join(&slug).join(format!("{stem}.o"));
+        if is_usable_object(&cached) {
+            staged.push((PathBuf::new(), cached, None));
+            continue;
+        }
         let src_path = tmpdir.join(format!("{stem}.c"));
         std::fs::write(&src_path, &tu)?;
         if let Some(dir) = &dump_dir {
             let _ = std::fs::write(dir.join(format!("{stem}.c")), &tu);
         }
-        staged.push((src_path, tmpdir.join(format!("{stem}.o"))));
+        staged.push((src_path, tmpdir.join(format!("{stem}.o")), Some(cached)));
     }
     // Bounded pool: clang -O3 TUs are memory-heavy; uncapped rayon on big
     // CI machines would OOM. 8 caps parallelism while keeping all
@@ -1173,11 +1230,26 @@ pub fn compile_units(
         .build()
         .map_err(|e| BuildError::Io(std::io::Error::other(format!("{e}"))))?;
     let cflags = clang_flags(opts, if clang.zig { None } else { target });
+    let cache_hits = staged
+        .iter()
+        .filter(|(s, _, _)| s.as_os_str().is_empty())
+        .count();
+    if opts.verbose {
+        eprintln!(
+            "zz: timing units_cache={}/{} hits",
+            cache_hits,
+            staged.len()
+        );
+    }
     let results: Vec<Result<PathBuf, BuildError>> = pool.install(|| {
         use rayon::prelude::*;
         staged
             .par_iter()
-            .map(|(src_path, obj)| {
+            .map(|(src_path, obj, cached)| {
+                // Cache hit: no source staged, object already on disk.
+                if src_path.as_os_str().is_empty() {
+                    return Ok(obj.clone());
+                }
                 let mut cmd = Command::new(&clang.path);
                 if clang.zig {
                     cmd.arg("cc");
@@ -1203,6 +1275,11 @@ pub fn compile_units(
                 if !out.status.success() {
                     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
                     return Err(BuildError::CompileFailed { stderr });
+                }
+                // Publish the fresh object for future builds (same key =
+                // same bytes). The tmpdir object stays for this link.
+                if let Some(dst) = cached {
+                    store_object(dst, obj);
                 }
                 Ok(obj.clone())
             })
@@ -1559,6 +1636,15 @@ mod tests {
         );
         b.verbose = true;
         assert_eq!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn unit_obj_slug_is_content_keyed() {
+        let a = unit_obj_slug("rt", 7, "H", "code-a");
+        assert_eq!(a, unit_obj_slug("rt", 7, "H", "code-a"));
+        assert_ne!(a, unit_obj_slug("rt", 7, "H", "code-b"));
+        assert_ne!(a, unit_obj_slug("rt", 7, "H2", "code-a"));
+        assert_ne!(a, unit_obj_slug("rt", 8, "H", "code-a"));
     }
 
     #[test]
