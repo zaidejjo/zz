@@ -363,10 +363,13 @@ fn pascal_case(name: &str) -> String {
 
 /// Handle `zz clean [--deps]`: remove build outputs (`bin/`, `build/`,
 /// `src/bin/`); with `--deps` also `vendor/` + `zz.lock`. Explicit flags
-/// only — never prompts, script-safe.
+/// only — never prompts, script-safe. Operates on the project root when
+/// invoked inside one (outputs live at the root regardless of the
+/// invocation subdir); standalone otherwise.
 pub fn clean(args: &[String]) -> Result<(), String> {
     let with_deps = args.iter().any(|a| a == "--deps");
-    let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let dir = crate::loader::find_project_root(&cwd).unwrap_or(cwd);
     clean_in(&dir, with_deps)
 }
 

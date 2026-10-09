@@ -231,6 +231,69 @@ fn no_clang_absolute_path_from_other_dir_finds_owning_project() {
 }
 
 #[test]
+fn no_clang_cross_project_explicit_wins_over_cwd() {
+    let a = project_dir();
+    let b = fresh_root("otherproj");
+    std::fs::write(
+        b.join("zz.toml"),
+        "[package]\nname = \"other\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("manifest");
+    std::fs::create_dir_all(b.join("src")).expect("src");
+    std::fs::write(b.join("src/main.zz"), PROG).expect("entry");
+    // Invoked from project B with project A's entry: A's root wins.
+    let entry_a = a.join("src/main.zz");
+    let (code, _, stderr) = run(&b, &["build", entry_a.to_str().unwrap()], &no_clang());
+    assert_eq!(code, 1, "no-clang build must fail.\nstderr:\n{stderr}");
+    assert!(a.join("bin/app.c").is_file(), "bin/app.c missing at A root");
+    assert!(!b.join("bin").exists(), "CWD project must stay clean");
+    assert!(
+        !a.join("src/bin").exists(),
+        "legacy src/bin/ must never be written"
+    );
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+#[test]
+fn project_build_ensures_bin_gitignored() {
+    let dir = project_dir();
+    std::fs::write(dir.join(".gitignore"), "target/\n").expect("gitignore");
+    let (code, _, stderr) = run(&dir, &["build"], &no_clang());
+    assert_eq!(code, 1, "no-clang build must fail.\nstderr:\n{stderr}");
+    let content = std::fs::read_to_string(dir.join(".gitignore")).expect("read gitignore");
+    assert!(content.contains("target/"), "existing entries kept");
+    assert!(
+        content.lines().any(|l| l.trim() == "bin/"),
+        "bin/ must be ensured, got:\n{content}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn standalone_build_leaves_gitignore_alone() {
+    let (dir, _) = standalone_dir();
+    std::fs::write(dir.join(".gitignore"), "target/\n").expect("gitignore");
+    let (code, _, stderr) = run(&dir, &["build", "hello.zz"], &no_clang());
+    assert_eq!(code, 1, "no-clang build must fail.\nstderr:\n{stderr}");
+    let content = std::fs::read_to_string(dir.join(".gitignore")).expect("read gitignore");
+    assert_eq!(content, "target/\n", "standalone must not touch gitignore");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn clean_from_subdir_cleans_project_root() {
+    let dir = project_dir();
+    let (code, _, stderr) = run(&dir, &["build"], &no_clang());
+    assert_eq!(code, 1, "no-clang build must fail.\nstderr:\n{stderr}");
+    assert!(dir.join("bin/app.c").is_file(), "bin/app.c missing");
+    let (code, _, stderr) = run(&dir.join("src"), &["clean"], &[]);
+    assert_eq!(code, 0, "clean must pass.\nstderr:\n{stderr}");
+    assert!(!dir.join("bin").exists(), "root bin/ must be cleaned");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn no_clang_bare_output_stays_in_resolved_dir() {
     let dir = project_dir();
     let (code, _, stderr) = run(&dir, &["build", "-o", "server", "src/main.zz"], &no_clang());

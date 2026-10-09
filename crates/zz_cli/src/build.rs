@@ -1108,6 +1108,14 @@ pub fn build_release(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
+    // Project-owned sources publish under `<root>/bin/` — make sure the
+    // root ignores it even when the project predates the redesign (new
+    // projects get this from `init`/`new`). Append-only, idempotent,
+    // silent; failures (read-only checkouts) never fail the build.
+    // Standalone builds leave the invocation dir alone.
+    if let Some(root) = crate::loader::find_project_root(path) {
+        let _ = zz_pm::manifest::Manifest::ensure_gitignore(&root);
+    }
     let mut opts = opts_for(mode);
     opts.allow_static_downgrade = rel.allow_static_downgrade;
     let target = rel.target_opt();

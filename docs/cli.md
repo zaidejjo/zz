@@ -134,6 +134,9 @@ from the current working directory. With an explicit source path, the
 file's owning project (nearest ancestor holding `zz.toml`) decides the
 output directory — even when invoked from another directory. A file
 outside any project builds standalone into the current directory.
+`zz clean` operates on the discovered project root too. Builds into a
+project root ensure `bin/` is gitignored (append-only, silent), so
+pre-redesign checkouts stay clean.
 
 Cross-compilation rules:
 
