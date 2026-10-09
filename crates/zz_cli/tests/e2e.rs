@@ -1438,7 +1438,13 @@ fn e2e_input_reads_piped_line() {
 /// `add`, a `tests/` @test file importing it, and a `src/`-adjacent
 /// runnable entry importing it too. Returns (dir, test_file, run_file).
 fn write_package_map_project() -> (PathBuf, PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("zz-e2e-pkgmap-{}", std::process::id()));
+    // Unique per call: the package-map tests run in parallel and must not
+    // share one pid-keyed dir (one test's `remove_dir_all` races another's
+    // `create_dir_all` → spurious NotFound).
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zz-e2e-pkgmap-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::create_dir_all(dir.join("tests")).unwrap();
