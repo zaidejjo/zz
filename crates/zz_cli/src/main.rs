@@ -2018,7 +2018,9 @@ fn check_or_fix_path(
         // Classify fixits by safety.
         let mut safe_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
         let mut ambiguous_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
-        let mut has_hard_errors = false;
+        // Any error-severity diagnostic fails the check (#292): fixable
+        // errors are still errors (warnings alone stay exit 0).
+        let mut has_errors = false;
 
         for e in &loaded.errors {
             for d in &e.diags {
@@ -2030,8 +2032,8 @@ fn check_or_fix_path(
                                 FixSafety::Ambiguous => ambiguous_fixits.push(fixit.clone()),
                             }
                         }
-                        if d.severity == Severity::Error && d.fixits.is_empty() {
-                            has_hard_errors = true;
+                        if d.severity == Severity::Error {
+                            has_errors = true;
                         }
                     }
                     _ => {}
@@ -2052,7 +2054,7 @@ fn check_or_fix_path(
             if !ambiguous_fixits.is_empty() {
                 any_ambiguous = true;
             }
-            if has_hard_errors {
+            if has_errors {
                 total_errors += 1;
             }
             continue;
@@ -2220,16 +2222,19 @@ mod tests {
         path
     }
 
+    /// Run `zz check` (check-only) under the isolated cache env: sharing the
+    /// process-global cache env with the loader's cache-counting tests
+    /// otherwise pollutes their entry counts mid-flight.
+    fn check_isolated(path: &str) -> Result<(), String> {
+        super::loader::cache::with_isolated_cache(|| {
+            check_or_fix_path(&Some(path.to_string()), false, false, false, false)
+        })
+    }
+
     #[test]
     fn check_ok_on_valid_file() {
         let path = write_temp("x := 1 + 2\nprintln(x)\n");
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
     }
@@ -2239,13 +2244,7 @@ mod tests {
         let path = write_temp(
             "scores := [10, 20, 30]\ny := scores[1]\nz := scores[1:3]\nfunc dbl(a: int, b: int) -> int { a * b }\nw := 5 |> dbl(3)\nt := typeof(w)\n",
         );
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
     }
@@ -2253,13 +2252,7 @@ mod tests {
     #[test]
     fn check_rejects_type_error() {
         let path = write_temp("x := 1 + \"a\"\n");
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_err(), "expected type error");
         let _ = fs::remove_file(&path);
     }
@@ -2267,26 +2260,36 @@ mod tests {
     #[test]
     fn check_rejects_index_error() {
         let path = write_temp("x := 5\nx[0]\n");
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_err(), "expected index type error");
         let _ = fs::remove_file(&path);
     }
 
     #[test]
-    fn check_missing_file_errors() {
-        let result = check_or_fix_path(
-            &Some("/tmp/zz_no_such_file_zz.zz".to_string()),
-            false,
-            false,
-            false,
-            false,
+    fn check_rejects_fixable_error() {
+        // #292: an error carrying auto-fix suggestions (typo fixit) must
+        // still fail `zz check` — only warnings exit 0.
+        let path = write_temp("func main() {\n    count := 1\n    println(cout)\n}\n");
+        let result = check_isolated(&path.to_string_lossy());
+        assert!(result.is_err(), "expected fixable typo error to fail check");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_ok_on_warnings_only() {
+        // #292: warnings alone (unused variable) must stay exit 0.
+        let path = write_temp("func main() {\n    unused_xyz := 1\n}\n");
+        let result = check_isolated(&path.to_string_lossy());
+        assert!(
+            result.is_ok(),
+            "expected warnings-only to pass, got {result:?}"
         );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_missing_file_errors() {
+        let result = check_isolated("/tmp/zz_no_such_file_zz.zz");
         assert!(result.is_err(), "expected error for missing file");
     }
     #[test]
@@ -2304,13 +2307,7 @@ mod tests {
         src.push_str("func main() {\n    println(zz_perf_fn_0(1))\n}\n");
         let path = write_temp(&src);
         let start = std::time::Instant::now();
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         let elapsed = start.elapsed();
         let _ = fs::remove_file(&path);
         assert!(result.is_ok(), "expected ok, got {result:?}");
@@ -2327,13 +2324,7 @@ mod tests {
         let fixtures_dir =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
         assert!(fixtures_dir.is_dir(), "tests/fixtures dir should exist");
-        let result = check_or_fix_path(
-            &Some(fixtures_dir.display().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&fixtures_dir.display().to_string());
         // The function may fail type-check on fixtures; the point is it
         // should find files and not panic/IO-error.
         match &result {
