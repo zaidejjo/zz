@@ -8,7 +8,6 @@ Complete grammar and syntax guide for the ZZ language.
 
 ```zz
 // Line comment
-# Alternative line comment
 /* Block comment
    can span multiple lines */
 ```

@@ -173,7 +173,6 @@ impl<'a> Lexer<'a> {
                     self.emit_significant(TokenKind::SlashEq, self.pos, self.pos + 2)
                 }
                 '/' => self.emit_significant(TokenKind::Slash, self.pos, self.pos + 1),
-                '#' => self.lex_line_comment(),
                 '(' => self.emit_significant(TokenKind::LParen, self.pos, self.pos + 1),
                 ')' => self.emit_significant(TokenKind::RParen, self.pos, self.pos + 1),
                 '{' => {
@@ -1444,6 +1443,30 @@ mod tests {
             assert!(
                 !kinds.contains(&TokenKind::Pipe),
                 "{src:?} must not lex Pipe: {kinds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hash_is_not_a_comment() {
+        // `#` is not comment syntax — only `//` and `/* */` are.
+        // A leading `#` must error instead of lexing silently.
+        let lexed = lex("# not a comment\nx := 1\n");
+        assert!(
+            lexed
+                .errors
+                .iter()
+                .any(|e| e.message.contains("unexpected character")),
+            "`#` must produce an unexpected-character error: {:?}",
+            lexed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        // The surviving comment forms still lex clean.
+        for src in ["// line\nx := 1\n", "x := 1 /* block */ + 2\n"] {
+            let lexed = lex(src);
+            assert!(
+                lexed.errors.is_empty(),
+                "{src:?} must lex without errors: {:?}",
+                lexed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
             );
         }
     }
