@@ -27,6 +27,14 @@ pub fn cache_objects_dir() -> PathBuf {
     zz_home().join("cache").join("objects")
 }
 
+/// `~/.zz/cache/` — everything rebuildable from a build: native binary
+/// cache entries (flat `<key>-<mode>-<target>` files), precompiled
+/// runtime archives (per-key dirs), and the per-module `objects/`
+/// cache. Safe to delete wholesale; `zz cache clean` clears this tree.
+pub fn build_cache_dir() -> PathBuf {
+    zz_home().join("cache")
+}
+
 /// `~/.zz/bin/` — installed compiler binaries and `zz install --path` tools.
 ///
 /// This directory is the canonical user-tool location: the install scripts
@@ -131,6 +139,17 @@ mod tests {
         env::remove_var("ZZ_HOME");
         let p = cache_objects_dir();
         assert!(p.ends_with("objects"), "should end with objects: {p:?}");
+    }
+
+    #[test]
+    fn build_cache_dir_under_home() {
+        let _guard = crate::paths::test_sync::lock_env();
+        env::remove_var("ZZ_HOME");
+        assert!(build_cache_dir().ends_with("cache"));
+        let tmp = std::env::temp_dir().join("zz_pm_test_home_cache");
+        env::set_var("ZZ_HOME", &tmp);
+        assert_eq!(build_cache_dir(), tmp.join("cache"));
+        env::remove_var("ZZ_HOME");
     }
 
     #[test]

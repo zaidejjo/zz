@@ -164,6 +164,22 @@ to the same authoritative destination as `zz build`) and executes the
 binary. The file argument defaults to the project entry inside a
 project.
 
+### `zz clean` / `zz cache`
+
+```bash
+zz clean                # remove project outputs (bin/, build/, src/bin/)
+zz clean --deps         # ... plus vendor/ + zz.lock (re-fetch with zz install)
+zz cache clean          # wipe the global build cache (~/.zz/cache)
+zz cache gc             # garbage-collect unused package downloads
+```
+
+`zz clean` operates on the discovered project root from any subdir and
+always reports the global build cache with a reclaim hint when it is
+non-empty. The cache holds native binaries, precompiled runtime
+archives, and per-module objects — everything rebuildable, keyed by
+content, honoring `ZZ_HOME`. When disk runs low, `zz cache clean` is
+the reclaim command (next builds just take a little longer).
+
 ### `zz toolchain <install|use|uninstall|status>`
 
 Manage the Zig C backend. `zz build` needs a C backend (system `clang`

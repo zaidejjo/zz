@@ -370,7 +370,29 @@ pub fn clean(args: &[String]) -> Result<(), String> {
     let with_deps = args.iter().any(|a| a == "--deps");
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
     let dir = crate::loader::find_project_root(&cwd).unwrap_or(cwd);
-    clean_in(&dir, with_deps)
+    clean_in(&dir, with_deps)?;
+    print_global_cache_hint();
+    Ok(())
+}
+
+/// One-line global cache status so `zz clean` never looks like a no-op
+/// while the build cache holds real weight: size plus the reclaim
+/// command. Silent when the cache is absent or empty.
+fn print_global_cache_hint() {
+    let cache_dir = zz_pm::paths::build_cache_dir();
+    if !cache_dir.exists() {
+        return;
+    }
+    let (entries, bytes) = zz_pm::paths::dir_usage(&cache_dir);
+    if entries == 0 {
+        return;
+    }
+    println!(
+        "global build cache: {} in {entries} entries ({})",
+        crate::ui::human_bytes(bytes),
+        cache_dir.display()
+    );
+    println!("hint: `zz cache clean` reclaims it (rebuilds on demand)");
 }
 
 /// `zz clean` in an explicit directory (split for tests — no cwd games).
@@ -1241,12 +1263,18 @@ pub fn cache(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("clean") | Some("clear") => {
-            let cache_dir = zz_pm::paths::cache_objects_dir();
+            // The whole build-cache tree: native binary entries, precompiled
+            // runtime archives, and per-module objects — all rebuildable.
+            let cache_dir = zz_pm::paths::build_cache_dir();
             if cache_dir.exists() {
-                let count = count_entries(&cache_dir);
+                let (entries, bytes) = zz_pm::paths::dir_usage(&cache_dir);
                 std::fs::remove_dir_all(&cache_dir)
                     .map_err(|e| format!("cannot remove cache: {e}"))?;
-                println!("cleared {count} cache entries from {}", cache_dir.display());
+                println!(
+                    "cleared build cache: {entries} entries, freed {} ({})",
+                    crate::ui::human_bytes(bytes),
+                    cache_dir.display()
+                );
             } else {
                 println!("no cache to clear");
             }
@@ -2177,13 +2205,6 @@ fn template_content(template: Option<&str>) -> &'static str {
             "func main() {\n    println(\"Hello, ZZ!\")\n}\n"
         }
     }
-}
-
-/// Count entries in a directory (non-recursive).
-fn count_entries(dir: &Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).count())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

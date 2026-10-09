@@ -22,23 +22,10 @@ use std::process::Command;
 
 use crate::compile::{BuildError, BuildOptions, Clang};
 
-/// Cache directory: `$HOME/.zz/cache/`.
+/// Cache directory: the shared build cache root (`zz_pm::paths`,
+/// honoring `ZZ_HOME` like every other ZZ path).
 fn cache_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| std::env::temp_dir().join("zz"))
-        .join(".zz")
-        .join("cache")
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-    #[cfg(windows)]
-    {
-        std::env::var("USERPROFILE").ok().map(PathBuf::from)
-    }
+    zz_pm::paths::build_cache_dir()
 }
 
 /// SHA256-like fingerprint of the C runtime sources.

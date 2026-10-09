@@ -158,13 +158,10 @@ pub fn embed_sig(dir: &Path) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// The cache directory (`~/.zz/cache`).
+/// The build cache directory (`~/.zz/cache`, honoring `ZZ_HOME` like
+/// every other ZZ path — see `zz_pm::paths::build_cache_dir`).
 pub fn cache_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".zz").join("cache")
+    zz_pm::paths::build_cache_dir()
 }
 
 /// Compute a cache key from source + build options + target triple.
