@@ -4,11 +4,12 @@
 //! therefore blind to genuine leaks in new emitter code.
 //!
 //! Method: build a churn program (2000 outer iterations, each building
-//! then dropping a 1k-element array) with `-p` on both backends and
-//! run each under `ulimit -v` (address-space cap). Steady-state use is
-//! a few MB; the cap is 512MB, so only unbounded growth trips it (the
-//! kernel kills past the cap → nonzero exit → failure). Stdout must
-//! still match exactly (correctness and leak-freedom in one gate).
+//! then dropping a 100-element array) with `--dynamic` on both backends
+//! and run each under `ulimit -v` (address-space cap) + `timeout`.
+//! Steady-state use is KBs; the cap is 512MB, so only unbounded growth
+//! trips it (the kernel kills past the cap → nonzero exit → failure).
+//! Stdout must still match exactly (correctness and leak-freedom in
+//! one gate).
 //!
 //! The churn program nests `for`-in-`for`, so it also dogfoods #311 on
 //! the chunk backend.
@@ -36,16 +37,20 @@ fn require_native() -> bool {
     true
 }
 
-// 2000 generations x 1k pushes; steady-state holds one 1k array
-// (~16KB). Expected sum: 2000 * 1000. The inner size only sets
+// 2000 generations x 100 pushes; steady-state holds one 100-element
+// array (~2KB). Expected sum: 2000 * 100. The inner size only sets
 // steady-state; the outer count sets leak generations, so a small
 // inner loop keeps the gate fast without losing detection power.
+// Builds use `--dynamic` (-O0, no LTO): refcount bugs reproduce
+// identically without optimization (the sweep UAF was found in a
+// `--dynamic` ASan build), and dev builds take seconds where `-p`
+// ThinLTO builds took minutes on a cold cache.
 const CHURN: &str = r#"
 func main() {
     s := 0
     for r in 0..2000 {
         a := []
-        for i in 0..1000 {
+        for i in 0..100 {
             a = vec.push(a, i % 97)
         }
         s = s + len(a)
@@ -54,7 +59,7 @@ func main() {
 }
 "#;
 
-const EXPECTED: &str = "2000000\n";
+const EXPECTED: &str = "200000\n";
 // 512MB address-space cap: ~3000x steady-state. Only a per-iteration
 // leak (the old loop-result placeholder class, or a new emitter leak)
 // can reach it in 2000 generations.
@@ -63,14 +68,21 @@ const CAP_KB: &str = "524288";
 fn build(dir: &std::path::Path, backend: &str, extra: &[&str]) {
     let f = dir.join("churn.zz");
     std::fs::write(&f, CHURN).unwrap();
-    let mut args = vec!["build", "-p"];
+    let mut args = vec!["build", "--dynamic"];
     args.extend(extra);
     args.push(f.to_str().unwrap());
-    let out = Command::new(zz_bin())
-        .args(&args)
+    // Bound the build itself: a wedged toolchain (stale cache lock,
+    // OOM-thrash) must fail loudly, never hang the suite forever.
+    // `timeout` maps the kill to exit 124, caught by the assert below.
+    let mut cmd: Vec<std::ffi::OsString> = vec!["timeout".into(), "600".into(), zz_bin().into()];
+    for a in &args {
+        cmd.push(a.into());
+    }
+    let out = Command::new(&cmd[0])
+        .args(&cmd[1..])
         .current_dir(dir)
         .output()
-        .expect("zz build should run");
+        .expect("timeout+zz should run");
     assert_eq!(
         out.status.code().unwrap_or(-1),
         0,
@@ -83,8 +95,10 @@ fn run_capped(dir: &std::path::Path, backend: &str) -> (i32, String) {
     let bin = dir.join("bin/churn");
     assert!(bin.exists(), "{backend} binary missing");
     // `ulimit -v` applies to the shell's children; exec replaces the
-    // shell so the cap binds exactly the test binary.
-    let script = format!("ulimit -v {CAP_KB}; exec \"{}\"", bin.display());
+    // shell so the cap binds exactly the test binary. `timeout` bounds
+    // a genuine hang (a leak dies fast at the cap): fail loudly in
+    // minutes instead of wedging CI until the 6-hour kill.
+    let script = format!("ulimit -v {CAP_KB}; exec timeout 240 \"{}\"", bin.display());
     let out = Command::new("bash")
         .args(["-c", script.as_str()])
         .output()
