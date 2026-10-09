@@ -324,7 +324,7 @@ fn sanitizer_aot_hir_and_chunk() {
             let (code, _out, err) = build_zz(&args, &dir);
             assert_eq!(code, 0, "{backend} sanitizer build of {name} failed: {err}");
             assert_no_reports(&format!("{backend} build {name}"), &err);
-            let bin = dir.join(format!("bin/{name}"));
+            let bin = dir.join(name);
             assert!(bin.exists(), "{backend} binary missing for {name}");
             let (rcode, stdout, rerr) = run_bin(&bin);
             assert_no_reports(&format!("{backend} run {name}"), &rerr);

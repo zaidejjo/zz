@@ -16,9 +16,10 @@ fn zz_bin() -> PathBuf {
     debug.join("zz")
 }
 
-fn run_zz(args: &[&str]) -> (i32, String, String) {
+fn run_zz_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(zz_bin())
         .args(args)
+        .current_dir(dir)
         .output()
         .expect("zz binary should run");
     (
@@ -207,7 +208,7 @@ fn chunk_matches_hir_stdout_and_exit() {
     if !require_native() {
         return;
     }
-    // One dir per backend so `bin/` names never collide.
+    // One dir per backend so output names never collide.
     let root = std::env::temp_dir().join(format!("zz-chunk-diff-{}", std::process::id()));
     for (name, src) in CASES {
         for backend in ["hir", "chunk"] {
@@ -220,9 +221,9 @@ fn chunk_matches_hir_stdout_and_exit() {
                 args.push("--chunk");
             }
             args.push(f.to_str().unwrap());
-            let (code, _out, err) = run_zz(&args);
+            let (code, _out, err) = run_zz_in(&dir, &args);
             assert_eq!(code, 0, "{backend} build of {name} failed: {err}");
-            let bin = dir.join(format!("bin/{name}"));
+            let bin = dir.join(name);
             assert!(bin.exists(), "{backend} binary missing for {name}");
             let (rcode, stdout) = run_bin(&bin);
             std::fs::write(dir.join("got.stdout"), &stdout).unwrap();

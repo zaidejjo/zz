@@ -92,7 +92,7 @@ fn build(dir: &std::path::Path, backend: &str, extra: &[&str]) {
 }
 
 fn run_capped(dir: &std::path::Path, backend: &str) -> (i32, String) {
-    let bin = dir.join("bin/churn");
+    let bin = dir.join("churn");
     assert!(bin.exists(), "{backend} binary missing");
     // `ulimit -v` applies to the shell's children; exec replaces the
     // shell so the cap binds exactly the test binary. `timeout` bounds

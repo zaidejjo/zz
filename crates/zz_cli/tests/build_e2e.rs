@@ -5,9 +5,9 @@
 //! (full LTO, plus PGO with `-- <train args>`), `--dynamic` for the
 //! fast dynamic debug build, `-o` to rename the output.
 //!
-//! - static default (`zz build`): builds `bin/<stem>`, executes it,
+//! - static default (`zz build`): builds `./<stem>`, executes it,
 //!   checks output (requires Clang on PATH).
-//! - without Clang (dev or release): emits `bin/app.c` + `build.sh`/
+//! - without Clang (dev or release): emits `./app.c` + `build.sh`/
 //!   `build.bat`, exits 1 with the no-clang error.
 //! - guard rails: `--pgo` + foreign `--target` and `--static` on macOS
 //!   triples fail with the exact CLI-contract errors; bad `--full`
@@ -69,8 +69,12 @@ fn static_default_builds_native_binary() {
         stderr.contains("(static,"),
         "static marker missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let bin = dir.join("bin/hello");
-    assert!(bin.is_file(), "bin/hello missing");
+    let bin = dir.join("hello");
+    assert!(bin.is_file(), "./hello missing");
+    assert!(
+        !dir.join("bin").exists(),
+        "no bin/ dir expected (standalone)"
+    );
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
@@ -86,8 +90,8 @@ fn dynamic_flag_builds_dynamic_dev_binary() {
         stderr.contains("(dev,"),
         "dev marker missing for --dynamic.\nstderr:\n{stderr}"
     );
-    let bin = dir.join("bin/hello");
-    assert!(bin.is_file(), "bin/hello missing");
+    let bin = dir.join("hello");
+    assert!(bin.is_file(), "./hello missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -101,10 +105,10 @@ fn dev_without_clang_emits_c_and_scripts() {
         stderr.contains("no clang found"),
         "no-clang error missing:\n{stderr}"
     );
-    assert!(dir.join("bin/app.c").is_file(), "bin/app.c missing");
-    assert!(dir.join("bin/build.sh").is_file(), "bin/build.sh missing");
-    assert!(dir.join("bin/build.bat").is_file(), "bin/build.bat missing");
-    assert!(!dir.join("bin/hello").is_file(), "no binary should exist");
+    assert!(dir.join("app.c").is_file(), "app.c missing");
+    assert!(dir.join("build.sh").is_file(), "build.sh missing");
+    assert!(dir.join("build.bat").is_file(), "build.bat missing");
+    assert!(!dir.join("hello").is_file(), "no binary should exist");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -124,10 +128,10 @@ fn release_without_clang_emits_c_and_scripts() {
         stderr.contains("no clang found"),
         "no-clang error missing:\n{stderr}"
     );
-    assert!(dir.join("bin/app.c").is_file(), "bin/app.c missing");
-    assert!(dir.join("bin/build.sh").is_file(), "bin/build.sh missing");
-    assert!(dir.join("bin/build.bat").is_file(), "bin/build.bat missing");
-    assert!(!dir.join("bin/hello").is_file(), "no binary should exist");
+    assert!(dir.join("app.c").is_file(), "app.c missing");
+    assert!(dir.join("build.sh").is_file(), "build.sh missing");
+    assert!(dir.join("build.bat").is_file(), "build.bat missing");
+    assert!(!dir.join("hello").is_file(), "no binary should exist");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -202,8 +206,8 @@ fn release_native_builds_and_runs() {
         code, 0,
         "release build must pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let bin = dir.join("bin/hello");
-    assert!(bin.is_file(), "bin/hello missing");
+    let bin = dir.join("hello");
+    assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
@@ -366,8 +370,8 @@ fn full_builds_max_opt_binary() {
         stderr.contains("(full,"),
         "full marker missing.\nstderr:\n{stderr}"
     );
-    let bin = dir.join("bin/hello");
-    assert!(bin.is_file(), "bin/hello missing");
+    let bin = dir.join("hello");
+    assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
@@ -402,8 +406,8 @@ fn output_flag_names_binary() {
         return;
     }
     assert_eq!(code, 0, "build -o must pass.\nstderr:\n{stderr}");
-    let bin = dir.join("bin/myapp");
-    assert!(bin.is_file(), "bin/myapp missing");
+    let bin = dir.join("myapp");
+    assert!(bin.is_file(), "./myapp missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
     // Path-like -o is used as-is relative to the project dir.
@@ -433,8 +437,8 @@ fn full_pgo_flow_trains_and_optimizes() {
         !dir.join("default.profdata").exists(),
         "profdata must be cleaned up on success"
     );
-    let bin = dir.join("bin/hello");
-    assert!(bin.is_file(), "bin/hello missing");
+    let bin = dir.join("hello");
+    assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
     let _ = std::fs::remove_dir_all(&dir);

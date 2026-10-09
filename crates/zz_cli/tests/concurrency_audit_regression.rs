@@ -63,8 +63,8 @@ fn build_audit_bench(name: &str) -> Option<PathBuf> {
         );
         return None;
     }
-    // zz build -p writes `bin/<basename>` next to the source; move it.
-    let produced = root.join("bench/audit/bin").join(name);
+    // Standalone builds publish to the invocation dir (CWD = root).
+    let produced = root.join(name);
     if produced.exists() {
         let _ = std::fs::rename(&produced, &target);
     }

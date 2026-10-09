@@ -164,7 +164,15 @@ fn c_plugin_vm_and_aot_agree() {
     // AOT path.
     let (code, _, stderr) = run_zz(&consumer, &["build", "--allow-hooks", "src/main.zz"]);
     assert_eq!(code, 0, "build failed: {stderr}");
-    let bin = consumer.join("src/bin/main");
+    let bin = consumer.join("bin/ctoyuse");
+    assert!(
+        bin.is_file(),
+        "project binary missing (must not be src/bin/)"
+    );
+    assert!(
+        !consumer.join("src/bin").exists(),
+        "legacy src/bin/ written"
+    );
     let out = Command::new(&bin).output().expect("binary should run");
     assert_eq!(String::from_utf8_lossy(&out.stdout), EXPECTED);
 

@@ -16,9 +16,10 @@ fn zz_bin() -> PathBuf {
 
 use std::path::PathBuf;
 
-fn run_zz(args: &[&str]) -> (i32, String) {
+fn run_zz_in(dir: &Path, args: &[&str]) -> (i32, String) {
     let out = Command::new(zz_bin())
         .args(args)
+        .current_dir(dir)
         .output()
         .expect("zz binary should run");
     (
@@ -61,12 +62,12 @@ fn build_dev_produces_runnable_binary() {
     if !require_native() {
         return;
     }
-    // Default build is a static self-contained binary in bin/.
+    // Default build is a static self-contained binary in CWD.
     let dir = std::env::temp_dir().join(format!("zz-cli-test-{}", std::process::id()));
     let f = write_fixture(&dir, "app.zz", HELLO);
-    let (code, out) = run_zz(&["build", f.to_str().unwrap()]);
+    let (code, out) = run_zz_in(&dir, &["build", f.to_str().unwrap()]);
     assert_eq!(code, 0, "build failed: {out}");
-    let bin = dir.join("bin/app");
+    let bin = dir.join("app");
     assert!(bin.exists(), "binary not produced");
 
     // Run the binary independently.
@@ -83,9 +84,9 @@ fn build_release_is_small_and_works() {
     }
     let dir = std::env::temp_dir().join(format!("zz-cli-rel-{}", std::process::id()));
     let f = write_fixture(&dir, "rp.zz", HELLO);
-    let (code, out) = run_zz(&["build", "-p", f.to_str().unwrap()]);
+    let (code, out) = run_zz_in(&dir, &["build", "-p", f.to_str().unwrap()]);
     assert_eq!(code, 0, "release build failed: {out}");
-    let bin = dir.join("bin/rp");
+    let bin = dir.join("rp");
     let size = std::fs::metadata(&bin).unwrap().len();
     assert!(
         size < 2_000_000,
@@ -104,7 +105,7 @@ fn run_native_executes_and_outputs() {
     }
     let dir = std::env::temp_dir().join(format!("zz-cli-native-{}", std::process::id()));
     let f = write_fixture(&dir, "rn.zz", HELLO);
-    let (code, out) = run_zz(&["run", "--native", f.to_str().unwrap()]);
+    let (code, out) = run_zz_in(&dir, &["run", "--native", f.to_str().unwrap()]);
     assert_eq!(code, 0, "native run failed: {out}");
     assert_eq!(out, "nativetest\n499500\n");
     let _ = std::fs::remove_dir_all(&dir);
@@ -118,10 +119,10 @@ fn build_cache_reuses_fast_on_unchanged_source() {
     let dir = std::env::temp_dir().join(format!("zz-cli-cache-{}", std::process::id()));
     let f = write_fixture(&dir, "rc.zz", HELLO);
     // First build populates cache (release; dev builds skip native compile).
-    let (code, _) = run_zz(&["build", "-p", f.to_str().unwrap()]);
+    let (code, _) = run_zz_in(&dir, &["build", "-p", f.to_str().unwrap()]);
     assert_eq!(code, 0);
     // Second build should be instant (cache hit) — just verify success.
-    let (code2, out2) = run_zz(&["build", "-p", f.to_str().unwrap()]);
+    let (code2, out2) = run_zz_in(&dir, &["build", "-p", f.to_str().unwrap()]);
     assert_eq!(code2, 0, "cached build failed: {out2}");
     let _ = std::fs::remove_dir_all(&dir);
 }

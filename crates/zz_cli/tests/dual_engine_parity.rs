@@ -80,6 +80,16 @@ fn run_zz_with_input_env(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    // Native builds publish standalone outputs to the invocation dir:
+    // run `--native` legs from a unique temp dir per fixture, never the
+    // shared workspace root (parallel fixtures would share — and race
+    // on — one destination, and litter the repo). Fixtures never touch
+    // CWD-relative paths (scratch lives under token-mixed /tmp dirs),
+    // so this is runtime-equivalent. The VM leg writes nothing and
+    // keeps the workspace CWD.
+    if args.contains(&"--native") {
+        cmd.current_dir(native_cwd(file));
+    }
     if let Some(t) = token {
         cmd.env("ZZ_SWEEP_TOKEN", t);
         // Sweep fast paths (test-only, never production):
@@ -170,6 +180,22 @@ fn run_zz_vm_token(file: &Path, token: &str) -> (i32, String, String) {
 fn run_zz_native_token(file: &Path, token: &str) -> (i32, String, String) {
     let input = stdin_for(file);
     run_zz_with_input_env(&["run", "--native"], file, &input, Some(token))
+}
+
+/// CWD for `--native` legs: a unique temp dir per fixture (path hash +
+/// stem), created on demand. See the call-site comment for why the
+/// shared workspace root is unsuitable.
+fn native_cwd(file: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    file.to_string_lossy().hash(&mut h);
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "zz".to_string());
+    let dir = std::env::temp_dir().join(format!("zz-parity-native-{:016x}-{stem}", h.finish()));
+    std::fs::create_dir_all(&dir).expect("native CWD tmpdir");
+    dir
 }
 
 /// Strip lines that are purely numeric (timestamps, memory addresses).
@@ -1522,6 +1548,11 @@ fn run_quad_leg(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    // Same standalone-destination rule as above: `--native` legs run
+    // from a unique temp dir per fixture (the VM writes nothing).
+    if native {
+        cmd.current_dir(native_cwd(file));
+    }
     cmd.env("ZZ_SWEEP_TOKEN", token);
     cmd.env("ZZ_CRYPTO_FAST", "1");
     if dev {

@@ -210,6 +210,14 @@ fn run_driver(driver: &Path, native: bool) -> (i32, String, String) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // Native builds publish standalone outputs to the invocation dir:
+    // run from the driver's own directory so parallel drivers never
+    // share (and race on) one destination. The VM writes nothing.
+    if native {
+        if let Some(parent) = driver.parent() {
+            cmd.current_dir(parent);
+        }
+    }
     let mut child = cmd.spawn().expect("spawn zz");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {

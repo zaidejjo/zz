@@ -99,6 +99,10 @@ fn scaffold_shared() -> (PathBuf, PathBuf) {
     let consumer = root.join("use");
     write_stable(&consumer, "zz.toml", CONSUMER_TOML);
     write_stable(&consumer, "src/main.zz", CONSUMER_MAIN);
+    // Migration: builds used to publish to `src/bin/`; the authoritative
+    // destination is now the project-root `bin/`. Drop stale legacy
+    // outputs from pre-redesign runs (build artifacts, regenerable).
+    let _ = std::fs::remove_dir_all(consumer.join("src").join("bin"));
     std::fs::write(&stamp_path, &stamp).unwrap();
     (toy, consumer)
 }
@@ -317,7 +321,15 @@ fn toy_plugin_aot_and_vm_agree() {
     // AOT path.
     let (code, _, stderr) = run_zz(&consumer, &["build", "--allow-hooks", "src/main.zz"]);
     assert_eq!(code, 0, "build failed: {stderr}");
-    let bin = consumer.join("src/bin/main");
+    let bin = consumer.join("bin/toyuse");
+    assert!(
+        bin.is_file(),
+        "project binary missing (must not be src/bin/)"
+    );
+    assert!(
+        !consumer.join("src/bin").exists(),
+        "legacy src/bin/ written"
+    );
     let out = Command::new(&bin).output().expect("binary should run");
     assert_eq!(String::from_utf8_lossy(&out.stdout), EXPECTED);
 
