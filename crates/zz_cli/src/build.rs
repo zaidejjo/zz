@@ -1535,7 +1535,17 @@ pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Stri
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
 
-    let tmp = std::env::temp_dir().join(format!("zz-native-{}", std::process::id()));
+    // Unique per call (pid + process-wide counter): parallel `zz run
+    // --native` invocations in one process (e.g. the e2e/parity suites)
+    // used to share a single `zz_out` path, so tests executed each
+    // other's binaries — rotating VM-vs-native mismatches.
+    // Unique per call (pid + process-wide counter): parallel `zz run
+    // --native` invocations in one process (e.g. the e2e/parity suites)
+    // used to share a single `zz_out` path, so tests executed each
+    // other's binaries — rotating VM-vs-native mismatches.
+    static TRANSIENT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = TRANSIENT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("zz-native-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create tmp: {e}"))?;
     let bin = tmp.join("zz_out");
     zz_codegen::build_native(
@@ -1603,6 +1613,48 @@ fn signal_name(sig: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_builds_are_isolated_across_threads() {
+        // Regression: transient dir was pid-only, so parallel native runs
+        // overwrote one `zz_out` and tests executed each other's binaries
+        // (rotating VM-vs-native mismatches in bug_hunter).
+        if zz_codegen::compile::detect_clang().is_none() {
+            return;
+        }
+        static FIX_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let base = std::env::temp_dir().join(format!("zz-transient-race-{}", std::process::id()));
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for i in 0..8usize {
+                let base = base.clone();
+                handles.push(s.spawn(move || {
+                    let n = FIX_COUNTER.fetch_add(1, Ordering::SeqCst);
+                    let dir = base.join(format!("case-{n}"));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let src = dir.join("t.zz");
+                    std::fs::write(&src, format!("func main() {{\n    println(\"t{i}\")\n}}\n"))
+                        .unwrap();
+                    let (bin, cleanup) = transient_build(&src).expect("transient build");
+                    let res = std::process::Command::new(&bin)
+                        .output()
+                        .expect("exec transient binary");
+                    cleanup();
+                    let _ = std::fs::remove_dir_all(&dir);
+                    (
+                        res.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&res.stdout).into_owned(),
+                    )
+                }));
+            }
+            for (k, h) in handles.into_iter().enumerate() {
+                let (code, out) = h.join().unwrap();
+                assert_eq!(code, 0, "case {k} exit");
+                assert_eq!(out, format!("t{k}\n"), "case {k} ran its own binary");
+            }
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn bin_naming_host_and_cross() {
