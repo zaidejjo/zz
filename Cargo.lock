@@ -3641,6 +3641,7 @@ version = "0.2.2"
 dependencies = [
  "ignore",
  "rayon",
+ "sha2",
  "similar",
  "thiserror 1.0.69",
  "tracing",

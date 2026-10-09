@@ -11,6 +11,7 @@
 //!
 //! Public entry points are re-exported at the crate root.
 
+pub mod cache;
 pub mod config;
 pub mod diff;
 pub mod doc;

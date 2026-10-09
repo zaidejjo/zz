@@ -2250,6 +2250,13 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
             .read_to_string(&mut source)
             .map_err(|e| format!("cannot read stdin: {e}"))?;
         let config = zz_fmt::FmtConfig::default();
+        // O(1) warm path: identical stdin seen clean before.
+        if zz_fmt::cache::is_clean(&source, &config) {
+            if !check_only {
+                print!("{source}");
+            }
+            return Ok(false);
+        }
         return match zz_fmt::format_source(&source, &config) {
             Ok(formatted) => {
                 if formatted != source {
@@ -2263,6 +2270,7 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
                     }
                     Ok(true)
                 } else {
+                    zz_fmt::cache::mark_clean(&source, &config);
                     if !check_only {
                         print!("{formatted}");
                     }
@@ -2298,7 +2306,37 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
 
     let src_refs: Vec<(&std::path::PathBuf, &str)> =
         sources.iter().map(|(p, s)| (p, s.as_str())).collect();
-    let results = zz_fmt::format_sources_parallel(&src_refs, &config);
+    // O(1) warm path: files proven clean on a previous run (same content,
+    // config, toolchain) skip the pipeline entirely. The rest format in
+    // parallel as before; newly-clean outputs are recorded for next time.
+    let todo_idx: Vec<usize> = src_refs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, s))| !zz_fmt::cache::is_clean(s, &config))
+        .map(|(i, _)| i)
+        .collect();
+    let todo_refs: Vec<(&std::path::PathBuf, &str)> =
+        todo_idx.iter().map(|&i| src_refs[i]).collect();
+    let todo_results = zz_fmt::format_sources_parallel(&todo_refs, &config);
+    let mut results: Vec<Result<String, zz_fmt::FmtError>> = Vec::with_capacity(sources.len());
+    {
+        let mut todo_iter = todo_results.into_iter();
+        let mut todo_pos = 0;
+        for (i, (_, src)) in src_refs.iter().enumerate() {
+            if todo_idx.get(todo_pos) == Some(&i) {
+                todo_pos += 1;
+                let r = todo_iter.next().expect("parallel results align");
+                if let Ok(formatted) = &r {
+                    if formatted == *src {
+                        zz_fmt::cache::mark_clean(src, &config);
+                    }
+                }
+                results.push(r);
+            } else {
+                results.push(Ok((*src).to_string()));
+            }
+        }
+    }
 
     let mut changed_any = false;
     let mut errors: Vec<String> = Vec::new();
