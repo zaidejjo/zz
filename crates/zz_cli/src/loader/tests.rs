@@ -1780,3 +1780,28 @@ fn non_matching_import_still_resolves_relatively() {
     assert!(no_errors(&result), "errors: {:?}", result.errors);
     assert_eq!(result.bindings["main.x"], Type::Int);
 }
+
+#[test]
+fn package_import_resolves_from_nested_tests_dir() {
+    // Deeper nesting on both sides: importer at `tests/unit/` reaches
+    // `src/nested/` through the root manifest alone (no nested
+    // manifests, no symlinks, no `tests/src/` — regression for #288).
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("src/math.zz", "pub func add(a: int, b: int) -> int { a + b }"),
+        (
+            "src/nested/deep.zz",
+            "import app.math\npub func deep_add(a: int, b: int) -> int { math.add(a, b) + 100 }",
+        ),
+        (
+            "tests/unit/check.zz",
+            "import app.nested.deep\nimport app.math(add as f)\nx := deep.deep_add(1, 2)\ny := f(20, 22)",
+        ),
+    ]);
+    let result = load_program(&dir.join("tests/unit/check.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.programs.len(), 3);
+    assert_eq!(result.bindings["check.x"], Type::Int);
+    assert_eq!(result.bindings["check.y"], Type::Int);
+}
