@@ -14,6 +14,7 @@ mod doctor;
 mod loader;
 mod pm;
 mod repl;
+mod run_cache;
 mod session;
 mod setup;
 mod test_runner;
@@ -738,6 +739,11 @@ struct PreparedRun {
     enums: std::collections::HashMap<String, zz_checker::EnumSig>,
     funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
     entry_path: String,
+    /// Threaded out for the run cache: interpreter inputs that cannot be
+    /// derived from `.zzc` bytes (stored in `meta.json` on a miss).
+    consts: std::collections::HashMap<String, f64>,
+    import_aliases: std::collections::HashMap<String, String>,
+    stdlib_aliases: Vec<(String, String)>,
 }
 
 /// Seed an interpreter: native dispatch, math constants, pure-ZZ
@@ -941,7 +947,7 @@ fn prepare_run(
     let interp = setup_interp(
         natives,
         &consts,
-        import_aliases,
+        import_aliases.clone(),
         &stdlib_aliases,
         &project_root,
         &plugin_funcs,
@@ -957,6 +963,9 @@ fn prepare_run(
         enums: typed.program.enums,
         funcs: typed.program.funcs,
         entry_path: path.to_string(),
+        consts,
+        import_aliases,
+        stdlib_aliases,
     })
 }
 
@@ -1326,6 +1335,96 @@ fn run_file(
     )?;
     let path = &resolved;
 
+    // One-time-compiler fast path: the key is content-addressed over the
+    // whole closure, so a hit executes cached IR with no frontend work.
+    // Plugin discovery is cheap (manifest scan) and must precede the key.
+    let entry_path = std::path::Path::new(path);
+    let plugin_funcs = crate::build::discover_plugin_manifests(entry_path);
+    if let Ok(slug) = run_cache::run_key(entry_path, &plugin_funcs, embed.as_deref()) {
+        if let Some(hit) = run_cache::lookup(&slug) {
+            run_cache::log_hit(&slug);
+            match run_cached(
+                &slug,
+                &hit,
+                path,
+                script_args,
+                embed.as_deref(),
+                &plugin_funcs,
+            ) {
+                Ok(()) => return Ok(()),
+                // Stale or corrupt entry (e.g. toolchain drift the key
+                // missed): fall through to the full pipeline, which
+                // re-stores cleanly. Never fail a run on cache content.
+                Err(e) => {
+                    if std::env::var("ZZ_VERBOSE").is_ok() {
+                        eprintln!("zz: run cache entry unusable ({e}), recompiling");
+                    }
+                }
+            }
+        } else {
+            if run_cache::cache_enabled() {
+                run_cache::log_miss(&slug);
+            }
+        }
+        // Miss: full pipeline, then store the compiled IR for next time.
+        let mut prep = prepare_run(path, script_args, embed.clone())?;
+        let mut last = Value::Unit;
+        // Compile each module to IR bytes alongside the typed execution.
+        // Note: `run_typed` recompiles internally, so a miss compiles
+        // twice; the miss path stays byte-identical to the uncached
+        // pipeline by design (a hit-only `run_loaded_chunk` would risk
+        // execution divergence where it matters least — cold runs).
+        let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+            std::sync::Arc::new(prep.interp.natives.keys().cloned().collect());
+        let mut cached_modules: Vec<Vec<u8>> = Vec::with_capacity(prep.programs.len());
+        let mut store_ok = true;
+        for (i, program) in prep.programs.iter().enumerate() {
+            let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+                program,
+                prep.types.clone(),
+                prep.structs.clone(),
+                prep.enums.clone(),
+                native_names.clone(),
+            );
+            match zz_ir::lower::lower_typed(&chunk, &prep.funcs) {
+                Ok(module) => cached_modules.push(zz_ir::codec::encode(&module)),
+                Err(_) => store_ok = false,
+            }
+            match prep.interp.run_typed(
+                program,
+                prep.types.clone(),
+                prep.structs.clone(),
+                prep.enums.clone(),
+            ) {
+                Ok(v) => last = v,
+                Err(e) => {
+                    let (name, source) = prep
+                        .files
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| (prep.entry_path.clone(), String::new()));
+                    return Err(render_eval_error(&e, &name, &source));
+                }
+            }
+        }
+        if store_ok {
+            let meta = run_cache::RunMeta {
+                consts: prep.consts.clone(),
+                import_aliases: prep.import_aliases.clone(),
+                stdlib_aliases: prep.stdlib_aliases.clone(),
+            };
+            run_cache::store(&slug, &cached_modules, &meta);
+        }
+        return run_entry_main(
+            &mut prep.interp,
+            last,
+            &prep.entry_path,
+            script_args,
+            &prep.files,
+        );
+    }
+
+    // Key computation failed (unreadable entry): today's behavior exactly.
     let mut prep = prepare_run(path, script_args, embed)?;
     let mut last = Value::Unit;
     for (i, program) in prep.programs.iter().enumerate() {
@@ -1352,6 +1451,72 @@ fn run_file(
         &prep.entry_path,
         script_args,
         &prep.files,
+    )
+}
+
+/// Execute a run-cache hit: rebuild natives (stdlib + alias replays),
+/// seed the interpreter (plugins, pure-ZZ stdlib, cached consts/aliases),
+/// then decode/verify/raise each cached module and run it. Mirrors the
+/// `.zzc` loader — no AST is available on this path.
+fn run_cached(
+    slug: &str,
+    hit: &run_cache::RunHit,
+    entry_path: &str,
+    script_args: &[String],
+    embed: Option<&std::path::Path>,
+    plugin_funcs: &[(String, zz_checker::FuncSig)],
+) -> Result<(), String> {
+    let path = std::path::Path::new(entry_path);
+    let project_root = loader::find_project_root(path).unwrap_or_else(|| {
+        path.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf()
+    });
+    enforce_project_zz(path)?;
+    // Natives: stdlib under every default namespace, plus replays for
+    // `import std.X as alias` pairs (the miss path registers those via
+    // the loader; without them aliased native calls would miss).
+    let mut natives = zz_stdlib::natives::stdlib_natives();
+    {
+        let mut funcs = std::collections::HashMap::new();
+        for module in zz_stdlib::STDLIB_MODULES {
+            let ns = module.rsplit('.').next().unwrap_or(module);
+            let _ = zz_stdlib::register_module_namespace(module, ns, &mut funcs, &mut natives);
+        }
+        for (module, ns) in &hit.meta.stdlib_aliases {
+            let short = module.strip_prefix("std.").unwrap_or(module);
+            let _ = zz_stdlib::register_module_namespace(short, ns, &mut funcs, &mut natives);
+        }
+    }
+    let mut interp = setup_interp(
+        natives,
+        &hit.meta.consts,
+        hit.meta.import_aliases.clone(),
+        &hit.meta.stdlib_aliases,
+        &project_root,
+        plugin_funcs,
+        script_args,
+        embed,
+    )?;
+    let mut last = Value::Unit;
+    for bytes in &hit.modules {
+        let loaded = zz_ir::codec::decode(bytes).map_err(|e| format!("invalid .zzc: {e}"))?;
+        zz_ir::verify::verify(&loaded).map_err(|e| format!(".zzc verify failed: {e}"))?;
+        let chunk = zz_ir::raise::raise(&loaded).map_err(|e| format!("ir raise failed: {e}"))?;
+        match interp.run_loaded_chunk(&chunk) {
+            Ok(v) => last = v,
+            Err(e) => {
+                return Err(render_eval_error(&e, entry_path, ""));
+            }
+        }
+    }
+    let _ = slug;
+    run_entry_main(
+        &mut interp,
+        last,
+        entry_path,
+        script_args,
+        &[(entry_path.to_string(), String::new())],
     )
 }
 
