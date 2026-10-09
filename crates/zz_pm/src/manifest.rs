@@ -596,10 +596,12 @@ pub enum DepSpec {
     /// Git dependency with version constraint.
     Git(GitDep),
     /// Path dependency (local filesystem).
-    // TODO(workspace): cross-source version conflicts (same package name available
-    // as both a registry version and a path dep, e.g. once [workspace] ships)
-    // are currently undefined behavior — not resolved now, just flagged so it
-    // isn't silently assumed away later.
+    // Cross-source pins (same name locked from another source, e.g. a
+    // registry entry left over from before the manifest flipped to a path
+    // dep) are stale by definition: the manifest declaration always wins
+    // (see resolve.rs notes, #266). True same-name-different-source
+    // declarations across workspace members stay future work until
+    // [workspace] ships.
     Path(PathDep),
 }
 

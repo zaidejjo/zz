@@ -349,6 +349,22 @@ Workaround: have both importers use the same name (or no alias), and
 import the shared file directly. Tracking per-importer alias copies
 in #228.
 
+### Dependency sources
+
+A dependency name has exactly one source: whatever `zz.toml` declares
+(`"1.2.3"` → registry, `{ git = …, rev = … }` → git, `{ path = … }` →
+path). The manifest always wins — a lock pin from another source (left
+over from before the manifest flipped, e.g. registry → path during
+local development) is stale by definition: the resolver ignores it,
+re-resolves from the manifest, and prints
+`note: <name>: manifest declares <source>, ignoring stale <source> pin`.
+`zz install` rewrites the lock and recreates `vendor/` links, so
+flipping a dep between path and registry needs no manual cleanup.
+`zz install` also verifies materialization: on a fresh clone (lock
+matches, `vendor/` missing) it fetches and links instead of reporting
+"up to date". Same-name declarations across workspace members stay
+future work until `[workspace]` ships (#266).
+
 ## REPL Commands
 
 In the REPL, these special commands are available:
