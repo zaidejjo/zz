@@ -18,7 +18,7 @@ pub use compile::{
     BuildOptions, Clang, ClangProvider, EmbedAsset, PgoMode,
 };
 pub use ffi::{ffi_impl, FfiError, FFI_VERSION};
-pub use lower::{mangle, native_supported, LoweredC, Lowerer};
+pub use lower::{mangle, native_supported, units, LoweredC, Lowerer};
 
 /// The embedded C runtime header. The runtime is split across modular
 /// sub-headers under `src/runtime/`; the umbrella `runtime.h` includes them
@@ -105,6 +105,68 @@ pub fn build_native(
     compile::build(&lowered.source, out_path, opts, target)?;
     if verbose {
         eprintln!("zz: timing clang_link={}ms", t_cc.elapsed().as_millis());
+    }
+    Ok(lowered)
+}
+
+/// Per-module native build: lower to namespaced translation units and
+/// compile them (serially for now) against the precompiled runtime archive.
+/// `--embed` tables ride in the entry unit (emitted once, never in the
+/// shared header). Returns the entry-unit index for callers that need it.
+pub fn build_native_units_with(
+    tp: &zz_hir::TypedProgram,
+    reach: &zz_hir::ReachableSet,
+    entry_main: &str,
+    opts: BuildOptions,
+    target: Option<&str>,
+    clang: &compile::Clang,
+    out_path: &std::path::Path,
+) -> Result<units::LoweredUnits, compile::BuildError> {
+    // Entry namespace derives from the dotted main key (`main.main` ->
+    // `main`); bare test mains land in the prelude bucket with bare fns.
+    let entry_ns = units::ns_of(entry_main).to_string();
+    let verbose = opts.verbose;
+    let t_lower = std::time::Instant::now();
+    let mut lowerer = Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        entry_main.to_string(),
+        tp.clone(),
+    );
+    lowerer.set_precompiled(true);
+    let mut lowered = lowerer.lower_units(&entry_ns);
+    if verbose {
+        eprintln!("zz: timing lower_units={}ms", t_lower.elapsed().as_millis());
+    }
+    let mut opts = opts;
+    opts.native_rt = opts.native_rt || lowered.needs_native_rt;
+    opts.pg_link = opts.pg_link || lowered.needs_pg_link;
+    opts.float_link = opts.float_link || lowered.needs_float_fmt;
+    opts.curl_link = opts.curl_link || lowered.needs_curl;
+    opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+    if !opts.embed_assets.is_empty() {
+        let tables = compile::embed_c(&opts.embed_assets);
+        match lowered.units.iter_mut().find(|u| u.ns == lowered.entry_ns) {
+            Some(u) => {
+                u.code.push_str(&tables);
+            }
+            None => {
+                lowered.units.push(units::CodeUnit {
+                    ns: lowered.entry_ns.clone(),
+                    code: tables,
+                });
+            }
+        }
+    }
+    let pairs: Vec<(String, String)> = lowered
+        .units
+        .iter()
+        .map(|u| (u.ns.clone(), u.code.clone()))
+        .collect();
+    let t_cc = std::time::Instant::now();
+    compile::compile_units(&lowered.header, &pairs, out_path, &opts, target, clang)?;
+    if verbose {
+        eprintln!("zz: timing units_cc_link={}ms", t_cc.elapsed().as_millis());
     }
     Ok(lowered)
 }

@@ -1606,7 +1606,8 @@ impl Lowerer {
         // Emit a forward declaration so the closure is visible to
         // call sites that appear before the closure definition.
         self.closure_forward_decls.borrow_mut().push(format!(
-            "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv);\n"
+            "{} zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv);\n",
+            self.link_kw()
         ));
         // Green closures (B3 suspendable frames): eligible bodies
         // lower to a state machine and suspend instead of parking.
@@ -1724,7 +1725,8 @@ impl Lowerer {
         }
         let mut o = String::new();
         o.push_str(&format!(
-            "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv) {{\n"
+            "{} zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv) {{\n",
+            self.link_kw()
         ));
         o.push_str("    (void)argc;\n");
         o.push_str("    (void)nenv;\n");

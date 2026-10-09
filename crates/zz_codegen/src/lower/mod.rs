@@ -17,6 +17,7 @@ mod fn_decl;
 mod green;
 mod move_elide;
 mod stmt;
+pub mod units;
 
 use zz_frontend::ast::{Expr, Pattern, Stmt};
 
@@ -61,7 +62,7 @@ pub struct LoweredC {
 /// True when a resolved type can carry an `f64` to a Display site.
 /// Recursive over every compound shape (no `Any` exists, so a whole-
 /// program scan of `TypedProgram` types is a sound float-format gate).
-fn type_has_float(t: &zz_checker::Type) -> bool {
+pub(crate) fn type_has_float(t: &zz_checker::Type) -> bool {
     match t {
         zz_checker::Type::Float => true,
         zz_checker::Type::Tuple(ts) | zz_checker::Type::Union(ts) => ts.iter().any(type_has_float),

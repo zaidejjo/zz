@@ -994,10 +994,29 @@ pub fn build_with(
         .arg("-lm")
         // sqlz: prepared-statement FFI needs sqlite3 headers.
         .arg("-DZZ_HAS_SQLITE3");
+    push_link_inputs(&mut cmd, &opts, target, clang, output_path)?;
+    let out = cmd.output().map_err(BuildError::Io)?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        return Err(BuildError::CompileFailed { stderr });
+    }
+    Ok(clang.clone())
+}
+
+/// Shared link inputs for single-TU and multi-TU builds: precompiled
+/// runtime archive, Rust native runtime, plugin artifacts, conditional
+/// system libs. Object files / TU sources are added by the caller.
+fn push_link_inputs(
+    cmd: &mut Command,
+    opts: &BuildOptions,
+    target: Option<&str>,
+    clang: &Clang,
+    output_path: &std::path::Path,
+) -> Result<(), BuildError> {
     // Precompiled C runtime archive: the runtime sources (core.c, strings.c,
     // collections.c, json.c, memory.c) are compiled once and cached. The
     // generated C only contains headers (declarations) + user code.
-    match crate::cache::ensure_rt_a(&opts, clang, target) {
+    match crate::cache::ensure_rt_a(opts, clang, target) {
         Ok(rt_a) => {
             if let Some(parent) = rt_a.parent() {
                 cmd.arg(format!("-L{}", parent.display()));
@@ -1079,7 +1098,95 @@ pub fn build_with(
         }
         cmd.arg("-Wl,--no-as-needed");
     }
+    Ok(())
+}
 
+/// Multi-TU build: compile each unit TU to an object file (serially;
+/// parallel fan-out is a planned follow-up), then link all objects with
+/// the same inputs as [`build_with`]. `units` are (namespace, code) pairs;
+/// `header` is prepended to every TU. Link-only flags (`-s`, `-Wl,*`,
+/// `-static`) are withheld from the `-c` steps and applied at link.
+pub fn compile_units(
+    header: &str,
+    units: &[(String, String)],
+    output_path: &Path,
+    opts: &BuildOptions,
+    target: Option<&str>,
+    clang: &Clang,
+) -> Result<Clang, BuildError> {
+    validate(opts, target)?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmpdir = std::env::temp_dir().join(format!("zz-units-{}-{uniq}", std::process::id()));
+    std::fs::create_dir_all(&tmpdir)?;
+    let dump_dir = std::env::var("ZZ_DUMP_C").ok().map(PathBuf::from);
+    let mut objs: Vec<PathBuf> = Vec::new();
+    for (ns, code) in units {
+        let safe_ns: String = ns
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let tu = crate::lower::strip_quoted_includes(&format!("{header}\n{code}"));
+        let src_path = tmpdir.join(format!("{safe_ns}.c"));
+        std::fs::write(&src_path, &tu)?;
+        if let Some(dir) = &dump_dir {
+            let _ = std::fs::write(dir.join(format!("{safe_ns}.c")), &tu);
+        }
+        let obj = tmpdir.join(format!("{safe_ns}.o"));
+        let mut cmd = Command::new(&clang.path);
+        if clang.zig {
+            cmd.arg("cc");
+            if let Some(t) = target {
+                cmd.arg("-target").arg(t);
+            }
+        }
+        for flag in clang_flags(opts, if clang.zig { None } else { target }) {
+            if clang.zig && flag.starts_with("--target=") {
+                continue;
+            }
+            if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
+                continue;
+            }
+            cmd.arg(flag);
+        }
+        cmd.arg("-c")
+            .arg(&src_path)
+            .arg("-o")
+            .arg(&obj)
+            .arg("-DZZ_HAS_SQLITE3");
+        let out = cmd.output().map_err(BuildError::Io)?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            return Err(BuildError::CompileFailed { stderr });
+        }
+        objs.push(obj);
+    }
+    let mut cmd = Command::new(&clang.path);
+    if clang.zig {
+        cmd.arg("cc");
+        if let Some(t) = target {
+            cmd.arg("-target").arg(t);
+        }
+    }
+    for flag in clang_flags(opts, if clang.zig { None } else { target }) {
+        if clang.zig && flag.starts_with("--target=") {
+            continue;
+        }
+        cmd.arg(flag);
+    }
+    cmd.arg("-o").arg(output_path);
+    for obj in &objs {
+        cmd.arg(obj);
+    }
+    cmd.arg("-lm");
+    push_link_inputs(&mut cmd, opts, target, clang, output_path)?;
     let out = cmd.output().map_err(BuildError::Io)?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
