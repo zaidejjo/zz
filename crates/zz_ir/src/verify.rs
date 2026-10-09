@@ -295,9 +295,14 @@ fn verify_func(
     }
     // Param slots are authoritative from the signature: entries must
     // match structurally (lowering seeds them; mismatch is corruption).
+    // Bounds-checked (not indexed): closure/spawn shapes can carry params
+    // with a shorter locals table — that must fail closed, never panic.
     for (i, t) in func.sig.params.iter().enumerate() {
+        let Some(local) = func.locals.get(i) else {
+            return Err(IrError::new("locals: fewer slots than signature params"));
+        };
         let (Some(a), Some(b)) = (
-            module.types.get(func.locals[i].0 as usize),
+            module.types.get(local.0 as usize),
             module.types.get(t.0 as usize),
         ) else {
             return Err(IrError::new("locals: type id out of range"));
