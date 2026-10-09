@@ -27,6 +27,10 @@ func main() {
     println(inc(9))
     println("units_ok")
 }
+
+// Trailing top-level statement in a namespace that already has functions:
+// same-namespace inits-after-fns must not emit the module twice.
+println("tail-init")
 "#;
 
 const HELPER_ZZ: &str = r#"pub struct Point {x: int, y: int}
