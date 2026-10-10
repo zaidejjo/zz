@@ -405,10 +405,6 @@ func main() -> Result<int, str> {
     .ok(0)
 }
 ```
-    .ok(res)  => println("users: {res.text()}"),
-    .err(e)   => println("request failed: {e}"),
-}
-```
 
 ### Testing Handlers
 

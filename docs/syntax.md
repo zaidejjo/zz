@@ -127,7 +127,7 @@ payload construction (`Token.IntLit(1).add(2)` fills the payload with
 `1`, calls `add` with `2`).
 
 Generic enums take plain parameters and name their arguments at use
-sites (`Box[int]`), exactly like generic structs:
+sites (`Box<int>`), exactly like generic structs:
 
 ```zz
 enum Box<T> {
@@ -654,12 +654,12 @@ impl Box<T> {
     }
 }
 
-b := Box{ v: 42 }      // Box[int]
+b := Box{ v: 42 }      // Box<int>
 println(b.get())       // 42
-s := Box{ v: "hi" }    // Box[str]
+s := Box{ v: "hi" }    // Box<str>
 
 struct Pair<A, B> { a: A, b: B }
-p := Pair{ a: 1, b: "s" }   // Pair[int, str]
+p := Pair{ a: 1, b: "s" }   // Pair<int, str>
 ```
 
 Rules:

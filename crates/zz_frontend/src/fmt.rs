@@ -522,14 +522,14 @@ impl<'a> FmtCtx<'a> {
             TyKind::Named(name, generics) => {
                 self.write_str(name);
                 if !generics.is_empty() {
-                    self.write_str("[");
+                    self.write_str("<");
                     for (i, g) in generics.iter().enumerate() {
                         if i > 0 {
                             self.write_str(", ");
                         }
                         self.fmt_ty(g, _source);
                     }
-                    self.write_str("]");
+                    self.write_str(">");
                 }
             }
             TyKind::Array(inner) => {

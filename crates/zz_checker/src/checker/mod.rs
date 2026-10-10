@@ -86,7 +86,7 @@ pub struct StructSig {
 }
 
 /// A registered type alias: type parameters and the target type with
-/// parameters as `Type::Named` (e.g. `type Pair[T] = (T, T)` stores
+/// parameters as `Type::Named` (e.g. `type Pair<T> = (T, T)` stores
 /// `Tuple([Named("T"), Named("T")])`). Uses resolve to the target, so
 /// aliases never appear at runtime.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -95,7 +95,7 @@ pub struct AliasSig {
     pub target: Type,
 }
 /// A registered user enum: type parameters and variant names with
-/// optional payload types (`enum Box[T] { V(T), E }` stores
+/// optional payload types (`enum Box<T> { V(T), E }` stores
 /// `generics: ["T"]`, `variants: [("V", Some(Named("T"))),
 /// ("E", None)]`). Construction (`Box.V(1)`) and patterns (`.V(v)`)
 /// resolve against this table; values erase to `Object`s at runtime.
@@ -493,7 +493,7 @@ fn check_program_impl(
             let builtin_key = Checker::builtin_ext_key(&type_name);
             let is_extension = builtin_key.is_some() || !(is_known_struct || is_known_enum);
             let type_key = builtin_key.unwrap_or_else(|| type_name.clone());
-            // Generic structs need a matching generic impl (`impl Box[T]`);
+            // Generic structs need a matching generic impl (`impl Box<T>`);
             // the parameters scope over every method below. Generic
             // enums follow the identical rule.
             let struct_generics: Vec<String> = checker
@@ -544,7 +544,7 @@ fn check_program_impl(
                     ));
                 }
             } else {
-                // Duplicate parameter names (`impl Box[T, T]`) shadow each
+                // Duplicate parameter names (`impl Box<T, T>`) shadow each
                 // other in substitution maps; reject rather than guess.
                 let mut seen_gen = std::collections::HashSet::new();
                 for g in &impl_gen_names {
@@ -571,7 +571,7 @@ fn check_program_impl(
                     let method_gens: Vec<String> =
                         generics.iter().map(|g| g.name.name.clone()).collect();
                     // Impl parameters scope over every method (so the
-                    // receiver's `Box[int]` unifies `T := int` at call
+                    // receiver's `Box<int>` unifies `T := int` at call
                     // sites through the existing instantiation path).
                     // A method parameter shadowing an impl parameter
                     // would collapse two distinct variables; reject it.

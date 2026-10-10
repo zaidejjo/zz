@@ -202,7 +202,7 @@ impl Checker {
                             .is_some_and(|q| self.enums.contains_key(q))
                     {
                         // User enums name their type directly (`t: Token`);
-                        // generic enums name their arguments (`Box[int]`),
+                        // generic enums name their arguments (`Box<int>`),
                         // exactly like generic structs.
                         let cname = self.canonical_enum_name(name);
                         if cname != *name {
@@ -215,7 +215,7 @@ impl Checker {
                             .unwrap_or(0);
                         if args.is_empty() && want > 0 {
                             // Mirror generic structs: name the arguments
-                            // (`Box[int]`). Inference still flows from
+                            // (`Box<int>`). Inference still flows from
                             // construction (`Box.V(1)` unifies on its own).
                             self.errors.push(error_at(
                                 format!(
@@ -393,7 +393,7 @@ pub(crate) fn default_variant_vars(t: &mut Type) {
         }
         Type::Enum(_, args) => {
             // Unconstrained enum parameters default like `Option`'s
-            // (bare `Box.Empty` with nothing to infer from is `Box[unit]`).
+            // (bare `Box.Empty` with nothing to infer from is `Box<unit>`).
             for a in args {
                 if contains_var(a) {
                     default_variant_vars(a);

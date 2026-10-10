@@ -535,7 +535,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_struct_generics(&mut self) -> Vec<crate::ast::Ident> {
         if !self.eat(TokenKind::Lt) {
             // Rust-style `struct Box[T]`: ZZ declares type parameters with
-            // `<T>` (`[T]` applies a generic type or makes an array type).
+            // `<T>` (`[T]` makes an array type).
             if self.at(TokenKind::LBracket) {
                 return self.parse_misplaced_bracket_struct_generics();
             }
@@ -549,7 +549,7 @@ impl<'a> Parser<'a> {
             if self.eat(TokenKind::Colon) {
                 self.error_here(
                     "struct type parameters do not take bounds\n\
-                     hint: bound the generic function instead (e.g. `func get<T: Num>(b: Box[T])`)",
+                     hint: bound the generic function instead (e.g. `func get<T: Num>(b: Box<T>)`)",
                 );
                 // Skip the bound list so recovery lands on `,`/`>`.
                 while !self.at(TokenKind::Comma)
@@ -1073,7 +1073,7 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         // Rust-style `func first[T](...)`: ZZ declares generics with `<T>`
-        // (`[T]` applies a generic type, e.g. `Box[T]`). Parse the bracketed
+        // (`[T]` makes an array type). Parse the bracketed
         // list for recovery and show the right way with a fix.
         if generics.is_empty() && self.at(TokenKind::LBracket) {
             generics = self.parse_misplaced_bracket_generics();
@@ -1238,7 +1238,7 @@ impl<'a> Parser<'a> {
                 bracket_span,
             )
             .with_note(format!(
-                "write `{fixed}` instead (`[T]` applies a generic type, e.g. `Box[T]`, or makes an array type)"
+                "write `{fixed}` instead (`[T]` makes an array type, e.g. `[int]`; apply a generic type with `<T>`, e.g. `Box<T>`)"
             ))
             .with_fixit(FixIt::safe(bracket_span, fixed, "use `<...>`")),
         );
@@ -1291,7 +1291,7 @@ impl<'a> Parser<'a> {
                 bracket_span,
             )
             .with_note(format!(
-                "write `{fixed}` instead (`[T]` applies a generic type, e.g. `Box[T]`, or makes an array type)"
+                "write `{fixed}` instead (`[T]` makes an array type, e.g. `[int]`; apply a generic type with `<T>`, e.g. `Box<T>`)"
             ))
             .with_fixit(FixIt::safe(bracket_span, fixed, "use `<...>`")),
         );

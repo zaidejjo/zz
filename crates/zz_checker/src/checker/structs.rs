@@ -88,7 +88,7 @@ impl Checker {
     }
 
     /// Direct field type with the use-site arguments substituted
-    /// (`Box[int].v` → `int`). Returns `None` for unknown structs,
+    /// (`Box<int>.v` → `int`). Returns `None` for unknown structs,
     /// unknown fields, or arity mismatch details (handled by callers).
     pub(crate) fn direct_field_type(
         &self,
