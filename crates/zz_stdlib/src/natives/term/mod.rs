@@ -48,6 +48,31 @@ pub(crate) fn term_read_key(
     }
 }
 
+pub(crate) fn term_poll(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let ms = match args.first() {
+        Some(Value::Int(ms)) => *ms,
+        other => {
+            return Err(EvalError::new(
+                format!(
+                    "poll expects `int` ms, found `{}`",
+                    other
+                        .map(|v| v.type_name())
+                        .unwrap_or_else(|| "nothing".to_string())
+                ),
+                span,
+            ))
+        }
+    };
+    match zz_native_rt::term::poll(ms) {
+        Ok(ready) => Ok(ok_wrap(Value::Bool(ready))),
+        Err(msg) => Ok(err_wrap(msg)),
+    }
+}
+
 pub(crate) fn term_get_size(
     _interp: &mut Interp,
     _args: &mut Vec<Value>,
