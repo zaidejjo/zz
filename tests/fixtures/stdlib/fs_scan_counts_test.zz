@@ -106,18 +106,26 @@ match fs.scan_counts(nul_path, [], "", "", false, false) {
 
 // FIFOs/pipes report size 0 but stream content: grow-to-EOF reads them
 // fully on both engines (regular read_to_string parity, one crossing).
+// The writer is SPAWNED, never run(): spawn returns immediately with
+// no EOF/exit wait, so no shell background semantics (`&`, pipe
+// release, parent exit — which wedge `run()` under some shells) can
+// hang the test. The scan opens the reader and the blocked foreground
+// writer proceeds; a failed spawn skips the scan instead of blocking
+// on a fifo no writer will ever open.
 fifo_path := base + "_pipe"
 match process.run("sh", ["-c", "mkfifo {fifo_path}"]) {
     .ok(_) => println("fifo_ok")
     .err(_) => println("fifo_bad")
 }
-match process.run("sh", ["-c", "printf 'a\\nb\\n' </dev/null >/dev/null 2>&1 > {fifo_path} &"]) {
-    .ok(_) => println("writer_ok")
-    .err(_) => println("writer_bad")
-}
-match fs.scan_counts(fifo_path, [], "", "", false, false) {
-    .ok(r) => println("fifo={r[0]},{r[1]},{r[2]},{r[3]},{r[4]}")
-    .err(e) => println("fifo_err: {e}")
+match process.spawn("sh", ["-c", "printf 'a\\nb\\n' > {fifo_path}"]) {
+    .ok(_) => {
+        println("writer_ok")
+        match fs.scan_counts(fifo_path, [], "", "", false, false) {
+            .ok(r) => println("fifo={r[0]},{r[1]},{r[2]},{r[3]},{r[4]}")
+            .err(e) => println("fifo_err: {e}")
+        }
+    }
+    .err(_) => println("fifo_skip")
 }
 match fs.remove_file(fifo_path) {
     .ok(_) => println("fifo_clean")
