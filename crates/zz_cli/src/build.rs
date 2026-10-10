@@ -945,7 +945,17 @@ fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
     );
     let module = zz_ir::lower::lower_typed(&chunk, &typed.program.funcs)
         .map_err(|e| format!("zz: ir lower failed: {e}"))?;
-    Ok((module, format!("{entry_ns}.main")))
+    // Unification: the chunk backend never consumes in-memory IR
+    // directly. Encode to `.zzc` bytes, decode, and verify — the exact
+    // bytes-derived path `zz run --bytecode` executes. A codec or
+    // verifier failure is a loud build error, never a silent divergence
+    // between VM-tested IR and AOT-emitted C.
+    let bytes = zz_ir::codec::encode(&module);
+    drop(chunk);
+    drop(module);
+    let loaded = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
+    zz_ir::verify::verify(&loaded).map_err(|e| format!("zz: .zzc verify failed: {e}"))?;
+    Ok((loaded, format!("{entry_ns}.main")))
 }
 
 /// Output directory for a build of `src` (authoritative, no duplicates):
