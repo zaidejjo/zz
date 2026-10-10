@@ -2241,25 +2241,48 @@ fn namespace_program(program: &mut Program, ns: &str) {
 /// hoisting the call runs before `MakeFunc` defines `ns.func` and fails
 /// with `undefined variable <ns>`.
 ///
-/// Only hoisted when safe: a function whose body references a top-level
-/// `Decl` MUST stay in source order — defining it before the `Decl`
-/// breaks capture (the binding lands in a slot the early-defined
-/// function never sees). Likewise a function that (transitively) calls
-/// a non-hoisted function stays put. Everything else (pure functions of
-/// their params, mutual recursion between hoisted functions) moves
-/// before executable statements, stably. Programs that hoisting cannot
-/// help keep exactly today's behavior.
+/// Only hoisted when safe, and placed after imports:
+/// - a function whose body references a top-level binding (`Decl` or
+///   `Destructure`) MUST stay in source order — defining/checking it
+///   before the binding breaks capture and check order;
+/// - a function that (transitively) calls a non-hoisted function stays
+///   put;
+/// - hoisted functions land AFTER all imports (the checker populates
+///   import aliases in statement order) but before everything else.
+/// Pure functions of their params (and mutual recursion between hoisted
+/// functions) move stably; programs hoisting cannot help keep exactly
+/// today's behavior.
 fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
-    use zz_frontend::ast::{Block, Expr};
-    // Top-level Decl names post-rewrite ("ns.x"); refs are rewritten too.
+    use zz_frontend::ast::{Block, Expr, Pattern};
+    // Top-level binding names: `Decl`s post-rewrite ("ns.x") plus their
+    // bare forms, and `Destructure` bindings (never namespaced — the
+    // rewriter leaves patterns alone, and refs to them stay bare).
     let mut decl_names: HashSet<String> = HashSet::new();
+    fn collect_pat_binds(p: &Pattern, out: &mut HashSet<String>) {
+        match p {
+            Pattern::Binding { name } => {
+                out.insert(name.name.clone());
+            }
+            Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+                for q in pats {
+                    collect_pat_binds(q, out);
+                }
+            }
+            Pattern::Variant { arg: Some(a), .. } => collect_pat_binds(a, out),
+            _ => {}
+        }
+    }
     // Index of each top-level func in stmt order + its bare name.
     let mut funcs: Vec<(usize, String)> = Vec::new();
     for (i, stmt) in program.stmts.iter().enumerate() {
         match stmt {
             Stmt::Decl { name, .. } => {
                 decl_names.insert(name.name.clone());
+                if let Some(bare) = name.name.rsplit('.').next() {
+                    decl_names.insert(bare.to_string());
+                }
             }
+            Stmt::Destructure { pat, .. } => collect_pat_binds(pat, &mut decl_names),
             Stmt::Func { name, .. } => {
                 // Post-rewrite: ["ns.foo"] (dot inside one element).
                 let full = name.join(".");
@@ -2493,14 +2516,22 @@ fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
         .filter(|(k, _)| hoistable[*k])
         .map(|(_, (si, _))| *si)
         .collect();
+    // Imports stay first (the checker populates import aliases in
+    // statement order), hoisted funcs follow, everything else keeps its
+    // relative order.
+    let mut imports = Vec::new();
     let mut hoisted = Vec::new();
     let mut rest = Vec::with_capacity(program.stmts.len());
     for (i, stmt) in program.stmts.drain(..).enumerate() {
-        if hoist_idx.contains(&i) {
+        if matches!(stmt, Stmt::Import { .. }) {
+            imports.push(stmt);
+        } else if hoist_idx.contains(&i) {
             hoisted.push(stmt);
         } else {
             rest.push(stmt);
         }
     }
-    program.stmts.extend(hoisted.into_iter().chain(rest));
+    program
+        .stmts
+        .extend(imports.into_iter().chain(hoisted).chain(rest));
 }
