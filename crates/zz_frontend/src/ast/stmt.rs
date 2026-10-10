@@ -84,8 +84,8 @@ pub struct Decorator {
     pub path: Vec<String>,
     /// Positional factory arguments (`@route("/path")`).
     pub args: Vec<Expr>,
-    /// Named factory arguments.
-    pub named: Vec<(String, Expr)>,
+    /// Named factory arguments (names carry spans for diagnostics).
+    pub named: Vec<(Ident, Expr)>,
     pub span: Span,
 }
 

@@ -98,7 +98,7 @@ impl<'a> FmtCtx<'a> {
                             if i > 0 || !dec.args.is_empty() {
                                 self.write_str(", ");
                             }
-                            self.write_str(aname);
+                            self.write_str(&aname.name);
                             self.write_str(": ");
                             self.fmt_expr(arg, source);
                         }
@@ -629,7 +629,7 @@ impl<'a> FmtCtx<'a> {
                     if i > 0 || !args.is_empty() {
                         self.write_str(", ");
                     }
-                    self.write_str(name);
+                    self.write_str(&name.name);
                     self.write_str(": ");
                     self.fmt_expr(arg, source);
                 }

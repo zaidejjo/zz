@@ -1,7 +1,7 @@
 //! Expression lowering: literals, binary ops, function calls, field access,
 //! collections, variants, closures, and match expressions.
 
-use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, MatchArm, Param, Pattern};
+use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, Ident, MatchArm, Param, Pattern};
 
 use super::green::GreenCtx;
 use super::*;
@@ -2002,7 +2002,7 @@ impl Lowerer {
         &self,
         callee: &Expr,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
         names: &mut NameCtx,
         out: &mut String,
         stmt_direct: bool,
@@ -2689,7 +2689,7 @@ impl Lowerer {
                     }
                     // Fill named args by param name
                     for (name, val) in named {
-                        if let Some(idx) = sig.params.iter().position(|(pn, _)| pn == name) {
+                        if let Some(idx) = sig.params.iter().position(|(pn, _)| pn == &name.name) {
                             if slots[idx].is_none() {
                                 slots[idx] = Some(val);
                             }
@@ -3668,7 +3668,7 @@ impl Lowerer {
         enum_name: &str,
         variant: String,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {

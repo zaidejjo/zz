@@ -155,7 +155,7 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
                     out.push(',');
                 }
                 for (n, v) in &dec.named {
-                    out.push_str(n);
+                    out.push_str(&n.name);
                     out.push(':');
                     fp_expr(v, out);
                     out.push(',');
@@ -601,7 +601,7 @@ fn fp_expr(e: &Expr, out: &mut String) {
                 out.push(',');
             }
             for (n, v) in named {
-                out.push_str(n);
+                out.push_str(&n.name);
                 out.push('=');
                 fp_expr(v, out);
                 out.push(',');

@@ -496,7 +496,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
                                 self.text(", ");
                             }
                             first = false;
-                            self.text(aname.clone());
+                            self.text(aname.name.clone());
                             self.text(": ");
                             self.emit_expr(arg);
                         }
@@ -1273,7 +1273,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     if !first {
                         self.text(", ");
                     }
-                    self.text(n);
+                    self.text(n.name.clone());
                     self.text(": ");
                     self.emit_expr(v);
                     first = false;

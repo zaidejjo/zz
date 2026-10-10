@@ -677,7 +677,7 @@ impl Interp {
         enum_name: &str,
         variant: &str,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(zz_frontend::ast::Ident, Expr)],
         span: Span,
     ) -> Result<Value, EvalError> {
         let variants = self.enums.get(enum_name).cloned().unwrap_or_default();
@@ -1200,7 +1200,7 @@ impl Interp {
                 }
                 let mut named_vals: Vec<(String, Value)> = Vec::with_capacity(named.len());
                 for (n, v) in named {
-                    named_vals.push((n.clone(), self.eval(v)?.into_value()?));
+                    named_vals.push((n.name.clone(), self.eval(v)?.into_value()?));
                 }
                 if !named_vals.is_empty() {
                     if let Value::Func(fv) = &f {
