@@ -44,10 +44,11 @@ zz> add(3, 4)
 
 ### `zz run <file.zz>`
 
-Type-check and run a ZZ source file:
+Type-check and run a ZZ source file (e.g. the `hello.zz` from
+Getting started):
 
 ```bash
-zz run examples/demo.zz
+zz run hello.zz
 ```
 
 ### `zz eval <source>`
@@ -427,7 +428,7 @@ In the REPL, these special commands are available:
 ### Run a Complete Program
 
 ```bash
-zz run examples/demo.zz
+zz run hello.zz
 ```
 
 ### Quick Evaluation
