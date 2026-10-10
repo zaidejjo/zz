@@ -2305,7 +2305,7 @@ fn listen_inner(
     SHUTDOWN_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
     install_shutdown_hook();
 
-    let listener = std::net::TcpListener::bind(("0.0.0.0", port as u16)).map_err(|e| {
+    let listener = super::net::bind_reusable(("0.0.0.0", port as u16)).map_err(|e| {
         eprintln!("[ERROR] std.http.listen: cannot bind port {port}: {e}");
         EvalError::new(
             format!("std.http.listen: cannot bind port {port}: {e}"),

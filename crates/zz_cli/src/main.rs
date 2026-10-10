@@ -21,6 +21,7 @@ mod test_runner;
 mod toolchain;
 mod ui;
 mod upgrade;
+mod watch;
 
 use zz_frontend::diag::{error_at, render_to_string, Files};
 use zz_frontend::span::Span;
@@ -56,6 +57,8 @@ USAGE:
     zz eval <source>              evaluate source and print the result
     zz run [<file.zz>]            type-check and run a file (defaults to the
                                    project entry when omitted inside a project)
+    zz run --watch [<file.zz>]    hot reload: re-check and restart on save
+                                   (VM only; broken edits keep serving)
     zz run --bytecode [<file>]    run via .zzc bytecode (compiles .zz, or
                                   loads .zzc directly with no frontend)
     zz dis [<file.zzc|file.zz>]   disassemble bytecode to stable text
@@ -127,6 +130,14 @@ FLAGS:
                          (test: per-file dev build, one process per test)
     --embed <dir>      with run/build, serve (VM) or bake (native) a static asset
                        directory, readable at runtime via `fs.embedfs()`
+    --watch            with run, hot reload on save (VM only; re-checks,
+                       broken edits keep the previous generation serving)
+    --clear            with run --watch, clear the screen on every restart
+    --debounce <ms>    with run --watch, quiet period before restart
+                       (default 150)
+    --watch-ignore <glob>
+                       with run --watch, skip paths matching the glob
+                       (repeatable; `*` spans directories)
     -p, --release      with build, full optimization (-O3 -flto=thin, dynamic, stripped)
     --static           with build, static self-contained binary (the default; explicit use errors where static is impossible)
     --dynamic          with build, dynamic debug build (-O0 -g, fast); falls back automatically where static is impossible
@@ -234,6 +245,7 @@ fn main() -> ExitCode {
         Some("run") => {
             let native = rest.iter().any(|a| a == "--native");
             let bytecode = rest.iter().any(|a| a == "--bytecode");
+            let watching = rest.iter().any(|a| a == "--watch");
             let embed = parse_flag_value(rest, "--embed").map(std::path::PathBuf::from);
             // `-o` / `--output` names the published binary, `--native`
             // only: VM runs forward everything after the file to the
@@ -259,7 +271,48 @@ fn main() -> ExitCode {
                 eprintln!("zz: cannot combine `--native` and `--bytecode`");
                 return ExitCode::FAILURE;
             }
-            if native {
+            if watching {
+                // Hot reload is a VM-only loop: native rebuilds are minutes,
+                // not milliseconds. Reject loudly instead of slow-looping.
+                if native || bytecode {
+                    eprintln!("zz: `--watch` supports VM runs only, not `--native` / `--bytecode`");
+                    return ExitCode::FAILURE;
+                }
+                let (flags, child_rest) = match watch::parse_watch_flags(&args) {
+                    Ok(parsed) => parsed,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                // Child replays this exact `run` invocation minus the
+                // watch-only flags (plus `--embed`, re-attached below).
+                let file = child_rest.iter().find(|a| !a.starts_with('-'));
+                let resolved = match resolve_run_entry(
+                    file,
+                    "zz run --watch [<file.zz>]",
+                    "provide the path to a .zz file to execute",
+                ) {
+                    Ok(r) => r,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let mut child_argv = vec!["run".to_string()];
+                child_argv.extend(child_rest);
+                if let Some(dir) = &embed {
+                    child_argv.push("--embed".to_string());
+                    child_argv.push(dir.to_string_lossy().into_owned());
+                }
+                match watch::run_watch(resolved, child_argv, embed, flags) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        ExitCode::FAILURE
+                    }
+                }
+            } else if native {
                 match run_native(file, &script_args, embed, output) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
