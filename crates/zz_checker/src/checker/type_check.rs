@@ -600,7 +600,7 @@ impl Checker {
         }
     }
 
-    /// Field read with generic arguments substituted: `Box[int].v` where
+    /// Field read with generic arguments substituted: `Box<int>.v` where
     /// `v: T` yields `int`. Direct fields hit first; otherwise the lookup
     /// promotes through embedded structs (threading each level's arguments).
     /// Error reporting (unknown struct/field, did-you-mean) matches the
@@ -1046,7 +1046,7 @@ impl Checker {
                 //
                 // Generic parameters instantiate to fresh variables, filled
                 // in by unifying each value with its (substituted) field
-                // type — so `Box{ v: 1 }` infers `Box[int]`, exactly like a
+                // type — so `Box{ v: 1 }` infers `Box<int>`, exactly like a
                 // generic function call infers its type arguments.
                 let gen_vars: Vec<Type> = sig
                     .generics
@@ -3584,7 +3584,7 @@ impl Checker {
                         match self.enum_variant_payload(ename, vname, *span) {
                             Some(Some(pty)) => {
                                 // Substitute the scrutinee's arguments for
-                                // the enum's parameters (`Box[int]` + `T`
+                                // the enum's parameters (`Box<int>` + `T`
                                 // → `int`), exactly like generic struct
                                 // field access.
                                 let inner = self.subst_enum_payload(ename, eargs, &pty);

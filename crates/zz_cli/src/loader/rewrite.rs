@@ -130,7 +130,7 @@ impl<'a> Rewriter<'a> {
                     name[0] = format!("{}.{}", self.ns, name[0]);
                 }
                 // Generic parameters shadow module names inside the
-                // target (`type Pair[T] = (T, T)` keeps `T` local).
+                // target (`type Pair<T> = (T, T)` keeps `T` local).
                 self.push_scope();
                 for g in generics {
                     self.declare(&g.name);

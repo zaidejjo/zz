@@ -20,8 +20,7 @@ zz
 
 Output:
 ```
-ZZ 0.1.0 — type-based language
-Type expressions to evaluate. :help for commands.
+ZZ REPL — type :help for commands, Ctrl+D to exit
 zz>
 ```
 

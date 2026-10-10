@@ -149,7 +149,7 @@ pub enum Stmt {
     },
     /// `struct Point { x: int, y: int }` — a named record type.
     /// For cross-module: `struct shapes.Point { ... }` stores ["shapes", "Point"].
-    /// `generics` holds plain type parameters (`struct Box[T] { v: T }`);
+    /// `generics` holds plain type parameters (`struct Box<T> { v: T }`);
     /// bounds are rejected by the parser (storage needs no constraints).
     Struct {
         name: Vec<String>,
@@ -160,7 +160,7 @@ pub enum Stmt {
     },
     /// `impl Point { func dist(self) -> int { ... } }` — method block.
     /// Methods inside are registered as `TypeName.method_name` functions.
-    /// `impl Box[T]` scopes `T` over every method (prepended to each
+    /// `impl Box<T>` scopes `T` over every method (prepended to each
     /// method's own generics at registration, so call-site instantiation
     /// unifies struct arguments from the receiver automatically).
     Impl {
@@ -171,8 +171,8 @@ pub enum Stmt {
         pub_: bool,
     },
     /// `type Tokens = [Token]` — a named type alias. Generic aliases
-    /// take plain parameters (`type Pair[T] = (T, T)`); use sites name
-    /// their arguments (`Pair[int]`), exactly like generic structs.
+    /// take plain parameters (`type Pair<T> = (T, T)`); use sites name
+    /// their arguments (`Pair<int>`), exactly like generic structs.
     /// Aliases erase at check time (uses resolve to the target type),
     /// so the runtime, VM, and native codegen never see them.
     TypeAlias {
@@ -185,8 +185,8 @@ pub enum Stmt {
     /// `enum Token { IntLit(int), Eof }` — a user-defined tagged union.
     /// Each variant holds an optional single payload type (any type,
     /// including tuples for multi-value payloads). Generic enums take
-    /// plain parameters (`enum Box[T] { V(T) }`); use sites name their
-    /// arguments (`Box[int]`), exactly like generic structs. Values are
+    /// plain parameters (`enum Box<T> { V(T) }`); use sites name their
+    /// arguments (`Box<int>`), exactly like generic structs. Values are
     /// constructed qualified (`Token.IntLit(1)`), matched by short name
     /// (`.IntLit(v)`), and erase to qualified `Object` values
     /// (`Token.IntLit`) so all engines share struct machinery.

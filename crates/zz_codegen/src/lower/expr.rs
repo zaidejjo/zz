@@ -4942,7 +4942,7 @@ impl Lowerer {
                     .and_then(|(_, p)| p.as_ref())
                     .map(|pty| {
                         // Substitute the scrutinee's arguments so generic
-                        // payloads (`V(T)` under `Box[int]`) unbox.
+                        // payloads (`V(T)` under `Box<int>`) unbox.
                         let generics = self
                             .tp
                             .enums
