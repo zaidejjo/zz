@@ -760,10 +760,26 @@ enum PushTag {
     Other,
 }
 
-/// Returns `(fused_stores, skip_pcs)`: `fused_stores[pc] = s` means the
-/// `StoreIndexOp` at `pc` fuses onto slot `s`; `skip_pcs` holds the
-/// following `StoreSlot(s)` pcs to skip.
-fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
+/// Returns `(fused, skip, borrow)`: `fused[pc] = s` means the
+/// `StoreIndexOp` at `pc` fuses onto slot `s`; `skip` holds the
+/// following `StoreSlot(s)` pcs to skip; `borrow` holds the subset of
+/// fused pcs whose `LoadSlot` may also be skipped (see below).
+///
+/// Borrow-skip: when neither the `LoadSlot` (`lpc`) nor the
+/// `StoreIndexOp` (`pc`) is a jump target, the load is not emitted at
+/// all — the window borrows `st[s]` directly instead of cloning it
+/// (saving an atomic refcount pair per store). Sound because stack
+/// values are linear (each pushed value is popped exactly once, so the
+/// clone this load would have pushed is consumed exactly once, by this
+/// op — `Swap` only reorders, and the tag model tracks through it),
+/// the middle is straight-line call/store-free code (observably
+/// identical one slot lower — balance is verifier-guaranteed, and
+/// every straight-line value op is position-relative except absolute
+/// slot accesses, which are unaffected), and untargeted endpoints mean
+/// no edge can enter expecting the pushed clone (or land on the store
+/// expecting three stack values). Targeted endpoints keep the
+/// clone-ful emission, which is today's behavior verbatim.
+fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>, HashSet<usize>) {
     // (pops, pushes) — mirrors `origins::apply` for the covered subset.
     fn effect(op: &Op) -> Option<(usize, usize)> {
         Some(match op {
@@ -803,7 +819,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
     let n = code.len();
     let mut at: Vec<Option<Vec<PushTag>>> = vec![None; n];
     if n == 0 {
-        return (HashMap::new(), HashSet::new());
+        return (HashMap::new(), HashSet::new(), HashSet::new());
     }
     // Linear scan suffices: fusion regions are straight-line by
     // construction (validated below); joins just need *a* sound state,
@@ -841,7 +857,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
             }
             entry[pc] = state.clone();
             let Some((pops, pushes)) = effect(op) else {
-                return (HashMap::new(), HashSet::new());
+                return (HashMap::new(), HashSet::new(), HashSet::new());
             };
             if let Op::PopN(_) = op {
                 let mut tmp = Vec::new();
@@ -928,6 +944,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
     };
     let mut fused: HashMap<usize, u16> = HashMap::new();
     let mut skip: HashSet<usize> = HashSet::new();
+    let mut borrow: HashSet<usize> = HashSet::new();
     for (pc, op) in code.iter().enumerate() {
         if !matches!(op, Op::StoreIndexOp) {
             continue;
@@ -971,9 +988,15 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
         if ok {
             fused.insert(pc, s);
             skip.insert(pc + 1);
+            // Borrow the home slot instead of cloning when no edge can
+            // observe the difference (see header doc).
+            if !is_target.contains(&lpc) && !is_target.contains(&pc) {
+                borrow.insert(pc);
+                skip.insert(lpc);
+            }
         }
     }
-    (fused, skip)
+    (fused, skip, borrow)
 }
 /// String-append fusion: `LoadSlot(s), PushConst(Str), BinOp(Add),
 /// StoreSlot(s)` (adjacent, in that order) compiles to an in-place
@@ -1999,7 +2022,13 @@ impl<'a> Emitter<'a> {
         let origins_empty: Vec<Vec<Callee>> = Vec::new();
         let org = origins_map.get(&(id.0 as usize)).unwrap_or(&origins_empty);
         // Store-index fusion (in-place slot stores; see `fuse_scan`).
-        let (fused, skip) = fuse_scan(&f.code);
+        // `borrow` (skipped `LoadSlot`s) joins the skip set up front so
+        // every later scan treats borrowed loads as claimed.
+        let (fused, skip, borrows) = fuse_scan(&f.code);
+        debug_assert!(
+            fused.keys().all(|k| !skip.contains(k)),
+            "fuse store in skip set"
+        );
         let (ufused, uskip) = int_fuse(f, &self.module.consts, &uint, &targets, &skip);
         let mut skip = skip;
         skip.extend(uskip);
@@ -2049,6 +2078,7 @@ impl<'a> Emitter<'a> {
             let cx = OpCx {
                 callee: callee_owned.as_ref(),
                 fuse_slot: fused.get(&pc).copied(),
+                fuse_borrow: borrows.contains(&pc),
                 ufuse: ufused.get(&pc).copied(),
                 peel: peels.get(&pc).cloned(),
                 strapp: strapped.get(&pc).copied(),
@@ -2643,6 +2673,9 @@ impl<'a> Emitter<'a> {
 struct OpCx<'x> {
     callee: Option<&'x Callee>,
     fuse_slot: Option<u16>,
+    /// True when the fused `StoreIndexOp` borrows its home slot (its
+    /// `LoadSlot` was skipped — see `fuse_scan` borrow-skip).
+    fuse_borrow: bool,
     /// Fused int window starting at this pc, if any: (total length, tail).
     /// See [`int_fuse`]. Window matching already consulted the int-slot
     /// set; emission re-walks the ops.
@@ -2683,7 +2716,7 @@ impl<'a> Emitter<'a> {
         cx: &OpCx<'_>,
         out: &mut String,
     ) -> Result<(), ChunkError> {
-        let (callee, fuse_slot) = (cx.callee, cx.fuse_slot);
+        let (callee, fuse_slot, fuse_borrow) = (cx.callee, cx.fuse_slot, cx.fuse_borrow);
         // Peeled counted loop (see `peel_scan`): raw C loop over the
         // fused body, then the exit edge. The `ForSetup` emission stands
         // (placeholders + `_lbase`), so exit accounting is untouched.
@@ -2926,7 +2959,15 @@ impl<'a> Emitter<'a> {
                     Op::ForSetup { num_vars, .. } => *num_vars as usize,
                     _ => 0,
                 };
-                out.push_str("      st[sp++] = zz_int(0);\n");
+                // Index placeholder: the VM seeds a range index with
+                // `r.start` (not 0), so nonzero-start ranges (`2..n`)
+                // visit the right values; arrays/dicts/bytes start at
+                // 0. A null range payload (only forgeable in hostile
+                // modules — `MakeRange` never builds one) falls back
+                // to 0 and traps loudly at the first `ForNext`.
+                out.push_str("      { int64_t _i0 = 0;\n");
+                out.push_str("        if (_it.tag == ZZ_RANGE && _it.payload) { _i0 = ((zz_crange*)_it.payload)->start; }\n");
+                out.push_str("        st[sp++] = zz_int(_i0); }\n");
                 for _ in 0..nvars {
                     out.push_str("      st[sp++] = zz_unit();\n");
                 }
@@ -3104,18 +3145,31 @@ impl<'a> Emitter<'a> {
                 // holds [object, index, value].
                 if let Some(s) = fuse_slot {
                     // Fused: the object is the `LoadSlot(s)` clone on
-                    // top-3. Drop our share first (restoring slot
-                    // uniqueness in the two-owner case), operate
-                    // directly on the slot, and consume all three —
-                    // the following `StoreSlot(s)` is skipped.
-                    out.push_str("    { zz_value _fv = st[--sp]; zz_value _fix = st[--sp];\n");
-                    out.push_str("      zz_release(&st[--sp]);\n");
+                    // top-3 — unless `fuse_borrow` skipped the load, in
+                    // which case the middle executed one slot lower and
+                    // the home slot is borrowed directly. Either way
+                    // exactly [index, value] sit on top here; the
+                    // following `StoreSlot(s)` is skipped.
+                    if fuse_borrow {
+                        out.push_str("    { zz_value _fv = st[--sp]; zz_value _fix = st[--sp];\n");
+                    } else {
+                        out.push_str("    { zz_value _fv = st[--sp]; zz_value _fix = st[--sp];\n");
+                        out.push_str("      zz_release(&st[--sp]);\n");
+                    }
+                    // Unique-array fast path: `refs == 1` is exactly
+                    // `zz_index_set`'s in-place condition (shared /
+                    // arena / sentinel buffers all carry `refs != 1`
+                    // and take the generic path, which dups or heals).
+                    // With a non-negative in-bounds int index the
+                    // outcome is bit-identical to the generic call
+                    // minus the call overhead: same `zz_assign`
+                    // (release-old, adopt-new), same releases. Anything
+                    // else — dicts, non-int indices, negatives, OOB —
+                    // runs the untouched generic emission below.
                     out.push_str(&format!(
-                        "      int _fe = 0; zz_index_set(&st[{s}], _fix, _fv, &_fe);\n"
+                        "      int _fe = 0;\n      if (st[{s}].tag == ZZ_ARRAY && st[{s}].arr && st[{s}].arr->refs == 1 && _fix.tag == ZZ_INT && _fix.i >= 0 && _fix.i < (int64_t)st[{s}].arr->len) {{\n        zz_assign(&st[{s}].arr->items[(size_t)_fix.i], _fv);\n        zz_release(&_fv);\n        zz_release(&_fix);\n      }} else {{\n        zz_index_set(&st[{s}], _fix, _fv, &_fe);\n        zz_release(&_fix); zz_release(&_fv);\n        if (_fe) {ctrap};\n      }}\n",
+                        ctrap = ctrap("index out of bounds")
                     ));
-                    out.push_str("      zz_release(&_fix); zz_release(&_fv);\n");
-                    out.push_str("      if (_fe) ");
-                    out.push_str(&format!("{};\n", ctrap("index out of bounds")));
                     out.push_str("    }\n");
                     return Ok(());
                 }
