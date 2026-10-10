@@ -875,6 +875,15 @@ zz_value zz_fs_read_dir(zz_value path, int *err);
 zz_value zz_fs_remove_dir_all(zz_value path, int *err);
 zz_value zz_fs_walk_dir(zz_value path, int *err);
 zz_value zz_fs_stat(zz_value path, int *err);
+zz_value zz_fs_scan_counts(
+    zz_value path,
+    zz_value markers,
+    zz_value bstart,
+    zz_value bend,
+    zz_value nested,
+    zz_value whole,
+    int *err
+);
 zz_value zz_fs_open(zz_value path, zz_value mode, int *err);
 zz_value zz_fs_read_chunk(zz_value f, zz_value n, int *err);
 zz_value zz_fs_read_chunk_bytes(zz_value f, zz_value n, int *err);

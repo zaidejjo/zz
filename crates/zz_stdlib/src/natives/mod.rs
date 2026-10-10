@@ -2032,6 +2032,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.fs.remove_dir_all", 1, fs::fs_remove_dir_all),
         ("std.fs.walk_dir", 1, fs::fs_walk_dir),
         ("std.fs.stat", 1, fs::fs_stat),
+        ("std.fs.scan_counts", 6, fs::fs_scan_counts),
         ("std.fs.open", 2, fs::fs_open),
         ("std.fs.read_chunk", 2, fs::file_read_chunk),
         ("std.fs.read_chunk_bytes", 2, fs::file_read_chunk_bytes),

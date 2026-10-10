@@ -121,6 +121,17 @@ fn batch_inventory_complete() {
     }
 }
 
+/// Truncate driver output in failure messages: enough to see how far a
+/// dying driver got (exit-1 with hidden stdout is otherwise undebuggable),
+/// bounded so a chatty driver can't flood the log.
+fn trunc_out(out: &str) -> String {
+    const LIM: usize = 3000;
+    if out.len() <= LIM {
+        return out.to_string();
+    }
+    format!("{}...[{} bytes total]", &out[..LIM], out.len())
+}
+
 /// Flat sandbox layout: each batched fixture is copied to
 /// `case_<global-index>.zz` (imported as `case_<i>`). Flat names dodge
 /// keyword stems (`syntax.match` is unimportable) and cross-category
@@ -348,7 +359,11 @@ fn batched_native_parity() {
         std::fs::write(&driver, &src).expect("write driver");
         let (vm_code, vm_out, vm_err) = run_driver(&driver, false);
         if vm_code != 0 {
-            failures.push(format!("driver {b}: VM exit {vm_code}:\n{vm_err}"));
+            failures.push(format!(
+                "driver {b}: VM exit {vm_code}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                trunc_out(&vm_out),
+                vm_err
+            ));
             continue;
         }
         if vm_only() {
@@ -357,7 +372,11 @@ fn batched_native_parity() {
         }
         let (nat_code, nat_out, nat_err) = run_driver(&driver, true);
         if nat_code != 0 {
-            failures.push(format!("driver {b}: native exit {nat_code}:\n{nat_err}"));
+            failures.push(format!(
+                "driver {b}: native exit {nat_code}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                trunc_out(&nat_out),
+                nat_err
+            ));
             continue;
         }
         let vm_chunks = demux(&vm_out);

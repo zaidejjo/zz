@@ -319,6 +319,93 @@ pub(crate) fn fs_read_bytes(
     })
 }
 
+// std.fs.scan_counts(path, markers, bstart, bend, nested, whole) —
+// fused read + binary-sniff + line classification in one native call:
+// one interpreter-boundary crossing per file instead of read + NUL
+// check + classify. Returns `Result<[lines, code, comments, blanks,
+// binary]>`: `binary` is 1 when a NUL byte is present (counts zeroed,
+// caller skips — mirrors the `read_to_string` + `has_nul` + `classify`
+// composition). Missing/unreadable files and invalid UTF-8 are `.err`
+// (`fs:scan_counts:<code>: <path>`, same codes as `read_to_string`).
+pub(crate) fn fs_scan_counts(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const OP: &str = "std.fs.scan_counts";
+    let path = crate::natives::expect_str(args, 0, OP)?;
+    let raw_markers = crate::natives::expect_array(args, 1, OP)?;
+    let bstart = crate::natives::expect_str(args, 2, OP)?;
+    let bend = crate::natives::expect_str(args, 3, OP)?;
+    let nested = match crate::natives::arg(args, 4, OP)? {
+        Value::Bool(b) => *b,
+        other => {
+            return Err(EvalError::new(
+                format!("`{OP}` expects booleans, found `{other}`"),
+                Span::new(0, 0),
+            ));
+        }
+    };
+    let whole = match crate::natives::arg(args, 5, OP)? {
+        Value::Bool(b) => *b,
+        other => {
+            return Err(EvalError::new(
+                format!("`{OP}` expects booleans, found `{other}`"),
+                Span::new(0, 0),
+            ));
+        }
+    };
+    let mut markers: Vec<String> = Vec::with_capacity(raw_markers.len());
+    for m in &raw_markers {
+        match m {
+            Value::Str(s) => markers.push((**s).clone()),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{OP}` expects marker strings, found `{other}`"),
+                    Span::new(0, 0),
+                ));
+            }
+        }
+    }
+    run_fs(interp, span, move || {
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return fs_err("scan_counts", &path, &e),
+        };
+        // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
+        if bytes.contains(&0) {
+            return ok_value(Value::Array(Box::new(vec![
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+            ])));
+        }
+        // Strict UTF-8 like `read_to_string`: non-UTF8 is unreadable.
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(t) => t,
+            Err(_) => return err_str(format!("fs:scan_counts:invalid_input: {path}")),
+        };
+        let marker_refs: Vec<&[u8]> = markers.iter().map(|m| m.as_bytes()).collect();
+        let (lines, code, comments, blanks) = super::str_mod::classify_bytes(
+            text.as_bytes(),
+            &marker_refs,
+            bstart.as_bytes(),
+            bend.as_bytes(),
+            nested,
+            whole,
+        );
+        ok_value(Value::Array(Box::new(vec![
+            Value::Int(lines),
+            Value::Int(code),
+            Value::Int(comments),
+            Value::Int(blanks),
+            Value::Int(0),
+        ])))
+    })
+}
+
 pub(crate) fn fs_write_file(
     interp: &mut Interp,
     args: &mut Vec<Value>,

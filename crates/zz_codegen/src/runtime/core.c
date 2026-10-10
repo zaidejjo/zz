@@ -7100,6 +7100,7 @@ static void zz_throw_printed_err(const zz_value *payload) {
 #ifndef ZZ_OS_WINDOWS
 #include <dirent.h>
 #endif
+#include <sys/stat.h>
 
 // errno → stable code (mirrors the VM's ErrorKind mapping).
 static const char *zz_fs_code(int e) {
@@ -7125,6 +7126,16 @@ static const char *zz_fs_code(int e) {
     default:
         return "io_error";
     }
+}
+
+// Directories can never be read as text: `ftell` on a directory stream
+// reports garbage sizes on some libcs, so the sized `str_alloc` below
+// would abort the process with out-of-memory. The VM's `IsADirectory`
+// kind falls through to `io_error`, so reject up front with the same
+// code on both engines (EIO maps to `io_error`, byte-identical).
+static int zz_fs_is_dir_path(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
 // `fs:<op>:<code>: <path>` as an `.err(str)`.
@@ -7165,6 +7176,9 @@ zz_value zz_fs_read(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    if (zz_fs_is_dir_path(p)) {
+        return zz_fs_err1("read", p, EIO);
+    }
     zz_fs_top_up();
     FILE *f = fopen(p, "rb");
     if (!f) return zz_fs_err1("read", p, errno);
@@ -7184,6 +7198,133 @@ zz_value zz_fs_read(zz_value path, int *err) {
     zz_str_ptr(out)[n] = '\0';
     out->len = n;
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
+}
+
+// fs.scan_counts(path, markers, bstart, bend, nested, whole) →
+// Result<[lines, code, comments, blanks, binary]>: fused read +
+// binary-sniff + line classification in one call (one native crossing
+// per file instead of read + NUL check + classify). `binary` is 1 when
+// a NUL byte is present (counts zeroed, caller skips — mirrors the
+// read_to_string + has_nul + classify composition). Missing/unreadable
+// files and invalid UTF-8 are `.err` (`fs:scan_counts:<code>: <path>`,
+// same codes as `read_to_string`).
+zz_value zz_fs_scan_counts(
+    zz_value path,
+    zz_value markers,
+    zz_value bstart,
+    zz_value bend,
+    zz_value nested,
+    zz_value whole,
+    int *err
+) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    // A NUL inside the path can never name a file: Rust's `std::fs::read`
+    // rejects it with `InvalidInput`, so report `invalid_input` here too
+    // instead of opening the truncated prefix (never stale, never surprising).
+    if (path.s && strlen(p) != path.s->len) {
+        return zz_fs_err1("scan_counts", p, EINVAL);
+    }
+    // Directories are rejected before any read (see zz_fs_is_dir_path):
+    // `ftell` on a directory stream reports garbage sizes on some libcs,
+    // which used to abort the process in `str_alloc`.
+    if (zz_fs_is_dir_path(p)) {
+        return zz_fs_err1("scan_counts", p, EIO);
+    }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) return zz_fs_err1("scan_counts", p, errno);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    zz_str *out;
+    size_t n;
+    if (sz > 0) {
+        // Regular files: one sized allocation, one read (same shape as
+        // `zz_fs_read`, so steady-state throughput is identical).
+        out = str_alloc((size_t)sz);
+        n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            zz_value leak = (zz_value){ZZ_STR, {.s = out}};
+            zz_release(&leak);
+            // Reading a directory fails here (Linux: EISDIR). The VM's
+            // `IsADirectory` kind falls through to `io_error`, so
+            // translate rather than reporting `invalid_input`.
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("scan_counts", p, e ? e : EIO);
+        }
+    } else {
+        // Pipes / procfs / sysfs / empty files report size 0: grow to EOF
+        // (same shape as `zz_fs_read_bytes`), then land in one `zz_str`.
+        size_t cap = 65536;
+        unsigned char *buf = (unsigned char *)malloc(cap > 0 ? cap : 1);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("scan_counts", p, ENOMEM);
+        }
+        n = 0;
+        size_t got;
+        int ferr = 0;
+        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                size_t ncap = cap * 2;
+                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
+                if (!nbuf) {
+                    free(buf);
+                    fclose(f);
+                    return zz_fs_err1("scan_counts", p, ENOMEM);
+                }
+                buf = nbuf;
+                cap = ncap;
+            }
+        }
+        ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("scan_counts", p, e ? e : EIO);
+        }
+        out = str_alloc(n);
+        if (n > 0) memcpy(zz_str_ptr(out), buf, n);
+        free(buf);
+    }
+    zz_str_ptr(out)[n] = '\0';
+    out->len = n;
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(out);
+    // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
+    if (memchr(d, 0, n) != NULL) {
+        zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&gone);
+        int sub_err = 0;
+        zz_value arr = zz_array_new();
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 1}}, &sub_err);
+        return zz_variant_ok(arr);
+    }
+    // Strict UTF-8 like `read_to_string`: non-UTF8 is unreadable
+    // (EINVAL maps to `invalid_input`, matching the VM's InvalidData).
+    if (!zz_utf8_valid(d, n)) {
+        zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&gone);
+        return zz_fs_err1("scan_counts", p, EINVAL);
+    }
+    zz_value text = (zz_value){ZZ_STR, {.s = out}};
+    int sub_err = 0;
+    zz_value arr = zz_str_classify(text, markers, bstart, bend, nested, whole, &sub_err);
+    zz_release(&text);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+    return zz_variant_ok(arr);
 }
 
 // fs.read_bytes(path) → Result<bytes> (contiguous buffer, ~1x RSS).

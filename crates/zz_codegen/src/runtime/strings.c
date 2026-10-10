@@ -1853,6 +1853,36 @@ zz_value zz_bytes_to_ints(zz_value b, int *err) {
 }
 
 // ---- comment-aware line classifier (str.classify) --------------------
+// Strict UTF-8 check shared by bytes.to_str and fs.scan_counts: rejects
+// overlongs, surrogates, and values above U+10FFFF (same predicate the
+// VM's `str::from_utf8` enforces, so both engines agree on validity).
+int zz_utf8_valid(const unsigned char *buf, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = buf[i];
+        size_t want = 1;
+        if (c < 0x80) want = 1;
+        else if (c >= 0xC2 && c <= 0xDF) want = 2;
+        else if (c >= 0xE0 && c <= 0xEF) want = 3;
+        else if (c >= 0xF0 && c <= 0xF4) want = 4;
+        else return 0;
+        if (i + want > n) return 0;
+        for (size_t k = 1; k < want; k++) {
+            if ((buf[i + k] & 0xC0) != 0x80) return 0;
+        }
+        if (want == 3) {
+            if (c == 0xE0 && buf[i + 1] < 0xA0) return 0;
+            if (c == 0xED && buf[i + 1] > 0x9F) return 0;
+        }
+        if (want == 4) {
+            if (c == 0xF0 && buf[i + 1] < 0x90) return 0;
+            if (c == 0xF4 && buf[i + 1] > 0x8F) return 0;
+        }
+        i += want;
+    }
+    return 1;
+}
+
 // Byte-oriented with ASCII-4 trim ({space, \t, \n, \r}), mirroring the
 // split/trim/starts_with native semantics exactly. The ZZ-level reference
 // implementation lives in zcc's counter; differential fixtures pin them.
