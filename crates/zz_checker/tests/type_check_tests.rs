@@ -1450,8 +1450,8 @@ fn if_let_constrains_uninferred_scrutinee() {
 }
 
 #[test]
-fn bare_none_with_payload_suggests_fixit() {
-    let r = check_src("v: Option<int> = .none\nmatch v { .none(x) => 0, .some(n) => n }");
+fn bare_none_with_wildcard_suggests_fixit() {
+    let r = check_src("v: Option<int> = .none\nmatch v { .none(_) => 0, .some(n) => n }");
     assert!(has_errors(&r), "expected error, got: {:?}", r.errors);
     assert!(
         r.errors
@@ -1459,6 +1459,22 @@ fn bare_none_with_payload_suggests_fixit() {
             .flat_map(|d| d.fixits.iter())
             .any(|f| f.replacement == ".none"),
         "expected `.none` fixit, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn bare_none_with_binding_has_no_fixit() {
+    // Dropping `.none(x)` would orphan uses of `x` in the arm body, so
+    // the fixit is withheld — error + guidance only.
+    let r = check_src("v: Option<int> = .none\nmatch v { .none(x) => x, .some(n) => n }");
+    assert!(has_errors(&r), "expected error, got: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".none"),
+        "must not offer the `.none` drop-payload fixit here, got: {:?}",
         r.errors
     );
 }

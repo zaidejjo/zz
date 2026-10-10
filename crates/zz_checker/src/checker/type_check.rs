@@ -3529,12 +3529,18 @@ impl Checker {
                     },
                     (Type::Option(_), "none") => {
                         if arg.is_some() {
-                            self.errors.push(
-                                error_at("`.none` pattern takes no argument", *span)
-                                    .with_note("`.none` carries no value — write `.none`")
+                            // The fixit only applies to a wildcard payload:
+                            // dropping `.none(x)` would orphan uses of `x`
+                            // in the arm body, so named payloads get the
+                            // error + notes and the user edits by hand.
+                            let mut diag = error_at("`.none` pattern takes no argument", *span)
+                                .with_note("`.none` carries no value — write `.none`");
+                            if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
+                                diag = diag
                                     .with_note("run `zz fix` to rewrite this automatically")
-                                    .with_fixit(FixIt::safe(*span, ".none", "drop payload")),
-                            );
+                                    .with_fixit(FixIt::safe(*span, ".none", "drop payload"));
+                            }
+                            self.errors.push(diag);
                         }
                         None
                     }
