@@ -495,6 +495,7 @@ import std.fs
 | `fs.remove_dir_all` / `fs.walk_dir` | `(path)` | Recursive remove / list |
 | `fs.stat` | `(path)` | Metadata dict |
 | `fs.scan_counts` | `(path, markers, bstart, bend, nested, whole) -> Result<[int]>` | Fused read + NUL-sniff + `str.classify` in one call: `[lines, code, comments, blanks, binary]` (`binary` 1 = NUL present, counts zeroed) |
+| `fs.is_generated` | `(path, markers) -> Result<bool>` | Whole-file generated-content heuristic in one call: minified tiny files and case-insensitive header markers |
 | `File.open` / `fs.open` | `(path, mode)` | Streaming handle (`r`/`w`/`a`) |
 | `fs.read_chunk` | `(f, n)` | Text chunk (`""` at EOF; UTF-8) |
 | `fs.read_chunk_bytes` | `(f, n)` | Binary-safe chunk as `bytes` (empty at EOF) |

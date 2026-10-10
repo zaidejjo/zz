@@ -52,6 +52,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "str_ord_chr_test.zz", true),
     ("stdlib", "str_classify_test.zz", true),
     ("stdlib", "fs_scan_counts_test.zz", false),
+    ("stdlib", "fs_is_generated_test.zz", false),
     ("syntax", "match.zz", false),
     ("syntax", "match_assign.zz", true),
     ("syntax", "return_in_loops.zz", false),
@@ -73,7 +74,6 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "json_test.zz", false),
     ("stdlib", "option_interpolation.zz", false),
     ("stdlib", "alias_module_calls.zz", false),
-    ("stdlib", "selective_calls.zz", false),
     ("stdlib", "import_alias.zz", true),
     ("syntax", "scope_collision.zz", false),
     ("stdlib", "builders.zz", true),
@@ -99,6 +99,10 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
 /// `dual_engine_parity` target that shares this file.)
 #[allow(dead_code)]
 pub const EXCLUDED: &[(&str, &str)] = &[
+    (
+        "stdlib/selective_calls.zz",
+        "native-only spurious HIR diagnostic (first-class selective import), see #351",
+    ),
     ("stdlib/envmod.zz", "reads env/argv (shared in batch)"),
     ("stdlib/env_test.zz", "reads env/argv (shared in batch)"),
     ("stdlib/env_full.zz", "reads env/argv (shared in batch)"),

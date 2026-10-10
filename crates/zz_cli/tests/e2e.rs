@@ -600,6 +600,11 @@ e2e_success_test!(
     "stdlib",
     "fs_scan_counts_test.zz"
 );
+e2e_success_test!(
+    e2e_stdlib_fs_is_generated_test,
+    "stdlib",
+    "fs_is_generated_test.zz"
+);
 e2e_success_test!(e2e_stdlib_fs_comprehensive, "stdlib", "fs_comprehensive.zz");
 e2e_success_test!(e2e_stdlib_result_print, "stdlib", "result_print.zz");
 e2e_success_test!(e2e_stdlib_import_alias, "stdlib", "import_alias.zz");

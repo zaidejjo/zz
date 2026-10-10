@@ -7327,6 +7327,166 @@ zz_value zz_fs_scan_counts(
     return zz_variant_ok(arr);
 }
 
+// Generated-content thresholds (mirror zcc's walker.is_generated_content,
+// the spec): minified gate fires only on tiny files, header scan covers
+// at most the first lines.
+#define ZZ_GEN_MIN_LINE 2000
+#define ZZ_GEN_TINY_LINES 3
+#define ZZ_GEN_HEAD_LINES 5
+
+static unsigned char gen_lower_byte(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') ? (unsigned char)(c + 32) : c;
+}
+
+// Char count of valid UTF-8 (continuation bytes skipped).
+static size_t gen_char_count(const unsigned char *d, size_t n) {
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if ((d[i] & 0xC0) != 0x80) c++;
+    }
+    return c;
+}
+
+// fs.is_generated(path, markers) → Result<bool>: whole-file
+// generated-content heuristic in one call (minified tiny files,
+// case-insensitive header markers in the first lines). Unreadable
+// files are `.err` (`fs:is_generated:<code>: <path>`, same codes as
+// `read_to_string`); NUL bytes and invalid UTF-8 report `false`
+// (callers check those via `scan_counts` first; deterministic here).
+// Byte-exact port of zcc's `walker.is_generated_content`, including
+// split_lines artifact-drop and char-count longest lines. Markers
+// match ASCII-lowercased: exact for ASCII-only marker sets (non-ASCII
+// bytes never equal ASCII marker bytes, and no casing pair unfolds a
+// non-ASCII char into marker-continuing ASCII — pinned by fixture).
+zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    if (path.s && strlen(p) != path.s->len) {
+        return zz_fs_err1("is_generated", p, EINVAL);
+    }
+    if (zz_fs_is_dir_path(p)) {
+        return zz_fs_err1("is_generated", p, EIO);
+    }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) return zz_fs_err1("is_generated", p, errno);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    unsigned char *buf = NULL;
+    size_t n = 0;
+    if (sz > 0) {
+        buf = (unsigned char *)malloc((size_t)sz);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("is_generated", p, ENOMEM);
+        }
+        n = fread(buf, 1, (size_t)sz, f);
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("is_generated", p, e ? e : EIO);
+        }
+    } else {
+        size_t cap = 65536;
+        buf = (unsigned char *)malloc(cap);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("is_generated", p, ENOMEM);
+        }
+        n = 0;
+        size_t got;
+        int ferr = 0;
+        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                size_t ncap = cap * 2;
+                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
+                if (!nbuf) {
+                    free(buf);
+                    fclose(f);
+                    return zz_fs_err1("is_generated", p, ENOMEM);
+                }
+                buf = nbuf;
+                cap = ncap;
+            }
+        }
+        ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("is_generated", p, e ? e : EIO);
+        }
+    }
+    // NUL / invalid UTF-8 / empty all report false (see above).
+    int generated = 0;
+    if (n > 0 && memchr(buf, 0, n) == NULL && zz_utf8_valid(buf, n)) {
+        // Line ends walked once (head gate needs at most 5).
+        size_t eols[ZZ_GEN_HEAD_LINES];
+        size_t neols = 0;
+        size_t pos = 0;
+        while (neols < ZZ_GEN_HEAD_LINES && pos < n) {
+            unsigned char *hit = memchr(buf + pos, '\n', n - pos);
+            if (!hit) break;
+            eols[neols++] = (size_t)(hit - buf);
+            pos = (size_t)(hit - buf) + 1;
+        }
+        // Total lines with artifact-drop: trailing newline adds no line.
+        // Fewer than 5 newlines means the tail was seen, so the count
+        // is exact; 5 found guarantees more than tiny either way.
+        size_t total = 0;
+        int tiny = 0;
+        if (neols < ZZ_GEN_HEAD_LINES) {
+            total = neols + ((n > 0 && buf[n - 1] == '\n') ? 0 : 1);
+            tiny = 1;
+        }
+        if (tiny && total <= ZZ_GEN_TINY_LINES) {
+            size_t longest = 0;
+            size_t prev = 0;
+            for (size_t k = 0; k < neols; k++) {
+                size_t c = gen_char_count(buf + prev, eols[k] - prev);
+                if (c > longest) longest = c;
+                prev = eols[k] + 1;
+            }
+            size_t c = gen_char_count(buf + prev, n - prev);
+            if (c > longest) longest = c;
+            if (longest > ZZ_GEN_MIN_LINE) generated = 1;
+            // Tiny file: the head below covers all of its lines.
+        }
+        if (!generated) {
+            size_t head_end = (neols == ZZ_GEN_HEAD_LINES) ? eols[ZZ_GEN_HEAD_LINES - 1] + 1 : n;
+            // Lowercase the head in place (owned buffer, freed below).
+            for (size_t i = 0; i < head_end; i++) buf[i] = gen_lower_byte(buf[i]);
+            size_t nm = 0;
+            const char *mbuf[32];
+            size_t mlen[32];
+            if (markers.tag == ZZ_ARRAY) {
+                for (size_t i = 0; i < markers.arr->len && nm < 32; i++) {
+                    zz_value v = markers.arr->items[i];
+                    if (v.tag == ZZ_STR) {
+                        mbuf[nm] = zz_str_ptr(v.s);
+                        mlen[nm] = v.s->len;
+                        nm++;
+                    }
+                }
+            }
+            for (size_t k = 0; k < nm && !generated; k++) {
+                if (mlen[k] == 0) continue;
+                if (memmem(buf, head_end, mbuf[k], mlen[k]) != NULL) generated = 1;
+            }
+        }
+    }
+    free(buf);
+    return zz_variant_ok((zz_value){ZZ_BOOL, {.b = generated != 0}});
+}
+
 // fs.read_bytes(path) → Result<bytes> (contiguous buffer, ~1x RSS).
 zz_value zz_fs_read_bytes(zz_value path, int *err) {
     (void)err;

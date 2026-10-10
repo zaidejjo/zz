@@ -884,6 +884,7 @@ zz_value zz_fs_scan_counts(
     zz_value whole,
     int *err
 );
+zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err);
 zz_value zz_fs_open(zz_value path, zz_value mode, int *err);
 zz_value zz_fs_read_chunk(zz_value f, zz_value n, int *err);
 zz_value zz_fs_read_chunk_bytes(zz_value f, zz_value n, int *err);

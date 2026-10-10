@@ -327,6 +327,25 @@ pub(crate) fn fs_read_bytes(
 // caller skips — mirrors the `read_to_string` + `has_nul` + `classify`
 // composition). Missing/unreadable files and invalid UTF-8 are `.err`
 // (`fs:scan_counts:<code>: <path>`, same codes as `read_to_string`).
+/// Owned marker strings for the fused file natives (`scan_counts`,
+/// `is_generated`): parsed up front so the `run_fs` closure owns
+/// everything it touches (`Send + 'static`).
+fn parse_markers(raw: &[Value], op: &str) -> Result<Vec<String>, EvalError> {
+    let mut markers: Vec<String> = Vec::with_capacity(raw.len());
+    for m in raw {
+        match m {
+            Value::Str(s) => markers.push((**s).clone()),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{op}` expects marker strings, found `{other}`"),
+                    Span::new(0, 0),
+                ));
+            }
+        }
+    }
+    Ok(markers)
+}
+
 pub(crate) fn fs_scan_counts(
     interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -355,18 +374,7 @@ pub(crate) fn fs_scan_counts(
             ));
         }
     };
-    let mut markers: Vec<String> = Vec::with_capacity(raw_markers.len());
-    for m in &raw_markers {
-        match m {
-            Value::Str(s) => markers.push((**s).clone()),
-            other => {
-                return Err(EvalError::new(
-                    format!("`{OP}` expects marker strings, found `{other}`"),
-                    Span::new(0, 0),
-                ));
-            }
-        }
-    }
+    let markers: Vec<String> = parse_markers(&raw_markers, OP)?;
     run_fs(interp, span, move || {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
@@ -403,6 +411,123 @@ pub(crate) fn fs_scan_counts(
             Value::Int(blanks),
             Value::Int(0),
         ])))
+    })
+}
+
+// Thresholds for the generated-content heuristic (mirror zcc's
+// `walker.is_generated_content`, the spec): minified gate fires only
+// on tiny files, header scan covers at most the first lines.
+const GEN_MIN_LINE_LEN: usize = 2000;
+const GEN_TINY_LINES: usize = 3;
+const GEN_HEAD_LINES: usize = 5;
+
+/// ASCII lowercase one byte (C twin does the same; equivalent to full
+/// Unicode lowering for ASCII-only marker sets — see below).
+fn ascii_lower_byte(c: u8) -> u8 {
+    if c.is_ascii_uppercase() {
+        c + 32
+    } else {
+        c
+    }
+}
+
+/// Char count of valid UTF-8 (continuation bytes skipped).
+fn utf8_char_count(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|b| **b & 0xC0 != 0x80).count()
+}
+
+// std.fs.is_generated(path, markers) — whole-file generated-content
+// heuristic in one native call: minified tiny files (longest line over
+// the gate) and case-insensitive header markers in the first lines.
+// Returns `Result<bool>`: unreadable files are `.err`
+// (`fs:is_generated:<code>: <path>`, same codes as `read_to_string`);
+// NUL bytes and invalid UTF-8 report `false` (callers check those via
+// `scan_counts` first; both are deterministic here).
+// Byte-exact port of zcc's `walker.is_generated_content`, including
+// split_lines artifact-drop (trailing newline adds no line) and
+// char-count longest lines. The markers are matched ASCII-lowercased:
+// safe because the marker set is ASCII-only — non-ASCII bytes never
+// equal ASCII marker bytes, and no casing pair unfolds a non-ASCII
+// char into marker-continuing ASCII (pinned: İ/ﬁ/ß/Kelvin headers).
+pub(crate) fn fs_is_generated(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    const OP: &str = "std.fs.is_generated";
+    let path = crate::natives::expect_str(args, 0, OP)?;
+    let raw_markers = crate::natives::expect_array(args, 1, OP)?;
+    let markers: Vec<String> = parse_markers(&raw_markers, OP)?;
+    run_fs(interp, span, move || {
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return fs_err("is_generated", &path, &e),
+        };
+        if bytes.contains(&0) {
+            return ok_value(Value::Bool(false));
+        }
+        if std::str::from_utf8(&bytes).is_err() {
+            return ok_value(Value::Bool(false));
+        }
+        if bytes.is_empty() {
+            return ok_value(Value::Bool(false));
+        }
+        // Line ends walked once (head gate needs at most GEN_HEAD_LINES).
+        let mut eols: Vec<usize> = Vec::new();
+        let mut pos = 0;
+        while eols.len() < GEN_HEAD_LINES {
+            match memchr::memmem::find(&bytes[pos..], b"\n") {
+                Some(rel) => {
+                    pos += rel + 1;
+                    eols.push(pos - 1);
+                    if pos >= bytes.len() {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        // Total lines with artifact-drop: trailing newline adds no line.
+        // Fewer than GEN_HEAD_LINES newlines means the tail was seen, so
+        // the count is exact; 5 found guarantees more than tiny either way.
+        let mut tiny = false;
+        let mut n = 0usize;
+        if eols.len() < GEN_HEAD_LINES {
+            n = if bytes.ends_with(b"\n") {
+                eols.len()
+            } else {
+                eols.len() + 1
+            };
+            tiny = true;
+        }
+        if tiny && n <= GEN_TINY_LINES {
+            // Longest line in chars (ZZ `len()` counts chars, and bytes
+            // overcount multibyte text).
+            let mut longest = 0usize;
+            let mut prev = 0usize;
+            for &e in &eols {
+                longest = longest.max(utf8_char_count(&bytes[prev..e]));
+                prev = e + 1;
+            }
+            longest = longest.max(utf8_char_count(&bytes[prev..]));
+            if longest > GEN_MIN_LINE_LEN {
+                return ok_value(Value::Bool(true));
+            }
+            // Tiny file: the head below covers all of its lines.
+        }
+        let head_end = if eols.len() == GEN_HEAD_LINES {
+            eols[GEN_HEAD_LINES - 1] + 1
+        } else {
+            bytes.len()
+        };
+        let low: Vec<u8> = bytes[..head_end]
+            .iter()
+            .map(|b| ascii_lower_byte(*b))
+            .collect();
+        let hit = markers
+            .iter()
+            .any(|m| !m.is_empty() && memchr::memmem::find(&low, m.as_bytes()).is_some());
+        ok_value(Value::Bool(hit))
     })
 }
 
