@@ -1,8 +1,16 @@
 #!/bin/bash
 # Parity test: compare VM vs native output for all .zz files in examples/.
+# NOTE: `examples/` is gitignored (personal scratch dir) — absent in fresh
+# clones and CI checkouts. Exit cleanly there instead of iterating a
+# literal unmatched glob.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+if ! compgen -G "examples/*.zz" >/dev/null; then
+	echo "NOTE: no examples/*.zz (gitignored scratch dir is absent) — nothing to check."
+	exit 0
+fi
 
 ZZ="cargo run --bin zz --"
 PASS=0
