@@ -57,8 +57,10 @@ match fs.scan_counts(base + "_missing.zz", ["//"], "/*", "*/", false, false) {
 }
 
 // Invalid UTF-8 is .err invalid_input (strict like read_to_string).
+// Octal escapes: POSIX-mandated, so dash and bash printf agree byte
+// for byte (`\xff` hex is a bashism dash prints literally).
 raw_path := base + "_raw.bin"
-sh_body := "printf '\\xff\\xfe\\n' > {raw_path}"
+sh_body := "printf '\\377\\376\\n' > {raw_path}"
 match process.run("sh", ["-c", sh_body]) {
     .ok(_) => println("printf_ok")
     .err(_) => println("printf_bad")
@@ -83,13 +85,23 @@ match fs.scan_counts(empty_path, ["//"], "/*", "*/", false, false) {
 }
 
 // Scanning a directory is .err io_error on both engines (the VM's
-// IsADirectory kind falls through to io_error; the C twin translates
-// EISDIR the same way instead of reporting invalid_input).
+// IsADirectory kind falls through to io_error; the C twin rejects
+// directories up front via stat — `ftell` on a directory stream
+// reports garbage sizes on some libcs, which used to abort the
+// process inside the sized allocation).
 match fs.scan_counts("/tmp", [], "", "", false, false) {
     .ok(_) => println("dir_bad")
     .err(e) => {
         dir_io := str.contains(e, "io_error")
         println("dir_err_ok: {dir_io}")
+    }
+}
+// Same guard in read_to_string (shared crash class, same fix).
+match fs.read_to_string("/tmp") {
+    .ok(_) => println("readdir_bad")
+    .err(e) => {
+        rdir_io := str.contains(e, "io_error")
+        println("readdir_err_ok: {rdir_io}")
     }
 }
 

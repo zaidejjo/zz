@@ -7100,6 +7100,7 @@ static void zz_throw_printed_err(const zz_value *payload) {
 #ifndef ZZ_OS_WINDOWS
 #include <dirent.h>
 #endif
+#include <sys/stat.h>
 
 // errno → stable code (mirrors the VM's ErrorKind mapping).
 static const char *zz_fs_code(int e) {
@@ -7125,6 +7126,16 @@ static const char *zz_fs_code(int e) {
     default:
         return "io_error";
     }
+}
+
+// Directories can never be read as text: `ftell` on a directory stream
+// reports garbage sizes on some libcs, so the sized `str_alloc` below
+// would abort the process with out-of-memory. The VM's `IsADirectory`
+// kind falls through to `io_error`, so reject up front with the same
+// code on both engines (EIO maps to `io_error`, byte-identical).
+static int zz_fs_is_dir_path(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
 // `fs:<op>:<code>: <path>` as an `.err(str)`.
@@ -7165,6 +7176,9 @@ zz_value zz_fs_read(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    if (zz_fs_is_dir_path(p)) {
+        return zz_fs_err1("read", p, EIO);
+    }
     zz_fs_top_up();
     FILE *f = fopen(p, "rb");
     if (!f) return zz_fs_err1("read", p, errno);
@@ -7211,6 +7225,12 @@ zz_value zz_fs_scan_counts(
     // instead of opening the truncated prefix (never stale, never surprising).
     if (path.s && strlen(p) != path.s->len) {
         return zz_fs_err1("scan_counts", p, EINVAL);
+    }
+    // Directories are rejected before any read (see zz_fs_is_dir_path):
+    // `ftell` on a directory stream reports garbage sizes on some libcs,
+    // which used to abort the process in `str_alloc`.
+    if (zz_fs_is_dir_path(p)) {
+        return zz_fs_err1("scan_counts", p, EIO);
     }
     zz_fs_top_up();
     FILE *f = fopen(p, "rb");
