@@ -27,7 +27,7 @@ pub fn init(args: &[String]) -> Result<(), String> {
     let src_dir = dir.join("src");
     if !src_dir.join("main.zz").exists() {
         std::fs::create_dir_all(&src_dir).map_err(|e| format!("cannot create src/: {e}"))?;
-        let content = template_content(template.as_deref());
+        let content = zz_pm::manifest::Manifest::starter_content(template.as_deref());
         std::fs::write(src_dir.join("main.zz"), content)
             .map_err(|e| format!("cannot write src/main.zz: {e}"))?;
     }
@@ -2242,21 +2242,6 @@ fn parse_pkg_spec(spec: &str) -> (String, Option<String>) {
     match spec.split_once('@') {
         Some((name, version)) => (name.to_string(), Some(version.to_string())),
         None => (spec.to_string(), None),
-    }
-}
-
-/// Starter content for `zz init` / `zz new`.
-fn template_content(template: Option<&str>) -> &'static str {
-    match template {
-        Some("lib") => {
-            "/// Add one to a number.\npub func add_one(n: int) -> int {\n    n + 1\n}\n"
-        }
-        Some("web") => {
-            "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"
-        }
-        _ => {
-            "func main() {\n    println(\"Hello, ZZ!\")\n}\n"
-        }
     }
 }
 
