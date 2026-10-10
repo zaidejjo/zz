@@ -19,7 +19,7 @@ Identifiers start with a letter or underscore, followed by letters, digits, or u
 ```zz
 name := "ZZ"
 _private := 42
-camelCase := true
+pascal_case := true
 ```
 
 ### Keywords
