@@ -2504,7 +2504,12 @@ impl Compiler {
         Arc::new(sub.chunk)
     }
 
-    fn compile_reordered_args(&mut self, func_name: &str, args: &[Expr], named: &[(String, Expr)]) {
+    fn compile_reordered_args(
+        &mut self,
+        func_name: &str,
+        args: &[Expr],
+        named: &[(zz_frontend::ast::Ident, Expr)],
+    ) {
         let info = match self.func_info.get(func_name) {
             Some(fi) => fi.clone(),
             None => {
@@ -2525,7 +2530,7 @@ impl Compiler {
             }
         }
         for (name, val) in named {
-            if let Some(i) = info.param_names.iter().position(|pn| pn == name) {
+            if let Some(i) = info.param_names.iter().position(|pn| pn == &name.name) {
                 if slots[i].is_none() {
                     slots[i] = Some(val.clone());
                 }
@@ -2613,7 +2618,12 @@ impl Compiler {
     /// (`pg.query(db, sql)`, `sqlz.query(db, sql)`, ...): the handle is a
     /// normal arg, so argc = db + template + bound params (+1 struct
     /// marker for query when the checker resolved `[Struct]`, + named).
-    fn module_db_call_argc(&self, args: &[Expr], named: &[(String, Expr)], span: Span) -> usize {
+    fn module_db_call_argc(
+        &self,
+        args: &[Expr],
+        named: &[(zz_frontend::ast::Ident, Expr)],
+        span: Span,
+    ) -> usize {
         let nparams = args.get(1).map(Self::fmt_param_count).unwrap_or(0);
         let base = 2 + nparams + args.len().saturating_sub(2) + named.len();
         if self.db_query_struct(span).is_some() {
@@ -2628,7 +2638,12 @@ impl Compiler {
     /// - args[0] (the handle) as normal,
     /// - args[1] (the SQL) in DbQuery mode,
     /// - trailing `__struct:Name` marker for query when typed.
-    fn compile_module_db_args(&mut self, args: &[Expr], named: &[(String, Expr)], span: Span) {
+    fn compile_module_db_args(
+        &mut self,
+        args: &[Expr],
+        named: &[(zz_frontend::ast::Ident, Expr)],
+        span: Span,
+    ) {
         if let Some(db) = args.first() {
             self.compile_expr(db);
         }

@@ -79,7 +79,7 @@ impl Checker {
         enum_name: &str,
         variant: &str,
         args: &[zz_frontend::ast::Expr],
-        named: &[(String, zz_frontend::ast::Expr)],
+        named: &[(zz_frontend::ast::Ident, zz_frontend::ast::Expr)],
         span: Span,
     ) -> Option<Type> {
         let sig = self.enums.get(enum_name).cloned()?;

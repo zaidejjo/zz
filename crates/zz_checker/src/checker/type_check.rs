@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::Checker;
 use crate::type_::Type;
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Param, Pattern, Stmt, Ty, UnOp};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
@@ -60,7 +60,7 @@ pub(crate) struct MethodCall<'a> {
     pub promoted_recv: Option<Type>,
     pub method: &'a str,
     pub args: &'a [Expr],
-    pub named: &'a [(String, Expr)],
+    pub named: &'a [(Ident, Expr)],
     pub span: Span,
 }
 
@@ -1795,7 +1795,7 @@ impl Checker {
         &mut self,
         callee: &Expr,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
     ) -> bool {
         let Expr::Path { parts, .. } = callee else {
             return false;
@@ -1848,7 +1848,7 @@ impl Checker {
         &mut self,
         callee: &Expr,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
         span: Span,
     ) -> Type {
         // Selective-import alias, resolved FIRST so the result flows
@@ -2653,10 +2653,16 @@ impl Checker {
                         })
                         .collect();
                     let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-                    if let Some((suggestion, _)) = suggest_all(&name, &refs).first() {
-                        // Note only: the span covers the whole call, not
-                        // just the name, so a replace fix would eat the args.
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    let all = suggest_all(&name, &refs);
+                    if let Some((suggestion, _)) = all.first() {
+                        // Note only, deliberately: the suggestion names the
+                        // *type* (`name`), not the callee value, and the
+                        // span covers the whole call — replacing the callee
+                        // with the function would silently drop a receiver,
+                        // so no fixit is offered.
+                        diag = diag.with_note(format!(
+                            "did you mean to call `{suggestion}` instead of calling a value of type `{name}`?"
+                        ));
                     }
                     self.errors.push(diag);
                     Type::Unit
@@ -2734,7 +2740,7 @@ impl Checker {
         ps: &[Type],
         has_default: &[bool],
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
         span: Span,
     ) {
         let total_provided = args.len() + named.len();
@@ -2770,7 +2776,9 @@ impl Checker {
                     .iter()
                     .zip(ps.iter())
                     .enumerate()
-                    .filter(|(i, (n, _))| *i >= args.len() && !named.iter().any(|(an, _)| an == *n))
+                    .filter(|(i, (n, _))| {
+                        *i >= args.len() && !named.iter().any(|(an, _)| an.name == **n)
+                    })
                     .map(|(_, (n, t))| format!("{n}: {t}"))
                     .collect();
                 if let Some(first) = missing.first() {
@@ -2802,12 +2810,12 @@ impl Checker {
         }
 
         for (name, val) in named {
-            let pos = param_names.iter().position(|pn| pn == name);
+            let pos = param_names.iter().position(|pn| pn == &name.name);
             match pos {
                 Some(i) => {
                     if slots[i].is_some() {
                         self.errors.push(error_at(
-                            format!("argument `{name}` already provided positionally"),
+                            format!("argument `{}` already provided positionally", name.name),
                             val.span(),
                         ));
                         return;
@@ -2815,12 +2823,28 @@ impl Checker {
                     slots[i] = Some(val);
                 }
                 None => {
-                    // Sherlock: typo'd named argument (`nmae:`) suggests the
-                    // real parameter instead of dying with just the name.
-                    let mut diag = error_at(format!("unknown parameter `{name}`"), val.span());
+                    // Sherlock: typo'd named argument (`nmae:`) suggests
+                    // the real parameter with a fix — the name span now
+                    // rides the AST, so the error points at the typo
+                    // itself instead of the value.
+                    let mut diag =
+                        error_at(format!("unknown parameter `{}`", name.name), name.span);
                     let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
-                    if let Some((suggestion, _)) = suggest_all(name, &refs).first() {
+                    let all = suggest_all(&name.name, &refs);
+                    if let Some((suggestion, _)) = all.first() {
                         diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                        let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
+                        let fixit = if alts.len() == 1 {
+                            FixIt::safe(name.span, suggestion.to_string(), "replace parameter")
+                        } else {
+                            FixIt::ambiguous(
+                                name.span,
+                                suggestion.to_string(),
+                                "replace parameter",
+                                alts,
+                            )
+                        };
+                        diag = diag.with_fixit(fixit);
                     }
                     self.errors.push(diag);
                     return;

@@ -1231,6 +1231,47 @@ fn method_funcs() -> HashMap<String, FuncSig> {
 }
 
 #[test]
+fn call_on_named_type_suggests_function() {
+    // `x: Line` called as `x("s")`: the suggestion names the type, so
+    // the diagnostic says so explicitly (replacing the callee would
+    // drop the receiver — deliberately no fixit).
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "line".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("s".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Int,
+        },
+    );
+    let r = check_src_with_funcs("func f<Line>(x: Line) { x(\"s\") }", funcs);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unknown function")),
+        "errors: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.notes.iter())
+            .any(|n| n.contains("did you mean to call `line`")),
+        "expected callee/type disambiguation note, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors.iter().flat_map(|d| d.fixits.iter()).any(|_| true),
+        "must not offer a fixit here, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn method_call_type_checks() {
     let r = check_src_with_funcs(
         "struct Point { x: int }\np := Point{ x: 3 }\nz := p.dist(2)",
@@ -1238,6 +1279,38 @@ fn method_call_type_checks() {
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn unknown_named_param_suggests_fixit() {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "greet".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("greeting".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    let src = "x := greet(greetnig: \"hi\")";
+    let r = check_src_with_funcs(src, funcs);
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("unknown parameter `greetnig`"))
+        .expect("expected unknown-parameter error");
+    // The error points at the typo'd name itself (span 11..19), not the value.
+    assert_eq!(diag.span, Some(Span::new(11, 19)), "span: {:?}", diag.span);
+    let fix = diag
+        .fixits
+        .iter()
+        .find(|f| f.replacement == "greeting")
+        .expect("expected `greeting` fixit");
+    assert_eq!(fix.safety, zz_frontend::diag::FixSafety::Safe);
 }
 
 #[test]

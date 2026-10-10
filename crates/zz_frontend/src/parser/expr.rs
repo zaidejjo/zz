@@ -494,7 +494,7 @@ impl<'a> Parser<'a> {
 
     /// Parse call arguments: `(pos1, pos2, name1: val1, name2: val2)`.
     /// Returns `(positional_args, named_args)`.
-    pub(crate) fn parse_call_args(&mut self) -> (Vec<Expr>, Vec<(String, Expr)>) {
+    pub(crate) fn parse_call_args(&mut self) -> (Vec<Expr>, Vec<(Ident, Expr)>) {
         let mut args = Vec::new();
         let mut named = Vec::new();
         if self.at(TokenKind::RParen) {
@@ -507,7 +507,11 @@ impl<'a> Parser<'a> {
             let is_named = self.at(TokenKind::Ident)
                 && matches!(self.peek_kind_at(1), TokenKind::Colon | TokenKind::Assign);
             if is_named {
-                let name = self.advance().text.into_owned();
+                let tok = self.advance();
+                let name = Ident {
+                    name: tok.text.into_owned(),
+                    span: tok.span,
+                };
                 self.advance(); // consume `:` or `=`
                 let value = self.parse_expr();
                 named.push((name, value));
