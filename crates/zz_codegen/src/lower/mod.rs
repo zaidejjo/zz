@@ -1042,6 +1042,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "fs.walk_dir" | "std.fs.walk_dir" => Some("zz_fs_walk_dir"),
         "fs.stat" | "std.fs.stat" => Some("zz_fs_stat"),
         "fs.scan_counts" | "std.fs.scan_counts" => Some("zz_fs_scan_counts"),
+        "fs.is_generated" | "std.fs.is_generated" => Some("zz_fs_is_generated"),
         "fs.open" | "std.fs.open" | "File.open" => Some("zz_fs_open"),
         "fs.read_chunk" | "std.fs.read_chunk" | "file.read_chunk" => Some("zz_fs_read_chunk"),
         "fs.read_chunk_bytes" | "std.fs.read_chunk_bytes" | "file.read_chunk_bytes" => {

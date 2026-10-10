@@ -2645,6 +2645,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     let fs_t = Type::Opaque("zzfs".to_string());
     let result_unit = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
     let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    let result_bool = || Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
     let result_int = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
     let result_file = || Type::Result(Box::new(file_t.clone()), Box::new(Type::Str));
     let result_str_arr = || {
@@ -2752,6 +2753,14 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
                 ("whole", Type::Bool),
             ],
             result_int_arr(),
+        ),
+        (
+            "std.fs.is_generated",
+            vec![
+                ("path", Type::Str),
+                ("markers", Type::Array(Box::new(Type::Str))),
+            ],
+            result_bool(),
         ),
         (
             "std.fs.open",
@@ -4397,6 +4406,7 @@ mod tests {
             "std.str.classify",
             "str.classify",
             "std.fs.scan_counts",
+            "std.fs.is_generated",
             "bytes.to_ints",
             "std.str.find",
             "str.find",
@@ -4411,7 +4421,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 909);
+        assert_eq!(funcs.len(), 910);
     }
 
     #[test]

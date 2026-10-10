@@ -1204,6 +1204,11 @@ parity_strict!(
     "stdlib",
     "fs_scan_counts_test.zz"
 );
+parity_strict!(
+    parity_stdlib_fs_is_generated_test,
+    "stdlib",
+    "fs_is_generated_test.zz"
+);
 parity_strict!(parity_stdlib_console, "stdlib", "console.zz");
 parity_strict!(parity_stdlib_envmod, "stdlib", "envmod.zz");
 parity_strict!(parity_stdlib_env_test, "stdlib", "env_test.zz");
