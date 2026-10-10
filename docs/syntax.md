@@ -730,6 +730,10 @@ match x {
 }
 ```
 
+Separate arms with a comma or a newline — a missing separator names
+itself (`expected `,` or newline between match arms`) and `zz fix`
+inserts the comma.
+
 ### Literal Patterns
 
 ```zz

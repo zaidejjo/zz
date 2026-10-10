@@ -288,7 +288,16 @@ impl Checker {
                 }
             }
             Stmt::Expr(e) => {
+                // A bare `match` statement discards the match value: tell
+                // `check_match` so bare `Result`/`Option` arm bodies warn
+                // (they never pass through this arm themselves). Tails
+                // are values, not discards.
+                let prev_discard = std::mem::replace(
+                    &mut self.direct_discard,
+                    matches!(e, Expr::Match { .. }) && !self.tail_is_value,
+                );
                 let t = self.check_expr(e);
+                self.direct_discard = prev_discard;
                 // Sherlock: a discarded `Result`/`Option` silently drops
                 // errors — unless this tail is the block's value.
                 if !self.tail_is_value {
@@ -467,7 +476,12 @@ impl Checker {
                     self.errors
                         .push(error_at("`defer` outside of a function", *span));
                 }
+                let prev_discard = std::mem::replace(
+                    &mut self.direct_discard,
+                    matches!(expr.as_ref(), Expr::Match { .. }),
+                );
                 let t = self.check_expr(expr);
+                self.direct_discard = prev_discard;
                 // Deferred results still vanish — same must-use rule.
                 self.warn_if_discarded(expr, &t);
                 Type::Unit
@@ -3132,6 +3146,15 @@ impl Checker {
             }
             let bt = self.check_expr(&arm.body);
             self.pop_scope();
+            // Sherlock: a bare `match` statement discards the match
+            // value, and bare arm bodies never pass through `Stmt::Expr`
+            // — warn here when an arm yields a discarded `Result` or
+            // `Option`. Block arm bodies are covered by the normal
+            // statement path (`direct_discard` is statement-level, so
+            // used positions like call args stay silent).
+            if self.direct_discard && !matches!(arm.body, Expr::Block(_)) {
+                self.warn_if_discarded(&arm.body, &bt);
+            }
             // `break`/`continue` arms diverge (never produce a value),
             // so they don't constrain the match's result type. Arms that
             // diverge via `return` (`Never`) vanish from the join the
