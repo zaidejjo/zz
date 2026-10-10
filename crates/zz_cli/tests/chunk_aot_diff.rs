@@ -351,6 +351,29 @@ func main() {
 }
 "#;
 
+// Nonzero-start ranges visit start..end (the chunk backend once seeded
+// every range index with 0 — extra iterations with wrong values).
+const RANGE_START: &str = r#"
+func main() {
+    s := 0
+    n := 0
+    for i in 2..10 {
+        s = s + i
+        n = n + 1
+    }
+    println(s)
+    println(n)
+    t := 0
+    m := 0
+    for i in 5..8 {
+        t = t + i
+        m = m + 1
+    }
+    println(t)
+    println(m)
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -367,6 +390,7 @@ const CASES: &[(&str, &str)] = &[
     ("idx_branch", IDX_BRANCH),
     ("idx_trap", IDX_TRAP),
     ("idx_neg", IDX_NEG),
+    ("range_start", RANGE_START),
 ];
 
 #[test]
