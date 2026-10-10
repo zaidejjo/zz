@@ -266,6 +266,24 @@ func main() {
 }
 "#;
 
+// String-append fusion pin: shared-string append must not leak into the
+// other binding (fresh-alloc path), unicode/empty appends exact.
+const STRAPP_ALIAS: &str = r#"
+func main() {
+    a := "hello"
+    b := a
+    a = a + "!"
+    println(a)
+    println(b)
+    u := "héllo"
+    u = u + "→✓"
+    println(u)
+    e := ""
+    e = e + ""
+    println(len(e))
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -277,6 +295,7 @@ const CASES: &[(&str, &str)] = &[
     ("sieve_small", SIEVE_SMALL),
     ("nested_vec", NESTED_VEC),
     ("bool_iter", BOOL_ITER),
+    ("strapp_alias", STRAPP_ALIAS),
 ];
 
 #[test]
