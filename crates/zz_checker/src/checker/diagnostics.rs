@@ -10,6 +10,18 @@ impl Checker {
     // --- errors -----------------------------------------------------------
 
     pub(crate) fn report_mismatch(&mut self, err: UnifyError, span: Span) {
+        self.report_mismatch_with_notes(err, span, Vec::new());
+    }
+
+    /// `report_mismatch` plus caller-supplied Sherlock notes. Call sites
+    /// that know the expected shape (parameter names, annotations) use
+    /// this so hints stay typed — never string-parsed.
+    pub(crate) fn report_mismatch_with_notes(
+        &mut self,
+        err: UnifyError,
+        span: Span,
+        notes: Vec<String>,
+    ) {
         let msg = match err.message.as_str() {
             "type mismatch" => {
                 format!(
@@ -21,7 +33,11 @@ impl Checker {
             "tuple arity mismatch" => "tuple arity mismatch".to_string(),
             other => other.to_string(),
         };
-        self.errors.push(error_at(msg, span));
+        let mut diag = error_at(msg, span);
+        for note in notes {
+            diag = diag.with_note(note);
+        }
+        self.errors.push(diag);
     }
 
     /// Sherlock: returning an unwrapped `Result` where a plain value is

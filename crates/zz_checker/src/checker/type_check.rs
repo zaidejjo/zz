@@ -91,7 +91,17 @@ impl Checker {
                     let gens = self.current_generics.clone();
                     let at = self.ast_to_type(ann, &gens);
                     if let Err(e) = self.unifier.unify(&vt, &at) {
-                        self.report_mismatch(e, ann.span);
+                        // Sherlock: point at the fix direction. Skip the
+                        // note while the value type is still uninferred
+                        // (`?0` helps nobody).
+                        let mut notes = Vec::new();
+                        let vt_r = self.unifier.resolve(&vt);
+                        if !matches!(vt_r, Type::Var(_)) {
+                            notes.push(format!(
+                                "to fix: change the annotation to `{vt_r}` or convert the value"
+                            ));
+                        }
+                        self.report_mismatch_with_notes(e, ann.span, notes);
                     }
                 }
                 let rt = self.unifier.resolve_deep(&vt);
@@ -2730,6 +2740,23 @@ impl Checker {
         name.rsplit('.').next().unwrap_or(name)
     }
 
+    /// Sherlock notes for an argument/parameter mismatch: name the
+    /// parameter and its expected type so the error points at the fix,
+    /// not just the conflict. Placeholder names (`_0`, from `func`
+    /// values) still show the type.
+    pub(crate) fn param_mismatch_notes(
+        param_names: &[String],
+        ps: &[Type],
+        i: usize,
+    ) -> Vec<String> {
+        match (param_names.get(i), ps.get(i)) {
+            (Some(name), Some(ty)) => {
+                vec![format!("parameter `{name}` expects `{ty}`")]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     // Eight args is the honest shape here (callee + params + args + span);
     // a struct would churn every call site for no checking benefit.
     #[allow(clippy::too_many_arguments)]
@@ -2874,7 +2901,11 @@ impl Checker {
                     };
                     let at = self.check_closure(params, ret_ty.as_ref(), body, *span, ep);
                     if let Err(e) = self.unifier.unify(&at, &ps[i]) {
-                        self.report_mismatch(e, arg.span());
+                        self.report_mismatch_with_notes(
+                            e,
+                            arg.span(),
+                            Self::param_mismatch_notes(param_names, ps, i),
+                        );
                     }
                 } else {
                     let at = self.check_expr(arg);
@@ -2896,7 +2927,11 @@ impl Checker {
                         _ => at,
                     };
                     if let Err(e) = self.unifier.unify(&at, &expected) {
-                        self.report_mismatch(e, arg.span());
+                        self.report_mismatch_with_notes(
+                            e,
+                            arg.span(),
+                            Self::param_mismatch_notes(param_names, ps, i),
+                        );
                     }
                 }
             }

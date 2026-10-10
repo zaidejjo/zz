@@ -35,6 +35,50 @@ fn annotation_mismatch_errors() {
 }
 
 #[test]
+fn annotation_mismatch_names_fix_direction() {
+    let r = check_src("x: str = 1");
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("change the annotation to `int`")),
+        "expected annotation fix note, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn arg_mismatch_names_parameter() {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "greet".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("greeting".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    let r = check_src_with_funcs("x := greet(42)", funcs);
+    assert!(
+        r.errors.iter().any(|e| e.message.contains("type mismatch")),
+        "errors: {:?}",
+        r.errors
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("parameter `greeting` expects `str`")),
+        "expected parameter note, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn type_mismatch_arithmetic() {
     errors_contain("1 + \"a\"", "cannot apply `+`");
 }

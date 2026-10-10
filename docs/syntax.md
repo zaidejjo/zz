@@ -769,6 +769,10 @@ Handle it (`match`), propagate it (`?`), or ignore it explicitly
 so `-> Result` function bodies never warn. Loop-body tails and
 `defer` expressions do warn — their values are discarded too.
 
+Type mismatches name the fix direction: argument errors name the
+expected parameter (``parameter `greeting` expects `str` ``), and
+annotation errors suggest the corrected annotation.
+
 ### Dead Arms
 
 Arms after a catch-all arm (`_` or a bare binding) can never run and
