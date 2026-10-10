@@ -436,12 +436,16 @@ fn write_if_different(path: &Path, content: &str) -> Result<bool, String> {
     }
 }
 
-/// `zz setup [--yes|--check]`: create `~/.zz/bin`, wire PATH + completions.
+/// `zz setup [--dry-run|--check]`: create `~/.zz/bin`, wire PATH + completions.
 /// `--yes` exists so the install scripts can call setup non-interactively
-/// (setup never prompts). `--check` only reports status, exit 1 when
-/// anything is missing.
+/// (setup never prompts). `--dry-run` only reports status, exit 1 when
+/// anything is missing (`--check` is a deprecated alias until 0.3).
 pub fn run(args: &[String]) -> Result<(), String> {
+    let dry_run = args.iter().any(|a| a == "--dry-run" || a == "--check");
     if args.iter().any(|a| a == "--check") {
+        eprintln!("warning: `--check` is deprecated; use `--dry-run` instead");
+    }
+    if dry_run {
         return check();
     }
     let bin = zz_pm::paths::bin_dir();
@@ -515,7 +519,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Read-only view of shell integration for `zz setup --check`.
+/// Read-only view of shell integration for `zz setup --dry-run`.
 pub struct ShellStatus {
     pub shell: &'static str,
     pub rc: PathBuf,
@@ -598,12 +602,12 @@ pub fn status() -> SetupStatus {
     }
 }
 
-/// `zz setup --check`: report shell-integration state, changing nothing.
+/// `zz setup --dry-run`: report shell-integration state, changing nothing.
 /// Exits 1 with a fix hint when anything is missing.
 pub fn check() -> Result<(), String> {
     let st = status();
     let home = home_dir();
-    ui::header("zz setup --check");
+    ui::header("zz setup --dry-run");
     let mut missing = 0u32;
     if st.bin_exists {
         ui::ok(&format!("{} exists", st.bin.display()));

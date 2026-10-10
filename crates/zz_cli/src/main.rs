@@ -84,24 +84,26 @@ PACKAGE MANAGER:
     zz install --allow-hooks    permit legacy [native] build hooks (direct only)
     zz remove <pkg>               remove a dependency
     zz update [pkg]               re-resolve floating versions
-    zz outdated                   locked vs wanted vs latest per dep
+    zz clean [--deps]             remove build outputs (plus vendor/ + lock)
+    zz cache gc                   garbage-collect unused CAS entries
+    zz cache clean                clear build cache
+    zz setup [--yes]              create ~/.zz/bin, wire PATH + completions
+    zz setup --dry-run            verify shell integration (no changes)
+    zz toolchain install          download a pinned Zig C backend into ~/.zz/toolchain
+    zz toolchain status           installed versions, pin, active backend
+    zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
+    zz upgrade [--dry-run]         self-update from GitHub releases
+    zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
+
+REGISTRY (see `zz pm --help` for full flags):
     zz deps tree [--depth N]      print the dependency tree
     zz deps why <pkg>             show why a package is depended on
+    zz outdated                   locked vs wanted vs latest per dep
     zz audit                      verify pins (published? hash? licensed?)
-    zz clean [--deps]             remove build outputs (plus vendor/ + lock)
     zz search <query>             search the package registry
     zz info <pkg>                 show package metadata and versions
     zz login [--browser]          authenticate for publishing
     zz publish [--dry-run]        validate, pack, and upload to the registry
-    zz cache gc                   garbage-collect unused CAS entries
-    zz cache clean                clear build cache
-    zz setup [--yes]              create ~/.zz/bin, wire PATH + completions
-    zz setup --check              verify shell integration (no changes)
-    zz toolchain install          download a pinned Zig C backend into ~/.zz/toolchain
-    zz toolchain status           installed versions, pin, active backend
-    zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
-    zz upgrade [--check]           self-update from GitHub releases
-    zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
 
 BUILD MODES (single Clang backend, always a native binary):
      zz build <file.zz>           static build (ThinLTO, DCE, stripped) — the default
@@ -116,7 +118,7 @@ BUILD MODES (single Clang backend, always a native binary):
                                   cross build via clang --target= (drops -march=native)
 
 FLAGS:
-    --check, -c        with fmt, check formatting without writing (exit 1 if changed)
+    --check, -c        with fmt ONLY, check formatting without writing (exit 1 if changed)
     --stdin            with fmt, read source from stdin and write formatted to stdout
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
@@ -135,8 +137,8 @@ FLAGS:
     --pgo              with build, profile-guided optimization build (native host only)
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
-    --chunk            with build, lower from the unified IR chunk instead of
-                       HIR (dual-codegen gate; stdout+exit must match HIR)
+    --dry-run          with setup/upgrade, report status without changing anything
+                       (--check kept as a deprecated alias until 0.3)
     --allow-source-builds
                         with build/install, compile transitive native deps
                         from source when no prebuilt covers the host tag
@@ -309,6 +311,14 @@ fn main() -> ExitCode {
         },
         Some("check") => {
             let (path, flags) = parse_path_and_flags(rest);
+            if flags.iter().any(|f| f == "--check" || f == "-c") {
+                eprintln!(
+                    "zz: `zz check --check` is not a flag\n\
+                     hint: did you mean `zz fmt --check` (formatting dry-run)? \
+                     `zz check` already checks without writing"
+                );
+                return ExitCode::FAILURE;
+            }
             let has_fix = flags.contains(&"--fix".to_string());
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
@@ -528,7 +538,9 @@ fn main() -> ExitCode {
 
 /// Split args into flags (--flag items) and path (last non-flag arg).
 /// Flags must precede the path: `zz check --fix src/`.
-/// Short aliases are normalized: `-i` → `--interactive`, `-f` → `--fix`, `-c` → `--check`.
+/// Short aliases are normalized per command: `-i` → `--interactive`,
+/// `-f` → `--fix`. `-c` is a `fmt`-only alias for `--check` and is kept
+/// verbatim here so other commands can reject it with a helpful error.
 fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
     let mut path = None;
     let mut flags = Vec::new();
@@ -537,8 +549,6 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
             flags.push("--interactive".to_string());
         } else if a == "-f" {
             flags.push("--fix".to_string());
-        } else if a == "-c" {
-            flags.push("--check".to_string());
         } else if a.starts_with("--") || a.starts_with('-') {
             flags.push(a.clone());
         } else {
@@ -1862,7 +1872,10 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         allow_hooks,
         allow_static_downgrade: allow_downgrade,
         output: output.clone(),
-        chunk: flag_args.iter().any(|a| a == "--chunk") || std::env::var("ZZ_CHUNK_C").is_ok(),
+        chunk: flag_args
+            .iter()
+            .any(|a| a == "--chunk" || a == "--unstable-chunk")
+            || std::env::var("ZZ_CHUNK_C").is_ok(),
     };
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",
