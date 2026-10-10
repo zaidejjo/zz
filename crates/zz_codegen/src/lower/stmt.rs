@@ -984,7 +984,10 @@ impl Lowerer {
                 // function's LIFO runner. The expression text (incl. any temp
                 // setup it needs) is built now but emitted only at function
                 // exit, so the deferred side effect runs in reverse order and
-                // re-reads the live values at that point.
+                // re-reads the live values at that point. Drop
+                // literal-length knowledge first: a `len(arr)` fold baked
+                // now would read stale past later reassignment (#350).
+                names.clear_array_lens();
                 let mut scratch = String::new();
                 let val = self.emit_expr(expr, names, &mut scratch);
                 let val = box_scalar_operand(expr, names, &val);
@@ -1642,10 +1645,17 @@ impl Lowerer {
             // Per-iteration scope: body-declared heap locals release at the
             // bottom (loop_scope_end) instead of accumulating per iteration.
             let body_scope = self.loop_scope_begin(names);
+            // Loop firewall for literal-length/index-forwarding knowledge
+            // (see the `while` guard fix, #350): the body reruns every
+            // iteration and may reassign, so pre-loop folds would go stale
+            // on later iterations; end-of-body knowledge is likewise
+            // unsound past the exit (zero-trip loops skip the body).
+            names.clear_array_lens();
             for bstmt in &body.stmts {
                 self.emit_stmt(bstmt, names, out, false);
             }
             self.loop_scope_end(names, out, body_scope);
+            names.clear_array_lens();
             if let Some(ref name) = loop_arena {
                 self.loop_arenas.borrow_mut().pop();
                 *self.current_loop_arena.borrow_mut() = self.loop_arenas.borrow().last().cloned();
@@ -1772,10 +1782,13 @@ impl Lowerer {
                     out.push_str(&format!("        {deref} = {cid};\n"));
                     names.enter_cell(v, &ptr, &deref, "zz_value", n);
                 }
+                // Same loop firewall as above (#350).
+                names.clear_array_lens();
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
                 self.loop_scope_end(names, out, item_scope);
+                names.clear_array_lens();
                 out.push_str("    }\n");
             } else if vars.len() == 2 {
                 // for k, v in <dict> — dict entries — or
@@ -1899,10 +1912,13 @@ impl Lowerer {
                         }
                     }
                 }
+                // Same loop firewall as above (#350).
+                names.clear_array_lens();
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
                 self.loop_scope_end(names, out, pair_scope);
+                names.clear_array_lens();
                 out.push_str("    }\n");
             }
         }

@@ -776,6 +776,132 @@ fn generated_source_contains_expected_sections() {
     );
 }
 
+/// Lower `src` to C (no clang involved).
+fn lower_c(src: &str) -> String {
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    lowerer.lower().source
+}
+
+/// `len(arr)` over a runtime call, not a baked arity.
+fn assert_len_is_live(c: &str, what: &str) {
+    assert!(
+        c.contains("zz_len"),
+        "{what}: expected a live `zz_len` call in:\n{c}"
+    );
+}
+
+/// Literal-length folds (`len(v)` → arity) are only valid in straight-line
+/// flow. Loop bodies re-run (and may reassign) while conditions
+/// re-evaluate; branch joins merge exclusive paths — folding across any
+/// of these boundaries bakes a stale constant (#350: `len(arr) < 5`
+/// folded to `0 < 5` while the body grew the array, so native looped to
+/// the iteration guard and paid O(n²) copies).
+
+#[test]
+fn while_cond_len_sees_body_push() {
+    let c = lower_c(
+        r#"
+import std.vec
+func main() {
+    arr := []
+    i := 0
+    while len(arr) < 5 {
+        arr = vec.push(arr, i)
+        i = i + 1
+        if i > 100000 {
+            break
+        }
+    }
+    println("n={len(arr)} i={i}")
+}
+"#,
+    );
+    assert_len_is_live(&c, "while guard");
+    assert!(
+        !c.contains("zz_binop(ZZOP_LT, zz_int(0), zz_int(5))"),
+        "while guard must not fold `len(arr)` to the pre-loop arity"
+    );
+}
+
+#[test]
+fn for_body_len_sees_body_push() {
+    let c = lower_c(
+        r#"
+import std.vec
+func main() {
+    arr := [1]
+    for i in 0..3 {
+        println("n={len(arr)}")
+        arr = vec.push(arr, i)
+    }
+}
+"#,
+    );
+    assert_len_is_live(&c, "for body");
+}
+
+#[test]
+fn if_join_len_not_folded_from_branch() {
+    let c = lower_c(
+        r#"
+func main() {
+    arr := [1, 2, 3]
+    if false {
+        arr = [9, 9, 9, 9]
+    }
+    println("n={len(arr)}")
+}
+"#,
+    );
+    assert_len_is_live(&c, "post-if join");
+    assert!(
+        !c.contains("zz_int(4)"),
+        "post-if `len(arr)` must not fold to the untaken branch arity"
+    );
+}
+
+#[test]
+fn match_join_len_not_folded_from_arm() {
+    let c = lower_c(
+        r#"
+func main() {
+    arr := [1, 2, 3]
+    x := 1
+    match x {
+        1 => { arr = [9, 9] }
+        _ => { arr = [7, 7, 7, 7, 7] }
+    }
+    println("n={len(arr)}")
+}
+"#,
+    );
+    assert_len_is_live(&c, "post-match join");
+}
+
+#[test]
+fn straight_line_len_still_folds() {
+    // The peephole must keep working where it is sound: same-block
+    // literal binds with no intervening control flow.
+    let c = lower_c(
+        r#"
+func main() {
+    arr := [1, 2, 3]
+    println("n={len(arr)}")
+}
+"#,
+    );
+    assert!(
+        !c.contains("zz_call_native1(zz_len"),
+        "straight-line `len` of a literal should still fold, got:\n{c}"
+    );
+}
+
 #[test]
 fn native_used_function_kept_unused_pruned() {
     let src = r#"
