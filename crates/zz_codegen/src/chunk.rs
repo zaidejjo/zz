@@ -975,6 +975,69 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
     }
     (fused, skip)
 }
+/// String-append fusion: `LoadSlot(s), PushConst(Str), BinOp(Add),
+/// StoreSlot(s)` (adjacent, in that order) compiles to an in-place
+/// `zz_str_append_lit` on the slot instead of clone → alloc+copy →
+/// store-back (which is O(n) per append — quadratic for loop-carried
+/// accumulators like strconcat).
+///
+/// Soundness: the four ops are adjacent with no jump target in the
+/// interior (entering mid-window would skip the append), no other
+/// claimant on those pcs (checked against the caller-provided skip
+/// set, so int/store-index/peel windows always win ties), and the rhs
+/// is a single string-literal push (no calls, no stores, no observable
+/// evaluation — nothing can witness the missing clone). The runtime
+/// helper reuses the buffer when uniquely owned (refs==1, not
+/// interned) and grows it 2x amortized; shared/interned/arena sources
+/// take the fresh-alloc path. A non-string slot (only reachable on
+/// Unknown-typed or hostile modules — checker-typed programs always
+/// hold a string here) takes a fail-closed boxed fallback with exact
+/// `zz_binop` semantics instead of trapping or misappending.
+///
+/// Returns `(fused, skip)`: `fused[p] = (s, c)` means the `LoadSlot`
+/// at `p` emits the whole window for slot `s` and literal const `c`;
+/// `skip` holds the other three pcs.
+fn strapp_scan(
+    code: &[Op],
+    consts: &[Const],
+    targets: &HashSet<u32>,
+    taken: &HashSet<usize>,
+) -> (HashMap<usize, (u16, ConstId)>, HashSet<usize>) {
+    let mut fused = HashMap::new();
+    let mut skip = HashSet::new();
+    if code.len() < 4 {
+        return (fused, skip);
+    }
+    for p in 0..code.len() - 3 {
+        if taken.contains(&p) {
+            continue;
+        }
+        let (s, c) = match (&code[p], &code[p + 1], &code[p + 2], &code[p + 3]) {
+            (Op::LoadSlot(s), Op::PushConst(c), Op::BinOp(b), Op::StoreSlot(d))
+                if s == d && matches!(b, zz_ir::op::BinOp::Add) =>
+            {
+                (*s, *c)
+            }
+            _ => continue,
+        };
+        if !matches!(consts.get(c.0 as usize), Some(Const::Str(_))) {
+            continue;
+        }
+        // Interior must be label-free (the start may itself be
+        // targeted — it still emits) and unclaimed.
+        if (p + 1..=p + 3).any(|q| targets.contains(&(q as u32)) || taken.contains(&q)) {
+            continue;
+        }
+        if skip.contains(&p) {
+            continue;
+        }
+        fused.insert(p, (s, c));
+        skip.insert(p + 1);
+        skip.insert(p + 2);
+        skip.insert(p + 3);
+    }
+    (fused, skip)
+}
 /// Coverage verdict for one module: every op supported, no default args
 /// (arity fill needs caller-env evaluation), and every `Call`/`CallPath`
 /// statically resolvable. Fails with the first gap found.
@@ -1651,6 +1714,14 @@ impl<'a> Emitter<'a> {
             peels.keys().all(|k| !skip.contains(k)),
             "peel start in skip set"
         );
+        // String-append fusion (see `strapp_scan`): strict 4-op windows
+        // lose every tie — anything already claimed stays claimed.
+        let (strapped, sskip) = strapp_scan(&f.code, &self.module.consts, &targets, &skip);
+        skip.extend(sskip);
+        debug_assert!(
+            strapped.keys().all(|k| !skip.contains(k)),
+            "strapp start in skip set"
+        );
         for (pc, op) in f.code.iter().enumerate() {
             if skip.contains(&pc) {
                 continue;
@@ -1671,6 +1742,7 @@ impl<'a> Emitter<'a> {
                 fuse_slot: fused.get(&pc).copied(),
                 ufuse: ufused.get(&pc).copied(),
                 peel: peels.get(&pc).cloned(),
+                strapp: strapped.get(&pc).copied(),
             };
             self.emit_op(id, pc, op, &cx, out)?;
         }
@@ -2115,6 +2187,9 @@ struct OpCx<'x> {
     ufuse: Option<(usize, FusedTail)>,
     /// Peeled loop starting at this pc, if any (see [`peel_scan`]).
     peel: Option<Peel>,
+    /// String-append window starting at this pc, if any: (slot, literal).
+    /// See [`strapp_scan`].
+    strapp: Option<(u16, ConstId)>,
 }
 
 /// One fused unboxed-int window: a straight-line int expression over
@@ -2166,6 +2241,28 @@ impl<'a> Emitter<'a> {
                 .get(id.0 as usize)
                 .ok_or_else(|| ChunkError::op("func id"))?;
             Self::emit_fused_window(self.module, &f.code, pc, len, tail, &HashMap::new(), out);
+            return Ok(());
+        }
+        // Fused string append (see `strapp_scan`): in-place literal
+        // append on the slot, no clone, no stack traffic. The tag guard
+        // keeps hostile/Unknown-typed modules on exact boxed semantics.
+        if let Some((s, c)) = cx.strapp {
+            let (lit, len) = match self.module.consts.get(c.0 as usize) {
+                Some(Const::Str(id)) => {
+                    let text = self
+                        .module
+                        .strings
+                        .get(id.0 as usize)
+                        .cloned()
+                        .unwrap_or_default();
+                    let len = text.len();
+                    (c_str(&text), len)
+                }
+                _ => return Err(ChunkError::op("strapp const")),
+            };
+            out.push_str(&format!(
+                "    {{ if (st[{s}].tag == ZZ_STR) {{ zz_str_append_lit(&st[{s}], {lit}, {len}); }} else {{ zz_value _sa = zz_clone(st[{s}]); zz_value _sb = zz_str_new({lit}, {len}); zz_value _sr = zz_binop(ZZOP_ADD, _sa, _sb); zz_release(&_sa); zz_release(&_sb); zz_cstore(&st[{s}], _sr); }} }}\n"
+            ));
             return Ok(());
         }
         match op {
