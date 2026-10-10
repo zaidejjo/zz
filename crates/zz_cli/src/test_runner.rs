@@ -9,8 +9,9 @@
 //! Design decisions (see docs/test-isolation.md):
 //! - VM: panic isolation via `std::panic::catch_unwind`.
 //! - Timeout: `@test(timeout = ms)` is a hard timeout (VM: watcher thread,
-//!   AOT: child kill). `--timeout <ms>` (default 60s) is a soft budget —
-//!   overruns print a notice but never interrupt or fail the test.
+//!   AOT: child kill). `--timeout <ms>` (default 60s) is a hard per-test
+//!   budget — overruns fail the test. `--soft-timeout` restores the old
+//!   notice-only behavior.
 //! - `--nocapture` forces `--serial` (interleaved output is noise).
 //! - `--jobs N` uses a thread pool with work-stealing (default: logical cores).
 //! - Files run sequentially so output stays grouped per file
@@ -34,9 +35,9 @@ use zz_runtime::{Interp, Value};
 
 use crate::loader;
 
-/// Soft per-test time budget: overruns print a notice but never
-/// interrupt or fail the test. Configurable via `--timeout <ms>`.
-const DEFAULT_SOFT_BUDGET: Duration = Duration::from_secs(60);
+/// Per-test time budget: overruns fail the test unless `--soft-timeout`
+/// restores notice-only mode. Configurable via `--timeout <ms>`.
+const DEFAULT_TIME_BUDGET: Duration = Duration::from_secs(60);
 
 /// Harness files generated for AOT mode. Discovery skips them so a
 /// leftover harness is never picked up as a test file.
@@ -61,7 +62,9 @@ struct TestConfig {
     fail_fast: bool,
     fail_on_empty: bool,
     slow_threshold: Option<Duration>,
-    soft_budget: Duration,
+    time_budget: Duration,
+    /// Notice-only budget overruns (legacy `--timeout` behavior).
+    soft_timeout: bool,
     nocapture: bool,
     serial: bool,
     jobs: usize,
@@ -90,7 +93,8 @@ impl TestConfig {
         let mut fail_fast = defaults.fail_fast;
         let mut fail_on_empty = false;
         let mut slow_threshold = defaults.slow_threshold;
-        let mut soft_budget = defaults.soft_budget;
+        let mut time_budget = defaults.time_budget;
+        let mut soft_timeout = defaults.soft_timeout;
         let mut nocapture = false;
         let mut serial = defaults.serial;
         let mut jobs: Option<usize> = defaults.jobs;
@@ -140,7 +144,7 @@ impl TestConfig {
                     }
                     "--timeout" => {
                         if let Ok(ms) = val.parse::<u64>() {
-                            soft_budget = Duration::from_millis(ms);
+                            time_budget = Duration::from_millis(ms);
                         }
                     }
                     "--engine" => {
@@ -167,7 +171,10 @@ impl TestConfig {
                 "--fail-on-empty" => fail_on_empty = true,
                 "--list" => list_only = true,
                 "--json" => json_output = true,
-                "--native" | "--aot" => engine = TestEngine::Native,
+                "--native" | "--aot" => {
+                    eprintln!("note: `--native` is an alias for `--engine native` (canonical)");
+                    engine = TestEngine::Native;
+                }
                 "-p" | "--release" => native_release = true,
                 "--allow-source-builds" => allow_source_builds = true,
                 "--allow-hooks" => allow_hooks = true,
@@ -200,9 +207,10 @@ impl TestConfig {
                 "--timeout" => {
                     i += 1;
                     if let Some(ms) = args.get(i).and_then(|s| s.parse::<u64>().ok()) {
-                        soft_budget = Duration::from_millis(ms);
+                        time_budget = Duration::from_millis(ms);
                     }
                 }
+                "--soft-timeout" => soft_timeout = true,
                 "--engine" => {
                     i += 1;
                     match args.get(i).map(String::as_str) {
@@ -248,11 +256,12 @@ impl TestConfig {
                            --list           List discovered tests without running\n  \
                            --nocapture      Show stdout/stderr live (forces serial)\n  \
                            --slow-threshold Mark passes slower than N ms\n  \
-                           --timeout <ms>   Soft time budget per test (default 60000);\n  \
-                           overruns print a notice, never interrupt or fail\n  \
-                           --native, --aot  Run tests as AOT binaries (dev build)\n  \
+                           --timeout <ms>   Hard time budget per test (default 60000);\n  \
+                           overruns fail unless --soft-timeout is passed\n  \
+                           --soft-timeout   Budget overruns print a notice only (legacy mode)\n  \
                            --engine=vm|native  Select the test engine (default vm)\n  \
-                           -p, --release    With --native: optimized build (default: dev)\n  \
+                           --native         Alias for --engine native (deprecated)\n  \
+                           -p, --release    With --engine native: optimized build (default: dev)\n  \
                            --allow-source-builds  With --native: compile transitive native deps\n  \
                            from source when no prebuilt covers the host tag\n  \
                            --allow-hooks    With --native: run legacy [native] build hooks\n  \
@@ -314,7 +323,8 @@ impl TestConfig {
             fail_fast,
             fail_on_empty,
             slow_threshold,
-            soft_budget,
+            time_budget,
+            soft_timeout,
             nocapture,
             serial,
             jobs,
@@ -353,7 +363,9 @@ struct TestDefaults {
     serial: bool,
     fail_fast: bool,
     slow_threshold: Option<Duration>,
-    soft_budget: Duration,
+    time_budget: Duration,
+    /// Notice-only budget overruns (legacy `--timeout` behavior).
+    soft_timeout: bool,
     seed: Option<u64>,
     repeat: usize,
     engine: TestEngine,
@@ -366,7 +378,8 @@ impl Default for TestDefaults {
             serial: false,
             fail_fast: false,
             slow_threshold: None,
-            soft_budget: DEFAULT_SOFT_BUDGET,
+            time_budget: DEFAULT_TIME_BUDGET,
+            soft_timeout: false,
             seed: None,
             repeat: 1,
             engine: TestEngine::Vm,
@@ -411,7 +424,10 @@ fn load_zz_toml_defaults() -> TestDefaults {
         d.repeat = (v.max(1)) as usize;
     }
     if let Some(v) = test_section.get("timeout").and_then(|v| v.as_integer()) {
-        d.soft_budget = Duration::from_millis(v.max(0) as u64);
+        d.time_budget = Duration::from_millis(v.max(0) as u64);
+    }
+    if let Some(v) = test_section.get("soft-timeout").and_then(|v| v.as_bool()) {
+        d.soft_timeout = v;
     }
     if let Some(v) = test_section.get("engine").and_then(|v| v.as_str()) {
         d.engine = match v {
@@ -465,7 +481,8 @@ struct TestResult {
     passed: bool,
     ignored: bool,
     slow: bool,
-    /// Duration exceeded the soft budget (notice only, never fails).
+    /// Duration exceeded the `--timeout` budget. Fails the test unless
+    /// `--soft-timeout` restores notice-only mode.
     over_budget: bool,
     reason: Option<String>,
     duration: Duration,
@@ -558,7 +575,8 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
         if config.json_output {
             println!("[]");
         } else {
-            eprintln!("zz test: {msg}");
+            eprintln!("warning: zz test: {msg}");
+            eprintln!("hint: no .zz files discovered — nothing ran, exit stays 0");
         }
         return Ok(());
     }
@@ -612,7 +630,12 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
         if config.json_output {
             println!("[]");
         } else {
-            eprintln!("zz test: {msg}");
+            eprintln!("warning: zz test: {msg}");
+            if !config.fail_on_empty {
+                eprintln!(
+                    "hint: no tests ran — exit stays 0; use --fail-on-empty to fail CI on empty match"
+                );
+            }
         }
         if config.fail_on_empty {
             return Err(msg);
@@ -1283,11 +1306,28 @@ fn run_single_test_vm(test: &TestInfo, config: &TestConfig) -> TestResult {
                 r.slow = true;
             }
         }
-        if !r.ignored && r.duration > config.soft_budget {
-            r.over_budget = true;
-        }
+        apply_time_budget(&mut r, config);
 
         return r;
+    }
+}
+
+/// Apply the `--timeout` budget to a finished attempt: mark `over_budget`,
+/// and — unless `--soft-timeout` — fail tests that passed functionally but
+/// overran the budget. Genuine failures, ignores, and fail-fast skips are
+/// left untouched.
+fn apply_time_budget(r: &mut TestResult, config: &TestConfig) {
+    if r.ignored || is_failfast_skip(r) || r.duration <= config.time_budget {
+        return;
+    }
+    r.over_budget = true;
+    if !config.soft_timeout && r.passed {
+        r.passed = false;
+        r.error_msg = Some(format!(
+            "timeout: exceeded {} budget (took {})",
+            fmt_dur(config.time_budget),
+            fmt_dur(r.duration),
+        ));
     }
 }
 
@@ -1971,8 +2011,8 @@ fn cleanup_aot(bins: &mut BTreeMap<PathBuf, (PathBuf, PathBuf)>) {
 
 /// Run one test as its own AOT process (`t<idx>` selects the dispatch
 /// arm). Exit 0 = pass; anything else = fail (inverted for `should_panic`).
-/// `@test(timeout = ms)` kills the child; the soft `--timeout` budget only
-/// marks `over_budget` (never interrupts).
+/// `@test(timeout = ms)` kills the child; the `--timeout` budget marks
+/// `over_budget` and fails the test unless `--soft-timeout` is passed.
 fn run_single_test_aot(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig) -> TestResult {
     let max_retries = test.meta.retry.unwrap_or(0);
     let mut attempt = 0;
@@ -1996,9 +2036,7 @@ fn run_single_test_aot(test: &TestInfo, idx: usize, bin: &Path, config: &TestCon
                 r.slow = true;
             }
         }
-        if !r.ignored && r.duration > config.soft_budget {
-            r.over_budget = true;
-        }
+        apply_time_budget(&mut r, config);
         return r;
     }
 }
@@ -2366,11 +2404,19 @@ fn print_test_line(r: &TestResult, config: &TestConfig) {
         extra.push_str(" (slow)");
     }
     if r.over_budget {
-        extra.push_str(&format!(
-            " (took {}; over {} soft budget, not interrupted)",
-            fmt_dur(r.duration),
-            fmt_dur(config.soft_budget),
-        ));
+        if config.soft_timeout {
+            extra.push_str(&format!(
+                " (took {}; over {} soft budget, not interrupted)",
+                fmt_dur(r.duration),
+                fmt_dur(config.time_budget),
+            ));
+        } else {
+            extra.push_str(&format!(
+                " (took {}; exceeded {} budget)",
+                fmt_dur(r.duration),
+                fmt_dur(config.time_budget),
+            ));
+        }
     }
 
     eprintln!(
@@ -2440,10 +2486,17 @@ fn print_file_footer(
         );
     }
     if over > 0 {
-        eprintln!(
-            "note: {over} test(s) exceeded the {} soft budget (not interrupted)",
-            fmt_dur(config.soft_budget),
-        );
+        if config.soft_timeout {
+            eprintln!(
+                "note: {over} test(s) exceeded the {} soft budget (not interrupted)",
+                fmt_dur(config.time_budget),
+            );
+        } else {
+            eprintln!(
+                "note: {over} test(s) exceeded the {} budget (failed; use --soft-timeout for notice-only)",
+                fmt_dur(config.time_budget),
+            );
+        }
     }
 }
 
