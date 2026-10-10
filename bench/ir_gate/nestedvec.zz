@@ -1,0 +1,23 @@
+import std.vec
+
+// Nested vectors: 400x400 int grid, then full sum.
+// Exercises take-push fusion on two live array slots (row + grid)
+// and value-semantics/COW on inner-vector capture.
+
+func main() {
+    a := []
+    for i in 0..400 {
+        row := []
+        for j in 0..400 {
+            row = vec.push(row, (i + j) % 97)
+        }
+        a = vec.push(a, row)
+    }
+    s := 0
+    for row in a {
+        for v in row {
+            s = s + v
+        }
+    }
+    println(s)
+}

@@ -5,6 +5,11 @@
 //! Corpus stays small and fast (dynamic `-O0` builds, sub-second runs)
 //! so PR CI keeps it; the bench-timing gate (fib35/tak/sieve/arraysum
 //! within 5%) is measured manually, not here.
+//!
+//! Sieve slice: `sieve_small` ([bool] + while + store-index fusion),
+//! `nested_vec` (take-push fusion on two live slots), and `bool_iter`
+//! ([bool] iteration through the boxed path) pin chunk↔HIR parity for
+//! the shapes the sieve bench exercises at scale.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -193,6 +198,74 @@ func main() {
 }
 "#;
 
+// Sieve slice at test scale: [bool] bitset, index stores, a `while`
+// inner loop, and int accumulation. Same shapes as bench/ir_gate/sieve.zz
+// (n=200000 there); n=20000 here keeps both dynamic builds + runs fast.
+const SIEVE_SMALL: &str = r#"
+func main() {
+    n := 20000
+    is_prime := []
+    for i in 0..n {
+        is_prime = vec.push(is_prime, true)
+    }
+    is_prime[0] = false
+    is_prime[1] = false
+    count := 0
+    for i in 2..n {
+        if is_prime[i] {
+            count = count + 1
+            j := i * 2
+            while j < n {
+                is_prime[j] = false
+                j = j + i
+            }
+        }
+    }
+    println(count)
+}
+"#;
+
+// Nested vectors at test scale: take-push fusion on two live array
+// slots (row + grid) plus value-semantics on inner capture.
+const NESTED_VEC: &str = r#"
+func main() {
+    a := []
+    for i in 0..50 {
+        row := []
+        for j in 0..50 {
+            row = vec.push(row, (i + j) % 97)
+        }
+        a = vec.push(a, row)
+    }
+    s := 0
+    for row in a {
+        for v in row {
+            s = s + v
+        }
+    }
+    println(s)
+    println(len(a))
+}
+"#;
+
+// Bool-array iteration through the boxed path (branchy body: never a
+// single fused int window, so no peel — parity must hold without it).
+const BOOL_ITER: &str = r#"
+func main() {
+    a := []
+    for i in 0..1000 {
+        a = vec.push(a, i % 3 == 0)
+    }
+    n := 0
+    for b in a {
+        if b {
+            n = n + 1
+        }
+    }
+    println(n)
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -201,6 +274,9 @@ const CASES: &[(&str, &str)] = &[
     ("str_concat", STR_CONCAT),
     ("tak", TAK),
     ("loop_mutate", LOOP_MUTATE),
+    ("sieve_small", SIEVE_SMALL),
+    ("nested_vec", NESTED_VEC),
+    ("bool_iter", BOOL_ITER),
 ];
 
 #[test]
