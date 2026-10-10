@@ -117,6 +117,52 @@ func colors.bg_white(s: str) -> str {
     "\e[47m" + s + "\e[0m"
 }
 
+// ── Bright backgrounds (100-107) ─────────────────────────────────────────────
+
+func colors.bg_bright_black(s: str) -> str {
+    "\e[100m" + s + "\e[0m"
+}
+
+func colors.bg_bright_red(s: str) -> str {
+    "\e[101m" + s + "\e[0m"
+}
+
+func colors.bg_bright_green(s: str) -> str {
+    "\e[102m" + s + "\e[0m"
+}
+
+func colors.bg_bright_yellow(s: str) -> str {
+    "\e[103m" + s + "\e[0m"
+}
+
+func colors.bg_bright_blue(s: str) -> str {
+    "\e[104m" + s + "\e[0m"
+}
+
+func colors.bg_bright_magenta(s: str) -> str {
+    "\e[105m" + s + "\e[0m"
+}
+
+func colors.bg_bright_cyan(s: str) -> str {
+    "\e[106m" + s + "\e[0m"
+}
+
+func colors.bg_bright_white(s: str) -> str {
+    "\e[107m" + s + "\e[0m"
+}
+
+// ── 256-color indexed (38;5;n / 48;5;n, clamped like `rgb`) ──────────────────
+
+func colors.color256(s: str, n: int) -> str {
+    c := colors.clamp255(n)
+    "\e[38;5;{c}m" + s + "\e[0m"
+}
+
+func colors.bg_256(s: str, n: int) -> str {
+    c := colors.clamp255(n)
+    "\e[48;5;{c}m" + s + "\e[0m"
+}
+
 // ── Text styles ──────────────────────────────────────────────────────────────
 
 func colors.bold(s: str) -> str {
@@ -133,6 +179,18 @@ func colors.italic(s: str) -> str {
 
 func colors.underline(s: str) -> str {
     "\e[4m" + s + "\e[0m"
+}
+
+func colors.blink(s: str) -> str {
+    "\e[5m" + s + "\e[0m"
+}
+
+func colors.reverse(s: str) -> str {
+    "\e[7m" + s + "\e[0m"
+}
+
+func colors.strikethrough(s: str) -> str {
+    "\e[9m" + s + "\e[0m"
 }
 
 func colors.reset(s: str) -> str {
@@ -166,6 +224,7 @@ func colors.bg_rgb(s: str, r: int, g: int, b: int) -> str {
 }
 
 // Single hex digit → nibble, or -1 when not a hex digit.
+
 func colors.hex_val(c: str) -> int {
     if c == "0" {
         return 0
@@ -237,6 +296,7 @@ func colors.hex_val(c: str) -> int {
 }
 
 // Parse one byte from two hex chars; -1 on malformed input.
+
 func colors.hex_byte(hi: str, lo: str) -> int {
     h := colors.hex_val(hi)
     l := colors.hex_val(lo)
@@ -257,11 +317,12 @@ func colors.hex_byte(hi: str, lo: str) -> int {
 //   declared after a loop;
 // - loops use flat single-level `if`s with int flags only — AOT miscompiles
 //   nested `if`s assigning outer vars, and bool locals under `&&` / `!`.
+
 func colors.hex(s: str, code: str) -> str {
     raw := str.split(code, "")
-    digits: [str] = []
+    digits:[str] = []
     c := ""
-    skip: int = 0
+    skip:int = 0
     i := 0
     n := vec.len(raw)
     count := 0
@@ -290,16 +351,17 @@ func colors.hex(s: str, code: str) -> str {
 }
 
 // Six-digit helper for `hex` (no loops: straight-line like `hex_val`).
+
 func colors.hex6(s: str, digits: [str]) -> str {
     a := digits[0]
     b := digits[1]
-    r: int = colors.hex_byte(a, b)
+    r:int = colors.hex_byte(a, b)
     c := digits[2]
     d := digits[3]
-    g: int = colors.hex_byte(c, d)
+    g:int = colors.hex_byte(c, d)
     e := digits[4]
     f := digits[5]
-    bch: int = colors.hex_byte(e, f)
+    bch:int = colors.hex_byte(e, f)
     if r < 0 {
         return s
     }
@@ -313,10 +375,11 @@ func colors.hex6(s: str, digits: [str]) -> str {
 }
 
 // Three-digit helper for `hex`: each nibble is doubled (`F53` → `FF5533`).
+
 func colors.hex3(s: str, digits: [str]) -> str {
-    r: int = colors.hex_val(digits[0])
-    g: int = colors.hex_val(digits[1])
-    b: int = colors.hex_val(digits[2])
+    r:int = colors.hex_val(digits[0])
+    g:int = colors.hex_val(digits[1])
+    b:int = colors.hex_val(digits[2])
     if r < 0 {
         return s
     }
@@ -335,12 +398,13 @@ func colors.hex3(s: str, digits: [str]) -> str {
 // Flat flag machine (int flags, no nesting, no bool locals): the VM
 // miscompiles bindings declared inside nested `while` + `break`, and AOT
 // miscompiles nested-`if` assignments and bool locals under `&&` / `!`.
+
 func colors.strip(s: str) -> str {
     chars := str.split(s, "")
     result := ""
     c := ""
-    esc: int = 0
-    was: int = 0
+    esc:int = 0
+    was:int = 0
     i := 0
     n := vec.len(chars)
     while i < n {

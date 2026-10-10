@@ -1,0 +1,54 @@
+// features: comparison, imports, locals, print, std-colors, std-str, string-literal
+// E2E: std.colors styles round 2 — reverse, strikethrough, blink,
+// bright backgrounds, 256-color indexed.
+//
+// Each feature prints its COLORED output followed by boolean assertions
+// (`strip` recovers the visible text, equality pins exact sequences).
+import std.colors
+import std.str
+
+// ── extra styles print ──
+println(colors.reverse("rev"))
+println(colors.strikethrough("strike"))
+println(colors.blink("blink"))
+println(colors.strip(colors.reverse("r")) == "r")
+println(colors.strip(colors.strikethrough("s")) == "s")
+println(colors.strip(colors.blink("b")) == "b")
+
+// ── bright backgrounds print ──
+println(colors.bg_bright_red("bbr"))
+println(colors.bg_bright_green("bbg"))
+println(colors.bg_bright_blue("bbb"))
+println(colors.strip(colors.bg_bright_red("x")) == "x")
+println(colors.strip(colors.bg_bright_green("x")) == "x")
+println(colors.strip(colors.bg_bright_blue("x")) == "x")
+println(colors.strip(colors.bg_bright_black("x")) == "x")
+println(colors.strip(colors.bg_bright_yellow("x")) == "x")
+println(colors.strip(colors.bg_bright_magenta("x")) == "x")
+println(colors.strip(colors.bg_bright_cyan("x")) == "x")
+println(colors.strip(colors.bg_bright_white("x")) == "x")
+
+// ── 256-color indexed ──
+println(colors.color256("c196", 196))
+println(colors.bg_256("bg27", 27))
+println(colors.strip(colors.color256("x", 196)) == "x")
+println(colors.strip(colors.bg_256("x", 27)) == "x")
+
+// ── 256-color clamps like rgb ──
+println(colors.color256("x", 999) == colors.color256("x", 255))
+println(colors.bg_256("x", 0 - 3) == colors.bg_256("x", 0))
+
+// ── exact sequences pinned ──
+println(colors.reverse("x") == "\e[7mx\e[0m")
+println(colors.strikethrough("x") == "\e[9mx\e[0m")
+println(colors.blink("x") == "\e[5mx\e[0m")
+println(colors.bg_bright_red("x") == "\e[101mx\e[0m")
+println(colors.color256("x", 196) == "\e[38;5;196mx\e[0m")
+println(colors.bg_256("x", 27) == "\e[48;5;27mx\e[0m")
+
+// ── nesting stacks like the base styles ──
+nested := "hi" |> colors.reverse() |> colors.bold()
+println(colors.strip(nested) == "hi")
+println(str.ends_with(nested, "\e[0m"))
+
+println("colors_styles_ok")

@@ -783,6 +783,7 @@ e2e_success_test!(e2e_stdlib_local_wildcard, "stdlib", "local_wildcard.zz");
 e2e_success_test!(e2e_stdlib_sqlz_sqlite, "stdlib", "sqlz_sqlite.zz");
 e2e_success_test!(e2e_stdlib_sqlz_transaction, "stdlib", "sqlz_transaction.zz");
 e2e_success_test!(e2e_stdlib_colors_demo, "stdlib", "colors_demo.zz");
+e2e_success_test!(e2e_stdlib_colors_styles, "stdlib", "colors_styles.zz");
 e2e_success_test!(
     e2e_stdlib_option_interpolation,
     "stdlib",

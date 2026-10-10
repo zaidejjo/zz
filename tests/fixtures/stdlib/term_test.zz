@@ -33,6 +33,18 @@ match term.get_size() {
     .err(e) => println("size: err: {e}")
 }
 
+// `poll(0)` never blocks: ready on EOF, not-ready on an idle pipe —
+// either way `.ok` (never hangs the harness, never touches termios).
+match term.poll(0) {
+    .ok(_) => println("poll: ok")
+    .err(e) => println("poll: err: {e}")
+}
+
+match std.term.poll(0 - 5) {
+    .ok(_) => println("poll_neg: ok")
+    .err(e) => println("poll_neg: err: {e}")
+}
+
 // Bare `term.*` spellings resolve through the same natives.
 println("std_spell: {std.term.is_tty() == tty}")
 

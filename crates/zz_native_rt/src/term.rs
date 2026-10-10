@@ -126,6 +126,50 @@ mod unix {
         }
     }
 
+    /// True when stdin has a byte ready, waiting at most `ms`.
+    /// `ms <= 0` polls without blocking. Works on pipes as well as TTYs
+    /// (closed stdin reports ready — the subsequent read returns EOF).
+    /// EINTR recomputes the deadline and retries; only real failures Err.
+    pub fn poll(ms: i64) -> Result<bool, String> {
+        use std::time::Instant;
+        let timeout = ms.max(0);
+        let deadline = Instant::now()
+            .checked_add(std::time::Duration::from_millis(timeout as u64))
+            .unwrap_or_else(|| Instant::now() + std::time::Duration::from_secs(86400));
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .map(|d| d.as_millis().min(i32::MAX as u128) as i32)
+                .unwrap_or(0);
+            let mut pfd = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: `pfd` is a valid 1-element array; timeout is ms.
+            let n = unsafe { libc::poll(&mut pfd, 1, remaining) };
+            if n > 0 {
+                return Ok(true);
+            }
+            if n == 0 {
+                // Timeout — unless the clock says otherwise (spurious
+                // wakeup with time left: re-poll the remainder).
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                continue;
+            }
+            return Err(format!("std.term.poll: poll failed: {err}"));
+        }
+    }
+
     pub fn get_size() -> Result<(i64, i64), String> {
         // SAFETY: `ws` is a valid local; `ioctl` only writes it on
         // success (checked via the return value).
@@ -163,6 +207,10 @@ mod unix {
         Err("std.term.read_key: unsupported on this platform".to_string())
     }
 
+    pub fn poll(_ms: i64) -> Result<bool, String> {
+        Err("std.term.poll: unsupported on this platform".to_string())
+    }
+
     pub fn get_size() -> Result<(i64, i64), String> {
         Err("std.term.get_size: unsupported on this platform".to_string())
     }
@@ -186,6 +234,11 @@ pub fn disable_raw() -> Result<(), String> {
 /// Block for one stdin byte, returning `0–255`.
 pub fn read_key() -> Result<i64, String> {
     unix::read_key()
+}
+
+/// True when stdin has a byte ready within `ms` (`ms <= 0` = no wait).
+pub fn poll(ms: i64) -> Result<bool, String> {
+    unix::poll(ms)
 }
 
 /// Terminal `(cols, rows)` via `TIOCGWINSZ`.
@@ -251,6 +304,17 @@ pub extern "C" fn zz_term_read_key(_unit: CValue, err: *mut std::ffi::c_int) -> 
     let _ = err;
     match read_key() {
         Ok(b) => ok_wrap(CValue::int(b)),
+        Err(msg) => err_wrap(&msg),
+    }
+}
+
+/// `term.poll(ms) -> Result<bool, str>` (input ready within `ms`).
+#[no_mangle]
+pub extern "C" fn zz_term_poll(ms: CValue, err: *mut std::ffi::c_int) -> CValue {
+    let _ = err;
+    let ms = ms.as_i64().unwrap_or(0);
+    match poll(ms) {
+        Ok(ready) => ok_wrap(CValue::boolean(ready)),
         Err(msg) => err_wrap(&msg),
     }
 }
@@ -322,6 +386,25 @@ mod tests {
         assert!(enable_raw().is_err());
         assert!(get_size().is_err());
         assert!(read_key().is_err());
+    }
+
+    #[test]
+    fn poll_zero_returns_immediately() {
+        // `poll(0)` never blocks: on piped CI stdin it resolves at once
+        // (ready on EOF, not-ready on an idle pipe — either is `Ok`).
+        // This also bounds the test's wall time by construction.
+        let start = std::time::Instant::now();
+        let r = poll(0);
+        assert!(r.is_ok());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn poll_negative_clamps_to_zero() {
+        let start = std::time::Instant::now();
+        let r = poll(-100);
+        assert!(r.is_ok());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
