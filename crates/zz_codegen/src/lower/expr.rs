@@ -930,6 +930,16 @@ impl Lowerer {
                 // threads get scheduled. Elided for concurrency-free
                 // programs (see `needs_safepoint`).
                 self.emit_safepoint(out, "        ");
+                // Literal-length/index-forwarding knowledge (`len(arr)` →
+                // arity, `arr[0]` → element text) is only valid in
+                // straight-line flow. A `while` condition re-runs every
+                // iteration while the body may reassign the variable, so
+                // pre-loop knowledge would bake a stale constant into the
+                // guard (#350: `len(arr) < 5` folded to `0 < 5` while the
+                // body grew the array via `vec.push`). Drop it before the
+                // condition; in-body re-establishment (fresh literals)
+                // still folds within the iteration.
+                names.clear_array_lens();
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
@@ -944,6 +954,11 @@ impl Lowerer {
                     self.emit_stmt(bstmt, names, out, false);
                 }
                 self.loop_scope_end(names, out, while_scope);
+                // End-of-body literal knowledge must not escape the loop:
+                // a later iteration re-enters through the guard (already
+                // cleared above), and zero-trip loops skip the body
+                // entirely, so post-loop reads re-evaluate at runtime.
+                names.clear_array_lens();
                 if let Some(ref name) = loop_arena {
                     self.loop_arenas.borrow_mut().pop();
                     *self.current_loop_arena.borrow_mut() =
@@ -997,6 +1012,11 @@ impl Lowerer {
                 } else {
                     out.push_str("    }\n");
                 }
+                // Branch join: `then`/`else` may have bound the same name
+                // to different literals (or only one side ran), so
+                // literal-length knowledge from either path is unsound
+                // past the merge — post-`if` reads re-evaluate at runtime.
+                names.clear_array_lens();
                 tmp
             }
             Expr::Block(b) => {
@@ -5509,6 +5529,10 @@ impl Lowerer {
             }
         }
         names.pop_scope();
+        // Arm join: arms are exclusive paths that may bind the same name
+        // to different literals, so post-`match` literal knowledge is
+        // unsound — downstream reads re-evaluate at runtime.
+        names.clear_array_lens();
         result_tmp
     }
 }
