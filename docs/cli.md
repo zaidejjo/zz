@@ -205,6 +205,9 @@ Flags: `--clear`, `--debounce <ms>`, repeatable `--watch-ignore <glob>`
 (`*` spans directories, matched against path and file name). `--watch`
 rejects `--native` / `--bytecode` (native rebuilds are minutes, not
 milliseconds). In-memory state resets on every restart by design.
+Roots over 20,000 entries refuse with a hint (create a `zz.toml`
+project or narrow with `--watch-ignore`) instead of statting the
+world every tick.
 
 ### `zz clean` / `zz cache`
 

@@ -31,6 +31,11 @@ const SKIP_DIRS: &[&str] = &[
     ".zzbin",
 ];
 
+/// Upper bound on directory entries visited per scan. A standalone file in
+/// a giant tree (e.g. `$HOME` with no `zz.toml`) must fail fast with a
+/// hint instead of statting the world every 100ms.
+const WALK_ENTRY_CAP: usize = 20_000;
+
 /// Parsed `--watch` family flags plus the scrubbed child argv.
 pub struct WatchFlags {
     pub debounce_ms: u64,
@@ -216,6 +221,7 @@ fn snapshot_dir(
     in_embed: bool,
     ignores: &[String],
     out: &mut HashMap<PathBuf, FileSig>,
+    visited: &mut usize,
 ) {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -224,6 +230,7 @@ fn snapshot_dir(
             Err(_) => continue,
         };
         for entry in rd.flatten() {
+            *visited += 1;
             let path = entry.path();
             if is_ignored(&path, ignores) {
                 continue;
@@ -270,6 +277,29 @@ fn diff_snapshots(
     }
     changed.sort();
     changed
+}
+
+/// Snapshot the source root plus the optional `--embed` asset tree,
+/// enforcing `cap` on visited entries (see `WALK_ENTRY_CAP`).
+fn snapshot_all(
+    source_root: &Path,
+    embed_root: Option<&Path>,
+    ignores: &[String],
+    cap: usize,
+) -> Result<HashMap<PathBuf, FileSig>, String> {
+    let mut snap = HashMap::new();
+    let mut visited = 0usize;
+    snapshot_dir(source_root, false, ignores, &mut snap, &mut visited);
+    if let Some(dir) = embed_root {
+        snapshot_dir(dir, true, ignores, &mut snap, &mut visited);
+    }
+    if visited > cap {
+        return Err(format!(
+            "too many files to watch under {} ({visited} entries)\n\nhint: run inside a project (with zz.toml), or narrow with --watch-ignore",
+            source_root.display()
+        ));
+    }
+    Ok(snap)
 }
 
 /// Run the `zz check` gate in a short-lived child (inherits stdio so
@@ -376,19 +406,19 @@ pub fn run_watch(
     }
 
     let scan = || {
-        let mut snap = HashMap::new();
-        snapshot_dir(&scan_root, false, &flags.ignores, &mut snap);
-        if let Some(dir) = &scan_embed {
-            snapshot_dir(dir, true, &flags.ignores, &mut snap);
-        }
-        snap
+        snapshot_all(
+            &scan_root,
+            scan_embed.as_deref(),
+            &flags.ignores,
+            WALK_ENTRY_CAP,
+        )
     };
 
     // Boot gate: broken code never starts a server (same as plain `run`).
     if !check_gate(&exe, &entry) {
         return Err("fix the errors above, then restart `zz run --watch`".to_string());
     }
-    let mut snapshot = scan();
+    let mut snapshot = scan()?;
     let mut generation = 1u64;
     if flags.clear {
         clear_screen();
@@ -425,7 +455,7 @@ pub fn run_watch(
                 }
             }
         }
-        let current = scan();
+        let current = scan()?;
         if diff_snapshots(&snapshot, &current).is_empty() {
             continue;
         }
@@ -441,7 +471,7 @@ pub fn run_watch(
                 eprintln!("zz: [watch] stopped");
                 return Ok(());
             }
-            let rescan = scan();
+            let rescan = scan()?;
             if !diff_snapshots(&latest, &rescan).is_empty() {
                 latest = rescan;
                 quiet_since = Instant::now();
@@ -462,7 +492,7 @@ pub fn run_watch(
         eprintln!("zz: [watch] change detected — rechecking...");
         if !check_gate(&exe, &entry) {
             eprintln!("zz: [watch] check failed — keeping previous generation running");
-            snapshot = scan();
+            snapshot = scan()?;
             continue;
         }
         if let Some(mut c) = child.take() {
@@ -476,7 +506,7 @@ pub fn run_watch(
         // Re-scan after spawning: edits made during check/gate must not
         // retrigger instantly, but must not be swallowed either — anything
         // newer than this scan fires the next tick.
-        snapshot = scan();
+        snapshot = scan()?;
         eprintln!("zz: [watch] restarted (generation {generation})");
     }
 }
@@ -594,6 +624,23 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_cap_rejects_giant_trees() {
+        let dir = std::env::temp_dir().join(format!(
+            "zz_watch_cap_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.zz"), "x").unwrap();
+        assert!(snapshot_all(&dir, None, &[], 100).is_ok());
+        assert!(snapshot_all(&dir, None, &[], 0).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn snapshot_skips_ignored_and_vendor() {
         let dir = std::env::temp_dir().join(format!(
             "zz_watch_test_{}",
@@ -610,7 +657,15 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "x").unwrap();
         std::fs::write(dir.join("zz.toml"), "x").unwrap();
         let mut snap = HashMap::new();
-        snapshot_dir(&dir, false, &["notes*".to_string()], &mut snap);
+        let mut visited = 0usize;
+        snapshot_dir(
+            &dir,
+            false,
+            &["notes*".to_string()],
+            &mut snap,
+            &mut visited,
+        );
+        assert!(visited > 0);
         assert!(snap.contains_key(&dir.join("src/main.zz")));
         assert!(snap.contains_key(&dir.join("zz.toml")));
         assert!(!snap.contains_key(&dir.join("vendor/dep.zz")));
