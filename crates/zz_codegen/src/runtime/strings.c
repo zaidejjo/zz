@@ -1882,6 +1882,7 @@ int zz_utf8_valid(const unsigned char *buf, size_t n) {
     }
     return 1;
 }
+
 // Byte-oriented with ASCII-4 trim ({space, \t, \n, \r}), mirroring the
 // split/trim/starts_with native semantics exactly. The ZZ-level reference
 // implementation lives in zcc's counter; differential fixtures pin them.
