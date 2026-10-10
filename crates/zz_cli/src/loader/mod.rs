@@ -2230,4 +2230,277 @@ fn namespace_program(program: &mut Program, ns: &str) {
     for stmt in &mut program.stmts {
         rw.rewrite_stmt(stmt);
     }
+    hoist_forward_callable_funcs(program, ns);
+}
+
+/// Hoist top-level `func` definitions that are safe to define early so a
+/// top-level statement may call a function defined later in the same file
+/// (`println(game_end(3))` before `func game_end`, #362). The checker
+/// already resolves such calls (Pass 1c registers all signatures
+/// upfront), but the VM executes statements in source order, so without
+/// hoisting the call runs before `MakeFunc` defines `ns.func` and fails
+/// with `undefined variable <ns>`.
+///
+/// Only hoisted when safe: a function whose body references a top-level
+/// `Decl` MUST stay in source order — defining it before the `Decl`
+/// breaks capture (the binding lands in a slot the early-defined
+/// function never sees). Likewise a function that (transitively) calls
+/// a non-hoisted function stays put. Everything else (pure functions of
+/// their params, mutual recursion between hoisted functions) moves
+/// before executable statements, stably. Programs that hoisting cannot
+/// help keep exactly today's behavior.
+fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
+    use zz_frontend::ast::{Block, Expr};
+    // Top-level Decl names post-rewrite ("ns.x"); refs are rewritten too.
+    let mut decl_names: HashSet<String> = HashSet::new();
+    // Index of each top-level func in stmt order + its bare name.
+    let mut funcs: Vec<(usize, String)> = Vec::new();
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        match stmt {
+            Stmt::Decl { name, .. } => {
+                decl_names.insert(name.name.clone());
+            }
+            Stmt::Func { name, .. } => {
+                // Post-rewrite: ["ns.foo"] (dot inside one element).
+                let full = name.join(".");
+                let bare = full
+                    .strip_prefix(&format!("{ns}."))
+                    .unwrap_or(&full)
+                    .to_string();
+                funcs.push((i, bare));
+            }
+            _ => {}
+        }
+    }
+    if funcs.is_empty() {
+        return;
+    }
+    // Collect Ident/Path references inside a function (params included —
+    // conservative: a param shadowing a Decl name just blocks hoisting).
+    fn collect_refs_expr(e: &Expr, out: &mut HashSet<String>) {
+        match e {
+            Expr::Ident { name, .. } => {
+                out.insert(name.clone());
+            }
+            Expr::Path { parts, .. } => {
+                out.insert(parts.join("."));
+                for p in parts {
+                    out.insert(p.clone());
+                }
+            }
+            _ => {}
+        }
+        // Recurse through children generically via debug walk: enumerate
+        // every nested Ident/Path by re-walking known containers.
+        match e {
+            Expr::Paren { expr: x, .. }
+            | Expr::Unary { expr: x, .. }
+            | Expr::Try { expr: x, .. }
+            | Expr::Closure { body: x, .. } => collect_refs_expr(x, out),
+            Expr::Binary { left, right, .. }
+            | Expr::Range {
+                start: left,
+                end: right,
+                ..
+            } => {
+                collect_refs_expr(left, out);
+                collect_refs_expr(right, out);
+            }
+            Expr::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => {
+                collect_refs_expr(callee, out);
+                for a in args {
+                    collect_refs_expr(a, out);
+                }
+                for (_, v) in named {
+                    collect_refs_expr(v, out);
+                }
+            }
+            Expr::If {
+                cond, then, els, ..
+            } => {
+                collect_refs_expr(cond, out);
+                collect_refs_block(then, out);
+                if let Some(x) = els {
+                    collect_refs_expr(x, out);
+                }
+            }
+            Expr::While { cond, body, .. } => {
+                collect_refs_expr(cond, out);
+                collect_refs_block(body, out);
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                collect_refs_expr(scrutinee, out);
+                for a in arms {
+                    collect_refs_expr(&a.body, out);
+                }
+            }
+            Expr::IfLet {
+                value, then, els, ..
+            } => {
+                collect_refs_expr(value, out);
+                collect_refs_block(then, out);
+                if let Some(x) = els {
+                    collect_refs_expr(x, out);
+                }
+            }
+            Expr::Block(b) => collect_refs_block(b, out),
+            Expr::Array { elems, .. } | Expr::Tuple { items: elems, .. } => {
+                for x in elems {
+                    collect_refs_expr(x, out);
+                }
+            }
+            Expr::Dict { entries, .. } => {
+                for (k, v) in entries {
+                    collect_refs_expr(k, out);
+                    collect_refs_expr(v, out);
+                }
+            }
+            Expr::Fmt { parts, .. } => {
+                for p in parts {
+                    if let zz_frontend::ast::FmtPart::Expr(x, _) = p {
+                        collect_refs_expr(x, out);
+                    }
+                }
+            }
+            Expr::Field { obj, .. } => collect_refs_expr(obj, out),
+            Expr::Index { obj, index, .. } => {
+                collect_refs_expr(obj, out);
+                collect_refs_expr(index, out);
+            }
+            Expr::Slice {
+                obj, start, end, ..
+            } => {
+                collect_refs_expr(obj, out);
+                if let Some(x) = start {
+                    collect_refs_expr(x, out);
+                }
+                if let Some(x) = end {
+                    collect_refs_expr(x, out);
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, v) in fields {
+                    collect_refs_expr(v, out);
+                }
+            }
+            Expr::ListComp {
+                body, iter, filter, ..
+            } => {
+                collect_refs_expr(body, out);
+                collect_refs_expr(iter, out);
+                if let Some(f) = filter {
+                    collect_refs_expr(f, out);
+                }
+            }
+            Expr::Variant { arg: Some(x), .. } => {
+                collect_refs_expr(x, out);
+            }
+            _ => {}
+        }
+    }
+    fn collect_refs_block(b: &Block, out: &mut HashSet<String>) {
+        for s in &b.stmts {
+            collect_refs_stmt(s, out);
+        }
+    }
+    fn collect_refs_stmt(s: &Stmt, out: &mut HashSet<String>) {
+        match s {
+            Stmt::Decl { value, .. } => collect_refs_expr(value, out),
+            Stmt::Func { body, .. } => collect_refs_block(body, out),
+            Stmt::Return { value: Some(x), .. } => {
+                collect_refs_expr(x, out);
+            }
+            Stmt::Expr(x) => collect_refs_expr(x, out),
+            Stmt::Defer { expr: x, .. } => collect_refs_expr(x, out),
+            Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+                collect_refs_expr(target, out);
+                collect_refs_expr(value, out);
+            }
+            Stmt::Destructure { value, .. } => collect_refs_expr(value, out),
+            Stmt::For { iter, body, .. } => {
+                collect_refs_expr(iter, out);
+                collect_refs_block(body, out);
+            }
+            Stmt::Impl { methods, .. } => {
+                for m in methods {
+                    collect_refs_stmt(m, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Per-func refs (body + defaults).
+    let mut refs: Vec<HashSet<String>> = Vec::with_capacity(funcs.len());
+    for (stmt_idx, _) in &funcs {
+        let mut out = HashSet::new();
+        if let Stmt::Func { params, body, .. } = &program.stmts[*stmt_idx] {
+            for p in params {
+                if let Some(d) = &p.default {
+                    collect_refs_expr(d, &mut out);
+                }
+            }
+            collect_refs_block(body, &mut out);
+        }
+        refs.push(out);
+    }
+    // Fixpoint: hoistable = no Decl refs + only calls hoistable funcs.
+    let mut hoistable: Vec<bool> = refs
+        .iter()
+        .map(|r| {
+            !r.iter().any(|n| {
+                decl_names.contains(n)
+                    || n.rsplit('.')
+                        .next()
+                        .is_some_and(|b| decl_names.iter().any(|d| d == b))
+            })
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for i in 0..funcs.len() {
+            if !hoistable[i] {
+                continue;
+            }
+            let calls_blocked = refs[i].iter().any(|n| {
+                let bare = n.rsplit('.').next().unwrap_or(n);
+                funcs
+                    .iter()
+                    .enumerate()
+                    .any(|(j, (_, b))| b == bare && !hoistable[j])
+            });
+            if calls_blocked {
+                hoistable[i] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if !hoistable.iter().any(|b| *b) {
+        return;
+    }
+    let hoist_idx: HashSet<usize> = funcs
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| hoistable[*k])
+        .map(|(_, (si, _))| *si)
+        .collect();
+    let mut hoisted = Vec::new();
+    let mut rest = Vec::with_capacity(program.stmts.len());
+    for (i, stmt) in program.stmts.drain(..).enumerate() {
+        if hoist_idx.contains(&i) {
+            hoisted.push(stmt);
+        } else {
+            rest.push(stmt);
+        }
+    }
+    program.stmts.extend(hoisted.into_iter().chain(rest));
 }
