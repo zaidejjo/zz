@@ -797,6 +797,21 @@ impl Manifest {
         Ok(())
     }
 
+    /// Starter `src/main.zz` for a template. Single source of truth shared
+    /// by `zz new` (below) and `zz init` (in `zz_cli::pm`): the default is
+    /// a bare `main` with no imports, so a fresh project checks warning-free.
+    pub fn starter_content(template: Option<&str>) -> &'static str {
+        match template {
+            Some("lib") => {
+                "/// Add one to a number.\npub func add_one(n: int) -> int {\n    n + 1\n}\n"
+            }
+            Some("web") => {
+                "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"
+            }
+            _ => "func main() {\n    println(\"Hello, ZZ!\")\n}\n",
+        }
+    }
+
     /// Create a new project directory with manifest and starter code.
     pub fn create_new(
         parent_dir: &Path,
@@ -822,18 +837,8 @@ impl Manifest {
         // Write manifest
         Self::create_init_opts(&project_dir, name, opts)?;
 
-        // Write starter source
-        let main_content = match template {
-            Some("lib") => {
-                "/// Add one to a number.\npub func add_one(n: int) -> int {\n    n + 1\n}\n"
-            }
-            Some("web") => {
-                "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"
-            }
-            _ => {
-                "import std.http\n\nfunc main() {\n    println(\"Hello, ZZ!\")\n}\n"
-            }
-        };
+        // Write starter source (single-sourced: see `starter_content`).
+        let main_content = Self::starter_content(template);
         std::fs::write(project_dir.join("src/main.zz"), main_content)
             .map_err(|e| format!("cannot write src/main.zz: {e}"))?;
 
@@ -1046,6 +1051,8 @@ foo = "^1.0"
         assert!(project.join("src/main.zz").exists());
         let src = fs::read_to_string(project.join("src/main.zz")).unwrap();
         assert!(src.contains("Hello, ZZ!"));
+        // No unused imports: a fresh project must check warning-free.
+        assert!(!src.contains("import"));
         let _ = fs::remove_dir_all(&d);
     }
 
