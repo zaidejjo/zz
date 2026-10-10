@@ -105,6 +105,7 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "term.enable_raw" | "std.term.enable_raw" => Some("zz_term_enable_raw"),
         "term.disable_raw" | "std.term.disable_raw" => Some("zz_term_disable_raw"),
         "term.read_key" | "std.term.read_key" => Some("zz_term_read_key"),
+        "term.poll" | "std.term.poll" => Some("zz_term_poll"),
         "term.get_size" | "std.term.get_size" => Some("zz_term_get_size"),
         "term.is_tty" | "std.term.is_tty" => Some("zz_term_is_tty"),
         "term.flush" | "std.term.flush" => Some("zz_term_flush"),
@@ -349,6 +350,7 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
             Some("zz_value zz_term_disable_raw(zz_value unit, int *err);")
         }
         "zz_term_read_key" => Some("zz_value zz_term_read_key(zz_value unit, int *err);"),
+        "zz_term_poll" => Some("zz_value zz_term_poll(zz_value ms, int *err);"),
         "zz_term_get_size" => Some("zz_value zz_term_get_size(zz_value unit, int *err);"),
         "zz_term_is_tty" => Some("zz_value zz_term_is_tty(zz_value unit, int *err);"),
         "zz_term_flush" => Some("zz_value zz_term_flush(zz_value unit, int *err);"),

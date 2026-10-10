@@ -817,6 +817,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // `is_tty` is the total predicate. Both spellings.
     let res_unit2 = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
     let res_int = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
+    let res_bool = || Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
     let res_size = || {
         Type::Result(
             Box::new(Type::Array(Box::new(Type::Int))),
@@ -826,12 +827,17 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("std.term.enable_raw".into(), sig(vec![], res_unit2()));
     m.insert("std.term.disable_raw".into(), sig(vec![], res_unit2()));
     m.insert("std.term.read_key".into(), sig(vec![], res_int()));
+    m.insert(
+        "std.term.poll".into(),
+        sig(vec![("ms", Type::Int)], res_bool()),
+    );
     m.insert("std.term.get_size".into(), sig(vec![], res_size()));
     m.insert("std.term.is_tty".into(), sig(vec![], Type::Bool));
     m.insert("std.term.flush".into(), sig(vec![], Type::Unit));
     m.insert("term.enable_raw".into(), sig(vec![], res_unit2()));
     m.insert("term.disable_raw".into(), sig(vec![], res_unit2()));
     m.insert("term.read_key".into(), sig(vec![], res_int()));
+    m.insert("term.poll".into(), sig(vec![("ms", Type::Int)], res_bool()));
     m.insert("term.get_size".into(), sig(vec![], res_size()));
     m.insert("term.is_tty".into(), sig(vec![], Type::Bool));
     m.insert("term.flush".into(), sig(vec![], Type::Unit));
@@ -3756,10 +3762,21 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "bg_magenta",
         "bg_cyan",
         "bg_white",
+        "bg_bright_black",
+        "bg_bright_red",
+        "bg_bright_green",
+        "bg_bright_yellow",
+        "bg_bright_blue",
+        "bg_bright_magenta",
+        "bg_bright_cyan",
+        "bg_bright_white",
         "bold",
         "dim",
         "italic",
         "underline",
+        "blink",
+        "reverse",
+        "strikethrough",
         "reset",
         "strip",
     ];
@@ -3770,6 +3787,16 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     }
     for (name, params, ret) in [
         ("clamp255", vec![("v", Type::Int)], Type::Int),
+        (
+            "color256",
+            vec![("s", Type::Str), ("n", Type::Int)],
+            Type::Str,
+        ),
+        (
+            "bg_256",
+            vec![("s", Type::Str), ("n", Type::Int)],
+            Type::Str,
+        ),
         (
             "rgb",
             vec![
@@ -4254,6 +4281,14 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
+        assert!(funcs.contains_key("std.colors.reverse"));
+        assert!(funcs.contains_key("colors.reverse"));
+        assert!(funcs.contains_key("std.colors.strikethrough"));
+        assert!(funcs.contains_key("colors.blink"));
+        assert!(funcs.contains_key("std.colors.bg_bright_red"));
+        assert!(funcs.contains_key("colors.bg_bright_white"));
+        assert!(funcs.contains_key("std.colors.color256"));
+        assert!(funcs.contains_key("colors.bg_256"));
         assert!(funcs.contains_key("dbg"));
         // net method aliases + binary transfers + shutdown.
         for name in [
@@ -4334,12 +4369,14 @@ mod tests {
             "std.term.enable_raw",
             "std.term.disable_raw",
             "std.term.read_key",
+            "std.term.poll",
             "std.term.get_size",
             "std.term.is_tty",
             "std.term.flush",
             "term.enable_raw",
             "term.disable_raw",
             "term.read_key",
+            "term.poll",
             "term.get_size",
             "term.is_tty",
             "term.flush",
@@ -4421,7 +4458,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 910);
+        assert_eq!(funcs.len(), 938);
     }
 
     #[test]

@@ -50,6 +50,7 @@ Available without imports:
 | `std.dec` | Exact decimal math on strings |
 | `std.bytes` | Linear string/byte builders |
 | `std.csv` | CSV parsing/serialization |
+| `std.colors` | ANSI styling: palette, styles, truecolor |
 
 ---
 
@@ -879,6 +880,49 @@ package (`~/Projects/toml`, pure-ZZ, versioned separately).
 
 ---
 
+## `std.colors` -- ANSI Styling
+
+```zz
+import std.colors
+```
+
+Pure-ZZ wrappers: every function takes text first (pipeline-friendly)
+and appends a trailing reset so styles never bleed. Nesting stacks
+(`bold(reverse(x))`); `strip` recovers the visible text.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `colors.black` … `colors.white` | `colors.<name>(s: str) -> str` | Foreground 30–37 |
+| `colors.bright_black` … `colors.bright_white` | `colors.<name>(s: str) -> str` | Foreground 90–97 |
+| `colors.bg_black` … `colors.bg_white` | `colors.<name>(s: str) -> str` | Background 40–47 |
+| `colors.bg_bright_black` … `colors.bg_bright_white` | `colors.<name>(s: str) -> str` | Background 100–107 |
+| `colors.bold` | `colors.bold(s: str) -> str` | Bold (SGR 1) |
+| `colors.dim` | `colors.dim(s: str) -> str` | Dim (SGR 2) |
+| `colors.italic` | `colors.italic(s: str) -> str` | Italic (SGR 3) |
+| `colors.underline` | `colors.underline(s: str) -> str` | Underline (SGR 4) |
+| `colors.blink` | `colors.blink(s: str) -> str` | Blink (SGR 5) |
+| `colors.reverse` | `colors.reverse(s: str) -> str` | Reverse video (SGR 7, selections) |
+| `colors.strikethrough` | `colors.strikethrough(s: str) -> str` | Strikethrough (SGR 9) |
+| `colors.reset` | `colors.reset(s: str) -> str` | Append reset |
+| `colors.strip` | `colors.strip(s: str) -> str` | Remove all `\e[...m` sequences |
+| `colors.rgb` | `colors.rgb(s: str, r: int, g: int, b: int) -> str` | Truecolor fg (channels clamped) |
+| `colors.bg_rgb` | `colors.bg_rgb(s: str, r: int, g: int, b: int) -> str` | Truecolor bg (channels clamped) |
+| `colors.color256` | `colors.color256(s: str, n: int) -> str` | 256-color fg (`38;5;n`, clamped) |
+| `colors.bg_256` | `colors.bg_256(s: str, n: int) -> str` | 256-color bg (`48;5;n`, clamped) |
+| `colors.hex` | `colors.hex(s: str, code: str) -> str` | `#FF5733` / `FF5733` / `#F53` (malformed input passes through) |
+| `colors.hex6` / `colors.hex3` | helpers over digit arrays | Six-/three-digit forms used by `hex` |
+| `colors.hex_val` / `colors.hex_byte` | digit parsers | Nibble/byte (`-1` on malformed) |
+| `colors.clamp255` | `colors.clamp255(v: int) -> int` | Clamp to `0–255` |
+
+```zz
+import std.colors
+
+println("TEST FAIL" |> colors.red() |> colors.bold())
+println(colors.strip(colors.reverse("sel")) == "sel")
+```
+
+---
+
 ## `std.term` -- Terminal Control
 
 ```zz
@@ -890,16 +934,36 @@ import std.term
 | `term.enable_raw` | `term.enable_raw() -> Result<unit, str>` | Save termios, switch stdin to raw (byte-at-a-time, no echo) |
 | `term.disable_raw` | `term.disable_raw() -> Result<unit, str>` | Restore saved terminal state (idempotent) |
 | `term.read_key` | `term.read_key() -> Result<int, str>` | Block for one stdin byte (`0–255`) |
+| `term.poll` | `term.poll(ms: int) -> Result<bool, str>` | True when a byte is ready within `ms` (`<= 0` = no wait; works on pipes too) |
 | `term.get_size` | `term.get_size() -> Result<[int, int], str>` | Terminal `[cols, rows]` via `TIOCGWINSZ` |
 | `term.is_tty` | `term.is_tty() -> bool` | Total predicate for graceful degradation |
 | `term.flush` | `term.flush()` | Flush stdout now (interactive renders without trailing newline) |
 
 Raw mode clears `ICANON`/`ECHO` (plus `ISIG`, so Ctrl+C arrives as
 byte `3` and ZZ code can restore the terminal via `defer` instead of
-dying with a raw TTY). Arrow keys arrive as three reads
-(`27, 91, 68/67/65/66`) — decode them with successive `read_key`
-calls. Non-TTY stdin (pipes, CI) fails soft with
-`.err("std.term.<op>: not a tty")`, so always pair with `is_tty`:
+dying with a raw TTY). Non-TTY stdin (pipes, CI) fails soft with
+`.err("std.term.<op>: not a tty")`, so always pair with `is_tty`
+(`poll` is the exception: it works on pipes — closed stdin reports
+ready and the following read returns EOF).
+
+### Key bytes (`read_key` yields raw bytes — decode table)
+
+Measured against xterm-style terminals (see `tests/fixtures/stdlib/term_test.zz`
+for the hermetic shape; interactive byte values were probed on a real TTY):
+
+| Key | Bytes |
+|-----|-------|
+| Up / Down / Right / Left | `27, 91, 65` / `66` / `67` / `68` |
+| Enter | `13` |
+| Esc (lone) | `27` |
+| Space | `32` |
+| Backspace | `127` |
+| Letters | ASCII (`a` = `97`, `q` = `113`) |
+| Ctrl+C | `3` (raw mode passes it through as a byte) |
+
+A lone `27` and an arrow prefix are indistinguishable on the first
+byte — after reading `27`, `poll(50)` for the rest: bytes waiting
+means an escape sequence, silence means the user pressed Esc:
 
 ```zz
 import std.term
