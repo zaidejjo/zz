@@ -376,6 +376,69 @@ fn entry_in(pkg_dir: &Path, dep_name: &str) -> Option<PathBuf> {
     .find(|candidate| candidate.is_file())
 }
 
+/// Submodule file inside a dependency package directory for dotted
+/// imports (`import tui.screen`, #375): `<rest...>` maps to
+/// `<depdir>/src/<rest...>.zz` (mirroring the self-package layout from
+/// #288), with a root-level `<depdir>/<rest...>.zz` fallback. Returns the
+/// file only when it positively exists — otherwise the importer falls
+/// through to legacy relative resolution untouched.
+fn submodule_in(pkg_dir: &Path, rest: &[String]) -> Option<PathBuf> {
+    let mut under_src = PathBuf::from("src");
+    let mut at_root = PathBuf::new();
+    for seg in rest {
+        under_src = under_src.join(seg);
+        at_root = at_root.join(seg);
+    }
+    [
+        pkg_dir.join(&under_src).with_extension("zz"),
+        pkg_dir.join(&at_root).with_extension("zz"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+/// Package directory of a registry/git/path dependency for dotted imports
+/// (`import <dep>.<module>`, #375). Unlike [`resolve_registry_entry`],
+/// no entry file is required (multi-module packages expose submodules
+/// without a top-level entry): path deps resolve against the manifest
+/// path, others prefer the `vendor/<dep>` link, then the lockfile CAS
+/// entry. Plugin packages (shipping `plugin.zzi`) count too — their
+/// `.zz` sources load as ordinary modules under the submodule
+/// namespace (manifest signatures only merge on bare `import <dep>`).
+fn resolve_dep_dir(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
+    // Manifest+lock parse once per root process-wide (#233), same as the
+    // sibling resolvers.
+    let (manifest, lock) = cache::manifest_lock(project_root)?;
+    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    if locked.source == "path" {
+        return match manifest.dependencies.get(dep_name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => Some(project_root.join(&p.path)),
+            _ => None,
+        };
+    }
+    let linked = project_root.join("vendor").join(dep_name);
+    if linked.exists() {
+        return Some(linked);
+    }
+    Some(zz_pm::paths::cas_entry(&locked.hash))
+}
+
+/// Resolve a dotted dependency import (`import tui.screen`) to its
+/// submodule file: `<depdir>/src/screen.zz` via [`resolve_dep_dir`] +
+/// [`submodule_in`]. Every ancestor root is tried so transitive imports
+/// (from inside `vendor/`) resolve against the outer project lock — the
+/// same discipline as bare registry imports.
+fn resolve_dep_submodule(start: &Path, imp: &[String]) -> Option<PathBuf> {
+    for root in ancestor_roots(start) {
+        if let Some(dir) = resolve_dep_dir(&root, &imp[0]) {
+            if let Some(file) = submodule_in(&dir, &imp[1..]) {
+                return Some(file);
+            }
+        }
+    }
+    None
+}
+
 /// All ancestor project roots (nearest first) for `import <dep>` lookup.
 /// The nearest root of a vendored file is the dependency itself (which
 /// has no lock); outer roots must also be tried for transitive deps.
@@ -900,6 +963,78 @@ impl Loader {
                         }
                         continue;
                     }
+                }
+            }
+            // Dotted dependency import (`import tui.screen`, #375): the
+            // first segment names a registry/git/path/plugin dependency
+            // and the rest maps to `<depdir>/src/<mod...>.zz`. Only fires
+            // when the submodule file positively exists — anything else
+            // falls through to legacy relative resolution untouched, so
+            // local `a/b.zz` layouts never change meaning.
+            if imp.len() > 1 {
+                if let Some(candidate) = resolve_dep_submodule(&canon, &imp) {
+                    // Effective namespace mirrors local imports: the `as`
+                    // alias when present, else the last segment
+                    // (`import tui.screen` binds `screen.*`, #368).
+                    let eff_ns = imp_alias
+                        .clone()
+                        .unwrap_or_else(|| imp.last().cloned().unwrap_or_default());
+                    // Cycle + double-namespace diagnostics mirror the
+                    // local branch below (importer source, same hints).
+                    if let Ok(dep) = cache::canon(&candidate) {
+                        if self.visiting.contains(&dep) {
+                            self.errors.push(LoadError {
+                                 name: path.display().to_string(),
+                                 source: source.clone(),
+                                 diags: vec![error_at(
+                                     format!(
+                                         "circular import: `{}` imports `{}`, which (transitively) imports `{}`\n\
+                                          hint: circular imports are not allowed; consider restructuring your code to break the cycle",
+                                         path.display(),
+                                         candidate.display(),
+                                         path.display()
+                                     ),
+                                     Span::new(0, 0),
+                                 )],
+                             });
+                            continue;
+                        }
+                        if let Some(existing) = self.ns_of.get(&dep) {
+                            let want = module_ns(Some(&eff_ns), &candidate);
+                            if existing != &want {
+                                self.errors.push(LoadError {
+                                     name: path.display().to_string(),
+                                     source: source.clone(),
+                                     diags: vec![error_at(
+                                         format!(
+                                             "`{}` is imported under two namespaces: `{existing}` and `{want}`\n\
+                                              hint: each file can only be imported under one namespace; \
+                                              consider using an alias to avoid the conflict",
+                                             candidate.display()
+                                         ),
+                                         Span::new(0, 0),
+                                     )],
+                                 });
+                                continue;
+                            }
+                        }
+                    }
+                    self.load_file(&candidate, Some(&eff_ns))?;
+                    // S1 dep edge (dependency submodule file).
+                    if let Ok(dep) = cache::canon(&candidate) {
+                        Self::record_edge(&mut self.dep_edges, &canon, &dep);
+                    }
+                    if is_selective {
+                        // Seeds hold `eff_ns.sym`, so record the effective
+                        // namespace like every other branch.
+                        let mut sel_path = imp.clone();
+                        if let Some(last) = sel_path.last_mut() {
+                            *last = eff_ns.clone();
+                        }
+                        self.selective_imports
+                            .push((canon.clone(), sel_path, imp_items, false));
+                    }
+                    continue;
                 }
             }
             // Local file import.
