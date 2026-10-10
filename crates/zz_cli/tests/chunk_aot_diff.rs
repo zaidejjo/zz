@@ -284,6 +284,73 @@ func main() {
 }
 "#;
 
+// Index-read fusion pins: accumulate-through-read (prefix operand
+// below the base), bare/branch reads, and trap parity (OOB + negative
+// normalize) on the fused paths. Trap cases exit 1 on both backends
+// (message text is not gated, exit codes are).
+const IDX_ACCUM: &str = r#"
+func main() {
+    a := [10, 20, 30, 40]
+    s := 0
+    i := 0
+    n := len(a)
+    while i < n {
+        s = s + a[i]
+        i = i + 1
+    }
+    println(s)
+    x := 0
+    x = a[0] + 100
+    println(x)
+    y := 0
+    y = a[3]
+    println(y)
+    z := 0
+    k := 1
+    z = a[k + 1] * 2
+    println(z)
+}
+"#;
+
+const IDX_BRANCH: &str = r#"
+func main() {
+    b := [true, false, true]
+    if b[0] {
+        println("t")
+    }
+    if b[1] {
+        println("f")
+    } else {
+        println("not-f")
+    }
+    n := 0
+    for v in b {
+        if v {
+            n = n + 1
+        }
+    }
+    println(n)
+}
+"#;
+
+const IDX_TRAP: &str = r#"
+func main() {
+    a := [1, 2, 3]
+    x := 0
+    x = a[5]
+    println(x)
+}
+"#;
+
+const IDX_NEG: &str = r#"
+func main() {
+    a := [10, 20, 30]
+    x := 0
+    x = a[-1]
+    println(x)
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -296,6 +363,10 @@ const CASES: &[(&str, &str)] = &[
     ("nested_vec", NESTED_VEC),
     ("bool_iter", BOOL_ITER),
     ("strapp_alias", STRAPP_ALIAS),
+    ("idx_accum", IDX_ACCUM),
+    ("idx_branch", IDX_BRANCH),
+    ("idx_trap", IDX_TRAP),
+    ("idx_neg", IDX_NEG),
 ];
 
 #[test]
