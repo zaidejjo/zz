@@ -35,6 +35,50 @@ fn annotation_mismatch_errors() {
 }
 
 #[test]
+fn annotation_mismatch_names_fix_direction() {
+    let r = check_src("x: str = 1");
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("change the annotation to `int`")),
+        "expected annotation fix note, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn arg_mismatch_names_parameter() {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "greet".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("greeting".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    let r = check_src_with_funcs("x := greet(42)", funcs);
+    assert!(
+        r.errors.iter().any(|e| e.message.contains("type mismatch")),
+        "errors: {:?}",
+        r.errors
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("parameter `greeting` expects `str`")),
+        "expected parameter note, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn type_mismatch_arithmetic() {
     errors_contain("1 + \"a\"", "cannot apply `+`");
 }
@@ -789,6 +833,36 @@ fn guarded_catchall_does_not_kill_next_arm() {
 }
 
 #[test]
+fn discarded_match_bare_arms_warn() {
+    // Bare arm bodies never pass through `Stmt::Expr`: a discarded
+    // `match` must warn on `Result`/`Option` arms itself.
+    let r = check_src("v := .ok(1)\nmatch v { .ok(n) => .err(\"x\"), .err(_) => .ok(1) }");
+    assert!(
+        !has_errors(&r),
+        "warnings must not be errors: {:?}",
+        r.errors
+    );
+    let count = r
+        .errors
+        .iter()
+        .filter(|d| d.message.contains("unused `Result`"))
+        .count();
+    assert_eq!(count, 2, "expected both arms to warn, got: {:?}", r.errors);
+}
+
+#[test]
+fn used_match_bare_arms_do_not_warn() {
+    // Same arms, but the match value feeds a binding — nothing discarded.
+    let r = check_src("v := .ok(1)\n_w := match v { .ok(_) => .err(\"x\"), .err(_) => .ok(1) }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors.iter().any(|d| d.message.contains("unused")),
+        "used match must not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn match_nonexhaustive_errors() {
     errors_contain("v := .some(1)\nmatch v { .some(n) => n }", "non-exhaustive");
 }
@@ -1311,6 +1385,98 @@ fn unknown_named_param_suggests_fixit() {
         .find(|f| f.replacement == "greeting")
         .expect("expected `greeting` fixit");
     assert_eq!(fix.safety, zz_frontend::diag::FixSafety::Safe);
+}
+
+#[test]
+fn ambiguous_named_param_offers_choices() {
+    // Two live candidates → Ambiguous fixit with alternatives, never a
+    // silent single pick.
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "draw".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![
+                ("count".to_string(), Type::Int),
+                ("court".to_string(), Type::Int),
+            ],
+            has_default: vec![],
+            ret: Type::Int,
+        },
+    );
+    let r = check_src_with_funcs("x := draw(1, cout: 2)", funcs);
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("unknown parameter `cout`"))
+        .expect("expected unknown-parameter error");
+    let fix = diag
+        .fixits
+        .iter()
+        .find(|f| f.safety == zz_frontend::diag::FixSafety::Ambiguous)
+        .expect("expected ambiguous fixit");
+    assert!(
+        fix.alternatives.contains(&"count".to_string())
+            && fix.alternatives.contains(&"court".to_string()),
+        "alternatives: {:?}",
+        fix.alternatives
+    );
+}
+
+#[test]
+fn or_catchall_dead_arm_warns() {
+    let r = check_src("match 1 { 1 | _ => 0, 2 => 1 }");
+    assert!(
+        !has_errors(&r),
+        "warnings must not be errors: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unreachable match arm")),
+        "expected dead-arm warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn if_let_constrains_uninferred_scrutinee() {
+    let r = check_src("func f(x) { if let .ok(v) = x { v } else { 0 } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn bare_none_with_wildcard_suggests_fixit() {
+    let r = check_src("v: Option<int> = .none\nmatch v { .none(_) => 0, .some(n) => n }");
+    assert!(has_errors(&r), "expected error, got: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".none"),
+        "expected `.none` fixit, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn bare_none_with_binding_has_no_fixit() {
+    // Dropping `.none(x)` would orphan uses of `x` in the arm body, so
+    // the fixit is withheld — error + guidance only.
+    let r = check_src("v: Option<int> = .none\nmatch v { .none(x) => x, .some(n) => n }");
+    assert!(has_errors(&r), "expected error, got: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".none"),
+        "must not offer the `.none` drop-payload fixit here, got: {:?}",
+        r.errors
+    );
 }
 
 #[test]

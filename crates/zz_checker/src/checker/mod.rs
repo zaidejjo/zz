@@ -1028,6 +1028,12 @@ pub(crate) struct Checker {
     /// with tail position, so `-> Result` tails never warn while loop
     /// tails that drop errors do. Saved/restored across nested blocks.
     pub(crate) tail_is_value: bool,
+    /// Whether the statement currently being checked directly discards
+    /// a `match` value (`match ...` as a bare statement/defer, not the
+    /// tail). `check_match` uses this to warn on bare `Result`/`Option`
+    /// arm bodies, which never pass through `Stmt::Expr` themselves.
+    /// Block arm bodies are covered by the normal statement path.
+    pub(crate) direct_discard: bool,
     /// Imported namespaces: (alias, span). Used to detect unused imports.
     pub(crate) imports: Vec<(String, zz_frontend::span::Span)>,
     /// Selective-import aliases: bare name → qualified `ns.sym`, from
@@ -1100,6 +1106,7 @@ impl Checker {
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             tail_is_value: false,
+            direct_discard: false,
             imports: Vec::new(),
             import_aliases: HashMap::new(),
             module_aliases: HashMap::new(),

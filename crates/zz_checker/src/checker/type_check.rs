@@ -91,7 +91,17 @@ impl Checker {
                     let gens = self.current_generics.clone();
                     let at = self.ast_to_type(ann, &gens);
                     if let Err(e) = self.unifier.unify(&vt, &at) {
-                        self.report_mismatch(e, ann.span);
+                        // Sherlock: point at the fix direction. Skip the
+                        // note while the value type is still uninferred
+                        // (`?0` helps nobody).
+                        let mut notes = Vec::new();
+                        let vt_r = self.unifier.resolve(&vt);
+                        if !matches!(vt_r, Type::Var(_)) {
+                            notes.push(format!(
+                                "to fix: change the annotation to `{vt_r}` or convert the value"
+                            ));
+                        }
+                        self.report_mismatch_with_notes(e, ann.span, notes);
                     }
                 }
                 let rt = self.unifier.resolve_deep(&vt);
@@ -278,7 +288,16 @@ impl Checker {
                 }
             }
             Stmt::Expr(e) => {
+                // A bare `match` statement discards the match value: tell
+                // `check_match` so bare `Result`/`Option` arm bodies warn
+                // (they never pass through this arm themselves). Tails
+                // are values, not discards.
+                let prev_discard = std::mem::replace(
+                    &mut self.direct_discard,
+                    matches!(e, Expr::Match { .. }) && !self.tail_is_value,
+                );
                 let t = self.check_expr(e);
+                self.direct_discard = prev_discard;
                 // Sherlock: a discarded `Result`/`Option` silently drops
                 // errors — unless this tail is the block's value.
                 if !self.tail_is_value {
@@ -457,7 +476,12 @@ impl Checker {
                     self.errors
                         .push(error_at("`defer` outside of a function", *span));
                 }
+                let prev_discard = std::mem::replace(
+                    &mut self.direct_discard,
+                    matches!(expr.as_ref(), Expr::Match { .. }),
+                );
                 let t = self.check_expr(expr);
+                self.direct_discard = prev_discard;
                 // Deferred results still vanish — same must-use rule.
                 self.warn_if_discarded(expr, &t);
                 Type::Unit
@@ -2730,6 +2754,23 @@ impl Checker {
         name.rsplit('.').next().unwrap_or(name)
     }
 
+    /// Sherlock notes for an argument/parameter mismatch: name the
+    /// parameter and its expected type so the error points at the fix,
+    /// not just the conflict. Placeholder names (`_0`, from `func`
+    /// values) still show the type.
+    pub(crate) fn param_mismatch_notes(
+        param_names: &[String],
+        ps: &[Type],
+        i: usize,
+    ) -> Vec<String> {
+        match (param_names.get(i), ps.get(i)) {
+            (Some(name), Some(ty)) => {
+                vec![format!("parameter `{name}` expects `{ty}`")]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     // Eight args is the honest shape here (callee + params + args + span);
     // a struct would churn every call site for no checking benefit.
     #[allow(clippy::too_many_arguments)]
@@ -2874,7 +2915,11 @@ impl Checker {
                     };
                     let at = self.check_closure(params, ret_ty.as_ref(), body, *span, ep);
                     if let Err(e) = self.unifier.unify(&at, &ps[i]) {
-                        self.report_mismatch(e, arg.span());
+                        self.report_mismatch_with_notes(
+                            e,
+                            arg.span(),
+                            Self::param_mismatch_notes(param_names, ps, i),
+                        );
                     }
                 } else {
                     let at = self.check_expr(arg);
@@ -2896,7 +2941,11 @@ impl Checker {
                         _ => at,
                     };
                     if let Err(e) = self.unifier.unify(&at, &expected) {
-                        self.report_mismatch(e, arg.span());
+                        self.report_mismatch_with_notes(
+                            e,
+                            arg.span(),
+                            Self::param_mismatch_notes(param_names, ps, i),
+                        );
                     }
                 }
             }
@@ -3097,6 +3146,15 @@ impl Checker {
             }
             let bt = self.check_expr(&arm.body);
             self.pop_scope();
+            // Sherlock: a bare `match` statement discards the match
+            // value, and bare arm bodies never pass through `Stmt::Expr`
+            // — warn here when an arm yields a discarded `Result` or
+            // `Option`. Block arm bodies are covered by the normal
+            // statement path (`direct_discard` is statement-level, so
+            // used positions like call args stay silent).
+            if self.direct_discard && !matches!(arm.body, Expr::Block(_)) {
+                self.warn_if_discarded(&arm.body, &bt);
+            }
             // `break`/`continue` arms diverge (never produce a value),
             // so they don't constrain the match's result type. Arms that
             // diverge via `return` (`Never`) vanish from the join the
@@ -3471,12 +3529,18 @@ impl Checker {
                     },
                     (Type::Option(_), "none") => {
                         if arg.is_some() {
-                            self.errors.push(
-                                error_at("`.none` pattern takes no argument", *span)
-                                    .with_note("`.none` carries no value — write `.none`")
+                            // The fixit only applies to a wildcard payload:
+                            // dropping `.none(x)` would orphan uses of `x`
+                            // in the arm body, so named payloads get the
+                            // error + notes and the user edits by hand.
+                            let mut diag = error_at("`.none` pattern takes no argument", *span)
+                                .with_note("`.none` carries no value — write `.none`");
+                            if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
+                                diag = diag
                                     .with_note("run `zz fix` to rewrite this automatically")
-                                    .with_fixit(FixIt::safe(*span, ".none", "drop payload")),
-                            );
+                                    .with_fixit(FixIt::safe(*span, ".none", "drop payload"));
+                            }
+                            self.errors.push(diag);
                         }
                         None
                     }

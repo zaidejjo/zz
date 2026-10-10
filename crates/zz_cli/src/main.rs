@@ -2500,7 +2500,7 @@ fn check_or_fix_path(
                 for fixit in &ambiguous_fixits {
                     let start = fixit.span.start as usize;
                     let end = fixit.span.end as usize;
-                    if end > source.len() || start >= end {
+                    if end > source.len() || start > end {
                         continue;
                     }
                     let original = &source[start..end];
@@ -2567,6 +2567,9 @@ fn check_or_fix_path(
         }
 
         // Apply all approved fixits in one pass, right-to-left to avoid offset shifts.
+        // Zero-width spans are insertions (`start == end`): replacing an
+        // empty range inserts text. The old `start < end` guard silently
+        // skipped every insertion fixit (missing commas/closers).
         let mut applied = 0u32;
         if !approved.is_empty() {
             let mut new_source = source.clone();
@@ -2574,12 +2577,16 @@ fn check_or_fix_path(
             for fixit in &approved {
                 let start = fixit.span.start as usize;
                 let end = fixit.span.end as usize;
-                if end <= new_source.len() && start < end {
+                if end <= new_source.len() && start <= end {
                     let original = source[start..end].to_string();
                     new_source.replace_range(start..end, &fixit.replacement);
                     applied += 1;
                     let label = if fixit.safety == zz_frontend::diag::FixSafety::Safe {
-                        "fixed"
+                        if start == end {
+                            "inserted"
+                        } else {
+                            "fixed"
+                        }
                     } else {
                         "fixed (force)"
                     };
@@ -2655,6 +2662,24 @@ mod tests {
         super::loader::cache::with_isolated_cache(|| {
             check_or_fix_path(&Some(path.to_string()), false, false, false, false)
         })
+    }
+
+    /// Run `zz check --fix` (fix mode) under the isolated cache env.
+    fn fix_isolated(path: &str) -> Result<(), String> {
+        super::loader::cache::with_isolated_cache(|| {
+            check_or_fix_path(&Some(path.to_string()), true, false, false, false)
+        })
+    }
+
+    #[test]
+    fn fix_inserts_missing_match_comma() {
+        // Zero-width insertion fixits must apply, not silently skip.
+        let path = write_temp("match .ok(1) { .ok(n) => { n } .err(_) => { 0 } }\n");
+        let result = fix_isolated(&path.to_string_lossy());
+        assert!(result.is_ok(), "expected fix ok, got {result:?}");
+        let fixed = fs::read_to_string(&path).unwrap();
+        assert!(fixed.contains(", .err"), "comma not inserted: {fixed:?}");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

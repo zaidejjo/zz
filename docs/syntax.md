@@ -730,6 +730,10 @@ match x {
 }
 ```
 
+Separate arms with a comma or a newline — a missing separator names
+itself (`expected `,` or newline between match arms`) and `zz fix`
+inserts the comma.
+
 ### Literal Patterns
 
 ```zz
@@ -768,6 +772,10 @@ Handle it (`match`), propagate it (`?`), or ignore it explicitly
 (`_ := fs.write(path, data)`). Block tails are values, not discards,
 so `-> Result` function bodies never warn. Loop-body tails and
 `defer` expressions do warn — their values are discarded too.
+
+Type mismatches name the fix direction: argument errors name the
+expected parameter (``parameter `greeting` expects `str` ``), and
+annotation errors suggest the corrected annotation.
 
 ### Dead Arms
 

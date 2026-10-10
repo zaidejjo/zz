@@ -396,7 +396,12 @@ impl<'a> Parser<'a> {
                 }
                 // Field access on a non-trivial base: `makePoint().x`. Pure
                 // identifier chains are consumed as `Path` in `parse_primary`.
+                // A dot that opens the next match arm (`... .err(_) => ...`)
+                // must not chain: `=>` never continues an expression.
                 TokenKind::Dot if self.peek_kind_at(1) == TokenKind::Ident => {
+                    if self.dot_starts_match_arm() {
+                        break;
+                    }
                     self.advance(); // `.`
                     let member = self.advance(); // identifier
                     let span = expr.span().join(member.span);
@@ -1390,6 +1395,20 @@ impl<'a> Parser<'a> {
             }
             if self.at(TokenKind::RBrace) {
                 break;
+            }
+            // Sherlock: `.name` here almost always starts the next arm
+            // whose separator was forgotten (`{ n } .err(_) => ...`) —
+            // name it, offer the comma, and keep parsing arms instead of
+            // dropping the rest of the match.
+            if self.at(TokenKind::Dot) && self.peek_kind_at(1) == TokenKind::Ident {
+                let dot = self.peek().span;
+                let at = Span::new(dot.start, dot.start);
+                self.errors.push(
+                    error_at("expected `,` or newline between match arms", dot)
+                        .with_note("separate arms with a comma or put each arm on its own line")
+                        .with_fixit(FixIt::safe(at, ", ".to_string(), "insert missing comma")),
+                );
+                continue;
             }
             self.error_here("expected `,` or `}` after match arm");
             self.skip_to_rbrace();
