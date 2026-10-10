@@ -11,16 +11,25 @@ Available without imports:
 | `print` | `print(v: T) -> unit` | Print value without newline |
 | `println` | `println(v: T) -> unit` | Print value with newline |
 | `input` | `input(prompt: str) -> str` | Read line from stdin (optional prompt) |
-| `typeof` | `typeof(v: T) -> str` | Runtime type name |
-| `str` | `str(v: T) -> str` | Convert to string |
-| `int` | `int(v: T)` | Parse/convert to int (`.none` on failure) |
-| `float` | `float(v: T)` | Parse/convert to float (`.none` on failure) |
+| `typeof` | `typeof(v: T) -> str` | Runtime type name as a string (e.g. `"int"`, `"str"`, `"bytes"`) |
+| `str` | `str(v: T) -> str` | Convert to string (keeps `.ok`/`.some` wrappers — see Console I/O) |
+| `int` | `int(v: T) -> Option<int>` | Parse/convert to int; `.none` on failure (reason discarded — use `??` fallback) |
+| `float` | `float(v: T) -> Option<float>` | Parse/convert to float; `.none` on failure (reason discarded — use `??` fallback) |
 | `len` | `len(v: T) -> int` | Length of array, tuple, bytes, string, dict, or range |
-| `range` | `range(start: int, stop: int, step: int)` | Create integer range |
-| `map` | `map(arr: [T] \| T.., f: func(T) -> U) -> [U]` | Apply function to each element |
-| `filter` | `filter(arr: [T] \| T.., f: func(T) -> bool) -> [T]` | Keep elements where predicate is true |
-| `enumerate` | `enumerate(arr: [T] \| T..)` | Index + value pairs |
+| `range` | `range(stop: int)` / `range(start: int, stop: int)` / `range(start: int, stop: int, step: int)` | Create integer range (`range(5)` = `0..5`, `range(1, 5)` = `1..5`) |
+| `map` | `map(arr: [T] \| T.., f: func(T) -> U) -> [U]` | Apply function to each element (also `std.vec` for arrays) |
+| `filter` | `filter(arr: [T] \| T.., f: func(T) -> bool) -> [T]` | Keep elements where predicate is true (also `std.vec` for arrays) |
+| `enumerate` | `enumerate(arr: [T] \| T..)` | Index + value pairs (also `vec.enumerate` / `std.vec.enumerate`) |
 | `zip` | `zip(a: [T] \| T.., b: [U] \| U..)` | Pair elements from two iterables |
+
+> Namespace rule: globals are convenience aliases. Canonical homes are
+> `std.vec.*` for array pipelines (`vec.*` short form works after
+> `import std.vec`), `str.*` for `ord`/`chr` (bare `ord`/`chr` are
+> aliases). Prefer the canonical home in new code; the bare forms stay
+> until 0.3. `int`/`float` return `Option` — the parse-failure reason is
+> discarded, so fall back explicitly at the call site:
+> `int(s) ?? 0`. `typeof` returns a type *name string*, not a type value —
+> compare with string equality only.
 
 ## Module Index
 

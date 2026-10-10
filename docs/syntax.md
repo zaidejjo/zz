@@ -138,8 +138,18 @@ enum Box<T> {
 b: Box<int> = Box.E
 ```
 
-Known V1 limits: match guards in native builds only see scalar
-payloads and outer bindings (the VM is fully general).
+Match guards (`n if n > 0 =>`) accept the arm's pattern bindings,
+literals, and operator combinations — on both engines. Anything else
+(calls, strings, field/index access) is a check-time error naming the
+exact subexpression, so VM and native builds never diverge silently.
+Outer variables and helper calls belong in the arm body:
+
+```zz
+match x {
+    .some(n) => if n > limit && is_valid(n) { println("ok") } else { println("bad") },
+    .none => println("nothing"),
+}
+```
 
 ## Functions
 
