@@ -117,18 +117,22 @@ match fs.embedfs() {
 Asset edits invalidate the build cache (content-hashed), and `app.c`
 manual builds include the same tables.
 
-Output paths (authoritative — no legacy duplicates): standalone builds
-place `./<stem>`, `./<stem>.exe` (Windows), or `./<stem>-<triple>[.exe]`
-for `--target` builds in the current working directory. Project builds
-(any source under a project, or `zz build` with no argument inside one)
-publish to `<project-root>/bin/`, named after `[package] name` for the
-entry point or the file stem for explicit non-entry files — never
-`src/bin/`. Byte-identical `src/bin/` twins left by previous versions
-are reaped on publish; anything else there is left alone. Sidecars
-(`app.c`, `build.sh`, `build.bat`: reproducible manual build with a
-single clang line) sit next to the binary. `-o <name>` renames the
-binary (a bare name stays in the resolved output directory, a path is
-used as-is relative to the current directory, go-like).
+Output paths (3-line rule): standalone file → `./<stem>` in CWD;
+project file → `<project-root>/bin/<name>`; `--target` adds
+`-<triple>` suffix. `-o <name>` renames (bare name stays in the
+resolved directory, a path is used as-is).
+
+<details>
+<summary>Output details (entry, discovery, sidecars, atomicity)</summary>
+
+Project builds (any source under a project, or `zz build` with no
+argument inside one) publish to `<project-root>/bin/`, named after
+`[package] name` for the entry point or the file stem for explicit
+non-entry files — never `src/bin/`. Byte-identical `src/bin/` twins
+left by previous versions are reaped on publish (logged to stderr);
+anything else there is left alone. Sidecars (`app.c`, `build.sh`,
+`build.bat`: reproducible manual build with a single clang line) sit
+next to the binary.
 
 Entry point: `src/main.zz`, then `main.zz` — or `[package] entry` to
 override (e.g. `entry = "src/cli.zz"`; must stay inside the package
@@ -148,6 +152,7 @@ Concurrent builds to one destination publish atomically (last writer
 wins, never a half-written binary); `zz run --native` executes a
 private staged copy, so a parallel publish can never swap the binary
 mid-exec.
+</details>
 
 Cross-compilation rules:
 
@@ -239,8 +244,11 @@ zz check src/
 | `--fix` / `-f` | Apply safe auto-fixes |
 | `--hard` | Apply all fixes including ambiguous (no prompts) |
 | `--interactive` / `-i` | Prompt for ambiguous fixes |
-| `--check` / `-c` | Check formatting without writing |
 | `--stats` | Print per-file and total check stats (modules, cache hits/misses, seed size, wall time) |
+
+> Note: `--check` / `-c` is a `zz fmt` flag only. `zz check --check`
+> is rejected — `zz check` already checks without writing; use
+> `zz fmt --check` for a formatting dry-run.
 
 #### Check Performance Budget
 
@@ -290,14 +298,15 @@ zz fmt src/
 
 ## Flags
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--check` | `-c` | Check formatting without writing (exit 1 if changed) |
-| `--fix` | `-f` | Apply safe auto-fixes |
-| `--hard` | | Apply all fixes including ambiguous |
-| `--interactive` | `-i` | Prompt for ambiguous fixes |
-| `--help` | `-h` | Show usage |
-| `--version` | `-V` | Show version |
+| Flag | Short | Scope | Description |
+|------|-------|-------|-------------|
+| `--check` | `-c` | `fmt` only | Check formatting without writing (exit 1 if changed) |
+| `--dry-run` | | `setup`, `upgrade` | Report status without changing anything (`--check` deprecated alias) |
+| `--fix` | `-f` | `check`, `fix` | Apply safe auto-fixes |
+| `--hard` | | `check`, `fix` | Apply all fixes including ambiguous |
+| `--interactive` | `-i` | `check`, `fix` | Prompt for ambiguous fixes |
+| `--help` | `-h` | all | Show usage |
+| `--version` | `-V` | all | Show version |
 
 ## Diagnostics
 
@@ -384,7 +393,8 @@ hint: circular imports are not allowed; consider restructuring your code to brea
 ```
 
 Restructure by extracting shared types into `c.zz`, then both `a` and `b`
-import `c` with no cycle. Tracking full cycle support in #232.
+import `c` with no cycle. Cyclic imports remain unsupported by design
+(use a shared leaf module to break the cycle).
 
 ### One file, one namespace
 
@@ -393,8 +403,8 @@ program (`import a as x` in one file, `import a as y` in another is an
 error). Struct identity is namespace-qualified (`x.T` vs `y.T` would
 diverge), so the loader keeps a single canonical namespace per file.
 Workaround: have both importers use the same name (or no alias), and
-import the shared file directly. Tracking per-importer alias copies
-in #228.
+import the shared file directly. Per-importer alias copies remain
+unsupported — migrate all importers to one canonical import path.
 
 ### Dependency sources
 
@@ -410,7 +420,8 @@ flipping a dep between path and registry needs no manual cleanup.
 `zz install` also verifies materialization: on a fresh clone (lock
 matches, `vendor/` missing) it fetches and links instead of reporting
 "up to date". Same-name declarations across workspace members stay
-future work until `[workspace]` ships (#266).
+unsupported until `[workspace]` ships — keep dependency names unique
+per workspace until then.
 
 ## REPL Commands
 

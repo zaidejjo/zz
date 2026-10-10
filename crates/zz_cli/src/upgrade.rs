@@ -4,7 +4,7 @@
 //! setup; `upgrade` keeps an existing install current without them:
 //!
 //! - `zz upgrade` — latest release over the current install dir
-//! - `zz upgrade --check` — report only (exit 1 when behind)
+//! - `zz upgrade --dry-run` — report only (exit 1 when behind)
 //! - `zz upgrade --version vX.Y.Z` — pin (downgrades warn)
 //! - `zz upgrade --keep-backup` — retain the `.bak` binaries on success
 //!
@@ -106,9 +106,13 @@ fn install_dir() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "cannot locate install directory".to_string())
 }
 
-/// `zz upgrade [--check] [--version vX.Y.Z] [--keep-backup]`.
+/// `zz upgrade [--dry-run] [--version vX.Y.Z] [--keep-backup]`.
+/// `--check` is a deprecated alias for `--dry-run` until 0.3.
 pub fn run(args: &[String]) -> Result<(), String> {
-    let check_only = args.iter().any(|a| a == "--check");
+    let check_only = args.iter().any(|a| a == "--dry-run" || a == "--check");
+    if args.iter().any(|a| a == "--check") {
+        eprintln!("warning: `--check` is deprecated; use `--dry-run` instead");
+    }
     let keep_backup = args.iter().any(|a| a == "--keep-backup");
     let pinned = args
         .iter()

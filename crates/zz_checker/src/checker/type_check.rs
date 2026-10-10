@@ -3095,6 +3095,27 @@ impl Checker {
         Type::Func(ptypes, Box::new(resolved_ret))
     }
 
+    /// Innermost span of a match-guard subexpression the native backend
+    /// cannot lower (`None` when the whole guard is in the scalar subset:
+    /// idents, paths, int/float/bool literals, and binary/unary/paren
+    /// combinations). Native guard lowering folds anything else to a
+    /// constant while the VM evaluates it fully — a silent engine
+    /// divergence the caller turns into a loud check-time error.
+    fn native_unsupported_guard(e: &Expr) -> Option<Span> {
+        match e {
+            Expr::Ident { .. }
+            | Expr::Path { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Bool { .. } => None,
+            Expr::Paren { expr, .. } => Self::native_unsupported_guard(expr),
+            Expr::Unary { expr, .. } => Self::native_unsupported_guard(expr),
+            Expr::Binary { left, right, .. } => Self::native_unsupported_guard(left)
+                .or_else(|| Self::native_unsupported_guard(right)),
+            _ => Some(e.span()),
+        }
+    }
+
     pub(crate) fn check_match(
         &mut self,
         scrutinee: &Expr,
@@ -3142,6 +3163,18 @@ impl Checker {
                 let gt = self.check_expr(guard);
                 if let Err(e) = self.unifier.unify(&gt, &Type::Bool) {
                     self.report_mismatch(e, guard.span());
+                } else if let Some(bad) = Self::native_unsupported_guard(guard) {
+                    // Native builds lower guards to raw C scalars (idents,
+                    // paths, scalar literals, binary/unary/paren combos).
+                    // Anything else degrades to a constant there while the
+                    // VM evaluates it fully — a silent engine divergence.
+                    // Reject loudly so both engines agree.
+                    self.errors.push(error_at(
+                        "match guard uses an expression native builds cannot evaluate",
+                        bad,
+                    ).with_note(
+                        "hint: guards support pattern bindings, literals, and operators only; move calls, strings, or field access into the arm body with if/else",
+                    ));
                 }
             }
             let bt = self.check_expr(&arm.body);

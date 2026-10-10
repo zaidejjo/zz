@@ -820,6 +820,36 @@ fn dead_arm_after_wildcard_warns() {
 }
 
 #[test]
+fn scalar_match_guard_passes() {
+    let r = check_src("match 1 { n if n > 0 => 0, _ => 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn outer_binding_in_match_guard_resolves() {
+    let r = check_src("limit := 5\nmatch 10 { n if n > limit => 0, _ => 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn call_in_match_guard_errors_loudly() {
+    // Native guard lowering folds calls to a constant while the VM
+    // evaluates them — reject at check time so engines never diverge.
+    errors_contain(
+        "func big(n: int) -> bool { n > 1 }\nmatch 1 { n if big(n) => 0, _ => 1 }",
+        "native builds cannot evaluate",
+    );
+}
+
+#[test]
+fn string_literal_in_match_guard_errors() {
+    errors_contain(
+        "match \"a\" { s if s == \"a\" => 0, _ => 1 }",
+        "native builds cannot evaluate",
+    );
+}
+
+#[test]
 fn guarded_catchall_does_not_kill_next_arm() {
     let r = check_src("match 1 { _ if 1 > 0 => 0, 1 => 1 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
