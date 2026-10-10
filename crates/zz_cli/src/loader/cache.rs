@@ -70,15 +70,45 @@ pub struct CachedModule<'a> {
 /// share a version string but not semantics — issue #221). Resolved once
 /// per process from the build tree; absent outside git checkouts
 /// (tarballs fall back to version-only, as before).
+///
+/// The stdlib seed fingerprint disambiguates same-version binaries with
+/// different baked stdlibs (release vs dev, or uncommitted stdlib work —
+/// issue #371): the cache key covers source + deps + genesis, but the
+/// live git HEAD resolves the *checkout*, not the binary, so two
+/// toolchains with different seeds shared a namespace whenever the HEAD
+/// matched. Any seed change now invalidates via the genesis.
 fn genesis(plugin_names: &[String]) -> String {
     let mut names = plugin_names.to_vec();
     names.sort();
     format!(
-        "zz-check-cache-v5|cli={}|git={}|plugins={}",
+        "zz-check-cache-v6|cli={}|git={}|plugins={}|seed={}",
         env!("CARGO_PKG_VERSION"),
         git_hash().as_deref().unwrap_or("nogit"),
         names.join(","),
+        seed_fingerprint(),
     )
+}
+
+/// Hash of the sorted stdlib seed keys (checker function table): any
+/// added/removed/renamed native changes the genesis, so stale check
+/// outcomes (including cached failures) never replay across stdlib
+/// changes. Sorted for determinism; SHA-256 hex like module keys.
+/// Cached process-wide: the seed is baked per binary and never changes
+/// mid-run; sorting ~1k keys once beats per-module recompute.
+fn seed_fingerprint() -> String {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT
+        .get_or_init(|| {
+            let mut keys: Vec<&String> = zz_stdlib::stdlib_funcs_cached().keys().collect();
+            keys.sort();
+            let mut h = Sha256::new();
+            for k in keys {
+                h.update(k.as_bytes());
+                h.update(b"\0");
+            }
+            hex_of(h)
+        })
+        .clone()
 }
 
 /// Commit hash of the tree this binary was built from (dev-loop cache
@@ -609,6 +639,28 @@ mod tests {
         assert_ne!(mid_a, mid_b, "dep content sensitivity");
         assert_ne!(mid_a, mid_c, "dep path sensitivity");
         assert_eq!(leaf_a.len(), 64, "sha256 hex");
+    }
+
+    #[test]
+    fn genesis_folds_seed_fingerprint() {
+        // #371: the S1 genesis must cover the stdlib seed content, so any
+        // seed change (added/removed/renamed native) invalidates cached
+        // outcomes — including stale failures recorded under an older
+        // toolchain.
+        let fp = seed_fingerprint();
+        assert_eq!(fp.len(), 64, "sha256 hex");
+        assert_eq!(fp, seed_fingerprint(), "deterministic");
+        let g = genesis_key(&[]);
+        assert!(
+            g.contains(&format!("seed={fp}")),
+            "genesis must embed the seed fingerprint, got: {g}"
+        );
+        // Different geneses key the same source differently: a seed change
+        // misses instead of replaying the old entry.
+        let other = format!("{g}|extra-seed-change");
+        let k1 = module_key(&g, "println(term.poll())", &[], "main");
+        let k2 = module_key(&other, "println(term.poll())", &[], "main");
+        assert_ne!(k1, k2, "seed change must invalidate module keys");
     }
 
     #[test]
