@@ -8,6 +8,30 @@ use std::time::Duration;
 use crate::natives::{arg, expect_int, expect_str};
 use zz_runtime::{EvalError, Interp, Span, Value};
 
+/// Bind a TCP listener with `SO_REUSEADDR` set: a just-stopped server
+/// (graceful drain, `zz run --watch` restarts) rebinds its port even with
+/// connections lingering in `TIME_WAIT`. Mirrors the C runtime, which
+/// already sets `SO_REUSEADDR` on both listener paths — VM and native
+/// must agree, or restarts behave differently per backend.
+pub(crate) fn bind_reusable<A: std::net::ToSocketAddrs>(
+    addr: A,
+) -> std::io::Result<std::net::TcpListener> {
+    let addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no addresses found")
+    })?;
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, None)?;
+    sock.set_reuse_address(true)?;
+    sock.bind(&addr.into())?;
+    // Same backlog as `std::net::TcpListener::bind`.
+    sock.listen(128)?;
+    Ok(sock.into())
+}
+
 /// `net.tcp_connect(addr: str, timeout_ms: int) -> Result<tcp.stream, str>`
 pub(crate) fn tcp_connect(
     _interp: &mut Interp,
@@ -45,7 +69,7 @@ pub(crate) fn tcp_listen(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let addr = expect_str(args, 0, "std.net.tcp_listen")?;
-    match std::net::TcpListener::bind(&addr) {
+    match bind_reusable(addr.as_str()) {
         Ok(listener) => Ok(Value::Result(Box::new(Ok(Value::TcpListener(Arc::new(
             Mutex::new(listener),
         )))))),

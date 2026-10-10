@@ -180,6 +180,35 @@ to the same authoritative destination as `zz build`, `-o` overrides
 like `build`) and executes the binary. The file argument defaults to
 the project entry inside a project.
 
+### `zz run --watch [<file.zz>]`
+
+Hot reload for VM runs: re-checks and restarts the program on every save.
+
+```bash
+zz run --watch server.zz
+zz run --watch --clear --debounce 200 --watch-ignore '*.gen.zz' src/main.zz
+```
+
+Each generation is a fresh `zz run` child, so restarts leak no sockets,
+threads, or interpreter state. The loop:
+
+1. Watches the owning project tree (`*.zz`, `zz.toml`/`zz.lock`) — or the
+   entry's own directory for standalone files — plus `--embed` assets.
+   `vendor/`, `.git/`, `bin/`, `build/`, `target/` are never watched.
+2. On change, waits for `--debounce` ms of quiet (default 150), then runs
+   `zz check`. A broken edit never replaces a running server: diagnostics
+   print and the previous generation keeps serving.
+3. Restarts print `generation N`; the child sees its number in
+   `ZZ_WATCH_GEN`. `--clear` clears the screen per restart.
+
+Flags: `--clear`, `--debounce <ms>`, repeatable `--watch-ignore <glob>`
+(`*` spans directories, matched against path and file name). `--watch`
+rejects `--native` / `--bytecode` (native rebuilds are minutes, not
+milliseconds). In-memory state resets on every restart by design.
+Roots over 20,000 entries refuse with a hint (create a `zz.toml`
+project or narrow with `--watch-ignore`) instead of statting the
+world every tick.
+
 ### `zz clean` / `zz cache`
 
 ```bash
