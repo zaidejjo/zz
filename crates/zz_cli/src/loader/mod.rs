@@ -2241,17 +2241,15 @@ fn namespace_program(program: &mut Program, ns: &str) {
 /// hoisting the call runs before `MakeFunc` defines `ns.func` and fails
 /// with `undefined variable <ns>`.
 ///
-/// Only hoisted when safe, and placed after imports:
-/// - a function whose body references a top-level binding (`Decl` or
-///   `Destructure`) MUST stay in source order — defining/checking it
-///   before the binding breaks capture and check order;
-/// - a function that (transitively) calls a non-hoisted function stays
-///   put;
-/// - hoisted functions land AFTER all imports (the checker populates
-///   import aliases in statement order) but before everything else.
-/// Pure functions of their params (and mutual recursion between hoisted
-/// functions) move stably; programs hoisting cannot help keep exactly
-/// today's behavior.
+/// Only hoisted when safe, and placed after imports. A function whose
+/// body references a top-level binding (`Decl` or `Destructure`) must stay
+/// in source order, since defining or checking it before the binding
+/// breaks capture and check order. A function that transitively calls a
+/// non-hoisted function also stays put. Hoisted functions land after all
+/// imports, because the checker populates import aliases in statement
+/// order, but before everything else. Pure functions of their params and
+/// mutual recursion between hoisted functions move stably, while programs
+/// hoisting cannot help keep exactly today's behavior.
 fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
     use zz_frontend::ast::{Block, Expr, Pattern};
     // Top-level binding names: `Decl`s post-rewrite ("ns.x") plus their
