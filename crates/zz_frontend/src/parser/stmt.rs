@@ -158,9 +158,14 @@ impl<'a> Parser<'a> {
             // `const x = expr` / `const x: type = expr` — immutable binding.
             TokenKind::Const => self.parse_const_decl(false),
             // `(a, b) := expr` — tuple destructuring declaration.
+            // Disambiguated from a tuple-expression tail (`(a, a + 1)`)
+            // by the trailing `:=`: only a `)` closed paren list followed
+            // by `:=` is a destructure (#367). Bare `(a, b)` without `:=`
+            // parses as `Stmt::Expr(Tuple)` below.
             TokenKind::LParen
                 if self.peek_kind_at(1) == TokenKind::Ident
-                    && self.peek_kind_at(2) == TokenKind::Comma =>
+                    && self.peek_kind_at(2) == TokenKind::Comma
+                    && self.at_paren_destructure() =>
             {
                 self.parse_destructure_decl(false)
             }
@@ -833,6 +838,41 @@ impl<'a> Parser<'a> {
             i += 2;
         }
         pairs > 0 && self.peek_kind_at(i) == TokenKind::ColonEq
+    }
+
+    /// True when the upcoming `(...)` is a destructuring declaration head:
+    /// the matching `)` is followed by `:=`. Disambiguates tuple-expression
+    /// tails like `(a, a + 1)` (no `:=`, parses as `Stmt::Expr`) from real
+    /// destructures like `(a, b) := expr` (#367). Nested parens balance;
+    /// any terminator before the close means "not a destructure".
+    pub(crate) fn at_paren_destructure(&self) -> bool {
+        if self.peek_kind_at(0) != TokenKind::LParen {
+            return false;
+        }
+        let mut depth = 0u32;
+        let mut i = 0usize;
+        loop {
+            match self.peek_kind_at(i) {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.peek_kind_at(i + 1) == TokenKind::ColonEq;
+                    }
+                }
+                TokenKind::Eof | TokenKind::StmtEnd | TokenKind::RBrace | TokenKind::RBracket => {
+                    return false
+                }
+                _ => {}
+            }
+            i += 1;
+            if i > 512 {
+                return false;
+            }
+        }
     }
 
     /// True when the upcoming tokens declare a type alias: `type` +
