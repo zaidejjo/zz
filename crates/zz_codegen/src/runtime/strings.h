@@ -212,6 +212,7 @@ zz_value zz_ord(zz_value ch, int *err);
 zz_value zz_chr(zz_value cp, int *err);
 zz_value zz_bytes_to_str(zz_value vs, int *err);
 zz_value zz_bytes_to_ints(zz_value b, int *err);
+zz_value zz_bytes_finish(zz_value vs, int *err);
 zz_value zz_str_trim_span(zz_value s, zz_value start, zz_value end, int *err);
 zz_value zz_str_find_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err);
 zz_value zz_str_rfind_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err);

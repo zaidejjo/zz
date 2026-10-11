@@ -226,6 +226,13 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "bytes.finish".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_finish,
+        },
+    );
+    m.insert(
         "std.bytes.len".into(),
         NativeEntry {
             arity: 1,
@@ -272,6 +279,13 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: str_mod::bytes_to_ints,
+        },
+    );
+    m.insert(
+        "std.bytes.finish".into(),
+        NativeEntry {
+            arity: 1,
+            f: str_mod::bytes_finish,
         },
     );
     m.insert(
