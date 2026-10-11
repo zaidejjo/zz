@@ -540,6 +540,12 @@ pub struct Lowerer {
     /// Scalar-specialized callees as (name, C ret, arity), computed once
     /// (was: refiltered from `specialized` per emitted function).
     pub(crate) scalar_fn_list: Vec<(String, &'static str, usize)>,
+    /// Per-parameter read-only verdicts for user functions (name →
+    /// one bool per signature parameter, in order), computed once in
+    /// `new` by [`param_escape::analyze`]. A read-only parameter never
+    /// lets its storage outlive the call, so callers may borrow (pass
+    /// the live local instead of a retained share) instead of cloning.
+    pub(crate) readonly_params: std::collections::HashMap<String, Vec<bool>>,
     /// Unit-emission mode: definitions/prototypes use external linkage so
     /// per-module translation units link together. Off = single-TU
     /// `static` (byte-identical legacy output).
@@ -555,6 +561,7 @@ impl Lowerer {
     ) -> Self {
         let escape = zz_hir::escape_analyze(&tp);
         let (import_fn_aliases, import_ns_aliases) = Self::collect_import_aliases(&tp);
+        let readonly_params = super::param_escape::analyze(&tp.program, &tp.funcs, &tp.structs);
         let mut lowerer = Lowerer {
             reachable_funcs,
             reachable_natives,
@@ -578,6 +585,7 @@ impl Lowerer {
             global_list: Vec::new(),
             global_set: std::collections::HashSet::new(),
             scalar_fn_list: Vec::new(),
+            readonly_params,
             unit_mode: std::cell::Cell::new(false),
         };
         lowerer.specialized = lowerer.compute_specialized();

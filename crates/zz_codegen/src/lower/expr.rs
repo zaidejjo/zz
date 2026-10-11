@@ -2032,6 +2032,36 @@ impl Lowerer {
         Some(format!("(bool)({} {c_op} {})", lraw.0, rraw.0))
     }
 
+    /// True when an argument expression is already a boxed `zz_value`
+    /// (never a raw struct/scalar needing representation conversion):
+    /// plain locals of boxed type only. Conservative by design — anything
+    /// else keeps today's defensive paths.
+    fn arg_is_boxed(a: &Expr, names: &NameCtx) -> bool {
+        match a {
+            Expr::Ident { name, .. } => {
+                matches!(names.lookup_type(name), Some("zz_value"))
+                    && !super::move_elide::is_moved_type(names.lookup_type(name))
+            }
+            _ => false,
+        }
+    }
+
+    /// Read-only verdict for one callee parameter position: true only
+    /// when escape analysis proved the parameter never outlives the call.
+    /// Missing entries (natives, methods, unknown callees, arity drift)
+    /// answer false, preserving today's clone behavior.
+    fn param_is_readonly(
+        masks: &std::collections::HashMap<String, Vec<bool>>,
+        cname: &str,
+        idx: usize,
+    ) -> bool {
+        masks
+            .get(cname)
+            .and_then(|m| m.get(idx))
+            .copied()
+            .unwrap_or(false)
+    }
+
     pub(super) fn emit_call(
         &self,
         callee: &Expr,
@@ -3006,8 +3036,28 @@ impl Lowerer {
         };
         for (arg_idx, a) in ordered_args.iter().enumerate() {
             if let Some(sname) = struct_box_for_arg.get(arg_idx).and_then(|o| o.clone()) {
-                arg_items.push(self.emit_boxed_value(&sname, a, names, out));
-                continue;
+                // Escape-analysis borrow (#383): when the callee provably
+                // never lets this parameter outlive the call AND the
+                // argument is already a boxed value, skip the defensive
+                // deep-copy box and pass through to the normal (borrowed)
+                // path below. Guarded to callee names needing no
+                // owned-fallback resolution, so this key matches the call
+                // site's mask lookup.
+                let no_fallback = cname.contains('.')
+                    || self.reachable_funcs.contains(&cname)
+                    || self.tp.funcs.contains_key(&cname);
+                if !self.green_active()
+                    && method_receiver.is_none()
+                    && no_fallback
+                    && named.is_empty()
+                    && Self::arg_is_boxed(a, names)
+                    && Self::param_is_readonly(&self.readonly_params, &cname, arg_idx)
+                {
+                    // fall through to normal emission (borrowed below)
+                } else {
+                    arg_items.push(self.emit_boxed_value(&sname, a, names, out));
+                    continue;
+                }
             }
             let emitted = self.emit_expr(a, names, out);
             // Display builtins (`println`, `print`, `str`, ...) render
@@ -3573,6 +3623,37 @@ impl Lowerer {
             }
             if arg_items.is_empty() {
                 return format!("{cf}(NULL, 0)");
+            }
+            // Escape-analysis borrow (#383): arguments to proven read-only
+            // parameters pass the live local instead of a retained share.
+            // Same shape guard as the read-only-native fast path above:
+            // only exact `zz_clone(barecid)` locals (which outlive the
+            // synchronous call); complex temporaries keep owned form.
+            // Skipped under green (suspend/resume) and for method calls,
+            // and requires 1:1 arg alignment as a structural backstop.
+            if !self.green_active()
+                && method_receiver.is_none()
+                && named.is_empty()
+                && arg_items.len() == ordered_args.len()
+            {
+                for (i, item) in arg_items.iter_mut().enumerate() {
+                    if !Self::param_is_readonly(&self.readonly_params, &cname_for_native, i) {
+                        continue;
+                    }
+                    if let Some(inner) = item
+                        .strip_prefix("zz_clone(")
+                        .and_then(|s| s.strip_suffix(')'))
+                    {
+                        if !inner.is_empty()
+                            && inner
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            && !inner.starts_with("zz_")
+                        {
+                            *item = inner.to_string();
+                        }
+                    }
+                }
             }
             return format!(
                 "({cf}((zz_value[]){{ {joined} }}, {n}))",

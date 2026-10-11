@@ -2089,3 +2089,59 @@ func main() {
         "expected a borrowed field read, got:\n{c}"
     );
 }
+
+#[test]
+fn readonly_call_arg_borrows_instead_of_cloning() {
+    // #188/#383: `next(r)` with a proven read-only parameter must pass
+    // the live local (`v0`), not a retained `zz_clone` share and not a
+    // member-wise rebuilt box (`__obj`), neither of which anything
+    // releases (~300B retained per call).
+    let src = r#"
+struct Rng { s0: int, s1: int, s2: int, s3: int }
+func next(r: Rng) -> (int, Rng) {
+    return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1, s2: r.s2, s3: r.s3 })
+}
+func step(r: Rng, n: int) -> int {
+    acc := 0
+    i := 0
+    while i < n {
+        p := next(r)
+        r = p[1]
+        acc = (acc + p[0]) & 4294967295
+        i += 1
+    }
+    return acc
+}
+func main() {
+    r := Rng{ s0: 0, s1: 0, s2: 0, s3: 0 }
+    println("{step(r, 200000)}")
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let c = lowerer.lower().source;
+    // Scope assertions to generated code (the embedded runtime headers
+    // legitimately contain clones and temps).
+    let gen = c
+        .find("// ---- generated code ----")
+        .map(|i| &c[i..])
+        .unwrap_or(&c);
+    // The step loop must call next with the live local (harness
+    // builds without loader namespacing, so the callee is `zz_fn_next`).
+    assert!(
+        gen.contains("zz_fn_next((zz_value[]){ v0 }"),
+        "expected a borrowed call arg, got:\n{gen}"
+    );
+    // ...and neither clone the loop-carried struct nor rebuild it via a
+    // field-clone temp. (`zz_clone(v1)` for the int loop bound is
+    // pre-existing, harmless, and out of scope.)
+    assert!(
+        !gen.contains("zz_clone(v0)") && !gen.contains("_field_obj"),
+        "read-only call args must not clone, got:\n{gen}"
+    );
+}
