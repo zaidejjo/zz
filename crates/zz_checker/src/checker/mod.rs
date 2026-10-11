@@ -173,6 +173,7 @@ pub fn check_program(
         initial_aliases,
         initial_enums,
         HashMap::new(),
+        "",
     )
     .result
 }
@@ -196,6 +197,7 @@ pub fn check_program_with_consts(
         initial_aliases,
         initial_enums,
         initial_consts,
+        "",
     )
     .result
 }
@@ -219,12 +221,43 @@ pub fn check_program_typed(
         initial_aliases,
         initial_enums,
         HashMap::new(),
+        "",
     );
     (out.result, out.span_types)
 }
 
-/// Core pass shared by [`check_program`], [`check_program_with_consts`], and
-/// [`check_program_typed`].
+/// Like [`check_program`], but names the module under check (`fen` for
+/// `fen.zz`) so bindings shadowing the module's own namespace (or an
+/// imported one) warn instead of failing only at runtime (#376, #361).
+/// The loader passes each module's namespace; merged programs and REPL
+/// snippets pass `""` (no single owner).
+pub fn check_program_with_module_ns(
+    program: &Program,
+    initial_bindings: HashMap<String, Type>,
+    initial_funcs: HashMap<String, FuncSig>,
+    initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
+    module_ns: &str,
+) -> CheckResult {
+    check_program_impl(
+        program,
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        initial_aliases,
+        initial_enums,
+        HashMap::new(),
+        module_ns,
+    )
+    .result
+}
+
+/// Core pass shared by [`check_program`], [`check_program_with_consts`],
+/// [`check_program_with_module_ns`], and [`check_program_typed`].
+// Eight params is the honest shape here (six seed maps + consts +
+// module owner); a struct would churn every call site for no benefit.
+#[allow(clippy::too_many_arguments)]
 fn check_program_impl(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
@@ -233,6 +266,7 @@ fn check_program_impl(
     initial_aliases: HashMap<String, AliasSig>,
     initial_enums: HashMap<String, EnumSig>,
     initial_consts: HashMap<String, Span>,
+    module_ns: &str,
 ) -> CheckerOutcome {
     // Resolve explicit decorators first: `@dec func f` becomes `f__inner` +
     // a same-signature wrapper, so all downstream passes see ordinary
@@ -259,6 +293,27 @@ fn check_program_impl(
         initial_enums,
         initial_consts,
     );
+    // Namespace roots whose shadowing breaks runtime resolution while the
+    // check stays green (#376, #361): the module's own namespace plus
+    // every imported namespace head. Any env binding reusing one hides
+    // the namespace object, so qualified calls through it fail at
+    // runtime (`undefined method`/`undefined variable`). Collected up
+    // front (position-independent): an import below the binding still
+    // breaks the same way.
+    if !module_ns.is_empty() {
+        checker.shadow_roots.insert(module_ns.to_string());
+    }
+    for stmt in &program.stmts {
+        if let Stmt::Import { path, alias, .. } = stmt {
+            let head = alias
+                .clone()
+                .or_else(|| path.last().cloned())
+                .unwrap_or_default();
+            if !head.is_empty() {
+                checker.shadow_roots.insert(head);
+            }
+        }
+    }
     // Offset fresh-var ids above any `Var(id)` carried in seed signatures
     // from already-checked modules. Those ids were allocated by a previous
     // checker's unifier; reusing them here would unify unrelated types
@@ -1059,6 +1114,14 @@ pub(crate) struct Checker {
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
     pub(crate) scope: Vec<Arc<str>>,
+    /// Own module namespace for this check (`fen` for `fen.zz`), plus
+    /// every imported namespace head. Any env binding reusing one of
+    /// these names shadows the namespace object at runtime, so
+    /// same-module (or same-import) qualified calls through it fail
+    /// with `undefined method`/`undefined variable` while the check
+    /// stays green (#376, #361). Empty when unknown (REPL, merged HIR
+    /// programs already covered per-module by the loader).
+    pub(crate) shadow_roots: std::collections::HashSet<String>,
 }
 
 impl Checker {
@@ -1114,6 +1177,7 @@ impl Checker {
             scope: Vec::new(),
             link_libs: Vec::new(),
             http_lint: http_lint::HttpLintState::default(),
+            shadow_roots: std::collections::HashSet::new(),
         }
     }
 

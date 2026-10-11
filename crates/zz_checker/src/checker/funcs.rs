@@ -151,13 +151,21 @@ impl Checker {
     }
 
     pub(crate) fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig) {
-        let (name, body) = match stmt {
-            Stmt::Func { name, body, .. } => (name, body),
+        let (name, params, body) = match stmt {
+            Stmt::Func {
+                name, params, body, ..
+            } => (name, params, body),
             _ => unreachable!(),
         };
         self.push_scope();
-        for (pname, pty) in &sig.params {
-            self.define(pname, pty.clone());
+        for (i, (pname, pty)) in sig.params.iter().enumerate() {
+            // Bind with the source span when available (powers precise
+            // diagnostics, e.g. the module-namespace shadow lint); the
+            // signature table itself carries no spans.
+            match params.get(i) {
+                Some(p) => self.define_var_at(&p.name.name, pty.clone(), p.name.span, false),
+                None => self.define(pname, pty.clone()),
+            }
         }
         let prev_ret = self.current_ret.replace(sig.ret.clone());
         let prev_gen = std::mem::replace(&mut self.current_generics, sig.generics.clone());

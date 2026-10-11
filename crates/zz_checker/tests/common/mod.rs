@@ -1,7 +1,7 @@
 //! Shared test helpers for zz_checker integration tests.
 
 use std::collections::HashMap;
-use zz_checker::{check_program, CheckResult, FuncSig, StructSig};
+use zz_checker::{check_program, check_program_with_module_ns, CheckResult, FuncSig, StructSig};
 use zz_frontend::parse;
 
 pub fn check_src(src: &str) -> CheckResult {
@@ -18,6 +18,26 @@ pub fn check_src(src: &str) -> CheckResult {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+    )
+}
+
+/// Check naming the module under check, so the module-namespace shadow
+/// lint (#376, #361) fires like it does through the loader.
+pub fn check_src_with_module_ns(src: &str, module_ns: &str) -> CheckResult {
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    check_program_with_module_ns(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        module_ns,
     )
 }
 

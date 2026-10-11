@@ -17,7 +17,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use zz_checker::{check_program, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type};
+use zz_checker::{
+    check_program_with_module_ns, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type,
+};
 use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
@@ -1912,6 +1914,9 @@ impl Loader {
             // own-only maps (never seeds — entries stay ~30KB, not 460KB).
             // Parse/selective/namespace work above always runs and feeds
             // both paths identically.
+            // Own namespace for the module-namespace shadow lint (#376,
+            // #361). Cloned up front: the check calls below take `&mut self`.
+            let module_ns: String = self.ns_of.get(path).cloned().unwrap_or_default();
             let (mut checked, pending_key): (CheckResult, Option<String>) = if self.use_cache {
                 // Dep-aware hit: the precomputed key covers source + true
                 // transitive deps. Absent key (unresolvable) misses.
@@ -1952,13 +1957,14 @@ impl Loader {
                         None => {
                             self.cache_misses += 1;
                             (
-                                check_program(
+                                check_program_with_module_ns(
                                     &program,
                                     self.bindings.clone(),
                                     std::mem::take(&mut self.funcs),
                                     std::mem::take(&mut self.structs),
                                     std::mem::take(&mut self.aliases),
                                     std::mem::take(&mut self.enums),
+                                    &module_ns,
                                 ),
                                 Some(key),
                             )
@@ -1969,13 +1975,14 @@ impl Loader {
                     None => {
                         self.cache_misses += 1;
                         (
-                            check_program(
+                            check_program_with_module_ns(
                                 &program,
                                 self.bindings.clone(),
                                 std::mem::take(&mut self.funcs),
                                 std::mem::take(&mut self.structs),
                                 std::mem::take(&mut self.aliases),
                                 std::mem::take(&mut self.enums),
+                                &module_ns,
                             ),
                             None,
                         )
@@ -1984,13 +1991,14 @@ impl Loader {
             } else {
                 self.cache_misses += 1;
                 (
-                    check_program(
+                    check_program_with_module_ns(
                         &program,
                         self.bindings.clone(),
                         std::mem::take(&mut self.funcs),
                         std::mem::take(&mut self.structs),
                         std::mem::take(&mut self.aliases),
                         std::mem::take(&mut self.enums),
+                        &module_ns,
                     ),
                     None,
                 )
