@@ -2618,8 +2618,8 @@ fn cross_module_nonunit_block_still_rejected() {
     let r = check_src_with_funcs(main, seed);
     let errs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
     assert!(
-        errs.iter().any(|e| e.contains("type mismatch")),
-        "expected a type-mismatch error, got: {errs:?}"
+        errs.iter().any(|e| e.contains("discarded")),
+        "expected a discarded-value error, got: {errs:?}"
     );
 }
 
@@ -3258,4 +3258,73 @@ fn std_gate_needs_module_owner() {
         r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn branch_trailing_call_reports_at_call_not_cond() {
+    // #388: `if` without `else` used as a statement whose branch ends in
+    // a value call must point at the discarded call — not the condition
+    // with reversed types.
+    let src = "func push_hist(h: [int], x: int) -> [int] { h }\nfunc probe(hist: [int]) -> bool {\n    side := 1\n    if side != 0 {\n        push_hist(hist, side)\n    }\n    true\n}";
+    let r = check_src(src);
+    assert!(has_errors(&r), "must stay an error: {:?}", r.errors);
+    let e = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("discarded"))
+        .expect("expected discarded-value error");
+    assert!(
+        e.message.contains("`[int]`"),
+        "must name the discarded type, got: {}",
+        e.message
+    );
+    let call_at = src.find("push_hist(hist, side)").unwrap();
+    assert_eq!(
+        e.span.map(|s| s.start),
+        Some(call_at as u32),
+        "must point at the call, got: {:?}",
+        e.span
+    );
+}
+
+#[test]
+fn branch_trailing_call_bound_is_fine() {
+    let r = check_src("func push_hist(h: [int], x: int) -> [int] { h }\nfunc probe(hist: [int]) -> bool {\n    side := 1\n    if side != 0 {\n        _h2 := push_hist(hist, side)\n        side = side\n    }\n    true\n}");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("discarded")),
+        "no discarded error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn branch_unit_tail_is_fine() {
+    let r = check_src("func probe(hist: [int]) -> bool {\n    side := 1\n    if side != 0 {\n        side = side + 1\n    }\n    true\n}");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("discarded")),
+        "no discarded error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn if_let_trailing_call_reports_at_call() {
+    // Same discarded-tail rule for `if let` without `else`.
+    let src = "func push_hist(h: [int], x: int) -> [int] { h }\nfunc probe(v: [int]) -> bool {\n    o := .some(1)\n    if let .some(h) = o {\n        push_hist(v, h)\n    }\n    true\n}";
+    let r = check_src(src);
+    assert!(has_errors(&r), "must stay an error: {:?}", r.errors);
+    let e = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("discarded"))
+        .expect("expected discarded-value error");
+    assert!(e.message.contains("`if let`"), "got: {}", e.message);
+    let call_at = src.find("push_hist(v, h)").unwrap();
+    assert_eq!(
+        e.span.map(|s| s.start),
+        Some(call_at as u32),
+        "must point at the call, got: {:?}",
+        e.span
+    );
 }
