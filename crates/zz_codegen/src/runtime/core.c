@@ -7197,6 +7197,14 @@ zz_value zz_fs_read(zz_value path, int *err) {
     }
     zz_str_ptr(out)[n] = '\0';
     out->len = n;
+    // Strict UTF-8 like the VM (`std::fs::read_to_string` rejects invalid
+    // UTF-8; programs branch on read success for binary detection, #277).
+    // EINVAL maps to `invalid_input`, matching the VM's InvalidData.
+    if (!zz_utf8_valid((const unsigned char *)zz_str_ptr(out), n)) {
+        zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&gone);
+        return zz_fs_err1("read", p, EINVAL);
+    }
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
 }
 

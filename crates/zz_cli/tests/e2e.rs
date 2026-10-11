@@ -576,6 +576,11 @@ e2e_success_test!(e2e_stdlib_strings, "stdlib", "strings.zz");
 e2e_success_test!(e2e_stdlib_vectors, "stdlib", "vectors.zz");
 e2e_success_test!(e2e_stdlib_str_utf8_parity, "stdlib", "str_utf8_parity.zz");
 e2e_success_test!(
+    e2e_stdlib_str_trim_unicode_test,
+    "stdlib",
+    "str_trim_unicode_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_vec_nested_str_parity,
     "stdlib",
     "vec_nested_str_parity.zz"
@@ -604,6 +609,11 @@ e2e_success_test!(
     e2e_stdlib_fs_is_generated_test,
     "stdlib",
     "fs_is_generated_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_fs_read_invalid_utf8_test,
+    "stdlib",
+    "fs_read_invalid_utf8_test.zz"
 );
 e2e_success_test!(e2e_stdlib_fs_comprehensive, "stdlib", "fs_comprehensive.zz");
 e2e_success_test!(e2e_stdlib_result_print, "stdlib", "result_print.zz");

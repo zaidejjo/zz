@@ -1183,6 +1183,11 @@ parity_strict!(
     "str_utf8_parity.zz"
 );
 parity_strict!(
+    parity_stdlib_str_trim_unicode_test,
+    "stdlib",
+    "str_trim_unicode_test.zz"
+);
+parity_strict!(
     parity_stdlib_vec_nested_str_parity,
     "stdlib",
     "vec_nested_str_parity.zz"
@@ -1208,6 +1213,11 @@ parity_strict!(
     parity_stdlib_fs_is_generated_test,
     "stdlib",
     "fs_is_generated_test.zz"
+);
+parity_strict!(
+    parity_stdlib_fs_read_invalid_utf8_test,
+    "stdlib",
+    "fs_read_invalid_utf8_test.zz"
 );
 parity_strict!(parity_stdlib_console, "stdlib", "console.zz");
 parity_strict!(parity_stdlib_envmod, "stdlib", "envmod.zz");
