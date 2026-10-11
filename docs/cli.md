@@ -425,15 +425,14 @@ Restructure by extracting shared types into `c.zz`, then both `a` and `b`
 import `c` with no cycle. Cyclic imports remain unsupported by design
 (use a shared leaf module to break the cycle).
 
-### One file, one namespace
+### One file, several namespaces
 
-One file cannot be imported under two different aliases in the same
-program (`import a as x` in one file, `import a as y` in another is an
-error). Struct identity is namespace-qualified (`x.T` vs `y.T` would
-diverge), so the loader keeps a single canonical namespace per file.
-Workaround: have both importers use the same name (or no alias), and
-import the shared file directly. Per-importer alias copies remain
-unsupported — migrate all importers to one canonical import path.
+One file may be imported under several namespaces in the same program
+(`import a as x` in one file, `import a as y` in another composes):
+the first binding wins as canonical and alias references rewrite
+through it, so struct identity stays qualified under one namespace
+(`x.T` and `y.T` would diverge, so they never both exist). Two
+*different* files under one namespace stay an error — alias one side.
 
 ### Dependency sources
 

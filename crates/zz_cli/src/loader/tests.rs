@@ -126,19 +126,104 @@ fn namespace_collision_detected() {
 }
 
 #[test]
-fn two_namespaces_for_one_module_detected() {
+fn same_file_two_namespaces_compose_via_alias() {
+    // #380: one file imported bare and aliased composes instead of
+    // erroring. The first binding wins as canonical; alias references
+    // rewrite through it so seeds keep one identity.
     let dir = temp_project(&[
-        ("main.zz", "import utils\nimport utils as u\n1"),
-        ("utils.zz", "func f() -> int { 1 }"),
+        (
+            "main.zz",
+            "import utils\nimport utils as u\nx := utils.f()\ny := u.f()",
+        ),
+        ("utils.zz", "pub func f() -> int { 1 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+    assert_eq!(result.bindings["main.y"], Type::Int);
     assert!(
-        result
-            .errors
+        result.funcs.contains_key("utils.f"),
+        "canonical seed entry missing: {:?}",
+        result.funcs.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn same_file_alias_before_bare_composes() {
+    // Order-independence: aliased-first also binds once and rewrites.
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import utils as u\nimport utils\nx := u.f()\ny := utils.f()",
+        ),
+        ("utils.zz", "pub func f() -> int { 1 }"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+    assert_eq!(result.bindings["main.y"], Type::Int);
+}
+
+#[test]
+fn dep_submodules_share_stem_across_packages() {
+    // #380: ask.keys + tui.keys coexist via aliases while tui.menu's
+    // internal bare `import tui.keys` keeps working. Path deps stand in
+    // for registry deps (same resolver path).
+    let dir = temp_project(&[
+        (
+            "app/zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nask = { path = \"../askpkg\" }\ntui = { path = \"../tuipkg\" }\n",
+        ),
+        (
+            "app/src/main.zz",
+            "import ask.keys as akeys\nimport tui.keys as tkeys\nimport tui.menu\nimport tui.keys(up)\nx := akeys.up()\ny := tkeys.up()\nz := menu.menu_up()\nw := up()",
+        ),
+        ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
+        (
+            "askpkg/src/keys.zz",
+            "pub func up() -> int { 1 }",
+        ),
+        ("tuipkg/zz.toml", "[package]\nname = \"tui\"\nversion = \"0.1.0\"\n"),
+        ("tuipkg/src/keys.zz", "pub func up() -> int { 2 }"),
+        (
+            "tuipkg/src/menu.zz",
+            "import tui.keys\npub func menu_up() -> int { keys.up() }",
+        ),
+    ]);
+    // Minimal path-dep lockfile (checksum via save, like `zz install`).
+    let mut lock = zz_pm::lock::Lockfile::new();
+    for dep in ["ask", "tui"] {
+        lock.deps.push(zz_pm::lock::LockedDep {
+            name: dep.to_string(),
+            version: "*".to_string(),
+            source: "path".to_string(),
+            hash: String::new(),
+            commit: None,
+            native: None,
+        });
+    }
+    lock.save(&dir.join("app/zz.lock")).expect("write lock");
+    let result = load_program(&dir.join("app/src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+    assert_eq!(result.bindings["main.y"], Type::Int);
+    assert_eq!(result.bindings["main.z"], Type::Int);
+    assert_eq!(result.bindings["main.w"], Type::Int);
+    for want in ["akeys.up", "tkeys.up", "menu.menu_up"] {
+        assert!(
+            result.funcs.contains_key(want),
+            "missing seed entry `{want}`: {:?}",
+            result.funcs.keys().collect::<Vec<_>>()
+        );
+    }
+    // Alias-rewritten references must not orphan their import (#380):
+    // no false `unused import` for the multi-bound spellings.
+    assert!(
+        !diag_texts(&result)
             .iter()
-            .any(|e| e.diags.iter().any(|d| d.message.contains("two namespaces"))),
-        "expected two-namespace error, got: {:?}",
-        result.errors
+            .any(|m| m.contains("unused import")),
+        "alias imports must not warn: {:?}",
+        diag_texts(&result)
     );
 }
 

@@ -145,6 +145,16 @@ struct Loader {
     /// resolves every import; key resolution follows true dependencies
     /// instead of load order.
     dep_edges: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Same-file namespace aliases (`(importer, requested)` → canonical):
+    /// when one file is imported under several namespaces (explicit `as`
+    /// aliases alongside bare or other-aliased imports, #380), the first
+    /// binding wins as the canonical namespace and every other requested
+    /// spelling maps to it — scoped per importing module. Importing
+    /// modules rewrite references through the canonical spelling, so
+    /// seeds, types, and runtime values keep a single identity instead
+    /// of fracturing per alias. Populated during discovery; empty when no
+    /// file is multi-bound (all substitution paths then no-op).
+    ns_aliases: HashMap<(PathBuf, String), String>,
     /// Whether the seed tables have been contributed to `all_*` yet.
     /// `all_*` must contain the seeds (stdlib!) exactly once: the first
     /// succeeding module contributes them (prior modules all errored, so
@@ -263,6 +273,7 @@ fn load_program_impl(
         pkg_cache: HashMap::new(),
         plugin_names: Vec::new(),
         dep_edges: HashMap::new(),
+        ns_aliases: HashMap::new(),
         all_funcs: HashMap::new(),
         all_bindings: HashMap::new(),
         all_structs: HashMap::new(),
@@ -582,6 +593,53 @@ impl Loader {
         entry
     }
 
+    /// Namespace a dependency module's symbols live under in the seeds:
+    /// its bound (first) namespace. Usually the import's own effective
+    /// namespace, but a multi-bound file (#380) answers with its
+    /// canonical spelling instead.
+    fn seed_ns(&self, dep: &Path, fallback: String) -> String {
+        self.ns_of.get(dep).cloned().unwrap_or(fallback)
+    }
+
+    /// Record a same-file namespace alias for later reference rewriting
+    /// (#380): when this import requests `requested` for a file already
+    /// bound under another (canonical) namespace, the importing module
+    /// rewrites `requested.*` references through the canonical spelling.
+    /// No-op for first bindings and repeat imports under one spelling.
+    fn record_ns_alias(&mut self, importer: &Path, requested: &str, dep: &Path) {
+        if let Some(canonical) = self.ns_of.get(dep).cloned() {
+            if canonical != requested {
+                self.ns_aliases
+                    .insert((importer.to_path_buf(), requested.to_string()), canonical);
+            }
+        }
+    }
+
+    /// Selective-import path with the canonical seed namespace last (see
+    /// [`Loader::seed_ns`]). `alias` is the import's own effective
+    /// spelling (`as` alias or last segment); `dep_canon` is the resolved
+    /// dependency file when known.
+    fn canonical_sel_path(
+        &self,
+        imp: &[String],
+        alias: Option<&str>,
+        dep_canon: Option<&Path>,
+    ) -> Vec<String> {
+        let mut sel_path = imp.to_vec();
+        if let Some(a) = alias {
+            if let Some(last) = sel_path.last_mut() {
+                *last = a.to_string();
+            }
+        }
+        if let Some(dep) = dep_canon {
+            let seed_ns = self.seed_ns(dep, sel_path.last().cloned().unwrap_or_default());
+            if let Some(last) = sel_path.last_mut() {
+                *last = seed_ns;
+            }
+        }
+        sel_path
+    }
+
     /// Record an importer → imported edge (deduped). Small vecs; linear
     /// scan is cheaper than a second map.
     fn record_edge(edges: &mut HashMap<PathBuf, Vec<PathBuf>>, importer: &Path, dep: &Path) {
@@ -814,44 +872,29 @@ impl Loader {
                              });
                             continue;
                         }
-                        // A module already loaded under a different
-                        // namespace cannot be re-imported under another one.
-                        if let Some(existing) = self.ns_of.get(&dep) {
-                            let want = module_ns(effective_alias.as_deref(), &candidate);
-                            if existing != &want {
-                                self.errors.push(LoadError {
-                                     name: path.display().to_string(),
-                                     source: source.clone(),
-                                     diags: vec![error_at(
-                                         format!(
-                                             "`{}` is imported under two namespaces: `{existing}` and `{want}`\n\
-                                              hint: each file can only be imported under one namespace; \
-                                              consider using an alias to avoid the conflict",
-                                             candidate.display()
-                                         ),
-                                         Span::new(0, 0),
-                                     )],
-                                 });
-                                continue;
-                            }
-                        }
+                        // Same-file re-imports under another namespace are
+                        // allowed (#380): the alias maps to the canonical
+                        // namespace in `register_ns`, and references
+                        // rewrite through it. Nothing to check here.
                     }
                     self.load_file(&candidate, effective_alias.as_deref())?;
                     // S1 dep edge (package file). Re-canonicalize
                     // defensively (filesystem cache hot).
                     if let Ok(dep) = cache::canon(&candidate) {
                         Self::record_edge(&mut self.dep_edges, &canon, &dep);
+                        // Same-file alias pair for reference rewriting (#380).
+                        let requested = module_ns(effective_alias.as_deref(), &candidate);
+                        self.record_ns_alias(&canon, &requested, &dep);
                     }
                     if is_selective {
-                        // Effective namespace (`as` alias, package name
-                        // for bare imports), matching the registry branch:
-                        // seeds hold `ns.sym`.
-                        let mut sel_path = imp.clone();
-                        if let Some(a) = effective_alias.as_deref() {
-                            if let Some(last) = sel_path.last_mut() {
-                                *last = a.to_string();
-                            }
-                        }
+                        // Seeds hold `ns.sym` under the canonical seed
+                        // namespace (see `canonical_sel_path`).
+                        let dep_canon = cache::canon(&candidate).ok();
+                        let sel_path = self.canonical_sel_path(
+                            &imp,
+                            effective_alias.as_deref(),
+                            dep_canon.as_deref(),
+                        );
                         self.selective_imports
                             .push((canon.clone(), sel_path, imp_items, false));
                     }
@@ -952,14 +995,20 @@ impl Loader {
                             &canon,
                             &cache::canon(&entry).unwrap_or(entry.clone()),
                         );
+                        // Same-file alias pair for reference rewriting (#380).
+                        if let Ok(dep) = cache::canon(&entry) {
+                            self.record_ns_alias(&canon, &alias, &dep);
+                        }
                         if is_selective {
-                            // Deferred to finish(): seed holds `alias.sym`,
-                            // so record the effective namespace, not the
-                            // package name (they differ with `as`).
-                            let mut sel_path = imp.clone();
-                            if let Some(last) = sel_path.last_mut() {
-                                *last = alias.clone();
-                            }
+                            // Deferred to finish(): seeds hold `ns.sym`
+                            // under the canonical seed namespace (see
+                            // `canonical_sel_path`).
+                            let dep_canon = cache::canon(&entry).ok();
+                            let sel_path = self.canonical_sel_path(
+                                &imp,
+                                Some(alias.as_str()),
+                                dep_canon.as_deref(),
+                            );
                             self.selective_imports
                                 .push((entry, sel_path, imp_items, false));
                         }
@@ -983,6 +1032,10 @@ impl Loader {
                         .unwrap_or_else(|| imp.last().cloned().unwrap_or_default());
                     // Cycle + double-namespace diagnostics mirror the
                     // local branch below (importer source, same hints).
+                    // Same-file re-imports under another namespace are
+                    // allowed (#380): the alias maps to the canonical
+                    // namespace in `register_ns`, and references rewrite
+                    // through it.
                     if let Ok(dep) = cache::canon(&candidate) {
                         if self.visiting.contains(&dep) {
                             self.errors.push(LoadError {
@@ -1001,38 +1054,20 @@ impl Loader {
                              });
                             continue;
                         }
-                        if let Some(existing) = self.ns_of.get(&dep) {
-                            let want = module_ns(Some(&eff_ns), &candidate);
-                            if existing != &want {
-                                self.errors.push(LoadError {
-                                     name: path.display().to_string(),
-                                     source: source.clone(),
-                                     diags: vec![error_at(
-                                         format!(
-                                             "`{}` is imported under two namespaces: `{existing}` and `{want}`\n\
-                                              hint: each file can only be imported under one namespace; \
-                                              consider using an alias to avoid the conflict",
-                                             candidate.display()
-                                         ),
-                                         Span::new(0, 0),
-                                     )],
-                                 });
-                                continue;
-                            }
-                        }
                     }
                     self.load_file(&candidate, Some(&eff_ns))?;
                     // S1 dep edge (dependency submodule file).
                     if let Ok(dep) = cache::canon(&candidate) {
                         Self::record_edge(&mut self.dep_edges, &canon, &dep);
+                        // Same-file alias pair for reference rewriting (#380).
+                        self.record_ns_alias(&canon, &eff_ns, &dep);
                     }
                     if is_selective {
-                        // Seeds hold `eff_ns.sym`, so record the effective
-                        // namespace like every other branch.
-                        let mut sel_path = imp.clone();
-                        if let Some(last) = sel_path.last_mut() {
-                            *last = eff_ns.clone();
-                        }
+                        // Seeds hold `ns.sym` under the canonical seed
+                        // namespace (see `canonical_sel_path`).
+                        let dep_canon = cache::canon(&candidate).ok();
+                        let sel_path =
+                            self.canonical_sel_path(&imp, Some(&eff_ns), dep_canon.as_deref());
                         self.selective_imports
                             .push((canon.clone(), sel_path, imp_items, false));
                     }
@@ -1063,45 +1098,26 @@ impl Loader {
                      });
                     continue;
                 }
-                // A module already loaded under a different namespace cannot
-                // be re-imported under another one.
-                if let Some(existing) = self.ns_of.get(&rel_canon) {
-                    let want = module_ns(imp_alias.as_deref(), &rel);
-                    if existing != &want {
-                        self.errors.push(LoadError {
-                             name: path.display().to_string(),
-                             source: source.clone(),
-                             diags: vec![error_at(
-                                 format!(
-                                     "`{}` is imported under two namespaces: `{existing}` and `{want}`\n\
-                                      hint: each file can only be imported under one namespace; \
-                                      consider using an alias to avoid the conflict",
-                                     rel.display()
-                                 ),
-                                 Span::new(0, 0),
-                             )],
-                         });
-                        continue;
-                    }
-                }
+                // Same-file re-imports under another namespace are
+                // allowed (#380): the alias maps to the canonical
+                // namespace in `register_ns`, and references rewrite
+                // through it. Nothing further to check here.
             }
             self.load_file(&rel, imp_alias.as_deref())?;
             // S1 dep edge (local file). `rel_canon` was verified above;
             // re-canonicalize defensively (filesystem cache hot).
             if let Ok(dep) = cache::canon(&rel) {
                 Self::record_edge(&mut self.dep_edges, &canon, &dep);
+                // Same-file alias pair for reference rewriting (#380).
+                let requested = module_ns(imp_alias.as_deref(), &rel);
+                self.record_ns_alias(&canon, &requested, &dep);
             }
             if is_selective {
-                // Store for processing in finish() when all modules are loaded.
-                // Record the effective namespace (`as` alias when present),
-                // matching the registry-package branch below: seeds hold
-                // `alias.sym`, not `file.sym`.
-                let mut sel_path = imp.clone();
-                if let Some(a) = imp_alias.as_deref() {
-                    if let Some(last) = sel_path.last_mut() {
-                        *last = a.to_string();
-                    }
-                }
+                // Seeds hold `ns.sym` under the canonical seed namespace
+                // (see `canonical_sel_path`).
+                let dep_canon = cache::canon(&rel).ok();
+                let sel_path =
+                    self.canonical_sel_path(&imp, imp_alias.as_deref(), dep_canon.as_deref());
                 self.selective_imports
                     .push((canon.clone(), sel_path, imp_items, false));
             }
@@ -1115,7 +1131,15 @@ impl Loader {
         let src = self.sources[&canon].clone();
         if self.register_ns(&ns, &canon, path, &src) {
             let mut program = program;
-            namespace_program(&mut program, &ns);
+            // Same-file alias heads requested by this module's own imports
+            // rewrite through the canonical namespace (#380).
+            let aliases: HashMap<String, String> = self
+                .ns_aliases
+                .iter()
+                .filter(|((imp, _), _)| imp == &canon)
+                .map(|((_, req), c)| (req.clone(), c.clone()))
+                .collect();
+            namespace_program(&mut program, &ns, &aliases);
             self.programs.insert(canon.clone(), program);
             self.order.push(canon);
         }
@@ -1219,24 +1243,20 @@ impl Loader {
 
     /// Register a namespace → module mapping, detecting collisions. Returns
     /// false (and records an error) when two different modules claim the same
-    /// namespace, or one module is claimed by two namespaces.
+    /// namespace. One module under several namespaces is allowed (#380):
+    /// the first binding wins as canonical; import sites record the
+    /// requested→canonical pair (see `record_ns_alias`) so references
+    /// rewrite through one spelling and keep a single value/type identity.
     fn register_ns(&mut self, ns: &str, canon: &Path, display: &Path, source: &str) -> bool {
         if let Some(existing) = self.ns_of.get(canon) {
             if existing != ns {
-                self.errors.push(LoadError {
-                    name: display.display().to_string(),
-                    source: source.to_string(),
-                    diags: vec![error_at(
-                        format!(
-                            "module `{}` is imported under two namespaces: `{existing}` and `{ns}`\n\
-                             hint: each file can only be imported under one namespace; \
-                             have both importers use the same name, or import the file directly without alias",
-                            display.display()
-                        ),
-                        Span::new(0, 0),
-                    )],
-                });
-                return false;
+                // Same file, another namespace: alias, don't error.
+                // (#380: `import tui.keys as tkeys` alongside a bare
+                // `import tui.keys` elsewhere must compose.)
+                if !self.namespaces.contains_key(ns) {
+                    self.namespaces.insert(ns.to_string(), canon.to_path_buf());
+                }
+                return true;
             }
             return true;
         }
@@ -1717,11 +1737,19 @@ impl Loader {
                             new_stmts.push(stmt.clone());
                             // resolve under the effective namespace: the
                             // statement alias when present (`import m as
-                            // a(x)` binds `a.x`, not `m.x`).
-                            let ns = stmt_alias
+                            // a(x)` binds `a.x`, not `m.x`). Canonicalized
+                            // through same-file alias pairs (#380): an
+                            // alias-spelled `tkeys` becomes the bound
+                            // `keys` the seeds actually hold.
+                            let stmt_ns = stmt_alias
                                 .as_deref()
                                 .or_else(|| imp_path.last().map(String::as_str))
                                 .unwrap_or("");
+                            let ns = self
+                                .ns_aliases
+                                .get(&(path.clone(), stmt_ns.to_string()))
+                                .cloned()
+                                .unwrap_or_else(|| stmt_ns.to_string());
                             let prefix = format!("{ns}.");
                             for item in items {
                                 match item {
@@ -2061,6 +2089,27 @@ impl Loader {
                 );
             }
             let mut diags = checked.errors;
+            // Same-file alias imports (#380) always read as unused: references
+            // through the alias head rewrite to the canonical spelling before
+            // checking, but the import statement still loads the file and feeds
+            // the alias mapping — removing it would break the load. Drop that
+            // false positive (only when this module actually requested the
+            // alias spelling).
+            diags.retain(|d| {
+                if d.severity != zz_frontend::diag::Severity::Warning {
+                    return true;
+                }
+                let Some(alias) = d
+                    .message
+                    .strip_prefix("unused import `")
+                    .and_then(|s| s.strip_suffix('`'))
+                else {
+                    return true;
+                };
+                !self
+                    .ns_aliases
+                    .contains_key(&(path.clone(), alias.to_string()))
+            });
             if has_errors {
                 // Upgrade generic "undefined variable / unknown struct / no
                 // field" errors into targeted "this item is private — add
@@ -2251,7 +2300,8 @@ impl Loader {
             programs.push(program);
         }
 
-        let import_aliases = collect_import_aliases(&programs, &self.funcs);
+        let import_aliases =
+            collect_import_aliases(&programs, &self.order, &self.ns_aliases, &self.funcs);
         LoadResult {
             programs,
             files,
@@ -2289,12 +2339,32 @@ impl Loader {
 /// First registration wins, mirroring seed shadowing. Only used as a
 /// miss-only fallback for generic-function calls (generics have no
 /// value binding); locals, seed entries and Decls take precedence.
+///
+/// Qualified spellings rewrite through same-file alias pairs (#380): an
+/// `as`-spelled `tkeys.Foo` becomes the canonical `keys.Foo` the seeds
+/// actually hold. `order[i]` is the importer of `programs[i]`.
 fn collect_import_aliases(
     programs: &[Program],
+    order: &[PathBuf],
+    ns_aliases: &HashMap<(PathBuf, String), String>,
     seed_funcs: &HashMap<String, FuncSig>,
 ) -> HashMap<String, String> {
+    // `programs[i]` was checked for `order[i]`; lengths stay in lockstep
+    // by construction in `finish`.
+    debug_assert_eq!(programs.len(), order.len());
+    // Rewrite an alias-spelled qualified name through this importer's
+    // same-file pairs; canonical and ordinary spellings pass through.
+    let canonicalize = |importer: &PathBuf, qualified: String| -> String {
+        match qualified.split_once('.') {
+            Some((head, _)) => match ns_aliases.get(&(importer.clone(), head.to_string())) {
+                Some(canon) => format!("{canon}.{}", &qualified[head.len() + 1..]),
+                None => qualified,
+            },
+            None => qualified,
+        }
+    };
     let mut aliases = HashMap::new();
-    for program in programs {
+    for (program, importer) in programs.iter().zip(order.iter()) {
         for stmt in &program.stmts {
             let Stmt::Import {
                 path, alias, items, ..
@@ -2318,7 +2388,7 @@ fn collect_import_aliases(
                         let target = alias.as_ref().unwrap_or(name);
                         aliases
                             .entry(target.clone())
-                            .or_insert_with(|| format!("{ns}.{name}"));
+                            .or_insert_with(|| canonicalize(importer, format!("{ns}.{name}")));
                     }
                     ImportItem::Wildcard { .. } => {
                         let prefix = format!("{ns}.");
@@ -2326,6 +2396,18 @@ fn collect_import_aliases(
                             if let Some(bare) = key.strip_prefix(&prefix) {
                                 if !bare.is_empty() && !bare.contains('.') {
                                     aliases.entry(bare.to_string()).or_insert(key.clone());
+                                }
+                            }
+                        }
+                        // Wildcard under an alias spelling: the seed holds
+                        // the canonical namespace instead.
+                        if let Some(canon) = ns_aliases.get(&(importer.clone(), ns.to_string())) {
+                            let prefix = format!("{canon}.");
+                            for key in seed_funcs.keys() {
+                                if let Some(bare) = key.strip_prefix(&prefix) {
+                                    if !bare.is_empty() && !bare.contains('.') {
+                                        aliases.entry(bare.to_string()).or_insert(key.clone());
+                                    }
                                 }
                             }
                         }
@@ -2341,8 +2423,10 @@ fn collect_import_aliases(
 /// - top-level `func foo` becomes `func ns.foo`,
 /// - top-level `x := ...` becomes `x := ...` with binding name `ns.x`,
 /// - references to those names (`Expr::Ident`) become `Expr::Path([ns, name])`
-///   unless shadowed by a local binding.
-fn namespace_program(program: &mut Program, ns: &str) {
+///   unless shadowed by a local binding,
+/// - same-file alias heads (`tkeys` bound alongside `keys`, #380) rewrite
+///   through the canonical namespace from `ns_aliases`.
+fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<String, String>) {
     let mut top = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
@@ -2359,6 +2443,7 @@ fn namespace_program(program: &mut Program, ns: &str) {
         }
     }
     let mut rw = rewrite::Rewriter::new(ns, &top);
+    rw.ns_aliases = ns_aliases.clone();
     // Imported namespace heads resolve on their own; the Call rewriter
     // must leave `alias.func(...)` paths untouched.
     for stmt in &program.stmts {
