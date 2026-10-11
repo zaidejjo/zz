@@ -26,6 +26,8 @@ uuid = { version = "1", features = ["v4", "v7"] }
 rustls = { workspace = true }
 webpki-roots = "1"
 rustls-pki-types = "1"
+rustls-pemfile = "2.2.0"
+socket2 = "0.6"
 
 [dev-dependencies]
 rcgen = "0.13"

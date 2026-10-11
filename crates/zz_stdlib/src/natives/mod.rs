@@ -3074,6 +3074,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("read", 2, net::tcp_read),
         ("read_line", 1, net::tcp_readline),
         ("read_bytes", 2, net::tcp_read_bytes),
+        ("read_exact", 2, net::tcp_read_exact),
         ("write", 2, net::tcp_write),
         ("write_bytes", 2, net::tcp_write_bytes),
         ("close", 1, net::tcp_shutdown),
@@ -3112,6 +3113,140 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 2,
             f: net::set_write_timeout,
+        },
+    );
+    m.insert(
+        "std.net.tcp_read_exact".into(),
+        NativeEntry {
+            arity: 2,
+            f: net::tcp_read_exact,
+        },
+    );
+    m.insert(
+        "std.net.tls_listen".into(),
+        NativeEntry {
+            arity: 3,
+            f: net::tls::tls_listen,
+        },
+    );
+    m.insert(
+        "std.net.tls_accept".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::tls::tls_accept,
+        },
+    );
+    m.insert(
+        "std.net.tls_listener_close".into(),
+        NativeEntry {
+            arity: 1,
+            f: net::tls::tls_listener_close,
+        },
+    );
+    for (name, arity, func) in [
+        (
+            "accept",
+            1_usize,
+            net::tls::tls_accept as zz_runtime::NativeFn,
+        ),
+        ("close", 1, net::tls::tls_listener_close),
+    ] {
+        m.insert(
+            format!("tls_listener.{name}"),
+            NativeEntry { arity, f: func },
+        );
+        m.insert(
+            format!("std.tls_listener.{name}"),
+            NativeEntry { arity, f: func },
+        );
+    }
+    // std.net — TLS client (VM adapters over zz_native_rt::tls_conn).
+    m.insert(
+        "std.net.tls_connect".into(),
+        NativeEntry {
+            arity: 3,
+            f: net::tls::tls_connect,
+        },
+    );
+    m.insert(
+        "std.net.tls_connect_with_ca".into(),
+        NativeEntry {
+            arity: 4,
+            f: net::tls::tls_connect_with_ca,
+        },
+    );
+    m.insert(
+        "std.net.tls_connect_insecure".into(),
+        NativeEntry {
+            arity: 3,
+            f: net::tls::tls_connect_insecure,
+        },
+    );
+    for (name, arity, func) in [
+        (
+            "tls_write",
+            2_usize,
+            net::tls::tls_write as zz_runtime::NativeFn,
+        ),
+        ("tls_write_bytes", 2, net::tls::tls_write_bytes),
+        ("tls_read", 2, net::tls::tls_read),
+        ("tls_read_bytes", 2, net::tls::tls_read_bytes),
+        ("tls_read_exact", 2, net::tls::tls_read_exact),
+        ("tls_readline", 1, net::tls::tls_readline),
+        ("tls_set_read_timeout", 2, net::tls::tls_set_read_timeout),
+        ("tls_set_write_timeout", 2, net::tls::tls_set_write_timeout),
+        ("tls_close", 1, net::tls::tls_close),
+        ("tls_shutdown", 1, net::tls::tls_close),
+        ("tls_readline", 1, net::tls::tls_readline),
+        ("tls_peer_addr", 1, net::tls::tls_peer_addr),
+    ] {
+        m.insert(format!("std.net.{name}"), NativeEntry { arity, f: func });
+        m.insert(format!("net.{name}"), NativeEntry { arity, f: func });
+    }
+    // `tls.*` method namespace (tag dispatch for Opaque("tls")).
+    for (name, arity, func) in [
+        (
+            "write",
+            2_usize,
+            net::tls::tls_write as zz_runtime::NativeFn,
+        ),
+        ("write_bytes", 2, net::tls::tls_write_bytes),
+        ("read", 2, net::tls::tls_read),
+        ("read_bytes", 2, net::tls::tls_read_bytes),
+        ("read_exact", 2, net::tls::tls_read_exact),
+        ("read_line", 1, net::tls::tls_readline),
+        ("set_read_timeout", 2, net::tls::tls_set_read_timeout),
+        ("set_write_timeout", 2, net::tls::tls_set_write_timeout),
+        ("close", 1, net::tls::tls_close),
+        ("shutdown", 1, net::tls::tls_close),
+        ("peer_addr", 1, net::tls::tls_peer_addr),
+    ] {
+        m.insert(format!("tls.{name}"), NativeEntry { arity, f: func });
+        m.insert(format!("std.tls.{name}"), NativeEntry { arity, f: func });
+    }
+    for (name, arity, func) in [
+        (
+            "connect",
+            3_usize,
+            net::tls::tls_connect as zz_runtime::NativeFn,
+        ),
+        ("connect_insecure", 3, net::tls::tls_connect_insecure),
+    ] {
+        m.insert(format!("tls.{name}"), NativeEntry { arity, f: func });
+        m.insert(format!("std.tls.{name}"), NativeEntry { arity, f: func });
+    }
+    m.insert(
+        "tls.connect_with_ca".into(),
+        NativeEntry {
+            arity: 4,
+            f: net::tls::tls_connect_with_ca,
+        },
+    );
+    m.insert(
+        "std.tls.connect_with_ca".into(),
+        NativeEntry {
+            arity: 4,
+            f: net::tls::tls_connect_with_ca,
         },
     );
 

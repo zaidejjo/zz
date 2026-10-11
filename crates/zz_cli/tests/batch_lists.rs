@@ -125,6 +125,7 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ),
     ("stdlib/fs_comprehensive.zz", "spawn/timing-sensitive"),
     ("stdlib/net_tcp_test.zz", "binds ports (collide in batch)"),
+    ("stdlib/net_tls_test.zz", "binds ports (collide in batch)"),
     ("stdlib/input_chained.zz", "needs .stdin (shared in batch)"),
     (
         "stdlib/http_request_response.zz",
