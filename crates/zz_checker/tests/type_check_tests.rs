@@ -1,7 +1,8 @@
 mod common;
 
 use common::{
-    check_src, check_src_with_funcs, check_src_with_funcs_and_structs, errors_contain, has_errors,
+    check_src, check_src_with_funcs, check_src_with_funcs_and_structs, check_src_with_module_ns,
+    errors_contain, has_errors,
 };
 use std::collections::HashMap;
 use zz_checker::type_::Type;
@@ -2897,5 +2898,81 @@ fn unreachable_after_return_warns() {
     assert!(
         !has_errors(&r),
         "unreachable must be a warning, not an error"
+    );
+}
+
+#[test]
+fn param_shadowing_module_name_warns() {
+    // #376: a param named after its own module shadows the namespace
+    // object, so same-module helper calls fail at runtime while the
+    // check stays green. Must warn (not error) with a rename fix.
+    let r = check_src_with_module_ns("func parse(fen: str) -> str {\n    fen\n}", "fen");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    let w = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("shadows a module namespace"))
+        .expect("expected shadow warning");
+    assert!(
+        w.fixits.iter().any(|f| f.replacement == "fen_local"),
+        "expected rename fixit, got: {:?}",
+        w.fixits
+    );
+}
+
+#[test]
+fn local_shadowing_module_name_warns() {
+    // #361: `lib9 := []` inside `lib9` breaks `helper(...)` at runtime.
+    let r = check_src_with_module_ns("func outer() -> int {\n    lib9 := 1\n    lib9\n}", "lib9");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("`lib9` shadows a module namespace")),
+        "expected shadow warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn binding_shadowing_imported_namespace_warns() {
+    // Same hazard through imports: a local named `vec` hides
+    // `vec.push` resolution the same way.
+    let r = check_src_with_module_ns(
+        "import std.vec\nfunc f() -> int {\n    vec := 1\n    vec\n}",
+        "m",
+    );
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("`vec` shadows a module namespace")),
+        "expected shadow warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unrelated_names_do_not_shadow_warn() {
+    let r = check_src_with_module_ns("func parse(text: str) -> str {\n    text\n}", "fen");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("shadows a module namespace")),
+        "no shadow warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shadow_lint_needs_module_owner() {
+    // Without a module owner (REPL, merged programs) nothing fires.
+    let r = check_src("func parse(fen: str) -> str {\n    fen\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("shadows a module namespace")),
+        "no shadow warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
