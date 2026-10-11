@@ -1077,3 +1077,176 @@ fn vm_if_let_result_does_not_alias_later_slots() {
         .expect("call main");
     assert_eq!(out, Value::Int(7));
 }
+
+/// `s.f = v` with pure `v` fuses to [`Op::SetFieldTake`] (#242).
+#[test]
+fn vm_fused_field_store_emits_set_field_take() {
+    let chunk = compile_with_push_native(
+        "struct W { f: [int], g: int }\ns := W{f: [], g: 0}\ns.f = [1, 2]\n",
+    );
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::SetFieldTake { .. })),
+        "expected fused SetFieldTake, got {:?}",
+        chunk.code
+    );
+}
+
+/// `s.f = s.f + v` fuses to [`Op::FieldBinopTake`] (#242).
+#[test]
+fn vm_fused_field_binop_emits_field_binop_take() {
+    let chunk =
+        compile_with_push_native("struct W { s: str }\ns := W{s: \"a\"}\ns.s = s.s + \"b\"\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::FieldBinopTake { .. })),
+        "expected fused FieldBinopTake, got {:?}",
+        chunk.code
+    );
+}
+
+/// `s.f[i] = v` fuses to [`Op::SetFieldIndexTake`] (#242).
+#[test]
+fn vm_fused_field_index_store_emits_set_field_index_take() {
+    let chunk = compile_with_push_native("struct W { f: [int] }\ns := W{f: [0]}\ns.f[0] = 9\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::SetFieldIndexTake { .. })),
+        "expected fused SetFieldIndexTake, got {:?}",
+        chunk.code
+    );
+}
+
+/// `s.f[i]` reads fuse to [`Op::GetFieldIndex`] (#242).
+#[test]
+fn vm_fused_field_index_read_emits_get_field_index() {
+    let chunk = compile_with_push_native("struct W { f: [int] }\ns := W{f: [7]}\nx := s.f[0]\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::GetFieldIndex { .. })),
+        "expected fused GetFieldIndex, got {:?}",
+        chunk.code
+    );
+}
+
+/// Stores mentioning the home fall back (no fusion, generic path).
+#[test]
+fn vm_field_store_mentioning_home_stays_generic() {
+    let chunk =
+        compile_with_push_native("struct W { f: [int], g: int }\ns := W{f: [], g: 0}\ns.f = s.g\n");
+    assert!(
+        !has_op(&chunk, |op| matches!(
+            op,
+            Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } | Op::SetFieldIndexTake { .. }
+        )),
+        "mentioning store must not fuse, got {:?}",
+        chunk.code
+    );
+}
+
+/// Differential: Doc-shaped workloads agree between VM and tree-walker,
+/// including stores, indexed stores, concat accumulation, and indexed
+/// reads through struct fields (#242).
+#[test]
+fn vm_tree_agree_on_doc_shapes() {
+    for src in [
+        "struct D { k: str, a: [str], n: [int] }\nd := D{k: \"\", a: [], n: []}\nd.k = d.k + \"I\"\nd.a = vec.push(d.a, \"s\")\nd.n = vec.push(d.n, 1)\nd.k",
+        "struct D { k: str, a: [str], n: [int] }\nd := D{k: \"\", a: [], n: []}\nd.k = d.k + \"I\"\nd.a = vec.push(d.a, \"s\")\nd.a[0]",
+        "struct D { t: [int] }\nd := D{t: [5, 6]}\nd.t[0] = 9\nd.t[0] + d.t[1]",
+        "struct D { t: [int] }\nd := D{t: [5]}\nx := d.t[0]\nx",
+        "struct D { k: str }\nfunc cat(d: D, s: str) -> D {\n    d.k = d.k + s\n    d\n}\nd := D{k: \"a\"}\ne := cat(d, \"b\")\nd.k + \"/\" + e.k",
+    ] {
+        assert_same(src);
+    }
+}
+
+/// Error parity: fused stores/reads report the generic errors.
+#[test]
+fn vm_fused_field_error_parity() {
+    // Index out of bounds through a fused read.
+    let (vm, tree) = (
+        run_src("struct W { f: [int] }\ns := W{f: [1]}\ns.f[5]"),
+        run_tree("struct W { f: [int] }\ns := W{f: [1]}\ns.f[5]"),
+    );
+    match (&vm, &tree) {
+        (Err(a), Err(b)) => assert_eq!(a.message, b.message, "OOB messages differ"),
+        _ => panic!("both must error: {vm:?} vs {tree:?}"),
+    }
+    // Type error through a fused binop store.
+    let (vm, tree) = (
+        run_src("struct W { s: str }\ns := W{s: \"a\"}\ns.s = s.s + 1\ns.s"),
+        run_tree("struct W { s: str }\ns := W{s: \"a\"}\ns.s = s.s + 1\ns.s"),
+    );
+    match (&vm, &tree) {
+        (Err(a), Err(b)) => assert_eq!(a.message, b.message, "binop messages differ"),
+        _ => panic!("both must error: {vm:?} vs {tree:?}"),
+    }
+    // Missing field through a fused store.
+    let (vm, tree) = (
+        run_src("struct W { f: int }\ns := W{f: 1}\ns.nope = 2\ns.f"),
+        run_tree("struct W { f: int }\ns := W{f: 1}\ns.nope = 2\ns.f"),
+    );
+    match (&vm, &tree) {
+        (Err(a), Err(b)) => assert_eq!(a.message, b.message, "missing-field messages differ"),
+        _ => panic!("both must error: {vm:?} vs {tree:?}"),
+    }
+}
+
+/// `len(s.f)` fuses to [`Op::LenField`] (#242).
+#[test]
+fn vm_fused_len_field_emits_len_field() {
+    let parsed = parse("struct W { f: [int] }\ns := W{f: [1, 2]}\nx := len(s.f)\n");
+    assert!(parsed.errors.is_empty());
+    let natives: Arc<std::collections::HashSet<String>> = Arc::new(
+        ["vec.push".to_string(), "len".to_string()]
+            .into_iter()
+            .collect(),
+    );
+    let chunk = Compiler::compile_program_with_natives(&parsed.program, natives);
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::LenField { .. })),
+        "expected fused LenField, got {:?}",
+        chunk.code
+    );
+}
+
+/// Differential: fused `len(s.f)` agrees, including strings, dicts,
+/// missing fields, and unsized fields (#242).
+#[test]
+fn vm_tree_agree_on_len_field() {
+    for src in [
+        "struct W { f: [int] }\ns := W{f: [1, 2, 3]}\nlen(s.f)",
+        "struct W { f: str }\ns := W{f: \"héllo\"}\nlen(s.f)",
+        "struct W { f: [int] }\ns := W{f: []}\nlen(s.f)",
+    ] {
+        assert_same(src);
+    }
+    for src in [
+        "struct W { f: int }\ns := W{f: 1}\nlen(s.f)",
+        "struct W { f: int }\ns := W{f: 1}\nlen(s.nope)",
+    ] {
+        let (vm, tree) = (run_src(src), run_tree(src));
+        match (&vm, &tree) {
+            (Err(a), Err(b)) => assert_eq!(a.message, b.message, "len messages differ"),
+            _ => panic!("both must error: {vm:?} vs {tree:?}"),
+        }
+    }
+}
+
+/// Short-circuit operators never fuse (`eval_binary` cannot execute
+/// them; forcing the right side would diverge).
+#[test]
+fn vm_short_circuit_field_binop_stays_generic() {
+    for src in [
+        "struct W { f: bool }\ns := W{f: true}\ns.f = s.f && true\n",
+        "struct W { f: bool }\ns := W{f: false}\ns.f = s.f || true\n",
+    ] {
+        let chunk = compile_with_push_native(src);
+        assert!(
+            !has_op(&chunk, |op| matches!(op, Op::FieldBinopTake { .. })),
+            "short-circuit must not fuse, got {:?}",
+            chunk.code
+        );
+        assert_same(src);
+    }
+    // Side-effect order: the right side runs only when reached.
+    assert_same(
+        "struct W { f: bool, n: int }\nfunc bump(w: W) -> bool {\n    w.n = w.n + 1\n    true\n}\ns := W{f: false, n: 0}\ns.f = s.f && bump(s)\ns.n",
+    );
+}

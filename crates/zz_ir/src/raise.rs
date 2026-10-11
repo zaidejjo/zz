@@ -319,6 +319,53 @@ impl<'a> Raiser<'a> {
                 method: self.str(*method)?,
                 span: VmSpan::default(),
             }),
+            Op::SetFieldTake {
+                home_slot,
+                home_var,
+                field,
+            } => Ok(VmOp::SetFieldTake {
+                home: self.raise_home(home_slot, home_var)?,
+                field: self.str(*field)?,
+                span: VmSpan::default(),
+            }),
+            Op::SetFieldIndexTake {
+                home_slot,
+                home_var,
+                field,
+            } => Ok(VmOp::SetFieldIndexTake {
+                home: self.raise_home(home_slot, home_var)?,
+                field: self.str(*field)?,
+                span: VmSpan::default(),
+            }),
+            Op::FieldBinopTake {
+                home_slot,
+                home_var,
+                field,
+                op,
+            } => Ok(VmOp::FieldBinopTake {
+                home: self.raise_home(home_slot, home_var)?,
+                field: self.str(*field)?,
+                op: Self::raise_binop(*op),
+                span: VmSpan::default(),
+            }),
+            Op::GetFieldIndex {
+                home_slot,
+                home_var,
+                field,
+            } => Ok(VmOp::GetFieldIndex {
+                home: self.raise_home(home_slot, home_var)?,
+                field: self.str(*field)?,
+                span: VmSpan::default(),
+            }),
+            Op::LenField {
+                home_slot,
+                home_var,
+                field,
+            } => Ok(VmOp::LenField {
+                home: self.raise_home(home_slot, home_var)?,
+                field: self.str(*field)?,
+                span: VmSpan::default(),
+            }),
             Op::IntAdd => Ok(VmOp::IntAdd(VmSpan::default())),
             Op::IntSub => Ok(VmOp::IntSub(VmSpan::default())),
             Op::IntMul => Ok(VmOp::IntMul(VmSpan::default())),

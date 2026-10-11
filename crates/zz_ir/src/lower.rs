@@ -528,6 +528,49 @@ impl<'a> Lowerer<'a> {
                     method: self.intern(method),
                 }])
             }
+            VmOp::SetFieldTake { home, field, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::SetFieldTake {
+                    home_slot,
+                    home_var,
+                    field: self.intern(field),
+                }])
+            }
+            VmOp::SetFieldIndexTake { home, field, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::SetFieldIndexTake {
+                    home_slot,
+                    home_var,
+                    field: self.intern(field),
+                }])
+            }
+            VmOp::FieldBinopTake {
+                home, field, op, ..
+            } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::FieldBinopTake {
+                    home_slot,
+                    home_var,
+                    field: self.intern(field),
+                    op: Self::lower_binop(op),
+                }])
+            }
+            VmOp::GetFieldIndex { home, field, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::GetFieldIndex {
+                    home_slot,
+                    home_var,
+                    field: self.intern(field),
+                }])
+            }
+            VmOp::LenField { home, field, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::LenField {
+                    home_slot,
+                    home_var,
+                    field: self.intern(field),
+                }])
+            }
             VmOp::SlotAddInt { dst, src } => Ok(vec![
                 Op::LoadSlot(*dst),
                 Op::LoadSlot(*src),

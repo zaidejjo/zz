@@ -1,3 +1,4 @@
+mod move_fuse;
 mod tree_walker;
 
 #[cfg(test)]
