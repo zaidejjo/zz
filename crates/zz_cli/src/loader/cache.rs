@@ -487,6 +487,73 @@ pub(crate) fn manifest_lock(
     Some((man?, lck?))
 }
 
+/// Memoized dependency file probes: `entry_in` (3 `is_file` stats per
+/// dep) and `submodule_in` (2 stats) otherwise re-stat the same
+/// `vendor/`/CAS/path-dep candidates for every importer (#233, item 3).
+/// Dependency directories never change mid-run (discovery is upfront;
+/// `--fix` only rewrites project `.zz` files), so results memoize for
+/// the process lifetime like [`canon`] — including negatives. Eviction
+/// only costs future hits, never correctness.
+/// Probe memo table: (package dir, probe key) → resolved file (or `None`
+/// when no candidate exists). Shared shape for [`ENTRY_MEMO`] and
+/// [`SUBMODULE_MEMO`] (clippy `type_complexity` would fire on repeats).
+type ProbeMemo = std::sync::Mutex<HashMap<(PathBuf, String), Option<PathBuf>>>;
+
+static ENTRY_MEMO: std::sync::OnceLock<ProbeMemo> = std::sync::OnceLock::new();
+static SUBMODULE_MEMO: std::sync::OnceLock<ProbeMemo> = std::sync::OnceLock::new();
+
+/// Memoized dependency entry-file probe (`<pkgdir>/src/main.zz`,
+/// `src/<dep>.zz`, `<dep>.zz`). `probe` stats the filesystem on miss.
+pub(crate) fn entry_in_memo(
+    pkg_dir: &std::path::Path,
+    dep_name: &str,
+    probe: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let key = (pkg_dir.to_path_buf(), dep_name.to_string());
+    if let Some(hit) = ENTRY_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).cloned())
+    {
+        return hit;
+    }
+    let v = probe();
+    if let Ok(mut m) = ENTRY_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        memo_capped_insert(&mut m, MAX_FS_ENTRIES, key, v.clone());
+    }
+    v
+}
+
+/// Memoized dependency submodule probe (`<depdir>/src/<mod...>.zz`,
+/// `<depdir>/<mod...>.zz`). `rest` is the dotted path below the dep.
+pub(crate) fn submodule_in_memo(
+    pkg_dir: &std::path::Path,
+    rest: &[String],
+    probe: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let key = (pkg_dir.to_path_buf(), rest.join("/"));
+    if let Some(hit) = SUBMODULE_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).cloned())
+    {
+        return hit;
+    }
+    let v = probe();
+    if let Ok(mut m) = SUBMODULE_MEMO
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        memo_capped_insert(&mut m, MAX_FS_ENTRIES, key, v.clone());
+    }
+    v
+}
+
 /// Isolated cache dir + serialized env for cache-behavior tests.
 ///
 /// Parallel tests share the process env, so XDG flips must be mutually
@@ -799,6 +866,60 @@ mod tests {
         let missing = dir.join("nope.zz");
         assert!(canon(&missing).is_err(), "absent path errors");
         assert!(canon(&missing).is_err(), "negative hit stays error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entry_and_submodule_memos_cache_probes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Process-global tables: unique dirs per test (pids collide
+        // across parallel tests only via the same dir — include a
+        // per-test tag).
+        let dir = std::env::temp_dir().join(format!(
+            "zz-unit-entrymemo-{}-{}",
+            std::process::id(),
+            "233a"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src").join("main.zz"),
+            b"pub func f() -> int { 1 }\n",
+        )
+        .unwrap();
+        let calls = AtomicUsize::new(0);
+        let probe = || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Some(dir.join("src").join("main.zz"))
+        };
+        let first = entry_in_memo(&dir, "some-dep-233a", probe);
+        assert!(first.is_some(), "positive probe");
+        let calls2 = AtomicUsize::new(0);
+        let second = entry_in_memo(&dir, "some-dep-233a", || {
+            calls2.fetch_add(1, Ordering::Relaxed);
+            None
+        });
+        assert_eq!(first, second, "repeat must serve memoized");
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "probe ran once");
+        assert_eq!(calls2.load(Ordering::Relaxed), 0, "repeat must not probe");
+        // Different dep name misses (same dir).
+        assert!(
+            entry_in_memo(&dir, "other-dep-233a", || None).is_none(),
+            "negative probe"
+        );
+        assert!(
+            entry_in_memo(&dir, "other-dep-233a", || {
+                panic!("negative hit must not re-probe")
+            })
+            .is_none(),
+            "negative hit stands"
+        );
+        // Submodule memo keyed by (dir, rest path).
+        let rest = vec!["mod0".to_string()];
+        let sub = submodule_in_memo(&dir, &rest, || Some(dir.join("src").join("main.zz")));
+        assert!(sub.is_some());
+        let sub2 = submodule_in_memo(&dir, &rest, || panic!("submodule hit must not re-probe"));
+        assert_eq!(sub, sub2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

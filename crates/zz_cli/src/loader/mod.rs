@@ -385,14 +385,18 @@ fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf
 }
 
 /// Entry-file convention inside a dependency package directory.
+/// Results memoize per (`pkg_dir`, `dep_name`) process-wide (#233):
+/// every bare dep import otherwise re-stats the same 3 candidates.
 fn entry_in(pkg_dir: &Path, dep_name: &str) -> Option<PathBuf> {
-    [
-        pkg_dir.join("src").join("main.zz"),
-        pkg_dir.join("src").join(format!("{dep_name}.zz")),
-        pkg_dir.join(format!("{dep_name}.zz")),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file())
+    cache::entry_in_memo(pkg_dir, dep_name, || {
+        [
+            pkg_dir.join("src").join("main.zz"),
+            pkg_dir.join("src").join(format!("{dep_name}.zz")),
+            pkg_dir.join(format!("{dep_name}.zz")),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+    })
 }
 
 /// Submodule file inside a dependency package directory for dotted
@@ -402,18 +406,20 @@ fn entry_in(pkg_dir: &Path, dep_name: &str) -> Option<PathBuf> {
 /// file only when it positively exists — otherwise the importer falls
 /// through to legacy relative resolution untouched.
 fn submodule_in(pkg_dir: &Path, rest: &[String]) -> Option<PathBuf> {
-    let mut under_src = PathBuf::from("src");
-    let mut at_root = PathBuf::new();
-    for seg in rest {
-        under_src = under_src.join(seg);
-        at_root = at_root.join(seg);
-    }
-    [
-        pkg_dir.join(&under_src).with_extension("zz"),
-        pkg_dir.join(&at_root).with_extension("zz"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file())
+    cache::submodule_in_memo(pkg_dir, rest, || {
+        let mut under_src = PathBuf::from("src");
+        let mut at_root = PathBuf::new();
+        for seg in rest {
+            under_src = under_src.join(seg);
+            at_root = at_root.join(seg);
+        }
+        [
+            pkg_dir.join(&under_src).with_extension("zz"),
+            pkg_dir.join(&at_root).with_extension("zz"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+    })
 }
 
 /// Package directory of a registry/git/path dependency for dotted imports
@@ -799,28 +805,42 @@ impl Loader {
                     let ns = imp_alias
                         .clone()
                         .unwrap_or_else(|| imp.last().cloned().unwrap_or_else(|| module.clone()));
-                    match register_module_namespace(
-                        &module,
-                        &ns,
-                        &mut self.funcs,
-                        &mut self.natives,
-                    ) {
-                        Err(msg) => {
-                            self.errors.push(LoadError {
-                                 name: path.display().to_string(),
-                                 source: source.clone(),
-                                 diags: vec![error_at(
-                                     format!("{msg}\n\
-                                              hint: this may occur if the stdlib module exports a conflicting name"),
-                                     Span::new(0, 0),
-                                 )],
-                             });
-                            continue;
+                    // Same (module, ns) pair already copied by an earlier
+                    // importer (#233): the std tables are immutable, so the
+                    // entries are byte-identical — skip the re-copy. The
+                    // namespace claim + alias/module bookkeeping below
+                    // still run (idempotent for repeats, and they own
+                    // collision diagnostics).
+                    let std_canon = PathBuf::from(format!("std:{module}"));
+                    let fresh_copy = self
+                        .namespaces
+                        .get(&ns)
+                        .map(|owner| *owner != std_canon)
+                        .unwrap_or(true);
+                    if fresh_copy {
+                        match register_module_namespace(
+                            &module,
+                            &ns,
+                            &mut self.funcs,
+                            &mut self.natives,
+                        ) {
+                            Err(msg) => {
+                                self.errors.push(LoadError {
+                                     name: path.display().to_string(),
+                                     source: source.clone(),
+                                     diags: vec![error_at(
+                                         format!("{msg}\n\
+                                                  hint: this may occur if the stdlib module exports a conflicting name"),
+                                         Span::new(0, 0),
+                                     )],
+                                 });
+                                continue;
+                            }
+                            // Seed-owned: the per-module check partition
+                            // restores (rather than consumes) these keys,
+                            // so every importer resolves identically (#214).
+                            Ok(inserted) => self.seed_func_keys.extend(inserted),
                         }
-                        // Seed-owned: the per-module check partition
-                        // restores (rather than consumes) these keys,
-                        // so every importer resolves identically (#214).
-                        Ok(inserted) => self.seed_func_keys.extend(inserted),
                     }
                     self.register_std_ns(&ns, &module, path, &source);
                     self.stdlib_aliases.push((module.clone(), ns.clone()));
