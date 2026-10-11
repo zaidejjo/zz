@@ -174,6 +174,11 @@ struct Loader {
     ns_of: HashMap<PathBuf, String>,
     /// Canonical path of the entry file (for main() call validation).
     entry: PathBuf,
+    /// Project root of the entry file (nearest ancestor holding
+    /// `zz.toml`; `None` for bare scripts). Files outside it (registry
+    /// CAS, path deps) or under a `vendor/` dir are dependencies —
+    /// their style warnings collapse to one note (#387).
+    root: Option<PathBuf>,
     /// Selective/wildcard imports to process after all modules are loaded.
     /// Each entry: (importing_file_path, module_path, items, is_stdlib).
     selective_imports: Vec<(PathBuf, Vec<String>, Vec<ImportItem>, bool)>,
@@ -282,7 +287,8 @@ fn load_program_impl(
         natives: stdlib_natives(),
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
-        entry,
+        entry: entry.clone(),
+        root: find_project_root(&entry),
         selective_imports: Vec::new(),
         selected_consts: HashMap::new(),
         stdlib_aliases: Vec::new(),
@@ -508,6 +514,20 @@ fn module_ns(alias: Option<&str>, path: &Path) -> String {
     })
 }
 
+/// True when `path` is first-party source the consumer owns (#387):
+/// under the entry's project root and outside any `vendor/` dir.
+/// Registry (CAS), path, and vendored deps are someone else's code —
+/// their style warnings are unactionable downstream. `None` root (bare
+/// scripts, which cannot have deps) means everything is first-party.
+fn is_first_party(root: Option<&Path>, path: &Path) -> bool {
+    match root {
+        None => true,
+        Some(root) => match path.strip_prefix(root) {
+            Ok(rel) => !rel.components().any(|c| c.as_os_str() == "vendor"),
+            Err(_) => false,
+        },
+    }
+}
 /// If `msg` is `prefix``name`` (a backtick-quoted name immediately after a
 /// known prefix), return `name`. Used to lift names out of checker messages
 /// (`undefined variable `b.helper``) for private-item detection.
@@ -2089,6 +2109,7 @@ impl Loader {
                 );
             }
             let mut diags = checked.errors;
+
             // Same-file alias imports (#380) always read as unused: references
             // through the alias head rewrite to the canonical spelling before
             // checking, but the import statement still loads the file and feeds
@@ -2110,6 +2131,44 @@ impl Loader {
                     .ns_aliases
                     .contains_key(&(path.clone(), alias.to_string()))
             });
+            // Dependency style-warning collapse (#387): a registry dep's
+            // lints (shadow-namespace, unused-*, dead-mutation, ...) are
+            // true positives the consumer can neither fix nor silence —
+            // every downstream build would carry them forever, burying
+            // first-party lints and breaking any future --deny-warnings
+            // gate. Errors still propagate (they break the build);
+            // warnings collapse to one `help` note keeping file
+            // attribution. Runs after the cache write (cached diags stay
+            // raw) and after the #380 false-positive filter above (only
+            // genuine warnings collapse) so each consumer filters by its
+            // own root — including cache-hit loads, which flow through
+            // here too.
+            if !is_first_party(self.root.as_deref(), path) {
+                let warned: Vec<(String, Option<Span>)> = diags
+                    .iter()
+                    .filter(|d| d.severity == zz_frontend::diag::Severity::Warning)
+                    .map(|d| (d.message.clone(), d.span))
+                    .collect();
+                if !warned.is_empty() {
+                    diags.retain(|d| d.severity != zz_frontend::diag::Severity::Warning);
+                    let ns = self.ns_of.get(path).cloned().unwrap_or_default();
+                    let n = warned.len();
+                    let (first_msg, first_span) = &warned[0];
+                    diags.push(
+                        zz_frontend::diag::warning_at(
+                            format!(
+                                "{n} style warning{} inside dependency `{ns}` hidden",
+                                if n == 1 { "" } else { "s" }
+                            ),
+                            first_span.unwrap_or(Span::new(0, 0)),
+                        )
+                        .with_severity(zz_frontend::diag::Severity::Help)
+                        .with_note(format!(
+                            "check that package directly to see them (first: {first_msg})"
+                        )),
+                    );
+                }
+            }
             if has_errors {
                 // Upgrade generic "undefined variable / unknown struct / no
                 // field" errors into targeted "this item is private — add
