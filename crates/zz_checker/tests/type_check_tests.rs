@@ -2977,6 +2977,112 @@ fn shadow_lint_needs_module_owner() {
     );
 }
 
+#[test]
+fn dead_mutation_of_array_param_warns() {
+    // #278: `buf[i] = v` on a `[int]` param is lost (values) — warn.
+    let r = check_src("func f(buf: [int]) -> int {\n    buf[0] = 32\n    return 0\n}");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `buf`")),
+        "expected dead-mutation warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_returned_param_silent() {
+    // Returning (or otherwise observing) the param silences the lint.
+    let r = check_src("func f(buf: [int]) -> int {\n    buf[0] = 32\n    return buf[0]\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_passed_to_call_silent() {
+    let r = check_src("func g(x: [int]) -> int {\n    return 0\n}\nfunc f(buf: [int]) -> int {\n    buf[0] = 1\n    return g(buf)\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_scalar_param_silent() {
+    // Scalars are Copy — rebinding them is ordinary, never a dead store.
+    let r = check_src("func f(x: int) -> int {\n    return x + 1\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_local_scratch_silent() {
+    // Locals are never linted — scratch buffers are idiomatic.
+    let r =
+        check_src("func f() -> int {\n    buf := [1, 2]\n    buf[0] = 32\n    return buf[0]\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_shadowed_param_silent() {
+    // A shadowing local hides the param: stores hit the local, not the param.
+    let r =
+        check_src("func f(buf: [int]) -> int {\n    buf := [9]\n    buf[0] = 1\n    return 0\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `buf`")),
+        "no warning expected (shadowed), got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_struct_field_warns() {
+    let r = check_src("struct P { x: int }\nfunc f(p: P) -> int {\n    p.x = 1\n    return 0\n}");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `p`")),
+        "expected dead-mutation warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_rebinding_is_not_a_store() {
+    // Plain `buf = ...` rebinds (ordinary assignment), not a dead store.
+    let r = check_src("func f(buf: [int]) -> int {\n    buf = [9]\n    return 0\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 fn std_fs_seed() -> HashMap<String, FuncSig> {
     let mut funcs = HashMap::new();
     funcs.insert(
