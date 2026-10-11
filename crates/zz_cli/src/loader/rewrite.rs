@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
 
@@ -9,6 +9,13 @@ pub(crate) struct Rewriter<'a> {
     /// `import std.str`, explicit aliases). Calls through them
     /// (`ops.resize(...)`) already resolve and must not be rewritten.
     pub(crate) imports: HashSet<String>,
+    /// Same-file alias heads mapped to their canonical namespace
+    /// (`tkeys` → `keys` when one file is bound under both, #380).
+    /// References through an alias head rewrite to the canonical
+    /// spelling so seeds, types, and runtime values keep one identity.
+    /// Skipped for shadowed heads and module-local definitions (locals
+    /// win, mirroring every other rule here).
+    pub(crate) ns_aliases: HashMap<String, String>,
     /// Stack of shadowing scopes; each holds names declared so far.
     pub(crate) scopes: Vec<HashSet<String>>,
 }
@@ -19,12 +26,23 @@ impl<'a> Rewriter<'a> {
             ns,
             top,
             imports: HashSet::new(),
+            ns_aliases: HashMap::new(),
             scopes: vec![HashSet::new()],
         }
     }
 
     pub(crate) fn is_shadowed(&self, name: &str) -> bool {
         self.scopes.iter().any(|s| s.contains(name))
+    }
+
+    /// Canonical namespace for an otherwise-unresolvable head: `Some`
+    /// when `head` is a same-file alias bound elsewhere in this load.
+    /// Never fires for shadowed names or module-local definitions.
+    fn canonical_head(&self, head: &str) -> Option<&str> {
+        if self.is_shadowed(head) || self.top.contains(head) {
+            return None;
+        }
+        self.ns_aliases.get(head).map(String::as_str)
     }
 
     pub(crate) fn push_scope(&mut self) {
@@ -215,7 +233,8 @@ impl<'a> Rewriter<'a> {
     }
 
     /// Rewrite type annotations: struct names defined in this module become
-    /// namespaced (`Point` → `shapes.Point`).
+    /// namespaced (`Point` → `shapes.Point`). Same-file alias heads
+    /// (`tkeys.Canvas`) rewrite through the canonical namespace (#380).
     pub(crate) fn rewrite_ty(&mut self, ty: &mut Ty) {
         match &mut ty.kind {
             TyKind::Named(name, args) => {
@@ -224,6 +243,11 @@ impl<'a> Rewriter<'a> {
                     && !name.starts_with(&format!("{}.", self.ns))
                 {
                     *name = format!("{}.{}", self.ns, name);
+                } else if let Some((head, rest)) = name.split_once('.') {
+                    let (head, rest) = (head.to_string(), rest.to_string());
+                    if let Some(canon) = self.canonical_head(&head) {
+                        *name = format!("{canon}.{rest}");
+                    }
                 }
                 for a in args {
                     self.rewrite_ty(a);
@@ -416,11 +440,18 @@ impl<'a> Rewriter<'a> {
             Expr::StructInit { name, fields, .. } => {
                 // A struct defined in this module is referenced by its
                 // namespaced name; imported structs are already qualified.
+                // Same-file alias heads rewrite through the canonical
+                // namespace like types do (#380).
                 if self.top.contains(name)
                     && !self.is_shadowed(name)
                     && !name.starts_with(&format!("{}.", self.ns))
                 {
                     *name = format!("{}.{}", self.ns, name);
+                } else if let Some((head, rest)) = name.split_once('.') {
+                    let (head, rest) = (head.to_string(), rest.to_string());
+                    if let Some(canon) = self.canonical_head(&head) {
+                        *name = format!("{canon}.{rest}");
+                    }
                 }
                 for (_, v) in fields {
                     self.rewrite_expr(v);
@@ -429,12 +460,19 @@ impl<'a> Rewriter<'a> {
             Expr::Path { parts, .. } => {
                 // `p.x` on a top-level binding: qualify the root so the
                 // struct-field walk finds `ns.p`.
-                if let Some(first) = parts.first_mut() {
+                if let Some(first) = parts.first() {
                     if self.top.contains(first)
                         && !self.is_shadowed(first)
                         && !first.starts_with(&format!("{}.", self.ns))
                     {
-                        *first = format!("{}.{}", self.ns, first);
+                        parts[0] = format!("{}.{}", self.ns, first);
+                    } else if parts.len() > 1 {
+                        // Same-file alias head (`tkeys.up` where the file
+                        // is bound as `keys`, #380): rewrite through the
+                        // canonical spelling. Bare heads stay as written.
+                        if let Some(canon) = self.canonical_head(&parts[0].clone()) {
+                            parts[0] = canon.to_string();
+                        }
                     }
                 }
             }

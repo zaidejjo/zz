@@ -860,9 +860,11 @@ import app                     // <project-root>/src/main.zz, used as app.*
 
 Rules: precedence is `std` > package > registry dependency >
 relative file; `-` and `_` spellings agree (`my-app` ⇔ `my_app`).
-One file keeps one namespace: importing the same file as both
-`app.utils` and a relative `utils` in one program is an error —
-migrate all importers to the `app.*` form.
+One file may be imported under several namespaces at once
+(`import tui.keys` in one module, `import tui.keys as tkeys` in
+another): the first binding wins as canonical and alias references
+rewrite through it, so values and types keep one identity. Two
+*different* files under one namespace stay an error — alias one side.
 
 ## Blocks as Expressions
 
