@@ -206,3 +206,69 @@ p := shapes.Point{ x: 1, y: 2 }
 struct shapes.Point { x: int, y: int }
 // Accessible as shapes.Point
 ```
+
+## Value Semantics: Copy by Default, Moves Are Invisible
+
+ZZ has value semantics. Every variable binding holds an independent
+value: after `y := x`, `y := f(x)`, or `return x`, mutating one side
+never observes through the other. There is no aliasing of mutable
+state through ordinary bindings — `y := id(doc)` stays independent of
+`doc` no matter what the callee does with its parameter.
+
+Concretely, what the programmer can rely on:
+
+- Reads copy. Evaluating a variable (`LoadVar`/`LoadSlot` in the
+  bytecode VM, `Env::get` in the tree-walker) yields a deep,
+  independent copy of the whole value.
+- Binds copy. `p := expr` stores a copy in `p` and yields the
+  evaluated value (both engines `define` a clone and push the
+  original); the source (if it names a variable) is untouched and
+  stays live.
+- Calls conceptually copy in, move internally. Argument expressions
+  are evaluated (cloning any variables they read) and the resulting
+  values are moved into the callee frame — no second copy at bind
+  time. Returns move to the caller.
+- Plain stores move. `x = v` overwrites the home without cloning.
+- No use-after-move exists. The checker performs no move tracking
+  (`crates/zz_checker/src` has no moved-from state) because no move
+  is observable: every statement leaves its target holding a complete,
+  valid value, and every live binding keeps an independent copy.
+
+What stays copying (the engine must clone):
+
+- Any read of a binding that stays live afterwards. The canonical
+  case is a by-value read argument: `p := find_pos(doc, ...)` clones
+  `doc` on evaluation because `doc` is used again later in the loop —
+  last-use threading cannot fire, and restoring after the call is
+  impossible without callee cooperation. See below.
+- Closure captures (cloned at capture; captures outlive the call),
+  multi-use right-hand sides (`x = x + x`), globals, and field/index
+  reads outside the fused windows.
+
+Where the engine moves internally (unobservable optimization, not a
+semantic promise):
+
+- Self-reassignment threading: `doc = push_node(doc, ...)` moves the
+  single-mentioned local into the call (`TakeVar`/`TakeSlot`; `Unit`
+  sits in the slot during evaluation, unobservable since the
+  statement completes before any user read). Fires only for plain
+  uncaptured slot locals outside top-level `main`; globals, captured
+  names, and path targets keep the cloning path.
+- Take-restore field windows (#394): `s.f = pure`, `s.f[i] = pure`,
+  `s.f = s.f OP pure`, `s.f[i]` reads (clones one element only), and
+  `len(s.f)` (zero clones) take the home, operate owned, and restore —
+  including on error paths. Gated on window purity (no
+  closures/spawns/early-exits, no home references; calls evaluate
+  pre-take). Tree-walker mirrors sit behind `run_tree_walker` with a
+  callee-visibility guard.
+- AOT readonly-parameter borrows (#383): `zz_codegen/src/lower/`
+  `param_escape.rs` proves per-parameter read-only (no stores,
+  returns, forwards to unknown code, captures, or slot rebinds, to
+  fixpoint) and passes those arguments borrowed instead of retained
+  shares. Anything unproven keeps clone behavior.
+
+None of the above changes program meaning: differential runs over the
+fixture corpus must read identically with every optimization on or
+off. If a future analysis ever made a move observable, that would be
+a language change requiring a checker error (use-after-move), not a
+silent optimization.
