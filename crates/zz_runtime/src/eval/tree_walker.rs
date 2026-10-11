@@ -311,6 +311,13 @@ impl Interp {
                 // evaluate BEFORE the value. Plain names and paths have
                 // no user code in the base, so they keep the shared
                 // `assign_target` path.
+                //
+                // Move fusion (#242): self-reassignment and pure stores
+                // take instead of cloning. Falls back (no-op) for
+                // anything outside the fused shapes.
+                if self.try_move_assign(target, value)? {
+                    return Ok(Flow::Value(Value::Unit));
+                }
                 match target {
                     Expr::Index { obj, index, span } => {
                         let mut objv = self.eval(obj)?.into_value()?;
@@ -1505,6 +1512,13 @@ impl Interp {
                 Ok(Flow::Value(Value::Object(Box::new(obj))))
             }
             Expr::Index { obj, index, span } => {
+                // Move fusion (#242): indexed field reads take the
+                // container, clone one element, and restore — O(1)
+                // instead of cloning the field array. Falls back for
+                // anything outside the fused shape.
+                if let Some(v) = self.try_move_index_read(obj, index, *span)? {
+                    return Ok(Flow::Value(v));
+                }
                 let ov = self.eval(obj)?.into_value()?;
                 let iv = self.eval(index)?.into_value()?;
                 get_index(&ov, &iv, *span).map(Flow::Value)

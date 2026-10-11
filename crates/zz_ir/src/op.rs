@@ -110,6 +110,40 @@ pub enum Op {
         home_var: Option<StrId>,
         method: StrId,
     },
+    /// Pop a value; take the home, write `object.field = value`, restore.
+    SetFieldTake {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        field: StrId,
+    },
+    /// Pop an index then a value; take the home, write
+    /// `object.field[index] = value`, restore.
+    SetFieldIndexTake {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        field: StrId,
+    },
+    /// Pop a right-hand side; take the home, take the field, apply
+    /// `field OP rhs`, store back, restore.
+    FieldBinopTake {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        field: StrId,
+        op: BinOp,
+    },
+    /// Pop an index; take the home, clone one element of the field,
+    /// restore the home, push the element.
+    GetFieldIndex {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        field: StrId,
+    },
+    /// Take the home, push the length of the field, restore.
+    LenField {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        field: StrId,
+    },
 
     // ---- typed integer arithmetic (wrap; trap MIN/-1, MIN%-1, div0) ----
     IntAdd,
@@ -330,6 +364,11 @@ impl Op {
             Op::TakeVar(_) => 11,
             Op::VecPushField { .. } => 12,
             Op::VecPushMethod { .. } => 13,
+            Op::SetFieldTake { .. } => 75,
+            Op::SetFieldIndexTake { .. } => 76,
+            Op::FieldBinopTake { .. } => 77,
+            Op::GetFieldIndex { .. } => 78,
+            Op::LenField { .. } => 79,
             Op::IntAdd => 14,
             Op::IntSub => 15,
             Op::IntMul => 16,
@@ -411,6 +450,11 @@ impl Op {
             Op::TakeVar(_) => "take",
             Op::VecPushField { .. } => "vecpushfield",
             Op::VecPushMethod { .. } => "vecpushmethod",
+            Op::SetFieldTake { .. } => "setfieldtake",
+            Op::SetFieldIndexTake { .. } => "setfieldindextake",
+            Op::FieldBinopTake { .. } => "fieldbinoptake",
+            Op::GetFieldIndex { .. } => "getfieldindex",
+            Op::LenField { .. } => "lenfield",
             Op::IntAdd => "iadd",
             Op::IntSub => "isub",
             Op::IntMul => "imul",

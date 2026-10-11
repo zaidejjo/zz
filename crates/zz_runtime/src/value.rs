@@ -643,7 +643,12 @@ pub fn reachable_refs(
                 }
                 Op::VecPush { home, .. }
                 | Op::VecPushField { home, .. }
-                | Op::VecPushMethod { home, .. } => {
+                | Op::VecPushMethod { home, .. }
+                | Op::SetFieldTake { home, .. }
+                | Op::SetFieldIndexTake { home, .. }
+                | Op::FieldBinopTake { home, .. }
+                | Op::GetFieldIndex { home, .. }
+                | Op::LenField { home, .. } => {
                     if let crate::vm::op::TakeHome::Env(n) = home {
                         loads.insert(n.clone());
                         admit(n, funcs, &mut names, &mut stack);
