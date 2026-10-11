@@ -88,6 +88,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "math_consts.zz", false),
     ("stdlib", "fs_path.zz", true),
     ("stdlib", "bytes.zz", true),
+    ("stdlib", "bytes_finish_test.zz", true),
     ("syntax", "brace_escapes.zz", false),
     ("syntax", "brace_escapes_multiline.zz", false),
     ("syntax", "destructuring.zz", false),

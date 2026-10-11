@@ -532,6 +532,47 @@ pub(crate) fn bytes_to_ints(
     }
 }
 
+// bytes.finish(vs) — assemble [int] (0-255) into an opaque byte buffer.
+// The missing bridge: builders collect ints, only natives mint `bytes`.
+// Out-of-range values are `.err` (never silently clamped); over 64 MiB
+// is `.err` (same cap as read_exact — a hostile length cannot OOM).
+pub(crate) fn bytes_finish(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    use crate::natives::expect_array;
+    let vs = expect_array(args, 0, "bytes.finish")?;
+    if vs.len() > 64 * 1024 * 1024 {
+        return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
+            "bytes.finish: length {} exceeds 67108864",
+            vs.len()
+        )))))));
+    }
+    let mut buf = Vec::with_capacity(vs.len());
+    for v in &vs {
+        match v {
+            Value::Int(n) => {
+                if !(0..=255).contains(n) {
+                    return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
+                        "bytes.finish: value {n} out of range 0-255"
+                    )))))));
+                }
+                buf.push(*n as u8);
+            }
+            other => {
+                return Err(EvalError::new(
+                    format!("`bytes.finish` expects an array of integers, found `{other}`"),
+                    zz_runtime::Span::new(0, 0),
+                ));
+            }
+        }
+    }
+    Ok(Value::Result(Box::new(Ok(Value::Bytes(Box::new(
+        zz_runtime::BytesData::from_vec(buf),
+    ))))))
+}
+
 pub(crate) fn str_find_in(
     _interp: &mut Interp,
     args: &mut Vec<Value>,

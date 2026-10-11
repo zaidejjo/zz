@@ -3896,6 +3896,23 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             m.insert(format!("bytes.{name}"), s.clone());
             m.insert(format!("std.bytes.{name}"), s);
         }
+        // bytes.finish: the missing [int] -> bytes bridge (mod.zz builds
+        // int-lists; only natives mint `bytes`). Fallible (range-checked),
+        // unlike str.finish — binary assembly must never silently clamp.
+        m.insert(
+            "bytes.finish".into(),
+            sig(
+                vec![("vs", arr_int.clone())],
+                Type::Result(Box::new(Type::Bytes), Box::new(Type::Str)),
+            ),
+        );
+        m.insert(
+            "std.bytes.finish".into(),
+            sig(
+                vec![("vs", arr_int.clone())],
+                Type::Result(Box::new(Type::Bytes), Box::new(Type::Str)),
+            ),
+        );
     }
 
     // std.csv — RFC4180 subset (zz/csv/mod.zz).
@@ -4628,6 +4645,8 @@ mod tests {
             "str.finish",
             "bytes.builder",
             "std.bytes.builder",
+            "bytes.finish",
+            "std.bytes.finish",
             "bytes.push_byte",
             "std.csv.parse",
             "csv.parse",
@@ -4676,7 +4695,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1001);
+        assert_eq!(funcs.len(), 1003);
     }
 
     #[test]

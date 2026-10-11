@@ -1,0 +1,42 @@
+// features: arrays, bytes, comparison, func-call, imports, int-arith, locals, match, option-result, print, std-bytes, string-literal
+// tests/fixtures/stdlib/bytes_finish_test.zz — bytes.finish([int]) -> bytes.
+// The missing bridge: builders collect ints, only natives mint `bytes`.
+// Out-of-range values and >64MiB lengths are loud `.err`, never clamped.
+import std.bytes
+
+func main() -> Result<int, str> {
+    // Round trip: ints -> bytes -> ints byte-equal.
+    b := bytes.finish([72, 105, 0, 255, 13, 10])?
+    println("finish_ok: {b.len()}")
+    assert(b.len() == 6)
+    back := bytes.to_ints(b)
+    assert(back == [72, 105, 0, 255, 13, 10])
+    println("roundtrip_ok")
+
+    // Valid UTF-8 crosses to str.
+    s := bytes.to_str(bytes.to_ints(bytes.finish([104, 105])?))?
+    assert(s == "hi")
+    println("str_ok")
+
+    // Empty is empty.
+    e := bytes.finish([])?
+    assert(e.len() == 0)
+    println("empty_ok")
+
+    // Out of range is loud, never clamped.
+    match bytes.finish([72, 300]) {
+        .ok(_) => println("ERROR: 300 should fail")
+        .err(msg) => {
+            println("range_ok")
+            assert(msg == "bytes.finish: value 300 out of range 0-255")
+        }
+    }
+    match bytes.finish([72, -1]) {
+        .ok(_) => println("ERROR: -1 should fail")
+        .err(_) => println("neg_ok")
+    }
+
+    // Non-integers are a program error (wrong shape, not a value error).
+    println("bytes_finish_test_ok")
+    .ok(0)
+}

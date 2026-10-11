@@ -933,6 +933,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "str.bytes" | "std.str.bytes" => Some("zz_str_bytes"),
         "bytes.to_str" | "std.bytes.to_str" => Some("zz_bytes_to_str"),
         "bytes.to_ints" | "std.bytes.to_ints" => Some("zz_bytes_to_ints"),
+        "bytes.finish" | "std.bytes.finish" => Some("zz_bytes_finish"),
         // math
         "math.abs" | "std.math.abs" => Some("zz_math_abs"),
         "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),

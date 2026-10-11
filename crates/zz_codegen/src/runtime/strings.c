@@ -1852,6 +1852,44 @@ zz_value zz_bytes_to_ints(zz_value b, int *err) {
     return arr;
 }
 
+// bytes.finish(vs) — assemble [int] (0-255) into an opaque byte buffer.
+// Out-of-range values are Err (never silently clamped); over 64 MiB is
+// Err (same cap as read_exact). Mirrors the VM's bytes_finish exactly.
+zz_value zz_bytes_finish(zz_value vs, int *err) {
+    (void)err;
+    if (vs.tag != ZZ_ARRAY || !vs.arr) {
+        return zz_variant_err(zz_str_static("bytes.finish: expected an array of integers"));
+    }
+    size_t n = vs.arr->len;
+    if (n > (size_t)(64 * 1024 * 1024)) {
+        char msg[96];
+        int m = snprintf(msg, sizeof(msg), "bytes.finish: length %zu exceeds 67108864", n);
+        return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+    }
+    unsigned char *buf = (unsigned char *)malloc(n > 0 ? n : 1);
+    if (!buf) return zz_variant_err(zz_str_static("bytes.finish: out of memory"));
+    for (size_t i = 0; i < n; i++) {
+        zz_value v = vs.arr->items[i];
+        if (v.tag != ZZ_INT) {
+            free(buf);
+            return zz_variant_err(zz_str_static("bytes.finish: expected an array of integers"));
+        }
+        if (v.i < 0 || v.i > 255) {
+            free(buf);
+            char msg[96];
+            int m = snprintf(msg, sizeof(msg), "bytes.finish: value %lld out of range 0-255", (long long)v.i);
+            return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+        }
+        buf[i] = (unsigned char)v.i;
+    }
+    zz_value out = zz_bytes_new(buf, n);
+    free(buf);
+    if (out.tag != ZZ_BYTES) {
+        return zz_variant_err(zz_str_static("bytes.finish: out of memory"));
+    }
+    return zz_variant_ok(out);
+}
+
 // ---- comment-aware line classifier (str.classify) --------------------
 // Strict UTF-8 check shared by bytes.to_str and fs.scan_counts: rejects
 // overlongs, surrogates, and values above U+10FFFF (same predicate the
