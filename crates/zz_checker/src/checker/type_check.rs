@@ -1266,8 +1266,34 @@ impl Checker {
                         // if-with-return in a non-unit function, since
                         // the fall-through path yields unit).
                         if !Self::block_has_return(then) {
-                            if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
-                                self.report_mismatch(err, *span);
+                            let tt_r = self.unifier.resolve(&tt);
+                            match tt_r {
+                                Type::Unit | Type::Never | Type::Var(_) => {
+                                    if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
+                                        self.report_mismatch(err, *span);
+                                    }
+                                }
+                                _ => {
+                                    // Trailing value discarded (#388): point
+                                    // at the tail statement that produced
+                                    // it, not the `if` — the old span
+                                    // (whole `if`) read as if the
+                                    // condition failed with reversed
+                                    // types. Vars/aliases keep the unify
+                                    // path (it pins them to unit).
+                                    let tail = then.stmts.last().map(|s| s.span()).unwrap_or(*span);
+                                    self.errors.push(
+                                        error_at(
+                                            format!(
+                                                "value of type `{tt_r}` discarded: `if` without `else` used as a statement must end in `unit`"
+                                            ),
+                                            tail,
+                                        )
+                                        .with_note(
+                                            "assign the value or end the branch with a statement of type `unit`",
+                                        ),
+                                    );
+                                }
                             }
                         }
                         Type::Unit
@@ -1320,8 +1346,28 @@ impl Checker {
                         }
                     }
                     None => {
-                        if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
-                            self.report_mismatch(err, *span);
+                        let tt_r = self.unifier.resolve(&tt);
+                        match tt_r {
+                            Type::Unit | Type::Never | Type::Var(_) => {
+                                if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
+                                    self.report_mismatch(err, *span);
+                                }
+                            }
+                            _ => {
+                                // Same discarded-tail rule as `if` (#388).
+                                let tail = then.stmts.last().map(|s| s.span()).unwrap_or(*span);
+                                self.errors.push(
+                                    error_at(
+                                        format!(
+                                            "value of type `{tt_r}` discarded: `if let` without `else` used as a statement must end in `unit`"
+                                        ),
+                                        tail,
+                                    )
+                                    .with_note(
+                                        "assign the value or end the branch with a statement of type `unit`",
+                                    ),
+                                );
+                            }
                         }
                         Type::Unit
                     }
