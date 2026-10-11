@@ -1247,6 +1247,20 @@ impl Lowerer {
                     // the emitted form, not just the AST shape. Anything
                     // else (Index, Call, Field chain, …) is an rvalue —
                     // hoist to a temp.
+                    //
+                    // Prefer borrowing a plain Ident's C local directly:
+                    // `zz_object_get_field` retains the field value it
+                    // returns, so cloning the base just to take its
+                    // address retains a share that is never released
+                    // (~0.5KB/draw in struct loops, #188). The base
+                    // outlives the read, so the borrow is sound.
+                    if let Expr::Ident { name: base, .. } = obj.as_ref() {
+                        if let Some(cid) = names.lookup(base).map(str::to_string) {
+                            if is_simple_ident(&cid) {
+                                return format!("zz_object_get_field(&{cid}, \"{name}\")");
+                            }
+                        }
+                    }
                     if matches!(obj.as_ref(), Expr::Ident { .. }) && is_simple_ident(&obj_val) {
                         format!("zz_object_get_field(&{obj_val}, \"{name}\")")
                     } else {
