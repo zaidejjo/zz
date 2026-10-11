@@ -10,6 +10,7 @@ pub mod scope;
 pub mod std_gate;
 pub mod structs;
 pub mod type_check;
+pub mod value_lint;
 
 use std::collections::HashMap;
 use std::sync::Arc;

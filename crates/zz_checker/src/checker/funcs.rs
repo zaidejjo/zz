@@ -178,6 +178,10 @@ impl Checker {
         self.current_generics = prev_gen;
         self.current_bounds = prev_bounds;
         self.pop_scope();
+        // Dead-mutation lint (#278): value-typed params mutated without
+        // ever being observed. Runs on the AST after the body checks so
+        // it sees the final program even when type errors exist.
+        super::value_lint::lint_dead_param_mutation(&sig.params, body, &mut self.errors);
         let _ = name;
         // The body's fall-through type must match the declared return
         // type. Divergent arms contribute `Never`, which vanishes from
