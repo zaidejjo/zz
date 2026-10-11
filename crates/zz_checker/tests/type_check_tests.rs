@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    check_src, check_src_with_funcs, check_src_with_funcs_and_structs, check_src_with_module_ns,
-    errors_contain, has_errors,
+    check_src, check_src_with_funcs, check_src_with_funcs_and_module_ns,
+    check_src_with_funcs_and_structs, check_src_with_module_ns, errors_contain, has_errors,
 };
 use std::collections::HashMap;
 use zz_checker::type_::Type;
@@ -2975,4 +2975,181 @@ fn shadow_lint_needs_module_owner() {
         "no shadow warning expected, got: {:?}",
         r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
+}
+
+fn std_fs_seed() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "std.fs.read_dir".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("path".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn std_path_without_import_errors() {
+    // #227: fully-qualified std use with no import is an error naming
+    // the missing import.
+    let r = check_src_with_funcs_and_module_ns(
+        "x := std.fs.read_dir(\".\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("`std.fs.read_dir` requires `import std.fs`")),
+        "expected import-hygiene error, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(has_errors(&r), "must be an error, not a warning");
+}
+
+#[test]
+fn std_path_with_import_ok() {
+    let r = check_src_with_funcs_and_module_ns(
+        "import std.fs\nx := std.fs.read_dir(\".\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import")),
+        "no hygiene error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn std_path_with_alias_import_ok() {
+    // Importing under any spelling unlocks the canonical paths.
+    let r = check_src_with_funcs_and_module_ns(
+        "import std.fs as f\nx := std.fs.read_dir(\".\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import")),
+        "no hygiene error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn std_path_selective_import_ok() {
+    let r = check_src_with_funcs_and_module_ns(
+        "import std.fs(read_dir)\nx := std.fs.read_dir(\".\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import")),
+        "no hygiene error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn std_path_other_module_still_errors() {
+    // Importing std.fs does not unlock std.math.
+    let mut funcs = std_fs_seed();
+    funcs.insert(
+        "std.math.sin".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("x".to_string(), Type::Float)],
+            has_default: vec![],
+            ret: Type::Float,
+        },
+    );
+    let r = check_src_with_funcs_and_module_ns(
+        "import std.fs\ny := std.math.sin(1.0)",
+        funcs,
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("`std.math.sin` requires `import std.math`")),
+        "expected import-hygiene error, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn std_path_type_position_gated() {
+    // Annotations name types too.
+    let mut structs = HashMap::new();
+    structs.insert(
+        "std.fs.Dir".to_string(),
+        StructSig {
+            generics: vec![],
+            fields: vec![("path".to_string(), Type::Str)],
+        },
+    );
+    let r = check_src_with_funcs_and_module_ns(
+        "x: std.fs.Dir = std.fs.Dir{ path: \".\" }",
+        HashMap::new(),
+        structs,
+        "main",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import std.fs`")),
+        "expected import-hygiene error, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn std_gate_dedupes_per_path() {
+    let r = check_src_with_funcs_and_module_ns(
+        "x := std.fs.read_dir(\".\")\ny := std.fs.read_dir(\"/tmp\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    let n = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("requires `import std.fs`"))
+        .count();
+    assert_eq!(n, 1, "one error per path, got: {:?}", r.errors);
+}
+
+#[test]
+fn std_gate_needs_module_owner() {
+    // No owner (REPL, stdlib internals, merged programs): silent.
+    let r = check_src_with_funcs("x := std.fs.read_dir(\".\")", std_fs_seed());
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import")),
+        "no hygiene error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
