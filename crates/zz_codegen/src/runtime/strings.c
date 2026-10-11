@@ -2289,38 +2289,39 @@ zz_value zz_str_endswith(zz_value s, zz_value suffix, int *err) {
     return (zz_value){ZZ_BOOL, {.b = memcmp(zz_str_ptr(s.s) + s.s->len - suffix.s->len, zz_str_ptr(suffix.s), suffix.s->len) == 0}};
 }
 
-// str.trim(s) — strip leading/trailing whitespace
+// str.trim(s) — strip leading/trailing whitespace (Unicode White_Space
+// on both backends, matching the VM's `str::trim`, #277).
 zz_value zz_str_trim(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = zz_str_ptr(s.s);
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
     size_t len = s.s->len;
-    size_t start = 0, end = len;
-    while (start < end && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
-    while (end > start && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
-    return zz_str_new(d + start, end - start);
+    size_t start = 0, end = len, w;
+    while (start < end && (w = ws_width_fwd(d, start, end)) != 0) start += w;
+    while (end > start && (w = ws_width_bwd(d, start, end)) != 0) end -= w;
+    return zz_str_new((const char *)d + start, end - start);
 }
 
-// str.trim_start(s) — strip leading whitespace
+// str.trim_start(s) — strip leading whitespace (Unicode, see trim).
 zz_value zz_str_trim_start(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = zz_str_ptr(s.s);
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
     size_t len = s.s->len;
-    size_t start = 0;
-    while (start < len && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
-    return zz_str_new(d + start, len - start);
+    size_t start = 0, w;
+    while (start < len && (w = ws_width_fwd(d, start, len)) != 0) start += w;
+    return zz_str_new((const char *)d + start, len - start);
 }
 
-// str.trim_end(s) — strip trailing whitespace
+// str.trim_end(s) — strip trailing whitespace (Unicode, see trim).
 zz_value zz_str_trim_end(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = zz_str_ptr(s.s);
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
     size_t len = s.s->len;
-    size_t end = len;
-    while (end > 0 && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
-    return zz_str_new(d, end);
+    size_t end = len, w;
+    while (end > 0 && (w = ws_width_bwd(d, 0, end)) != 0) end -= w;
+    return zz_str_new((const char *)d, end);
 }
 
 // str.join(items, sep) — join array of strings with separator.

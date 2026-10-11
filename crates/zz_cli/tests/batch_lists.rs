@@ -51,6 +51,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "str_bytes_test.zz", true),
     ("stdlib", "str_ord_chr_test.zz", true),
     ("stdlib", "str_classify_test.zz", true),
+    ("stdlib", "str_trim_unicode_test.zz", false),
     ("stdlib", "fs_scan_counts_test.zz", false),
     ("stdlib", "fs_is_generated_test.zz", false),
     ("syntax", "match.zz", false),
@@ -141,6 +142,11 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("stdlib/generic_selective.zz", "needs helpers/ support dir"),
     ("stdlib/result_print.zz", "sweep-token scratch fs"),
     ("stdlib/fs_vfs.zz", "sweep-token scratch fs"),
+    // Reads a tests/ data file (batch sandbox is flat, no data dir).
+    (
+        "stdlib/fs_read_invalid_utf8_test.zz",
+        "needs tests/fixtures/stdlib/data/ sibling",
+    ),
     // `alias_import` and `enum_import` claim the same `shapes` alias
     // for different support modules: a genuine per-program collision,
     // so they run individually (each passes alone).

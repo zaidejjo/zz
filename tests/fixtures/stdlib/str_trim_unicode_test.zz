@@ -1,0 +1,22 @@
+// features: comparison, imports, locals, print, std-str, string-literal, string-ops
+// str_trim_unicode_test.zz -- trim family strips Unicode White_Space
+// identically on both backends (#277).
+import std.str
+
+// Non-breaking space (U+00A0) both sides.
+nbsp := "\xA0"
+println(str.length(str.trim(nbsp + nbsp + "hi" + nbsp + nbsp)))
+// NEL (U+0085) + EM SPACE (U+2003).
+println(str.length(str.trim("\x85" + " " + "hi" + " " + "\x85")))
+// IDEOGRAPHIC SPACE (U+3000).
+println(str.length(str.trim("　" + "hi" + "　")))
+// ASCII vertical tab + form feed.
+println(str.length(str.trim("\x0B\x0Chi\x0B\x0C")))
+// Plain ASCII still trims.
+println(str.length(str.trim("  hi  ")))
+// Interior whitespace is untouched.
+println(str.trim("a" + nbsp + "b"))
+// trim_start / trim_end match trim on each side.
+println(str.length(str.trim_start(nbsp + nbsp + "hi" + nbsp + nbsp)))
+println(str.length(str.trim_end(nbsp + nbsp + "hi" + nbsp + nbsp)))
+println("str_trim_unicode_test_ok")

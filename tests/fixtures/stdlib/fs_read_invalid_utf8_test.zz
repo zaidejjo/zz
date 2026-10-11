@@ -1,0 +1,17 @@
+// features: imports, locals, match, option-result, print, std-fs, string-literal
+// fs_read_invalid_utf8_test.zz -- read_to_string rejects invalid UTF-8
+// identically on both backends (#277). Programs branching on read
+// success (binary detection) must agree per backend.
+import std.fs
+
+// 61 FF 62 0A is not valid UTF-8: strict read reports .err.
+match fs.read_to_string("tests/fixtures/stdlib/data/invalid_utf8.bin") {
+    .ok(_) => println("unexpected ok"),
+    .err(_) => println("is binary"),
+}
+// A valid sibling still reads.
+match fs.read_to_string("tests/fixtures/stdlib/data/valid_utf8.txt") {
+    .ok(_) => println("sample reads"),
+    .err(_) => println("unexpected err"),
+}
+println("fs_read_invalid_utf8_test_ok")
