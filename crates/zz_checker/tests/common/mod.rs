@@ -65,6 +65,32 @@ pub fn has_errors(r: &CheckResult) -> bool {
         .any(|e| e.severity == zz_frontend::diag::Severity::Error)
 }
 
+/// Check with seeded functions/structs and a module owner (for
+/// owner-gated lints like module-namespace shadowing and std import
+/// hygiene).
+pub fn check_src_with_funcs_and_module_ns(
+    src: &str,
+    funcs: HashMap<String, FuncSig>,
+    structs: HashMap<String, StructSig>,
+    module_ns: &str,
+) -> CheckResult {
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    check_program_with_module_ns(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        structs,
+        HashMap::new(),
+        HashMap::new(),
+        module_ns,
+    )
+}
+
 /// Check with a seeded function map (e.g. a generic builtin like `typeof`).
 pub fn check_src_with_funcs(src: &str, funcs: HashMap<String, FuncSig>) -> CheckResult {
     let parsed = parse(src);

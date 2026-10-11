@@ -7,6 +7,7 @@ pub mod funcs;
 pub mod http_lint;
 pub mod inference;
 pub mod scope;
+pub mod std_gate;
 pub mod structs;
 pub mod type_check;
 
@@ -344,6 +345,14 @@ fn check_program_impl(
         }
     }
     checker.errors.append(&mut decorator_errors);
+    // Import hygiene for fully-qualified std paths (#227): only enforced
+    // for loader-checked user modules (non-empty owner). Stdlib internals,
+    // the REPL, and merged HIR programs pass "" and skip it.
+    if !module_ns.is_empty() {
+        checker
+            .errors
+            .extend(std_gate::lint_std_imports(program, module_ns));
+    }
 
     // Track which items are pub (for cross-module export).
     let mut pub_bindings_set: std::collections::HashSet<String> = std::collections::HashSet::new();
