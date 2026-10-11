@@ -1370,6 +1370,7 @@ parity_strict!(parity_stdlib_fs_vfs, "stdlib", "fs_vfs.zz");
 parity_strict!(parity_stdlib_bytes, "stdlib", "bytes.zz");
 parity_strict!(parity_stdlib_env_full, "stdlib", "env_full.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+parity_strict!(parity_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 parity_strict!(parity_stdlib_input_chained, "stdlib", "input_chained.zz");
 parity_strict!(
     parity_stdlib_http_request_response,

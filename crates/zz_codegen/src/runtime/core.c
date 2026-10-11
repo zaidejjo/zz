@@ -3264,6 +3264,47 @@ zz_value zz_tcp_write_bytes(zz_value stream, zz_value data, int *err) {
     return zz_variant_ok((zz_value){ZZ_INT, {.i = (int64_t)total}});
 }
 
+// net.tcp_read_exact(stream, n) → Result<Ok(bytes len n), Err(msg)>
+// Loops until exactly `n` bytes arrive (MSG_WAITALL would also work but
+// hides short-read vs close distinctions; the loop keeps errno mapping
+// identical to the VM side).
+zz_value zz_tcp_read_exact(zz_value stream, zz_value n, int *err) {
+    (void)err;
+    if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
+        return zz_variant_err(zz_str_static("tcp_read_exact failed: not a stream"));
+    }
+    if (n.tag != ZZ_INT || n.i <= 0 || n.i > 64 * 1024 * 1024) {
+        return zz_variant_err(zz_str_static("tcp_read_exact failed: bad length (want 1..67108864)"));
+    }
+    size_t want = (size_t)n.i;
+    unsigned char *buf = (unsigned char *)malloc(want);
+    if (!buf) return zz_variant_err(zz_str_static("tcp_read_exact failed: out of memory"));
+    size_t got = 0;
+    while (got < want) {
+        ssize_t r = recv(stream.net->fd, buf + got, want - got, 0);
+        if (r < 0) {
+            free(buf);
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return zz_variant_err(zz_str_static("tcp_read_exact failed: timed out"));
+            }
+            char msg[192];
+            int m = snprintf(msg, sizeof msg, "tcp_read_exact failed: %s", strerror(errno));
+            return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+        }
+        if (r == 0) {
+            free(buf);
+            return zz_variant_err(zz_str_static("tcp_read_exact failed: connection closed"));
+        }
+        got += (size_t)r;
+    }
+    zz_value out = zz_bytes_new(buf, want);
+    free(buf);
+    if (out.tag != ZZ_BYTES) {
+        return zz_variant_err(zz_str_static("tcp_read_exact failed: out of memory"));
+    }
+    return zz_variant_ok(out);
+}
+
 // net.tcp_shutdown(stream) → Result<Ok(unit), Err(msg)>
 // Real shutdown: both directions stop. The fd stays valid for
 // address queries; later I/O fails naturally at the syscall layer.

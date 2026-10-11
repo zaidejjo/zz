@@ -2603,6 +2603,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_bytes(),
         ),
         (
+            "read_exact",
+            vec![("stream", Type::TcpStream), ("n", Type::Int)],
+            result_bytes(),
+        ),
+        (
             "write",
             vec![("stream", Type::TcpStream), ("data", Type::Str)],
             result_int(),
@@ -2641,6 +2646,213 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             sig(vec![("stream", Type::TcpStream)], result_unit()),
         );
     }
+    m.insert(
+        "std.net.tcp_read_exact".into(),
+        sig(
+            vec![("stream", Type::TcpStream), ("n", Type::Int)],
+            result_bytes(),
+        ),
+    );
+    // std.net — TLS client (Track T, T-A via rustls; see docs/adr/0001-tls.md).
+    // Connections are `Opaque("tls")` so `c.write(..)` method syntax works
+    // through tag dispatch; AOT lowers through the `zz_tls_*` staticlib FFI
+    // (same driver as the VM, byte-identical by construction).
+    let tls_t = Type::Opaque("tls".to_string());
+    let result_tls = || Type::Result(Box::new(tls_t.clone()), Box::new(Type::Str));
+    let tls_listener_t = Type::Opaque("tls_listener".to_string());
+    let result_tls_listener =
+        || Type::Result(Box::new(tls_listener_t.clone()), Box::new(Type::Str));
+    m.insert(
+        "std.net.tls_listen".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("cert_file", Type::Str),
+                ("key_file", Type::Str),
+            ],
+            result_tls_listener(),
+        ),
+    );
+    m.insert(
+        "std.net.tls_accept".into(),
+        sig(vec![("listener", tls_listener_t.clone())], result_tls()),
+    );
+    m.insert(
+        "std.net.tls_listener_close".into(),
+        sig(vec![("listener", tls_listener_t.clone())], result_bool()),
+    );
+    for (method, params, ret) in [
+        (
+            "accept",
+            vec![("listener", tls_listener_t.clone())],
+            result_tls(),
+        ),
+        (
+            "close",
+            vec![("listener", tls_listener_t.clone())],
+            result_bool(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("tls_listener.{method}"), s.clone());
+        m.insert(format!("std.tls_listener.{method}"), s);
+    }
+    for (name, params) in [
+        (
+            "std.net.tls_connect",
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+        ),
+        (
+            "std.net.tls_connect_insecure",
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+        ),
+    ] {
+        m.insert(name.into(), sig(params, result_tls()));
+    }
+    m.insert(
+        "std.net.tls_connect_with_ca".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("ca_file", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+            result_tls(),
+        ),
+    );
+    // `tls.*` method namespace (mirrors the `tcp.*` set: canonical
+    // `tls_readline` (no underscore, like `tcp_readline`); `close` is the
+    // real shutdown like `net.close`).
+    for (method, canon, params, ret) in [
+        (
+            "write",
+            "tls_write",
+            vec![("stream", tls_t.clone()), ("data", Type::Str)],
+            result_int(),
+        ),
+        (
+            "write_bytes",
+            "tls_write_bytes",
+            vec![("stream", tls_t.clone()), ("data", Type::Bytes)],
+            result_int(),
+        ),
+        (
+            "read",
+            "tls_read",
+            vec![("stream", tls_t.clone()), ("max_bytes", Type::Int)],
+            result_str(),
+        ),
+        (
+            "read_bytes",
+            "tls_read_bytes",
+            vec![("stream", tls_t.clone()), ("max_bytes", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "read_exact",
+            "tls_read_exact",
+            vec![("stream", tls_t.clone()), ("n", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "read_line",
+            "tls_readline",
+            vec![("stream", tls_t.clone())],
+            result_str(),
+        ),
+        (
+            "set_read_timeout",
+            "tls_set_read_timeout",
+            vec![("stream", tls_t.clone()), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "set_write_timeout",
+            "tls_set_write_timeout",
+            vec![("stream", tls_t.clone()), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "peer_addr",
+            "tls_peer_addr",
+            vec![("stream", tls_t.clone())],
+            result_str(),
+        ),
+        (
+            "close",
+            "tls_close",
+            vec![("stream", tls_t.clone())],
+            result_unit(),
+        ),
+        (
+            "shutdown",
+            "tls_shutdown",
+            vec![("stream", tls_t.clone())],
+            result_unit(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.net.{canon}"), s.clone());
+        m.insert(format!("std.tls.{method}"), s.clone());
+        m.insert(format!("tls.{method}"), s.clone());
+        m.insert(format!("net.{canon}"), s);
+    }
+    // `tls.connect*` constructor aliases so `tls.connect(..)` reads naturally.
+    for (alias, params) in [
+        (
+            "connect",
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+        ),
+        (
+            "connect_insecure",
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+        ),
+    ] {
+        let s = sig(params, result_tls());
+        m.insert(format!("tls.{alias}"), s.clone());
+        m.insert(format!("std.tls.{alias}"), s);
+    }
+    m.insert(
+        "tls.connect_with_ca".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("ca_file", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+            result_tls(),
+        ),
+    );
+    m.insert(
+        "std.tls.connect_with_ca".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("ca_file", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+            result_tls(),
+        ),
+    );
 
     // std.fs — comprehensive non-blocking filesystem. All fallible ops
     // return `Result<_, str>` with unified `fs:<op>:<code>: <path>`
@@ -4319,6 +4531,12 @@ mod tests {
             "net.set_read_timeout",
             "std.net.set_write_timeout",
             "net.set_write_timeout",
+            "std.net.tcp_read_exact",
+            "std.net.tls_connect",
+            "std.net.tls_connect_with_ca",
+            "std.net.tls_connect_insecure",
+            "std.net.tls_listen",
+            "std.net.tls_accept",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
@@ -4458,7 +4676,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 938);
+        assert_eq!(funcs.len(), 1001);
     }
 
     #[test]

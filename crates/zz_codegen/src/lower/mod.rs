@@ -1097,6 +1097,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.tcp_readline" | "std.net.tcp_readline" => Some("zz_tcp_readline"),
         "net.tcp_close" | "std.net.tcp_close" => Some("zz_tcp_close"),
         "net.tcp_read_bytes" | "std.net.tcp_read_bytes" => Some("zz_tcp_read_bytes"),
+        "net.tcp_read_exact" | "std.net.tcp_read_exact" => Some("zz_tcp_read_exact"),
         "net.tcp_write_bytes" | "std.net.tcp_write_bytes" => Some("zz_tcp_write_bytes"),
         "net.tcp_shutdown" | "std.net.tcp_shutdown" => Some("zz_tcp_shutdown"),
         // Ergonomic `net.*` method aliases (same C impls as the canonicals).
@@ -1104,6 +1105,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.read" | "std.net.read" => Some("zz_tcp_read"),
         "net.read_line" | "std.net.read_line" => Some("zz_tcp_readline"),
         "net.read_bytes" | "std.net.read_bytes" => Some("zz_tcp_read_bytes"),
+        "net.read_exact" | "std.net.read_exact" => Some("zz_tcp_read_exact"),
         "net.write" | "std.net.write" => Some("zz_tcp_write"),
         "net.write_bytes" | "std.net.write_bytes" => Some("zz_tcp_write_bytes"),
         "net.close" | "std.net.close" => Some("zz_tcp_shutdown"),

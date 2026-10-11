@@ -1,5 +1,7 @@
 //! `std.net` — Low-level TCP networking.
 
+pub(crate) mod tls;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
@@ -446,6 +448,46 @@ pub(crate) fn set_write_timeout(
         Ok(()) => Ok(Value::Result(Box::new(Ok(Value::Bool(true))))),
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
             format!("set_write_timeout failed: {e}").into(),
+        ))))),
+    }
+}
+
+/// `net.tcp_read_exact(stream: tcp.stream, n: int) -> Result<bytes, str>`
+///
+/// Loops until exactly `n` bytes arrive (RESP bulk reads, framing tests).
+/// Single `tcp_read_bytes` may return short; this never does.
+pub(crate) fn tcp_read_exact(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let stream = match arg(args, 0, "std.net.tcp_read_exact")? {
+        Value::TcpStream(s) => s.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.net.tcp_read_exact: expected a tcp.stream, found `{other}`"),
+                span,
+            ))
+        }
+    };
+    let n = expect_int(args, 1, "std.net.tcp_read_exact")?;
+    if n <= 0 || n > 64 * 1024 * 1024 {
+        return Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("tcp_read_exact: bad length {n} (want 1..67108864)").into(),
+        )))));
+    }
+    let mut lock = stream
+        .lock()
+        .map_err(|e| EvalError::new(format!("std.net.tcp_read_exact: lock poisoned: {e}"), span))?;
+    let mut out = vec![0u8; n as usize];
+    // `TcpStream` behind a `MutexGuard` derefs to `TcpStream`; `read_exact`
+    // comes from the `Read` trait (already imported).
+    match lock.read_exact(&mut out) {
+        Ok(()) => Ok(Value::Result(Box::new(Ok(Value::Bytes(Box::new(
+            zz_runtime::BytesData::from_vec(out),
+        )))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("tcp_read_exact failed: {e}").into(),
         ))))),
     }
 }
