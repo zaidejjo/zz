@@ -1922,3 +1922,127 @@ fn stdlib_import_kinds_recorded_for_scoped_runs() {
         result.stdlib_aliases
     );
 }
+
+#[test]
+fn dep_style_warnings_collapse_to_one_note() {
+    // #387: a registry/path dep's style lints are true positives the
+    // consumer can neither fix nor silence — they must not print per
+    // site. Errors from deps still propagate. Path deps stand in for
+    // registry deps (same resolver path).
+    let dir = temp_project(&[
+        (
+            "app/zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nask = { path = \"../askpkg\" }\n",
+        ),
+        (
+            "app/src/main.zz",
+            "import ask.editor\nx := editor.edit()",
+        ),
+        ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
+        (
+            "askpkg/src/helper.zz",
+            "pub func get() -> int { 1 }",
+        ),
+        (
+            // `ed` shadows the `ed` import head: the #381 lint fires
+            // inside the dep (same shape as ask's `ed := env.get(..)`).
+            "askpkg/src/editor.zz",
+            "import ask.helper as ed\npub func edit() -> int {\n    ed := 1\n    ed\n}",
+        ),
+    ]);
+    let mut lock = zz_pm::lock::Lockfile::new();
+    lock.deps.push(zz_pm::lock::LockedDep {
+        name: "ask".to_string(),
+        version: "*".to_string(),
+        source: "path".to_string(),
+        hash: String::new(),
+        commit: None,
+        native: None,
+    });
+    lock.save(&dir.join("app/zz.lock")).expect("write lock");
+    let result = load_program(&dir.join("app/src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    // Messages only (notes echo the first hidden warning for triage).
+    let msgs: Vec<&str> = result
+        .errors
+        .iter()
+        .flat_map(|e| e.diags.iter().map(|d| d.message.as_str()))
+        .collect();
+    // The raw per-site warning must not reach the consumer ...
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| m.contains("shadows a module namespace")),
+        "dep shadow warning must collapse, got: {:?}",
+        msgs
+    );
+    // ... but the collapse note names the dependency.
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("inside dependency") && m.contains("hidden")),
+        "expected collapse note, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn first_party_shadow_warning_still_fires() {
+    // #387 companion: first-party files keep the raw per-site warning.
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "src/main.zz",
+            "import math.utils\nfunc f(utils: str) -> str {\n    utils\n}",
+        ),
+        (
+            "src/math/utils.zz",
+            "pub func double(n: int) -> int { n * 2 }",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(
+        diag_texts(&result)
+            .iter()
+            .any(|m| m.contains("shadows a module namespace")),
+        "first-party shadow warning must fire, got: {:?}",
+        diag_texts(&result)
+    );
+}
+
+#[test]
+fn dep_errors_still_propagate() {
+    // #387 companion: only warnings collapse — dep type errors still
+    // break the consumer build.
+    let dir = temp_project(&[
+        (
+            "app/zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nask = { path = \"../askpkg\" }\n",
+        ),
+        (
+            "app/src/main.zz",
+            "import ask.broken\nx := broken.f()",
+        ),
+        ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
+        ("askpkg/src/broken.zz", "pub func f() -> int { \"nope\" }"),
+    ]);
+    let mut lock = zz_pm::lock::Lockfile::new();
+    lock.deps.push(zz_pm::lock::LockedDep {
+        name: "ask".to_string(),
+        version: "*".to_string(),
+        source: "path".to_string(),
+        hash: String::new(),
+        commit: None,
+        native: None,
+    });
+    lock.save(&dir.join("app/zz.lock")).expect("write lock");
+    let result = load_program(&dir.join("app/src/main.zz")).unwrap();
+    assert!(
+        !no_errors(&result),
+        "dep type error must propagate, got: {:?}",
+        result.errors
+    );
+}
