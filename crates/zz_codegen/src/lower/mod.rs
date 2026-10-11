@@ -9,6 +9,7 @@
 //!   - [`expr`]: expression lowering (literals, binops, calls, fields)
 //!   - [`stmt`]: statement lowering (decls, assigns, if/else, match, loops)
 //!   - [`fn_decl`]: function generation, signatures, struct declarations
+//!   - [`param_escape`]: per-parameter escape analysis for call ownership
 
 mod context;
 mod expr;
@@ -16,6 +17,7 @@ mod extern_call;
 mod fn_decl;
 mod green;
 mod move_elide;
+mod param_escape;
 mod stmt;
 pub mod units;
 
