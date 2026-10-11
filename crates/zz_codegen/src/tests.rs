@@ -2048,3 +2048,44 @@ match w {
     );
     assert_eq!(out, "-1\n");
 }
+
+#[test]
+fn boxed_field_read_borrows_ident_base() {
+    // #188: boxing an already-boxed struct argument for a call rebuilds
+    // it member-wise; each synthesized `r.s0` read must borrow the
+    // local for `zz_object_get_field` (which retains the field value)
+    // instead of cloning the base into a `_field_obj` temp that nothing
+    // releases (~0.5KB/draw retained in struct loops).
+    // A caller passing its own (already boxed) struct parameter through
+    // hits the box-for-arg path with a non-literal base: the shape that
+    // retained per-iteration temps in loops.
+    let src = r#"
+struct Rng { s0: int, s1: int, s2: int, s3: int }
+func next(r: Rng) -> (int, Rng) {
+    return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1, s2: r.s2, s3: r.s3 })
+}
+func mid(r: Rng) -> (int, Rng) {
+    next(r)
+}
+func main() {
+    r := Rng{ s0: 0, s1: 0, s2: 0, s3: 0 }
+    println("{mid(r)}")
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let c = lowerer.lower().source;
+    assert!(
+        !c.contains("_field_obj"),
+        "ident-base field reads must not hoist clone temps, got:\n{c}"
+    );
+    assert!(
+        c.contains("zz_object_get_field(&v"),
+        "expected a borrowed field read, got:\n{c}"
+    );
+}
