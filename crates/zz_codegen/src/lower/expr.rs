@@ -5498,7 +5498,35 @@ impl Lowerer {
                     } else {
                         out.push_str(&format!("    if ({full_cond}) {{\n"));
                     }
+                    // Record the payload type for method dispatch: without
+                    // this, calls on match-bound handles (e.g.
+                    // `.ok(ss) => ss.read_line()`) lose their receiver
+                    // type and misroute to another namespace's same-named
+                    // native on AOT (the VM dispatches on the live value
+                    // tag, so only native diverged). Single-binding arms
+                    // only; nested payloads keep the old behavior.
+                    let arm_payload_ty: Option<zz_checker::Type> = if fp.binds.len() == 1 {
+                        self.ty_at(names, scrutinee.span()).and_then(|ty| {
+                            match (ty, name.as_str()) {
+                                (zz_checker::Type::Option(inner), "some") => {
+                                    Some(inner.as_ref().clone())
+                                }
+                                (zz_checker::Type::Result(ok, _), "ok") => {
+                                    Some(ok.as_ref().clone())
+                                }
+                                (zz_checker::Type::Result(_, err), "err") => {
+                                    Some(err.as_ref().clone())
+                                }
+                                _ => None,
+                            }
+                        })
+                    } else {
+                        None
+                    };
                     for (bname, pexpr) in &fp.binds {
+                        if let Some(pty) = arm_payload_ty.clone() {
+                            names.checker_types.insert(bname.clone(), pty);
+                        }
                         if self.green_active() {
                             let (ptr, deref, n) = self.green_cell(names, "zz_value", false, out);
                             out.push_str(&format!("        {deref} = {pexpr};\n"));
