@@ -46,6 +46,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "str_utf8_parity.zz", true),
     ("stdlib", "vec_nested_str_parity.zz", true),
     ("stdlib", "console.zz", false),
+    ("stdlib", "selective_calls.zz", false),
     ("stdlib", "str_extended_test.zz", false),
     ("stdlib", "str_find_test.zz", true),
     ("stdlib", "str_bytes_test.zz", true),
@@ -99,10 +100,6 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
 /// `dual_engine_parity` target that shares this file.)
 #[allow(dead_code)]
 pub const EXCLUDED: &[(&str, &str)] = &[
-    (
-        "stdlib/selective_calls.zz",
-        "native-only spurious HIR diagnostic (first-class selective import), see #351",
-    ),
     ("stdlib/envmod.zz", "reads env/argv (shared in batch)"),
     ("stdlib/env_test.zz", "reads env/argv (shared in batch)"),
     ("stdlib/env_full.zz", "reads env/argv (shared in batch)"),
