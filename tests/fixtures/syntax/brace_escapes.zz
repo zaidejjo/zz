@@ -5,9 +5,9 @@ n := 42
 
 // 1-4: basic collapses
 println("{{" == "{")
-println("}}" == "}")
+println("}}" == "}" + "}")
 println("{{}}" == "{}")
-println("a{{b}}c" == "a{{b}}c")
+println("a{{b}}c" == "a{" + "b}c")
 
 // 5-6: doubled braces stay literal (no interpolation)
 println("{{name}}" == "{{name}}")
@@ -44,6 +44,10 @@ println("{n:x}{{lit}}" == "2a{{lit}}")
 println("\\{{x\\}}" == "\\{{x\\}}")
 
 // 20: empty escaped pair inside text
-println("x{{}}y" == "x{{}}y")
+println("x{{}}y" == "x{}y")
+
+// 21-22: unmatched `}}` stays literal (#402 — nested JSON closes)
+println("end}}" == "end}" + "}")
+println("{\"a\": {}}" == "{\"a\": " + "{}}")
 
 println("brace_escapes_ok")

@@ -370,9 +370,9 @@ println("bin = {n:b}")      // 11111111
 println("dec = {n:d}")      // 255
 ```
 
-Literal braces use doubled escapes — `{{` renders `{`, `}}`
-renders `}` — in both `"..."` and `"""..."""` strings. This is the
-preferred way to emit JSON, CSS, or template syntax:
+Literal braces use doubled escapes — `{{` renders `{`, and a `}}`
+that closes a `{{` pair renders `}` — in both `"..."` and `"""..."""`
+strings. This is the preferred way to emit CSS or template syntax:
 
 ```zz
 println("{{name}}")        // {name} (no interpolation)
@@ -385,8 +385,15 @@ css := """
     """
 ```
 
+An unmatched `}}` (no preceding `{{` in the same string) stays two
+literal braces, so nested JSON needs no escaping at all:
+
+```zz
+println("{\"a\": {}}") // {"a": {}} — both closes preserved
+```
+
 `\{` / `\}` remain accepted for backwards compatibility and mean
-the same as `{{` / `}}`, but prefer the doubled form.
+the same as `{{` / a matched `}}`, but prefer the doubled form.
 
 #### What `{...}` expands
 

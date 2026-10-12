@@ -54,6 +54,12 @@ enum LexContext {
         /// current triple-quoted string. On close, all segments are dedented
         /// together based on the closing delimiter's indentation.
         segs: Vec<usize>,
+        /// Unclosed `{{` escapes seen in this string. A `}}` pair collapses
+        /// to a single literal `}` only while this is nonzero; an unmatched
+        /// `}}` (no preceding `{{` — the nested-JSON `...}}` case, #402)
+        /// stays two literal braces. Carried across interpolation
+        /// continuations so `"{{a{x}b}}"` still collapses.
+        brace_depth: u32,
         /// True when the accumulated `value` is byte-identical to the source
         /// slice (no escapes processed, no interpolation split). Clean
         /// single-line segments borrow the source instead of allocating.
@@ -683,6 +689,7 @@ impl<'a> Lexer<'a> {
             is_nested,
             triple,
             segs: Vec::new(),
+            brace_depth: 0,
             // Fresh strings are clean until an escape proves otherwise.
             // Triple-quoted strings are never clean: post-hoc dedent
             // rewrites their text, so they always take the owned path.
@@ -695,7 +702,7 @@ impl<'a> Lexer<'a> {
     fn lex_string_cont(&mut self) {
         // Pop the current string context; continuation arms re-push it with
         // the updated value.
-        let (start, value, is_nested, clean) = match self.contexts.pop() {
+        let (start, value, is_nested, clean, brace_depth) = match self.contexts.pop() {
             Some(LexContext::Str {
                 start,
                 value,
@@ -703,9 +710,10 @@ impl<'a> Lexer<'a> {
                 triple: false,
                 segs,
                 clean,
+                brace_depth,
             }) => {
                 debug_assert!(segs.is_empty());
-                (start, value, is_nested, clean)
+                (start, value, is_nested, clean, brace_depth)
             }
             Some(LexContext::Str { triple: true, .. }) => {
                 unreachable!("triple-quoted string dispatched to lex_string_cont")
@@ -744,6 +752,7 @@ impl<'a> Lexer<'a> {
                         segs: Vec::new(),
                         // Continuation segment (no opening quote at `start`).
                         clean: false,
+                        brace_depth,
                     });
                 } else {
                     // Final closing quote — emit Str (complete string).
@@ -754,10 +763,11 @@ impl<'a> Lexer<'a> {
                     );
                 }
             }
-            // Doubled-brace escapes: `{{` / `}}` emit a single literal
-            // brace and never open an interpolation. Checked before the
+            // Doubled-brace escape `{{` emits a single literal brace and
+            // never opens an interpolation. Checked before the
             // interpolation arm so `{{name}}` stays literal text while
             // `{{{name}}}` is literal `{` + interpolation + literal `}`.
+            // Each `{{` opens one escape pair (tracked in `brace_depth`).
             // Uses byte-prefix checks (`starts_with`) for exact two-byte
             // consumes; `peek_char_at` is byte-offset based and would be
             // wrong for multi-byte lookahead.
@@ -774,9 +784,14 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Rewritten text: never borrow afterwards.
                     clean: false,
+                    brace_depth: brace_depth.saturating_add(1),
                 });
             }
-            Some('}') if self.src[self.pos..].starts_with("}}") => {
+            // Doubled-brace escape `}}` closes one `{{` pair. An unmatched
+            // `}}` (no preceding `{{` — the nested-JSON `...}}` case, #402)
+            // is NOT an escape: the guard fails and the braces lex as two
+            // literal characters via the default arm below.
+            Some('}') if self.src[self.pos..].starts_with("}}") && brace_depth > 0 => {
                 let mut value = value;
                 value.push('}');
                 self.bump_char();
@@ -789,6 +804,7 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Rewritten text: never borrow afterwards.
                     clean: false,
+                    brace_depth: brace_depth - 1,
                 });
             }
             // String interpolation: `{ident...`, `{1...`, `{(...` start an
@@ -823,6 +839,8 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Post-`{` continuation: no opening quote at `start`.
                     clean: false,
+                    // Pairs span interpolations: `"{{a{x}b}}"` still closes.
+                    brace_depth,
                 });
                 self.pending_interp = true;
             }
@@ -911,6 +929,7 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Any `\` escape rewrites text: never borrow afterwards.
                     clean: false,
+                    brace_depth,
                 });
             }
             Some(c) => {
@@ -925,6 +944,8 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Verbatim char: cleanliness unchanged.
                     clean,
+                    // Unmatched `}}` lands here one brace at a time (#402).
+                    brace_depth,
                 });
             }
             None => {
@@ -944,7 +965,7 @@ impl<'a> Lexer<'a> {
     /// - on close, all emitted text segments are dedented together based on
     ///   the closing delimiter's indentation.
     fn lex_triple_cont(&mut self) {
-        let (start, value, is_nested, segs) = match self.contexts.pop() {
+        let (start, value, is_nested, segs, brace_depth) = match self.contexts.pop() {
             Some(LexContext::Str {
                 start,
                 value,
@@ -953,7 +974,8 @@ impl<'a> Lexer<'a> {
                 segs,
                 // Triple strings never borrow (dedent rewrites); ignored.
                 clean: _,
-            }) => (start, value, is_nested, segs),
+                brace_depth,
+            }) => (start, value, is_nested, segs, brace_depth),
             Some(LexContext::Str { triple: false, .. }) => {
                 unreachable!("single-line string dispatched to lex_triple_cont")
             }
@@ -988,6 +1010,7 @@ impl<'a> Lexer<'a> {
                     segs: next_segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    brace_depth,
                 });
             } else {
                 let idx = self.tokens.len();
@@ -997,9 +1020,10 @@ impl<'a> Lexer<'a> {
             return;
         }
         match self.peek_char() {
-            // Doubled-brace escapes: `{{` / `}}` emit a single literal
-            // brace and never open an interpolation. Same semantics as
-            // single-line strings; dedent sees only the collapsed value.
+            // Doubled-brace escape `{{` emits a single literal brace and
+            // never opens an interpolation. Same semantics as single-line
+            // strings; dedent sees only the collapsed value. Each `{{`
+            // opens one escape pair (tracked in `brace_depth`).
             Some('{') if self.src[self.pos..].starts_with("{{") => {
                 let mut value = value;
                 value.push('{');
@@ -1013,9 +1037,13 @@ impl<'a> Lexer<'a> {
                     segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    brace_depth: brace_depth.saturating_add(1),
                 });
             }
-            Some('}') if self.src[self.pos..].starts_with("}}") => {
+            // Doubled-brace escape `}}` closes one `{{` pair. An unmatched
+            // `}}` (no preceding `{{` — the nested-JSON `...}}` case, #402)
+            // stays two literal braces via the default arm below.
+            Some('}') if self.src[self.pos..].starts_with("}}") && brace_depth > 0 => {
                 let mut value = value;
                 value.push('}');
                 self.bump_char();
@@ -1028,6 +1056,7 @@ impl<'a> Lexer<'a> {
                     segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    brace_depth: brace_depth - 1,
                 });
             }
             // Interpolation: `{ident...`, `{1...`, `{(...` start an embedded
@@ -1046,6 +1075,8 @@ impl<'a> Lexer<'a> {
                     segs: next_segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    // Pairs span interpolations, as in single-line strings.
+                    brace_depth,
                 });
                 self.pending_interp = true;
             }
@@ -1134,6 +1165,7 @@ impl<'a> Lexer<'a> {
                     segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    brace_depth,
                 });
             }
             Some(c) => {
@@ -1148,6 +1180,8 @@ impl<'a> Lexer<'a> {
                     segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    // Unmatched `}}` lands here one brace at a time (#402).
+                    brace_depth,
                 });
             }
             None => {
@@ -1636,6 +1670,28 @@ mod tests {
         // Lone braces stay literal.
         let toks = sig("\"a}b\"");
         assert_eq!(toks, vec![(TokenKind::Str, "a}b".to_string())]);
+    }
+
+    #[test]
+    fn unmatched_double_close_stays_literal() {
+        // #402: nested JSON closes (`...}}`) have no preceding `{{`, so
+        // both braces stay literal instead of collapsing to one.
+        let toks = sig("\"{\\\"a\\\": {}}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{\"a\": {}}".to_string())]);
+        let toks = sig("\"x}}y\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "x}}y".to_string())]);
+        // Matched pairs still collapse, even across an interpolation.
+        let toks = sig("\"{{a{x}b}}\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "{a".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "x".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, "b}".to_string()),
+            ]
+        );
     }
 
     #[test]
