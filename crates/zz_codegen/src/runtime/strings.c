@@ -1703,6 +1703,13 @@ zz_value zz_str_bytes(zz_value s, int *err) {
     return arr;
 }
 
+// str.byte_len(s) — byte length (len() counts chars).
+zz_value zz_str_byte_len(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || !s.s) return (zz_value){ZZ_INT, {.i = 0}};
+    return (zz_value){ZZ_INT, {.i = (int64_t)s.s->len}};
+}
+
 // ord(ch) — codepoint of a single-character string (#276, #263).
 // Empty and multi-character inputs are hard errors, mirroring the VM.
 // Invalid bytes decode to their byte value (unreachable from valid

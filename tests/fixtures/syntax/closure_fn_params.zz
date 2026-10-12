@@ -1,0 +1,26 @@
+// features: closures, func-call, int-arith, locals, print, string-literal
+// E2E: func-typed closure parameters — `|f: func(int) -> int|`.
+// The closing pipe used to be eaten as a union operator inside function
+// return types, cascading into dict-type errors. Includes nesting that
+// captures the outer closure's function parameter.
+func apply2(f: func(int) -> int, x: int) -> int {
+    g := |y: int| { f(y) + 1 }
+    g(x)
+}
+
+func deco(f: func(int) -> int) -> func(int) -> int {
+    return |x: int| { f(x) + 1 }
+}
+
+func main() {
+    base := |x: int| { x * 2 }
+    println("simple={apply2(base, 5)}")
+    outer := |f: func(int) -> int| {
+        inner := |x: int| { f(x) + 1 }
+        inner(5)
+    }
+    println("nested={outer(base)}")
+    w := deco(base)
+    println("factory={w(5)}")
+    println("closure_fn_params_ok")
+}

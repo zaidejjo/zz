@@ -10,9 +10,24 @@ use super::Parser;
 impl<'a> Parser<'a> {
     // --- types ------------------------------------------------------------
 
+    /// Full type inside an explicit delimiter (`()`, `<>`, `[]`, `{}`):
+    /// the closer disambiguates, so unions parse even while the
+    /// closure-signature flag is set (e.g. `|x: Box<A | B>|`). The flag
+    /// is restored afterwards (a func return *inside* stays protected).
+    pub(crate) fn parse_type_delimited(&mut self) -> Ty {
+        let save = self.no_union;
+        self.no_union = false;
+        let ty = self.parse_type();
+        self.no_union = save;
+        ty
+    }
+
     pub(crate) fn parse_type(&mut self) -> Ty {
         let first = self.parse_type_base();
-        if !self.at(TokenKind::Pipe) {
+        // Closure signatures reclaim `|`: inside parameter types (flag set
+        // by parse_closure, inherited by nested function returns) a pipe
+        // closes the parameter list — it is never a union operator here.
+        if self.no_union || !self.at(TokenKind::Pipe) {
             return first;
         }
         let mut members = vec![first];
@@ -66,9 +81,9 @@ impl<'a> Parser<'a> {
                 let params = if self.at(TokenKind::RParen) {
                     Vec::new()
                 } else {
-                    let mut ts = vec![self.parse_type()];
+                    let mut ts = vec![self.parse_type_delimited()];
                     while self.eat(TokenKind::Comma) {
-                        ts.push(self.parse_type());
+                        ts.push(self.parse_type_delimited());
                     }
                     ts
                 };
@@ -102,9 +117,9 @@ impl<'a> Parser<'a> {
                     }
                 }
                 let args = if self.eat(TokenKind::Lt) {
-                    let mut ts = vec![self.parse_type()];
+                    let mut ts = vec![self.parse_type_delimited()];
                     while self.eat(TokenKind::Comma) {
-                        ts.push(self.parse_type());
+                        ts.push(self.parse_type_delimited());
                     }
                     if !self.eat_gt_close() {
                         self.error_here("expected `>` to close type arguments");
@@ -212,7 +227,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LBracket => {
                 self.advance();
-                let inner = self.parse_type();
+                let inner = self.parse_type_delimited();
                 let end = if self.eat_close(TokenKind::RBracket) {
                     self.previous().span
                 } else {
@@ -226,11 +241,11 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LBrace => {
                 self.advance();
-                let key = self.parse_type();
+                let key = self.parse_type_delimited();
                 if !self.eat(TokenKind::Colon) {
                     self.error_here("expected `:` in dict type");
                 }
-                let value = self.parse_type();
+                let value = self.parse_type_delimited();
                 let end = if self.eat_close(TokenKind::RBrace) {
                     self.previous().span
                 } else {
@@ -250,12 +265,12 @@ impl<'a> Parser<'a> {
                         span: tok.span,
                     };
                 }
-                let first = self.parse_type();
+                let first = self.parse_type_delimited();
                 let first_span = first.span;
                 if self.eat(TokenKind::Comma) {
                     let mut ts = vec![first];
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                        ts.push(self.parse_type());
+                        ts.push(self.parse_type_delimited());
                         if !self.eat(TokenKind::Comma) {
                             break;
                         }

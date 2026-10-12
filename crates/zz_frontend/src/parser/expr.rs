@@ -1037,13 +1037,18 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_closure(&mut self) -> Expr {
         let pipe_tok = self.advance(); // `|`
         let mut params = Vec::new();
+        // Reclaim `|` from union parsing for the parameter list: a pipe at
+        // the top level of a parameter type (including nested function
+        // returns like `func(int) -> int`) closes the list. Unions stay
+        // forbidden there (genuinely ambiguous); delimited positions keep
+        // full unions. Save/restore: closures nest.
+        let save_no_union = self.no_union;
+        self.no_union = true;
         if !self.at(TokenKind::Pipe) {
             loop {
                 let name = self
                     .expect_ident()
                     .unwrap_or_else(|| dummy_ident(self.peek().span));
-                // Base type only: `|` closes the parameter list, so unions
-                // are not allowed in closure parameter types.
                 let ty = if self.eat(TokenKind::Colon) {
                     Some(self.parse_type_base())
                 } else {
@@ -1069,6 +1074,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        self.no_union = save_no_union;
         if !self.eat(TokenKind::Pipe) {
             self.error_here("expected `|` to close closure parameters");
         }

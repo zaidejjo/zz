@@ -931,8 +931,13 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "str.count_in" | "std.str.count_in" => Some("zz_str_count_in"),
         "str.classify" | "std.str.classify" => Some("zz_str_classify"),
         "str.bytes" | "std.str.bytes" => Some("zz_str_bytes"),
+        "str.byte_len" | "std.str.byte_len" => Some("zz_str_byte_len"),
         "bytes.to_str" | "std.bytes.to_str" => Some("zz_bytes_to_str"),
         "bytes.to_ints" | "std.bytes.to_ints" => Some("zz_bytes_to_ints"),
+        "cell.new" | "std.cell.new" => Some("zz_cell_new"),
+        "cell.get" | "std.cell.get" => Some("zz_cell_get"),
+        "cell.set" | "std.cell.set" => Some("zz_cell_set"),
+        "cell.drop" | "std.cell.drop" => Some("zz_cell_drop"),
         "bytes.finish" | "std.bytes.finish" => Some("zz_bytes_finish"),
         // math
         "math.abs" | "std.math.abs" => Some("zz_math_abs"),
