@@ -6,7 +6,7 @@ func f2(p3: int) -> int {
     -(p3)
 }
 acc4 := 0
-for i5 in 3..9 {
+for _i5 in 3..9 {
     acc4 = 5 - (v1 + acc4)
 }
 println(acc4)

@@ -35,7 +35,7 @@ if name1 == "nobody" {
 }
 
 // while with string comparison
-s := "start"
+_s := "start"
 count := 0
 while count < 1 {
     println("looping")

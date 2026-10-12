@@ -31,7 +31,7 @@ func main() {
 
   // Loop-built inner arrays through a struct field (former SIGSEGV).
   u := T{ rows: [] }
-  for i in range(0, 5) {
+  for _i in range(0, 5) {
     r := ["a", "b"]
     u.rows = vec.push(u.rows, r)
   }
@@ -43,7 +43,7 @@ func main() {
 
   // Loop-built plain-local nested array.
   flat: [[str]] = []
-  for i in range(0, 3) {
+  for _i in range(0, 3) {
     r := ["x", "y"]
     flat = vec.push(flat, r)
   }

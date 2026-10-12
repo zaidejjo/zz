@@ -6,12 +6,12 @@ func f2(p3: int) -> int {
     m4 := p3 % 3
     match m4 {
         0 => { return (10 - -8) },
-        _ => { q5 := -19 },
+        _ => { _q5 := -19 },
     }
     v1
 }
 acc6 := 0
-for i7 in 2..7 {
+for _i7 in 2..7 {
     acc6 = 2 - (v1 + acc6)
 }
 println(acc6)

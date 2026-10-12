@@ -8,14 +8,14 @@ enum Box<T> {
 impl Box<T> {
     func get_or(self, d: T) -> T {
         match self {
-            .V(v) => v,
-            .E => d,
+            .V(v) => v
+            .E => d
         }
     }
     func is_void(self) -> bool {
         match self {
-            .V(_) => false,
-            .E => true,
+            .V(_) => false
+            .E => true
         }
     }
 }
@@ -33,7 +33,7 @@ func main() {
     println(a)
     println(a.get_or(0))
     // Explicit annotation.
-    b: Box<int> = Box.E
+    b:Box<int> = Box.E
     println(b.get_or(7))
     println(b == Box.E)
     println(b.is_void())
@@ -43,10 +43,10 @@ func main() {
     // Multi-parameter enums with tuple payloads.
     p := Pair.Both((1, "x"))
     match p {
-        .Both((n, t)) => println(n),
-        .First(n) => println(n),
-        .Second(t) => println(t),
-        .Neither => println("neither"),
+        .Both((n, _t)) => println(n)
+        .First(n) => println(n)
+        .Second(t) => println(t)
+        .Neither => println("neither")
     }
     // Unconstrained unit variant defaults like Option.
     e := Box.E
