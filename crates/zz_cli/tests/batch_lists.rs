@@ -95,6 +95,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "closure_fn_params.zz", true),
     ("stdlib", "bytes_finish_test.zz", true),
     ("syntax", "brace_escapes.zz", false),
+    ("syntax", "raw_strings.zz", false),
     ("syntax", "brace_escapes_multiline.zz", false),
     ("syntax", "destructuring.zz", false),
     ("syntax", "short_circuit.zz", true),

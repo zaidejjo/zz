@@ -761,6 +761,7 @@ parity_strict!(
 );
 parity_strict!(parity_syntax_fstrings, "syntax", "fstrings.zz");
 parity_strict!(parity_syntax_brace_escapes, "syntax", "brace_escapes.zz");
+parity_strict!(parity_syntax_raw_strings, "syntax", "raw_strings.zz");
 parity_strict!(
     parity_syntax_brace_escapes_multiline,
     "syntax",
