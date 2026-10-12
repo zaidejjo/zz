@@ -14,7 +14,7 @@ pub mod cursor;
 
 use std::borrow::Cow;
 
-use crate::diag::{error_at, FixIt, RawDiag};
+use crate::diag::{error_at, render_replacement, FixIt, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind, Trivia, TriviaKind};
 
@@ -133,13 +133,16 @@ impl<'a> Lexer<'a> {
         };
         self.errors.push(
             error_at(
-                format!("unterminated string literal — add closing `{closer}` {place}"),
+                format!(
+                    "unterminated string literal — add closing {} {place}",
+                    render_replacement(closer)
+                ),
                 span,
             )
             .with_fixit(FixIt::safe(
                 Span::new(at, at),
                 closer,
-                format!("add closing `{closer}`"),
+                format!("add closing {}", render_replacement(closer)),
             )),
         );
     }
@@ -1899,8 +1902,21 @@ mod tests {
     fn raw_unterminated_is_error() {
         let lexed = lex("`abc");
         assert!(
-            lexed.errors.iter().any(|e| e.message.contains('`')),
-            "unterminated raw string must error: {:?}",
+            lexed
+                .errors
+                .iter()
+                .any(|e| e.message.contains("a backtick")),
+            "unterminated raw string must name the closer: {:?}",
+            lexed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        // Triple raw names its triple-backtick closer the same way.
+        let lexed = lex("```abc");
+        assert!(
+            lexed
+                .errors
+                .iter()
+                .any(|e| e.message.contains("3 backticks")),
+            "unterminated triple raw must name the closer: {:?}",
             lexed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
     }

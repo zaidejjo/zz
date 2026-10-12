@@ -871,6 +871,17 @@ fn string_literal_in_match_guard_errors() {
 }
 
 #[test]
+fn raw_strings_type_as_str() {
+    // #414: backtick delimiters don't change typing — raw literals are
+    // plain str in every position, single-line and triple.
+    let r = check_src("x := `{a} {1} C:\\new`");
+    assert_eq!(r.bindings["x"], Type::Str);
+    let r = check_src("x: str = `typed`");
+    assert_eq!(r.bindings["x"], Type::Str);
+    errors_contain("x: int = `not an int`", "type mismatch");
+}
+
+#[test]
 fn guarded_catchall_does_not_kill_next_arm() {
     let r = check_src("match 1 { _ if 1 > 0 => 0, 1 => 1 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);

@@ -415,6 +415,13 @@ backtick (same doubling philosophy as `{{` / `}}`):
 println(`a``b`)   // a`b
 ```
 
+Two limits to know: inside triple-backtick strings a lone or
+doubled backtick is plain content — only ``` closes — so a
+triple-backtick fence itself cannot appear inside one (split the
+string or use single-line raw there). And ``` `` ``` means one
+backtick in single-line raw but two in triple raw: each form keeps
+exactly one way to spell a literal backtick.
+
 Triple-backtick strings span lines and dedent exactly like
 `"""..."""`, without any interpolation or escapes:
 
