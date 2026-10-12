@@ -13,7 +13,7 @@ import std.process(pid)
 func main() {
     tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
     scratch := "/tmp/zz_result_print_{pid()}_{tok}.txt"
-    fs.write(scratch, "hello clean")
+    _u1 := fs.write(scratch, "hello clean")
     // Bare Ok straight to stdout unwraps.
     println(fs.read_to_string(scratch))
     print(fs.read_to_string(scratch))
@@ -27,6 +27,6 @@ func main() {
         .ok(c) => println("unexpected: {c}")
         .err(e) => println("caught: {e}")
     }
-    fs.remove_file(scratch)
+    _u2 := fs.remove_file(scratch)
     println("result_print_ok")
 }

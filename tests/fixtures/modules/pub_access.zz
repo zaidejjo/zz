@@ -6,13 +6,18 @@ pub func add(a: int, b: int) -> int {
     a + b
 }
 
-pub struct Point {x: int, y: int}
-secret := 99
+pub struct Point {
+    x: int,
+    y: int,
+}
+_secret := 99
 func helper(x: int) -> int {
     x
 }
 
-struct Box {val: int}
+struct Box {
+    val: int,
+}
 
 func main() {
     p := Point{x: 1, y: 2}

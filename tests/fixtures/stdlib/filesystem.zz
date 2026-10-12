@@ -25,6 +25,6 @@ println(fs.exists(scratch))
 println(fs.exists("/tmp/zz_no_such_file.txt"))
 
 // cleanup
-fs.write_file(scratch, "")
+_u1 := fs.write_file(scratch, "")
 
 println("fs_ok")
