@@ -1381,6 +1381,11 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_env_full, "stdlib", "env_full.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+parity_strict!(
+    parity_stdlib_tcp_method_on_try,
+    "stdlib",
+    "tcp_method_on_try.zz"
+);
 parity_strict!(parity_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 parity_strict!(parity_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
 parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
