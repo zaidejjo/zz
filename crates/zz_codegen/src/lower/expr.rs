@@ -3069,6 +3069,25 @@ impl Lowerer {
                     continue;
                 }
             }
+            // Natives take boxed zz_value args without exception: wrap an
+            // unboxed struct argument into a runtime object. Generic
+            // natives (`vec.push(arr, Pt {...})`) miss this because their
+            // signatures name `T`, not the struct — without the wrap the
+            // raw C struct hits a zz_value parameter (native-only C type
+            // error; the VM boxes everything). User functions keep the
+            // sig-driven paths above and below (raw unboxed params).
+            {
+                let std_name = format!("std.{cname}");
+                let is_native = self.reachable_natives.contains(&cname)
+                    || self.reachable_natives.contains(&std_name)
+                    || native_supported(&cname);
+                if is_native {
+                    if let Some(sname) = self.struct_box_name(a, names) {
+                        arg_items.push(self.emit_boxed_value(&sname, a, names, out));
+                        continue;
+                    }
+                }
+            }
             // Auto-box if this argument is a scalar variable or struct field
             let boxed = if let Expr::Ident { name, .. } = a {
                 let name_str = name.clone();
@@ -3260,6 +3279,19 @@ impl Lowerer {
             // In void context (result discarded), use in-place mutation
             // instead of copy-on-write for vec.push.
             let effective_name = if *self.void_context.borrow() && impl_name == "zz_vec_push" {
+                // Field receivers (`base.field.push(e)` as a statement)
+                // cannot append in place: the receiver lowers to a field
+                // *value* temp, so appending mutates the temp and the
+                // result is lost (silent no-op, diverging from the VM
+                // write-back). Route single-level Ident bases through the
+                // take helper, which does get+push+set internally.
+                // Deeper chains, captures, green bodies, and unboxed bases
+                // keep the old shape (same as before this change).
+                if let Some(take_expr) =
+                    self.void_field_push_take(&method_receiver, &arg_items, names)
+                {
+                    return take_expr;
+                }
                 "zz_vec_append"
             } else {
                 impl_name
@@ -4176,6 +4208,29 @@ impl Lowerer {
         if hits.len() == 1 {
             return Some(hits[0].clone());
         }
+        // Same-suffix spellings that lower to one native impl
+        // (`vec.push`/`std.vec.push` → `zz_vec_push`) are not ambiguous:
+        // either spelling emits identical code. Without this, any method
+        // whose free function has a `std.`-qualified twin (resolved
+        // through this fallback, e.g. receiver chains like `b.cmds.push`)
+        // fell through to a bogus direct call. Distinct impls stay
+        // unresolved (loud fallback downstream, never a guess).
+        if hits.len() > 1 {
+            let mut impls: Vec<Option<&str>> = hits
+                .iter()
+                .map(|h| native_impl(h).or_else(|| crate::ffi_impl(h)))
+                .collect();
+            impls.sort_unstable();
+            impls.dedup();
+            if impls.len() == 1 {
+                // Prefer the unqualified spelling (matches free-form
+                // lowering); any choice is code-identical here.
+                if let Some(bare) = hits.iter().find(|h| !h.starts_with("std.")) {
+                    return Some((*bare).clone());
+                }
+                return Some(hits[0].clone());
+            }
+        }
         if self.reachable_natives.contains(method) || native_supported(method) {
             return Some(method.to_string());
         }
@@ -4262,7 +4317,7 @@ impl Lowerer {
     /// value: struct literals of unboxed type plus Ident/Path/Field shapes
     /// rooted at raw values (see `unboxed_struct_of_expr`). Calls, indexes,
     /// arrays, blocks, etc. lower boxed and yield `None`.
-    fn struct_box_name(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+    pub(super) fn struct_box_name(&self, e: &Expr, names: &NameCtx) -> Option<String> {
         if let Expr::StructInit { name, .. } = e {
             if self.is_unboxed_struct(name) {
                 return Some(name.clone());
@@ -4277,7 +4332,7 @@ impl Lowerer {
     /// `zz_value`. Raw producers (locals, literals, field reads) are pure,
     /// so reusing the emitted text per field is side-effect free. The
     /// emitted operand itself is left untouched (no re-emission).
-    fn box_raw_struct(
+    pub(super) fn box_raw_struct(
         &self,
         sname: &str,
         raw: &str,
@@ -4400,7 +4455,7 @@ impl Lowerer {
     /// Box a binary operand that lowers to a raw unboxed struct into a
     /// runtime object; pass through everything else unchanged. `emitted`
     /// is the already scalar-boxed operand text (identity for structs).
-    fn box_struct_operand(
+    pub(super) fn box_struct_operand(
         &self,
         e: &Expr,
         emitted: String,
@@ -4413,6 +4468,51 @@ impl Lowerer {
         } else {
             emitted
         }
+    }
+
+    /// Void-statement `base.field.push(e)`: route through the take helper.
+    /// The generic void shape appends to the receiver *value* temp, so the
+    /// result is lost for field receivers (silent no-op). The take helper
+    /// does get+push+set against the base slot internally. Returns the
+    /// replacement expression, or `None` to keep the old shape (deeper
+    /// chains, captures, green bodies, unboxed bases).
+    fn void_field_push_take(
+        &self,
+        method_receiver: &Option<Expr>,
+        arg_items: &[String],
+        names: &mut NameCtx,
+    ) -> Option<String> {
+        if self.green_active() {
+            return None;
+        }
+        if arg_items.len() != 2 {
+            return None;
+        }
+        let recv = method_receiver.as_ref()?;
+        let (base, field) = match recv {
+            Expr::Path { parts, .. } if parts.len() == 2 => (parts[0].clone(), parts[1].clone()),
+            Expr::Field { obj, name, .. } => match obj.as_ref() {
+                Expr::Ident { name: b, .. } => (b.clone(), name.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if names.cap_deref.contains_key(&base) {
+            return None;
+        }
+        let cid = names.lookup(&base)?.to_string();
+        if names
+            .lookup_type(&base)
+            .map(|ty| ty.starts_with("zz_struct_"))
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let elem = arg_items.get(1)?.clone();
+        let err = names.fresh("_e");
+        Some(format!(
+            "({{ int {err} = 0; zz_object_push_field_take(&{cid}, \"{field}\", {elem}, &{err}); zz_unit(); }})"
+        ))
     }
 
     /// Resolve a multi-segment `Path` callee into a method-dispatch pair
