@@ -967,6 +967,14 @@ zz_value zz_tcp_peer_addr(zz_value stream, int *err);
 zz_value zz_tcp_local_addr(zz_value stream, int *err);
 zz_value zz_tcp_set_read_timeout(zz_value stream, zz_value ms, int *err);
 zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err);
+// ---- std.cell shared-mutable slots -------------------------------------
+// Pool of retained zz_value slots addressed by small integer ids. VM and
+// AOT keep separate pools with identical semantics (same convention as
+// the old TCP split: different reps, one contract). All ops lock once.
+zz_value zz_cell_new(zz_value v, int *err);
+zz_value zz_cell_get(zz_value id, int *err);
+zz_value zz_cell_set(zz_value id, zz_value v, int *err);
+zz_value zz_cell_drop(zz_value id, int *err);
 
 // http AOT server — route table with ZZ-closure handlers; http.test
 // dispatches in-process (epoll workers serve a static OK until Step 2).

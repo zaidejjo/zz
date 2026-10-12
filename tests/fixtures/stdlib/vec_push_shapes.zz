@@ -1,0 +1,38 @@
+// features: arrays, closures, func-call, int-arith, locals, methods, print, std-vec, string-literal, structs
+// E2E: push shapes with struct elements and field receivers — regression
+// cover for two native-only bugs (struct-literal elements miscompiled,
+// field pushes silently dropped). VM and AOT must agree exactly.
+struct Pt {
+    x: int,
+    y: int,
+}
+
+struct Bag {
+    items: [Pt],
+    tags: [str],
+}
+
+func main() {
+    // Struct literal elements, assign form.
+    arr := [Pt{x: 1, y: 2}]
+    arr = arr.push(Pt{x: 3, y: 4})
+    println("lit_assign={arr.len()}:{arr[1].x}")
+    // Struct literal elements, void form.
+    arr.push(Pt{x: 5, y: 6})
+    println("lit_void={arr.len()}")
+    // Free-function form on the same shapes.
+    arr2 := vec.push(arr, Pt{x: 7, y: 8})
+    println("free={arr2.len()},orig={arr.len()}")
+    // Field receivers, all three spellings.
+    b := Bag{items: [], tags: []}
+    b.items = b.items.push(Pt{x: 1, y: 1})
+    println("field_assign={b.items.len()}")
+    b.tags.push("hi")
+    println("field_void={b.tags.len()}")
+    b.items = vec.push(b.items, Pt{x: 2, y: 2})
+    println("field_free={b.items.len()}")
+    // Value copy semantics still hold (push returns new, original kept).
+    c := b.tags.push("yo")
+    println("copy={b.tags.len()},{c.len()}")
+    println("vec_push_shapes_ok")
+}

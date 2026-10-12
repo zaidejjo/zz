@@ -1,6 +1,7 @@
 //! `std.net` — Low-level TCP networking.
 
 pub(crate) mod tls;
+pub(crate) mod unix;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

@@ -54,7 +54,7 @@ enum TestEngine {
 }
 
 struct TestConfig {
-    path: String,
+    paths: Vec<String>,
     filter: Option<String>,
     exact: bool,
     tag: Option<String>,
@@ -85,7 +85,7 @@ impl TestConfig {
         // Load zz.toml defaults first (optional; absence is fine).
         let defaults = load_zz_toml_defaults();
 
-        let mut path: Option<String> = None;
+        let mut paths: Vec<String> = Vec::new();
         let mut filter: Option<String> = None;
         let mut exact = false;
         let mut tag: Option<String> = None;
@@ -242,7 +242,7 @@ impl TestConfig {
                 "--changed" => changed = true,
                 "--nocapture-impl" => {}
                 "--help" | "-h" => {
-                    return Err("usage: zz test [file.zz | directory] [FLAGS]\n\n\
+                    return Err("usage: zz test [file.zz | directory]... [FLAGS]\n\n\
                          FLAGS:\n  \
                            --exact          Exact match filter (not substring)\n  \
                            --tag <t>        Only tests with tag = t\n  \
@@ -285,13 +285,19 @@ impl TestConfig {
                     ));
                 }
                 _ => {
-                    path = Some(args[i].clone());
+                    // Multiple positionals run together
+                    // (`zz test a.zz b.zz dir/`); previously only the
+                    // last one survived, silently dropping the rest.
+                    paths.push(args[i].clone());
                 }
             }
             i += 1;
         }
 
-        let path = path.unwrap_or_else(default_test_path);
+        if paths.is_empty() {
+            paths.push(default_test_path());
+        }
+        let paths = paths;
 
         // --nocapture forces --serial
         if nocapture {
@@ -315,7 +321,7 @@ impl TestConfig {
         });
 
         Ok(Self {
-            path,
+            paths,
             filter,
             exact,
             tag,
@@ -542,14 +548,22 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
     let config = TestConfig::parse(args)?;
 
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
-    crate::enforce_project_zz(std::path::Path::new(&config.path))?;
+    for root in &config.paths {
+        crate::enforce_project_zz(std::path::Path::new(root))?;
+    }
 
+    let mut files: Vec<PathBuf> = Vec::new();
+    for root in &config.paths {
+        files.extend(collect_zz_files(root)?);
+    }
+    files.sort();
+    files.dedup();
     let files = if config.changed {
         // When --changed, only load files that git says are modified.
         let changed = git_changed_files().unwrap_or_default();
         let changed_set: std::collections::HashSet<PathBuf> = changed.into_iter().collect();
-        let all = collect_zz_files(&config.path)?;
-        all.into_iter()
+        files
+            .into_iter()
             .filter(|p| {
                 changed_set.contains(p)
                     || std::fs::canonicalize(p)
@@ -559,7 +573,7 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
             })
             .collect::<Vec<_>>()
     } else {
-        collect_zz_files(&config.path)?
+        files
     };
 
     if files.is_empty() {
@@ -569,7 +583,7 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
             format!(
                 "no .zz files found in `{}`\n\n\
                  hint: ensure the path contains .zz source files",
-                config.path
+                config.paths.join(", ")
             )
         };
         if config.json_output {

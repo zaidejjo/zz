@@ -212,6 +212,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
     );
     m.insert(
+        "std.str.byte_len".into(),
+        sig(vec![("s", Type::Str)], Type::Int),
+    );
+    m.insert(
         "std.str.ord".into(),
         sig(vec![("ch", Type::Str)], Type::Int),
     );
@@ -378,6 +382,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "str.bytes".into(),
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
+    );
+    m.insert(
+        "str.byte_len".into(),
+        sig(vec![("s", Type::Str)], Type::Int),
     );
     m.insert("str.ord".into(), sig(vec![("ch", Type::Str)], Type::Int));
     m.insert("str.chr".into(), sig(vec![("cp", Type::Int)], Type::Str));
@@ -2646,6 +2654,159 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             sig(vec![("stream", Type::TcpStream)], result_unit()),
         );
     }
+    // std.cell — shared-mutable slots (pool-backed handles; each op
+    // takes the pool lock once). Generic over the stored value type.
+    let cell_t = Type::Opaque("cell".to_string());
+    {
+        let t = Type::Named("T".to_string());
+        let cell_result = |inner: Type| Type::Result(Box::new(inner), Box::new(Type::Str));
+        m.insert(
+            "std.cell.new".into(),
+            sig_t(vec![("v", t.clone())], cell_t.clone()),
+        );
+        m.insert(
+            "cell.new".into(),
+            sig_t(vec![("v", t.clone())], cell_t.clone()),
+        );
+        m.insert(
+            "std.cell.get".into(),
+            sig_t(vec![("c", cell_t.clone())], cell_result(t.clone())),
+        );
+        m.insert(
+            "cell.get".into(),
+            sig_t(vec![("c", cell_t.clone())], cell_result(t.clone())),
+        );
+        m.insert(
+            "std.cell.set".into(),
+            sig_t(
+                vec![("c", cell_t.clone()), ("v", t.clone())],
+                cell_result(Type::Bool),
+            ),
+        );
+        m.insert(
+            "cell.set".into(),
+            sig_t(
+                vec![("c", cell_t.clone()), ("v", t.clone())],
+                cell_result(Type::Bool),
+            ),
+        );
+        m.insert(
+            "std.cell.drop".into(),
+            sig(vec![("c", cell_t.clone())], Type::Bool),
+        );
+        m.insert(
+            "cell.drop".into(),
+            sig(vec![("c", cell_t.clone())], Type::Bool),
+        );
+    }
+    let unix_t = Type::Opaque("unix".to_string());
+    let unix_listener_t = Type::Opaque("unix_listener".to_string());
+    let result_unix = || Type::Result(Box::new(unix_t.clone()), Box::new(Type::Str));
+    let result_unix_listener =
+        || Type::Result(Box::new(unix_listener_t.clone()), Box::new(Type::Str));
+    m.insert(
+        "std.net.unix_connect".into(),
+        sig(
+            vec![("path", Type::Str), ("timeout_ms", Type::Int)],
+            result_unix(),
+        ),
+    );
+    m.insert(
+        "std.net.unix_listen".into(),
+        sig(vec![("path", Type::Str)], result_unix_listener()),
+    );
+    m.insert(
+        "std.net.unix_accept".into(),
+        sig(vec![("listener", unix_listener_t.clone())], result_unix()),
+    );
+    m.insert(
+        "std.net.unix_listener_close".into(),
+        sig(vec![("listener", unix_listener_t.clone())], result_bool()),
+    );
+    for (method, canon, params, ret) in [
+        (
+            "write",
+            "unix_write",
+            vec![("stream", unix_t.clone()), ("data", Type::Str)],
+            result_int(),
+        ),
+        (
+            "write_bytes",
+            "unix_write_bytes",
+            vec![("stream", unix_t.clone()), ("data", Type::Bytes)],
+            result_int(),
+        ),
+        (
+            "read",
+            "unix_read",
+            vec![("stream", unix_t.clone()), ("max_bytes", Type::Int)],
+            result_str(),
+        ),
+        (
+            "read_bytes",
+            "unix_read_bytes",
+            vec![("stream", unix_t.clone()), ("max_bytes", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "read_exact",
+            "unix_read_exact",
+            vec![("stream", unix_t.clone()), ("n", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "read_line",
+            "unix_readline",
+            vec![("stream", unix_t.clone())],
+            result_str(),
+        ),
+        (
+            "set_read_timeout",
+            "unix_set_read_timeout",
+            vec![("stream", unix_t.clone()), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "set_write_timeout",
+            "unix_set_write_timeout",
+            vec![("stream", unix_t.clone()), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "close",
+            "unix_close",
+            vec![("stream", unix_t.clone())],
+            result_unit(),
+        ),
+        (
+            "shutdown",
+            "unix_shutdown",
+            vec![("stream", unix_t.clone())],
+            result_unit(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.net.{canon}"), s.clone());
+        m.insert(format!("std.unix.{method}"), s.clone());
+        m.insert(format!("unix.{method}"), s.clone());
+        m.insert(format!("net.{canon}"), s);
+    }
+    for (method, params, ret) in [
+        (
+            "accept",
+            vec![("listener", unix_listener_t.clone())],
+            result_unix(),
+        ),
+        (
+            "close",
+            vec![("listener", unix_listener_t.clone())],
+            result_bool(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("unix_listener.{method}"), s.clone());
+        m.insert(format!("std.unix_listener.{method}"), s);
+    }
     m.insert(
         "std.net.tcp_read_exact".into(),
         sig(
@@ -4647,6 +4808,34 @@ mod tests {
             "std.bytes.builder",
             "bytes.finish",
             "std.bytes.finish",
+            "std.cell.new",
+            "cell.new",
+            "std.cell.get",
+            "cell.get",
+            "std.cell.set",
+            "cell.set",
+            "std.cell.drop",
+            "cell.drop",
+            "std.net.unix_connect",
+            "std.net.unix_listen",
+            "std.net.unix_accept",
+            "std.net.unix_listener_close",
+            "std.net.unix_write",
+            "std.net.unix_write_bytes",
+            "std.net.unix_read",
+            "std.net.unix_read_bytes",
+            "std.net.unix_read_exact",
+            "std.net.unix_readline",
+            "std.net.unix_set_read_timeout",
+            "std.net.unix_set_write_timeout",
+            "std.net.unix_close",
+            "std.net.unix_shutdown",
+            "net.unix_shutdown",
+            "unix_listener.accept",
+            "std.unix_listener.close",
+            "std.net.tls_readline",
+            "std.net.tls_shutdown",
+            "net.tls_shutdown",
             "bytes.push_byte",
             "std.csv.parse",
             "csv.parse",
@@ -4674,6 +4863,8 @@ mod tests {
             "str.count_in",
             "std.str.bytes",
             "str.bytes",
+            "std.str.byte_len",
+            "str.byte_len",
             "std.bytes.to_str",
             "bytes.to_str",
             "std.bytes.to_ints",
@@ -4695,7 +4886,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1003);
+        assert_eq!(funcs.len(), 1061);
     }
 
     #[test]

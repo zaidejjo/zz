@@ -48,6 +48,10 @@ impl Checker {
             .map(|(fname, fty)| (fname.name.clone(), self.ast_to_type(fty, &gen_names)))
             .collect();
         let full_name = name.join(".");
+        // Recursive fields (direct or behind arrays/options) are sound:
+        // struct values are heap objects held by reference, so nesting
+        // is always finite at construction. The AOT unbox analysis
+        // treats any cycle as boxed (see is_unboxed_struct).
         // Shadowing a builtin amid generics is still a collision; the
         // plain-struct path reports it elsewhere, so only check arity here.
         self.structs.insert(

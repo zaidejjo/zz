@@ -3326,6 +3326,116 @@ zz_value zz_tcp_shutdown(zz_value stream, int *err) {
     return zz_variant_ok(zz_unit());
 }
 
+// ---- std.cell shared-mutable slots --------------------------------------
+typedef struct {
+    uint64_t id;
+    int live;
+    zz_value val;
+} zz_cell_slot;
+
+static zz_cell_slot *zz_cells = NULL;
+static size_t zz_cell_n = 0;
+static size_t zz_cell_cap = 0;
+static uint64_t zz_cell_next = 1;
+static pthread_mutex_t zz_cell_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static zz_cell_slot *zz_cell_find(uint64_t id) {
+    for (size_t i = 0; i < zz_cell_n; i++) {
+        if (zz_cells[i].live && zz_cells[i].id == id) return &zz_cells[i];
+    }
+    return NULL;
+}
+
+// cell.new(v) → cell id (plain int; AOT Opaque("cell") lowers to ids,
+// mirroring the int-id convention of the staticlib FFI handles).
+zz_value zz_cell_new(zz_value v, int *err) {
+    (void)err;
+    pthread_mutex_lock(&zz_cell_mu);
+    if (zz_cell_n == zz_cell_cap) {
+        size_t nc = zz_cell_cap == 0 ? 16 : zz_cell_cap * 2;
+        zz_cell_slot *ns = (zz_cell_slot *)realloc(zz_cells, nc * sizeof(zz_cell_slot));
+        if (!ns) {
+            pthread_mutex_unlock(&zz_cell_mu);
+            return zz_variant_err(zz_str_static("cell.new: out of memory"));
+        }
+        zz_cells = ns;
+        zz_cell_cap = nc;
+    }
+    for (size_t i = 0; i < zz_cell_n; i++) {
+        if (!zz_cells[i].live) {
+            zz_cells[i].live = 1;
+            zz_cells[i].val = zz_clone(v);
+            uint64_t id = zz_cells[i].id;
+            pthread_mutex_unlock(&zz_cell_mu);
+            return (zz_value){ZZ_INT, {.i = (int64_t)id}};
+        }
+    }
+    uint64_t id = zz_cell_next++;
+    if (id == 0) id = zz_cell_next++;
+    zz_cells[zz_cell_n].id = id;
+    zz_cells[zz_cell_n].live = 1;
+    zz_cells[zz_cell_n].val = zz_clone(v);
+    zz_cell_n++;
+    pthread_mutex_unlock(&zz_cell_mu);
+    return (zz_value){ZZ_INT, {.i = (int64_t)id}};
+}
+
+// cell.get(id) → Result<ok(value clone), err> (.err when dropped/unknown).
+zz_value zz_cell_get(zz_value id, int *err) {
+    (void)err;
+    if (id.tag != ZZ_INT || id.i <= 0) {
+        return zz_variant_err(zz_str_static("cell.get: not a cell"));
+    }
+    pthread_mutex_lock(&zz_cell_mu);
+    zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
+    if (!s) {
+        pthread_mutex_unlock(&zz_cell_mu);
+        return zz_variant_err(zz_str_static("cell.get: cell was dropped"));
+    }
+    zz_value out = zz_clone(s->val);
+    pthread_mutex_unlock(&zz_cell_mu);
+    return zz_variant_ok(out);
+}
+
+// cell.set(id, v) → Result<ok(true), err>.
+zz_value zz_cell_set(zz_value id, zz_value v, int *err) {
+    (void)err;
+    if (id.tag != ZZ_INT || id.i <= 0) {
+        return zz_variant_err(zz_str_static("cell.set: not a cell"));
+    }
+    pthread_mutex_lock(&zz_cell_mu);
+    zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
+    if (!s) {
+        pthread_mutex_unlock(&zz_cell_mu);
+        return zz_variant_err(zz_str_static("cell.set: cell was dropped"));
+    }
+    zz_release(&s->val);
+    s->val = zz_clone(v);
+    pthread_mutex_unlock(&zz_cell_mu);
+    return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
+}
+
+// cell.drop(id) → plain bool (idempotent). NOTE: the checker signature
+// is plain Bool, NOT Result — so this returns the bare value, unlike
+// get/set (Result). Wrapping it in zz_variant_ok here was a real bug:
+// the call site reads `.b` directly and saw the wrapper payload instead.
+zz_value zz_cell_drop(zz_value id, int *err) {
+    (void)err;
+    if (id.tag != ZZ_INT || id.i <= 0) {
+        return (zz_value){ZZ_BOOL, {.b = false}};
+    }
+    pthread_mutex_lock(&zz_cell_mu);
+    zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
+    if (!s) {
+        pthread_mutex_unlock(&zz_cell_mu);
+        return (zz_value){ZZ_BOOL, {.b = false}};
+    }
+    zz_release(&s->val);
+    s->live = 0;
+    pthread_mutex_unlock(&zz_cell_mu);
+    return (zz_value){ZZ_BOOL, {.b = true}};
+}
+
 static zz_value tcp_addr(zz_value stream, int peer, int *err) {
     (void)err;
     if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {

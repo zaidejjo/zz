@@ -443,6 +443,26 @@ fn struct_unknown_type_errors() {
 }
 
 #[test]
+fn struct_self_reference_resolves() {
+    // Recursive fields (behind arrays/options) resolve: the type name is
+    // pre-registered before fields are collected.
+    let r = check_src("struct Node { n: int, kids: [Node] }\nleaf := Node { n: 1, kids: [] }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn struct_mutual_reference_resolves_in_either_order() {
+    let r = check_src("struct A { b: B, n: int }\nstruct B { a: Option<A>, n: int }\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_self_reference_resolves() {
+    let r = check_src("enum R { Null, Int(int), List([R]) }\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
 fn struct_in_func_signature() {
     let r = check_src(
         "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nz := dist(Point{ x: 1, y: 2 })",
@@ -2214,6 +2234,14 @@ fn opaque_handle_types_resolve_in_annotations() {
         ("tcp.listener", Type::TcpListener),
         ("http.response", Type::Response),
         ("http.request", Type::HttpRequest),
+        // Native module handles (Opaque tags): connection/listener/file
+        // values became annotatable so helpers can take them.
+        ("tls", Type::Opaque("tls".to_string())),
+        ("tls_listener", Type::Opaque("tls_listener".to_string())),
+        ("unix", Type::Opaque("unix".to_string())),
+        ("unix_listener", Type::Opaque("unix_listener".to_string())),
+        ("file", Type::Opaque("file".to_string())),
+        ("regexp", Type::Opaque("regexp".to_string())),
     ] {
         let src = format!("func w(c: {ann}) {{ }}\n");
         let r = check_src(&src);

@@ -48,5 +48,8 @@ func main() {
         },
         .err(_) => println("b64_bad"),
     }
+    println("bytelen_ascii={str.byte_len("ABC")}")
+    println("bytelen_uni={str.byte_len("é")}")
+    println("bytelen_empty={std.str.byte_len("")}")
     println("str_bytes_ok")
 }

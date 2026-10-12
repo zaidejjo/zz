@@ -15,6 +15,13 @@ import std.str
 import std.task
 import std.time
 
+// Annotated-TLS helper: exercises nameable Opaque handle types (`tls`)
+// across user-function boundaries on both engines.
+func tls_echo(c: tls, line: str) -> Result<str, str> {
+    c.write(line)?
+    c.read_line()
+}
+
 func main() -> Result<int, str> {
     sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
     tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
@@ -116,8 +123,7 @@ func main() -> Result<int, str> {
     time.sleep_ms(200)
     c2 := net.tls_connect_insecure(addr10, "localhost", 5000)?
     println("insecure_ok")
-    c2.write("ping\n")?
-    line3 := c2.read_line()?
+    line3 := tls_echo(c2, "ping\n")?
     assert(line3 == "pong")
     println("insecure_echo_ok")
     c2.close()?

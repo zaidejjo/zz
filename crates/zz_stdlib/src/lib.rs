@@ -95,6 +95,8 @@ pub const STDLIB_MODULES: &[&str] = &[
     "dec",
     "bytes",
     "csv",
+    "cell",
+    "unix",
 ];
 
 /// Resolve a module name to its canonical backing module.

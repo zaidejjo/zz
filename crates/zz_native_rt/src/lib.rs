@@ -62,6 +62,8 @@ pub mod term;
 pub mod time_ext;
 /// `net.tls_connect` rustls TLS client shared by VM and AOT.
 pub mod tls_conn;
+/// `net.unix_connect` Unix-domain client shared by VM and AOT.
+pub mod unix_conn;
 /// `std.uuid` identifier generation (v4 random, v7 time-ordered).
 pub mod uuid;
 

@@ -1,0 +1,64 @@
+// features: arrays, comparison, func-call, int-arith, locals, match, option-result, print, recursion, string-literal, structs
+// E2E: recursive struct/enum types — self-reference behind arrays and
+// options, mutual recursion,_nesting, methods over recursive values.
+// The checker pre-registers type names; uninhabited direct cycles stay
+// boxed (reference layout), so construction is always finite.
+struct Node {
+    n: int,
+    kids: [Node],
+}
+
+enum R {
+    Null,
+    Str(str),
+    Int(int),
+    List([R]),
+}
+
+struct A {
+    b: B,
+    n: int,
+}
+
+struct B {
+    a: Option<A>,
+    n: int,
+}
+
+func sum(t: Node) -> int {
+    s := t.n
+    for k in t.kids {
+        s = s + sum(k)
+    }
+    s
+}
+
+func depth(v: R) -> int {
+    match v {
+        .Null => 0
+        .Str(_) => 0
+        .Int(_) => 0
+        .List(xs) => {
+            m := 0
+            for x in xs {
+                d := depth(x)
+                if d > m {
+                    m = d
+                }
+            }
+            m + 1
+        }
+    }
+}
+
+func main() {
+    leaf := Node{n: 1, kids: []}
+    root := Node{n: 10, kids: [leaf, Node{n: 2, kids: []}]}
+    println("tree_sum={sum(root)},kids={root.kids.len()}")
+    v := R.List([R.Int(1), R.List([R.Str("x")])])
+    println("enum_depth={depth(v)}")
+    b := B{a: .none, n: 1}
+    a := A{b: b, n: 2}
+    println("mutual={a.n + a.b.n}")
+    println("recursive_ok")
+}

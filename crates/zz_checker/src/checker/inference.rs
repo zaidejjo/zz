@@ -312,6 +312,17 @@ impl Checker {
                         Type::Response
                     } else if name == "http.request" {
                         Type::HttpRequest
+                    } else if let Some(tag) = opaque_handle_tag(name) {
+                        // Module handle types (`tls` connections,
+                        // `tls_listener`s, `file`s, compiled `regexp`s,
+                        // log `span`s, cli `args` parsers, `process`
+                        // handles, `zzfs` providers): natives traffic in
+                        // `Opaque(tag)` values and dispatch methods on the
+                        // tag, but source could never name them — helper
+                        // funcs had to leave params untyped (uncallable).
+                        // Only consulted when no struct/enum/alias/builtin
+                        // matches, so user types always win.
+                        Type::Opaque(tag.to_string())
                     } else {
                         self.errors
                             .push(error_at(format!("unknown type `{name}`"), ty.span));
@@ -320,6 +331,27 @@ impl Checker {
                 }
             }
         }
+    }
+}
+
+/// Surface name of a native module-handle type (`tls`, `file`, ...).
+/// Consulted only when no struct/enum/alias/builtin matches, so user
+/// types always win. Keep in sync with the `Opaque(..)` tags in
+/// `zz_stdlib::funcs` (a new handle-producing native adds one line).
+fn opaque_handle_tag(name: &str) -> Option<&'static str> {
+    match name {
+        "tls" => Some("tls"),
+        "tls_listener" => Some("tls_listener"),
+        "unix" => Some("unix"),
+        "unix_listener" => Some("unix_listener"),
+        "cell" => Some("cell"),
+        "file" => Some("file"),
+        "zzfs" => Some("zzfs"),
+        "regexp" => Some("regexp"),
+        "span" => Some("span"),
+        "args" => Some("args"),
+        "process" => Some("process"),
+        _ => None,
     }
 }
 

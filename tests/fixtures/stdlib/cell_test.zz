@@ -1,0 +1,53 @@
+// features: func-call, imports, int-arith, locals, match, option-result, print, std-cell, string-literal
+// tests/fixtures/stdlib/cell_test.zz — shared-mutable slots.
+// Each op takes the pool lock once (individually atomic); read-modify-write
+// sequences are NOT atomic (coordinate with chan when that matters).
+import std.cell
+
+func main() -> Result<int, str> {
+    // Round trip across types.
+    c := cell.new(41)
+    println("new_ok")
+    match cell.get(c) {
+        .ok(v) => println("get_ok: {v}")
+        .err(_) => println("ERROR: get should succeed")
+    }
+    s := cell.new("hi")
+    match cell.get(s) {
+        .ok(v) => println("str_ok: {v}")
+        .err(_) => println("ERROR: str get should succeed")
+    }
+    // Set replaces.
+    cell.set(c, 42)?
+    match cell.get(c) {
+        .ok(v) => {
+            println("set_ok: {v}")
+            assert(v == 42)
+        }
+        .err(_) => println("ERROR: set get should succeed")
+    }
+    // Method syntax works through the tag.
+    _ := c.set(7)?
+    g: int = c.get()?
+    println("method_ok: {g}")
+    // Drop is idempotent; use-after-drop is a loud err, never silent.
+    d1 := c.drop()
+    d2 := c.drop()
+    println("drop_ok: {d1},{d2}")
+    match cell.get(c) {
+        .ok(_) => println("ERROR: dropped get should fail")
+        .err(_) => println("dropped_ok")
+    }
+    match cell.set(c, 1) {
+        .ok(_) => println("ERROR: dropped set should fail")
+        .err(_) => println("dropped_set_ok")
+    }
+    // Array values share (no copy on store).
+    a := cell.new([1, 2, 3])
+    match cell.get(a) {
+        .ok(v) => println("arr_ok: {v.len()}")
+        .err(_) => println("ERROR: arr get should succeed")
+    }
+    println("cell_test_ok")
+    .ok(0)
+}

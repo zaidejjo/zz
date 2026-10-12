@@ -189,6 +189,10 @@ impl Lowerer {
         // and the take→push→store window runs no user code at all.
         let elem_c = self.emit_expr(elem, names, out);
         let elem_boxed = box_scalar_operand(elem, names, &elem_c);
+        // Unboxed struct elements (e.g. `arr.push(Pt { ... })`) lower to
+        // raw C structs; push takes boxed `zz_value`. Same wrap the
+        // binop/native-call paths apply (no-op for anything else).
+        let elem_boxed = self.box_struct_operand(elem, elem_boxed, &elem_c, names, out);
         let mv = names.fresh("__mv");
         let err = names.fresh("_e");
         out.push_str(&format!("    zz_value {mv} = {cid};\n"));
@@ -295,6 +299,7 @@ impl Lowerer {
         };
         let elem_c = self.emit_expr(elem, names, out);
         let elem_boxed = box_scalar_operand(elem, names, &elem_c);
+        let elem_boxed = self.box_struct_operand(elem, elem_boxed, &elem_c, names, out);
         let err = names.fresh("_e");
         out.push_str(&format!(
             "    {{ int {err} = 0; zz_object_push_field_take(&{base_cid}, \"{field}\", {elem_boxed}, &{err}); }}\n"

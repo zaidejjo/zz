@@ -435,6 +435,18 @@ pub(crate) fn str_bytes(
     )))
 }
 
+// str.byte_len(s) — byte length of a string (len() counts chars).
+// RESP framing, Content-Length, and binary protocols need bytes;
+// `"h\u{e9}llo".byte_len()` is 6 while `len()` is 5. Total.
+pub(crate) fn str_byte_len(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "std.str.byte_len")?;
+    Ok(Value::Int(s.len() as i64))
+}
+
 // ord(ch) — codepoint of a single-character string (#276, #263).
 // Empty and multi-character inputs are hard errors (a programming bug,
 // like a negative shift count — not routine input like bytes.to_str).

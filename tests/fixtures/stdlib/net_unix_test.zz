@@ -1,0 +1,87 @@
+// features: bytes, closures, func-call, imports, int-arith, locals, match, option-result, print, std-chan, std-env, std-net, std-process, std-str, std-task, std-time, std-unix, string-literal, string-ops
+// tests/fixtures/stdlib/net_unix_test.zz — Unix-domain socket transport.
+// Loopback listener on a pid/tok-keyed socket file + client handshake
+// matrix. Accepts run in spawned tasks (like TLS: the server app must
+// accept; the kernel backlog only completes TCP).
+import std.chan
+import std.env
+import std.net
+import std.process(pid)
+import std.str
+import std.task
+import std.time
+
+func main() -> Result<int, str> {
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    tag := pid() % 20000 + tok_num % 20000
+    sock := "/tmp/zz_unix_{tag}.sock"
+    sock2 := "/tmp/zz_unix_{tag + 1}.sock"
+    // 1. Listen + connect + line echo + exact bytes.
+    l := net.unix_listen(sock)?
+    println("listen_ok")
+    done := std.chan()
+    task.spawn(|_| {
+        match net.unix_accept(l) {
+            .ok(ss) => {
+                match ss.read_line() {
+                    .ok(line) => {
+                        if line == "hello" {
+                            match ss.write("world") {
+                                .ok(_) => {
+                                    _ := ss.close()
+                                    std.chan.send(done, "srv_ok")
+                                }
+                                .err(_) => {
+                                    _ := ss.close()
+                                    std.chan.send(done, "srv_write_fail")
+                                }
+                            }
+                        } else {
+                            _ := ss.close()
+                            std.chan.send(done, "srv_bad_line")
+                        }
+                    }
+                    .err(_) => {
+                        _ := ss.close()
+                        std.chan.send(done, "srv_read_fail")
+                    }
+                }
+            }
+            .err(_) => {
+                std.chan.send(done, "srv_accept_fail")
+            }
+        }
+    })
+    time.sleep_ms(200)
+    c := net.unix_connect(sock, 5000)?
+    println("connect_ok")
+    c.write("hello\n")?
+    b := c.read_exact(5)?
+    println("exact_ok: {b.len()}")
+    assert(b.len() == 5)
+    c.set_read_timeout(2000)?
+    c.set_write_timeout(2000)?
+    println("timeout_ok")
+    c.close()?
+    r:str = std.chan.recv(done)
+    assert(r == "srv_ok")
+    println("echo_ok")
+    l.close()?
+    println("close_ok")
+    // 2. Missing socket fails fast with refused (no hang).
+    match net.unix_connect(sock2, 2000) {
+        .ok(_) => println("ERROR: missing socket should fail")
+        .err(e) => {
+            println("refused_ok")
+            assert(str.contains(e, "unix:"))
+        }
+    }
+    // 3. Empty path is loud.
+    match net.unix_connect("", 1000) {
+        .ok(_) => println("ERROR: empty path should fail")
+        .err(_) => println("empty_ok")
+    }
+    println("net_unix_test_ok")
+    .ok(0)
+}
