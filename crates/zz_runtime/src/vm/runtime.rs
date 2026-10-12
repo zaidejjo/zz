@@ -8,8 +8,8 @@ use super::op::{Op, TakeHome};
 use crate::env::{Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
-    eval_binary, eval_int_binary, eval_unary, fill_default_headers, get_index, object_field,
-    set_index, set_object_field, slice_value,
+    eval_binary, eval_int_binary, eval_unary, fill_default_headers, get_index, normalize_index,
+    object_field, set_index, set_object_field, slice_value,
 };
 use crate::runtime::Flow;
 use crate::value::{FuncValue, NativeFunc, RangeValue, Value};
@@ -634,6 +634,252 @@ impl Vm {
                             Self::restore_home(self, interp, home, result);
                             yield_check!();
                         }
+                    }
+                }
+                Op::SetFieldTake { home, field, span } => {
+                    let value = self.stack.pop().unwrap();
+                    let Some(mut taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(value);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    if let Err(e) = set_object_field(&mut taken, field, value, *span) {
+                        Self::restore_home(self, interp, home, taken);
+                        return Err(e);
+                    }
+                    Self::restore_home(self, interp, home, taken);
+                }
+                Op::SetFieldIndexTake { home, field, span } => {
+                    let value = self.stack.pop().unwrap();
+                    let index = self.stack.pop().unwrap();
+                    let Some(mut taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(index);
+                        self.stack.push(value);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // Take the field out of the owned object (no field
+                    // clone); non-direct shapes read generically (same
+                    // errors, one field clone — identical to unfused).
+                    // `set_index` only writes on success, so on error
+                    // `field_val` is untouched and writing it back
+                    // restores the exact pre-op object.
+                    let mut field_val = match &mut taken {
+                        Value::Object(o) if o.fields.iter().any(|(n, _)| n == field) => {
+                            let slot = o
+                                .fields
+                                .iter_mut()
+                                .find(|(n, _)| n == field)
+                                .expect("direct field re-resolved");
+                            std::mem::replace(&mut slot.1, Value::Unit)
+                        }
+                        _ => match object_field(&taken, field, *span) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                Self::restore_home(self, interp, home, taken);
+                                return Err(e);
+                            }
+                        },
+                    };
+                    if let Err(e) = set_index(&mut field_val, &index, value, *span) {
+                        let _ = set_object_field(&mut taken, field, field_val, *span);
+                        Self::restore_home(self, interp, home, taken);
+                        return Err(e);
+                    }
+                    if let Err(e) = set_object_field(&mut taken, field, field_val, *span) {
+                        Self::restore_home(self, interp, home, taken);
+                        return Err(e);
+                    }
+                    Self::restore_home(self, interp, home, taken);
+                }
+                Op::FieldBinopTake {
+                    home,
+                    field,
+                    op,
+                    span,
+                } => {
+                    let rhs = self.stack.pop().unwrap();
+                    let Some(mut taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(rhs);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // Read the field generically (one field clone, same as
+                    // unfused — the container take is where the Doc
+                    // clone dies). `eval_binary` consumes its operands,
+                    // but the clone keeps `taken` pristine, so on error
+                    // restoring it yields the exact pre-op object.
+                    let field_val = match object_field(&taken, field, *span) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            Self::restore_home(self, interp, home, taken);
+                            return Err(e);
+                        }
+                    };
+                    let new = match eval_binary(*op, field_val, rhs, *span) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            Self::restore_home(self, interp, home, taken);
+                            return Err(e);
+                        }
+                    };
+                    if let Err(e) = set_object_field(&mut taken, field, new, *span) {
+                        Self::restore_home(self, interp, home, taken);
+                        return Err(e);
+                    }
+                    Self::restore_home(self, interp, home, taken);
+                }
+                Op::GetFieldIndex { home, field, span } => {
+                    let index = self.stack.pop().unwrap();
+                    let Some(taken) = Self::take_home(self, interp, home) else {
+                        self.stack.push(index);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // Direct array/tuple/dict fields: clone one element,
+                    // not the field. Anything else completes generically
+                    // on the owned object (same calls, same errors).
+                    let direct = match &taken {
+                        Value::Object(o) => {
+                            o.fields.iter().find(|(n, _)| n == field).map(|(_, v)| v)
+                        }
+                        _ => None,
+                    };
+                    let elem = match (direct, &index) {
+                        (Some(Value::Array(items)), Value::Int(i)) => {
+                            match normalize_index(*i, items.len(), *span) {
+                                Ok(ix) => Some(items[ix].clone()),
+                                Err(e) => {
+                                    Self::restore_home(self, interp, home, taken);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        (Some(Value::Tuple(items)), Value::Int(i)) => {
+                            match normalize_index(*i, items.len(), *span) {
+                                Ok(ix) => Some(items[ix].clone()),
+                                Err(e) => {
+                                    Self::restore_home(self, interp, home, taken);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        (Some(Value::Dict(entries)), key) => entries
+                            .iter()
+                            .find(|(k, _)| k == key)
+                            .map(|(_, v)| v.clone()),
+                        _ => None,
+                    };
+                    match elem {
+                        Some(v) => {
+                            Self::restore_home(self, interp, home, taken);
+                            self.stack.push(v);
+                        }
+                        None => {
+                            match object_field(&taken, field, *span)
+                                .and_then(|f| get_index(&f, &index, *span))
+                            {
+                                Ok(v) => {
+                                    Self::restore_home(self, interp, home, taken);
+                                    self.stack.push(v);
+                                }
+                                Err(e) => {
+                                    Self::restore_home(self, interp, home, taken);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Op::LenField { home, field, span } => {
+                    let Some(taken) = Self::take_home(self, interp, home) else {
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // Direct fields: length without cloning anything
+                    // (the borrow ends before `taken` moves again).
+                    // Anything else completes generically on the owned
+                    // object (same errors as `len`).
+                    enum LenFast {
+                        Hit(i64),
+                        Miss,
+                        Err(EvalError),
+                    }
+                    let fast = match &taken {
+                        Value::Object(o) => match o.fields.iter().find(|(n, _)| n == field) {
+                            Some((_, v)) => match Self::value_len(v) {
+                                Some(n) => LenFast::Hit(n),
+                                None => LenFast::Err(Self::len_error(v, *span)),
+                            },
+                            None => LenFast::Miss,
+                        },
+                        _ => LenFast::Miss,
+                    };
+                    match fast {
+                        LenFast::Hit(n) => {
+                            Self::restore_home(self, interp, home, taken);
+                            self.stack.push(Value::Int(n));
+                        }
+                        LenFast::Err(e) => {
+                            Self::restore_home(self, interp, home, taken);
+                            return Err(e);
+                        }
+                        LenFast::Miss => match object_field(&taken, field, *span) {
+                            Ok(f) => match Self::value_len(&f) {
+                                Some(n) => {
+                                    Self::restore_home(self, interp, home, taken);
+                                    self.stack.push(Value::Int(n));
+                                }
+                                None => {
+                                    Self::restore_home(self, interp, home, taken);
+                                    return Err(Self::len_error(&f, *span));
+                                }
+                            },
+                            Err(e) => {
+                                Self::restore_home(self, interp, home, taken);
+                                return Err(e);
+                            }
+                        },
                     }
                 }
                 Op::SlotAddInt { dst, src } => {
@@ -2378,6 +2624,45 @@ impl Vm {
     /// like `LoadVar`.
     fn load_var_fallback(interp: &mut Interp, name: &str, span: Span) -> Result<Value, EvalError> {
         Self::load_var(interp, name, span)
+    }
+
+    /// Length of a value with `len` semantics (mirrors the `len`
+    /// native: arrays, tuples, byte buffers, strings by char count,
+    /// dicts, and ranges). `None` for unsized values.
+    fn value_len(v: &Value) -> Option<i64> {
+        match v {
+            Value::Array(vs) => Some(vs.len() as i64),
+            Value::Tuple(vs) => Some(vs.len() as i64),
+            Value::Bytes(b) => Some(b.len() as i64),
+            Value::Str(st) => Some(st.chars().count() as i64),
+            Value::Dict(entries) => Some(entries.len() as i64),
+            Value::Range(r) => {
+                let (start, stop, step) = (r.start, r.end, r.step);
+                if step == 0 {
+                    return None;
+                }
+                Some(
+                    if (step > 0 && start < stop) || (step < 0 && start > stop) {
+                        (stop - start + step - if step > 0 { 1 } else { -1 }) / step
+                    } else {
+                        0
+                    },
+                )
+            }
+            _ => None,
+        }
+    }
+
+    /// Exact `len` failure for unsized values (mirrors the native,
+    /// including the zero-step range message).
+    fn len_error(v: &Value, span: Span) -> EvalError {
+        if matches!(v, Value::Range(r) if r.step == 0) {
+            return EvalError::new("range step cannot be zero", span);
+        }
+        EvalError::new(
+            format!("len expects array, tuple, bytes, string, dict, or range, found `{v}`"),
+            span,
+        )
     }
 
     /// Take the value out of a fused-op home (leaving `Unit`). Returns

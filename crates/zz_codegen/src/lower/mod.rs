@@ -9,6 +9,7 @@
 //!   - [`expr`]: expression lowering (literals, binops, calls, fields)
 //!   - [`stmt`]: statement lowering (decls, assigns, if/else, match, loops)
 //!   - [`fn_decl`]: function generation, signatures, struct declarations
+//!   - [`param_escape`]: per-parameter escape analysis for call ownership
 
 mod context;
 mod expr;
@@ -16,7 +17,9 @@ mod extern_call;
 mod fn_decl;
 mod green;
 mod move_elide;
+mod param_escape;
 mod stmt;
+pub mod units;
 
 use zz_frontend::ast::{Expr, Pattern, Stmt};
 
@@ -61,7 +64,7 @@ pub struct LoweredC {
 /// True when a resolved type can carry an `f64` to a Display site.
 /// Recursive over every compound shape (no `Any` exists, so a whole-
 /// program scan of `TypedProgram` types is a sound float-format gate).
-fn type_has_float(t: &zz_checker::Type) -> bool {
+pub(crate) fn type_has_float(t: &zz_checker::Type) -> bool {
     match t {
         zz_checker::Type::Float => true,
         zz_checker::Type::Tuple(ts) | zz_checker::Type::Union(ts) => ts.iter().any(type_has_float),
@@ -870,6 +873,8 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         // Debug print preserving Option wrappers; returns its argument.
         "dbg" => Some("zz_dbg"),
         "len" => Some("zz_len"),
+        "ord" | "str.ord" | "std.str.ord" => Some("zz_ord"),
+        "chr" | "str.chr" | "std.str.chr" => Some("zz_chr"),
         "map" | "vec.map" | "std.vec.map" => Some("zz_iter_map"),
         "filter" | "vec.filter" | "std.vec.filter" => Some("zz_iter_filter"),
         "enumerate" | "vec.enumerate" | "std.vec.enumerate" => Some("zz_iter_enumerate"),
@@ -926,8 +931,14 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "str.count_in" | "std.str.count_in" => Some("zz_str_count_in"),
         "str.classify" | "std.str.classify" => Some("zz_str_classify"),
         "str.bytes" | "std.str.bytes" => Some("zz_str_bytes"),
+        "str.byte_len" | "std.str.byte_len" => Some("zz_str_byte_len"),
         "bytes.to_str" | "std.bytes.to_str" => Some("zz_bytes_to_str"),
         "bytes.to_ints" | "std.bytes.to_ints" => Some("zz_bytes_to_ints"),
+        "cell.new" | "std.cell.new" => Some("zz_cell_new"),
+        "cell.get" | "std.cell.get" => Some("zz_cell_get"),
+        "cell.set" | "std.cell.set" => Some("zz_cell_set"),
+        "cell.drop" | "std.cell.drop" => Some("zz_cell_drop"),
+        "bytes.finish" | "std.bytes.finish" => Some("zz_bytes_finish"),
         // math
         "math.abs" | "std.math.abs" => Some("zz_math_abs"),
         "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),
@@ -1038,6 +1049,8 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "fs.remove_dir_all" | "std.fs.remove_dir_all" => Some("zz_fs_remove_dir_all"),
         "fs.walk_dir" | "std.fs.walk_dir" => Some("zz_fs_walk_dir"),
         "fs.stat" | "std.fs.stat" => Some("zz_fs_stat"),
+        "fs.scan_counts" | "std.fs.scan_counts" => Some("zz_fs_scan_counts"),
+        "fs.is_generated" | "std.fs.is_generated" => Some("zz_fs_is_generated"),
         "fs.open" | "std.fs.open" | "File.open" => Some("zz_fs_open"),
         "fs.read_chunk" | "std.fs.read_chunk" | "file.read_chunk" => Some("zz_fs_read_chunk"),
         "fs.read_chunk_bytes" | "std.fs.read_chunk_bytes" | "file.read_chunk_bytes" => {
@@ -1090,6 +1103,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.tcp_readline" | "std.net.tcp_readline" => Some("zz_tcp_readline"),
         "net.tcp_close" | "std.net.tcp_close" => Some("zz_tcp_close"),
         "net.tcp_read_bytes" | "std.net.tcp_read_bytes" => Some("zz_tcp_read_bytes"),
+        "net.tcp_read_exact" | "std.net.tcp_read_exact" => Some("zz_tcp_read_exact"),
         "net.tcp_write_bytes" | "std.net.tcp_write_bytes" => Some("zz_tcp_write_bytes"),
         "net.tcp_shutdown" | "std.net.tcp_shutdown" => Some("zz_tcp_shutdown"),
         // Ergonomic `net.*` method aliases (same C impls as the canonicals).
@@ -1097,6 +1111,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.read" | "std.net.read" => Some("zz_tcp_read"),
         "net.read_line" | "std.net.read_line" => Some("zz_tcp_readline"),
         "net.read_bytes" | "std.net.read_bytes" => Some("zz_tcp_read_bytes"),
+        "net.read_exact" | "std.net.read_exact" => Some("zz_tcp_read_exact"),
         "net.write" | "std.net.write" => Some("zz_tcp_write"),
         "net.write_bytes" | "std.net.write_bytes" => Some("zz_tcp_write_bytes"),
         "net.close" | "std.net.close" => Some("zz_tcp_shutdown"),

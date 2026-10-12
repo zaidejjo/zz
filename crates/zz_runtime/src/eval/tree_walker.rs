@@ -311,6 +311,13 @@ impl Interp {
                 // evaluate BEFORE the value. Plain names and paths have
                 // no user code in the base, so they keep the shared
                 // `assign_target` path.
+                //
+                // Move fusion (#242): self-reassignment and pure stores
+                // take instead of cloning. Falls back (no-op) for
+                // anything outside the fused shapes.
+                if self.try_move_assign(target, value)? {
+                    return Ok(Flow::Value(Value::Unit));
+                }
                 match target {
                     Expr::Index { obj, index, span } => {
                         let mut objv = self.eval(obj)?.into_value()?;
@@ -395,6 +402,31 @@ impl Interp {
                                 }
                                 return Ok(Flow::Value(Value::Unit));
                             }
+                        } else if parts.len() >= 3 {
+                            // Chained receiver (`base.field.push(x)`,
+                            // deeper chains alike): the method is the last
+                            // segment, the receiver is everything before
+                            // it. Call on the receiver value, then store
+                            // back through the chain (any depth).
+                            let method_name = parts.last().unwrap();
+                            let dotted = parts.join(".");
+                            if !self.natives.contains_key(&dotted)
+                                && MUTATING_METHODS.contains(&method_name.as_str())
+                            {
+                                let recv_parts = parts[..parts.len() - 1].to_vec();
+                                let recv = self.resolve_path_value(&recv_parts, *pspan)?;
+                                let f = self.lookup_method(&recv, method_name, *pspan)?;
+                                let mut arg_vals = vec![recv];
+                                for a in args {
+                                    arg_vals.push(self.eval(a)?.into_value()?);
+                                }
+                                for (_, v) in named {
+                                    arg_vals.push(self.eval(v)?.into_value()?);
+                                }
+                                let result = self.call(f, arg_vals, *pspan)?;
+                                self.assign_path(&recv_parts, result, *pspan)?;
+                                return Ok(Flow::Value(Value::Unit));
+                            }
                         }
                     }
                     // Handle `obj.method(x)` — parsed as Field { obj, name }
@@ -405,6 +437,40 @@ impl Interp {
                     } = callee.as_ref()
                     {
                         if MUTATING_METHODS.contains(&method_name.as_str()) {
+                            // One-level field receiver (`base.field.push(x)`):
+                            // call on the field value, then store back into
+                            // the base variable. Deeper chains keep the old
+                            // evaluate-and-discard behavior (same quirk as
+                            // `assign_target` for non-Ident roots).
+                            if let Expr::Field {
+                                obj: inner,
+                                name: field,
+                                ..
+                            } = field_obj.as_ref()
+                            {
+                                if let Expr::Ident { name: base, .. } = inner.as_ref() {
+                                    let recv = self.eval(field_obj)?.into_value()?;
+                                    let f =
+                                        self.lookup_method(&recv, method_name, field_obj.span())?;
+                                    let mut arg_vals = vec![recv];
+                                    for a in args {
+                                        arg_vals.push(self.eval(a)?.into_value()?);
+                                    }
+                                    for (_, v) in named {
+                                        arg_vals.push(self.eval(v)?.into_value()?);
+                                    }
+                                    let result = self.call(f, arg_vals, field_obj.span())?;
+                                    let mut basev = self.eval(inner)?.into_value()?;
+                                    set_object_field(&mut basev, field, result, field_obj.span())?;
+                                    if !self.env.assign(base, basev) {
+                                        return Err(EvalError::new(
+                                            format!("undefined variable `{base}`"),
+                                            field_obj.span(),
+                                        ));
+                                    }
+                                    return Ok(Flow::Value(Value::Unit));
+                                }
+                            }
                             if let Expr::Ident { name, span } = field_obj.as_ref() {
                                 let recv = self.eval(field_obj)?.into_value()?;
                                 let f = self.lookup_method(&recv, method_name, *span)?;
@@ -677,7 +743,7 @@ impl Interp {
         enum_name: &str,
         variant: &str,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(zz_frontend::ast::Ident, Expr)],
         span: Span,
     ) -> Result<Value, EvalError> {
         let variants = self.enums.get(enum_name).cloned().unwrap_or_default();
@@ -1200,7 +1266,7 @@ impl Interp {
                 }
                 let mut named_vals: Vec<(String, Value)> = Vec::with_capacity(named.len());
                 for (n, v) in named {
-                    named_vals.push((n.clone(), self.eval(v)?.into_value()?));
+                    named_vals.push((n.name.clone(), self.eval(v)?.into_value()?));
                 }
                 if !named_vals.is_empty() {
                     if let Value::Func(fv) = &f {
@@ -1505,6 +1571,13 @@ impl Interp {
                 Ok(Flow::Value(Value::Object(Box::new(obj))))
             }
             Expr::Index { obj, index, span } => {
+                // Move fusion (#242): indexed field reads take the
+                // container, clone one element, and restore — O(1)
+                // instead of cloning the field array. Falls back for
+                // anything outside the fused shape.
+                if let Some(v) = self.try_move_index_read(obj, index, *span)? {
+                    return Ok(Flow::Value(v));
+                }
                 let ov = self.eval(obj)?.into_value()?;
                 let iv = self.eval(index)?.into_value()?;
                 get_index(&ov, &iv, *span).map(Flow::Value)
@@ -1568,18 +1641,32 @@ impl Interp {
             }
             Pattern::Literal { value: lit, .. } => value_matches_lit(value, lit),
             Pattern::Variant { name, arg, .. } => {
-                let inner = match (name.as_str(), value) {
-                    ("some", Value::Option(Some(v))) => Some(v.as_ref()),
-                    ("none", Value::Option(None)) => None,
+                // Tag-first matching: a bare pattern (no payload) is a
+                // tag-only test (parity with the AOT backend, which checks
+                // `tag == ZZ_RESULT_OK/ERR`). The checker rejects bare
+                // `.ok`/`.err`/`.some` on typed code, but the runtime must
+                // still answer sanely — never the *opposite* variant. The
+                // old `(None, None) => true` encoding conflated "wrong
+                // variant" with "right variant, no payload" and matched
+                // inverted (bare `.ok` hit `Err`, bare `.err` hit `Ok`).
+                match (name.as_str(), value) {
+                    ("some", Value::Option(opt)) => match (arg.as_deref(), opt.as_deref()) {
+                        (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
+                        (None, Some(_)) => true,
+                        _ => false,
+                    },
+                    ("none", Value::Option(opt)) => arg.is_none() && opt.is_none(),
                     #[allow(clippy::manual_ok_err)]
-                    ("ok", Value::Result(r)) => match &**r {
-                        Ok(v) => Some(v),
-                        Err(_) => None,
+                    ("ok", Value::Result(r)) => match (&**r, arg.as_deref()) {
+                        (Ok(v), Some(p)) => Self::match_pattern(p, v, scope),
+                        (Ok(_), None) => true,
+                        _ => false,
                     },
                     #[allow(clippy::manual_ok_err)]
-                    ("err", Value::Result(r)) => match &**r {
-                        Err(e) => Some(e),
-                        Ok(_) => None,
+                    ("err", Value::Result(r)) => match (&**r, arg.as_deref()) {
+                        (Err(e), Some(p)) => Self::match_pattern(p, e, scope),
+                        (Err(_), None) => true,
+                        _ => false,
                     },
                     // User enums erase to qualified `Object`s
                     // (`Token.IntLit`): the pattern names the variant
@@ -1589,16 +1676,19 @@ impl Interp {
                     (vname, Value::Object(obj))
                         if obj.name.rsplit('.').next().unwrap_or("") == vname =>
                     {
-                        obj.fields
-                            .iter()
-                            .find(|(k, _)| k == "value")
-                            .map(|(_, v)| v)
+                        match (
+                            arg.as_deref(),
+                            obj.fields
+                                .iter()
+                                .find(|(k, _)| k == "value")
+                                .map(|(_, v)| v),
+                        ) {
+                            (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
+                            (None, None) => true,
+                            (None, Some(_)) => true,
+                            _ => false,
+                        }
                     }
-                    _ => return false,
-                };
-                match (arg.as_deref(), inner) {
-                    (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
-                    (None, None) => true,
                     _ => false,
                 }
             }

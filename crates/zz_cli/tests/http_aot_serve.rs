@@ -72,6 +72,7 @@ fn aot_server_bin() -> PathBuf {
         let out = Command::new(zz_bin())
             .arg("build")
             .arg(&src)
+            .current_dir(&dir)
             .output()
             .expect("spawn zz build");
         assert!(
@@ -80,8 +81,8 @@ fn aot_server_bin() -> PathBuf {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        // `zz build <dir>/srv.zz` publishes to `<dir>/bin/srv`.
-        let bin = dir.join("bin").join("srv");
+        // `zz build <dir>/srv.zz` (standalone) publishes to `<dir>/srv`.
+        let bin = dir.join("srv");
         assert!(bin.exists(), "built binary missing: {}", bin.display());
         bin
     })
@@ -432,6 +433,7 @@ func main() {
     let out = Command::new(zz_bin())
         .arg("build")
         .arg(&src)
+        .current_dir(&dir)
         .output()
         .expect("spawn zz build");
     assert!(
@@ -440,7 +442,7 @@ func main() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let bin = dir.join("bin").join("server");
+    let bin = dir.join("server");
     assert!(bin.exists(), "built binary missing: {}", bin.display());
     let port = free_port();
     let mut child = Command::new(&bin)

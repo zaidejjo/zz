@@ -108,6 +108,26 @@ impl Checker {
         if let Some(scope) = self.defined_names.last_mut() {
             scope.insert(name.to_string(), span);
         }
+        // A binding reusing a namespace root (own module name or imported
+        // head) shadows the namespace object: qualified calls through it
+        // fail at runtime while the check stays green (#376, #361). Warn
+        // once per binding site with a rename as the fix.
+        if self.shadow_roots.contains(name) {
+            self.errors.push(
+                warning_at(
+                    format!(
+                        "`{name}` shadows a module namespace — qualified calls through it fail at runtime"
+                    ),
+                    span,
+                )
+                .with_note("rename the binding to something other than the module name")
+                .with_fixit(FixIt::safe(
+                    span,
+                    format!("{name}_local"),
+                    "rename binding",
+                )),
+            );
+        }
     }
 
     /// Define a variable, recording its immutability when `is_const`.
@@ -197,10 +217,15 @@ impl Checker {
                 // `std.`-rooted spelling counts too, or every selectively
                 // imported std call warns falsely.
                 || self.import_aliases.get(alias).is_some_and(|q| {
-                    self.used_names.contains(q)
-                        || self
-                            .used_names
-                            .contains(format!("std.{q}").as_str())
+                    let qdot = format!("{q}.");
+                    let stdq = format!("std.{q}");
+                    let stdqdot = format!("{stdq}.");
+                    self.used_names.iter().any(|n| {
+                        n == q
+                            || n.starts_with(&qdot)
+                            || n == &stdq
+                            || n.starts_with(&stdqdot)
+                    })
                 });
             if !used {
                 self.errors.push(

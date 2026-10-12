@@ -105,6 +105,7 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "term.enable_raw" | "std.term.enable_raw" => Some("zz_term_enable_raw"),
         "term.disable_raw" | "std.term.disable_raw" => Some("zz_term_disable_raw"),
         "term.read_key" | "std.term.read_key" => Some("zz_term_read_key"),
+        "term.poll" | "std.term.poll" => Some("zz_term_poll"),
         "term.get_size" | "std.term.get_size" => Some("zz_term_get_size"),
         "term.is_tty" | "std.term.is_tty" => Some("zz_term_is_tty"),
         "term.flush" | "std.term.flush" => Some("zz_term_flush"),
@@ -134,6 +135,111 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "uuid.v7" | "std.uuid.v7" => Some("zz_uuid_v7"),
         "uuid.parse" | "std.uuid.parse" => Some("zz_uuid_parse"),
         "uuid.is_valid" | "std.uuid.is_valid" => Some("zz_uuid_is_valid"),
+        "net.tls_connect" | "std.net.tls_connect" | "tls.connect" | "std.tls.connect" => {
+            Some("zz_tls_connect")
+        }
+        "net.tls_connect_with_ca"
+        | "std.net.tls_connect_with_ca"
+        | "tls.connect_with_ca"
+        | "std.tls.connect_with_ca" => Some("zz_tls_connect_with_ca"),
+        "net.tls_connect_insecure"
+        | "std.net.tls_connect_insecure"
+        | "tls.connect_insecure"
+        | "std.tls.connect_insecure" => Some("zz_tls_connect_insecure"),
+        "net.tls_write" | "std.net.tls_write" | "tls.write" | "std.tls.write" => {
+            Some("zz_tls_write")
+        }
+        "net.tls_write_bytes"
+        | "std.net.tls_write_bytes"
+        | "tls.write_bytes"
+        | "std.tls.write_bytes" => Some("zz_tls_write_bytes"),
+        "net.tls_read" | "std.net.tls_read" | "tls.read" | "std.tls.read" => Some("zz_tls_read"),
+        "net.tls_read_bytes"
+        | "std.net.tls_read_bytes"
+        | "tls.read_bytes"
+        | "std.tls.read_bytes" => Some("zz_tls_read_bytes"),
+        "net.tls_read_exact"
+        | "std.net.tls_read_exact"
+        | "tls.read_exact"
+        | "std.tls.read_exact" => Some("zz_tls_read_exact"),
+        "net.tls_readline" | "std.net.tls_readline" | "tls.read_line" | "std.tls.read_line" => {
+            Some("zz_tls_read_line")
+        }
+        "net.tls_set_read_timeout"
+        | "std.net.tls_set_read_timeout"
+        | "tls.set_read_timeout"
+        | "std.tls.set_read_timeout" => Some("zz_tls_set_read_timeout"),
+        "net.tls_set_write_timeout"
+        | "std.net.tls_set_write_timeout"
+        | "tls.set_write_timeout"
+        | "std.tls.set_write_timeout" => Some("zz_tls_set_write_timeout"),
+        "net.tls_close"
+        | "std.net.tls_close"
+        | "tls.close"
+        | "std.tls.close"
+        | "tls.shutdown"
+        | "std.tls.shutdown"
+        | "net.tls_shutdown"
+        | "std.net.tls_shutdown" => Some("zz_tls_close"),
+        "net.unix_connect" | "std.net.unix_connect" => Some("zz_unix_connect"),
+        "net.unix_listen" | "std.net.unix_listen" => Some("zz_unix_listen"),
+        "net.unix_accept"
+        | "std.net.unix_accept"
+        | "unix_listener.accept"
+        | "std.unix_listener.accept" => Some("zz_unix_accept"),
+        "net.unix_listener_close"
+        | "std.net.unix_listener_close"
+        | "unix_listener.close"
+        | "std.unix_listener.close" => Some("zz_unix_listener_close"),
+        "net.unix_write" | "std.net.unix_write" | "unix.write" | "std.unix.write" => {
+            Some("zz_unix_write")
+        }
+        "net.unix_write_bytes"
+        | "std.net.unix_write_bytes"
+        | "unix.write_bytes"
+        | "std.unix.write_bytes" => Some("zz_unix_write_bytes"),
+        "net.unix_read" | "std.net.unix_read" | "unix.read" | "std.unix.read" => {
+            Some("zz_unix_read")
+        }
+        "net.unix_read_bytes"
+        | "std.net.unix_read_bytes"
+        | "unix.read_bytes"
+        | "std.unix.read_bytes" => Some("zz_unix_read_bytes"),
+        "net.unix_read_exact"
+        | "std.net.unix_read_exact"
+        | "unix.read_exact"
+        | "std.unix.read_exact" => Some("zz_unix_read_exact"),
+        "net.unix_readline" | "std.net.unix_readline" | "unix.read_line" | "std.unix.read_line" => {
+            Some("zz_unix_read_line")
+        }
+        "net.unix_set_read_timeout"
+        | "std.net.unix_set_read_timeout"
+        | "unix.set_read_timeout"
+        | "std.unix.set_read_timeout" => Some("zz_unix_set_read_timeout"),
+        "net.unix_set_write_timeout"
+        | "std.net.unix_set_write_timeout"
+        | "unix.set_write_timeout"
+        | "std.unix.set_write_timeout" => Some("zz_unix_set_write_timeout"),
+        "net.unix_close"
+        | "std.net.unix_close"
+        | "unix.close"
+        | "std.unix.close"
+        | "unix.shutdown"
+        | "std.unix.shutdown"
+        | "net.unix_shutdown"
+        | "std.net.unix_shutdown" => Some("zz_unix_close"),
+        "net.tls_listen" | "std.net.tls_listen" => Some("zz_tls_listen"),
+        "net.tls_accept"
+        | "std.net.tls_accept"
+        | "tls_listener.accept"
+        | "std.tls_listener.accept" => Some("zz_tls_accept"),
+        "net.tls_listener_close"
+        | "std.net.tls_listener_close"
+        | "tls_listener.close"
+        | "std.tls_listener.close" => Some("zz_tls_listener_close"),
+        "net.tls_peer_addr" | "std.net.tls_peer_addr" | "tls.peer_addr" | "std.tls.peer_addr" => {
+            Some("zz_tls_peer_addr")
+        }
         _ => None,
     }
 }
@@ -349,6 +455,7 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
             Some("zz_value zz_term_disable_raw(zz_value unit, int *err);")
         }
         "zz_term_read_key" => Some("zz_value zz_term_read_key(zz_value unit, int *err);"),
+        "zz_term_poll" => Some("zz_value zz_term_poll(zz_value ms, int *err);"),
         "zz_term_get_size" => Some("zz_value zz_term_get_size(zz_value unit, int *err);"),
         "zz_term_is_tty" => Some("zz_value zz_term_is_tty(zz_value unit, int *err);"),
         "zz_term_flush" => Some("zz_value zz_term_flush(zz_value unit, int *err);"),
@@ -386,6 +493,67 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_uuid_v4" => Some("zz_value zz_uuid_v4(zz_value unit, int *err);"),
         "zz_uuid_v7" => Some("zz_value zz_uuid_v7(zz_value unit, int *err);"),
         "zz_uuid_parse" => Some("zz_value zz_uuid_parse(zz_value s, int *err);"),
+        "zz_tls_connect" => {
+            Some("zz_value zz_tls_connect(zz_value addr, zz_value name, zz_value timeout, int *err);")
+        }
+        "zz_tls_connect_with_ca" => Some(
+            "zz_value zz_tls_connect_with_ca(zz_value addr, zz_value name, zz_value ca, zz_value timeout, int *err);",
+        ),
+        "zz_tls_connect_insecure" => Some(
+            "zz_value zz_tls_connect_insecure(zz_value addr, zz_value name, zz_value timeout, int *err);",
+        ),
+        "zz_tls_write" => Some("zz_value zz_tls_write(zz_value id, zz_value data, int *err);"),
+        "zz_tls_write_bytes" => {
+            Some("zz_value zz_tls_write_bytes(zz_value id, zz_value data, int *err);")
+        }
+        "zz_tls_read" => Some("zz_value zz_tls_read(zz_value id, zz_value max, int *err);"),
+        "zz_tls_read_bytes" => {
+            Some("zz_value zz_tls_read_bytes(zz_value id, zz_value max, int *err);")
+        }
+        "zz_tls_read_exact" => {
+            Some("zz_value zz_tls_read_exact(zz_value id, zz_value n, int *err);")
+        }
+        "zz_tls_read_line" => Some("zz_value zz_tls_read_line(zz_value id, int *err);"),
+        "zz_tls_set_read_timeout" => {
+            Some("zz_value zz_tls_set_read_timeout(zz_value id, zz_value ms, int *err);")
+        }
+        "zz_tls_set_write_timeout" => {
+            Some("zz_value zz_tls_set_write_timeout(zz_value id, zz_value ms, int *err);")
+        }
+        "zz_tls_close" => Some("zz_value zz_tls_close(zz_value id, int *err);"),
+        "zz_tls_peer_addr" => Some("zz_value zz_tls_peer_addr(zz_value id, int *err);"),
+        "zz_unix_connect" => {
+            Some("zz_value zz_unix_connect(zz_value path, zz_value timeout, int *err);")
+        }
+        "zz_unix_listen" => Some("zz_value zz_unix_listen(zz_value path, int *err);"),
+        "zz_unix_accept" => Some("zz_value zz_unix_accept(zz_value id, int *err);"),
+        "zz_unix_listener_close" => {
+            Some("zz_value zz_unix_listener_close(zz_value id, int *err);")
+        }
+        "zz_unix_write" => Some("zz_value zz_unix_write(zz_value id, zz_value data, int *err);"),
+        "zz_unix_write_bytes" => {
+            Some("zz_value zz_unix_write_bytes(zz_value id, zz_value data, int *err);")
+        }
+        "zz_unix_read" => Some("zz_value zz_unix_read(zz_value id, zz_value max, int *err);"),
+        "zz_unix_read_bytes" => {
+            Some("zz_value zz_unix_read_bytes(zz_value id, zz_value max, int *err);")
+        }
+        "zz_unix_read_exact" => {
+            Some("zz_value zz_unix_read_exact(zz_value id, zz_value n, int *err);")
+        }
+        "zz_unix_read_line" => Some("zz_value zz_unix_read_line(zz_value id, int *err);"),
+        "zz_unix_set_read_timeout" => {
+            Some("zz_value zz_unix_set_read_timeout(zz_value id, zz_value ms, int *err);")
+        }
+        "zz_unix_set_write_timeout" => {
+            Some("zz_value zz_unix_set_write_timeout(zz_value id, zz_value ms, int *err);")
+        }
+        "zz_unix_close" => Some("zz_value zz_unix_close(zz_value id, int *err);"),
+        "zz_tls_listen" => Some(
+            "zz_value zz_tls_listen(zz_value addr, zz_value cert, zz_value key, int *err);",
+        ),
+        "zz_tls_accept" => Some("zz_value zz_tls_accept(zz_value id, int *err);"),
+        "zz_tls_listener_close" => Some("zz_value zz_tls_listener_close(zz_value id, int *err);"),
         "zz_uuid_is_valid" => Some("zz_value zz_uuid_is_valid(zz_value s, int *err);"),
         _ => None,
     }

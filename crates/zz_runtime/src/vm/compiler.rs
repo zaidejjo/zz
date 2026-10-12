@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
-use zz_frontend::move_elide::{classify_self_assign_vm, unqualify_expr, MoveKind};
+use zz_frontend::move_elide::{
+    classify_self_assign_vm, count_refs, has_closure_or_spawn, has_early_exit, unqualify_expr,
+    MoveKind,
+};
 use zz_frontend::span::Span;
 
 use super::capture::*;
@@ -418,7 +421,12 @@ impl Compiler {
             Op::TakeVar(_, span)
             | Op::VecPush { span, .. }
             | Op::VecPushField { span, .. }
-            | Op::VecPushMethod { span, .. } => *span,
+            | Op::VecPushMethod { span, .. }
+            | Op::SetFieldTake { span, .. }
+            | Op::SetFieldIndexTake { span, .. }
+            | Op::FieldBinopTake { span, .. }
+            | Op::GetFieldIndex { span, .. }
+            | Op::LenField { span, .. } => *span,
             Op::LoadPath(_, span) | Op::StorePath(_, span) => *span,
             Op::JumpIfFalseBool(_, span) => *span,
             Op::ForSetup { span, .. } | Op::WhileCond { span, .. } => *span,
@@ -459,6 +467,10 @@ impl Compiler {
             Op::DefineVar(_) => 0,
             Op::StoreVar(..) | Op::StorePath(..) | Op::StoreSlot(_) => -1,
             Op::VecPush { .. } | Op::VecPushField { .. } | Op::VecPushMethod { .. } => -1,
+            Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => -1,
+            Op::SetFieldIndexTake { .. } => -2,
+            Op::GetFieldIndex { .. } => 0,
+            Op::LenField { .. } => 1,
             Op::SlotAddInt { .. } => 0,
             Op::SlotInc { .. } => 0,
             Op::SlotAddIntImm { .. } => 0,
@@ -1051,6 +1063,233 @@ impl Compiler {
         };
         self.compile_expr(elem);
         self.emit(Op::VecPushField {
+            home,
+            field: field.to_string(),
+            span,
+        });
+        true
+    }
+
+    /// Window purity for take-restore field ops (#242): no
+    /// closures/spawns (deferred observation of the transient), no
+    /// early exits (the store must run), and no reference to the home
+    /// in any form (bare, path head, or field root — the window runs
+    /// with the home taken). Calls are allowed: siblings evaluate
+    /// pre-take with the home intact, matching `VecPushField` order.
+    fn move_window_clean(&self, e: &Expr, home: &str) -> bool {
+        !has_closure_or_spawn(e) && !has_early_exit(e) && count_refs(e, home) == 0
+    }
+
+    /// True when `e` is exactly the field path `(obj, field)` (either
+    /// surface spelling).
+    fn is_exact_field(e: &Expr, obj: &str, field: &str) -> bool {
+        match e {
+            Expr::Path { parts, .. } => parts.len() == 2 && parts[0] == obj && parts[1] == field,
+            Expr::Field { obj: o, name, .. } => {
+                name == field && matches!(o.as_ref(), Expr::Ident { name: n, .. } if n == obj)
+            }
+            _ => false,
+        }
+    }
+
+    /// Split `obj` of a field target into a takeable home name: bare
+    /// `Ident` or len-2 `Path` (dotted homes stay generic).
+    fn field_home_obj(obj: &Expr) -> Option<&str> {
+        match obj {
+            Expr::Ident { name, .. } => Some(name.as_str()),
+            Expr::Path { parts, .. } if parts.len() == 2 => Some(parts[0].as_str()),
+            _ => None,
+        }
+    }
+
+    /// `s.f = v` with a clean `v`: `[v] SetFieldTake` (#242).
+    fn try_emit_set_field_take(
+        &mut self,
+        obj: &str,
+        field: &str,
+        value: &Expr,
+        span: Span,
+    ) -> bool {
+        if !self.move_window_clean(value, obj) {
+            return false;
+        }
+        let home = match self.move_home_of(obj) {
+            Some(h) => h,
+            None => return false,
+        };
+        self.compile_expr(value);
+        self.emit(Op::SetFieldTake {
+            home,
+            field: field.to_string(),
+            span,
+        });
+        true
+    }
+
+    /// `s.f = s.f OP v` with a clean `v`: `[v] FieldBinopTake` (#242).
+    /// The field read must be a direct binary operand (not nested inside
+    /// calls) so the take window stays free of user code.
+    fn try_emit_field_binop_take(
+        &mut self,
+        obj: &str,
+        field: &str,
+        value: &Expr,
+        span: Span,
+    ) -> bool {
+        let Expr::Binary {
+            op, left, right, ..
+        } = value
+        else {
+            return false;
+        };
+        // Short-circuit operators evaluate conditionally; fusing
+        // would force the right side and diverge (`eval_binary` cannot
+        // even execute them — they lower to jumps).
+        if matches!(op, BinOp::And | BinOp::Or | BinOp::Elvis) {
+            return false;
+        }
+        let other = if Self::is_exact_field(left, obj, field) {
+            right.as_ref()
+        } else {
+            return false;
+        };
+        if !self.move_window_clean(other, obj) {
+            return false;
+        }
+        let home = match self.move_home_of(obj) {
+            Some(h) => h,
+            None => return false,
+        };
+        self.compile_expr(other);
+        self.emit(Op::FieldBinopTake {
+            home,
+            field: field.to_string(),
+            op: *op,
+            span,
+        });
+        true
+    }
+
+    /// `s.f[i] = v` with clean index and value: `[i][v]
+    /// SetFieldIndexTake` (#242).
+    fn try_emit_set_field_index_take(
+        &mut self,
+        obj: &str,
+        field: &str,
+        index: &Expr,
+        value: &Expr,
+        span: Span,
+    ) -> bool {
+        if !self.move_window_clean(index, obj) || !self.move_window_clean(value, obj) {
+            return false;
+        }
+        let home = match self.move_home_of(obj) {
+            Some(h) => h,
+            None => return false,
+        };
+        self.compile_expr(index);
+        self.compile_expr(value);
+        self.emit(Op::SetFieldIndexTake {
+            home,
+            field: field.to_string(),
+            span,
+        });
+        true
+    }
+
+    /// Canonical `len` callee spelling resolving to the real native
+    /// (not shadowed by a user func or local): mirrors
+    /// `move_push_native` discipline.
+    fn len_native_spelling(&self, callee: &Expr) -> Option<String> {
+        let spelling = match callee {
+            Expr::Ident { name, .. } => name.clone(),
+            Expr::Path { parts, .. } => parts.join("."),
+            _ => return None,
+        };
+        if !matches!(
+            spelling.as_str(),
+            "len" | "std.len" | "vec.len" | "std.vec.len"
+        ) {
+            return None;
+        }
+        if self.func_info.contains_key(&spelling) {
+            return None;
+        }
+        if !self
+            .native_names
+            .as_ref()
+            .is_some_and(|n| n.contains(&spelling))
+        {
+            return None;
+        }
+        if !spelling.contains('.') && self.locals.iter().any(|l| l.name == spelling) {
+            return None;
+        }
+        Some(spelling)
+    }
+
+    /// `len(s.f)`: `LenField` take-restore read (#242). No purity
+    /// requirement beyond resolvability — the op takes, measures, and
+    /// restores with no user code in between.
+    fn try_emit_len_field(&mut self, expr: &Expr) -> bool {
+        let Expr::Call {
+            callee,
+            args,
+            named,
+            span,
+        } = expr
+        else {
+            return false;
+        };
+        if !named.is_empty() || args.len() != 1 {
+            return false;
+        }
+        if self.len_native_spelling(callee).is_none() {
+            return false;
+        }
+        let (home_name, field) = match &args[0] {
+            Expr::Field { obj, name, .. } => match obj.as_ref() {
+                Expr::Ident { name: o, .. } => (o.as_str(), name.as_str()),
+                _ => return false,
+            },
+            Expr::Path { parts, .. } if parts.len() == 2 => (parts[0].as_str(), parts[1].as_str()),
+            _ => return false,
+        };
+        let home = match self.move_home_of(home_name) {
+            Some(h) => h,
+            None => return false,
+        };
+        self.emit(Op::LenField {
+            home,
+            field: field.to_string(),
+            span: *span,
+        });
+        true
+    }
+
+    /// `s.f[i]` reads with a clean index: `[i] GetFieldIndex` (#242).
+    /// Returns true when emitted (caller pushes the statement value and
+    /// returns); expression-position callers use the pushed element.
+    fn try_emit_get_field_index(&mut self, obj: &Expr, index: &Expr, span: Span) -> bool {
+        let (home_name, field) = match obj {
+            Expr::Field {
+                obj: inner, name, ..
+            } => match inner.as_ref() {
+                Expr::Ident { name: o, .. } => (o.as_str(), name.as_str()),
+                _ => return false,
+            },
+            Expr::Path { parts, .. } if parts.len() == 2 => (parts[0].as_str(), parts[1].as_str()),
+            _ => return false,
+        };
+        if !self.move_window_clean(index, home_name) {
+            return false;
+        }
+        let home = match self.move_home_of(home_name) {
+            Some(h) => h,
+            None => return false,
+        };
+        self.compile_expr(index);
+        self.emit(Op::GetFieldIndex {
             home,
             field: field.to_string(),
             span,
@@ -1992,6 +2231,17 @@ impl Compiler {
                         }
                     }
                     let full = parts.join(".");
+                    // Take-restore field stores (#242): pure stores and
+                    // self-read-modify-write skip the container clone.
+                    // Module-namespace targets fall through (their heads
+                    // never resolve to a takeable home).
+                    if parts.len() == 2
+                        && (self.try_emit_field_binop_take(&parts[0], &parts[1], value, *span)
+                            || self.try_emit_set_field_take(&parts[0], &parts[1], value, *span))
+                    {
+                        self.emit_const(Value::Unit);
+                        return StmtValue::Discard;
+                    }
                     // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
                     // resolves to a direct slot when the full name is a local.
                     if let Resolved::Slot(_) = self.resolve(&full) {
@@ -2007,6 +2257,25 @@ impl Compiler {
                     StmtValue::Discard
                 }
                 Expr::Index { obj, index, span } => {
+                    // Take-restore indexed field stores (#242): `s.f[i]`
+                    // and path-spelled equivalents.
+                    let home_field: Option<(&str, &str)> = match obj.as_ref() {
+                        Expr::Field {
+                            obj: inner,
+                            name: f,
+                            ..
+                        } => Self::field_home_obj(inner).map(|h| (h, f.as_str())),
+                        Expr::Path { parts, .. } if parts.len() == 2 => {
+                            Some((parts[0].as_str(), parts[1].as_str()))
+                        }
+                        _ => None,
+                    };
+                    if let Some((home, field)) = home_field {
+                        if self.try_emit_set_field_index_take(home, field, index, value, *span) {
+                            self.emit_const(Value::Unit);
+                            return StmtValue::Discard;
+                        }
+                    }
                     // Source order: base, index, value (spec §7). The
                     // stack layout stays [base, index, value] for the new
                     // StoreIndexOp pop order (value, index, object).
@@ -2050,6 +2319,16 @@ impl Compiler {
                                 self.emit_const(Value::Unit);
                                 return StmtValue::Discard;
                             }
+                        }
+                    }
+                    // Take-restore field stores (#242): pure stores and
+                    // self-read-modify-write skip the container clone.
+                    if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                        if self.try_emit_field_binop_take(obj_name, name, value, *span)
+                            || self.try_emit_set_field_take(obj_name, name, value, *span)
+                        {
+                            self.emit_const(Value::Unit);
+                            return StmtValue::Discard;
                         }
                     }
                     // Source order: base, then value (spec §7). `Swap`
@@ -2217,6 +2496,38 @@ impl Compiler {
                                         self.emit(Op::StoreVar(obj_name.clone(), e.span()))
                                     }
                                 }
+                                return StmtValue::None;
+                            }
+                        }
+                    }
+                    // Chained receiver (`base.field.push(x)`, deeper chains
+                    // alike): method is the last segment; call on the chain
+                    // value, then store back through the chain (any depth).
+                    // Without this the result was discarded — a silent no-op
+                    // that diverged from the assign form (`b.cmds = ...`).
+                    if let Expr::Path { parts, .. } = callee.as_ref() {
+                        if parts.len() >= 3 {
+                            let method_name = parts.last().unwrap();
+                            let dotted = parts.join(".");
+                            let is_native = self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&dotted));
+                            if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
+                                let recv_parts = parts[..parts.len() - 1].to_vec();
+                                self.compile_path_load(&recv_parts, e.span());
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                                for (_, val) in named {
+                                    self.compile_expr(val);
+                                }
+                                self.emit(Op::CallMethod {
+                                    name: method_name.clone(),
+                                    argc: (args.len() + named.len()) as u16,
+                                    span: e.span(),
+                                });
+                                self.compile_path_store(&recv_parts, e.span());
                                 return StmtValue::None;
                             }
                         }
@@ -2504,7 +2815,12 @@ impl Compiler {
         Arc::new(sub.chunk)
     }
 
-    fn compile_reordered_args(&mut self, func_name: &str, args: &[Expr], named: &[(String, Expr)]) {
+    fn compile_reordered_args(
+        &mut self,
+        func_name: &str,
+        args: &[Expr],
+        named: &[(zz_frontend::ast::Ident, Expr)],
+    ) {
         let info = match self.func_info.get(func_name) {
             Some(fi) => fi.clone(),
             None => {
@@ -2525,7 +2841,7 @@ impl Compiler {
             }
         }
         for (name, val) in named {
-            if let Some(i) = info.param_names.iter().position(|pn| pn == name) {
+            if let Some(i) = info.param_names.iter().position(|pn| pn == &name.name) {
                 if slots[i].is_none() {
                     slots[i] = Some(val.clone());
                 }
@@ -2613,7 +2929,12 @@ impl Compiler {
     /// (`pg.query(db, sql)`, `sqlz.query(db, sql)`, ...): the handle is a
     /// normal arg, so argc = db + template + bound params (+1 struct
     /// marker for query when the checker resolved `[Struct]`, + named).
-    fn module_db_call_argc(&self, args: &[Expr], named: &[(String, Expr)], span: Span) -> usize {
+    fn module_db_call_argc(
+        &self,
+        args: &[Expr],
+        named: &[(zz_frontend::ast::Ident, Expr)],
+        span: Span,
+    ) -> usize {
         let nparams = args.get(1).map(Self::fmt_param_count).unwrap_or(0);
         let base = 2 + nparams + args.len().saturating_sub(2) + named.len();
         if self.db_query_struct(span).is_some() {
@@ -2628,7 +2949,12 @@ impl Compiler {
     /// - args[0] (the handle) as normal,
     /// - args[1] (the SQL) in DbQuery mode,
     /// - trailing `__struct:Name` marker for query when typed.
-    fn compile_module_db_args(&mut self, args: &[Expr], named: &[(String, Expr)], span: Span) {
+    fn compile_module_db_args(
+        &mut self,
+        args: &[Expr],
+        named: &[(zz_frontend::ast::Ident, Expr)],
+        span: Span,
+    ) {
         if let Some(db) = args.first() {
             self.compile_expr(db);
         }
@@ -2750,6 +3076,10 @@ impl Compiler {
     }
 
     fn compile_expr(&mut self, expr: &Expr) {
+        // Take-restore `len(s.f)` (#242): no container or field clone.
+        if self.try_emit_len_field(expr) {
+            return;
+        }
         match expr {
             Expr::Int { value, .. } => self.emit_const(Value::Int(*value)),
             Expr::Float { value, .. } => self.emit_const(Value::Float(*value)),
@@ -3530,6 +3860,11 @@ impl Compiler {
                 });
             }
             Expr::Index { obj, index, span } => {
+                // Take-restore indexed field reads (#242): O(1) element
+                // clone instead of cloning the field array.
+                if self.try_emit_get_field_index(obj, index, *span) {
+                    return;
+                }
                 self.compile_expr(obj);
                 self.compile_expr(index);
                 self.emit(Op::IndexOp(*span));

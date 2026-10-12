@@ -206,8 +206,14 @@ zz_value zz_str_starts_with_at(zz_value s, zz_value sub, zz_value pos, int *err)
 zz_value zz_str_ends_with_at(zz_value s, zz_value sub, zz_value pos, int *err);
 zz_value zz_str_classify(zz_value text, zz_value markers, zz_value bstart, zz_value bend, zz_value nested, zz_value whole, int *err);
 zz_value zz_str_bytes(zz_value s, int *err);
+zz_value zz_str_byte_len(zz_value s, int *err);
+// Strict UTF-8 validity (shared by bytes.to_str and fs.scan_counts).
+int zz_utf8_valid(const unsigned char *buf, size_t n);
+zz_value zz_ord(zz_value ch, int *err);
+zz_value zz_chr(zz_value cp, int *err);
 zz_value zz_bytes_to_str(zz_value vs, int *err);
 zz_value zz_bytes_to_ints(zz_value b, int *err);
+zz_value zz_bytes_finish(zz_value vs, int *err);
 zz_value zz_str_trim_span(zz_value s, zz_value start, zz_value end, int *err);
 zz_value zz_str_find_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err);
 zz_value zz_str_rfind_in(zz_value s, zz_value sub, zz_value start, zz_value end, int *err);

@@ -17,7 +17,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use zz_checker::{check_program, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type};
+use zz_checker::{
+    check_program_with_module_ns, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type,
+};
 use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
@@ -28,7 +30,7 @@ use zz_stdlib::{
     stdlib_funcs, stdlib_natives, STDLIB_MODULES,
 };
 
-mod cache;
+pub(crate) mod cache;
 mod rewrite;
 
 #[cfg(test)]
@@ -43,6 +45,11 @@ pub struct LoadError {
     pub source: String,
     pub diags: Vec<RawDiag>,
 }
+
+/// A selective stdlib import replayed for bare-name natives on scoped
+/// runs: (module, [(name, alias)]). Alias for the nested vec (clippy
+/// `type_complexity` would otherwise fire at every use site).
+pub type StdlibSelectives = Vec<(String, Vec<(String, Option<String>)>)>;
 
 /// A fully loaded program: all modules in dependency order (imports first,
 /// the entry file last), plus the accumulated checker seed.
@@ -87,6 +94,15 @@ pub struct LoadResult {
     pub import_aliases: HashMap<String, String>,
     /// Check-pipeline counters for `zz check --stats`.
     pub stats: LoadStats,
+    /// Sorted union of every stdlib module imported anywhere in the load
+    /// closure (any import kind). Scoped runs execute only these modules'
+    /// pure-ZZ programs plus their runtime deps (see
+    /// `zz_stdlib::stdlib_program_closure`).
+    pub stdlib_modules: Vec<String>,
+    /// Selective imports replayed for bare-name natives on scoped runs.
+    pub stdlib_selectives: StdlibSelectives,
+    /// Wildcard imports replayed for bare-name natives on scoped runs.
+    pub stdlib_wildcards: Vec<String>,
 }
 
 struct Loader {
@@ -117,6 +133,11 @@ struct Loader {
     /// Only the `zz check` entry point enables it: `run`/`build` need
     /// span types and codegen inputs the cache does not store.
     use_cache: bool,
+    /// Project manifests cached per project root (`None` = no `zz.toml`
+    /// or unloadable manifest): backs implicit package mapping
+    /// (`import app.x` → `<root>/src/x.zz`, issue #288) without
+    /// re-parsing the manifest per import.
+    pkg_cache: HashMap<PathBuf, Option<(String, PathBuf)>>,
     /// Plugin function names, for the cache genesis hash.
     plugin_names: Vec<String>,
     /// File dependency edges (importer → imported canonical paths) for S1
@@ -124,6 +145,16 @@ struct Loader {
     /// resolves every import; key resolution follows true dependencies
     /// instead of load order.
     dep_edges: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Same-file namespace aliases (`(importer, requested)` → canonical):
+    /// when one file is imported under several namespaces (explicit `as`
+    /// aliases alongside bare or other-aliased imports, #380), the first
+    /// binding wins as the canonical namespace and every other requested
+    /// spelling maps to it — scoped per importing module. Importing
+    /// modules rewrite references through the canonical spelling, so
+    /// seeds, types, and runtime values keep a single identity instead
+    /// of fracturing per alias. Populated during discovery; empty when no
+    /// file is multi-bound (all substitution paths then no-op).
+    ns_aliases: HashMap<(PathBuf, String), String>,
     /// Whether the seed tables have been contributed to `all_*` yet.
     /// `all_*` must contain the seeds (stdlib!) exactly once: the first
     /// succeeding module contributes them (prior modules all errored, so
@@ -143,6 +174,11 @@ struct Loader {
     ns_of: HashMap<PathBuf, String>,
     /// Canonical path of the entry file (for main() call validation).
     entry: PathBuf,
+    /// Project root of the entry file (nearest ancestor holding
+    /// `zz.toml`; `None` for bare scripts). Files outside it (registry
+    /// CAS, path deps) or under a `vendor/` dir are dependencies —
+    /// their style warnings collapse to one note (#387).
+    root: Option<PathBuf>,
     /// Selective/wildcard imports to process after all modules are loaded.
     /// Each entry: (importing_file_path, module_path, items, is_stdlib).
     selective_imports: Vec<(PathBuf, Vec<String>, Vec<ImportItem>, bool)>,
@@ -151,6 +187,17 @@ struct Loader {
     selected_consts: HashMap<String, f64>,
     /// Mirrors LoadResult::stdlib_aliases while loading.
     stdlib_aliases: Vec<(String, String)>,
+    /// Every stdlib module touched by any import kind (full, selective,
+    /// wildcard), across all loaded modules including vendor deps. Drives
+    /// scoped pure-ZZ stdlib execution and scoped natives on run-cache
+    /// hits — unimported stdlib code is unreachable by checked programs.
+    stdlib_modules: std::collections::HashSet<String>,
+    /// Selective imports to replay for runtime natives on scoped runs:
+    /// (module, [(name, alias)]). Bare-name natives exist only through
+    /// these (and wildcards); full-module registration is qualified-only.
+    stdlib_selectives: StdlibSelectives,
+    /// Wildcard-imported stdlib modules, replayed like selectives on hits.
+    stdlib_wildcards: Vec<String>,
     /// S1 check-cache outcomes for `--stats` observability (#248).
     cache_hits: usize,
     cache_misses: usize,
@@ -201,7 +248,7 @@ fn load_program_impl(
     plugin_funcs: &[(String, FuncSig)],
     use_cache: bool,
 ) -> Result<LoadResult, String> {
-    let entry = main_path.canonicalize().map_err(|e| {
+    let entry = cache::canon(main_path).map_err(|e| {
         format!(
             "cannot read entry file `{}`: {e}\n\
                  hint: check that the file exists and the path is correct",
@@ -228,8 +275,10 @@ fn load_program_impl(
         seed_enum_keys: HashSet::new(),
         contributed_seeds: false,
         use_cache,
+        pkg_cache: HashMap::new(),
         plugin_names: Vec::new(),
         dep_edges: HashMap::new(),
+        ns_aliases: HashMap::new(),
         all_funcs: HashMap::new(),
         all_bindings: HashMap::new(),
         all_structs: HashMap::new(),
@@ -238,10 +287,14 @@ fn load_program_impl(
         natives: stdlib_natives(),
         namespaces: HashMap::new(),
         ns_of: HashMap::new(),
-        entry,
+        entry: entry.clone(),
+        root: find_project_root(&entry),
         selective_imports: Vec::new(),
         selected_consts: HashMap::new(),
         stdlib_aliases: Vec::new(),
+        stdlib_modules: std::collections::HashSet::new(),
+        stdlib_selectives: Vec::new(),
+        stdlib_wildcards: Vec::new(),
         cache_hits: 0,
         cache_misses: 0,
     };
@@ -259,20 +312,46 @@ fn load_program_impl(
 /// the nearest ancestor (or self) holding `zz.toml`.
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     // Canonicalize so relative starts (e.g. `src/main.zz` with cwd at
-    // the project root) walk up through real ancestors.
-    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    let mut dir = if canonical.is_file() {
-        canonical.parent()?.to_path_buf()
+    // the project root) walk up through real ancestors. Both the
+    // canonicalization and the walk memoize process-wide (#233): every
+    // bare import otherwise re-walks per entry file.
+    let canonical = cache::canon(start).unwrap_or_else(|_| start.to_path_buf());
+    cache::project_root_memo(&canonical, || {
+        let mut dir = if canonical.is_file() {
+            canonical.parent()?.to_path_buf()
+        } else {
+            canonical.clone()
+        };
+        loop {
+            if dir.join("zz.toml").exists() {
+                return Some(dir);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    })
+}
+
+/// Normalize a package name for import matching: `-` and `_` spellings
+/// agree (`my-app` in `zz.toml` matches `import my_app.x`), since `-`
+/// is not a valid identifier character in import paths.
+fn normalize_pkg(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+/// Resolve `<pkg>.<rest...>` against a project root: `<rest...>` maps to
+/// `<root>/src/<rest...>.zz` (dot-separated → path). A bare `<pkg>`
+/// (empty `rest`) maps to `<root>/src/main.zz`.
+fn package_target(root: &Path, rest: &[String]) -> PathBuf {
+    if rest.is_empty() {
+        root.join("src").join("main.zz")
     } else {
-        canonical
-    };
-    loop {
-        if dir.join("zz.toml").exists() {
-            return Some(dir);
+        let mut p = root.join("src");
+        for seg in rest {
+            p = p.join(seg);
         }
-        if !dir.pop() {
-            return None;
-        }
+        p.with_extension("zz")
     }
 }
 
@@ -282,8 +361,9 @@ pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
 /// or `<dep>.zz`). Prefers the `vendor/<dep>` link when present, else the
 /// CAS entry recorded in `zz.lock`. Returns the ENTRY FILE path.
 fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
-    let manifest = zz_pm::manifest::Manifest::load(&project_root.join("zz.toml")).ok()?;
-    let lock = zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")).ok()?;
+    // Manifest+lock parse once per root process-wide (#233); mtimes
+    // revalidate so concurrent edits reload instead of serving stale deps.
+    let (manifest, lock) = cache::manifest_lock(project_root)?;
     let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
     // Path deps resolve against the manifest path (same as plugins).
     if locked.source == "path" {
@@ -305,46 +385,116 @@ fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf
 }
 
 /// Entry-file convention inside a dependency package directory.
+/// Results memoize per (`pkg_dir`, `dep_name`) process-wide (#233):
+/// every bare dep import otherwise re-stats the same 3 candidates.
 fn entry_in(pkg_dir: &Path, dep_name: &str) -> Option<PathBuf> {
-    [
-        pkg_dir.join("src").join("main.zz"),
-        pkg_dir.join("src").join(format!("{dep_name}.zz")),
-        pkg_dir.join(format!("{dep_name}.zz")),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file())
+    cache::entry_in_memo(pkg_dir, dep_name, || {
+        [
+            pkg_dir.join("src").join("main.zz"),
+            pkg_dir.join("src").join(format!("{dep_name}.zz")),
+            pkg_dir.join(format!("{dep_name}.zz")),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+    })
+}
+
+/// Submodule file inside a dependency package directory for dotted
+/// imports (`import tui.screen`, #375): `<rest...>` maps to
+/// `<depdir>/src/<rest...>.zz` (mirroring the self-package layout from
+/// #288), with a root-level `<depdir>/<rest...>.zz` fallback. Returns the
+/// file only when it positively exists — otherwise the importer falls
+/// through to legacy relative resolution untouched.
+fn submodule_in(pkg_dir: &Path, rest: &[String]) -> Option<PathBuf> {
+    cache::submodule_in_memo(pkg_dir, rest, || {
+        let mut under_src = PathBuf::from("src");
+        let mut at_root = PathBuf::new();
+        for seg in rest {
+            under_src = under_src.join(seg);
+            at_root = at_root.join(seg);
+        }
+        [
+            pkg_dir.join(&under_src).with_extension("zz"),
+            pkg_dir.join(&at_root).with_extension("zz"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+    })
+}
+
+/// Package directory of a registry/git/path dependency for dotted imports
+/// (`import <dep>.<module>`, #375). Unlike [`resolve_registry_entry`],
+/// no entry file is required (multi-module packages expose submodules
+/// without a top-level entry): path deps resolve against the manifest
+/// path, others prefer the `vendor/<dep>` link, then the lockfile CAS
+/// entry. Plugin packages (shipping `plugin.zzi`) count too — their
+/// `.zz` sources load as ordinary modules under the submodule
+/// namespace (manifest signatures only merge on bare `import <dep>`).
+fn resolve_dep_dir(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
+    // Manifest+lock parse once per root process-wide (#233), same as the
+    // sibling resolvers.
+    let (manifest, lock) = cache::manifest_lock(project_root)?;
+    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    if locked.source == "path" {
+        return match manifest.dependencies.get(dep_name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => Some(project_root.join(&p.path)),
+            _ => None,
+        };
+    }
+    let linked = project_root.join("vendor").join(dep_name);
+    if linked.exists() {
+        return Some(linked);
+    }
+    Some(zz_pm::paths::cas_entry(&locked.hash))
+}
+
+/// Resolve a dotted dependency import (`import tui.screen`) to its
+/// submodule file: `<depdir>/src/screen.zz` via [`resolve_dep_dir`] +
+/// [`submodule_in`]. Every ancestor root is tried so transitive imports
+/// (from inside `vendor/`) resolve against the outer project lock — the
+/// same discipline as bare registry imports.
+fn resolve_dep_submodule(start: &Path, imp: &[String]) -> Option<PathBuf> {
+    for root in ancestor_roots(start) {
+        if let Some(dir) = resolve_dep_dir(&root, &imp[0]) {
+            if let Some(file) = submodule_in(&dir, &imp[1..]) {
+                return Some(file);
+            }
+        }
+    }
+    None
 }
 
 /// All ancestor project roots (nearest first) for `import <dep>` lookup.
 /// The nearest root of a vendored file is the dependency itself (which
 /// has no lock); outer roots must also be tried for transitive deps.
 fn ancestor_roots(start: &Path) -> Vec<PathBuf> {
-    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    let mut dir = if canonical.is_file() {
-        match canonical.parent() {
-            Some(p) => p.to_path_buf(),
-            None => return Vec::new(),
+    let canonical = cache::canon(start).unwrap_or_else(|_| start.to_path_buf());
+    cache::ancestor_roots_memo(&canonical, || {
+        let mut dir = if canonical.is_file() {
+            match canonical.parent() {
+                Some(p) => p.to_path_buf(),
+                None => return Vec::new(),
+            }
+        } else {
+            canonical.clone()
+        };
+        let mut roots = Vec::new();
+        loop {
+            if dir.join("zz.toml").exists() {
+                roots.push(dir.clone());
+            }
+            if !dir.pop() {
+                break;
+            }
         }
-    } else {
-        canonical
-    };
-    let mut roots = Vec::new();
-    loop {
-        if dir.join("zz.toml").exists() {
-            roots.push(dir.clone());
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    roots
+        roots
+    })
 }
 /// Resolve a plugin dependency's package directory for `import <dep>`.
 /// Returns the package dir only when the dep exists in `zz.lock` and
 /// ships a `plugin.zzi` manifest.
 fn resolve_plugin_pkg(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
-    let manifest = zz_pm::manifest::Manifest::load(&project_root.join("zz.toml")).ok()?;
-    let lock = zz_pm::lock::Lockfile::load(&project_root.join("zz.lock")).ok()?;
+    let (manifest, lock) = cache::manifest_lock(project_root)?;
     let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
     let pkg_dir = if locked.source == "path" {
         match manifest.dependencies.get(dep_name) {
@@ -370,6 +520,20 @@ fn module_ns(alias: Option<&str>, path: &Path) -> String {
     })
 }
 
+/// True when `path` is first-party source the consumer owns (#387):
+/// under the entry's project root and outside any `vendor/` dir.
+/// Registry (CAS), path, and vendored deps are someone else's code —
+/// their style warnings are unactionable downstream. `None` root (bare
+/// scripts, which cannot have deps) means everything is first-party.
+fn is_first_party(root: Option<&Path>, path: &Path) -> bool {
+    match root {
+        None => true,
+        Some(root) => match path.strip_prefix(root) {
+            Ok(rel) => !rel.components().any(|c| c.as_os_str() == "vendor"),
+            Err(_) => false,
+        },
+    }
+}
 /// If `msg` is `prefix``name`` (a backtick-quoted name immediately after a
 /// known prefix), return `name`. Used to lift names out of checker messages
 /// (`undefined variable `b.helper``) for private-item detection.
@@ -398,13 +562,14 @@ fn push_private_note(d: &mut RawDiag, name: &str, template: &str) {
 }
 
 /// Resolve one module's S1 cache key over in-memory sources (no IO):
-/// `H(genesis, source, sorted(dep path, dep key)...)`, memoized.
+/// `H(genesis, namespace, source, sorted(dep path, dep key)...)`, memoized.
 /// Returns `None` when unresolvable (missing source, cycle) — the caller
 /// treats it as a cache miss and checks normally.
 fn resolve_module_key(
     genesis: &str,
     sources: &HashMap<PathBuf, String>,
     edges: &HashMap<PathBuf, Vec<PathBuf>>,
+    namespaces: &HashMap<PathBuf, String>,
     path: &Path,
     memo: &mut HashMap<PathBuf, String>,
     stack: &mut Vec<PathBuf>,
@@ -420,17 +585,87 @@ fn resolve_module_key(
     let mut deps = Vec::new();
     if let Some(edge_list) = edges.get(path) {
         for dep in edge_list {
-            let dep_key = resolve_module_key(genesis, sources, edges, dep, memo, stack)?;
+            let dep_key =
+                resolve_module_key(genesis, sources, edges, namespaces, dep, memo, stack)?;
             deps.push((dep.display().to_string(), dep_key));
         }
     }
     stack.pop();
-    let key = cache::module_key(genesis, source, &deps);
+    // #290: the importing namespace is part of the key — cached pubs are
+    // stored already-namespaced, so sharing one entry across namespaces
+    // restores the wrong qualifier set.
+    let ns: &str = namespaces.get(path).map(String::as_str).unwrap_or("");
+    let key = cache::module_key(genesis, source, &deps, ns);
     memo.insert(path.to_path_buf(), key.clone());
     Some(key)
 }
 
 impl Loader {
+    /// Project name + root owning `canon` (nearest `zz.toml`), cached per
+    /// root. `None` outside any project or when the manifest cannot load
+    /// (callers fall back to legacy relative resolution, never hard-error).
+    fn package_of(&mut self, canon: &Path) -> Option<(String, PathBuf)> {
+        let root = find_project_root(canon)?;
+        if let Some(cached) = self.pkg_cache.get(&root) {
+            return cached.clone();
+        }
+        // Manifest parses once per root process-wide (#233); the
+        // per-Loader pkg_cache keeps first-load ordering semantics.
+        // Lockless projects (manifest, no lock) resolve too.
+        let entry = cache::manifest_of(&root)
+            .filter(|m| !m.package.name.is_empty())
+            .map(|m| (m.package.name.clone(), root.clone()));
+        self.pkg_cache.insert(root, entry.clone());
+        entry
+    }
+
+    /// Namespace a dependency module's symbols live under in the seeds:
+    /// its bound (first) namespace. Usually the import's own effective
+    /// namespace, but a multi-bound file (#380) answers with its
+    /// canonical spelling instead.
+    fn seed_ns(&self, dep: &Path, fallback: String) -> String {
+        self.ns_of.get(dep).cloned().unwrap_or(fallback)
+    }
+
+    /// Record a same-file namespace alias for later reference rewriting
+    /// (#380): when this import requests `requested` for a file already
+    /// bound under another (canonical) namespace, the importing module
+    /// rewrites `requested.*` references through the canonical spelling.
+    /// No-op for first bindings and repeat imports under one spelling.
+    fn record_ns_alias(&mut self, importer: &Path, requested: &str, dep: &Path) {
+        if let Some(canonical) = self.ns_of.get(dep).cloned() {
+            if canonical != requested {
+                self.ns_aliases
+                    .insert((importer.to_path_buf(), requested.to_string()), canonical);
+            }
+        }
+    }
+
+    /// Selective-import path with the canonical seed namespace last (see
+    /// [`Loader::seed_ns`]). `alias` is the import's own effective
+    /// spelling (`as` alias or last segment); `dep_canon` is the resolved
+    /// dependency file when known.
+    fn canonical_sel_path(
+        &self,
+        imp: &[String],
+        alias: Option<&str>,
+        dep_canon: Option<&Path>,
+    ) -> Vec<String> {
+        let mut sel_path = imp.to_vec();
+        if let Some(a) = alias {
+            if let Some(last) = sel_path.last_mut() {
+                *last = a.to_string();
+            }
+        }
+        if let Some(dep) = dep_canon {
+            let seed_ns = self.seed_ns(dep, sel_path.last().cloned().unwrap_or_default());
+            if let Some(last) = sel_path.last_mut() {
+                *last = seed_ns;
+            }
+        }
+        sel_path
+    }
+
     /// Record an importer → imported edge (deduped). Small vecs; linear
     /// scan is cheaper than a second map.
     fn record_edge(edges: &mut HashMap<PathBuf, Vec<PathBuf>>, importer: &Path, dep: &Path) {
@@ -443,7 +678,7 @@ impl Loader {
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
     fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
-        let canon = path.canonicalize().map_err(|e| {
+        let canon = cache::canon(path).map_err(|e| {
             format!(
                 "cannot read imported file `{}`: {e}\n\
                      hint: check that the file exists relative to the importing module",
@@ -476,38 +711,46 @@ impl Loader {
                 path.display()
             )
         })?;
-        let parsed = parse(&source);
-        if !parsed.errors.is_empty() {
-            self.errors.push(LoadError {
-                name: path.display().to_string(),
-                source,
-                diags: parsed.errors,
-            });
-            return Ok(());
-        }
+        // Shared parse memo (#327): every entry file re-parses its whole
+        // dependency closure; serve repeats from memory. Keyed by content
+        // hash (edits, including `--fix` writes mid-run, miss soundly).
+        // The memoized program is pre-namespace: each consumer clones it
+        // and namespace-rewrites below with its own alias.
+        let hash = cache::source_hash(&source);
+        let program = match cache::parsed_get(&canon, &hash) {
+            Some(program) => program,
+            None => {
+                let parsed = parse(&source);
+                if !parsed.errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source,
+                        diags: parsed.errors,
+                    });
+                    return Ok(());
+                }
 
-        // Expand explicit decorators before import scanning and namespacing
-        // so decorator references are ordinary call expressions when the
-        // namespace rewriter runs.
-        let (expanded_program, decorator_errors) =
-            zz_frontend::decorators::expand_program(&parsed.program);
-        if !decorator_errors.is_empty() {
-            self.errors.push(LoadError {
-                name: path.display().to_string(),
-                source,
-                diags: decorator_errors,
-            });
-            return Ok(());
-        }
-        let parsed = zz_frontend::Parsed {
-            program: expanded_program,
-            errors: Vec::new(),
+                // Expand explicit decorators before import scanning and namespacing
+                // so decorator references are ordinary call expressions when the
+                // namespace rewriter runs.
+                let (expanded_program, decorator_errors) =
+                    zz_frontend::decorators::expand_program(&parsed.program);
+                if !decorator_errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source,
+                        diags: decorator_errors,
+                    });
+                    return Ok(());
+                }
+                cache::parsed_insert(&canon, &hash, &expanded_program, source.len());
+                expanded_program
+            }
         };
 
         self.visiting.insert(canon.clone());
 
-        let imports: Vec<(Vec<String>, Option<String>, Vec<ImportItem>)> = parsed
-            .program
+        let imports: Vec<(Vec<String>, Option<String>, Vec<ImportItem>)> = program
             .stmts
             .iter()
             .filter_map(|s| match s {
@@ -562,33 +805,141 @@ impl Loader {
                     let ns = imp_alias
                         .clone()
                         .unwrap_or_else(|| imp.last().cloned().unwrap_or_else(|| module.clone()));
-                    match register_module_namespace(
-                        &module,
-                        &ns,
-                        &mut self.funcs,
-                        &mut self.natives,
-                    ) {
-                        Err(msg) => {
+                    // Same (module, ns) pair already copied by an earlier
+                    // importer (#233): the std tables are immutable, so the
+                    // entries are byte-identical — skip the re-copy. The
+                    // namespace claim + alias/module bookkeeping below
+                    // still run (idempotent for repeats, and they own
+                    // collision diagnostics).
+                    let std_canon = PathBuf::from(format!("std:{module}"));
+                    let fresh_copy = self
+                        .namespaces
+                        .get(&ns)
+                        .map(|owner| *owner != std_canon)
+                        .unwrap_or(true);
+                    if fresh_copy {
+                        match register_module_namespace(
+                            &module,
+                            &ns,
+                            &mut self.funcs,
+                            &mut self.natives,
+                        ) {
+                            Err(msg) => {
+                                self.errors.push(LoadError {
+                                     name: path.display().to_string(),
+                                     source: source.clone(),
+                                     diags: vec![error_at(
+                                         format!("{msg}\n\
+                                                  hint: this may occur if the stdlib module exports a conflicting name"),
+                                         Span::new(0, 0),
+                                     )],
+                                 });
+                                continue;
+                            }
+                            // Seed-owned: the per-module check partition
+                            // restores (rather than consumes) these keys,
+                            // so every importer resolves identically (#214).
+                            Ok(inserted) => self.seed_func_keys.extend(inserted),
+                        }
+                    }
+                    self.register_std_ns(&ns, &module, path, &source);
+                    self.stdlib_aliases.push((module.clone(), ns.clone()));
+                    self.stdlib_modules.insert(module.clone());
+                }
+                continue;
+            }
+            // Implicit package mapping (`import app.math`, issue #288):
+            // the first segment matches `package.name` in the nearest
+            // `zz.toml` → `<root>/src/...`. Precedence: std (above) >
+            // self-package (here) > registry/plugin (below) > relative
+            // file (bottom). No manifest or no name match → fall through
+            // to the legacy branches untouched.
+            if let Some((pkg_name, root)) = self.package_of(&canon) {
+                if normalize_pkg(&pkg_name) == imp[0] {
+                    let candidate = package_target(&root, &imp[1..]);
+                    if !candidate.is_file() {
+                        let want = if imp.len() == 1 {
+                            "src/main.zz".to_string()
+                        } else {
+                            format!("src/{}.zz", imp[1..].join("/"))
+                        };
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(
+                                format!(
+                                    "package `{}` resolved to `{}`: file not found\n\
+                                     hint: `{}` maps to `{want}` under the project root; check the `src/` layout",
+                                    imp[0],
+                                    candidate.display(),
+                                    imp.join("."),
+                                ),
+                                Span::new(0, 0),
+                            )],
+                        });
+                        continue;
+                    }
+                    // Bare `import app` binds `src/main.zz` under the
+                    // package name itself (not the `main` file stem) so
+                    // selective imports (`import app(x)`) and qualified
+                    // calls (`app.x()`) agree. Deeper paths bind under
+                    // their file stem (or `as` alias), mirroring
+                    // relative imports.
+                    let effective_alias = imp_alias.clone().or_else(|| {
+                        if imp.len() == 1 {
+                            Some(imp[0].clone())
+                        } else {
+                            None
+                        }
+                    });
+                    // Report cycles at the import site, against the
+                    // importer's source (mirrors the relative branch).
+                    if let Ok(dep) = cache::canon(&candidate) {
+                        if self.visiting.contains(&dep) {
                             self.errors.push(LoadError {
                                  name: path.display().to_string(),
                                  source: source.clone(),
                                  diags: vec![error_at(
-                                     format!("{msg}\n\
-                                              hint: this may occur if the stdlib module exports a conflicting name"),
+                                     format!(
+                                         "circular import: `{}` imports `{}`, which (transitively) imports `{}`\n\
+                                          hint: circular imports are not allowed; consider restructuring your code to break the cycle",
+                                         path.display(),
+                                         candidate.display(),
+                                         path.display()
+                                     ),
                                      Span::new(0, 0),
                                  )],
                              });
                             continue;
                         }
-                        // Seed-owned: the per-module check partition
-                        // restores (rather than consumes) these keys,
-                        // so every importer resolves identically (#214).
-                        Ok(inserted) => self.seed_func_keys.extend(inserted),
+                        // Same-file re-imports under another namespace are
+                        // allowed (#380): the alias maps to the canonical
+                        // namespace in `register_ns`, and references
+                        // rewrite through it. Nothing to check here.
                     }
-                    self.register_std_ns(&ns, &module, path, &source);
-                    self.stdlib_aliases.push((module.clone(), ns.clone()));
+                    self.load_file(&candidate, effective_alias.as_deref())?;
+                    // S1 dep edge (package file). Re-canonicalize
+                    // defensively (filesystem cache hot).
+                    if let Ok(dep) = cache::canon(&candidate) {
+                        Self::record_edge(&mut self.dep_edges, &canon, &dep);
+                        // Same-file alias pair for reference rewriting (#380).
+                        let requested = module_ns(effective_alias.as_deref(), &candidate);
+                        self.record_ns_alias(&canon, &requested, &dep);
+                    }
+                    if is_selective {
+                        // Seeds hold `ns.sym` under the canonical seed
+                        // namespace (see `canonical_sel_path`).
+                        let dep_canon = cache::canon(&candidate).ok();
+                        let sel_path = self.canonical_sel_path(
+                            &imp,
+                            effective_alias.as_deref(),
+                            dep_canon.as_deref(),
+                        );
+                        self.selective_imports
+                            .push((canon.clone(), sel_path, imp_items, false));
+                    }
+                    continue;
                 }
-                continue;
             }
             // Plugin dependency import (`import zimg`): the dep ships a
             // `plugin.zzi` manifest. Merge its signatures under their
@@ -682,21 +1033,85 @@ impl Loader {
                         Self::record_edge(
                             &mut self.dep_edges,
                             &canon,
-                            &entry.canonicalize().unwrap_or(entry.clone()),
+                            &cache::canon(&entry).unwrap_or(entry.clone()),
                         );
+                        // Same-file alias pair for reference rewriting (#380).
+                        if let Ok(dep) = cache::canon(&entry) {
+                            self.record_ns_alias(&canon, &alias, &dep);
+                        }
                         if is_selective {
-                            // Deferred to finish(): seed holds `alias.sym`,
-                            // so record the effective namespace, not the
-                            // package name (they differ with `as`).
-                            let mut sel_path = imp.clone();
-                            if let Some(last) = sel_path.last_mut() {
-                                *last = alias.clone();
-                            }
+                            // Deferred to finish(): seeds hold `ns.sym`
+                            // under the canonical seed namespace (see
+                            // `canonical_sel_path`).
+                            let dep_canon = cache::canon(&entry).ok();
+                            let sel_path = self.canonical_sel_path(
+                                &imp,
+                                Some(alias.as_str()),
+                                dep_canon.as_deref(),
+                            );
                             self.selective_imports
                                 .push((entry, sel_path, imp_items, false));
                         }
                         continue;
                     }
+                }
+            }
+            // Dotted dependency import (`import tui.screen`, #375): the
+            // first segment names a registry/git/path/plugin dependency
+            // and the rest maps to `<depdir>/src/<mod...>.zz`. Only fires
+            // when the submodule file positively exists — anything else
+            // falls through to legacy relative resolution untouched, so
+            // local `a/b.zz` layouts never change meaning.
+            if imp.len() > 1 {
+                if let Some(candidate) = resolve_dep_submodule(&canon, &imp) {
+                    // Effective namespace mirrors local imports: the `as`
+                    // alias when present, else the last segment
+                    // (`import tui.screen` binds `screen.*`, #368).
+                    let eff_ns = imp_alias
+                        .clone()
+                        .unwrap_or_else(|| imp.last().cloned().unwrap_or_default());
+                    // Cycle + double-namespace diagnostics mirror the
+                    // local branch below (importer source, same hints).
+                    // Same-file re-imports under another namespace are
+                    // allowed (#380): the alias maps to the canonical
+                    // namespace in `register_ns`, and references rewrite
+                    // through it.
+                    if let Ok(dep) = cache::canon(&candidate) {
+                        if self.visiting.contains(&dep) {
+                            self.errors.push(LoadError {
+                                 name: path.display().to_string(),
+                                 source: source.clone(),
+                                 diags: vec![error_at(
+                                     format!(
+                                         "circular import: `{}` imports `{}`, which (transitively) imports `{}`\n\
+                                          hint: circular imports are not allowed; consider restructuring your code to break the cycle",
+                                         path.display(),
+                                         candidate.display(),
+                                         path.display()
+                                     ),
+                                     Span::new(0, 0),
+                                 )],
+                             });
+                            continue;
+                        }
+                    }
+                    self.load_file(&candidate, Some(&eff_ns))?;
+                    // S1 dep edge (dependency submodule file).
+                    if let Ok(dep) = cache::canon(&candidate) {
+                        Self::record_edge(&mut self.dep_edges, &canon, &dep);
+                        // Same-file alias pair for reference rewriting (#380).
+                        self.record_ns_alias(&canon, &eff_ns, &dep);
+                    }
+                    if is_selective {
+                        // Seeds hold `ns.sym` under the canonical seed
+                        // namespace (see `canonical_sel_path`).
+                        let dep_canon = cache::canon(&candidate).ok();
+                        let sel_path =
+                            self.canonical_sel_path(&imp, Some(&eff_ns), dep_canon.as_deref());
+                        self.selective_imports
+                            .push((canon.clone(), sel_path, imp_items, false));
+                    }
+                    continue;
                 }
             }
             // Local file import.
@@ -705,7 +1120,7 @@ impl Loader {
                 .unwrap_or_else(|| Path::new("."))
                 .join(format!("{}.zz", imp.join("/")));
             // Report cycles at the import site, against the importer's source.
-            if let Ok(rel_canon) = rel.canonicalize() {
+            if let Ok(rel_canon) = cache::canon(&rel) {
                 if self.visiting.contains(&rel_canon) {
                     self.errors.push(LoadError {
                          name: path.display().to_string(),
@@ -723,45 +1138,26 @@ impl Loader {
                      });
                     continue;
                 }
-                // A module already loaded under a different namespace cannot
-                // be re-imported under another one.
-                if let Some(existing) = self.ns_of.get(&rel_canon) {
-                    let want = module_ns(imp_alias.as_deref(), &rel);
-                    if existing != &want {
-                        self.errors.push(LoadError {
-                             name: path.display().to_string(),
-                             source: source.clone(),
-                             diags: vec![error_at(
-                                 format!(
-                                     "`{}` is imported under two namespaces: `{existing}` and `{want}`\n\
-                                      hint: each file can only be imported under one namespace; \
-                                      consider using an alias to avoid the conflict",
-                                     rel.display()
-                                 ),
-                                 Span::new(0, 0),
-                             )],
-                         });
-                        continue;
-                    }
-                }
+                // Same-file re-imports under another namespace are
+                // allowed (#380): the alias maps to the canonical
+                // namespace in `register_ns`, and references rewrite
+                // through it. Nothing further to check here.
             }
             self.load_file(&rel, imp_alias.as_deref())?;
             // S1 dep edge (local file). `rel_canon` was verified above;
             // re-canonicalize defensively (filesystem cache hot).
-            if let Ok(dep) = rel.canonicalize() {
+            if let Ok(dep) = cache::canon(&rel) {
                 Self::record_edge(&mut self.dep_edges, &canon, &dep);
+                // Same-file alias pair for reference rewriting (#380).
+                let requested = module_ns(imp_alias.as_deref(), &rel);
+                self.record_ns_alias(&canon, &requested, &dep);
             }
             if is_selective {
-                // Store for processing in finish() when all modules are loaded.
-                // Record the effective namespace (`as` alias when present),
-                // matching the registry-package branch below: seeds hold
-                // `alias.sym`, not `file.sym`.
-                let mut sel_path = imp.clone();
-                if let Some(a) = imp_alias.as_deref() {
-                    if let Some(last) = sel_path.last_mut() {
-                        *last = a.to_string();
-                    }
-                }
+                // Seeds hold `ns.sym` under the canonical seed namespace
+                // (see `canonical_sel_path`).
+                let dep_canon = cache::canon(&rel).ok();
+                let sel_path =
+                    self.canonical_sel_path(&imp, imp_alias.as_deref(), dep_canon.as_deref());
                 self.selective_imports
                     .push((canon.clone(), sel_path, imp_items, false));
             }
@@ -774,8 +1170,16 @@ impl Loader {
         let ns = module_ns(alias, &canon);
         let src = self.sources[&canon].clone();
         if self.register_ns(&ns, &canon, path, &src) {
-            let mut program = parsed.program;
-            namespace_program(&mut program, &ns);
+            let mut program = program;
+            // Same-file alias heads requested by this module's own imports
+            // rewrite through the canonical namespace (#380).
+            let aliases: HashMap<String, String> = self
+                .ns_aliases
+                .iter()
+                .filter(|((imp, _), _)| imp == &canon)
+                .map(|((_, req), c)| (req.clone(), c.clone()))
+                .collect();
+            namespace_program(&mut program, &ns, &aliases);
             self.programs.insert(canon.clone(), program);
             self.order.push(canon);
         }
@@ -879,24 +1283,20 @@ impl Loader {
 
     /// Register a namespace → module mapping, detecting collisions. Returns
     /// false (and records an error) when two different modules claim the same
-    /// namespace, or one module is claimed by two namespaces.
+    /// namespace. One module under several namespaces is allowed (#380):
+    /// the first binding wins as canonical; import sites record the
+    /// requested→canonical pair (see `record_ns_alias`) so references
+    /// rewrite through one spelling and keep a single value/type identity.
     fn register_ns(&mut self, ns: &str, canon: &Path, display: &Path, source: &str) -> bool {
         if let Some(existing) = self.ns_of.get(canon) {
             if existing != ns {
-                self.errors.push(LoadError {
-                    name: display.display().to_string(),
-                    source: source.to_string(),
-                    diags: vec![error_at(
-                        format!(
-                            "module `{}` is imported under two namespaces: `{existing}` and `{ns}`\n\
-                             hint: each file can only be imported under one namespace; \
-                             have both importers use the same name, or import the file directly without alias",
-                            display.display()
-                        ),
-                        Span::new(0, 0),
-                    )],
-                });
-                return false;
+                // Same file, another namespace: alias, don't error.
+                // (#380: `import tui.keys as tkeys` alongside a bare
+                // `import tui.keys` elsewhere must compose.)
+                if !self.namespaces.contains_key(ns) {
+                    self.namespaces.insert(ns.to_string(), canon.to_path_buf());
+                }
+                return true;
             }
             return true;
         }
@@ -976,6 +1376,36 @@ impl Loader {
         None
     }
 
+    /// If diagnostic message `msg` is cascade noise from a failed dependency
+    /// (#274) — a reference to namespace `ns` whose module failed to check —
+    /// return `ns`. The failed module contributed no pubs, so every use of
+    /// `ns` or `ns.item` in an importer is a follow-on of the same root
+    /// cause, reported once at the dependency itself (calls `ns.f()` and
+    /// struct literals `ns.T{}` included). The importer's own
+    /// namespace never counts (its references are genuine).
+    fn failed_dep_ns(failed: &HashSet<String>, own_ns: &str, msg: &str) -> Option<String> {
+        failed.iter().find_map(|ns| {
+            if ns == own_ns {
+                return None;
+            }
+            let bare = format!("undefined variable `{ns}`");
+            let dotted = format!("undefined variable `{ns}.");
+            let called = format!("unknown function `{ns}");
+            let structured = format!("unknown struct `{ns}");
+            let unused = format!("unused import `{ns}`");
+            if msg == bare
+                || msg.starts_with(&dotted)
+                || msg.starts_with(&called)
+                || msg.starts_with(&structured)
+                || msg == unused
+            {
+                Some(ns.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     /// The item kind if `name` exists in the private universe (all items of
     /// already-loaded modules) but is missing from the pub export seed.
     fn private_item_kind(&self, name: &str) -> Option<&'static str> {
@@ -1009,6 +1439,7 @@ impl Loader {
                 &genesis,
                 &self.sources,
                 &self.dep_edges,
+                &self.ns_of,
                 path,
                 &mut key_memo,
                 &mut stack,
@@ -1017,6 +1448,11 @@ impl Loader {
             }
         }
 
+        // Namespaces of modules that failed to check (#274): `order` is
+        // dependency-first, so a failed dependency is recorded before its
+        // importers are processed and their cascade noise can be collapsed
+        // to one targeted error each.
+        let mut failed_ns: HashSet<String> = HashSet::new();
         for path in &self.order {
             let name = path.display().to_string();
             let source = self.sources.remove(path).unwrap_or_default();
@@ -1072,6 +1508,8 @@ impl Loader {
                                         }
                                     }
                                 }
+                                self.stdlib_modules.insert(module.clone());
+                                self.stdlib_wildcards.push(module.clone());
                             }
                         }
                     } else {
@@ -1139,6 +1577,8 @@ impl Loader {
                                 self.selected_consts.insert(target.clone(), val);
                             }
                         }
+                        self.stdlib_modules.insert(module.clone());
+                        self.stdlib_selectives.push((module.clone(), name_aliases));
                     }
                 } else {
                     // Local file selective import — items are in seed as ns.name.
@@ -1191,17 +1631,30 @@ impl Loader {
                                     found = true;
                                 }
                                 if !found {
+                                    // #274: the symbol is missing because the
+                                    // dependency itself failed — say so
+                                    // instead of misdirecting toward `pub`.
+                                    let missing = if failed_ns.contains(ns) {
+                                        let dep_path = self
+                                            .namespaces
+                                            .get(ns)
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| ns.to_string());
+                                        format!(
+                                            "cannot use `{prefix}{sym_name}`: dependency `{dep_path}` failed to check\n\
+                                             hint: fix the errors in `{dep_path}` first"
+                                        )
+                                    } else {
+                                        format!(
+                                            "symbol `{sym_name}` not found or not public in `{}`\n\
+                                             hint: ensure the symbol is declared with `pub` in the imported module",
+                                            imp_path.join(".")
+                                        )
+                                    };
                                     self.errors.push(LoadError {
                                         name: name.clone(),
                                         source: source.clone(),
-                                        diags: vec![error_at(
-                                            format!(
-                                                "symbol `{sym_name}` not found or not public in `{}`\n\
-                                                 hint: ensure the symbol is declared with `pub` in the imported module",
-                                                imp_path.join(".")
-                                            ),
-                                            Span::new(0, 0),
-                                        )],
+                                        diags: vec![error_at(missing, Span::new(0, 0))],
                                     });
                                 }
                             }
@@ -1324,11 +1777,19 @@ impl Loader {
                             new_stmts.push(stmt.clone());
                             // resolve under the effective namespace: the
                             // statement alias when present (`import m as
-                            // a(x)` binds `a.x`, not `m.x`).
-                            let ns = stmt_alias
+                            // a(x)` binds `a.x`, not `m.x`). Canonicalized
+                            // through same-file alias pairs (#380): an
+                            // alias-spelled `tkeys` becomes the bound
+                            // `keys` the seeds actually hold.
+                            let stmt_ns = stmt_alias
                                 .as_deref()
                                 .or_else(|| imp_path.last().map(String::as_str))
                                 .unwrap_or("");
+                            let ns = self
+                                .ns_aliases
+                                .get(&(path.clone(), stmt_ns.to_string()))
+                                .cloned()
+                                .unwrap_or_else(|| stmt_ns.to_string());
                             let prefix = format!("{ns}.");
                             for item in items {
                                 match item {
@@ -1521,6 +1982,9 @@ impl Loader {
             // own-only maps (never seeds — entries stay ~30KB, not 460KB).
             // Parse/selective/namespace work above always runs and feeds
             // both paths identically.
+            // Own namespace for the module-namespace shadow lint (#376,
+            // #361). Cloned up front: the check calls below take `&mut self`.
+            let module_ns: String = self.ns_of.get(path).cloned().unwrap_or_default();
             let (mut checked, pending_key): (CheckResult, Option<String>) = if self.use_cache {
                 // Dep-aware hit: the precomputed key covers source + true
                 // transitive deps. Absent key (unresolvable) misses.
@@ -1561,13 +2025,14 @@ impl Loader {
                         None => {
                             self.cache_misses += 1;
                             (
-                                check_program(
+                                check_program_with_module_ns(
                                     &program,
                                     self.bindings.clone(),
                                     std::mem::take(&mut self.funcs),
                                     std::mem::take(&mut self.structs),
                                     std::mem::take(&mut self.aliases),
                                     std::mem::take(&mut self.enums),
+                                    &module_ns,
                                 ),
                                 Some(key),
                             )
@@ -1578,13 +2043,14 @@ impl Loader {
                     None => {
                         self.cache_misses += 1;
                         (
-                            check_program(
+                            check_program_with_module_ns(
                                 &program,
                                 self.bindings.clone(),
                                 std::mem::take(&mut self.funcs),
                                 std::mem::take(&mut self.structs),
                                 std::mem::take(&mut self.aliases),
                                 std::mem::take(&mut self.enums),
+                                &module_ns,
                             ),
                             None,
                         )
@@ -1593,13 +2059,14 @@ impl Loader {
             } else {
                 self.cache_misses += 1;
                 (
-                    check_program(
+                    check_program_with_module_ns(
                         &program,
                         self.bindings.clone(),
                         std::mem::take(&mut self.funcs),
                         std::mem::take(&mut self.structs),
                         std::mem::take(&mut self.aliases),
                         std::mem::take(&mut self.enums),
+                        &module_ns,
                     ),
                     None,
                 )
@@ -1610,30 +2077,33 @@ impl Loader {
                 .any(|e| e.severity == zz_frontend::diag::Severity::Error);
             // Restore seeds BEFORE error enrichment (it reads the seeds).
             // Each checked table splits into seed-owned entries (keys known
-            // before the check — move back untouched) and module-owned
-            // entries. On error the module contributes nothing, exactly as
+            // before the check) and module-owned entries. Seeds stay in
+            // place (`extract_if` pulls only the module-owned entries out),
+            // so no rehash of the ~1k seed entries per module — the old
+            // partition-into-two-fresh-maps rebuilt them every time.
+            // On error the module contributes nothing, exactly as
             // before (seeds were never mutated: registration is insert-only
             // under namespace-qualified keys).
-            let (seeded_funcs, own_funcs): (HashMap<String, FuncSig>, HashMap<String, FuncSig>) =
-                std::mem::take(&mut checked.funcs)
-                    .into_iter()
-                    .partition(|(k, _)| self.seed_func_keys.contains(k));
-            let (seeded_structs, own_structs): (
-                HashMap<String, StructSig>,
-                HashMap<String, StructSig>,
-            ) = std::mem::take(&mut checked.structs)
-                .into_iter()
-                .partition(|(k, _)| self.seed_struct_keys.contains(k));
-            let (seeded_aliases, own_aliases): (
-                HashMap<String, AliasSig>,
-                HashMap<String, AliasSig>,
-            ) = std::mem::take(&mut checked.aliases)
-                .into_iter()
-                .partition(|(k, _)| self.seed_alias_keys.contains(k));
-            let (seeded_enums, own_enums): (HashMap<String, EnumSig>, HashMap<String, EnumSig>) =
-                std::mem::take(&mut checked.enums)
-                    .into_iter()
-                    .partition(|(k, _)| self.seed_enum_keys.contains(k));
+            let mut checked_funcs = std::mem::take(&mut checked.funcs);
+            let own_funcs: HashMap<String, FuncSig> = checked_funcs
+                .extract_if(|k, _| !self.seed_func_keys.contains(k))
+                .collect();
+            let seeded_funcs = checked_funcs;
+            let mut checked_structs = std::mem::take(&mut checked.structs);
+            let own_structs: HashMap<String, StructSig> = checked_structs
+                .extract_if(|k, _| !self.seed_struct_keys.contains(k))
+                .collect();
+            let seeded_structs = checked_structs;
+            let mut checked_aliases = std::mem::take(&mut checked.aliases);
+            let own_aliases: HashMap<String, AliasSig> = checked_aliases
+                .extract_if(|k, _| !self.seed_alias_keys.contains(k))
+                .collect();
+            let seeded_aliases = checked_aliases;
+            let mut checked_enums = std::mem::take(&mut checked.enums);
+            let own_enums: HashMap<String, EnumSig> = checked_enums
+                .extract_if(|k, _| !self.seed_enum_keys.contains(k))
+                .collect();
+            let seeded_enums = checked_enums;
             self.funcs = seeded_funcs;
             self.structs = seeded_structs;
             self.aliases = seeded_aliases;
@@ -1659,6 +2129,66 @@ impl Loader {
                 );
             }
             let mut diags = checked.errors;
+
+            // Same-file alias imports (#380) always read as unused: references
+            // through the alias head rewrite to the canonical spelling before
+            // checking, but the import statement still loads the file and feeds
+            // the alias mapping — removing it would break the load. Drop that
+            // false positive (only when this module actually requested the
+            // alias spelling).
+            diags.retain(|d| {
+                if d.severity != zz_frontend::diag::Severity::Warning {
+                    return true;
+                }
+                let Some(alias) = d
+                    .message
+                    .strip_prefix("unused import `")
+                    .and_then(|s| s.strip_suffix('`'))
+                else {
+                    return true;
+                };
+                !self
+                    .ns_aliases
+                    .contains_key(&(path.clone(), alias.to_string()))
+            });
+            // Dependency style-warning collapse (#387): a registry dep's
+            // lints (shadow-namespace, unused-*, dead-mutation, ...) are
+            // true positives the consumer can neither fix nor silence —
+            // every downstream build would carry them forever, burying
+            // first-party lints and breaking any future --deny-warnings
+            // gate. Errors still propagate (they break the build);
+            // warnings collapse to one `help` note keeping file
+            // attribution. Runs after the cache write (cached diags stay
+            // raw) and after the #380 false-positive filter above (only
+            // genuine warnings collapse) so each consumer filters by its
+            // own root — including cache-hit loads, which flow through
+            // here too.
+            if !is_first_party(self.root.as_deref(), path) {
+                let warned: Vec<(String, Option<Span>)> = diags
+                    .iter()
+                    .filter(|d| d.severity == zz_frontend::diag::Severity::Warning)
+                    .map(|d| (d.message.clone(), d.span))
+                    .collect();
+                if !warned.is_empty() {
+                    diags.retain(|d| d.severity != zz_frontend::diag::Severity::Warning);
+                    let ns = self.ns_of.get(path).cloned().unwrap_or_default();
+                    let n = warned.len();
+                    let (first_msg, first_span) = &warned[0];
+                    diags.push(
+                        zz_frontend::diag::warning_at(
+                            format!(
+                                "{n} style warning{} inside dependency `{ns}` hidden",
+                                if n == 1 { "" } else { "s" }
+                            ),
+                            first_span.unwrap_or(Span::new(0, 0)),
+                        )
+                        .with_severity(zz_frontend::diag::Severity::Help)
+                        .with_note(format!(
+                            "check that package directly to see them (first: {first_msg})"
+                        )),
+                    );
+                }
+            }
             if has_errors {
                 // Upgrade generic "undefined variable / unknown struct / no
                 // field" errors into targeted "this item is private — add
@@ -1683,14 +2213,59 @@ impl Loader {
                         })
                     });
                 }
+                // When the root cause is a failed dependency, collapse the
+                // cascade: every `ns` / `ns.item` follow-on becomes one
+                // targeted error naming the broken dependency (#274). The
+                // dependency's own failure is already reported at its source.
+                let own_ns: String = self.ns_of.get(path).cloned().unwrap_or_default();
+                let mut collapsed: Vec<String> = Vec::new();
+                diags.retain(
+                    |d| match Self::failed_dep_ns(&failed_ns, &own_ns, &d.message) {
+                        Some(ns) => {
+                            if !collapsed.contains(&ns) {
+                                collapsed.push(ns);
+                            }
+                            false
+                        }
+                        None => true,
+                    },
+                );
+                collapsed.sort();
+                for ns in &collapsed {
+                    let dep_path = self
+                        .namespaces
+                        .get(ns)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| ns.clone());
+                    diags.push(error_at(
+                        format!(
+                            "cannot use `{ns}`: dependency `{dep_path}` failed to check\n\
+                             hint: fix the errors in `{dep_path}` first"
+                        ),
+                        Span::new(0, 0),
+                    ));
+                }
                 self.errors.push(LoadError {
                     name: name.clone(),
                     source: source.clone(),
                     diags,
                 });
+                // Record the failure BEFORE the next module is processed:
+                // importers come later in `order` and collapse references
+                // to this namespace into one targeted error (#274).
+                if let Some(own) = self.ns_of.get(path).cloned() {
+                    failed_ns.insert(own);
+                }
             } else {
                 // Propagate warnings (even if there are no hard errors)
-                // so they can be displayed to the user.
+                // so they can be displayed to the user. Drop the `unused
+                // import` warning for a failed dependency (#274): the import
+                // is unused only because the dependency contributed nothing.
+                if !failed_ns.is_empty() {
+                    let own_ns: String = self.ns_of.get(path).cloned().unwrap_or_default();
+                    diags
+                        .retain(|d| Self::failed_dep_ns(&failed_ns, &own_ns, &d.message).is_none());
+                }
                 if !diags.is_empty() {
                     self.errors.push(LoadError {
                         name: name.clone(),
@@ -1804,7 +2379,8 @@ impl Loader {
             programs.push(program);
         }
 
-        let import_aliases = collect_import_aliases(&programs, &self.funcs);
+        let import_aliases =
+            collect_import_aliases(&programs, &self.order, &self.ns_aliases, &self.funcs);
         LoadResult {
             programs,
             files,
@@ -1824,6 +2400,13 @@ impl Loader {
                 cache_misses: self.cache_misses,
                 seed_funcs: self.seed_func_keys.len(),
             },
+            stdlib_modules: {
+                let mut v: Vec<String> = self.stdlib_modules.into_iter().collect();
+                v.sort();
+                v
+            },
+            stdlib_selectives: self.stdlib_selectives,
+            stdlib_wildcards: self.stdlib_wildcards,
         }
     }
 }
@@ -1835,12 +2418,32 @@ impl Loader {
 /// First registration wins, mirroring seed shadowing. Only used as a
 /// miss-only fallback for generic-function calls (generics have no
 /// value binding); locals, seed entries and Decls take precedence.
+///
+/// Qualified spellings rewrite through same-file alias pairs (#380): an
+/// `as`-spelled `tkeys.Foo` becomes the canonical `keys.Foo` the seeds
+/// actually hold. `order[i]` is the importer of `programs[i]`.
 fn collect_import_aliases(
     programs: &[Program],
+    order: &[PathBuf],
+    ns_aliases: &HashMap<(PathBuf, String), String>,
     seed_funcs: &HashMap<String, FuncSig>,
 ) -> HashMap<String, String> {
+    // `programs[i]` was checked for `order[i]`; lengths stay in lockstep
+    // by construction in `finish`.
+    debug_assert_eq!(programs.len(), order.len());
+    // Rewrite an alias-spelled qualified name through this importer's
+    // same-file pairs; canonical and ordinary spellings pass through.
+    let canonicalize = |importer: &PathBuf, qualified: String| -> String {
+        match qualified.split_once('.') {
+            Some((head, _)) => match ns_aliases.get(&(importer.clone(), head.to_string())) {
+                Some(canon) => format!("{canon}.{}", &qualified[head.len() + 1..]),
+                None => qualified,
+            },
+            None => qualified,
+        }
+    };
     let mut aliases = HashMap::new();
-    for program in programs {
+    for (program, importer) in programs.iter().zip(order.iter()) {
         for stmt in &program.stmts {
             let Stmt::Import {
                 path, alias, items, ..
@@ -1864,7 +2467,7 @@ fn collect_import_aliases(
                         let target = alias.as_ref().unwrap_or(name);
                         aliases
                             .entry(target.clone())
-                            .or_insert_with(|| format!("{ns}.{name}"));
+                            .or_insert_with(|| canonicalize(importer, format!("{ns}.{name}")));
                     }
                     ImportItem::Wildcard { .. } => {
                         let prefix = format!("{ns}.");
@@ -1872,6 +2475,18 @@ fn collect_import_aliases(
                             if let Some(bare) = key.strip_prefix(&prefix) {
                                 if !bare.is_empty() && !bare.contains('.') {
                                     aliases.entry(bare.to_string()).or_insert(key.clone());
+                                }
+                            }
+                        }
+                        // Wildcard under an alias spelling: the seed holds
+                        // the canonical namespace instead.
+                        if let Some(canon) = ns_aliases.get(&(importer.clone(), ns.to_string())) {
+                            let prefix = format!("{canon}.");
+                            for key in seed_funcs.keys() {
+                                if let Some(bare) = key.strip_prefix(&prefix) {
+                                    if !bare.is_empty() && !bare.contains('.') {
+                                        aliases.entry(bare.to_string()).or_insert(key.clone());
+                                    }
                                 }
                             }
                         }
@@ -1887,8 +2502,10 @@ fn collect_import_aliases(
 /// - top-level `func foo` becomes `func ns.foo`,
 /// - top-level `x := ...` becomes `x := ...` with binding name `ns.x`,
 /// - references to those names (`Expr::Ident`) become `Expr::Path([ns, name])`
-///   unless shadowed by a local binding.
-fn namespace_program(program: &mut Program, ns: &str) {
+///   unless shadowed by a local binding,
+/// - same-file alias heads (`tkeys` bound alongside `keys`, #380) rewrite
+///   through the canonical namespace from `ns_aliases`.
+fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<String, String>) {
     let mut top = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
@@ -1905,6 +2522,7 @@ fn namespace_program(program: &mut Program, ns: &str) {
         }
     }
     let mut rw = rewrite::Rewriter::new(ns, &top);
+    rw.ns_aliases = ns_aliases.clone();
     // Imported namespace heads resolve on their own; the Call rewriter
     // must leave `alias.func(...)` paths untouched.
     for stmt in &program.stmts {
@@ -1919,4 +2537,306 @@ fn namespace_program(program: &mut Program, ns: &str) {
     for stmt in &mut program.stmts {
         rw.rewrite_stmt(stmt);
     }
+    hoist_forward_callable_funcs(program, ns);
+}
+
+/// Hoist top-level `func` definitions that are safe to define early so a
+/// top-level statement may call a function defined later in the same file
+/// (`println(game_end(3))` before `func game_end`, #362). The checker
+/// already resolves such calls (Pass 1c registers all signatures
+/// upfront), but the VM executes statements in source order, so without
+/// hoisting the call runs before `MakeFunc` defines `ns.func` and fails
+/// with `undefined variable <ns>`.
+///
+/// Only hoisted when safe, and placed after imports. A function whose
+/// body references a top-level binding (`Decl` or `Destructure`) must stay
+/// in source order, since defining or checking it before the binding
+/// breaks capture and check order. A function that transitively calls a
+/// non-hoisted function also stays put. Hoisted functions land after all
+/// imports, because the checker populates import aliases in statement
+/// order, but before everything else. Pure functions of their params and
+/// mutual recursion between hoisted functions move stably, while programs
+/// hoisting cannot help keep exactly today's behavior.
+fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
+    use zz_frontend::ast::{Block, Expr, Pattern};
+    // Top-level binding names: `Decl`s post-rewrite ("ns.x") plus their
+    // bare forms, and `Destructure` bindings (never namespaced — the
+    // rewriter leaves patterns alone, and refs to them stay bare).
+    let mut decl_names: HashSet<String> = HashSet::new();
+    fn collect_pat_binds(p: &Pattern, out: &mut HashSet<String>) {
+        match p {
+            Pattern::Binding { name } => {
+                out.insert(name.name.clone());
+            }
+            Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+                for q in pats {
+                    collect_pat_binds(q, out);
+                }
+            }
+            Pattern::Variant { arg: Some(a), .. } => collect_pat_binds(a, out),
+            _ => {}
+        }
+    }
+    // Index of each top-level func in stmt order + its bare name.
+    let mut funcs: Vec<(usize, String)> = Vec::new();
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        match stmt {
+            Stmt::Decl { name, .. } => {
+                decl_names.insert(name.name.clone());
+                if let Some(bare) = name.name.rsplit('.').next() {
+                    decl_names.insert(bare.to_string());
+                }
+            }
+            Stmt::Destructure { pat, .. } => collect_pat_binds(pat, &mut decl_names),
+            Stmt::Func { name, .. } => {
+                // Post-rewrite: ["ns.foo"] (dot inside one element).
+                let full = name.join(".");
+                let bare = full
+                    .strip_prefix(&format!("{ns}."))
+                    .unwrap_or(&full)
+                    .to_string();
+                funcs.push((i, bare));
+            }
+            _ => {}
+        }
+    }
+    if funcs.is_empty() {
+        return;
+    }
+    // Collect Ident/Path references inside a function (params included —
+    // conservative: a param shadowing a Decl name just blocks hoisting).
+    fn collect_refs_expr(e: &Expr, out: &mut HashSet<String>) {
+        match e {
+            Expr::Ident { name, .. } => {
+                out.insert(name.clone());
+            }
+            Expr::Path { parts, .. } => {
+                out.insert(parts.join("."));
+                for p in parts {
+                    out.insert(p.clone());
+                }
+            }
+            _ => {}
+        }
+        // Recurse through children generically via debug walk: enumerate
+        // every nested Ident/Path by re-walking known containers.
+        match e {
+            Expr::Paren { expr: x, .. }
+            | Expr::Unary { expr: x, .. }
+            | Expr::Try { expr: x, .. }
+            | Expr::Closure { body: x, .. } => collect_refs_expr(x, out),
+            Expr::Binary { left, right, .. }
+            | Expr::Range {
+                start: left,
+                end: right,
+                ..
+            } => {
+                collect_refs_expr(left, out);
+                collect_refs_expr(right, out);
+            }
+            Expr::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => {
+                collect_refs_expr(callee, out);
+                for a in args {
+                    collect_refs_expr(a, out);
+                }
+                for (_, v) in named {
+                    collect_refs_expr(v, out);
+                }
+            }
+            Expr::If {
+                cond, then, els, ..
+            } => {
+                collect_refs_expr(cond, out);
+                collect_refs_block(then, out);
+                if let Some(x) = els {
+                    collect_refs_expr(x, out);
+                }
+            }
+            Expr::While { cond, body, .. } => {
+                collect_refs_expr(cond, out);
+                collect_refs_block(body, out);
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                collect_refs_expr(scrutinee, out);
+                for a in arms {
+                    collect_refs_expr(&a.body, out);
+                }
+            }
+            Expr::IfLet {
+                value, then, els, ..
+            } => {
+                collect_refs_expr(value, out);
+                collect_refs_block(then, out);
+                if let Some(x) = els {
+                    collect_refs_expr(x, out);
+                }
+            }
+            Expr::Block(b) => collect_refs_block(b, out),
+            Expr::Array { elems, .. } | Expr::Tuple { items: elems, .. } => {
+                for x in elems {
+                    collect_refs_expr(x, out);
+                }
+            }
+            Expr::Dict { entries, .. } => {
+                for (k, v) in entries {
+                    collect_refs_expr(k, out);
+                    collect_refs_expr(v, out);
+                }
+            }
+            Expr::Fmt { parts, .. } => {
+                for p in parts {
+                    if let zz_frontend::ast::FmtPart::Expr(x, _) = p {
+                        collect_refs_expr(x, out);
+                    }
+                }
+            }
+            Expr::Field { obj, .. } => collect_refs_expr(obj, out),
+            Expr::Index { obj, index, .. } => {
+                collect_refs_expr(obj, out);
+                collect_refs_expr(index, out);
+            }
+            Expr::Slice {
+                obj, start, end, ..
+            } => {
+                collect_refs_expr(obj, out);
+                if let Some(x) = start {
+                    collect_refs_expr(x, out);
+                }
+                if let Some(x) = end {
+                    collect_refs_expr(x, out);
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, v) in fields {
+                    collect_refs_expr(v, out);
+                }
+            }
+            Expr::ListComp {
+                body, iter, filter, ..
+            } => {
+                collect_refs_expr(body, out);
+                collect_refs_expr(iter, out);
+                if let Some(f) = filter {
+                    collect_refs_expr(f, out);
+                }
+            }
+            Expr::Variant { arg: Some(x), .. } => {
+                collect_refs_expr(x, out);
+            }
+            _ => {}
+        }
+    }
+    fn collect_refs_block(b: &Block, out: &mut HashSet<String>) {
+        for s in &b.stmts {
+            collect_refs_stmt(s, out);
+        }
+    }
+    fn collect_refs_stmt(s: &Stmt, out: &mut HashSet<String>) {
+        match s {
+            Stmt::Decl { value, .. } => collect_refs_expr(value, out),
+            Stmt::Func { body, .. } => collect_refs_block(body, out),
+            Stmt::Return { value: Some(x), .. } => {
+                collect_refs_expr(x, out);
+            }
+            Stmt::Expr(x) => collect_refs_expr(x, out),
+            Stmt::Defer { expr: x, .. } => collect_refs_expr(x, out),
+            Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+                collect_refs_expr(target, out);
+                collect_refs_expr(value, out);
+            }
+            Stmt::Destructure { value, .. } => collect_refs_expr(value, out),
+            Stmt::For { iter, body, .. } => {
+                collect_refs_expr(iter, out);
+                collect_refs_block(body, out);
+            }
+            Stmt::Impl { methods, .. } => {
+                for m in methods {
+                    collect_refs_stmt(m, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Per-func refs (body + defaults).
+    let mut refs: Vec<HashSet<String>> = Vec::with_capacity(funcs.len());
+    for (stmt_idx, _) in &funcs {
+        let mut out = HashSet::new();
+        if let Stmt::Func { params, body, .. } = &program.stmts[*stmt_idx] {
+            for p in params {
+                if let Some(d) = &p.default {
+                    collect_refs_expr(d, &mut out);
+                }
+            }
+            collect_refs_block(body, &mut out);
+        }
+        refs.push(out);
+    }
+    // Fixpoint: hoistable = no Decl refs + only calls hoistable funcs.
+    let mut hoistable: Vec<bool> = refs
+        .iter()
+        .map(|r| {
+            !r.iter().any(|n| {
+                decl_names.contains(n)
+                    || n.rsplit('.')
+                        .next()
+                        .is_some_and(|b| decl_names.iter().any(|d| d == b))
+            })
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for i in 0..funcs.len() {
+            if !hoistable[i] {
+                continue;
+            }
+            let calls_blocked = refs[i].iter().any(|n| {
+                let bare = n.rsplit('.').next().unwrap_or(n);
+                funcs
+                    .iter()
+                    .enumerate()
+                    .any(|(j, (_, b))| b == bare && !hoistable[j])
+            });
+            if calls_blocked {
+                hoistable[i] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if !hoistable.iter().any(|b| *b) {
+        return;
+    }
+    let hoist_idx: HashSet<usize> = funcs
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| hoistable[*k])
+        .map(|(_, (si, _))| *si)
+        .collect();
+    // Imports stay first (the checker populates import aliases in
+    // statement order), hoisted funcs follow, everything else keeps its
+    // relative order.
+    let mut imports = Vec::new();
+    let mut hoisted = Vec::new();
+    let mut rest = Vec::with_capacity(program.stmts.len());
+    for (i, stmt) in program.stmts.drain(..).enumerate() {
+        if matches!(stmt, Stmt::Import { .. }) {
+            imports.push(stmt);
+        } else if hoist_idx.contains(&i) {
+            hoisted.push(stmt);
+        } else {
+            rest.push(stmt);
+        }
+    }
+    program
+        .stmts
+        .extend(imports.into_iter().chain(hoisted).chain(rest));
 }

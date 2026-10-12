@@ -39,3 +39,6 @@ packaging/aur/out/
 packaging/aur/tmp/
 
 tests/fuzz/__pycache__/
+
+# agent session metadata (local only)
+.opencode/

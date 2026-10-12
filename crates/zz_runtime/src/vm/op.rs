@@ -81,6 +81,50 @@ pub enum Op {
         method: String,
         span: Span,
     },
+    /// Pop a value; take the home object, write `object.field = value` in
+    /// place, store it back. Fused `s.f = v` with pure `v` (#242): zero
+    /// clones on the steady path. Restores the home on error (same
+    /// errors as the generic path).
+    SetFieldTake {
+        home: TakeHome,
+        field: String,
+        span: Span,
+    },
+    /// Pop an index then a value; take the home, write
+    /// `object.field[index] = value` in place, store back. Fused
+    /// `s.f[i] = v` (#242). Restores the home on error.
+    SetFieldIndexTake {
+        home: TakeHome,
+        field: String,
+        span: Span,
+    },
+    /// Pop a right-hand side; take the home, take the field, apply
+    /// `field OP rhs` via `eval_binary`, store back. Fused
+    /// `s.f = s.f OP v` (#242, e.g. string-concat accumulation).
+    /// Restores the home on error.
+    FieldBinopTake {
+        home: TakeHome,
+        field: String,
+        op: BinOp,
+        span: Span,
+    },
+    /// Pop an index; take the home, clone one element of the named
+    /// field, restore the home, push the element. Fused `s.f[i]` reads
+    /// (#242): O(1) instead of cloning the field array. Non-direct
+    /// shapes complete generically at runtime (same errors).
+    GetFieldIndex {
+        home: TakeHome,
+        field: String,
+        span: Span,
+    },
+    /// Take the home, push the length of the named field, restore the
+    /// home. Fused `len(s.f)` (#242): no container or field clone.
+    /// Non-direct shapes complete generically at runtime (same errors).
+    LenField {
+        home: TakeHome,
+        field: String,
+        span: Span,
+    },
     /// In-place integer add: `slot[dst] = Int(slot[dst] + slot[src])`.
     ///
     /// Fused fast path for `x = x + y` inside hot loops: no stack traffic,

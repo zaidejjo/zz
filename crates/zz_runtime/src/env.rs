@@ -447,6 +447,27 @@ impl EnvLink {
         }
     }
 
+    /// The link owning `name` (leaf-first), if bound anywhere. Identity
+    /// anchor for move-fusion visibility guards: a callee whose captured
+    /// chain contains this link can observe the take transient, so the
+    /// fused path must not run for it.
+    pub fn owner_link(&self, name: &str) -> Option<EnvLink> {
+        match self {
+            EnvLink::Owned(rc) => {
+                if rc.borrow().vars.contains_key(name) {
+                    return Some(self.clone());
+                }
+                rc.borrow().parent.clone()?.owner_link(name)
+            }
+            EnvLink::Frozen(f) => {
+                if f.vars.contains_key(name) {
+                    return Some(self.clone());
+                }
+                f.parent.clone().map(EnvLink::Frozen)?.owner_link(name)
+            }
+        }
+    }
+
     /// Move a binding's value out, leaving `Unit` behind — the take half
     /// of fused move ops. Walks like [`EnvLink::assign`] (same owning
     /// scope, same frozen-detach discipline), but moves instead of

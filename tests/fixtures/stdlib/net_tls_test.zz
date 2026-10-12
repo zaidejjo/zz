@@ -1,0 +1,192 @@
+// features: bytes, closures, func-call, imports, int-arith, locals, match, option-result, print, std-chan, std-env, std-net, std-process, std-str, std-task, std-time, string-literal, string-ops
+// tests/fixtures/stdlib/net_tls_test.zz — TLS client transport (Track T).
+// Loopback rustls server (p3 localhost cert) + client handshake matrix.
+// Ports derive from (pid, sweep task) so parallel runners never share them
+// (same scheme as net_tcp_test.zz, range 60000+ to avoid its 20000+ range).
+// NOTE: TLS handshakes need the server app to accept (unlike TCP, where the
+// kernel completes the handshake via backlog), so every accept runs in a
+// spawned task while main connects. Spawned closures avoid `?` (they would
+// need a Result return); they report via channels instead.
+import std.chan
+import std.env
+import std.net
+import std.process(pid)
+import std.str
+import std.task
+import std.time
+
+// Annotated-TLS helper: exercises nameable Opaque handle types (`tls`)
+// across user-function boundaries on both engines.
+func tls_echo(c: tls, line: str) -> Result<str, str> {
+    c.write(line)?
+    c.read_line()
+}
+
+func main() -> Result<int, str> {
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    base_port := 60000 + pid() % 2000 + tok_num % 2000
+    tls_port := base_port
+    plain_port := base_port + 1
+    refused_port := base_port + 2
+    p10 := base_port + 10
+    p11 := base_port + 11
+    p12 := base_port + 12
+    tls_addr := "127.0.0.1:{tls_port}"
+    plain_addr := "127.0.0.1:{plain_port}"
+    refused_addr := "127.0.0.1:{refused_port}"
+    addr10 := "127.0.0.1:{p10}"
+    addr11 := "127.0.0.1:{p11}"
+    addr12 := "127.0.0.1:{p12}"
+    cert := "tests/fixtures/stdlib/data/net_tls/cert.pem"
+    key := "tests/fixtures/stdlib/data/net_tls/key.pem"
+    // 1. Verified handshake (CA pin) + line echo + exact bytes.
+    l := net.tls_listen(tls_addr, cert, key)?
+    println("listen_ok")
+    done := std.chan()
+    task.spawn(|_| {
+        match net.tls_accept(l) {
+            .ok(ss) => {
+                match ss.read_line() {
+                    .ok(line) => {
+                        if line == "hello" {
+                            match ss.write("world") {
+                                .ok(_) => {
+                                    _ := ss.close()
+                                    std.chan.send(done, "srv_ok")
+                                }
+                                .err(_) => {
+                                    _ := ss.close()
+                                    std.chan.send(done, "srv_write_fail")
+                                }
+                            }
+                        } else {
+                            _ := ss.close()
+                            std.chan.send(done, "srv_bad_line")
+                        }
+                    }
+                    .err(_) => {
+                        _ := ss.close()
+                        std.chan.send(done, "srv_read_fail")
+                    }
+                }
+            }
+            .err(_) => {
+                std.chan.send(done, "srv_accept_fail")
+            }
+        }
+    })
+    time.sleep_ms(200)
+    c := net.tls_connect_with_ca(tls_addr, "localhost", cert, 5000)?
+    println("connect_ok")
+    c.write("hello\n")?
+    b := c.read_exact(5)?
+    println("exact_ok: {b.len()}")
+    assert(b.len() == 5)
+    c.set_read_timeout(2000)?
+    c.set_write_timeout(2000)?
+    println("timeout_ok")
+    c.close()?
+    r:str = std.chan.recv(done)
+    assert(r == "srv_ok")
+    println("echo_ok")
+    l.close()?
+    println("close_ok")
+    // 2. Insecure connect (verification OFF) still speaks TLS.
+    l2 := net.tls_listen(addr10, cert, key)?
+    done2 := std.chan()
+    task.spawn(|_| {
+        match net.tls_accept(l2) {
+            .ok(ss2) => {
+                match ss2.read_line() {
+                    .ok(line2) => {
+                        if line2 == "ping" {
+                            _ := ss2.write("pong\n")
+                            _ := ss2.close()
+                            std.chan.send(done2, "srv2_ok")
+                        } else {
+                            _ := ss2.close()
+                            std.chan.send(done2, "srv2_bad_line")
+                        }
+                    }
+                    .err(_) => {
+                        _ := ss2.close()
+                        std.chan.send(done2, "srv2_read_fail")
+                    }
+                }
+            }
+            .err(_) => {
+                std.chan.send(done2, "srv2_accept_fail")
+            }
+        }
+    })
+    time.sleep_ms(200)
+    c2 := net.tls_connect_insecure(addr10, "localhost", 5000)?
+    println("insecure_ok")
+    line3 := tls_echo(c2, "ping\n")?
+    assert(line3 == "pong")
+    println("insecure_echo_ok")
+    c2.close()?
+    r2:str = std.chan.recv(done2)
+    assert(r2 == "srv2_ok")
+    l2.close()?
+    // 3. Wrong hostname fails closed (no plaintext fallback).
+    l3 := net.tls_listen(addr11, cert, key)?
+    done3 := std.chan()
+    task.spawn(|_| {
+        match net.tls_accept(l3) {
+            .ok(s) => {
+                _ := s.close()
+                std.chan.send(done3, "srv3_accepted")
+            }
+            .err(_) => {
+                std.chan.send(done3, "srv3_fail")
+            }
+        }
+    })
+    time.sleep_ms(200)
+    match net.tls_connect_with_ca(addr11, "wrong.invalid", cert, 3000) {
+        .ok(_) => println("ERROR: wrong hostname should fail")
+        .err(e) => {
+            println("hostname_ok")
+            assert(str.contains(e, "tls:"))
+        }
+    }
+    r3:str = std.chan.recv(done3)
+    println("accept_done: {r3}")
+    l3.close()?
+    // 4. Plaintext on a TLS port fails (no hang, no downgrade).
+    pl := net.tcp_listen(plain_addr)?
+    match net.tls_connect_insecure(plain_addr, "localhost", 2000) {
+        .ok(_) => println("ERROR: plaintext should not handshake")
+        .err(e) => {
+            println("refused_ok")
+            assert(str.contains(e, "tls:"))
+        }
+    }
+    ss3 := pl.accept()?
+    _d3 := ss3.read(64)?
+    println("plain_drain_ok")
+    ss3.close()?
+    // 5. Connection refused names TLS (no hang).
+    match net.tls_connect(refused_addr, "localhost", 1000) {
+        .ok(_) => println("ERROR: refused should fail")
+        .err(e) => {
+            println("refused_conn_ok")
+            assert(str.contains(e, "tls:"))
+        }
+    }
+    // 6. TCP read_exact loops until n bytes (RESP bulk-read primitive).
+    l4 := net.tcp_listen(addr12)?
+    cc := net.tcp_connect(addr12, 5000)?
+    sc := l4.accept()?
+    sc.write("ab")?
+    sc.write("cd")?
+    eb := cc.read_exact(4)?
+    println("tcp_exact_ok: {eb.len()}")
+    assert(eb.len() == 4)
+    cc.close()?
+    sc.close()?
+    println("net_tls_test_ok")
+    .ok(0)
+}

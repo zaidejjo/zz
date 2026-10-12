@@ -46,10 +46,15 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "str_utf8_parity.zz", true),
     ("stdlib", "vec_nested_str_parity.zz", true),
     ("stdlib", "console.zz", false),
+    ("stdlib", "selective_calls.zz", false),
     ("stdlib", "str_extended_test.zz", false),
     ("stdlib", "str_find_test.zz", true),
     ("stdlib", "str_bytes_test.zz", true),
+    ("stdlib", "str_ord_chr_test.zz", true),
     ("stdlib", "str_classify_test.zz", true),
+    ("stdlib", "str_trim_unicode_test.zz", false),
+    ("stdlib", "fs_scan_counts_test.zz", false),
+    ("stdlib", "fs_is_generated_test.zz", false),
     ("syntax", "match.zz", false),
     ("syntax", "match_assign.zz", true),
     ("syntax", "return_in_loops.zz", false),
@@ -71,7 +76,6 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "json_test.zz", false),
     ("stdlib", "option_interpolation.zz", false),
     ("stdlib", "alias_module_calls.zz", false),
-    ("stdlib", "selective_calls.zz", false),
     ("stdlib", "import_alias.zz", true),
     ("syntax", "scope_collision.zz", false),
     ("stdlib", "builders.zz", true),
@@ -84,6 +88,11 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "math_consts.zz", false),
     ("stdlib", "fs_path.zz", true),
     ("stdlib", "bytes.zz", true),
+    ("stdlib", "cell_test.zz", true),
+    ("stdlib", "vec_push_shapes.zz", true),
+    ("types", "recursive.zz", true),
+    ("syntax", "closure_fn_params.zz", true),
+    ("stdlib", "bytes_finish_test.zz", true),
     ("syntax", "brace_escapes.zz", false),
     ("syntax", "brace_escapes_multiline.zz", false),
     ("syntax", "destructuring.zz", false),
@@ -121,6 +130,15 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ),
     ("stdlib/fs_comprehensive.zz", "spawn/timing-sensitive"),
     ("stdlib/net_tcp_test.zz", "binds ports (collide in batch)"),
+    (
+        "stdlib/tcp_method_on_try.zz",
+        "binds ports (collide in batch)",
+    ),
+    ("stdlib/net_tls_test.zz", "binds ports (collide in batch)"),
+    (
+        "stdlib/net_unix_test.zz",
+        "binds socket files (collide in batch)",
+    ),
     ("stdlib/input_chained.zz", "needs .stdin (shared in batch)"),
     (
         "stdlib/http_request_response.zz",
@@ -135,6 +153,11 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("stdlib/generic_selective.zz", "needs helpers/ support dir"),
     ("stdlib/result_print.zz", "sweep-token scratch fs"),
     ("stdlib/fs_vfs.zz", "sweep-token scratch fs"),
+    // Reads a tests/ data file (batch sandbox is flat, no data dir).
+    (
+        "stdlib/fs_read_invalid_utf8_test.zz",
+        "needs tests/fixtures/stdlib/data/ sibling",
+    ),
     // `alias_import` and `enum_import` claim the same `shapes` alias
     // for different support modules: a genuine per-program collision,
     // so they run individually (each passes alone).

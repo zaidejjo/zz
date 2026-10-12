@@ -60,11 +60,11 @@ pub enum Type {
     TaskJoin,
     /// A named struct type: `Point` from `struct Point { ... }`.
     /// Generic instantiations carry their arguments
-    /// (`Box[int]` from `struct Box[T]`); non-generic structs use `[]`.
+    /// (`Box<int>` from `struct Box<T>`); non-generic structs use `[]`.
     /// Arguments are erased at runtime (values only store the name).
     Struct(String, Vec<Type>),
-    /// A user enum: `Token` from `enum Token { ... }`, `Box[int]` from
-    /// `enum Box[T] { ... }`. Generic instantiations carry their
+    /// A user enum: `Token` from `enum Token { ... }`, `Box<int>` from
+    /// `enum Box<T> { ... }`. Generic instantiations carry their
     /// arguments (parameters as `Type::Named` in signatures, substituted
     /// at construction); non-generic enums use `[]`. Arguments are
     /// erased at runtime (values only store `Enum.Variant` names).
@@ -158,14 +158,14 @@ impl fmt::Display for Type {
             Type::Struct(n, args) => {
                 write!(f, "{n}")?;
                 if !args.is_empty() {
-                    write!(f, "[")?;
+                    write!(f, "<")?;
                     for (i, a) in args.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
                         write!(f, "{a}")?;
                     }
-                    write!(f, "]")?;
+                    write!(f, ">")?;
                 }
                 Ok(())
             }
@@ -173,14 +173,14 @@ impl fmt::Display for Type {
             Type::Enum(n, args) => {
                 write!(f, "{n}")?;
                 if !args.is_empty() {
-                    write!(f, "[")?;
+                    write!(f, "<")?;
                     for (i, a) in args.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
                         write!(f, "{a}")?;
                     }
-                    write!(f, "]")?;
+                    write!(f, ">")?;
                 }
                 Ok(())
             }

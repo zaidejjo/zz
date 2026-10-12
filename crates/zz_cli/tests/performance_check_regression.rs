@@ -52,10 +52,8 @@ fn build_zz_bench(name: &str) -> Option<PathBuf> {
         );
         return None;
     }
-    // zz build -p writes `bin/<basename>` next to the source; move it.
-    let produced = root
-        .join("bench/performance_check/zz/bin")
-        .join(format!("bench_{name}"));
+    // Standalone builds publish to the invocation dir (CWD = root).
+    let produced = root.join(format!("bench_{name}"));
     if produced.exists() {
         let _ = std::fs::rename(&produced, &target);
     }

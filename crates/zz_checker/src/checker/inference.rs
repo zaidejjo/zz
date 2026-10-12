@@ -202,7 +202,7 @@ impl Checker {
                             .is_some_and(|q| self.enums.contains_key(q))
                     {
                         // User enums name their type directly (`t: Token`);
-                        // generic enums name their arguments (`Box[int]`),
+                        // generic enums name their arguments (`Box<int>`),
                         // exactly like generic structs.
                         let cname = self.canonical_enum_name(name);
                         if cname != *name {
@@ -215,7 +215,7 @@ impl Checker {
                             .unwrap_or(0);
                         if args.is_empty() && want > 0 {
                             // Mirror generic structs: name the arguments
-                            // (`Box[int]`). Inference still flows from
+                            // (`Box<int>`). Inference still flows from
                             // construction (`Box.V(1)` unifies on its own).
                             self.errors.push(error_at(
                                 format!(
@@ -312,6 +312,17 @@ impl Checker {
                         Type::Response
                     } else if name == "http.request" {
                         Type::HttpRequest
+                    } else if let Some(tag) = opaque_handle_tag(name) {
+                        // Module handle types (`tls` connections,
+                        // `tls_listener`s, `file`s, compiled `regexp`s,
+                        // log `span`s, cli `args` parsers, `process`
+                        // handles, `zzfs` providers): natives traffic in
+                        // `Opaque(tag)` values and dispatch methods on the
+                        // tag, but source could never name them — helper
+                        // funcs had to leave params untyped (uncallable).
+                        // Only consulted when no struct/enum/alias/builtin
+                        // matches, so user types always win.
+                        Type::Opaque(tag.to_string())
                     } else {
                         self.errors
                             .push(error_at(format!("unknown type `{name}`"), ty.span));
@@ -320,6 +331,27 @@ impl Checker {
                 }
             }
         }
+    }
+}
+
+/// Surface name of a native module-handle type (`tls`, `file`, ...).
+/// Consulted only when no struct/enum/alias/builtin matches, so user
+/// types always win. Keep in sync with the `Opaque(..)` tags in
+/// `zz_stdlib::funcs` (a new handle-producing native adds one line).
+fn opaque_handle_tag(name: &str) -> Option<&'static str> {
+    match name {
+        "tls" => Some("tls"),
+        "tls_listener" => Some("tls_listener"),
+        "unix" => Some("unix"),
+        "unix_listener" => Some("unix_listener"),
+        "cell" => Some("cell"),
+        "file" => Some("file"),
+        "zzfs" => Some("zzfs"),
+        "regexp" => Some("regexp"),
+        "span" => Some("span"),
+        "args" => Some("args"),
+        "process" => Some("process"),
+        _ => None,
     }
 }
 
@@ -393,7 +425,7 @@ pub(crate) fn default_variant_vars(t: &mut Type) {
         }
         Type::Enum(_, args) => {
             // Unconstrained enum parameters default like `Option`'s
-            // (bare `Box.Empty` with nothing to infer from is `Box[unit]`).
+            // (bare `Box.Empty` with nothing to infer from is `Box<unit>`).
             for a in args {
                 if contains_var(a) {
                     default_variant_vars(a);

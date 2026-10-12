@@ -760,10 +760,26 @@ enum PushTag {
     Other,
 }
 
-/// Returns `(fused_stores, skip_pcs)`: `fused_stores[pc] = s` means the
-/// `StoreIndexOp` at `pc` fuses onto slot `s`; `skip_pcs` holds the
-/// following `StoreSlot(s)` pcs to skip.
-fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
+/// Returns `(fused, skip, borrow)`: `fused[pc] = s` means the
+/// `StoreIndexOp` at `pc` fuses onto slot `s`; `skip` holds the
+/// following `StoreSlot(s)` pcs to skip; `borrow` holds the subset of
+/// fused pcs whose `LoadSlot` may also be skipped (see below).
+///
+/// Borrow-skip: when neither the `LoadSlot` (`lpc`) nor the
+/// `StoreIndexOp` (`pc`) is a jump target, the load is not emitted at
+/// all — the window borrows `st[s]` directly instead of cloning it
+/// (saving an atomic refcount pair per store). Sound because stack
+/// values are linear (each pushed value is popped exactly once, so the
+/// clone this load would have pushed is consumed exactly once, by this
+/// op — `Swap` only reorders, and the tag model tracks through it),
+/// the middle is straight-line call/store-free code (observably
+/// identical one slot lower — balance is verifier-guaranteed, and
+/// every straight-line value op is position-relative except absolute
+/// slot accesses, which are unaffected), and untargeted endpoints mean
+/// no edge can enter expecting the pushed clone (or land on the store
+/// expecting three stack values). Targeted endpoints keep the
+/// clone-ful emission, which is today's behavior verbatim.
+fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>, HashSet<usize>) {
     // (pops, pushes) — mirrors `origins::apply` for the covered subset.
     fn effect(op: &Op) -> Option<(usize, usize)> {
         Some(match op {
@@ -803,7 +819,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
     let n = code.len();
     let mut at: Vec<Option<Vec<PushTag>>> = vec![None; n];
     if n == 0 {
-        return (HashMap::new(), HashSet::new());
+        return (HashMap::new(), HashSet::new(), HashSet::new());
     }
     // Linear scan suffices: fusion regions are straight-line by
     // construction (validated below); joins just need *a* sound state,
@@ -841,7 +857,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
             }
             entry[pc] = state.clone();
             let Some((pops, pushes)) = effect(op) else {
-                return (HashMap::new(), HashSet::new());
+                return (HashMap::new(), HashSet::new(), HashSet::new());
             };
             if let Op::PopN(_) = op {
                 let mut tmp = Vec::new();
@@ -928,6 +944,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
     };
     let mut fused: HashMap<usize, u16> = HashMap::new();
     let mut skip: HashSet<usize> = HashSet::new();
+    let mut borrow: HashSet<usize> = HashSet::new();
     for (pc, op) in code.iter().enumerate() {
         if !matches!(op, Op::StoreIndexOp) {
             continue;
@@ -971,7 +988,378 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>) {
         if ok {
             fused.insert(pc, s);
             skip.insert(pc + 1);
+            // Borrow the home slot instead of cloning when no edge can
+            // observe the difference (see header doc).
+            if !is_target.contains(&lpc) && !is_target.contains(&pc) {
+                borrow.insert(pc);
+                skip.insert(lpc);
+            }
         }
+    }
+    (fused, skip, borrow)
+}
+/// String-append fusion: `LoadSlot(s), PushConst(Str), BinOp(Add),
+/// StoreSlot(s)` (adjacent, in that order) compiles to an in-place
+/// `zz_str_append_lit` on the slot instead of clone → alloc+copy →
+/// store-back (which is O(n) per append — quadratic for loop-carried
+/// accumulators like strconcat).
+///
+/// Soundness: the four ops are adjacent with no jump target in the
+/// interior (entering mid-window would skip the append), no other
+/// claimant on those pcs (checked against the caller-provided skip
+/// set, so int/store-index/peel windows always win ties), and the rhs
+/// is a single string-literal push (no calls, no stores, no observable
+/// evaluation — nothing can witness the missing clone). The runtime
+/// helper reuses the buffer when uniquely owned (refs==1, not
+/// interned) and grows it 2x amortized; shared/interned/arena sources
+/// take the fresh-alloc path. A non-string slot (only reachable on
+/// Unknown-typed or hostile modules — checker-typed programs always
+/// hold a string here) takes a fail-closed boxed fallback with exact
+/// `zz_binop` semantics instead of trapping or misappending.
+///
+/// Returns `(fused, skip)`: `fused[p] = (s, c)` means the `LoadSlot`
+/// at `p` emits the whole window for slot `s` and literal const `c`;
+/// `skip` holds the other three pcs.
+fn strapp_scan(
+    code: &[Op],
+    consts: &[Const],
+    targets: &HashSet<u32>,
+    taken: &HashSet<usize>,
+) -> (HashMap<usize, (u16, ConstId)>, HashSet<usize>) {
+    let mut fused = HashMap::new();
+    let mut skip = HashSet::new();
+    if code.len() < 4 {
+        return (fused, skip);
+    }
+    for p in 0..code.len() - 3 {
+        if taken.contains(&p) {
+            continue;
+        }
+        let (s, c) = match (&code[p], &code[p + 1], &code[p + 2], &code[p + 3]) {
+            (Op::LoadSlot(s), Op::PushConst(c), Op::BinOp(b), Op::StoreSlot(d))
+                if s == d && matches!(b, zz_ir::op::BinOp::Add) =>
+            {
+                (*s, *c)
+            }
+            _ => continue,
+        };
+        if !matches!(consts.get(c.0 as usize), Some(Const::Str(_))) {
+            continue;
+        }
+        // Interior must be label-free (the start may itself be
+        // targeted — it still emits) and unclaimed.
+        if (p + 1..=p + 3).any(|q| targets.contains(&(q as u32)) || taken.contains(&q)) {
+            continue;
+        }
+        if skip.contains(&p) {
+            continue;
+        }
+        fused.insert(p, (s, c));
+        skip.insert(p + 1);
+        skip.insert(p + 2);
+        skip.insert(p + 3);
+    }
+    (fused, skip)
+}
+/// Index-read fusion: `LoadSlot(a), <int idxexpr>, IndexOp` feeding an
+/// int store or a bool branch compiles to guarded direct element access
+/// instead of clone → runtime call → releases (an atomic refcount pair
+/// plus a call per read — the dominant cost in index-driven loops like
+/// sieve and arraywhile).
+///
+/// Window shape (all adjacent):
+/// - `LoadSlot(a)` with `a` declared `Array(Int)` (store tail) or
+///   `Array(Bool)` (branch tail). Declaration-checked, like
+///   [`int_slots`]: checker-typed programs always hold the declared
+///   array here, so the tag guard is assertive.
+/// - idxexpr: 1..=8 ops from int loads, int consts, and trapping-free
+///   `+ - *` (no div/rem, no calls, no stores at all).
+/// - `IndexOp`, then either an int REST expr plus `StoreSlot(d)` with
+///   `d` int-declared, or `JumpIfFalseBool`/`JumpIfTrue` (bool arrays).
+/// - No jump target in the window interior (the start may be targeted),
+///   no overlap with already-claimed pcs (every existing fusion wins
+///   ties), no `StoreSlot(a)` in the window.
+///
+/// Guards mirror `zz_array_get` exactly (single `i += n` normalize,
+/// then the OOB check) and every unboxing boundary is guarded with a
+/// cold out-of-line trap — the same fail-closed discipline as
+/// [`int_fuse`] and [`strapp_scan`]. Negative-index and OOB behavior
+/// is therefore bit-identical to the boxed path (exit 1; message text
+/// is never gated).
+///
+/// Returns `(fused, skip)`: `fused[start]` describes the window; `skip`
+/// holds every other pc in it.
+#[derive(Debug, Clone, Copy)]
+enum IdxTail {
+    /// REST int-expr stored to int-declared slot.
+    Store(u16),
+    /// Bool element branches to `target` (`jump_if_true` selects the
+    /// polarity: false = `JumpIfFalseBool`, true = `JumpIfTrue`).
+    Branch(u32, bool),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IdxRead {
+    arr: u16,
+    /// Int-expr ops before the base load (the other operand, 0-8 ops).
+    prefix_len: usize,
+    /// Int-expr ops between the base load and `IndexOp` (1-8 ops).
+    idx_len: usize,
+    /// Int-expr ops between `IndexOp` and the terminator (0 for branches).
+    rest_len: usize,
+    tail: IdxTail,
+    elem_bool: bool,
+}
+
+fn idxread_scan(
+    f: &FuncDef,
+    module: &Module,
+    ints: &HashSet<u16>,
+    targets: &HashSet<u32>,
+    taken: &HashSet<usize>,
+) -> (HashMap<usize, IdxRead>, HashSet<usize>) {
+    /// Declared element kind of an array slot: `Some(false)` for
+    /// `[int]`, `Some(true)` for `[bool]`, `None` otherwise.
+    fn array_elem(module: &Module, f: &FuncDef, s: u16) -> Option<bool> {
+        let ty = f
+            .locals
+            .get(s as usize)
+            .and_then(|id| module.types.get(id.0 as usize));
+        match ty {
+            Some(IrType::Array(e)) => match module.types.get(e.0 as usize) {
+                Some(IrType::Int) => Some(false),
+                Some(IrType::Bool) => Some(true),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    /// Effect of an int-expression op on the ministack, or `None` when
+    /// the op can never appear in an idxexpr/REST expr.
+    fn int_effect(ints: &HashSet<u16>, consts: &[Const], op: &Op) -> Option<i32> {
+        match op {
+            Op::LoadSlot(s) if ints.contains(s) => Some(1),
+            Op::PushConst(c) => match consts.get(c.0 as usize) {
+                Some(Const::Int(_)) => Some(1),
+                _ => None,
+            },
+            Op::IntAdd | Op::IntSub | Op::IntMul => Some(-1),
+            Op::BinOp(zz_ir::op::BinOp::Add | zz_ir::op::BinOp::Sub | zz_ir::op::BinOp::Mul) => {
+                Some(-1)
+            }
+            _ => None,
+        }
+    }
+    let code = &f.code;
+    let mut fused = HashMap::new();
+    let mut skip = HashSet::new();
+    if code.len() < 4 {
+        return (fused, skip);
+    }
+    let mut pc = 0usize;
+    while pc + 3 < code.len() {
+        if taken.contains(&pc) || skip.contains(&pc) {
+            pc += 1;
+            continue;
+        }
+        // Window value discipline (all counts are window values only —
+        // below-window stack is never addressable, so every pop below
+        // the phase floor fails matching and the shape stays boxed):
+        // - prefix: optional int expr, 0 → P where P ∈ {0, 1};
+        // - base: the single array load, P → P+1;
+        // - idx: int expr, P+1 → P+2 (binaries need two values strictly
+        //   above the protected `[X?, arr]` prefix, i.e. depth ≥ P+3 —
+        //   popping the base and rebuilding the depth with other values
+        //   would alias the wrong object, so it bails);
+        // - IndexOp at exactly P+2, leaving P+1 (`[X?, elem]`);
+        // - rest: int expr ending at exactly 1, then `StoreSlot`.
+        // Phase caps (8/8/8) keep matching linear; longest match wins
+        // by construction (the walk takes all it can).
+        let mut q = pc;
+        let mut w = 0i32;
+        let mut ok = true;
+        // Prefix: int producers and trapping-free `+ - *` only (every
+        // other op — calls, stores, flow, non-int pushes — ends the
+        // prefix; only an array load may follow).
+        while q < code.len() && q - pc < 8 {
+            if let Op::LoadSlot(a) = &code[q] {
+                if array_elem(module, f, *a).is_some() {
+                    if w == 0 || w == 1 {
+                        break;
+                    }
+                    ok = false;
+                    break;
+                }
+            }
+            match int_effect(ints, &module.consts, &code[q]) {
+                Some(e) => {
+                    // Binaries consume two window values.
+                    if e < 0 && w < 2 {
+                        ok = false;
+                        break;
+                    }
+                    w += e;
+                    if w < 0 {
+                        ok = false;
+                        break;
+                    }
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+            q += 1;
+        }
+        if !ok {
+            pc += 1;
+            continue;
+        }
+        // Base: the array load (prefix length P = w ∈ {0, 1}).
+        let (arr, prefix_len, p) = match code.get(q) {
+            Some(Op::LoadSlot(a)) if array_elem(module, f, *a).is_some() && (w == 0 || w == 1) => {
+                (*a, q - pc, w)
+            }
+            _ => {
+                pc += 1;
+                continue;
+            }
+        };
+        let Some(elem_bool) = array_elem(module, f, arr) else {
+            pc += 1;
+            continue;
+        };
+        // Index expr: P+1 → P+2, floor P+1.
+        let mut iq = q + 1;
+        let mut iw = p + 1;
+        let mut iok = true;
+        while iw < p + 2 {
+            if iq >= code.len() || iq - (q + 1) >= 8 {
+                iok = false;
+                break;
+            }
+            match int_effect(ints, &module.consts, &code[iq]) {
+                Some(e) => {
+                    if e < 0 && iw < p + 3 {
+                        iok = false;
+                        break;
+                    }
+                    iw += e;
+                    if iw < p + 1 {
+                        iok = false;
+                        break;
+                    }
+                }
+                None => {
+                    iok = false;
+                    break;
+                }
+            }
+            iq += 1;
+        }
+        // Nonempty idxexpr (iw > P+1 guarantees at least one op ran).
+        if !iok || iw != p + 2 {
+            pc += 1;
+            continue;
+        }
+        if !matches!(code.get(iq), Some(Op::IndexOp)) {
+            pc += 1;
+            continue;
+        }
+        let index_pc = iq;
+        // Tail: bool branch (bool arrays, empty prefix and empty REST)
+        // or int REST + store (int arrays). REST starts with P+1 window
+        // values (`[X?, elem]`) and must end at exactly 1.
+        let (tail, end) = if !elem_bool {
+            let mut r = index_pc + 1;
+            let mut rw = p + 1;
+            let mut found = None;
+            while r < code.len() && r - (index_pc + 1) < 8 {
+                // The only store allowed is the terminating one, at
+                // depth exactly 1 (it pops the computed value and
+                // nothing below it).
+                if let Some(Op::StoreSlot(d)) = code.get(r) {
+                    if rw == 1 && ints.contains(d) {
+                        found = Some((IdxTail::Store(*d), r));
+                    }
+                    break;
+                }
+                match int_effect(ints, &module.consts, &code[r]) {
+                    Some(e) => {
+                        if e < 0 && rw < 2 {
+                            break;
+                        }
+                        rw += e;
+                        if rw < 1 {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+                r += 1;
+            }
+            // An empty REST (bare element store `d = a[i]`) qualifies:
+            // the loop meets the store immediately at depth 1.
+            match found {
+                Some(t) => t,
+                None => {
+                    pc += 1;
+                    continue;
+                }
+            }
+        } else {
+            // A prefix value would leak (the branch pops only the
+            // element), so bool branches require P == 0.
+            if p != 0 {
+                pc += 1;
+                continue;
+            }
+            match code.get(index_pc + 1) {
+                Some(Op::JumpIfFalseBool(t)) => (IdxTail::Branch(*t, false), index_pc + 1),
+                Some(Op::JumpIfTrue(t)) => (IdxTail::Branch(*t, true), index_pc + 1),
+                _ => {
+                    pc += 1;
+                    continue;
+                }
+            }
+        };
+        // Interior label-free and unclaimed; total window bounded
+        // (8 prefix + base + 8 index + read + 8 rest + terminator).
+        if end - pc > 28 {
+            pc += 1;
+            continue;
+        }
+        if (pc + 1..=end).any(|x| targets.contains(&(x as u32)) || taken.contains(&x)) {
+            pc += 1;
+            continue;
+        }
+        // The array home must not be rebound inside the window (keeps
+        // the borrow trivially sound — the buffer cannot be swapped
+        // mid-window; reads never mutate anyway).
+        if code[pc..=end]
+            .iter()
+            .any(|o| matches!(o, Op::StoreSlot(s) if *s == arr))
+        {
+            pc += 1;
+            continue;
+        }
+        let rd = IdxRead {
+            arr,
+            prefix_len,
+            idx_len: index_pc - (pc + prefix_len + 1),
+            // Ops between IndexOp and the terminator (0 for branches).
+            rest_len: match tail {
+                IdxTail::Store(_) => end - (index_pc + 1),
+                IdxTail::Branch(_, _) => 0,
+            },
+            tail,
+            elem_bool,
+        };
+        fused.insert(pc, rd);
+        for x in pc + 1..=end {
+            skip.insert(x);
+        }
+        pc = end + 1;
     }
     (fused, skip)
 }
@@ -1634,7 +2022,13 @@ impl<'a> Emitter<'a> {
         let origins_empty: Vec<Vec<Callee>> = Vec::new();
         let org = origins_map.get(&(id.0 as usize)).unwrap_or(&origins_empty);
         // Store-index fusion (in-place slot stores; see `fuse_scan`).
-        let (fused, skip) = fuse_scan(&f.code);
+        // `borrow` (skipped `LoadSlot`s) joins the skip set up front so
+        // every later scan treats borrowed loads as claimed.
+        let (fused, skip, borrows) = fuse_scan(&f.code);
+        debug_assert!(
+            fused.keys().all(|k| !skip.contains(k)),
+            "fuse store in skip set"
+        );
         let (ufused, uskip) = int_fuse(f, &self.module.consts, &uint, &targets, &skip);
         let mut skip = skip;
         skip.extend(uskip);
@@ -1650,6 +2044,21 @@ impl<'a> Emitter<'a> {
         debug_assert!(
             peels.keys().all(|k| !skip.contains(k)),
             "peel start in skip set"
+        );
+        // String-append fusion (see `strapp_scan`): strict 4-op windows
+        // lose every tie — anything already claimed stays claimed.
+        let (strapped, sskip) = strapp_scan(&f.code, &self.module.consts, &targets, &skip);
+        skip.extend(sskip);
+        debug_assert!(
+            strapped.keys().all(|k| !skip.contains(k)),
+            "strapp start in skip set"
+        );
+        // Index-read fusion (see `idxread_scan`): same tie discipline.
+        let (idxreads, iskip) = idxread_scan(f, self.module, &uint, &targets, &skip);
+        skip.extend(iskip);
+        debug_assert!(
+            idxreads.keys().all(|k| !skip.contains(k)),
+            "idxread start in skip set"
         );
         for (pc, op) in f.code.iter().enumerate() {
             if skip.contains(&pc) {
@@ -1669,8 +2078,11 @@ impl<'a> Emitter<'a> {
             let cx = OpCx {
                 callee: callee_owned.as_ref(),
                 fuse_slot: fused.get(&pc).copied(),
+                fuse_borrow: borrows.contains(&pc),
                 ufuse: ufused.get(&pc).copied(),
                 peel: peels.get(&pc).cloned(),
+                strapp: strapped.get(&pc).copied(),
+                idxread: idxreads.get(&pc).copied(),
             };
             self.emit_op(id, pc, op, &cx, out)?;
         }
@@ -1694,6 +2106,158 @@ impl<'a> Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
+    /// Emit one fused index-read window (see [`IdxRead`]): guarded direct
+    /// element access with no clone, no runtime call, and no stack
+    /// traffic. The window is self-contained by matching (net-zero stack
+    /// effect, all pops matched by pushes inside), so emission never
+    /// touches `sp`. Guards fail closed to cold out-of-line traps:
+    /// - base must be an array (checker-typed programs always hold the
+    ///   declared `[int]`/`[bool]` here);
+    /// - every slot load is int-guarded (fail-closed like [`int_fuse`]);
+    /// - bounds mirror `zz_array_get` exactly (single `i += n`
+    ///   normalize, then the OOB check);
+    /// - the element must match the declared kind.
+    ///
+    /// Store tails write back through release-then-move (sound for any
+    /// old content); branch tails jump exactly like the boxed
+    /// `JumpIfFalseBool`/`JumpIfTrue`.
+    fn emit_idxread(
+        module: &Module,
+        code: &[Op],
+        pc: usize,
+        rd: &IdxRead,
+        out: &mut String,
+    ) -> Result<(), ChunkError> {
+        /// Emit one int-expression op into window temps (see
+        /// [`int_fuse`]): loads are int-guarded, consts direct,
+        /// trapping-free `+ - *` compile to raw wrapping arithmetic
+        /// (`-fwrapv`, like the boxed fast paths). Returns the temp
+        /// holding the value.
+        fn emit_int_op(
+            module: &Module,
+            op: &Op,
+            tstack: &mut Vec<String>,
+            tmp: &mut usize,
+            out: &mut String,
+        ) -> Result<(), ChunkError> {
+            let t = format!("_qd{tmp}");
+            *tmp += 1;
+            match op {
+                Op::LoadSlot(s) => {
+                    out.push_str(&format!(
+                        "      zz_value _b{t} = st[{s}]; if (_b{t}.tag != ZZ_INT) {};\n",
+                        ftrap("int slot loaded non-int value")
+                    ));
+                    out.push_str(&format!("      int64_t {t} = _b{t}.i;\n"));
+                    tstack.push(t);
+                }
+                Op::PushConst(c) => {
+                    let k = match module.consts.get(c.0 as usize) {
+                        Some(Const::Int(k)) => *k,
+                        // Unreachable: the matcher only admits int consts.
+                        _ => return Err(ChunkError::op("idxread const")),
+                    };
+                    out.push_str(&format!("      int64_t {t} = {};\n", c_int(k)));
+                    tstack.push(t);
+                }
+                Op::IntAdd | Op::BinOp(zz_ir::op::BinOp::Add) => {
+                    let b = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("idxread stack"))?;
+                    let a = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("idxread stack"))?;
+                    out.push_str(&format!("      int64_t {t} = {a} + {b};\n"));
+                    tstack.push(t);
+                }
+                Op::IntSub | Op::BinOp(zz_ir::op::BinOp::Sub) => {
+                    let b = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("idxread stack"))?;
+                    let a = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("idxread stack"))?;
+                    out.push_str(&format!("      int64_t {t} = {a} - {b};\n"));
+                    tstack.push(t);
+                }
+                Op::IntMul | Op::BinOp(zz_ir::op::BinOp::Mul) => {
+                    let b = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("idxread stack"))?;
+                    let a = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("idxread stack"))?;
+                    out.push_str(&format!("      int64_t {t} = {a} * {b};\n"));
+                    tstack.push(t);
+                }
+                _ => return Err(ChunkError::op("idxread expr")),
+            }
+            Ok(())
+        }
+        let base_pc = pc + rd.prefix_len;
+        let index_pc = base_pc + 1 + rd.idx_len;
+        let rest_pc = index_pc + 1;
+        out.push_str("    {\n");
+        // Base borrow (read-only: no calls or stores in the window, so
+        // the buffer cannot move under us — the same guarantee the
+        // fused store-index object relies on in [`fuse_scan`]).
+        out.push_str(&format!(
+            "      zz_value _qb = st[{arr}]; if (_qb.tag != ZZ_ARRAY) {};\n",
+            ftrap("cannot index this value"),
+            arr = rd.arr,
+        ));
+        // Prefix expression (the other operand, evaluated first —
+        // source order) then the index expression, into temps.
+        let mut tstack: Vec<String> = Vec::new();
+        let mut tmp = 0usize;
+        for op in &code[pc..base_pc] {
+            emit_int_op(module, op, &mut tstack, &mut tmp, out)?;
+        }
+        for op in &code[base_pc + 1..index_pc] {
+            emit_int_op(module, op, &mut tstack, &mut tmp, out)?;
+        }
+        let top = tstack
+            .pop()
+            .ok_or_else(|| ChunkError::op("idxread stack"))?;
+        // Bounds exactly like `zz_array_get`: normalize once, then check.
+        out.push_str("      int64_t _qn = (int64_t)_qb.arr->len;\n");
+        out.push_str(&format!(
+            "      int64_t _qx = {top}; if (_qx < 0) _qx += _qn; if (_qx < 0 || _qx >= _qn) {};\n",
+            ftrap("index out of bounds")
+        ));
+        if rd.elem_bool {
+            out.push_str("      zz_value _qe = _qb.arr->items[_qx]; if (_qe.tag != ZZ_BOOL) ");
+            out.push_str(&format!("{};\n", ftrap("array element is not a bool")));
+            match rd.tail {
+                IdxTail::Branch(t, false) => {
+                    out.push_str(&format!("      if (!_qe.b) goto L{t};\n"));
+                }
+                IdxTail::Branch(t, true) => {
+                    out.push_str(&format!("      if (_qe.b) goto L{t};\n"));
+                }
+                IdxTail::Store(_) => return Err(ChunkError::op("idxread tail")),
+            }
+        } else {
+            out.push_str("      zz_value _qe = _qb.arr->items[_qx]; if (_qe.tag != ZZ_INT) ");
+            out.push_str(&format!("{};\n", ftrap("array element is not an int")));
+            tstack.push("_qe.i".to_string());
+            for op in &code[rest_pc..rest_pc + rd.rest_len] {
+                emit_int_op(module, op, &mut tstack, &mut tmp, out)?;
+            }
+            let fin = tstack
+                .pop()
+                .ok_or_else(|| ChunkError::op("idxread stack"))?;
+            match rd.tail {
+                IdxTail::Store(d) => {
+                    out.push_str(&format!("      zz_release(&st[{d}]);\n"));
+                    out.push_str(&format!("      st[{d}] = zz_int({fin});\n"));
+                }
+                IdxTail::Branch(_, _) => return Err(ChunkError::op("idxread tail")),
+            }
+        }
+        out.push_str("    }\n");
+        Ok(())
+    }
     /// Emit one peeled counted loop (see [`Peel`]): pop the `ForSetup`
     /// placeholders, hoist promoted int slots to C locals (entry-guarded
     /// once), run a raw C loop over the fused body, write promotions back,
@@ -2109,12 +2673,20 @@ impl<'a> Emitter<'a> {
 struct OpCx<'x> {
     callee: Option<&'x Callee>,
     fuse_slot: Option<u16>,
+    /// True when the fused `StoreIndexOp` borrows its home slot (its
+    /// `LoadSlot` was skipped — see `fuse_scan` borrow-skip).
+    fuse_borrow: bool,
     /// Fused int window starting at this pc, if any: (total length, tail).
     /// See [`int_fuse`]. Window matching already consulted the int-slot
     /// set; emission re-walks the ops.
     ufuse: Option<(usize, FusedTail)>,
     /// Peeled loop starting at this pc, if any (see [`peel_scan`]).
     peel: Option<Peel>,
+    /// String-append window starting at this pc, if any: (slot, literal).
+    /// See [`strapp_scan`].
+    strapp: Option<(u16, ConstId)>,
+    /// Index-read window starting at this pc, if any. See [`idxread_scan`].
+    idxread: Option<IdxRead>,
 }
 
 /// One fused unboxed-int window: a straight-line int expression over
@@ -2144,7 +2716,7 @@ impl<'a> Emitter<'a> {
         cx: &OpCx<'_>,
         out: &mut String,
     ) -> Result<(), ChunkError> {
-        let (callee, fuse_slot) = (cx.callee, cx.fuse_slot);
+        let (callee, fuse_slot, fuse_borrow) = (cx.callee, cx.fuse_slot, cx.fuse_borrow);
         // Peeled counted loop (see `peel_scan`): raw C loop over the
         // fused body, then the exit edge. The `ForSetup` emission stands
         // (placeholders + `_lbase`), so exit accounting is untouched.
@@ -2166,6 +2738,39 @@ impl<'a> Emitter<'a> {
                 .get(id.0 as usize)
                 .ok_or_else(|| ChunkError::op("func id"))?;
             Self::emit_fused_window(self.module, &f.code, pc, len, tail, &HashMap::new(), out);
+            return Ok(());
+        }
+        // Fused string append (see `strapp_scan`): in-place literal
+        // append on the slot, no clone, no stack traffic. The tag guard
+        // keeps hostile/Unknown-typed modules on exact boxed semantics.
+        if let Some((s, c)) = cx.strapp {
+            let (lit, len) = match self.module.consts.get(c.0 as usize) {
+                Some(Const::Str(id)) => {
+                    let text = self
+                        .module
+                        .strings
+                        .get(id.0 as usize)
+                        .cloned()
+                        .unwrap_or_default();
+                    let len = text.len();
+                    (c_str(&text), len)
+                }
+                _ => return Err(ChunkError::op("strapp const")),
+            };
+            out.push_str(&format!(
+                "    {{ if (st[{s}].tag == ZZ_STR) {{ zz_str_append_lit(&st[{s}], {lit}, {len}); }} else {{ zz_value _sa = zz_clone(st[{s}]); zz_value _sb = zz_str_new({lit}, {len}); zz_value _sr = zz_binop(ZZOP_ADD, _sa, _sb); zz_release(&_sa); zz_release(&_sb); zz_cstore(&st[{s}], _sr); }} }}\n"
+            ));
+            return Ok(());
+        }
+        // Fused index read (see `idxread_scan`): guarded direct element
+        // access with no clone, no call, no stack traffic.
+        if let Some(rd) = cx.idxread {
+            let f = self
+                .module
+                .funcs
+                .get(id.0 as usize)
+                .ok_or_else(|| ChunkError::op("func id"))?;
+            Self::emit_idxread(self.module, &f.code, pc, &rd, out)?;
             return Ok(());
         }
         match op {
@@ -2354,7 +2959,15 @@ impl<'a> Emitter<'a> {
                     Op::ForSetup { num_vars, .. } => *num_vars as usize,
                     _ => 0,
                 };
-                out.push_str("      st[sp++] = zz_int(0);\n");
+                // Index placeholder: the VM seeds a range index with
+                // `r.start` (not 0), so nonzero-start ranges (`2..n`)
+                // visit the right values; arrays/dicts/bytes start at
+                // 0. A null range payload (only forgeable in hostile
+                // modules — `MakeRange` never builds one) falls back
+                // to 0 and traps loudly at the first `ForNext`.
+                out.push_str("      { int64_t _i0 = 0;\n");
+                out.push_str("        if (_it.tag == ZZ_RANGE && _it.payload) { _i0 = ((zz_crange*)_it.payload)->start; }\n");
+                out.push_str("        st[sp++] = zz_int(_i0); }\n");
                 for _ in 0..nvars {
                     out.push_str("      st[sp++] = zz_unit();\n");
                 }
@@ -2532,18 +3145,31 @@ impl<'a> Emitter<'a> {
                 // holds [object, index, value].
                 if let Some(s) = fuse_slot {
                     // Fused: the object is the `LoadSlot(s)` clone on
-                    // top-3. Drop our share first (restoring slot
-                    // uniqueness in the two-owner case), operate
-                    // directly on the slot, and consume all three —
-                    // the following `StoreSlot(s)` is skipped.
-                    out.push_str("    { zz_value _fv = st[--sp]; zz_value _fix = st[--sp];\n");
-                    out.push_str("      zz_release(&st[--sp]);\n");
+                    // top-3 — unless `fuse_borrow` skipped the load, in
+                    // which case the middle executed one slot lower and
+                    // the home slot is borrowed directly. Either way
+                    // exactly [index, value] sit on top here; the
+                    // following `StoreSlot(s)` is skipped.
+                    if fuse_borrow {
+                        out.push_str("    { zz_value _fv = st[--sp]; zz_value _fix = st[--sp];\n");
+                    } else {
+                        out.push_str("    { zz_value _fv = st[--sp]; zz_value _fix = st[--sp];\n");
+                        out.push_str("      zz_release(&st[--sp]);\n");
+                    }
+                    // Unique-array fast path: `refs == 1` is exactly
+                    // `zz_index_set`'s in-place condition (shared /
+                    // arena / sentinel buffers all carry `refs != 1`
+                    // and take the generic path, which dups or heals).
+                    // With a non-negative in-bounds int index the
+                    // outcome is bit-identical to the generic call
+                    // minus the call overhead: same `zz_assign`
+                    // (release-old, adopt-new), same releases. Anything
+                    // else — dicts, non-int indices, negatives, OOB —
+                    // runs the untouched generic emission below.
                     out.push_str(&format!(
-                        "      int _fe = 0; zz_index_set(&st[{s}], _fix, _fv, &_fe);\n"
+                        "      int _fe = 0;\n      if (st[{s}].tag == ZZ_ARRAY && st[{s}].arr && st[{s}].arr->refs == 1 && _fix.tag == ZZ_INT && _fix.i >= 0 && _fix.i < (int64_t)st[{s}].arr->len) {{\n        zz_assign(&st[{s}].arr->items[(size_t)_fix.i], _fv);\n        zz_release(&_fv);\n        zz_release(&_fix);\n      }} else {{\n        zz_index_set(&st[{s}], _fix, _fv, &_fe);\n        zz_release(&_fix); zz_release(&_fv);\n        if (_fe) {ctrap};\n      }}\n",
+                        ctrap = ctrap("index out of bounds")
                     ));
-                    out.push_str("      zz_release(&_fix); zz_release(&_fv);\n");
-                    out.push_str("      if (_fe) ");
-                    out.push_str(&format!("{};\n", ctrap("index out of bounds")));
                     out.push_str("    }\n");
                     return Ok(());
                 }

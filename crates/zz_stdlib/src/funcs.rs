@@ -128,6 +128,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert("len".into(), sig_t(vec![("v", t.clone())], Type::Int));
+    // Unicode scalar conversions (#276, #263): `ord` reads the codepoint of
+    // a single-character string, `chr` builds one (both reject bad input at
+    // runtime). Bare like `len`; `str.*` forms below enable method syntax.
+    m.insert("ord".into(), sig(vec![("ch", Type::Str)], Type::Int));
+    m.insert("chr".into(), sig(vec![("cp", Type::Int)], Type::Str));
     // Union of array-of-T and range-of-T so T stays as element type.
     let iterable_t = Type::Union(vec![
         Type::Array(Box::new(t.clone())),
@@ -205,6 +210,18 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert(
         "std.str.bytes".into(),
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
+    );
+    m.insert(
+        "std.str.byte_len".into(),
+        sig(vec![("s", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.str.ord".into(),
+        sig(vec![("ch", Type::Str)], Type::Int),
+    );
+    m.insert(
+        "std.str.chr".into(),
+        sig(vec![("cp", Type::Int)], Type::Str),
     );
     m.insert(
         "std.str.classify".into(),
@@ -366,6 +383,12 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "str.bytes".into(),
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
     );
+    m.insert(
+        "str.byte_len".into(),
+        sig(vec![("s", Type::Str)], Type::Int),
+    );
+    m.insert("str.ord".into(), sig(vec![("ch", Type::Str)], Type::Int));
+    m.insert("str.chr".into(), sig(vec![("cp", Type::Int)], Type::Str));
     m.insert(
         "str.classify".into(),
         sig(
@@ -802,6 +825,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // `is_tty` is the total predicate. Both spellings.
     let res_unit2 = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
     let res_int = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
+    let res_bool = || Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
     let res_size = || {
         Type::Result(
             Box::new(Type::Array(Box::new(Type::Int))),
@@ -811,12 +835,17 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("std.term.enable_raw".into(), sig(vec![], res_unit2()));
     m.insert("std.term.disable_raw".into(), sig(vec![], res_unit2()));
     m.insert("std.term.read_key".into(), sig(vec![], res_int()));
+    m.insert(
+        "std.term.poll".into(),
+        sig(vec![("ms", Type::Int)], res_bool()),
+    );
     m.insert("std.term.get_size".into(), sig(vec![], res_size()));
     m.insert("std.term.is_tty".into(), sig(vec![], Type::Bool));
     m.insert("std.term.flush".into(), sig(vec![], Type::Unit));
     m.insert("term.enable_raw".into(), sig(vec![], res_unit2()));
     m.insert("term.disable_raw".into(), sig(vec![], res_unit2()));
     m.insert("term.read_key".into(), sig(vec![], res_int()));
+    m.insert("term.poll".into(), sig(vec![("ms", Type::Int)], res_bool()));
     m.insert("term.get_size".into(), sig(vec![], res_size()));
     m.insert("term.is_tty".into(), sig(vec![], Type::Bool));
     m.insert("term.flush".into(), sig(vec![], Type::Unit));
@@ -2582,6 +2611,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_bytes(),
         ),
         (
+            "read_exact",
+            vec![("stream", Type::TcpStream), ("n", Type::Int)],
+            result_bytes(),
+        ),
+        (
             "write",
             vec![("stream", Type::TcpStream), ("data", Type::Str)],
             result_int(),
@@ -2620,6 +2654,366 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             sig(vec![("stream", Type::TcpStream)], result_unit()),
         );
     }
+    // std.cell — shared-mutable slots (pool-backed handles; each op
+    // takes the pool lock once). Generic over the stored value type.
+    let cell_t = Type::Opaque("cell".to_string());
+    {
+        let t = Type::Named("T".to_string());
+        let cell_result = |inner: Type| Type::Result(Box::new(inner), Box::new(Type::Str));
+        m.insert(
+            "std.cell.new".into(),
+            sig_t(vec![("v", t.clone())], cell_t.clone()),
+        );
+        m.insert(
+            "cell.new".into(),
+            sig_t(vec![("v", t.clone())], cell_t.clone()),
+        );
+        m.insert(
+            "std.cell.get".into(),
+            sig_t(vec![("c", cell_t.clone())], cell_result(t.clone())),
+        );
+        m.insert(
+            "cell.get".into(),
+            sig_t(vec![("c", cell_t.clone())], cell_result(t.clone())),
+        );
+        m.insert(
+            "std.cell.set".into(),
+            sig_t(
+                vec![("c", cell_t.clone()), ("v", t.clone())],
+                cell_result(Type::Bool),
+            ),
+        );
+        m.insert(
+            "cell.set".into(),
+            sig_t(
+                vec![("c", cell_t.clone()), ("v", t.clone())],
+                cell_result(Type::Bool),
+            ),
+        );
+        m.insert(
+            "std.cell.drop".into(),
+            sig(vec![("c", cell_t.clone())], Type::Bool),
+        );
+        m.insert(
+            "cell.drop".into(),
+            sig(vec![("c", cell_t.clone())], Type::Bool),
+        );
+    }
+    let unix_t = Type::Opaque("unix".to_string());
+    let unix_listener_t = Type::Opaque("unix_listener".to_string());
+    let result_unix = || Type::Result(Box::new(unix_t.clone()), Box::new(Type::Str));
+    let result_unix_listener =
+        || Type::Result(Box::new(unix_listener_t.clone()), Box::new(Type::Str));
+    m.insert(
+        "std.net.unix_connect".into(),
+        sig(
+            vec![("path", Type::Str), ("timeout_ms", Type::Int)],
+            result_unix(),
+        ),
+    );
+    m.insert(
+        "std.net.unix_listen".into(),
+        sig(vec![("path", Type::Str)], result_unix_listener()),
+    );
+    m.insert(
+        "std.net.unix_accept".into(),
+        sig(vec![("listener", unix_listener_t.clone())], result_unix()),
+    );
+    m.insert(
+        "std.net.unix_listener_close".into(),
+        sig(vec![("listener", unix_listener_t.clone())], result_bool()),
+    );
+    for (method, canon, params, ret) in [
+        (
+            "write",
+            "unix_write",
+            vec![("stream", unix_t.clone()), ("data", Type::Str)],
+            result_int(),
+        ),
+        (
+            "write_bytes",
+            "unix_write_bytes",
+            vec![("stream", unix_t.clone()), ("data", Type::Bytes)],
+            result_int(),
+        ),
+        (
+            "read",
+            "unix_read",
+            vec![("stream", unix_t.clone()), ("max_bytes", Type::Int)],
+            result_str(),
+        ),
+        (
+            "read_bytes",
+            "unix_read_bytes",
+            vec![("stream", unix_t.clone()), ("max_bytes", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "read_exact",
+            "unix_read_exact",
+            vec![("stream", unix_t.clone()), ("n", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "read_line",
+            "unix_readline",
+            vec![("stream", unix_t.clone())],
+            result_str(),
+        ),
+        (
+            "set_read_timeout",
+            "unix_set_read_timeout",
+            vec![("stream", unix_t.clone()), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "set_write_timeout",
+            "unix_set_write_timeout",
+            vec![("stream", unix_t.clone()), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "close",
+            "unix_close",
+            vec![("stream", unix_t.clone())],
+            result_unit(),
+        ),
+        (
+            "shutdown",
+            "unix_shutdown",
+            vec![("stream", unix_t.clone())],
+            result_unit(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.net.{canon}"), s.clone());
+        m.insert(format!("std.unix.{method}"), s.clone());
+        m.insert(format!("unix.{method}"), s.clone());
+        m.insert(format!("net.{canon}"), s);
+    }
+    for (method, params, ret) in [
+        (
+            "accept",
+            vec![("listener", unix_listener_t.clone())],
+            result_unix(),
+        ),
+        (
+            "close",
+            vec![("listener", unix_listener_t.clone())],
+            result_bool(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("unix_listener.{method}"), s.clone());
+        m.insert(format!("std.unix_listener.{method}"), s);
+    }
+    m.insert(
+        "std.net.tcp_read_exact".into(),
+        sig(
+            vec![("stream", Type::TcpStream), ("n", Type::Int)],
+            result_bytes(),
+        ),
+    );
+    // std.net — TLS client (Track T, T-A via rustls; see docs/adr/0001-tls.md).
+    // Connections are `Opaque("tls")` so `c.write(..)` method syntax works
+    // through tag dispatch; AOT lowers through the `zz_tls_*` staticlib FFI
+    // (same driver as the VM, byte-identical by construction).
+    let tls_t = Type::Opaque("tls".to_string());
+    let result_tls = || Type::Result(Box::new(tls_t.clone()), Box::new(Type::Str));
+    let tls_listener_t = Type::Opaque("tls_listener".to_string());
+    let result_tls_listener =
+        || Type::Result(Box::new(tls_listener_t.clone()), Box::new(Type::Str));
+    m.insert(
+        "std.net.tls_listen".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("cert_file", Type::Str),
+                ("key_file", Type::Str),
+            ],
+            result_tls_listener(),
+        ),
+    );
+    m.insert(
+        "std.net.tls_accept".into(),
+        sig(vec![("listener", tls_listener_t.clone())], result_tls()),
+    );
+    m.insert(
+        "std.net.tls_listener_close".into(),
+        sig(vec![("listener", tls_listener_t.clone())], result_bool()),
+    );
+    for (method, params, ret) in [
+        (
+            "accept",
+            vec![("listener", tls_listener_t.clone())],
+            result_tls(),
+        ),
+        (
+            "close",
+            vec![("listener", tls_listener_t.clone())],
+            result_bool(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("tls_listener.{method}"), s.clone());
+        m.insert(format!("std.tls_listener.{method}"), s);
+    }
+    for (name, params) in [
+        (
+            "std.net.tls_connect",
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+        ),
+        (
+            "std.net.tls_connect_insecure",
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+        ),
+    ] {
+        m.insert(name.into(), sig(params, result_tls()));
+    }
+    m.insert(
+        "std.net.tls_connect_with_ca".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("ca_file", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+            result_tls(),
+        ),
+    );
+    // `tls.*` method namespace (mirrors the `tcp.*` set: canonical
+    // `tls_readline` (no underscore, like `tcp_readline`); `close` is the
+    // real shutdown like `net.close`).
+    for (method, canon, params, ret) in [
+        (
+            "write",
+            "tls_write",
+            vec![("stream", tls_t.clone()), ("data", Type::Str)],
+            result_int(),
+        ),
+        (
+            "write_bytes",
+            "tls_write_bytes",
+            vec![("stream", tls_t.clone()), ("data", Type::Bytes)],
+            result_int(),
+        ),
+        (
+            "read",
+            "tls_read",
+            vec![("stream", tls_t.clone()), ("max_bytes", Type::Int)],
+            result_str(),
+        ),
+        (
+            "read_bytes",
+            "tls_read_bytes",
+            vec![("stream", tls_t.clone()), ("max_bytes", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "read_exact",
+            "tls_read_exact",
+            vec![("stream", tls_t.clone()), ("n", Type::Int)],
+            result_bytes(),
+        ),
+        (
+            "read_line",
+            "tls_readline",
+            vec![("stream", tls_t.clone())],
+            result_str(),
+        ),
+        (
+            "set_read_timeout",
+            "tls_set_read_timeout",
+            vec![("stream", tls_t.clone()), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "set_write_timeout",
+            "tls_set_write_timeout",
+            vec![("stream", tls_t.clone()), ("ms", Type::Int)],
+            result_bool(),
+        ),
+        (
+            "peer_addr",
+            "tls_peer_addr",
+            vec![("stream", tls_t.clone())],
+            result_str(),
+        ),
+        (
+            "close",
+            "tls_close",
+            vec![("stream", tls_t.clone())],
+            result_unit(),
+        ),
+        (
+            "shutdown",
+            "tls_shutdown",
+            vec![("stream", tls_t.clone())],
+            result_unit(),
+        ),
+    ] {
+        let s = sig(params, ret);
+        m.insert(format!("std.net.{canon}"), s.clone());
+        m.insert(format!("std.tls.{method}"), s.clone());
+        m.insert(format!("tls.{method}"), s.clone());
+        m.insert(format!("net.{canon}"), s);
+    }
+    // `tls.connect*` constructor aliases so `tls.connect(..)` reads naturally.
+    for (alias, params) in [
+        (
+            "connect",
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+        ),
+        (
+            "connect_insecure",
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+        ),
+    ] {
+        let s = sig(params, result_tls());
+        m.insert(format!("tls.{alias}"), s.clone());
+        m.insert(format!("std.tls.{alias}"), s);
+    }
+    m.insert(
+        "tls.connect_with_ca".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("ca_file", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+            result_tls(),
+        ),
+    );
+    m.insert(
+        "std.tls.connect_with_ca".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("ca_file", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+            result_tls(),
+        ),
+    );
 
     // std.fs — comprehensive non-blocking filesystem. All fallible ops
     // return `Result<_, str>` with unified `fs:<op>:<code>: <path>`
@@ -2630,6 +3024,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     let fs_t = Type::Opaque("zzfs".to_string());
     let result_unit = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
     let result_str = || Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+    let result_bool = || Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
     let result_int = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
     let result_file = || Type::Result(Box::new(file_t.clone()), Box::new(Type::Str));
     let result_str_arr = || {
@@ -2639,6 +3034,12 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         )
     };
     let result_bytes = || Type::Result(Box::new(Type::Bytes), Box::new(Type::Str));
+    let result_int_arr = || {
+        Type::Result(
+            Box::new(Type::Array(Box::new(Type::Int))),
+            Box::new(Type::Str),
+        )
+    };
     let result_stat = || {
         Type::Result(
             Box::new(Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
@@ -2720,6 +3121,26 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_str_arr(),
         ),
         ("std.fs.stat", vec![("path", Type::Str)], result_stat()),
+        (
+            "std.fs.scan_counts",
+            vec![
+                ("path", Type::Str),
+                ("markers", Type::Array(Box::new(Type::Str))),
+                ("bstart", Type::Str),
+                ("bend", Type::Str),
+                ("nested", Type::Bool),
+                ("whole", Type::Bool),
+            ],
+            result_int_arr(),
+        ),
+        (
+            "std.fs.is_generated",
+            vec![
+                ("path", Type::Str),
+                ("markers", Type::Array(Box::new(Type::Str))),
+            ],
+            result_bool(),
+        ),
         (
             "std.fs.open",
             vec![("path", Type::Str), ("mode", Type::Str)],
@@ -3636,6 +4057,23 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             m.insert(format!("bytes.{name}"), s.clone());
             m.insert(format!("std.bytes.{name}"), s);
         }
+        // bytes.finish: the missing [int] -> bytes bridge (mod.zz builds
+        // int-lists; only natives mint `bytes`). Fallible (range-checked),
+        // unlike str.finish — binary assembly must never silently clamp.
+        m.insert(
+            "bytes.finish".into(),
+            sig(
+                vec![("vs", arr_int.clone())],
+                Type::Result(Box::new(Type::Bytes), Box::new(Type::Str)),
+            ),
+        );
+        m.insert(
+            "std.bytes.finish".into(),
+            sig(
+                vec![("vs", arr_int.clone())],
+                Type::Result(Box::new(Type::Bytes), Box::new(Type::Str)),
+            ),
+        );
     }
 
     // std.csv — RFC4180 subset (zz/csv/mod.zz).
@@ -3714,10 +4152,21 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "bg_magenta",
         "bg_cyan",
         "bg_white",
+        "bg_bright_black",
+        "bg_bright_red",
+        "bg_bright_green",
+        "bg_bright_yellow",
+        "bg_bright_blue",
+        "bg_bright_magenta",
+        "bg_bright_cyan",
+        "bg_bright_white",
         "bold",
         "dim",
         "italic",
         "underline",
+        "blink",
+        "reverse",
+        "strikethrough",
         "reset",
         "strip",
     ];
@@ -3728,6 +4177,16 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     }
     for (name, params, ret) in [
         ("clamp255", vec![("v", Type::Int)], Type::Int),
+        (
+            "color256",
+            vec![("s", Type::Str), ("n", Type::Int)],
+            Type::Str,
+        ),
+        (
+            "bg_256",
+            vec![("s", Type::Str), ("n", Type::Int)],
+            Type::Str,
+        ),
         (
             "rgb",
             vec![
@@ -4212,6 +4671,14 @@ mod tests {
         assert!(funcs.contains_key("colors.red"));
         assert!(funcs.contains_key("colors.bold"));
         assert!(funcs.contains_key("colors.strip"));
+        assert!(funcs.contains_key("std.colors.reverse"));
+        assert!(funcs.contains_key("colors.reverse"));
+        assert!(funcs.contains_key("std.colors.strikethrough"));
+        assert!(funcs.contains_key("colors.blink"));
+        assert!(funcs.contains_key("std.colors.bg_bright_red"));
+        assert!(funcs.contains_key("colors.bg_bright_white"));
+        assert!(funcs.contains_key("std.colors.color256"));
+        assert!(funcs.contains_key("colors.bg_256"));
         assert!(funcs.contains_key("dbg"));
         // net method aliases + binary transfers + shutdown.
         for name in [
@@ -4242,6 +4709,12 @@ mod tests {
             "net.set_read_timeout",
             "std.net.set_write_timeout",
             "net.set_write_timeout",
+            "std.net.tcp_read_exact",
+            "std.net.tls_connect",
+            "std.net.tls_connect_with_ca",
+            "std.net.tls_connect_insecure",
+            "std.net.tls_listen",
+            "std.net.tls_accept",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
@@ -4292,12 +4765,14 @@ mod tests {
             "std.term.enable_raw",
             "std.term.disable_raw",
             "std.term.read_key",
+            "std.term.poll",
             "std.term.get_size",
             "std.term.is_tty",
             "std.term.flush",
             "term.enable_raw",
             "term.disable_raw",
             "term.read_key",
+            "term.poll",
             "term.get_size",
             "term.is_tty",
             "term.flush",
@@ -4331,6 +4806,36 @@ mod tests {
             "str.finish",
             "bytes.builder",
             "std.bytes.builder",
+            "bytes.finish",
+            "std.bytes.finish",
+            "std.cell.new",
+            "cell.new",
+            "std.cell.get",
+            "cell.get",
+            "std.cell.set",
+            "cell.set",
+            "std.cell.drop",
+            "cell.drop",
+            "std.net.unix_connect",
+            "std.net.unix_listen",
+            "std.net.unix_accept",
+            "std.net.unix_listener_close",
+            "std.net.unix_write",
+            "std.net.unix_write_bytes",
+            "std.net.unix_read",
+            "std.net.unix_read_bytes",
+            "std.net.unix_read_exact",
+            "std.net.unix_readline",
+            "std.net.unix_set_read_timeout",
+            "std.net.unix_set_write_timeout",
+            "std.net.unix_close",
+            "std.net.unix_shutdown",
+            "net.unix_shutdown",
+            "unix_listener.accept",
+            "std.unix_listener.close",
+            "std.net.tls_readline",
+            "std.net.tls_shutdown",
+            "net.tls_shutdown",
             "bytes.push_byte",
             "std.csv.parse",
             "csv.parse",
@@ -4358,20 +4863,30 @@ mod tests {
             "str.count_in",
             "std.str.bytes",
             "str.bytes",
+            "std.str.byte_len",
+            "str.byte_len",
             "std.bytes.to_str",
             "bytes.to_str",
             "std.bytes.to_ints",
             "std.str.classify",
             "str.classify",
+            "std.fs.scan_counts",
+            "std.fs.is_generated",
             "bytes.to_ints",
             "std.str.find",
             "str.find",
             "std.str.rfind",
             "str.rfind",
+            "ord",
+            "str.ord",
+            "std.str.ord",
+            "chr",
+            "str.chr",
+            "std.str.chr",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 902);
+        assert_eq!(funcs.len(), 1061);
     }
 
     #[test]

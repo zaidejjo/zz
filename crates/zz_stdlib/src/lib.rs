@@ -17,7 +17,10 @@ pub mod zz_std;
 
 pub use funcs::{stdlib_funcs, stdlib_funcs_cached};
 pub use natives::{stdlib_natives, stdlib_natives_cached};
-pub use zz_std::{define_canonical_purezz_aliases, zz_stdlib_programs};
+pub use zz_std::{
+    define_canonical_purezz_aliases, stdlib_program_closure, zz_stdlib_program_at,
+    zz_stdlib_program_count, zz_stdlib_programs,
+};
 
 /// Math constants registered as static float values (not zero-arg functions).
 /// Keys are fully-qualified names like `"std.math.PI"`.
@@ -92,6 +95,8 @@ pub const STDLIB_MODULES: &[&str] = &[
     "dec",
     "bytes",
     "csv",
+    "cell",
+    "unix",
 ];
 
 /// Resolve a module name to its canonical backing module.
@@ -102,6 +107,104 @@ pub fn canonical_module(module: &str) -> &str {
         "db" => "sqlz",
         _ => module,
     }
+}
+
+/// Per-module direct members, precomputed once per process (#233).
+/// [`register_module_namespace`] used to scan the ENTIRE std func/native
+/// tables per import (O(all symbols) per importer); with ~1k seed entries
+/// and N importers that is O(N × seed) prefix checks. The table below
+/// narrows each import to its own module's members (typically 3–30).
+struct ModuleMembers {
+    funcs: Vec<(String, zz_checker::FuncSig)>,
+    natives: Vec<(String, zz_runtime::NativeEntry)>,
+    consts: Vec<String>,
+}
+
+/// Short names in `members` are bare (`length`, not `str.length`).
+fn module_members_table() -> &'static std::collections::HashMap<String, ModuleMembers> {
+    static MEMBERS: std::sync::OnceLock<std::collections::HashMap<String, ModuleMembers>> =
+        std::sync::OnceLock::new();
+    MEMBERS.get_or_init(|| {
+        let std_funcs = crate::funcs::stdlib_funcs_cached();
+        let std_natives = crate::natives::stdlib_natives_cached();
+        let std_consts = stdlib_consts_cached();
+        let mut table: std::collections::HashMap<String, ModuleMembers> =
+            std::collections::HashMap::new();
+        // Direct members only (mirrors the old full-scan filter):
+        // `import std.sqlz` must not leak nested `std.sqlz.postgres.*` keys.
+        for (k, v) in std_funcs {
+            if let Some((module, rest)) = split_std_key(k) {
+                if !rest.contains('.') {
+                    members_entry(&mut table, module)
+                        .funcs
+                        .push((rest.to_string(), v.clone()));
+                }
+            }
+        }
+        for (k, v) in std_natives {
+            if let Some((module, rest)) = split_std_key(k) {
+                if !rest.contains('.') {
+                    members_entry(&mut table, module)
+                        .natives
+                        .push((rest.to_string(), *v));
+                }
+            }
+        }
+        for k in std_consts.keys() {
+            if let Some((module, rest)) = split_std_key(k) {
+                // The old full-module copy had no dot filter for consts;
+                // all shipped consts are single-level (`std.math.PI`), so
+                // the filter is a no-op today and keeps nested consts
+                // with their own submodule like funcs/natives.
+                if !rest.contains('.') {
+                    members_entry(&mut table, module)
+                        .consts
+                        .push(rest.to_string());
+                }
+            }
+        }
+        table
+    })
+}
+
+/// Vacant-or-present entry for the member table build.
+fn members_entry<'a>(
+    table: &'a mut std::collections::HashMap<String, ModuleMembers>,
+    module: &str,
+) -> &'a mut ModuleMembers {
+    table
+        .entry(module.to_string())
+        .or_insert_with(|| ModuleMembers {
+            funcs: Vec::new(),
+            natives: Vec::new(),
+            consts: Vec::new(),
+        })
+}
+
+/// Split a `std.<module>.<rest>` key (module may itself be dotted, e.g.
+/// `sqlz.postgres`) into (canonical module, rest). Non-std keys (bare
+/// builtins like `print`, method-dispatch aliases like `vec.push`)
+/// return `None`.
+fn split_std_key(key: &str) -> Option<(&str, &str)> {
+    let without_std = key.strip_prefix("std.")?;
+    // Longest module match first: `sqlz.postgres.x` belongs to
+    // `sqlz.postgres`, not `sqlz`.
+    let mut best: Option<(&str, &str)> = None;
+    for module in STDLIB_MODULES {
+        let canonical = canonical_module(module);
+        if let Some(rest) = without_std.strip_prefix(canonical) {
+            if let Some(rest) = rest.strip_prefix('.') {
+                if rest.is_empty() {
+                    continue;
+                }
+                match best {
+                    Some((prev, _)) if prev.len() >= canonical.len() => {}
+                    _ => best = Some((canonical, rest)),
+                }
+            }
+        }
+    }
+    best
 }
 
 /// Register a `std.*` module under a namespace name by copying its entries
@@ -136,38 +239,26 @@ pub fn register_module_namespace(
     }
     // `std.db` is a zero-overhead alias: importing it copies the canonical
     // `std.sqlz.*` entries (identical sigs + fn pointers, no extra layer).
-    // Borrow the process-wide cached tables: no per-import rebuild.
+    // Members are precomputed once per process (#233): per import we walk
+    // only this module's members instead of scanning the whole tables.
     let source = canonical_module(module);
-    let prefix = format!("std.{source}.");
-    let std_funcs = crate::funcs::stdlib_funcs_cached();
-    let std_natives = crate::natives::stdlib_natives_cached();
-    let mut inserted = Vec::new();
-    for (k, v) in std_funcs {
-        // Direct members only: `import std.sqlz` must not leak the nested
-        // `std.sqlz.postgres.*` keys (those belong to `sqlz.postgres`).
-        if let Some(rest) = k.strip_prefix(&prefix) {
-            if !rest.contains('.') {
-                let key = format!("{ns}.{rest}");
-                funcs.insert(key.clone(), v.clone());
-                inserted.push(key);
-            }
-        }
+    let Some(members) = module_members_table().get(source) else {
+        return Ok(Vec::new());
+    };
+    let mut inserted = Vec::with_capacity(members.funcs.len() + members.consts.len());
+    for (short, sig) in &members.funcs {
+        let key = format!("{ns}.{short}");
+        funcs.insert(key.clone(), sig.clone());
+        inserted.push(key);
     }
-    for (k, v) in std_natives {
-        if let Some(rest) = k.strip_prefix(&prefix) {
-            if !rest.contains('.') {
-                natives.insert(format!("{ns}.{rest}"), *v);
-            }
-        }
+    for (short, entry) in &members.natives {
+        natives.insert(format!("{ns}.{short}"), *entry);
     }
     // Also copy static constants.
-    let std_consts = stdlib_consts_cached();
-    for k in std_consts.keys() {
-        if let Some(rest) = k.strip_prefix(&prefix) {
-            let key = format!("{ns}.{rest}");
-            funcs.insert(key.clone(), const_sig(zz_checker::Type::Float));
-            inserted.push(key);
-        }
+    for short in &members.consts {
+        let key = format!("{ns}.{short}");
+        funcs.insert(key.clone(), const_sig(zz_checker::Type::Float));
+        inserted.push(key);
     }
     Ok(inserted)
 }
@@ -239,35 +330,22 @@ pub fn register_wildcard_namespace(
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
     // Alias: wildcard `import std.db(*)` resolves against `std.sqlz.*`.
-    // Borrow cached tables (no per-import rebuild).
-    let prefix = format!("std.{}.", canonical_module(module));
-    let std_funcs = crate::funcs::stdlib_funcs_cached();
-    let std_natives = crate::natives::stdlib_natives_cached();
-    let std_consts = stdlib_consts_cached();
-    let mut inserted = Vec::new();
-    for (k, v) in std_funcs {
-        // Direct members only (see `register_module_namespace`).
-        if let Some(rest) = k.strip_prefix(&prefix) {
-            if !rest.contains('.') {
-                funcs.insert(rest.to_string(), v.clone());
-                inserted.push(rest.to_string());
-            }
-        }
+    // Members precomputed once per process (#233), same set as the old
+    // full-table scan (direct members only — see `register_module_namespace`).
+    let Some(members) = module_members_table().get(canonical_module(module)) else {
+        return Ok(Vec::new());
+    };
+    let mut inserted = Vec::with_capacity(members.funcs.len() + members.consts.len());
+    for (short, sig) in &members.funcs {
+        funcs.insert(short.clone(), sig.clone());
+        inserted.push(short.clone());
     }
-    for (k, v) in std_natives {
-        if let Some(rest) = k.strip_prefix(&prefix) {
-            if !rest.contains('.') {
-                natives.insert(rest.to_string(), *v);
-            }
-        }
+    for (short, entry) in &members.natives {
+        natives.insert(short.clone(), *entry);
     }
-    for k in std_consts.keys() {
-        if let Some(rest) = k.strip_prefix(&prefix) {
-            if !rest.contains('.') {
-                funcs.insert(rest.to_string(), const_sig(zz_checker::Type::Float));
-                inserted.push(rest.to_string());
-            }
-        }
+    for short in &members.consts {
+        funcs.insert(short.clone(), const_sig(zz_checker::Type::Float));
+        inserted.push(short.clone());
     }
     inserted.sort();
     inserted.dedup();

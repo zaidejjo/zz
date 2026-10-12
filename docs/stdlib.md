@@ -11,16 +11,25 @@ Available without imports:
 | `print` | `print(v: T) -> unit` | Print value without newline |
 | `println` | `println(v: T) -> unit` | Print value with newline |
 | `input` | `input(prompt: str) -> str` | Read line from stdin (optional prompt) |
-| `typeof` | `typeof(v: T) -> str` | Runtime type name |
-| `str` | `str(v: T) -> str` | Convert to string |
-| `int` | `int(v: T)` | Parse/convert to int (`.none` on failure) |
-| `float` | `float(v: T)` | Parse/convert to float (`.none` on failure) |
+| `typeof` | `typeof(v: T) -> str` | Runtime type name as a string (e.g. `"int"`, `"str"`, `"bytes"`) |
+| `str` | `str(v: T) -> str` | Convert to string (keeps `.ok`/`.some` wrappers — see Console I/O) |
+| `int` | `int(v: T) -> Option<int>` | Parse/convert to int; `.none` on failure (reason discarded — use `??` fallback) |
+| `float` | `float(v: T) -> Option<float>` | Parse/convert to float; `.none` on failure (reason discarded — use `??` fallback) |
 | `len` | `len(v: T) -> int` | Length of array, tuple, bytes, string, dict, or range |
-| `range` | `range(start: int, stop: int, step: int)` | Create integer range |
-| `map` | `map(arr: [T] \| T.., f: func(T) -> U) -> [U]` | Apply function to each element |
-| `filter` | `filter(arr: [T] \| T.., f: func(T) -> bool) -> [T]` | Keep elements where predicate is true |
-| `enumerate` | `enumerate(arr: [T] \| T..)` | Index + value pairs |
+| `range` | `range(stop: int)` / `range(start: int, stop: int)` / `range(start: int, stop: int, step: int)` | Create integer range (`range(5)` = `0..5`, `range(1, 5)` = `1..5`) |
+| `map` | `map(arr: [T] \| T.., f: func(T) -> U) -> [U]` | Apply function to each element (also `std.vec` for arrays) |
+| `filter` | `filter(arr: [T] \| T.., f: func(T) -> bool) -> [T]` | Keep elements where predicate is true (also `std.vec` for arrays) |
+| `enumerate` | `enumerate(arr: [T] \| T..)` | Index + value pairs (also `vec.enumerate` / `std.vec.enumerate`) |
 | `zip` | `zip(a: [T] \| T.., b: [U] \| U..)` | Pair elements from two iterables |
+
+> Namespace rule: globals are convenience aliases. Canonical homes are
+> `std.vec.*` for array pipelines (`vec.*` short form works after
+> `import std.vec`), `str.*` for `ord`/`chr` (bare `ord`/`chr` are
+> aliases). Prefer the canonical home in new code; the bare forms stay
+> until 0.3. `int`/`float` return `Option` — the parse-failure reason is
+> discarded, so fall back explicitly at the call site:
+> `int(s) ?? 0`. `typeof` returns a type *name string*, not a type value —
+> compare with string equality only.
 
 ## Module Index
 
@@ -41,6 +50,7 @@ Available without imports:
 | `std.dec` | Exact decimal math on strings |
 | `std.bytes` | Linear string/byte builders |
 | `std.csv` | CSV parsing/serialization |
+| `std.colors` | ANSI styling: palette, styles, truecolor |
 
 ---
 
@@ -89,6 +99,8 @@ import std.str
 | `str.rfind_in` | `str.rfind_in(s: str, sub: str, start: int, end: int) -> int` | Last match in `[start, end)` (-1 on miss) |
 | `str.count_in` | `str.count_in(s: str, sub: str, start: int, end: int) -> int` | Non-overlapping matches in `[start, end)` |
 | `str.bytes` | `str.bytes(s: str) -> [int]` | UTF-8 bytes as plain ints (one copy) |
+| `ord` / `str.ord` | `ord(ch: str) -> int` | Codepoint of a single-character string (empty/multi-char is a runtime error) |
+| `chr` / `str.chr` | `chr(cp: int) -> str` | 1-char string for a scalar value (surrogates, negatives, >0x10FFFF are runtime errors) |
 | `bytes.to_str` | `bytes.to_str(vs: [int]) -> Result<str>` | Strict UTF-8 decode; range/invalid input is `.err` on both backends |
 | `bytes.to_ints` | `bytes.to_ints(b: bytes) -> [int]` | Opaque byte buffer as plain ints |
 | `str.classify` | `str.classify(text, markers, bstart, bend, nested, whole) -> [int]` | Comment-aware line counts `[lines, code, comments, blanks]`; `markers` line list, `bstart`/`bend` block pair (`""` = none), `nested` Rust-style depth, `whole` whole-line blocks |
@@ -119,6 +131,9 @@ str.starts_with_at("hello", "ell", 1) // true
 str.ends_with_at("hello", "ell", 4)   // true
 str.trim_span("  hi  ", 0, 6)          // [2, 4]
 str.bytes("AB")                    // [65, 66]
+ord("A")                           // 65
+chr(233)                           // "é"
+chr(ord("Z"))                      // "Z"
 bytes.to_str([104, 105])           // .ok("hi")
 bytes.to_ints(b)[0]                // first byte as int
 ```
@@ -400,10 +415,6 @@ func main() -> Result<int, str> {
     .ok(0)
 }
 ```
-    .ok(res)  => println("users: {res.text()}"),
-    .err(e)   => println("request failed: {e}"),
-}
-```
 
 ### Testing Handlers
 
@@ -489,12 +500,14 @@ import std.fs
 | `fs.read_dir` / `fs.readdir` | `(path)` | Child basenames (sorted) |
 | `fs.remove_dir_all` / `fs.walk_dir` | `(path)` | Recursive remove / list |
 | `fs.stat` | `(path)` | Metadata dict |
+| `fs.scan_counts` | `(path, markers, bstart, bend, nested, whole) -> Result<[int]>` | Fused read + NUL-sniff + `str.classify` in one call: `[lines, code, comments, blanks, binary]` (`binary` 1 = NUL present, counts zeroed) |
+| `fs.is_generated` | `(path, markers) -> Result<bool>` | Whole-file generated-content heuristic in one call: minified tiny files and case-insensitive header markers |
 | `File.open` / `fs.open` | `(path, mode)` | Streaming handle (`r`/`w`/`a`) |
 | `fs.read_chunk` | `(f, n)` | Text chunk (`""` at EOF; UTF-8) |
 | `fs.read_chunk_bytes` | `(f, n)` | Binary-safe chunk as `bytes` (empty at EOF) |
 | `fs.write_chunk` / `fs.seek` / `fs.flush` / `fs.close` | | Handle ops |
 | `fs.normalize` | `(path) -> str` | Lexical normalize (OS separators, `.`/`..`, roots/UNC) |
-| `fs.join` | `(a, b) -> str` | Join + normalize (`b` wins when absolute) |
+| `fs.join` | `(a, b) -> str` | Join + normalize (`b` wins when absolute, like Python/Rust — use `join(dir, "file.txt")`, not `join(dir, "/file.txt")`) |
 | `fs.basename` / `fs.dirname` | `(path) -> str` | Final segment / directory part |
 | `fs.is_absolute` | `(path) -> bool` | Rooted (`/x`, `C:\x`, `\\unc\…`) |
 | `fs.extension` | `(path) -> str` | Extension without dot |
@@ -867,6 +880,49 @@ package (`~/Projects/toml`, pure-ZZ, versioned separately).
 
 ---
 
+## `std.colors` -- ANSI Styling
+
+```zz
+import std.colors
+```
+
+Pure-ZZ wrappers: every function takes text first (pipeline-friendly)
+and appends a trailing reset so styles never bleed. Nesting stacks
+(`bold(reverse(x))`); `strip` recovers the visible text.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `colors.black` … `colors.white` | `colors.<name>(s: str) -> str` | Foreground 30–37 |
+| `colors.bright_black` … `colors.bright_white` | `colors.<name>(s: str) -> str` | Foreground 90–97 |
+| `colors.bg_black` … `colors.bg_white` | `colors.<name>(s: str) -> str` | Background 40–47 |
+| `colors.bg_bright_black` … `colors.bg_bright_white` | `colors.<name>(s: str) -> str` | Background 100–107 |
+| `colors.bold` | `colors.bold(s: str) -> str` | Bold (SGR 1) |
+| `colors.dim` | `colors.dim(s: str) -> str` | Dim (SGR 2) |
+| `colors.italic` | `colors.italic(s: str) -> str` | Italic (SGR 3) |
+| `colors.underline` | `colors.underline(s: str) -> str` | Underline (SGR 4) |
+| `colors.blink` | `colors.blink(s: str) -> str` | Blink (SGR 5) |
+| `colors.reverse` | `colors.reverse(s: str) -> str` | Reverse video (SGR 7, selections) |
+| `colors.strikethrough` | `colors.strikethrough(s: str) -> str` | Strikethrough (SGR 9) |
+| `colors.reset` | `colors.reset(s: str) -> str` | Append reset |
+| `colors.strip` | `colors.strip(s: str) -> str` | Remove all `\e[...m` sequences |
+| `colors.rgb` | `colors.rgb(s: str, r: int, g: int, b: int) -> str` | Truecolor fg (channels clamped) |
+| `colors.bg_rgb` | `colors.bg_rgb(s: str, r: int, g: int, b: int) -> str` | Truecolor bg (channels clamped) |
+| `colors.color256` | `colors.color256(s: str, n: int) -> str` | 256-color fg (`38;5;n`, clamped) |
+| `colors.bg_256` | `colors.bg_256(s: str, n: int) -> str` | 256-color bg (`48;5;n`, clamped) |
+| `colors.hex` | `colors.hex(s: str, code: str) -> str` | `#FF5733` / `FF5733` / `#F53` (malformed input passes through) |
+| `colors.hex6` / `colors.hex3` | helpers over digit arrays | Six-/three-digit forms used by `hex` |
+| `colors.hex_val` / `colors.hex_byte` | digit parsers | Nibble/byte (`-1` on malformed) |
+| `colors.clamp255` | `colors.clamp255(v: int) -> int` | Clamp to `0–255` |
+
+```zz
+import std.colors
+
+println("TEST FAIL" |> colors.red() |> colors.bold())
+println(colors.strip(colors.reverse("sel")) == "sel")
+```
+
+---
+
 ## `std.term` -- Terminal Control
 
 ```zz
@@ -878,16 +934,36 @@ import std.term
 | `term.enable_raw` | `term.enable_raw() -> Result<unit, str>` | Save termios, switch stdin to raw (byte-at-a-time, no echo) |
 | `term.disable_raw` | `term.disable_raw() -> Result<unit, str>` | Restore saved terminal state (idempotent) |
 | `term.read_key` | `term.read_key() -> Result<int, str>` | Block for one stdin byte (`0–255`) |
+| `term.poll` | `term.poll(ms: int) -> Result<bool, str>` | True when a byte is ready within `ms` (`<= 0` = no wait; works on pipes too) |
 | `term.get_size` | `term.get_size() -> Result<[int, int], str>` | Terminal `[cols, rows]` via `TIOCGWINSZ` |
 | `term.is_tty` | `term.is_tty() -> bool` | Total predicate for graceful degradation |
 | `term.flush` | `term.flush()` | Flush stdout now (interactive renders without trailing newline) |
 
 Raw mode clears `ICANON`/`ECHO` (plus `ISIG`, so Ctrl+C arrives as
 byte `3` and ZZ code can restore the terminal via `defer` instead of
-dying with a raw TTY). Arrow keys arrive as three reads
-(`27, 91, 68/67/65/66`) — decode them with successive `read_key`
-calls. Non-TTY stdin (pipes, CI) fails soft with
-`.err("std.term.<op>: not a tty")`, so always pair with `is_tty`:
+dying with a raw TTY). Non-TTY stdin (pipes, CI) fails soft with
+`.err("std.term.<op>: not a tty")`, so always pair with `is_tty`
+(`poll` is the exception: it works on pipes — closed stdin reports
+ready and the following read returns EOF).
+
+### Key bytes (`read_key` yields raw bytes — decode table)
+
+Measured against xterm-style terminals (see `tests/fixtures/stdlib/term_test.zz`
+for the hermetic shape; interactive byte values were probed on a real TTY):
+
+| Key | Bytes |
+|-----|-------|
+| Up / Down / Right / Left | `27, 91, 65` / `66` / `67` / `68` |
+| Enter | `13` |
+| Esc (lone) | `27` |
+| Space | `32` |
+| Backspace | `127` |
+| Letters | ASCII (`a` = `97`, `q` = `113`) |
+| Ctrl+C | `3` (raw mode passes it through as a byte) |
+
+A lone `27` and an arrow prefix are indistinguishable on the first
+byte — after reading `27`, `poll(50)` for the rest: bytes waiting
+means an escape sequence, silence means the user pressed Esc:
 
 ```zz
 import std.term

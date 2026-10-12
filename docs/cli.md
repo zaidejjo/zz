@@ -20,8 +20,7 @@ zz
 
 Output:
 ```
-ZZ 0.1.0 — type-based language
-Type expressions to evaluate. :help for commands.
+ZZ REPL — type :help for commands, Ctrl+D to exit
 zz>
 ```
 
@@ -45,10 +44,11 @@ zz> add(3, 4)
 
 ### `zz run <file.zz>`
 
-Type-check and run a ZZ source file:
+Type-check and run a ZZ source file (e.g. the `hello.zz` from
+Getting started):
 
 ```bash
-zz run examples/demo.zz
+zz run hello.zz
 ```
 
 ### `zz eval <source>`
@@ -64,11 +64,11 @@ hello
 ()
 ```
 
-### `zz build [FLAGS] <file.zz>`
+### `zz build [FLAGS] [<file.zz>]`
 
 Single Clang backend. Every `zz build` produces a real native binary and
 requires `clang` (18+) or `zig` on PATH. (`zz run` without `--native` is
-the only VM path.)
+the only VM path, and it leaves no build artifacts.)
 
 ```bash
 # Static (default): self-contained -O3 -flto=thin, stripped, DCE.
@@ -78,7 +78,9 @@ the only VM path.)
 # static syslibs required; fetch/query programs need libcurl.a /
 # libsqlite3.a for explicit `--static`, otherwise the default build
 # downgrades to dynamic with a note.
-zz build main.zz
+zz build main.zz                # standalone: produces ./main
+zz build                        # inside a project: builds src/main.zz
+                                # (then main.zz) to <root>/bin/<pkg-name>
 
 # Release: native Clang -O3 -flto=thin, stripped, dynamic, cached under ~/.zz/cache
 zz build -p main.zz
@@ -87,7 +89,7 @@ zz build -p --full main.zz
 zz build -p --full main.zz -- fast representative workload
 zz build --static main.zz        # self-contained, explicit (not on macOS)
 zz build --dynamic main.zz       # fast dynamic debug build -O0 -g
-zz build -o server main.zz       # name the output binary (bin/server)
+zz build -o server main.zz       # name the output binary (project bin/server or ./server)
 zz build --pgo main.zz           # profile-guided, native host only
 zz build --target aarch64-unknown-linux-gnu main.zz   # cross (implies -p)
 zz build -p --cc zig main.zz     # use `zig cc` as the provider
@@ -112,14 +114,45 @@ match fs.embedfs() {
 }
 ```
 
-Asset edits invalidate the build cache (content-hashed), and `bin/app.c`
+Asset edits invalidate the build cache (content-hashed), and `app.c`
 manual builds include the same tables.
 
-All artifacts live in `bin/` next to the source: `bin/app`,
-`bin/app.exe` (Windows), or `bin/app-<triple>[.exe]` for `--target`
-builds, plus `bin/app.c`, `bin/build.sh`, `bin/build.bat` (reproducible
-manual build with a single clang line). `-o <name>` renames the binary
-(a bare name stays in `bin/`, a path is used as-is, go-like).
+Output paths (3-line rule): standalone file → `./<stem>` in CWD;
+project file → `<project-root>/bin/<name>`; `--target` adds
+`-<triple>` suffix. `-o <name>` renames (bare name stays in the
+resolved directory, a path is used as-is).
+
+<details>
+<summary>Output details (entry, discovery, sidecars, atomicity)</summary>
+
+Project builds (any source under a project, or `zz build` with no
+argument inside one) publish to `<project-root>/bin/`, named after
+`[package] name` for the entry point or the file stem for explicit
+non-entry files — never `src/bin/`. Byte-identical `src/bin/` twins
+left by previous versions are reaped on publish (logged to stderr);
+anything else there is left alone. Sidecars (`app.c`, `build.sh`,
+`build.bat`: reproducible manual build with a single clang line) sit
+next to the binary.
+
+Entry point: `src/main.zz`, then `main.zz` — or `[package] entry` to
+override (e.g. `entry = "src/cli.zz"`; must stay inside the package
+and exist, else the build fails loudly). The entry also decides the
+default binary name (`[package] name`).
+
+Project discovery: `zz build` with no argument discovers the project
+from the current working directory. With an explicit source path, the
+file's owning project (nearest ancestor holding `zz.toml`) decides the
+output directory — even when invoked from another directory. A file
+outside any project builds standalone into the current directory.
+`zz clean` operates on the discovered project root too. Builds into a
+project root ensure `bin/` is gitignored (append-only, silent), so
+pre-redesign checkouts stay clean.
+
+Concurrent builds to one destination publish atomically (last writer
+wins, never a half-written binary); `zz run --native` executes a
+private staged copy, so a parallel publish can never swap the binary
+mid-exec.
+</details>
 
 Cross-compilation rules:
 
@@ -135,14 +168,62 @@ and `-fno-strict-aliasing`, and without `-ffast-math` or
 `-march=native`: VM and native binaries must agree bit-for-bit on
 integers and floats (see the IR spec). If no Clang provider is
 installed,
-the build (debug or release) fails after still emitting `bin/app.c` +
-build scripts so the program can be built manually on a machine with
-Clang.
+the build (debug or release) fails after still emitting `app.c` +
+build scripts next to the planned destination so the program can be
+built manually on a machine with Clang.
 
-### `zz run --native <file.zz>`
+### `zz run [--native] [<file.zz>]`
 
-Transient release compile → execute → cleanup (uses the same Clang
-release pipeline as `zz build -p`).
+`zz run` executes through the VM and leaves no build artifacts.
+`zz run --native` builds through the cached Clang pipeline (publishing
+to the same authoritative destination as `zz build`, `-o` overrides
+like `build`) and executes the binary. The file argument defaults to
+the project entry inside a project.
+
+### `zz run --watch [<file.zz>]`
+
+Hot reload for VM runs: re-checks and restarts the program on every save.
+
+```bash
+zz run --watch server.zz
+zz run --watch --clear --debounce 200 --watch-ignore '*.gen.zz' src/main.zz
+```
+
+Each generation is a fresh `zz run` child, so restarts leak no sockets,
+threads, or interpreter state. The loop:
+
+1. Watches the owning project tree (`*.zz`, `zz.toml`/`zz.lock`) — or the
+   entry's own directory for standalone files — plus `--embed` assets.
+   `vendor/`, `.git/`, `bin/`, `build/`, `target/` are never watched.
+2. On change, waits for `--debounce` ms of quiet (default 150), then runs
+   `zz check`. A broken edit never replaces a running server: diagnostics
+   print and the previous generation keeps serving.
+3. Restarts print `generation N`; the child sees its number in
+   `ZZ_WATCH_GEN`. `--clear` clears the screen per restart.
+
+Flags: `--clear`, `--debounce <ms>`, repeatable `--watch-ignore <glob>`
+(`*` spans directories, matched against path and file name). `--watch`
+rejects `--native` / `--bytecode` (native rebuilds are minutes, not
+milliseconds). In-memory state resets on every restart by design.
+Roots over 20,000 entries refuse with a hint (create a `zz.toml`
+project or narrow with `--watch-ignore`) instead of statting the
+world every tick.
+
+### `zz clean` / `zz cache`
+
+```bash
+zz clean                # remove project outputs (bin/, build/, src/bin/)
+zz clean --deps         # ... plus vendor/ + zz.lock (re-fetch with zz install)
+zz cache clean          # wipe the global build cache (~/.zz/cache)
+zz cache gc             # garbage-collect unused package downloads
+```
+
+`zz clean` operates on the discovered project root from any subdir and
+always reports the global build cache with a reclaim hint when it is
+non-empty. The cache holds native binaries, precompiled runtime
+archives, and per-module objects — everything rebuildable, keyed by
+content, honoring `ZZ_HOME`. When disk runs low, `zz cache clean` is
+the reclaim command (next builds just take a little longer).
 
 ### `zz toolchain <install|use|uninstall|status>`
 
@@ -192,8 +273,11 @@ zz check src/
 | `--fix` / `-f` | Apply safe auto-fixes |
 | `--hard` | Apply all fixes including ambiguous (no prompts) |
 | `--interactive` / `-i` | Prompt for ambiguous fixes |
-| `--check` / `-c` | Check formatting without writing |
 | `--stats` | Print per-file and total check stats (modules, cache hits/misses, seed size, wall time) |
+
+> Note: `--check` / `-c` is a `zz fmt` flag only. `zz check --check`
+> is rejected — `zz check` already checks without writing; use
+> `zz fmt --check` for a formatting dry-run.
 
 #### Check Performance Budget
 
@@ -243,14 +327,15 @@ zz fmt src/
 
 ## Flags
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--check` | `-c` | Check formatting without writing (exit 1 if changed) |
-| `--fix` | `-f` | Apply safe auto-fixes |
-| `--hard` | | Apply all fixes including ambiguous |
-| `--interactive` | `-i` | Prompt for ambiguous fixes |
-| `--help` | `-h` | Show usage |
-| `--version` | `-V` | Show version |
+| Flag | Short | Scope | Description |
+|------|-------|-------|-------------|
+| `--check` | `-c` | `fmt` only | Check formatting without writing (exit 1 if changed) |
+| `--dry-run` | | `setup`, `upgrade` | Report status without changing anything (`--check` deprecated alias) |
+| `--fix` | `-f` | `check`, `fix` | Apply safe auto-fixes |
+| `--hard` | | `check`, `fix` | Apply all fixes including ambiguous |
+| `--interactive` | `-i` | `check`, `fix` | Prompt for ambiguous fixes |
+| `--help` | `-h` | all | Show usage |
+| `--version` | `-V` | all | Show version |
 
 ## Diagnostics
 
@@ -319,6 +404,13 @@ project/
 - `import std.*` loads from the built-in standard library
 - `import .name` loads from the current directory
 - `import utils.helper` loads `utils/helper.zz` relative to the source file
+- `import <package>.path` (package name from the nearest `zz.toml`)
+  loads `<project-root>/src/path.zz`, from anywhere in the project —
+  including `tests/` files importing `src/` modules. A bare
+  `import <package>` loads `<project-root>/src/main.zz` under the
+  package name. Resolution precedence: `std` > package > registry
+  dependency > relative file. `-` and `_` spellings of the package
+  name both match (`my-app` ⇔ `my_app`).
 
 ### Circular imports
 
@@ -330,17 +422,34 @@ hint: circular imports are not allowed; consider restructuring your code to brea
 ```
 
 Restructure by extracting shared types into `c.zz`, then both `a` and `b`
-import `c` with no cycle. Tracking full cycle support in #232.
+import `c` with no cycle. Cyclic imports remain unsupported by design
+(use a shared leaf module to break the cycle).
 
-### One file, one namespace
+### One file, several namespaces
 
-One file cannot be imported under two different aliases in the same
-program (`import a as x` in one file, `import a as y` in another is an
-error). Struct identity is namespace-qualified (`x.T` vs `y.T` would
-diverge), so the loader keeps a single canonical namespace per file.
-Workaround: have both importers use the same name (or no alias), and
-import the shared file directly. Tracking per-importer alias copies
-in #228.
+One file may be imported under several namespaces in the same program
+(`import a as x` in one file, `import a as y` in another composes):
+the first binding wins as canonical and alias references rewrite
+through it, so struct identity stays qualified under one namespace
+(`x.T` and `y.T` would diverge, so they never both exist). Two
+*different* files under one namespace stay an error — alias one side.
+
+### Dependency sources
+
+A dependency name has exactly one source: whatever `zz.toml` declares
+(`"1.2.3"` → registry, `{ git = …, rev = … }` → git, `{ path = … }` →
+path). The manifest always wins — a lock pin from another source (left
+over from before the manifest flipped, e.g. registry → path during
+local development) is stale by definition: the resolver ignores it,
+re-resolves from the manifest, and prints
+`note: <name>: manifest declares <source>, ignoring stale <source> pin`.
+`zz install` rewrites the lock and recreates `vendor/` links, so
+flipping a dep between path and registry needs no manual cleanup.
+`zz install` also verifies materialization: on a fresh clone (lock
+matches, `vendor/` missing) it fetches and links instead of reporting
+"up to date". Same-name declarations across workspace members stay
+unsupported until `[workspace]` ships — keep dependency names unique
+per workspace until then.
 
 ## REPL Commands
 
@@ -358,7 +467,7 @@ In the REPL, these special commands are available:
 ### Run a Complete Program
 
 ```bash
-zz run examples/demo.zz
+zz run hello.zz
 ```
 
 ### Quick Evaluation

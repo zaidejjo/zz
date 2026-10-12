@@ -38,7 +38,13 @@ fn load(src: &str) -> (TypedProgram, String) {
 fn dump_bench_c() {
     let src_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/performace_check/arena/bench_memory_arena.zz");
-    let src = std::fs::read_to_string(&src_path).unwrap();
+    let src = match std::fs::read_to_string(&src_path) {
+        Ok(src) => src,
+        Err(e) => {
+            println!("SKIP: {} ({})", src_path.display(), e);
+            return;
+        }
+    };
     let (pruned, main_key) = load(&src);
     let lowerer = zz_codegen::Lowerer::new(
         std::collections::HashSet::new(),

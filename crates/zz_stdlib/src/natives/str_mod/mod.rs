@@ -254,7 +254,7 @@ fn needs_blank(line: &[u8], markers: &[&[u8]], has_open: bool) -> bool {
     line.contains(&b'\"') || line.contains(&b'\'') || line.contains(&b'`')
 }
 
-fn classify_bytes(
+pub(crate) fn classify_bytes(
     text: &[u8],
     markers: &[&[u8]],
     bstart: &[u8],
@@ -435,6 +435,63 @@ pub(crate) fn str_bytes(
     )))
 }
 
+// str.byte_len(s) — byte length of a string (len() counts chars).
+// RESP framing, Content-Length, and binary protocols need bytes;
+// `"h\u{e9}llo".byte_len()` is 6 while `len()` is 5. Total.
+pub(crate) fn str_byte_len(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "std.str.byte_len")?;
+    Ok(Value::Int(s.len() as i64))
+}
+
+// ord(ch) — codepoint of a single-character string (#276, #263).
+// Empty and multi-character inputs are hard errors (a programming bug,
+// like a negative shift count — not routine input like bytes.to_str).
+pub(crate) fn str_ord(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let s = expect_str(args, 0, "ord")?;
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Ok(Value::Int(c as i64)),
+        (None, _) => Err(EvalError::new(
+            "`ord` expects a single-character string, found an empty string",
+            span,
+        )),
+        _ => Err(EvalError::new(
+            format!(
+                "`ord` expects a single-character string, found {} characters",
+                s.chars().count()
+            ),
+            span,
+        )),
+    }
+}
+
+// chr(cp) — 1-char string for a Unicode scalar value (#263). Surrogates,
+// negatives, and values above 0x10FFFF are hard errors on both backends.
+pub(crate) fn str_chr(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let cp = expect_int(args, 0, "chr")?;
+    match u32::try_from(cp).ok().and_then(char::from_u32) {
+        Some(c) => Ok(Value::Str(Box::new(c.to_string()))),
+        None => Err(EvalError::new(
+            format!(
+                "`chr` expects a Unicode scalar value (0-0x10FFFF, no surrogates), found `{cp}`"
+            ),
+            span,
+        )),
+    }
+}
+
 // bytes.to_str(vs) — strict UTF-8 decode; invalid sequences and
 // out-of-range values are .err (identical on VM and AOT).
 pub(crate) fn bytes_to_str(
@@ -485,6 +542,47 @@ pub(crate) fn bytes_to_ints(
             zz_runtime::Span::new(0, 0),
         )),
     }
+}
+
+// bytes.finish(vs) — assemble [int] (0-255) into an opaque byte buffer.
+// The missing bridge: builders collect ints, only natives mint `bytes`.
+// Out-of-range values are `.err` (never silently clamped); over 64 MiB
+// is `.err` (same cap as read_exact — a hostile length cannot OOM).
+pub(crate) fn bytes_finish(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    _span: Span,
+) -> Result<Value, EvalError> {
+    use crate::natives::expect_array;
+    let vs = expect_array(args, 0, "bytes.finish")?;
+    if vs.len() > 64 * 1024 * 1024 {
+        return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
+            "bytes.finish: length {} exceeds 67108864",
+            vs.len()
+        )))))));
+    }
+    let mut buf = Vec::with_capacity(vs.len());
+    for v in &vs {
+        match v {
+            Value::Int(n) => {
+                if !(0..=255).contains(n) {
+                    return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
+                        "bytes.finish: value {n} out of range 0-255"
+                    )))))));
+                }
+                buf.push(*n as u8);
+            }
+            other => {
+                return Err(EvalError::new(
+                    format!("`bytes.finish` expects an array of integers, found `{other}`"),
+                    zz_runtime::Span::new(0, 0),
+                ));
+            }
+        }
+    }
+    Ok(Value::Result(Box::new(Ok(Value::Bytes(Box::new(
+        zz_runtime::BytesData::from_vec(buf),
+    ))))))
 }
 
 pub(crate) fn str_find_in(

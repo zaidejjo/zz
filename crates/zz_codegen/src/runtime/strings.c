@@ -1703,6 +1703,85 @@ zz_value zz_str_bytes(zz_value s, int *err) {
     return arr;
 }
 
+// str.byte_len(s) — byte length (len() counts chars).
+zz_value zz_str_byte_len(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || !s.s) return (zz_value){ZZ_INT, {.i = 0}};
+    return (zz_value){ZZ_INT, {.i = (int64_t)s.s->len}};
+}
+
+// ord(ch) — codepoint of a single-character string (#276, #263).
+// Empty and multi-character inputs are hard errors, mirroring the VM.
+// Invalid bytes decode to their byte value (unreachable from valid
+// strings — the VM's strings are always valid UTF-8 — but never crash).
+zz_value zz_ord(zz_value s, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || !s.s) {
+        fprintf(stderr, "zz error: `ord` expects a string\n");
+        exit(1);
+    }
+    size_t nchars = zz_str_char_len(s.s);
+    if (nchars != 1) {
+        if (nchars == 0) {
+            fprintf(stderr, "zz error: `ord` expects a single-character string, found an empty string\n");
+        } else {
+            fprintf(stderr, "zz error: `ord` expects a single-character string, found %zu characters\n", nchars);
+        }
+        exit(1);
+    }
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
+    size_t l = zz_utf8_seq_len(d, s.s->len);
+    uint32_t cp;
+    if (l == 1) {
+        cp = d[0];
+    } else {
+        // Strict prefix decode (overlongs/surrogates cannot occur in
+        // valid strings; decode the well-formed prefix deterministically).
+        static const uint32_t masks[] = {0, 0x7F, 0x1F, 0x0F, 0x07};
+        cp = d[0] & masks[l];
+        for (size_t k = 1; k < l; k++) cp = (cp << 6) | (d[k] & 0x3F);
+    }
+    return zz_int((int64_t)cp);
+}
+
+// chr(cp) — 1-char string for a Unicode scalar value (#263). Surrogates,
+// negatives, and values above 0x10FFFF are hard errors on both backends.
+zz_value zz_chr(zz_value cp, int *err) {
+    (void)err;
+    if (cp.tag != ZZ_INT) {
+        fprintf(stderr, "zz error: `chr` expects an integer codepoint\n");
+        exit(1);
+    }
+    int64_t n = cp.i;
+    if (n < 0 || n > 0x10FFFF || (n >= 0xD800 && n <= 0xDFFF)) {
+        fprintf(stderr, "zz error: `chr` expects a Unicode scalar value (0-0x10FFFF, no surrogates), found `%lld`\n", (long long)n);
+        exit(1);
+    }
+    uint32_t u = (uint32_t)n;
+    char buf[4];
+    size_t len;
+    if (u < 0x80) {
+        buf[0] = (char)u;
+        len = 1;
+    } else if (u < 0x800) {
+        buf[0] = (char)(0xC0 | (u >> 6));
+        buf[1] = (char)(0x80 | (u & 0x3F));
+        len = 2;
+    } else if (u < 0x10000) {
+        buf[0] = (char)(0xE0 | (u >> 12));
+        buf[1] = (char)(0x80 | ((u >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (u & 0x3F));
+        len = 3;
+    } else {
+        buf[0] = (char)(0xF0 | (u >> 18));
+        buf[1] = (char)(0x80 | ((u >> 12) & 0x3F));
+        buf[2] = (char)(0x80 | ((u >> 6) & 0x3F));
+        buf[3] = (char)(0x80 | (u & 0x3F));
+        len = 4;
+    }
+    return zz_str_new(buf, len);
+}
+
 // bytes.to_str(vs) — strict UTF-8 decode; out-of-range values and
 // invalid sequences are .err, identically on VM and AOT.
 zz_value zz_bytes_to_str(zz_value vs, int *err) {
@@ -1780,7 +1859,75 @@ zz_value zz_bytes_to_ints(zz_value b, int *err) {
     return arr;
 }
 
+// bytes.finish(vs) — assemble [int] (0-255) into an opaque byte buffer.
+// Out-of-range values are Err (never silently clamped); over 64 MiB is
+// Err (same cap as read_exact). Mirrors the VM's bytes_finish exactly.
+zz_value zz_bytes_finish(zz_value vs, int *err) {
+    (void)err;
+    if (vs.tag != ZZ_ARRAY || !vs.arr) {
+        return zz_variant_err(zz_str_static("bytes.finish: expected an array of integers"));
+    }
+    size_t n = vs.arr->len;
+    if (n > (size_t)(64 * 1024 * 1024)) {
+        char msg[96];
+        int m = snprintf(msg, sizeof(msg), "bytes.finish: length %zu exceeds 67108864", n);
+        return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+    }
+    unsigned char *buf = (unsigned char *)malloc(n > 0 ? n : 1);
+    if (!buf) return zz_variant_err(zz_str_static("bytes.finish: out of memory"));
+    for (size_t i = 0; i < n; i++) {
+        zz_value v = vs.arr->items[i];
+        if (v.tag != ZZ_INT) {
+            free(buf);
+            return zz_variant_err(zz_str_static("bytes.finish: expected an array of integers"));
+        }
+        if (v.i < 0 || v.i > 255) {
+            free(buf);
+            char msg[96];
+            int m = snprintf(msg, sizeof(msg), "bytes.finish: value %lld out of range 0-255", (long long)v.i);
+            return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+        }
+        buf[i] = (unsigned char)v.i;
+    }
+    zz_value out = zz_bytes_new(buf, n);
+    free(buf);
+    if (out.tag != ZZ_BYTES) {
+        return zz_variant_err(zz_str_static("bytes.finish: out of memory"));
+    }
+    return zz_variant_ok(out);
+}
+
 // ---- comment-aware line classifier (str.classify) --------------------
+// Strict UTF-8 check shared by bytes.to_str and fs.scan_counts: rejects
+// overlongs, surrogates, and values above U+10FFFF (same predicate the
+// VM's `str::from_utf8` enforces, so both engines agree on validity).
+int zz_utf8_valid(const unsigned char *buf, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = buf[i];
+        size_t want = 1;
+        if (c < 0x80) want = 1;
+        else if (c >= 0xC2 && c <= 0xDF) want = 2;
+        else if (c >= 0xE0 && c <= 0xEF) want = 3;
+        else if (c >= 0xF0 && c <= 0xF4) want = 4;
+        else return 0;
+        if (i + want > n) return 0;
+        for (size_t k = 1; k < want; k++) {
+            if ((buf[i + k] & 0xC0) != 0x80) return 0;
+        }
+        if (want == 3) {
+            if (c == 0xE0 && buf[i + 1] < 0xA0) return 0;
+            if (c == 0xED && buf[i + 1] > 0x9F) return 0;
+        }
+        if (want == 4) {
+            if (c == 0xF0 && buf[i + 1] < 0x90) return 0;
+            if (c == 0xF4 && buf[i + 1] > 0x8F) return 0;
+        }
+        i += want;
+    }
+    return 1;
+}
+
 // Byte-oriented with ASCII-4 trim ({space, \t, \n, \r}), mirroring the
 // split/trim/starts_with native semantics exactly. The ZZ-level reference
 // implementation lives in zcc's counter; differential fixtures pin them.
@@ -2187,38 +2334,39 @@ zz_value zz_str_endswith(zz_value s, zz_value suffix, int *err) {
     return (zz_value){ZZ_BOOL, {.b = memcmp(zz_str_ptr(s.s) + s.s->len - suffix.s->len, zz_str_ptr(suffix.s), suffix.s->len) == 0}};
 }
 
-// str.trim(s) — strip leading/trailing whitespace
+// str.trim(s) — strip leading/trailing whitespace (Unicode White_Space
+// on both backends, matching the VM's `str::trim`, #277).
 zz_value zz_str_trim(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = zz_str_ptr(s.s);
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
     size_t len = s.s->len;
-    size_t start = 0, end = len;
-    while (start < end && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
-    while (end > start && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
-    return zz_str_new(d + start, end - start);
+    size_t start = 0, end = len, w;
+    while (start < end && (w = ws_width_fwd(d, start, end)) != 0) start += w;
+    while (end > start && (w = ws_width_bwd(d, start, end)) != 0) end -= w;
+    return zz_str_new((const char *)d + start, end - start);
 }
 
-// str.trim_start(s) — strip leading whitespace
+// str.trim_start(s) — strip leading whitespace (Unicode, see trim).
 zz_value zz_str_trim_start(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = zz_str_ptr(s.s);
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
     size_t len = s.s->len;
-    size_t start = 0;
-    while (start < len && (d[start] == ' ' || d[start] == '\t' || d[start] == '\n' || d[start] == '\r')) start++;
-    return zz_str_new(d + start, len - start);
+    size_t start = 0, w;
+    while (start < len && (w = ws_width_fwd(d, start, len)) != 0) start += w;
+    return zz_str_new((const char *)d + start, len - start);
 }
 
-// str.trim_end(s) — strip trailing whitespace
+// str.trim_end(s) — strip trailing whitespace (Unicode, see trim).
 zz_value zz_str_trim_end(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    const char *d = zz_str_ptr(s.s);
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(s.s);
     size_t len = s.s->len;
-    size_t end = len;
-    while (end > 0 && (d[end-1] == ' ' || d[end-1] == '\t' || d[end-1] == '\n' || d[end-1] == '\r')) end--;
-    return zz_str_new(d, end);
+    size_t end = len, w;
+    while (end > 0 && (w = ws_width_bwd(d, 0, end)) != 0) end -= w;
+    return zz_str_new((const char *)d, end);
 }
 
 // str.join(items, sep) — join array of strings with separator.

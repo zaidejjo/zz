@@ -1,0 +1,23 @@
+// features: imports, locals, print, std-str, string-literal
+// E2E: ord/chr roundtrips + boundary values on both engines.
+import std.str
+
+func main() {
+    a := ord("A")
+    println("ordA={a}")
+    e := str.ord("é")
+    println("ordE={e}")
+    g := std.str.ord("😀")
+    println("ordEmoji={g}")
+    c := chr(65)
+    println("chr65={c}")
+    ce := str.chr(233)
+    println("chrE={ce}")
+    cg := std.str.chr(128512)
+    println("chrEmoji={cg}")
+    cm := chr(1114111)
+    println("chrMax={cm}")
+    rt := chr(ord("Z"))
+    println("roundtrip={rt}")
+    println("str_ord_chr_ok")
+}

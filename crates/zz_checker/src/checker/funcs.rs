@@ -151,13 +151,21 @@ impl Checker {
     }
 
     pub(crate) fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig) {
-        let (name, body) = match stmt {
-            Stmt::Func { name, body, .. } => (name, body),
+        let (name, params, body) = match stmt {
+            Stmt::Func {
+                name, params, body, ..
+            } => (name, params, body),
             _ => unreachable!(),
         };
         self.push_scope();
-        for (pname, pty) in &sig.params {
-            self.define(pname, pty.clone());
+        for (i, (pname, pty)) in sig.params.iter().enumerate() {
+            // Bind with the source span when available (powers precise
+            // diagnostics, e.g. the module-namespace shadow lint); the
+            // signature table itself carries no spans.
+            match params.get(i) {
+                Some(p) => self.define_var_at(&p.name.name, pty.clone(), p.name.span, false),
+                None => self.define(pname, pty.clone()),
+            }
         }
         let prev_ret = self.current_ret.replace(sig.ret.clone());
         let prev_gen = std::mem::replace(&mut self.current_generics, sig.generics.clone());
@@ -165,11 +173,15 @@ impl Checker {
             &mut self.current_bounds,
             sig.bounds.iter().cloned().collect(),
         );
-        let body_t = self.check_block(body);
+        let body_t = self.check_fn_body_block(body);
         self.current_ret = prev_ret;
         self.current_generics = prev_gen;
         self.current_bounds = prev_bounds;
         self.pop_scope();
+        // Dead-mutation lint (#278): value-typed params mutated without
+        // ever being observed. Runs on the AST after the body checks so
+        // it sees the final program even when type errors exist.
+        super::value_lint::lint_dead_param_mutation(&sig.params, body, &mut self.errors);
         let _ = name;
         // The body's fall-through type must match the declared return
         // type. Divergent arms contribute `Never`, which vanishes from

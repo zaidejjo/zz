@@ -63,17 +63,17 @@ fn comments_are_trivia() {
 }
 
 #[test]
-fn hash_line_comment() {
+fn hash_is_not_a_comment() {
+    // Only `//` and `/* */` are comments — `#` is an error.
     let lexed = zz_frontend::lex("1 # comment\n2");
-    assert_eq!(
-        lexed.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
-        vec![K::Int, K::StmtEnd, K::Int, K::Eof]
+    assert!(
+        lexed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("unexpected character")),
+        "errors: {:?}",
+        lexed.errors
     );
-    let stmt_end = &lexed.tokens[1];
-    assert!(stmt_end
-        .leading
-        .iter()
-        .any(|t| t.kind == zz_frontend::token::TriviaKind::Comment));
 }
 
 #[test]

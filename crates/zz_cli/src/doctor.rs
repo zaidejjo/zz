@@ -1,7 +1,7 @@
 //! `zz doctor`: environment audit with fix hints.
 //!
 //! Checks the toolchain end to end — binary, C backend, shell integration
-//! (reuses `setup --check` state), git, and registry reachability — and
+//! (reuses `setup --dry-run` state), git, and registry reachability — and
 //! reports one grouped verdict. `zz doctor --fix` auto-runs `zz setup`
 //! when shell integration is the problem.
 
@@ -97,7 +97,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         )),
     }
 
-    // 3. Shell integration (same state as `zz setup --check`).
+    // 3. Shell integration (same state as `zz setup --dry-run`).
     let st = setup::status();
     if !st.bin_exists {
         checks.push(fail(

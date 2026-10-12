@@ -158,13 +158,10 @@ pub fn embed_sig(dir: &Path) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// The cache directory (`~/.zz/cache`).
+/// The build cache directory (`~/.zz/cache`, honoring `ZZ_HOME` like
+/// every other ZZ path — see `zz_pm::paths::build_cache_dir`).
 pub fn cache_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".zz").join("cache")
+    zz_pm::paths::build_cache_dir()
 }
 
 /// Compute a cache key from source + build options + target triple.
@@ -948,21 +945,139 @@ fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
     );
     let module = zz_ir::lower::lower_typed(&chunk, &typed.program.funcs)
         .map_err(|e| format!("zz: ir lower failed: {e}"))?;
-    Ok((module, format!("{entry_ns}.main")))
+    // Unification: the chunk backend never consumes in-memory IR
+    // directly. Encode to `.zzc` bytes, decode, and verify — the exact
+    // bytes-derived path `zz run --bytecode` executes. A codec or
+    // verifier failure is a loud build error, never a silent divergence
+    // between VM-tested IR and AOT-emitted C.
+    let bytes = zz_ir::codec::encode(&module);
+    drop(chunk);
+    drop(module);
+    let loaded = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
+    zz_ir::verify::verify(&loaded).map_err(|e| format!("zz: .zzc verify failed: {e}"))?;
+    Ok((loaded, format!("{entry_ns}.main")))
 }
 
-/// Directory holding build artifacts: `bin/` next to the source file
-/// (or `<cwd>/bin` when the source has no parent).
-pub fn bin_dir_for(src: &Path) -> PathBuf {
-    src.parent()
-        .map(|p| {
-            if p.as_os_str().is_empty() {
-                PathBuf::from("bin")
-            } else {
-                p.join("bin")
+/// Output directory for a build of `src` (authoritative, no duplicates):
+/// `<project-root>/bin` when `src` sits under a project (nearest ancestor
+/// holding `zz.toml`, resolved from the source path itself so an explicit
+/// path builds into its owning project even when invoked from another
+/// directory), otherwise the current working directory (standalone builds
+/// place `./<stem>` next to the invocation, never `./bin/`).
+pub fn output_dir_for(src: &Path) -> PathBuf {
+    if let Some(root) = crate::loader::find_project_root(src) {
+        return root.join("bin");
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Conventional entry point of a project root: `src/main.zz`, then
+/// `main.zz`. Returns the `src/main.zz` candidate even when neither
+/// exists (callers surface a "no entry file" error).
+pub fn project_entry(root: &Path) -> PathBuf {
+    let src_main = root.join("src").join("main.zz");
+    if src_main.is_file() {
+        return src_main;
+    }
+    let top_main = root.join("main.zz");
+    if top_main.is_file() {
+        return top_main;
+    }
+    src_main
+}
+
+/// Authoritative entry point of a project root: the configured
+/// `[package] entry` when present (validated — a bad value is a loud
+/// error), else the conventional [`project_entry`], which must exist.
+pub fn resolve_entry(root: &Path) -> Result<PathBuf, String> {
+    // Configured entries validate loudly; an unloadable manifest falls
+    // through to conventional discovery (other layers report it).
+    if let Ok(manifest) = zz_pm::manifest::Manifest::load(&root.join("zz.toml")) {
+        if let Some(entry) = manifest.entry_path(root)? {
+            return Ok(entry);
+        }
+    }
+    let entry = project_entry(root);
+    if entry.is_file() {
+        return Ok(entry);
+    }
+    Err(format!(
+        "no entry file in `{}`\n\
+         hint: expected src/main.zz or main.zz (or set [package] entry)",
+        root.display()
+    ))
+}
+
+/// Binary name configured for a project root: `[package] name` when
+/// present and a safe file name, else `None` (callers fall back to the
+/// entry file stem).
+pub fn package_bin_name(root: &Path) -> Option<String> {
+    let manifest = zz_pm::manifest::Manifest::load(&root.join("zz.toml")).ok()?;
+    let name = manifest.package.name;
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return None;
+    }
+    Some(name)
+}
+
+/// Same-file comparison via canonicalization (falls back to a plain
+/// comparison when either side cannot canonicalize).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Default binary stem for `src`: the package name when `src` is its
+/// project's resolved entry point, else the file stem (`"app"`
+/// fallback). Never reads CWD: only the source path and its owning
+/// project matter.
+pub fn default_stem_for(src: &Path) -> String {
+    if let Some(root) = crate::loader::find_project_root(src) {
+        let entry = resolve_entry(&root)
+            .ok()
+            .unwrap_or_else(|| project_entry(&root));
+        if same_file(src, &entry) {
+            if let Some(name) = package_bin_name(&root) {
+                return name;
             }
-        })
-        .unwrap_or_else(|| PathBuf::from("bin"))
+        }
+    }
+    src.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "app".to_string())
+}
+
+/// Authoritative output destination for a build of `src` (single writer:
+/// no legacy duplicates). Precedence:
+/// - path-like `-o` (contains a separator): exact destination relative
+///   to the current directory (go-like), `+ .exe` on Windows targets.
+/// - bare `-o`: resolved stem inside [`output_dir_for`] (project
+///   `bin/` or standalone CWD).
+/// - none: [`default_stem_for`] inside [`output_dir_for`].
+///
+/// `target` contributes the cross suffix / `.exe` via [`bin_name`].
+pub fn planned_dest_for(src: &Path, output: Option<&Path>, target: Option<&str>) -> PathBuf {
+    match output {
+        Some(o) if o.components().count() > 1 => {
+            let mut dest = o.to_path_buf();
+            let windows = match target {
+                Some(t) => zz_codegen::is_windows_target(t),
+                None => cfg!(windows),
+            };
+            if windows && dest.extension().is_none() {
+                dest.set_extension("exe");
+            }
+            dest
+        }
+        Some(o) => {
+            let stem = o.to_string_lossy().into_owned();
+            output_dir_for(src).join(bin_name(&stem, target))
+        }
+        None => output_dir_for(src).join(bin_name(&default_stem_for(src), target)),
+    }
 }
 
 /// Output binary name: `<stem>`, `<stem>-<triple>` for cross builds,
@@ -1006,13 +1121,14 @@ fn is_usable_cache_binary(p: &Path) -> bool {
     }
 }
 
-/// Native Clang build (cached), published to `bin/` next to the source.
-/// Returns the output binary path. `Dev` mode compiles with `-O0 -g`
+/// Native Clang build (cached), published to the authoritative output
+/// destination ([`planned_dest_for`]: project-root `bin/` or standalone
+/// CWD). Returns the output binary path. `Dev` mode compiles with `-O0 -g`
 /// (fast debug binary); `Release`/`Static`/`Pgo` use their option sets.
 ///
 /// When no Clang provider is installed, the generated C + build scripts
-/// are still emitted to `bin/` before the error is returned, so the user
-/// can build manually on a machine with Clang.
+/// are still emitted next to the planned destination before the error is
+/// returned, so the user can build manually on a machine with Clang.
 pub fn build_release(
     path: &Path,
     mode: BuildMode,
@@ -1022,9 +1138,25 @@ pub fn build_release(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let t_front = std::time::Instant::now();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
+    if rel.verbose {
+        eprintln!(
+            "zz: timing load_check_hir_dce={}ms",
+            t_front.elapsed().as_millis()
+        );
+    }
+    // Project-owned sources publish under `<root>/bin/` — make sure the
+    // root ignores it even when the project predates the redesign (new
+    // projects get this from `init`/`new`). Append-only, idempotent,
+    // silent; failures (read-only checkouts) never fail the build.
+    // Standalone builds leave the invocation dir alone.
+    if let Some(root) = crate::loader::find_project_root(path) {
+        let _ = zz_pm::manifest::Manifest::ensure_gitignore(&root);
+    }
     let mut opts = opts_for(mode);
     opts.allow_static_downgrade = rel.allow_static_downgrade;
+    opts.verbose = rel.verbose;
     let target = rel.target_opt();
     // Default-static fallback for macOS (static linking is rejected
     // there): downgrade to dynamic with a note instead of failing the
@@ -1076,7 +1208,8 @@ pub fn build_release(
     }
 
     // Resolve the provider now so a missing toolchain fails fast — but
-    // still leave bin/app.c + scripts behind for manual builds.
+    // still leave app.c + scripts behind for manual builds, next to the
+    // planned destination (project-root `bin/` or standalone CWD).
     let clang = match zz_codegen::detect_clang_with(rel.provider) {
         Some(c) => c,
         None => {
@@ -1084,7 +1217,11 @@ pub fn build_release(
             let mut script_opts = opts.clone();
             script_opts.curl_link = script_opts.curl_link || lowered.needs_curl;
             script_opts.sqlite_link = script_opts.sqlite_link || lowered.needs_sqlite;
-            let dir = bin_dir_for(path);
+            let dir = planned_dest_for(path, rel.output.as_deref(), target)
+                .parent()
+                .map(Path::to_path_buf)
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| PathBuf::from("."));
             let _ = zz_codegen::emit_c_plus_script(&lowered.source, &dir, target, &script_opts);
             return Err(zz_codegen::BuildError::NoClang.to_string());
         }
@@ -1177,9 +1314,13 @@ pub fn build_release(
     // Chunk backend: lower from the unified IR, then compile the
     // emitted source with the same option/flag flow as `build_native`.
     if rel.chunk {
+        let t_chunk = std::time::Instant::now();
         let (module, main_key) = chunk_module_for(path)?;
         let lowered =
             zz_codegen::build_chunk_module(&module, &main_key).map_err(|e| e.to_string())?;
+        if rel.verbose {
+            eprintln!("zz: timing chunk_lower={}ms", t_chunk.elapsed().as_millis());
+        }
         opts.native_rt = opts.native_rt || lowered.needs_native_rt;
         opts.pg_link = opts.pg_link || lowered.needs_pg_link;
         opts.float_link = opts.float_link || lowered.needs_float_fmt;
@@ -1187,6 +1328,15 @@ pub fn build_release(
         opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
         if let Err(e) = zz_codegen::compile::build_with(&lowered.source, &tmp, opts, target, &clang)
         {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+    } else if std::env::var("ZZ_CODEGEN_UNITS").is_ok_and(|v| v == "1") {
+        // Rollout gate for per-module translation units (parallel
+        // clang fan-out, serial link): same binary out, split TUs.
+        if let Err(e) = zz_codegen::build_native_units_with(
+            &pruned, &reach, &main_key, opts, target, &clang, &tmp,
+        ) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.to_string());
         }
@@ -1220,8 +1370,8 @@ pub fn build_release(
     publish_to_bin(&cached, path, target, output.as_deref())
 }
 
-/// Copy a cached binary into `bin/` next to the source with the
-/// target-aware name. Returns the `bin/` path.
+/// Copy a cached binary to the authoritative [`planned_dest_for`]
+/// destination. Returns the destination path.
 ///
 /// The copy goes through a unique temp file in the same directory plus an
 /// atomic rename: parallel `zz run --native` / `zz build` invocations for
@@ -1233,33 +1383,7 @@ fn publish_to_bin(
     target: Option<&str>,
     output: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    let dest = match output {
-        Some(o) if o.components().count() > 1 => {
-            // Path-like `-o` (contains a separator): exact destination
-            // relative to the current directory (go-like).
-            let mut dest = o.to_path_buf();
-            let windows = match target {
-                Some(t) => zz_codegen::is_windows_target(t),
-                None => cfg!(windows),
-            };
-            if windows && dest.extension().is_none() {
-                dest.set_extension("exe");
-            }
-            dest
-        }
-        Some(o) => {
-            // Bare `-o` name: keep the `bin/` convention.
-            let stem = o.to_string_lossy().into_owned();
-            bin_dir_for(src).join(bin_name(&stem, target))
-        }
-        None => {
-            let stem = src
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "app".to_string());
-            bin_dir_for(src).join(bin_name(&stem, target))
-        }
-    };
+    let dest = planned_dest_for(src, output, target);
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -1313,13 +1437,108 @@ fn publish_to_bin(
                 }
             }
         }
+        reap_legacy_twin(src, &dest);
     }
     res.map(|()| dest)
 }
 
+/// Migration: drop a byte-identical legacy twin (`src/bin/<name>`, where
+/// pre-redesign publishes landed) so upgrades never accumulate
+/// duplicates. Only byte-identical files are ever removed — anything
+/// else is left alone, and the empty legacy dir goes with it.
+fn reap_legacy_twin(src: &Path, dest: &Path) {
+    let Some(name) = dest.file_name() else {
+        return;
+    };
+    let Some(parent) = src.parent() else {
+        return;
+    };
+    if parent.as_os_str().is_empty() {
+        return;
+    }
+    let legacy = parent.join("bin").join(name);
+    if same_file(&legacy, dest) || !legacy.is_file() {
+        return;
+    }
+    if files_identical(&legacy, dest) {
+        let _ = std::fs::remove_file(&legacy);
+        if let Some(dir) = legacy.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// Byte-identical files (size fast-path, then full read). Best effort:
+/// unreadable sides compare unequal.
+fn files_identical(a: &Path, b: &Path) -> bool {
+    let meta = match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => (x, y),
+        _ => return false,
+    };
+    if meta.0.len() != meta.1.len() {
+        return false;
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Stage a published binary for execution under a unique temp path plus
+/// neighboring `libstd-*` sidecars (same `$ORIGIN` rule as publishing).
+///
+/// Concurrent `run --native` invocations for same-named sources share
+/// one published destination; executing a private copy means a parallel
+/// publish can never swap the binary mid-exec. Returns the staged path
+/// and a best-effort cleanup closure.
+#[allow(clippy::type_complexity)]
+pub fn stage_exec_copy(built: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), String> {
+    static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "zz-native-exec-{}-{}",
+        std::process::id(),
+        STAGE_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create tmp: {e}"))?;
+    let name = built
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "zz_out".to_string());
+    let staged = dir.join(&name);
+    std::fs::copy(built, &staged).map_err(|e| format!("cannot stage binary: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&staged) {
+            let mut perms = meta.permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            let _ = std::fs::set_permissions(&staged, perms);
+        }
+    }
+    if let Some(from_dir) = built.parent() {
+        if let Ok(entries) = std::fs::read_dir(from_dir) {
+            for entry in entries.flatten() {
+                let side = entry.file_name().to_string_lossy().into_owned();
+                let is_sidecar = side.starts_with("libstd-")
+                    && (side.ends_with(".so") || side.ends_with(".dylib"));
+                if is_sidecar {
+                    let _ = std::fs::copy(entry.path(), dir.join(&side));
+                }
+            }
+        }
+    }
+    Ok((
+        staged.clone(),
+        Box::new(move || {
+            let _ = std::fs::remove_dir_all(&dir);
+        }),
+    ))
+}
+
 /// Build a native binary for `path` in release `mode` with default options.
 /// Convenience wrapper over [`build_release`] (native host, auto provider).
-/// Returns the `bin/` output binary path.
+/// Returns the authoritative output binary path.
 #[allow(dead_code)]
 pub fn build_native(path: &Path, mode: BuildMode) -> Result<PathBuf, String> {
     build_release(path, mode, &ReleaseOptions::default())
@@ -1335,7 +1554,17 @@ pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Stri
         .unwrap_or_default();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
 
-    let tmp = std::env::temp_dir().join(format!("zz-native-{}", std::process::id()));
+    // Unique per call (pid + process-wide counter): parallel `zz run
+    // --native` invocations in one process (e.g. the e2e/parity suites)
+    // used to share a single `zz_out` path, so tests executed each
+    // other's binaries — rotating VM-vs-native mismatches.
+    // Unique per call (pid + process-wide counter): parallel `zz run
+    // --native` invocations in one process (e.g. the e2e/parity suites)
+    // used to share a single `zz_out` path, so tests executed each
+    // other's binaries — rotating VM-vs-native mismatches.
+    static TRANSIENT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = TRANSIENT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("zz-native-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create tmp: {e}"))?;
     let bin = tmp.join("zz_out");
     zz_codegen::build_native(
@@ -1405,6 +1634,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transient_builds_are_isolated_across_threads() {
+        // Regression: transient dir was pid-only, so parallel native runs
+        // overwrote one `zz_out` and tests executed each other's binaries
+        // (rotating VM-vs-native mismatches in bug_hunter).
+        if zz_codegen::compile::detect_clang().is_none() {
+            return;
+        }
+        static FIX_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let base = std::env::temp_dir().join(format!("zz-transient-race-{}", std::process::id()));
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for i in 0..8usize {
+                let base = base.clone();
+                handles.push(s.spawn(move || {
+                    let n = FIX_COUNTER.fetch_add(1, Ordering::SeqCst);
+                    let dir = base.join(format!("case-{n}"));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let src = dir.join("t.zz");
+                    std::fs::write(&src, format!("func main() {{\n    println(\"t{i}\")\n}}\n"))
+                        .unwrap();
+                    let (bin, cleanup) = transient_build(&src).expect("transient build");
+                    let res = std::process::Command::new(&bin)
+                        .output()
+                        .expect("exec transient binary");
+                    cleanup();
+                    let _ = std::fs::remove_dir_all(&dir);
+                    (
+                        res.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&res.stdout).into_owned(),
+                    )
+                }));
+            }
+            for (k, h) in handles.into_iter().enumerate() {
+                let (code, out) = h.join().unwrap();
+                assert_eq!(code, 0, "case {k} exit");
+                assert_eq!(out, format!("t{k}\n"), "case {k} ran its own binary");
+            }
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn bin_naming_host_and_cross() {
         // Host naming follows the cfg target (this suite runs on unix).
         let host = bin_name("app", None);
@@ -1425,12 +1696,96 @@ mod tests {
     }
 
     #[test]
-    fn bin_dir_is_pathbuf_joined() {
-        // Never string-concatenated separators: always parent + "bin".
+    fn output_dir_prefers_project_root_bin() {
+        // Standalone: a path with no zz.toml ancestor resolves to the
+        // invocation dir (never a `bin/` next to the source).
+        let base = std::env::temp_dir().join(format!(
+            "zz-output-plan-{}-{}",
+            std::process::id(),
+            "standalone"
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let src = base.join("no-such-file.zz");
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(output_dir_for(&src), cwd);
         assert_eq!(
-            bin_dir_for(Path::new("src/main.zz")),
-            PathBuf::from("src/bin")
+            planned_dest_for(&src, None, None),
+            cwd.join(bin_name("no-such-file", None))
         );
-        assert_eq!(bin_dir_for(Path::new("main.zz")), PathBuf::from("bin"));
+        // Project-owned source: `<root>/bin`, package-named default stem.
+        let root = base.join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("zz.toml"),
+            "[package]\nname = \"demo-pkg\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let entry = root.join("src").join("main.zz");
+        std::fs::write(&entry, "println(\"hi\")\n").unwrap();
+        assert_eq!(output_dir_for(&entry), root.join("bin"));
+        assert_eq!(default_stem_for(&entry), "demo-pkg");
+        assert_eq!(
+            planned_dest_for(&entry, None, None),
+            root.join("bin").join(bin_name("demo-pkg", None))
+        );
+        // Explicit non-entry file in a project: project `bin/` + stem.
+        let other = root.join("src").join("tool.zz");
+        std::fs::write(&other, "println(\"tool\")\n").unwrap();
+        assert_eq!(
+            planned_dest_for(&other, None, None),
+            root.join("bin").join(bin_name("tool", None))
+        );
+        // Bare `-o` stays in the resolved dir; path-like `-o` is CWD-exact.
+        assert_eq!(
+            planned_dest_for(&entry, Some(Path::new("server")), None),
+            root.join("bin").join(bin_name("server", None))
+        );
+        assert_eq!(
+            planned_dest_for(&entry, Some(Path::new("out/server")), None),
+            PathBuf::from("out/server")
+        );
+        // Cross targets tag the triple (Windows triples add .exe) in
+        // every destination shape — exercised on any host.
+        let win = Some("x86_64-pc-windows-gnu");
+        assert_eq!(
+            planned_dest_for(&entry, None, win),
+            root.join("bin").join("demo-pkg-x86_64-pc-windows-gnu.exe")
+        );
+        assert_eq!(
+            planned_dest_for(&src, None, win),
+            cwd.join("no-such-file-x86_64-pc-windows-gnu.exe")
+        );
+        assert_eq!(
+            planned_dest_for(&entry, Some(Path::new("out/srv")), win),
+            PathBuf::from("out/srv.exe")
+        );
+        // Configured `[package] entry` wins over the conventional one —
+        // for resolution, naming, and destination alike.
+        let cfg = base.join("cfgproj");
+        std::fs::create_dir_all(cfg.join("src")).unwrap();
+        std::fs::write(
+            cfg.join("zz.toml"),
+            "[package]\nname = \"cfg-pkg\"\nversion = \"0.1.0\"\nentry = \"src/cli.zz\"\n",
+        )
+        .unwrap();
+        let cli = cfg.join("src").join("cli.zz");
+        std::fs::write(&cli, "println(\"hi\")\n").unwrap();
+        assert_eq!(resolve_entry(&cfg).unwrap(), cli);
+        assert_eq!(default_stem_for(&cli), "cfg-pkg");
+        assert_eq!(
+            planned_dest_for(&cli, None, None),
+            cfg.join("bin").join(bin_name("cfg-pkg", None))
+        );
+        // A configured-but-missing entry is a loud error, not a silent
+        // conventional fallback.
+        std::fs::write(
+            cfg.join("zz.toml"),
+            "[package]\nname = \"cfg-pkg\"\nversion = \"0.1.0\"\nentry = \"src/gone.zz\"\n",
+        )
+        .unwrap();
+        let err = resolve_entry(&cfg).expect_err("missing configured entry must fail");
+        assert!(err.contains("does not exist"), "got:\n{err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

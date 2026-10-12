@@ -14,12 +14,14 @@ mod doctor;
 mod loader;
 mod pm;
 mod repl;
+mod run_cache;
 mod session;
 mod setup;
 mod test_runner;
 mod toolchain;
 mod ui;
 mod upgrade;
+mod watch;
 
 use zz_frontend::diag::{error_at, render_to_string, Files};
 use zz_frontend::span::Span;
@@ -53,15 +55,20 @@ zz — the ZZ programming language
 USAGE:
     zz                            start the interactive REPL
     zz eval <source>              evaluate source and print the result
-    zz run <file.zz>              type-check and run a file
-    zz run --bytecode <file>      run via .zzc bytecode (compiles .zz, or
+    zz run [<file.zz>]            type-check and run a file (defaults to the
+                                   project entry when omitted inside a project)
+    zz run --watch [<file.zz>]    hot reload: re-check and restart on save
+                                   (VM only; broken edits keep serving)
+    zz run --bytecode [<file>]    run via .zzc bytecode (compiles .zz, or
                                   loads .zzc directly with no frontend)
-    zz dis <file.zzc|file.zz>     disassemble bytecode to stable text
+    zz dis [<file.zzc|file.zz>]   disassemble bytecode to stable text
     zz test <file.zz | dir>       run @test-annotated functions
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
-    zz build [FLAGS] <file.zz>    compile a native binary (cached)
+    zz build [FLAGS] [<file.zz>]  compile a native binary (cached; defaults
+                                   to the project entry when omitted inside
+                                   a project)
     zz build --emit-ir -o <f.zzc> emit .zzc bytecode instead of a binary
 
 PACKAGE MANAGER:
@@ -80,24 +87,26 @@ PACKAGE MANAGER:
     zz install --allow-hooks    permit legacy [native] build hooks (direct only)
     zz remove <pkg>               remove a dependency
     zz update [pkg]               re-resolve floating versions
-    zz outdated                   locked vs wanted vs latest per dep
+    zz clean [--deps]             remove build outputs (plus vendor/ + lock)
+    zz cache gc                   garbage-collect unused CAS entries
+    zz cache clean                clear build cache
+    zz setup [--yes]              create ~/.zz/bin, wire PATH + completions
+    zz setup --dry-run            verify shell integration (no changes)
+    zz toolchain install          download a pinned Zig C backend into ~/.zz/toolchain
+    zz toolchain status           installed versions, pin, active backend
+    zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
+    zz upgrade [--dry-run]         self-update from GitHub releases
+    zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
+
+REGISTRY (see `zz pm --help` for full flags):
     zz deps tree [--depth N]      print the dependency tree
     zz deps why <pkg>             show why a package is depended on
+    zz outdated                   locked vs wanted vs latest per dep
     zz audit                      verify pins (published? hash? licensed?)
-    zz clean [--deps]             remove build outputs (plus vendor/ + lock)
     zz search <query>             search the package registry
     zz info <pkg>                 show package metadata and versions
     zz login [--browser]          authenticate for publishing
     zz publish [--dry-run]        validate, pack, and upload to the registry
-    zz cache gc                   garbage-collect unused CAS entries
-    zz cache clean                clear build cache
-    zz setup [--yes]              create ~/.zz/bin, wire PATH + completions
-    zz setup --check              verify shell integration (no changes)
-    zz toolchain install          download a pinned Zig C backend into ~/.zz/toolchain
-    zz toolchain status           installed versions, pin, active backend
-    zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
-    zz upgrade [--check]           self-update from GitHub releases
-    zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
 
 BUILD MODES (single Clang backend, always a native binary):
      zz build <file.zz>           static build (ThinLTO, DCE, stripped) — the default
@@ -106,13 +115,13 @@ BUILD MODES (single Clang backend, always a native binary):
      zz build -p --full <file.zz> max optimization (full LTO + DCE + strip); with `-- <args>` adds PGO training
      zz build --static <file.zz>  static build, explicit (same as the default; errors where static is impossible)
      zz build --pgo <file.zz>     PGO build (profile-guided, native host only)
-     zz profile <file.zz> [-- args]
+     zz profile [<file.zz>] [-- args]
                                   PGO end to end: instrument → train → optimize
      zz build --target <triple> <file.zz>
                                   cross build via clang --target= (drops -march=native)
 
 FLAGS:
-    --check, -c        with fmt, check formatting without writing (exit 1 if changed)
+    --check, -c        with fmt ONLY, check formatting without writing (exit 1 if changed)
     --stdin            with fmt, read source from stdin and write formatted to stdout
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
     --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
@@ -121,16 +130,26 @@ FLAGS:
                          (test: per-file dev build, one process per test)
     --embed <dir>      with run/build, serve (VM) or bake (native) a static asset
                        directory, readable at runtime via `fs.embedfs()`
+    --watch            with run, hot reload on save (VM only; re-checks,
+                       broken edits keep the previous generation serving)
+    --clear            with run --watch, clear the screen on every restart
+    --debounce <ms>    with run --watch, quiet period before restart
+                       (default 150)
+    --watch-ignore <glob>
+                       with run --watch, skip paths matching the glob
+                       (repeatable; `*` spans directories)
     -p, --release      with build, full optimization (-O3 -flto=thin, dynamic, stripped)
     --static           with build, static self-contained binary (the default; explicit use errors where static is impossible)
     --dynamic          with build, dynamic debug build (-O0 -g, fast); falls back automatically where static is impossible
     --full             with build, max optimization: full LTO (-O3, DCE, stripped); with `-- <args>` runs PGO training first
-    -o, --output <name> with build, name the output binary (bare name stays in bin/, path is used as-is)
+    -o, --output <name> with build/run --native, name the output binary
+                          (bare name stays in the project bin/ or standalone
+                          CWD; path is used as-is)
     --pgo              with build, profile-guided optimization build (native host only)
     --target <triple>  with build, cross-compile via clang --target= (same flags as without -p, minus -march=native)
     --cc <clang|zig>   with build, select the Clang provider
-    --chunk            with build, lower from the unified IR chunk instead of
-                       HIR (dual-codegen gate; stdout+exit must match HIR)
+    --dry-run          with setup/upgrade, report status without changing anything
+                       (--check kept as a deprecated alias until 0.3)
     --allow-source-builds
                         with build/install, compile transitive native deps
                         from source when no prebuilt covers the host tag
@@ -226,20 +245,75 @@ fn main() -> ExitCode {
         Some("run") => {
             let native = rest.iter().any(|a| a == "--native");
             let bytecode = rest.iter().any(|a| a == "--bytecode");
+            let watching = rest.iter().any(|a| a == "--watch");
             let embed = parse_flag_value(rest, "--embed").map(std::path::PathBuf::from);
+            // `-o` / `--output` names the published binary, `--native`
+            // only: VM runs forward everything after the file to the
+            // script untouched.
+            let output = if native {
+                parse_flag_value(rest, "--output")
+                    .or_else(|| parse_flag_value(rest, "-o"))
+                    .map(std::path::PathBuf::from)
+            } else {
+                None
+            };
             // Strip `--embed <dir>` / `--embed=<dir>` (and `--native` /
-            // `--bytecode`) so neither the loader nor the script sees
-            // them as paths/args.
+            // `--bytecode`, plus `-o <name>` for native) so neither the
+            // loader nor the script sees them as paths/args.
             let mut args: Vec<String> = strip_flag_value(rest, "--embed", "--native");
             args.retain(|a| a != "--bytecode");
+            if native {
+                args = strip_output_flag(&args);
+            }
             let script_args = args.get(1..).unwrap_or(&[]).to_vec();
             let file = args.iter().find(|a| !a.starts_with('-'));
             if native && bytecode {
                 eprintln!("zz: cannot combine `--native` and `--bytecode`");
                 return ExitCode::FAILURE;
             }
-            if native {
-                match run_native(file, &script_args, embed) {
+            if watching {
+                // Hot reload is a VM-only loop: native rebuilds are minutes,
+                // not milliseconds. Reject loudly instead of slow-looping.
+                if native || bytecode {
+                    eprintln!("zz: `--watch` supports VM runs only, not `--native` / `--bytecode`");
+                    return ExitCode::FAILURE;
+                }
+                let (flags, child_rest) = match watch::parse_watch_flags(&args) {
+                    Ok(parsed) => parsed,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                // Child replays this exact `run` invocation minus the
+                // watch-only flags (plus `--embed`, re-attached below).
+                let file = child_rest.iter().find(|a| !a.starts_with('-'));
+                let resolved = match resolve_run_entry(
+                    file,
+                    "zz run --watch [<file.zz>]",
+                    "provide the path to a .zz file to execute",
+                ) {
+                    Ok(r) => r,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let mut child_argv = vec!["run".to_string()];
+                child_argv.extend(child_rest);
+                if let Some(dir) = &embed {
+                    child_argv.push("--embed".to_string());
+                    child_argv.push(dir.to_string_lossy().into_owned());
+                }
+                match watch::run_watch(resolved, child_argv, embed, flags) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        ExitCode::FAILURE
+                    }
+                }
+            } else if native {
+                match run_native(file, &script_args, embed, output) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -290,6 +364,14 @@ fn main() -> ExitCode {
         },
         Some("check") => {
             let (path, flags) = parse_path_and_flags(rest);
+            if flags.iter().any(|f| f == "--check" || f == "-c") {
+                eprintln!(
+                    "zz: `zz check --check` is not a flag\n\
+                     hint: did you mean `zz fmt --check` (formatting dry-run)? \
+                     `zz check` already checks without writing"
+                );
+                return ExitCode::FAILURE;
+            }
             let has_fix = flags.contains(&"--fix".to_string());
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
@@ -509,7 +591,9 @@ fn main() -> ExitCode {
 
 /// Split args into flags (--flag items) and path (last non-flag arg).
 /// Flags must precede the path: `zz check --fix src/`.
-/// Short aliases are normalized: `-i` → `--interactive`, `-f` → `--fix`, `-c` → `--check`.
+/// Short aliases are normalized per command: `-i` → `--interactive`,
+/// `-f` → `--fix`. `-c` is a `fmt`-only alias for `--check` and is kept
+/// verbatim here so other commands can reject it with a helpful error.
 fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
     let mut path = None;
     let mut flags = Vec::new();
@@ -518,8 +602,6 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
             flags.push("--interactive".to_string());
         } else if a == "-f" {
             flags.push("--fix".to_string());
-        } else if a == "-c" {
-            flags.push("--check".to_string());
         } else if a.starts_with("--") || a.starts_with('-') {
             flags.push(a.clone());
         } else {
@@ -720,6 +802,17 @@ struct PreparedRun {
     enums: std::collections::HashMap<String, zz_checker::EnumSig>,
     funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
     entry_path: String,
+    /// Threaded out for the run cache: interpreter inputs that cannot be
+    /// derived from `.zzc` bytes (stored in `meta.json` on a miss).
+    consts: std::collections::HashMap<String, f64>,
+    import_aliases: std::collections::HashMap<String, String>,
+    stdlib_aliases: Vec<(String, String)>,
+    /// Scoped-stdlib inputs: every stdlib module imported anywhere in the
+    /// closure (any import kind) + selective/wildcard replays for bare-name
+    /// natives. Hits execute only these modules' pure-ZZ programs.
+    stdlib_modules: Vec<String>,
+    stdlib_selectives: crate::loader::StdlibSelectives,
+    stdlib_wildcards: Vec<String>,
 }
 
 /// Seed an interpreter: native dispatch, math constants, pure-ZZ
@@ -735,6 +828,13 @@ fn setup_interp(
     plugin_funcs: &[(String, zz_checker::FuncSig)],
     script_args: &[String],
     embed: Option<&std::path::Path>,
+    mut timer: Option<&mut run_cache::StageTimer>,
+    // Scoped pure-ZZ stdlib: loader-module namespaces to execute
+    // (`None` = all, for the `.zzc` loader which lacks import info).
+    // Unimported stdlib code is unreachable by checked programs; the
+    // runtime dependency closure comes from
+    // `zz_stdlib::stdlib_program_closure`.
+    stdlib_filter: Option<&[String]>,
 ) -> Result<Interp, String> {
     let mut natives = natives;
     let first_try = match crate::load_vm_plugins(project_root, &mut natives, plugin_funcs) {
@@ -749,6 +849,10 @@ fn setup_interp(
         if let Err(e) = crate::load_vm_plugins(project_root, &mut natives, plugin_funcs) {
             eprintln!("zz: warning: {e}");
         }
+    }
+
+    if let Some(t) = timer.as_mut() {
+        t.stage("vm plugins");
     }
 
     let mut interp = Interp::with_natives(natives);
@@ -793,11 +897,18 @@ fn setup_interp(
         interp.env.define(name, Value::Float(*val));
     }
 
-    // Run compiled pure-ZZ stdlib programs. These populate the environment
-    // with functions written in ZZ (e.g. vec.map, math.sum) that extend
-    // the native stdlib. Must happen before user code so the functions are
-    // available when user modules reference them.
-    for zz_prog in zz_stdlib::zz_stdlib_programs() {
+    // Run the needed pure-ZZ stdlib programs (scoped by imports when
+    // known). These populate the environment with functions written in
+    // ZZ (e.g. vec.map, math.sum) that extend the native stdlib. Must
+    // happen before user code so the functions are available when user
+    // modules reference them. Programs compile lazily per slot, so an
+    // import-free program compiles zero stdlib sources.
+    let wanted: Vec<usize> = match stdlib_filter {
+        Some(modules) => zz_stdlib::stdlib_program_closure(modules),
+        None => (0..zz_stdlib::zz_stdlib_program_count()).collect(),
+    };
+    for idx in wanted {
+        let zz_prog = zz_stdlib::zz_stdlib_program_at(idx);
         if let Err(e) = interp.run_typed(
             &zz_prog.program,
             std::sync::Arc::new(zz_prog.types.clone()),
@@ -807,6 +918,9 @@ fn setup_interp(
             eprintln!("zz: pure-ZZ stdlib error: {e:?}");
             return Err("stdlib initialization failed".to_string());
         }
+    }
+    if let Some(t) = timer {
+        t.stage("pure-ZZ stdlib");
     }
     // Canonical `std.*` aliases for pure-ZZ helpers: sources declare short
     // names (`json.is_null`) while the checker advertises both spellings.
@@ -910,6 +1024,9 @@ fn prepare_run(
         errors: _,
         stdlib_aliases,
         import_aliases,
+        stdlib_modules,
+        stdlib_selectives,
+        stdlib_wildcards,
         ..
     } = loaded;
     let typed = zz_hir::build_program(
@@ -923,12 +1040,14 @@ fn prepare_run(
     let interp = setup_interp(
         natives,
         &consts,
-        import_aliases,
+        import_aliases.clone(),
         &stdlib_aliases,
         &project_root,
         &plugin_funcs,
         script_args,
         embed.as_deref(),
+        None,
+        Some(&stdlib_modules),
     )?;
     Ok(PreparedRun {
         interp,
@@ -939,11 +1058,87 @@ fn prepare_run(
         enums: typed.program.enums,
         funcs: typed.program.funcs,
         entry_path: path.to_string(),
+        consts,
+        import_aliases,
+        stdlib_aliases,
+        stdlib_modules,
+        stdlib_selectives,
+        stdlib_wildcards,
     })
 }
 
-/// Render an execution error against its source. Empty sources (`.zzc`
-/// loads carry none) render plainly — the span renderer would panic.
+/// Compile a prepared program's modules to IR bytes for the run cache.
+/// `None` when any module fails to lower (caller skips storing).
+/// Note: `run_typed` recompiles internally, so miss runs compile twice;
+/// the execution path stays byte-identical to the uncached pipeline by
+/// design (a hit-only `run_loaded_chunk` would risk execution divergence
+/// where it matters least — cold runs).
+fn compile_prep(prep: &PreparedRun) -> Option<Vec<Vec<u8>>> {
+    let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(prep.interp.natives.keys().cloned().collect());
+    let mut modules: Vec<Vec<u8>> = Vec::with_capacity(prep.programs.len());
+    for program in &prep.programs {
+        let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+            program,
+            prep.types.clone(),
+            prep.structs.clone(),
+            prep.enums.clone(),
+            native_names.clone(),
+        );
+        match zz_ir::lower::lower_typed(&chunk, &prep.funcs) {
+            Ok(module) => modules.push(zz_ir::codec::encode(&module)),
+            Err(_) => return None,
+        }
+    }
+    Some(modules)
+}
+
+/// Run-cache metadata from a prepared program: interpreter inputs that
+/// cannot be derived from `.zzc` bytes.
+fn meta_from_prep(prep: &PreparedRun) -> run_cache::RunMeta {
+    run_cache::RunMeta {
+        consts: prep.consts.clone(),
+        import_aliases: prep.import_aliases.clone(),
+        stdlib_aliases: prep.stdlib_aliases.clone(),
+        stdlib_modules: prep.stdlib_modules.clone(),
+        stdlib_selectives: prep.stdlib_selectives.clone(),
+        stdlib_wildcards: prep.stdlib_wildcards.clone(),
+    }
+}
+
+/// Pre-compile the project entry into the run cache (install-time
+/// prewarming, cargo-style): after this, the first `zz run` hits instead
+/// of paying parse+check+compile — even-cold runs go warm speed.
+/// Best-effort: lookup hits and disabled caches return silently; one line
+/// prints only when compilation actually happened. Never runs user code
+/// (`prepare_run` loads, checks and seeds — execution stays in `run`).
+/// Never fails: any error means `zz run` will surface it properly there.
+pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
+    if !run_cache::cache_enabled() {
+        return;
+    }
+    let entry = match crate::build::resolve_entry(root) {
+        Ok(p) => p,
+        Err(_) => return, // no entry (lib-only package): nothing to warm
+    };
+    let plugin_funcs = crate::build::discover_plugin_manifests(&entry);
+    let slug = match run_cache::run_key(&entry, &plugin_funcs, None) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if run_cache::lookup(&slug).is_some() {
+        return;
+    }
+    let path = entry.to_string_lossy().into_owned();
+    let prep = match prepare_run(&path, &[], None) {
+        Ok(p) => p,
+        Err(_) => return, // check errors: `zz run` reports them
+    };
+    if let Some(modules) = compile_prep(&prep) {
+        run_cache::store(&slug, &modules, &meta_from_prep(&prep));
+        println!("pre-compiled entry cache for instant runs");
+    }
+}
 fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> String {
     if source.is_empty() {
         eprintln!(
@@ -1045,14 +1240,11 @@ fn run_bytecode(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let path = path
-        .ok_or_else(|| {
-            "missing file argument\n\n\
-             usage: zz run --bytecode <file.zz|file.zzc>\n\
-             hint: provide a .zz file (round-trips through bytecode) or a .zzc file (loads directly)"
-                .to_string()
-        })?
-        .clone();
+    let path = resolve_run_entry(
+        path,
+        "zz run --bytecode [<file.zz|file.zzc>]",
+        "provide a .zz file (round-trips through bytecode) or a .zzc file (loads directly)",
+    )?;
     if path.ends_with(".zzc") {
         run_bytecode_file(&path, script_args)
     } else {
@@ -1142,6 +1334,8 @@ fn run_bytecode_file(path: &str, script_args: &[String]) -> Result<(), String> {
         &[],
         script_args,
         None,
+        None,
+        None,
     )?;
     let last = match interp.run_loaded_chunk(&chunk) {
         Ok(v) => v,
@@ -1161,14 +1355,11 @@ fn run_bytecode_file(path: &str, script_args: &[String]) -> Result<(), String> {
 /// `zz dis <file>`: disassemble `.zzc` bytes (or a `.zz` program lowered
 /// in memory) to stable text.
 fn dis_file(path: Option<&String>) -> Result<(), String> {
-    let path = path
-        .ok_or_else(|| {
-            "missing file argument\n\n\
-             usage: zz dis <file.zzc|file.zz>\n\
-             hint: provide a .zzc file or a .zz file to disassemble"
-                .to_string()
-        })?
-        .clone();
+    let path = resolve_run_entry(
+        path,
+        "zz dis [<file.zzc|file.zz>]",
+        "provide a .zzc file or a .zz file to disassemble",
+    )?;
     if path.ends_with(".zzc") {
         let bytes = std::fs::read(&path).map_err(|e| format!("zz: cannot read {path}: {e}"))?;
         let module = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
@@ -1276,18 +1467,117 @@ fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the entry file for `run` / `run --native` / `build` when the
+/// file argument is omitted: the conventional project entry (`src/main.zz`,
+/// then `main.zz`) under the project discovered from the current working
+/// directory. An explicit argument is returned unchanged (its owning
+/// project — resolved from the source path itself — decides the output
+/// destination; see [`build::planned_dest_for`]).
+fn resolve_default_entry(usage: &str, hint: &str) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let Some(root) = loader::find_project_root(&cwd) else {
+        return Err(format!(
+            "missing file argument\n\nusage: {usage}\nhint: {hint}"
+        ));
+    };
+    // resolve_entry carries actionable hints for every failure shape.
+    Ok(build::resolve_entry(&root)?.to_string_lossy().into_owned())
+}
+
+/// Resolve the entry file for `run` / `run --native`: explicit argument
+/// wins, otherwise [`resolve_default_entry`].
+fn resolve_run_entry(path: Option<&String>, usage: &str, hint: &str) -> Result<String, String> {
+    match path {
+        Some(p) => Ok(p.clone()),
+        None => resolve_default_entry(usage, hint),
+    }
+}
+
 fn run_file(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let path = path.ok_or_else(|| {
-        "missing file argument\n\n\
-             usage: zz run <file.zz>\n\
-             hint: provide the path to a .zz file to execute"
-            .to_string()
-    })?;
+    let resolved = resolve_run_entry(
+        path,
+        "zz run [<file.zz>]",
+        "provide the path to a .zz file to execute",
+    )?;
+    let path = &resolved;
 
+    // One-time-compiler fast path: the key is content-addressed over the
+    // whole closure, so a hit executes cached IR with no frontend work.
+    // Plugin discovery is cheap (manifest scan) and must precede the key.
+    let entry_path = std::path::Path::new(path);
+    let mut timer = run_cache::StageTimer::start();
+    let plugin_funcs = crate::build::discover_plugin_manifests(entry_path);
+    timer.stage("plugin discovery");
+    if let Ok(slug) = run_cache::run_key(entry_path, &plugin_funcs, embed.as_deref()) {
+        timer.stage("run key");
+        if let Some(hit) = run_cache::lookup(&slug) {
+            timer.stage("lookup");
+            run_cache::log_hit(&slug);
+            match run_cached(
+                &slug,
+                &hit,
+                path,
+                script_args,
+                embed.as_deref(),
+                &plugin_funcs,
+                &mut timer,
+            ) {
+                Ok(()) => return Ok(()),
+                // Stale or corrupt entry (e.g. toolchain drift the key
+                // missed): fall through to the full pipeline, which
+                // re-stores cleanly. Never fail a run on cache content.
+                Err(e) => {
+                    if std::env::var("ZZ_VERBOSE").is_ok() {
+                        eprintln!("zz: run cache entry unusable ({e}), recompiling");
+                    }
+                }
+            }
+        } else {
+            if run_cache::cache_enabled() {
+                run_cache::log_miss(&slug);
+            }
+        }
+        // Miss: full pipeline, then store the compiled IR for next time.
+        let mut prep = prepare_run(path, script_args, embed.clone())?;
+        let mut last = Value::Unit;
+        // Compile each module to IR bytes alongside the typed execution
+        // (shared with install-time prewarming below).
+        let cached_modules = compile_prep(&prep);
+        for (i, program) in prep.programs.iter().enumerate() {
+            match prep.interp.run_typed(
+                program,
+                prep.types.clone(),
+                prep.structs.clone(),
+                prep.enums.clone(),
+            ) {
+                Ok(v) => last = v,
+                Err(e) => {
+                    let (name, source) = prep
+                        .files
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| (prep.entry_path.clone(), String::new()));
+                    return Err(render_eval_error(&e, &name, &source));
+                }
+            }
+        }
+        if let Some(modules) = cached_modules {
+            run_cache::store(&slug, &modules, &meta_from_prep(&prep));
+        }
+        return run_entry_main(
+            &mut prep.interp,
+            last,
+            &prep.entry_path,
+            script_args,
+            &prep.files,
+        );
+    }
+
+    // Key computation failed (unreadable entry): today's behavior exactly.
     let mut prep = prepare_run(path, script_args, embed)?;
     let mut last = Value::Unit;
     for (i, program) in prep.programs.iter().enumerate() {
@@ -1317,18 +1607,108 @@ fn run_file(
     )
 }
 
-/// `zz run --native <file>`: compile to a temp location, execute, cleanup.
+/// Execute a run-cache hit: rebuild natives (stdlib + alias replays),
+/// seed the interpreter (plugins, pure-ZZ stdlib, cached consts/aliases),
+/// then decode/verify/raise each cached module and run it. Mirrors the
+/// `.zzc` loader — no AST is available on this path.
+fn run_cached(
+    slug: &str,
+    hit: &run_cache::RunHit,
+    entry_path: &str,
+    script_args: &[String],
+    embed: Option<&std::path::Path>,
+    plugin_funcs: &[(String, zz_checker::FuncSig)],
+    timer: &mut run_cache::StageTimer,
+) -> Result<(), String> {
+    let path = std::path::Path::new(entry_path);
+    let project_root = loader::find_project_root(path).unwrap_or_else(|| {
+        path.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf()
+    });
+    enforce_project_zz(path)?;
+    // Natives scoped to the recorded imports (== the miss path's loader
+    // natives exactly): full-module registrations under default namespaces,
+    // alias replays, selective bare names, and wildcard bare names. The
+    // base table's canonical `std.*` keys are always present; scoped-out
+    // modules are unreachable by checked programs.
+    let mut natives = zz_stdlib::natives::stdlib_natives();
+    {
+        let mut funcs = std::collections::HashMap::new();
+        for module in &hit.meta.stdlib_modules {
+            let ns = module.rsplit('.').next().unwrap_or(module);
+            let _ = zz_stdlib::register_module_namespace(module, ns, &mut funcs, &mut natives);
+        }
+        for (module, ns) in &hit.meta.stdlib_aliases {
+            let short = module.strip_prefix("std.").unwrap_or(module);
+            let _ = zz_stdlib::register_module_namespace(short, ns, &mut funcs, &mut natives);
+        }
+        for (module, items) in &hit.meta.stdlib_selectives {
+            let _ =
+                zz_stdlib::register_selective_namespace(module, items, &mut funcs, &mut natives);
+        }
+        for module in &hit.meta.stdlib_wildcards {
+            let _ = zz_stdlib::register_wildcard_namespace(module, &mut funcs, &mut natives);
+        }
+    }
+    timer.stage("natives rebuild");
+    let mut interp = setup_interp(
+        natives,
+        &hit.meta.consts,
+        hit.meta.import_aliases.clone(),
+        &hit.meta.stdlib_aliases,
+        &project_root,
+        plugin_funcs,
+        script_args,
+        embed,
+        Some(timer),
+        Some(&hit.meta.stdlib_modules),
+    )?;
+    timer.stage("interp seed");
+    let mut last = Value::Unit;
+    for bytes in &hit.modules {
+        let loaded = zz_ir::codec::decode(bytes).map_err(|e| format!("invalid .zzc: {e}"))?;
+        timer.stage("ir decode");
+        zz_ir::verify::verify(&loaded).map_err(|e| format!(".zzc verify failed: {e}"))?;
+        let chunk = zz_ir::raise::raise(&loaded).map_err(|e| format!("ir raise failed: {e}"))?;
+        timer.stage("ir verify+raise");
+        match interp.run_loaded_chunk(&chunk) {
+            Ok(v) => last = v,
+            Err(e) => {
+                return Err(render_eval_error(&e, entry_path, ""));
+            }
+        }
+        timer.stage("chunk exec");
+    }
+    timer.stage("modules exec");
+    let _ = slug;
+    let r = run_entry_main(
+        &mut interp,
+        last,
+        entry_path,
+        script_args,
+        &[(entry_path.to_string(), String::new())],
+    );
+    timer.stage("main + total");
+    r
+}
+
+/// `zz run --native [<file>]`: build (cached, published to the
+/// authoritative output destination, `-o` overrides like `build`) and
+/// execute. The file argument defaults to the project entry inside a
+/// project.
 fn run_native(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    output: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    let path = path.ok_or_else(|| {
-        "missing file argument\n\n\
-             usage: zz run --native <file.zz>\n\
-             hint: provide the path to a .zz file to compile and execute"
-            .to_string()
-    })?;
+    let resolved = resolve_run_entry(
+        path,
+        "zz run --native [<file.zz>]",
+        "provide the path to a .zz file to compile and execute",
+    )?;
+    let path = &resolved;
     let p = std::path::Path::new(path);
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(p)?;
@@ -1340,12 +1720,49 @@ fn run_native(
     } else {
         build::BuildMode::Release
     };
+    let auto_output = output.is_none();
     let rel = build::ReleaseOptions {
         embed,
+        output,
         ..Default::default()
     };
-    let cached = build::build_release(p, mode, &rel)?;
-    let code = build::exec_binary(&cached, script_args)?;
+    // Publish through a private destination when the user gave no `-o`:
+    // parallel same-named runs (e.g. the parity suites) shared one
+    // published binary, so a build could stage a sibling's program between
+    // publish and stage — rotating VM-vs-native mismatches. An explicit
+    // `-o` keeps today's shared destination (user's choice, user's race).
+    // auto_tmp tracks the private dir for best-effort cleanup below.
+    let mut auto_tmp: Option<std::path::PathBuf> = None;
+    let rel = if auto_output {
+        static RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let uniq = RUN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!("zz-run-native-{}-{uniq}", std::process::id()));
+        auto_tmp = Some(tmp.clone());
+        build::ReleaseOptions {
+            output: Some(tmp.join("zz_out")),
+            ..rel
+        }
+    } else {
+        rel
+    };
+    // Publish through the normal destination, then execute a private
+    // staged copy: concurrent same-named publishes can never swap the
+    // binary mid-exec.
+    let built = build::build_release(p, mode, &rel)?;
+    let (bin, cleanup) = build::stage_exec_copy(&built)?;
+    let code = match build::exec_binary(&bin, script_args) {
+        Ok(code) => code,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    cleanup();
+    // Best-effort removal of the private publish dir (never the user's
+    // explicit `-o`): `run` must not litter temp or CWD.
+    if let Some(dir) = auto_tmp {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     if code != 0 {
         return Err(format!(
             "native program exited with code {code}\n\
@@ -1355,7 +1772,7 @@ fn run_native(
     Ok(())
 }
 
-/// `zz build [FLAGS] <file>`: always a native Clang binary.
+/// `zz build [FLAGS] [<file>]`: always a native Clang binary.
 ///
 /// Default (`zz build`): static self-contained binary (ThinLTO, DCE,
 /// stripped). Falls back to dynamic with a note where static is
@@ -1365,8 +1782,14 @@ fn run_native(
 /// stay static.
 /// `-p/--release/-O3` selects the dynamic optimized build; `--dynamic`
 /// selects the fast dynamic debug build (`-O0 -g`).
-/// Both paths are real binaries in `bin/` — never VM execution.
-/// (`zz run` is the only command that executes through the VM.)
+/// Output (authoritative, no legacy duplicates): standalone builds place
+/// `./<stem>` in the current working directory; project builds (file
+/// omitted inside a project, or any source under a project) publish to
+/// `<project-root>/bin/` named after `[package] name` (entry) or the
+/// file stem (non-entry files). Bare `-o` renames inside that directory;
+/// path-like `-o` is used as-is relative to the current directory.
+/// (`zz run` without `--native` is the only command that executes
+/// through the VM, leaving no build artifacts.)
 fn build_cmd(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--emit-ir") {
         return emit_ir_cmd(args);
@@ -1429,9 +1852,10 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     }
     // Positional path: first non-flag arg, skipping values consumed by
     // `--target <triple>` / `--cc <name>` / `--embed <dir>` /
-    // `-o <name>` (space form).
+    // `-o <name>` (space form). Omitted inside a project: build the
+    // conventional entry (`src/main.zz`, then `main.zz`).
     let mut skip_next = false;
-    let path = flag_args
+    let path: String = match flag_args
         .iter()
         .find(|a| {
             if skip_next {
@@ -1449,12 +1873,14 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             }
             !a.starts_with('-')
         })
-        .ok_or_else(|| {
-            "missing file argument\n\n\
-             usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [-o <name>] <file.zz>\n\
-             hint: provide the path to a .zz file to build"
-                .to_string()
-        })?;
+        .cloned() {
+        Some(p) => p,
+        None => resolve_default_entry(
+            "zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [-o <name>] [<file.zz>]",
+            "provide the path to a .zz file to build (or run inside a project)",
+        )?,
+    };
+    let path = path.as_str();
     let p = std::path::Path::new(path);
 
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
@@ -1499,7 +1925,10 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         allow_hooks,
         allow_static_downgrade: allow_downgrade,
         output: output.clone(),
-        chunk: flag_args.iter().any(|a| a == "--chunk") || std::env::var("ZZ_CHUNK_C").is_ok(),
+        chunk: flag_args
+            .iter()
+            .any(|a| a == "--chunk" || a == "--unstable-chunk")
+            || std::env::var("ZZ_CHUNK_C").is_ok(),
     };
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",
@@ -1667,7 +2096,7 @@ fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
     }
 }
 
-/// `zz profile <file.zz> [-- args]`: PGO end to end.
+/// `zz profile [<file.zz>] [-- args]`: PGO end to end.
 ///
 /// Phase 1 instruments (`-fprofile-generate`), the training run executes
 /// with the given args, `llvm-profdata` merges coverage, and phase 2
@@ -1675,12 +2104,13 @@ fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
 /// success; on failure they are left in place with a hint.
 fn profile_cmd(args: &[String]) -> Result<(), String> {
     let (left, train_args) = split_train_args(args);
-    let path = left.iter().find(|a| !a.starts_with('-')).ok_or_else(|| {
-        "missing file argument\n\n\
-              usage: zz profile <file.zz> [-- args]\n\
-              hint: args after `--` run the training workload"
-            .to_string()
-    })?;
+    let path: String = match left.iter().find(|a| !a.starts_with('-')).cloned() {
+        Some(p) => p,
+        None => resolve_default_entry(
+            "zz profile [<file.zz>] [-- args]",
+            "provide the path to a .zz file to profile (or run inside a project)",
+        )?,
+    };
     if left.iter().any(|a| a.starts_with('-')) {
         return Err("zz profile takes no build flags\n\
             hint: instrument + optimize modes are fixed; use `zz build` for custom flags"
@@ -1698,7 +2128,7 @@ fn profile_cmd(args: &[String]) -> Result<(), String> {
             hint: install LLVM tools (apt: llvm, brew: llvm) to use `zz profile`"
             .to_string());
     }
-    let p = std::path::Path::new(path);
+    let p = std::path::Path::new(path.as_str());
     let rel = build::ReleaseOptions::default();
 
     crate::ui::header(&format!("profiling {path}"));
@@ -1838,6 +2268,30 @@ fn strip_flag_value(args: &[String], flag: &str, bare: &str) -> Vec<String> {
     out
 }
 
+/// Strip `-o <name>` / `--output <name>` (and `=` forms): `run --native`
+/// consumes the output flag itself, so the script and the positional
+/// file search must never see it or its value.
+fn strip_output_flag(args: &[String]) -> Vec<String> {
+    const FLAGS: [&str; 2] = ["-o", "--output"];
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if FLAGS.contains(&a.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        if FLAGS.iter().any(|f| a.starts_with(&format!("{f}="))) {
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
 /// Top-level entry for `zz fmt`.
 ///
 /// Modes:
@@ -1862,6 +2316,13 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
             .read_to_string(&mut source)
             .map_err(|e| format!("cannot read stdin: {e}"))?;
         let config = zz_fmt::FmtConfig::default();
+        // O(1) warm path: identical stdin seen clean before.
+        if zz_fmt::cache::is_clean(&source, &config) {
+            if !check_only {
+                print!("{source}");
+            }
+            return Ok(false);
+        }
         return match zz_fmt::format_source(&source, &config) {
             Ok(formatted) => {
                 if formatted != source {
@@ -1875,6 +2336,7 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
                     }
                     Ok(true)
                 } else {
+                    zz_fmt::cache::mark_clean(&source, &config);
                     if !check_only {
                         print!("{formatted}");
                     }
@@ -1910,7 +2372,37 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
 
     let src_refs: Vec<(&std::path::PathBuf, &str)> =
         sources.iter().map(|(p, s)| (p, s.as_str())).collect();
-    let results = zz_fmt::format_sources_parallel(&src_refs, &config);
+    // O(1) warm path: files proven clean on a previous run (same content,
+    // config, toolchain) skip the pipeline entirely. The rest format in
+    // parallel as before; newly-clean outputs are recorded for next time.
+    let todo_idx: Vec<usize> = src_refs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, s))| !zz_fmt::cache::is_clean(s, &config))
+        .map(|(i, _)| i)
+        .collect();
+    let todo_refs: Vec<(&std::path::PathBuf, &str)> =
+        todo_idx.iter().map(|&i| src_refs[i]).collect();
+    let todo_results = zz_fmt::format_sources_parallel(&todo_refs, &config);
+    let mut results: Vec<Result<String, zz_fmt::FmtError>> = Vec::with_capacity(sources.len());
+    {
+        let mut todo_iter = todo_results.into_iter();
+        let mut todo_pos = 0;
+        for (i, (_, src)) in src_refs.iter().enumerate() {
+            if todo_idx.get(todo_pos) == Some(&i) {
+                todo_pos += 1;
+                let r = todo_iter.next().expect("parallel results align");
+                if let Ok(formatted) = &r {
+                    if formatted == *src {
+                        zz_fmt::cache::mark_clean(src, &config);
+                    }
+                }
+                results.push(r);
+            } else {
+                results.push(Ok((*src).to_string()));
+            }
+        }
+    }
 
     let mut changed_any = false;
     let mut errors: Vec<String> = Vec::new();
@@ -2018,7 +2510,9 @@ fn check_or_fix_path(
         // Classify fixits by safety.
         let mut safe_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
         let mut ambiguous_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
-        let mut has_hard_errors = false;
+        // Any error-severity diagnostic fails the check (#292): fixable
+        // errors are still errors (warnings alone stay exit 0).
+        let mut has_errors = false;
 
         for e in &loaded.errors {
             for d in &e.diags {
@@ -2030,8 +2524,8 @@ fn check_or_fix_path(
                                 FixSafety::Ambiguous => ambiguous_fixits.push(fixit.clone()),
                             }
                         }
-                        if d.severity == Severity::Error && d.fixits.is_empty() {
-                            has_hard_errors = true;
+                        if d.severity == Severity::Error {
+                            has_errors = true;
                         }
                     }
                     _ => {}
@@ -2052,7 +2546,7 @@ fn check_or_fix_path(
             if !ambiguous_fixits.is_empty() {
                 any_ambiguous = true;
             }
-            if has_hard_errors {
+            if has_errors {
                 total_errors += 1;
             }
             continue;
@@ -2072,7 +2566,7 @@ fn check_or_fix_path(
                 for fixit in &ambiguous_fixits {
                     let start = fixit.span.start as usize;
                     let end = fixit.span.end as usize;
-                    if end > source.len() || start >= end {
+                    if end > source.len() || start > end {
                         continue;
                     }
                     let original = &source[start..end];
@@ -2139,6 +2633,9 @@ fn check_or_fix_path(
         }
 
         // Apply all approved fixits in one pass, right-to-left to avoid offset shifts.
+        // Zero-width spans are insertions (`start == end`): replacing an
+        // empty range inserts text. The old `start < end` guard silently
+        // skipped every insertion fixit (missing commas/closers).
         let mut applied = 0u32;
         if !approved.is_empty() {
             let mut new_source = source.clone();
@@ -2146,12 +2643,16 @@ fn check_or_fix_path(
             for fixit in &approved {
                 let start = fixit.span.start as usize;
                 let end = fixit.span.end as usize;
-                if end <= new_source.len() && start < end {
+                if end <= new_source.len() && start <= end {
                     let original = source[start..end].to_string();
                     new_source.replace_range(start..end, &fixit.replacement);
                     applied += 1;
                     let label = if fixit.safety == zz_frontend::diag::FixSafety::Safe {
-                        "fixed"
+                        if start == end {
+                            "inserted"
+                        } else {
+                            "fixed"
+                        }
                     } else {
                         "fixed (force)"
                     };
@@ -2220,16 +2721,37 @@ mod tests {
         path
     }
 
+    /// Run `zz check` (check-only) under the isolated cache env: sharing the
+    /// process-global cache env with the loader's cache-counting tests
+    /// otherwise pollutes their entry counts mid-flight.
+    fn check_isolated(path: &str) -> Result<(), String> {
+        super::loader::cache::with_isolated_cache(|| {
+            check_or_fix_path(&Some(path.to_string()), false, false, false, false)
+        })
+    }
+
+    /// Run `zz check --fix` (fix mode) under the isolated cache env.
+    fn fix_isolated(path: &str) -> Result<(), String> {
+        super::loader::cache::with_isolated_cache(|| {
+            check_or_fix_path(&Some(path.to_string()), true, false, false, false)
+        })
+    }
+
+    #[test]
+    fn fix_inserts_missing_match_comma() {
+        // Zero-width insertion fixits must apply, not silently skip.
+        let path = write_temp("match .ok(1) { .ok(n) => { n } .err(_) => { 0 } }\n");
+        let result = fix_isolated(&path.to_string_lossy());
+        assert!(result.is_ok(), "expected fix ok, got {result:?}");
+        let fixed = fs::read_to_string(&path).unwrap();
+        assert!(fixed.contains(", .err"), "comma not inserted: {fixed:?}");
+        let _ = fs::remove_file(&path);
+    }
+
     #[test]
     fn check_ok_on_valid_file() {
         let path = write_temp("x := 1 + 2\nprintln(x)\n");
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
     }
@@ -2239,13 +2761,7 @@ mod tests {
         let path = write_temp(
             "scores := [10, 20, 30]\ny := scores[1]\nz := scores[1:3]\nfunc dbl(a: int, b: int) -> int { a * b }\nw := 5 |> dbl(3)\nt := typeof(w)\n",
         );
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
     }
@@ -2253,13 +2769,7 @@ mod tests {
     #[test]
     fn check_rejects_type_error() {
         let path = write_temp("x := 1 + \"a\"\n");
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_err(), "expected type error");
         let _ = fs::remove_file(&path);
     }
@@ -2267,26 +2777,36 @@ mod tests {
     #[test]
     fn check_rejects_index_error() {
         let path = write_temp("x := 5\nx[0]\n");
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_err(), "expected index type error");
         let _ = fs::remove_file(&path);
     }
 
     #[test]
-    fn check_missing_file_errors() {
-        let result = check_or_fix_path(
-            &Some("/tmp/zz_no_such_file_zz.zz".to_string()),
-            false,
-            false,
-            false,
-            false,
+    fn check_rejects_fixable_error() {
+        // #292: an error carrying auto-fix suggestions (typo fixit) must
+        // still fail `zz check` — only warnings exit 0.
+        let path = write_temp("func main() {\n    count := 1\n    println(cout)\n}\n");
+        let result = check_isolated(&path.to_string_lossy());
+        assert!(result.is_err(), "expected fixable typo error to fail check");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_ok_on_warnings_only() {
+        // #292: warnings alone (unused variable) must stay exit 0.
+        let path = write_temp("func main() {\n    unused_xyz := 1\n}\n");
+        let result = check_isolated(&path.to_string_lossy());
+        assert!(
+            result.is_ok(),
+            "expected warnings-only to pass, got {result:?}"
         );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_missing_file_errors() {
+        let result = check_isolated("/tmp/zz_no_such_file_zz.zz");
         assert!(result.is_err(), "expected error for missing file");
     }
     #[test]
@@ -2304,13 +2824,7 @@ mod tests {
         src.push_str("func main() {\n    println(zz_perf_fn_0(1))\n}\n");
         let path = write_temp(&src);
         let start = std::time::Instant::now();
-        let result = check_or_fix_path(
-            &Some(path.to_string_lossy().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&path.to_string_lossy());
         let elapsed = start.elapsed();
         let _ = fs::remove_file(&path);
         assert!(result.is_ok(), "expected ok, got {result:?}");
@@ -2327,13 +2841,7 @@ mod tests {
         let fixtures_dir =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
         assert!(fixtures_dir.is_dir(), "tests/fixtures dir should exist");
-        let result = check_or_fix_path(
-            &Some(fixtures_dir.display().to_string()),
-            false,
-            false,
-            false,
-            false,
-        );
+        let result = check_isolated(&fixtures_dir.display().to_string());
         // The function may fail type-check on fixtures; the point is it
         // should find files and not panic/IO-error.
         match &result {

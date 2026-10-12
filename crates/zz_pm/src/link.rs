@@ -127,6 +127,40 @@ pub fn link_project(
     Ok(linked)
 }
 
+/// Check that every manifest dependency is materialized without changing
+/// anything (#323): each vendor/ link exists and points at the target the
+/// manifest + lockfile imply (path deps at their local dir, others at their
+/// CAS entry, which must itself exist). Lets `zz install` tell
+/// resolved-but-unlinked (fresh clone, wiped vendor/) apart from fully
+/// installed.
+pub fn links_valid(project_dir: &Path, manifest: &Manifest, lockfile: &Lockfile) -> bool {
+    let vendor_dir = project_dir.join("vendor");
+    for (name, spec) in &manifest.dependencies {
+        let locked = match lockfile.find(name) {
+            Some(l) => l,
+            None => return false,
+        };
+        let target = match spec {
+            crate::manifest::DepSpec::Path(path_dep) => project_dir.join(&path_dep.path),
+            _ => {
+                let cas_path = if let Some(commit) = &locked.commit {
+                    crate::paths::cas_entry(commit)
+                } else {
+                    crate::paths::cas_entry(&locked.hash)
+                };
+                if !cas_path.exists() {
+                    return false;
+                }
+                cas_path
+            }
+        };
+        if !is_valid_symlink(&vendor_dir.join(name), &target) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Re-link a project (Amendment 2: verify existing symlinks).
 ///
 /// Checks each existing symlink in vendor/ and recreates if the target
@@ -419,6 +453,80 @@ mod tests {
         let linked = link_project(&project, &manifest, &lock, LinkStrategy::Symlink).unwrap();
         assert_eq!(linked.len(), 1);
         assert!(project.join("vendor/mylib").exists());
+        std::env::remove_var("ZZ_HOME");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn links_valid_after_link_project() {
+        // #323: a linked project reads as materialized; a wiped vendor/
+        // (fresh clone) reads as needing fetch + link.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let d = tmp();
+        std::env::set_var("ZZ_HOME", &d);
+
+        let project = d.join("project");
+        let dep_dir = d.join("mylib");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&dep_dir).unwrap();
+        fs::write(dep_dir.join("zz.toml"), "[package]\nname=\"mylib\"\n").unwrap();
+
+        let mut manifest = Manifest::default();
+        manifest.dependencies.insert(
+            "mylib".to_string(),
+            DepSpec::Path(crate::manifest::PathDep {
+                path: "../mylib".to_string(),
+            }),
+        );
+
+        let mut lock = Lockfile::new();
+        lock.upsert(LockedDep {
+            name: "mylib".to_string(),
+            version: "*".to_string(),
+            source: "path".to_string(),
+            hash: "deadbeef".to_string(),
+            commit: None,
+            native: None,
+        });
+
+        link_project(&project, &manifest, &lock, LinkStrategy::Symlink).unwrap();
+        assert!(links_valid(&project, &manifest, &lock));
+
+        fs::remove_dir_all(project.join("vendor")).unwrap();
+        assert!(!links_valid(&project, &manifest, &lock));
+
+        std::env::remove_var("ZZ_HOME");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn links_valid_false_without_cas_entry() {
+        // #323: a registry pin with no CAS entry is not materialized —
+        // install must fall through to fetch, not short-circuit.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let d = tmp();
+        std::env::set_var("ZZ_HOME", &d);
+
+        let project = d.join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        let mut manifest = Manifest::default();
+        manifest
+            .dependencies
+            .insert("mylib".to_string(), DepSpec::Version("^1.0".to_string()));
+
+        let mut lock = Lockfile::new();
+        lock.upsert(LockedDep {
+            name: "mylib".to_string(),
+            version: "1.0.0".to_string(),
+            source: "registry+https://example.com/mylib#1.0.0".to_string(),
+            hash: "abc123".to_string(),
+            commit: None,
+            native: None,
+        });
+
+        assert!(!links_valid(&project, &manifest, &lock));
+
         std::env::remove_var("ZZ_HOME");
         let _ = fs::remove_dir_all(&d);
     }

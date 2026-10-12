@@ -1134,7 +1134,7 @@ fn resolve_obj_type(program: &Program, cr: &CheckResult, name: &str) -> Option<T
     }
     // 3. Check struct name.
     if let Some(sig) = cr.structs.get(name) {
-        // Generic parameters stay symbolic in hovers (`Box[T]`).
+        // Generic parameters stay symbolic in hovers (`Box<T>`).
         let args = sig
             .generics
             .iter()

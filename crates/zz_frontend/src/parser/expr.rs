@@ -396,7 +396,12 @@ impl<'a> Parser<'a> {
                 }
                 // Field access on a non-trivial base: `makePoint().x`. Pure
                 // identifier chains are consumed as `Path` in `parse_primary`.
+                // A dot that opens the next match arm (`... .err(_) => ...`)
+                // must not chain: `=>` never continues an expression.
                 TokenKind::Dot if self.peek_kind_at(1) == TokenKind::Ident => {
+                    if self.dot_starts_match_arm() {
+                        break;
+                    }
                     self.advance(); // `.`
                     let member = self.advance(); // identifier
                     let span = expr.span().join(member.span);
@@ -494,7 +499,7 @@ impl<'a> Parser<'a> {
 
     /// Parse call arguments: `(pos1, pos2, name1: val1, name2: val2)`.
     /// Returns `(positional_args, named_args)`.
-    pub(crate) fn parse_call_args(&mut self) -> (Vec<Expr>, Vec<(String, Expr)>) {
+    pub(crate) fn parse_call_args(&mut self) -> (Vec<Expr>, Vec<(Ident, Expr)>) {
         let mut args = Vec::new();
         let mut named = Vec::new();
         if self.at(TokenKind::RParen) {
@@ -507,7 +512,11 @@ impl<'a> Parser<'a> {
             let is_named = self.at(TokenKind::Ident)
                 && matches!(self.peek_kind_at(1), TokenKind::Colon | TokenKind::Assign);
             if is_named {
-                let name = self.advance().text.into_owned();
+                let tok = self.advance();
+                let name = Ident {
+                    name: tok.text.into_owned(),
+                    span: tok.span,
+                };
                 self.advance(); // consume `:` or `=`
                 let value = self.parse_expr();
                 named.push((name, value));
@@ -1028,13 +1037,18 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_closure(&mut self) -> Expr {
         let pipe_tok = self.advance(); // `|`
         let mut params = Vec::new();
+        // Reclaim `|` from union parsing for the parameter list: a pipe at
+        // the top level of a parameter type (including nested function
+        // returns like `func(int) -> int`) closes the list. Unions stay
+        // forbidden there (genuinely ambiguous); delimited positions keep
+        // full unions. Save/restore: closures nest.
+        let save_no_union = self.no_union;
+        self.no_union = true;
         if !self.at(TokenKind::Pipe) {
             loop {
                 let name = self
                     .expect_ident()
                     .unwrap_or_else(|| dummy_ident(self.peek().span));
-                // Base type only: `|` closes the parameter list, so unions
-                // are not allowed in closure parameter types.
                 let ty = if self.eat(TokenKind::Colon) {
                     Some(self.parse_type_base())
                 } else {
@@ -1060,6 +1074,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        self.no_union = save_no_union;
         if !self.eat(TokenKind::Pipe) {
             self.error_here("expected `|` to close closure parameters");
         }
@@ -1386,6 +1401,20 @@ impl<'a> Parser<'a> {
             }
             if self.at(TokenKind::RBrace) {
                 break;
+            }
+            // Sherlock: `.name` here almost always starts the next arm
+            // whose separator was forgotten (`{ n } .err(_) => ...`) —
+            // name it, offer the comma, and keep parsing arms instead of
+            // dropping the rest of the match.
+            if self.at(TokenKind::Dot) && self.peek_kind_at(1) == TokenKind::Ident {
+                let dot = self.peek().span;
+                let at = Span::new(dot.start, dot.start);
+                self.errors.push(
+                    error_at("expected `,` or newline between match arms", dot)
+                        .with_note("separate arms with a comma or put each arm on its own line")
+                        .with_fixit(FixIt::safe(at, ", ".to_string(), "insert missing comma")),
+                );
+                continue;
             }
             self.error_here("expected `,` or `}` after match arm");
             self.skip_to_rbrace();

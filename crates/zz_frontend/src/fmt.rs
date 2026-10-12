@@ -98,7 +98,7 @@ impl<'a> FmtCtx<'a> {
                             if i > 0 || !dec.args.is_empty() {
                                 self.write_str(", ");
                             }
-                            self.write_str(aname);
+                            self.write_str(&aname.name);
                             self.write_str(": ");
                             self.fmt_expr(arg, source);
                         }
@@ -522,14 +522,14 @@ impl<'a> FmtCtx<'a> {
             TyKind::Named(name, generics) => {
                 self.write_str(name);
                 if !generics.is_empty() {
-                    self.write_str("[");
+                    self.write_str("<");
                     for (i, g) in generics.iter().enumerate() {
                         if i > 0 {
                             self.write_str(", ");
                         }
                         self.fmt_ty(g, _source);
                     }
-                    self.write_str("]");
+                    self.write_str(">");
                 }
             }
             TyKind::Array(inner) => {
@@ -629,7 +629,7 @@ impl<'a> FmtCtx<'a> {
                     if i > 0 || !args.is_empty() {
                         self.write_str(", ");
                     }
-                    self.write_str(name);
+                    self.write_str(&name.name);
                     self.write_str(": ");
                     self.fmt_expr(arg, source);
                 }

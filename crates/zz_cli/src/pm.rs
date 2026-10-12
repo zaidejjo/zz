@@ -27,14 +27,14 @@ pub fn init(args: &[String]) -> Result<(), String> {
     let src_dir = dir.join("src");
     if !src_dir.join("main.zz").exists() {
         std::fs::create_dir_all(&src_dir).map_err(|e| format!("cannot create src/: {e}"))?;
-        let content = template_content(template.as_deref());
+        let content = zz_pm::manifest::Manifest::starter_content(template.as_deref());
         std::fs::write(src_dir.join("main.zz"), content)
             .map_err(|e| format!("cannot write src/main.zz: {e}"))?;
     }
 
     println!("initialized project `{}` in {}", name, dir.display());
     println!("  zz.toml: created");
-    println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
+    println!("  .gitignore: ensured (vendor/, build/, bin/)");
     if !dir.join("src/main.zz").exists() {
         println!("  src/main.zz: created");
     }
@@ -85,7 +85,7 @@ pub fn new(args: &[String]) -> Result<(), String> {
     println!("created project `{name}` at {}", project_dir.display());
     println!("  zz.toml: created");
     println!("  src/main.zz: created");
-    println!("  .gitignore: ensured (vendor/, build/, src/bin/)");
+    println!("  .gitignore: ensured (vendor/, build/, bin/)");
 
     if no_git {
         return Ok(());
@@ -363,11 +363,36 @@ fn pascal_case(name: &str) -> String {
 
 /// Handle `zz clean [--deps]`: remove build outputs (`bin/`, `build/`,
 /// `src/bin/`); with `--deps` also `vendor/` + `zz.lock`. Explicit flags
-/// only — never prompts, script-safe.
+/// only — never prompts, script-safe. Operates on the project root when
+/// invoked inside one (outputs live at the root regardless of the
+/// invocation subdir); standalone otherwise.
 pub fn clean(args: &[String]) -> Result<(), String> {
     let with_deps = args.iter().any(|a| a == "--deps");
-    let dir = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
-    clean_in(&dir, with_deps)
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let dir = crate::loader::find_project_root(&cwd).unwrap_or(cwd);
+    clean_in(&dir, with_deps)?;
+    print_global_cache_hint();
+    Ok(())
+}
+
+/// One-line global cache status so `zz clean` never looks like a no-op
+/// while the build cache holds real weight: size plus the reclaim
+/// command. Silent when the cache is absent or empty.
+fn print_global_cache_hint() {
+    let cache_dir = zz_pm::paths::build_cache_dir();
+    if !cache_dir.exists() {
+        return;
+    }
+    let (entries, bytes) = zz_pm::paths::dir_usage(&cache_dir);
+    if entries == 0 {
+        return;
+    }
+    println!(
+        "global build cache: {} in {entries} entries ({})",
+        crate::ui::human_bytes(bytes),
+        cache_dir.display()
+    );
+    println!("hint: `zz cache clean` reclaims it (rebuilds on demand)");
 }
 
 /// `zz clean` in an explicit directory (split for tests — no cwd games).
@@ -781,8 +806,13 @@ pub fn install(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())?
             {
                 println!("path dependency content changed, re-resolving...");
+            } else if !zz_pm::link::links_valid(&dir, &manifest, lock) {
+                // #323: resolved but not materialized (fresh clone, wiped
+                // vendor/, GC'd CAS) — fall through to fetch + link.
+                println!("vendor links missing or stale, fetching and linking...");
             } else {
                 println!("dependencies unchanged (lockfile is up to date)");
+                crate::prewarm_run_cache(&dir);
                 return Ok(());
             }
         }
@@ -798,6 +828,10 @@ pub fn install(args: &[String]) -> Result<(), String> {
     let opts = zz_pm::resolve::ResolveOptions::remote(&registry_base_from(args));
     let resolved = zz_pm::resolve::resolve_with(&manifest, existing_lock.as_ref(), &dir, &opts)
         .map_err(|e| e.to_string())?;
+    // #266: surface manifest-wins source decisions (stale cross-source pins).
+    for note in &resolved.notes {
+        println!("note: {note}");
+    }
 
     // Build new lockfile
     let mut lock = zz_pm::lock::Lockfile::new();
@@ -930,6 +964,10 @@ pub fn install(args: &[String]) -> Result<(), String> {
         println!("native audit recorded in zz.lock");
     }
     println!("hint: run `zz build` to compile");
+    // Cargo-style: compile the entry now so the first `zz run` hits the
+    // run cache instead of paying parse+check+compile (even-cold speed).
+    // Best-effort and silent when warm; never fails the install.
+    crate::prewarm_run_cache(&dir);
     Ok(())
 }
 
@@ -989,6 +1027,11 @@ fn project_from_dir(target: &std::path::Path) -> Result<(PathBuf, PathBuf, Strin
     })?;
     let name = manifest.package.name.clone();
     check_bin_name(&name)?;
+    // Configured `[package] entry` wins (validated loudly); otherwise the
+    // conventional entry, with install-flavored guidance when absent.
+    if let Some(entry) = manifest.entry_path(target)? {
+        return Ok((target.to_path_buf(), entry, name));
+    }
     let entry = ["src/main.zz", "main.zz"]
         .iter()
         .map(|c| target.join(c))
@@ -996,7 +1039,7 @@ fn project_from_dir(target: &std::path::Path) -> Result<(PathBuf, PathBuf, Strin
         .ok_or_else(|| {
             format!(
                 "no entry file in `{}`\n\
-                  hint: expected src/main.zz or main.zz",
+                  hint: expected src/main.zz or main.zz (or set [package] entry)",
                 target.display()
             )
         })?;
@@ -1238,12 +1281,18 @@ pub fn cache(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("clean") | Some("clear") => {
-            let cache_dir = zz_pm::paths::cache_objects_dir();
+            // The whole build-cache tree: native binary entries, precompiled
+            // runtime archives, and per-module objects — all rebuildable.
+            let cache_dir = zz_pm::paths::build_cache_dir();
             if cache_dir.exists() {
-                let count = count_entries(&cache_dir);
+                let (entries, bytes) = zz_pm::paths::dir_usage(&cache_dir);
                 std::fs::remove_dir_all(&cache_dir)
                     .map_err(|e| format!("cannot remove cache: {e}"))?;
-                println!("cleared {count} cache entries from {}", cache_dir.display());
+                println!(
+                    "cleared build cache: {entries} entries, freed {} ({})",
+                    crate::ui::human_bytes(bytes),
+                    cache_dir.display()
+                );
             } else {
                 println!("no cache to clear");
             }
@@ -1582,6 +1631,18 @@ pub fn update(args: &[String]) -> Result<(), String> {
                                 println!("    {name}: {current} → {picked}");
                             } else {
                                 println!("    {name} is up to date ({current})");
+                                // #295: a newer release exists but the manifest
+                                // requirement excludes it — name the blocker
+                                // instead of no-op silence that contradicts
+                                // `zz outdated`.
+                                if !info.metadata.latest.is_empty()
+                                    && info.metadata.latest != picked
+                                {
+                                    println!(
+                                        "    note: {} exists but requirement `{req}` excludes it — edit zz.toml to widen it",
+                                        info.metadata.latest
+                                    );
+                                }
                             }
                         }
                         Err(e) => eprintln!("    warning: {e}"),
@@ -1679,6 +1740,24 @@ fn locked_dep_manifest(
     None
 }
 
+/// Pure status for one `zz outdated` row (#295): `locked` is the pinned
+/// version, `wanted` the newest satisfying the manifest requirement,
+/// `latest` the newest on the registry.
+fn outdated_status(locked: &str, wanted_ver: &str, latest: &str) -> &'static str {
+    if wanted_ver == "∅" {
+        "no match"
+    } else if locked == latest {
+        "up to date"
+    } else if locked != wanted_ver {
+        // A newer version satisfies the requirement: `zz update` moves here.
+        "update available"
+    } else {
+        // Locked == wanted but latest is newer: the requirement itself
+        // blocks the update — `zz update` cannot move here.
+        "outside requirement"
+    }
+}
+
 /// Handle `zz outdated`: locked vs wanted vs latest per registry dep.
 pub fn outdated(args: &[String]) -> Result<(), String> {
     let (_dir, manifest, lock) = load_manifest_and_lock()?;
@@ -1739,15 +1818,7 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
         let wanted_ver = zz_pm::remote::pick_version(&info.metadata.versions, req)
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "∅".to_string());
-        let status = if wanted_ver == "∅" {
-            "no match"
-        } else if locked == latest {
-            "up to date"
-        } else if locked == wanted_ver {
-            "update available"
-        } else {
-            "behind requirement"
-        };
+        let status = outdated_status(&locked, &wanted_ver, &latest);
         rows.push((
             (*name).clone(),
             locked,
@@ -1759,11 +1830,24 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
     print!("{}", format_outdated_table(&rows));
     if rows.iter().any(|r| r.4 == "no match") {
         println!("hint: `zz info <pkg>` lists the available versions");
-    } else if rows
-        .iter()
-        .any(|r| r.4 == "update available" || r.4 == "behind requirement")
-    {
-        println!("hint: run `zz update [pkg]` to re-resolve, then `zz install`");
+    } else {
+        let blocked: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.4 == "outside requirement")
+            .map(|r| r.0.as_str())
+            .collect();
+        if !blocked.is_empty() {
+            println!(
+                "hint: {} {} pinned by {} requirement — edit zz.toml to widen {}, then run `zz update`",
+                blocked.join(", "),
+                if blocked.len() == 1 { "is" } else { "are" },
+                if blocked.len() == 1 { "its" } else { "their" },
+                if blocked.len() == 1 { "it" } else { "them" },
+            );
+        }
+        if rows.iter().any(|r| r.4 == "update available") {
+            println!("hint: run `zz update [pkg]` to re-resolve, then `zz install`");
+        }
     }
     Ok(())
 }
@@ -2161,28 +2245,6 @@ fn parse_pkg_spec(spec: &str) -> (String, Option<String>) {
     }
 }
 
-/// Starter content for `zz init` / `zz new`.
-fn template_content(template: Option<&str>) -> &'static str {
-    match template {
-        Some("lib") => {
-            "/// Add one to a number.\npub func add_one(n: int) -> int {\n    n + 1\n}\n"
-        }
-        Some("web") => {
-            "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"
-        }
-        _ => {
-            "func main() {\n    println(\"Hello, ZZ!\")\n}\n"
-        }
-    }
-}
-
-/// Count entries in a directory (non-recursive).
-fn count_entries(dir: &Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).count())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2227,6 +2289,22 @@ mod tests {
         // Aligned: status column starts at the same offset.
         let status_off = |l: &str| l.find("update available").or_else(|| l.find("up to date"));
         assert_eq!(status_off(lines[1]), status_off(lines[2]));
+    }
+
+    #[test]
+    fn outdated_status_distinguishes_blocked_updates() {
+        // #295: locked == wanted != latest is not "update available" — the
+        // requirement itself blocks it and `zz update` cannot move.
+        assert_eq!(outdated_status("0.4.1", "0.4.1", "0.4.1"), "up to date");
+        assert_eq!(
+            outdated_status("0.2.0", "0.2.5", "0.4.1"),
+            "update available"
+        );
+        assert_eq!(
+            outdated_status("0.2.0", "0.2.0", "0.4.1"),
+            "outside requirement"
+        );
+        assert_eq!(outdated_status("0.2.0", "∅", "0.4.1"), "no match");
     }
 
     #[test]

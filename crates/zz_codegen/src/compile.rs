@@ -583,6 +583,11 @@ pub struct BuildOptions {
     /// tables + a static initializer calling `zz_embed_register`, served
     /// at runtime through `fs.embedfs()`. Empty = no embedding.
     pub embed_assets: Vec<EmbedAsset>,
+    /// Verbose phase timings (`--verbose`): print load/check/lower/compile
+    /// wall times to stderr. Display-only: never affects clang flags and
+    /// deliberately excluded from the cache fingerprint, so timed builds
+    /// share cache entries with silent ones.
+    pub verbose: bool,
 }
 
 impl BuildOptions {
@@ -606,6 +611,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -629,6 +635,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -652,6 +659,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -675,6 +683,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -699,6 +708,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -722,6 +732,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -745,6 +756,7 @@ impl BuildOptions {
             plugin_artifacts: Vec::new(),
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
+            verbose: false,
         }
     }
 }
@@ -982,10 +994,29 @@ pub fn build_with(
         .arg("-lm")
         // sqlz: prepared-statement FFI needs sqlite3 headers.
         .arg("-DZZ_HAS_SQLITE3");
+    push_link_inputs(&mut cmd, &opts, target, clang, output_path)?;
+    let out = cmd.output().map_err(BuildError::Io)?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        return Err(BuildError::CompileFailed { stderr });
+    }
+    Ok(clang.clone())
+}
+
+/// Shared link inputs for single-TU and multi-TU builds: precompiled
+/// runtime archive, Rust native runtime, plugin artifacts, conditional
+/// system libs. Object files / TU sources are added by the caller.
+fn push_link_inputs(
+    cmd: &mut Command,
+    opts: &BuildOptions,
+    target: Option<&str>,
+    clang: &Clang,
+    output_path: &std::path::Path,
+) -> Result<(), BuildError> {
     // Precompiled C runtime archive: the runtime sources (core.c, strings.c,
     // collections.c, json.c, memory.c) are compiled once and cached. The
     // generated C only contains headers (declarations) + user code.
-    match crate::cache::ensure_rt_a(&opts, clang, target) {
+    match crate::cache::ensure_rt_a(opts, clang, target) {
         Ok(rt_a) => {
             if let Some(parent) = rt_a.parent() {
                 cmd.arg(format!("-L{}", parent.display()));
@@ -1067,7 +1098,216 @@ pub fn build_with(
         }
         cmd.arg("-Wl,--no-as-needed");
     }
+    Ok(())
+}
 
+/// Multi-TU build: compile each unit TU to an object file (serially;
+/// parallel fan-out is a planned follow-up), then link all objects with
+/// the same inputs as [`build_with`]. `units` are (namespace, code) pairs;
+/// `header` is prepended to every TU. Link-only flags (`-s`, `-Wl,*`,
+/// `-static`) are withheld from the `-c` steps and applied at link.
+/// Unique file stem for a unit namespace: sanitized, with a numeric
+/// suffix on collision (`a-b` and `a_b` both sanitize to `a_b`).
+pub fn unit_file_stem(ns: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let base: String = ns
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let base = if base.is_empty() {
+        "_unit".to_string()
+    } else {
+        base
+    };
+    let mut stem = base.clone();
+    let mut n = 1u32;
+    while used.contains(&stem) {
+        n += 1;
+        stem = format!("{base}_{n}");
+    }
+    used.insert(stem.clone());
+    stem
+}
+
+/// Cache slug for one unit object: runtime/toolchain base + full option
+/// fingerprint + header + unit code. Same bytes in, same object out —
+/// shared across projects; any signature change alters the header and
+/// misses (correctness over hit rate, matching whole-program behavior).
+fn unit_obj_slug(rt_base: &str, flags_hash: u64, header: &str, code: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rt_base.hash(&mut h);
+    flags_hash.hash(&mut h);
+    header.hash(&mut h);
+    code.hash(&mut h);
+    format!("u{:016x}", h.finish())
+}
+
+/// A cached object is usable when it is a non-empty file.
+fn is_usable_object(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
+}
+
+/// Store a fresh object into the cache (atomic tmp + rename; best effort —
+/// a failed store only costs a recompile next time, never correctness).
+fn store_object(cached: &Path, obj: &Path) {
+    let Some(parent) = cached.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let tmp = parent.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        cached
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    if std::fs::copy(obj, &tmp).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&tmp, cached);
+}
+
+pub fn compile_units(
+    header: &str,
+    units: &[(String, String)],
+    output_path: &Path,
+    opts: &BuildOptions,
+    target: Option<&str>,
+    clang: &Clang,
+) -> Result<Clang, BuildError> {
+    validate(opts, target)?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmpdir = std::env::temp_dir().join(format!("zz-units-{}-{uniq}", std::process::id()));
+    std::fs::create_dir_all(&tmpdir)?;
+    let dump_dir = std::env::var("ZZ_DUMP_C").ok().map(PathBuf::from);
+    // Per-unit object cache (`~/.zz/cache/objects/units/<slug>/`): a TU's
+    // object depends only on header + unit code + flags + toolchain, so
+    // unchanged modules skip clang entirely — shared across projects when
+    // the bytes match. Body-only edits keep the header identical, so only
+    // edited units miss; any signature/struct change alters the header and
+    // conservatively rebuilds everything (same as today's whole-program
+    // behavior, never stale). Cleared with the rest of the tree by
+    // `zz cache clean`.
+    let obj_base = zz_pm::paths::cache_objects_dir().join("units");
+    let rt_base = crate::cache::cache_key(target, opts.optimize, clang);
+    let flags_hash = opts.fingerprint_with(target);
+    let mut staged: Vec<(PathBuf, PathBuf, Option<PathBuf>)> = Vec::new();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (ns, code) in units {
+        let stem = unit_file_stem(ns, &mut used);
+        let tu = crate::lower::strip_quoted_includes(&format!("{header}\n{code}"));
+        let slug = unit_obj_slug(&rt_base, flags_hash, header, code);
+        let cached = obj_base.join(&slug).join(format!("{stem}.o"));
+        if is_usable_object(&cached) {
+            staged.push((PathBuf::new(), cached, None));
+            continue;
+        }
+        let src_path = tmpdir.join(format!("{stem}.c"));
+        std::fs::write(&src_path, &tu)?;
+        if let Some(dir) = &dump_dir {
+            let _ = std::fs::write(dir.join(format!("{stem}.c")), &tu);
+        }
+        staged.push((src_path, tmpdir.join(format!("{stem}.o")), Some(cached)));
+    }
+    // Bounded pool: clang -O3 TUs are memory-heavy; uncapped rayon on big
+    // CI machines would OOM. 8 caps parallelism while keeping all
+    // mainstream machines saturated.
+    let jobs = std::cmp::min(staged.len(), 8);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs.max(1))
+        .thread_name(|i| format!("zz-cc-{i}"))
+        .build()
+        .map_err(|e| BuildError::Io(std::io::Error::other(format!("{e}"))))?;
+    let cflags = clang_flags(opts, if clang.zig { None } else { target });
+    let cache_hits = staged
+        .iter()
+        .filter(|(s, _, _)| s.as_os_str().is_empty())
+        .count();
+    if opts.verbose {
+        eprintln!(
+            "zz: timing units_cache={}/{} hits",
+            cache_hits,
+            staged.len()
+        );
+    }
+    let results: Vec<Result<PathBuf, BuildError>> = pool.install(|| {
+        use rayon::prelude::*;
+        staged
+            .par_iter()
+            .map(|(src_path, obj, cached)| {
+                // Cache hit: no source staged, object already on disk.
+                if src_path.as_os_str().is_empty() {
+                    return Ok(obj.clone());
+                }
+                let mut cmd = Command::new(&clang.path);
+                if clang.zig {
+                    cmd.arg("cc");
+                    if let Some(t) = target {
+                        cmd.arg("-target").arg(t);
+                    }
+                }
+                for flag in &cflags {
+                    if clang.zig && flag.starts_with("--target=") {
+                        continue;
+                    }
+                    if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
+                        continue;
+                    }
+                    cmd.arg(flag);
+                }
+                cmd.arg("-c")
+                    .arg(src_path)
+                    .arg("-o")
+                    .arg(obj)
+                    .arg("-DZZ_HAS_SQLITE3");
+                let out = cmd.output().map_err(BuildError::Io)?;
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                    return Err(BuildError::CompileFailed { stderr });
+                }
+                // Publish the fresh object for future builds (same key =
+                // same bytes). The tmpdir object stays for this link.
+                if let Some(dst) = cached {
+                    store_object(dst, obj);
+                }
+                Ok(obj.clone())
+            })
+            .collect()
+    });
+    let mut objs: Vec<PathBuf> = Vec::with_capacity(results.len());
+    for r in results {
+        objs.push(r?);
+    }
+    let mut cmd = Command::new(&clang.path);
+    if clang.zig {
+        cmd.arg("cc");
+        if let Some(t) = target {
+            cmd.arg("-target").arg(t);
+        }
+    }
+    for flag in clang_flags(opts, if clang.zig { None } else { target }) {
+        if clang.zig && flag.starts_with("--target=") {
+            continue;
+        }
+        cmd.arg(flag);
+    }
+    cmd.arg("-o").arg(output_path);
+    for obj in &objs {
+        cmd.arg(obj);
+    }
+    cmd.arg("-lm");
+    push_link_inputs(&mut cmd, opts, target, clang, output_path)?;
     let out = cmd.output().map_err(BuildError::Io)?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -1376,6 +1616,46 @@ mod tests {
         assert!(win.iter().any(|f| f == "-lws2_32"));
         let native = clang_flags(&release_opts(), None);
         assert!(!native.iter().any(|f| f == "-lws2_32"));
+    }
+
+    #[test]
+    fn verbose_excluded_from_fingerprint() {
+        // Display-only flag: timed and silent builds must share cache
+        // entries, or --verbose would force full rebuilds.
+        let mut a = BuildOptions::release();
+        let mut b = BuildOptions::release();
+        a.verbose = true;
+        assert!(
+            !clang_flags(&a, None).iter().any(|f| f.contains("verbose")),
+            "verbose must not leak into clang flags"
+        );
+        assert_eq!(
+            a.fingerprint(),
+            b.fingerprint(),
+            "verbose must not bust the cache"
+        );
+        b.verbose = true;
+        assert_eq!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn unit_obj_slug_is_content_keyed() {
+        let a = unit_obj_slug("rt", 7, "H", "code-a");
+        assert_eq!(a, unit_obj_slug("rt", 7, "H", "code-a"));
+        assert_ne!(a, unit_obj_slug("rt", 7, "H", "code-b"));
+        assert_ne!(a, unit_obj_slug("rt", 7, "H2", "code-a"));
+        assert_ne!(a, unit_obj_slug("rt", 8, "H", "code-a"));
+    }
+
+    #[test]
+    fn unit_file_stems_are_unique_and_sanitized() {
+        use std::collections::HashSet;
+        let mut used = HashSet::new();
+        assert_eq!(unit_file_stem("walker", &mut used), "walker");
+        // `a-b` and `a_b` sanitize identically: suffix on collision.
+        assert_eq!(unit_file_stem("a-b", &mut used), "a_b");
+        assert_eq!(unit_file_stem("a_b", &mut used), "a_b_2");
+        assert_eq!(unit_file_stem("", &mut used), "_unit");
     }
 
     #[test]

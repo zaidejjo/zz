@@ -1,5 +1,8 @@
 //! `std.net` — Low-level TCP networking.
 
+pub(crate) mod tls;
+pub(crate) mod unix;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
@@ -7,6 +10,30 @@ use std::time::Duration;
 
 use crate::natives::{arg, expect_int, expect_str};
 use zz_runtime::{EvalError, Interp, Span, Value};
+
+/// Bind a TCP listener with `SO_REUSEADDR` set: a just-stopped server
+/// (graceful drain, `zz run --watch` restarts) rebinds its port even with
+/// connections lingering in `TIME_WAIT`. Mirrors the C runtime, which
+/// already sets `SO_REUSEADDR` on both listener paths — VM and native
+/// must agree, or restarts behave differently per backend.
+pub(crate) fn bind_reusable<A: std::net::ToSocketAddrs>(
+    addr: A,
+) -> std::io::Result<std::net::TcpListener> {
+    let addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no addresses found")
+    })?;
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, None)?;
+    sock.set_reuse_address(true)?;
+    sock.bind(&addr.into())?;
+    // Same backlog as `std::net::TcpListener::bind`.
+    sock.listen(128)?;
+    Ok(sock.into())
+}
 
 /// `net.tcp_connect(addr: str, timeout_ms: int) -> Result<tcp.stream, str>`
 pub(crate) fn tcp_connect(
@@ -45,7 +72,7 @@ pub(crate) fn tcp_listen(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let addr = expect_str(args, 0, "std.net.tcp_listen")?;
-    match std::net::TcpListener::bind(&addr) {
+    match bind_reusable(addr.as_str()) {
         Ok(listener) => Ok(Value::Result(Box::new(Ok(Value::TcpListener(Arc::new(
             Mutex::new(listener),
         )))))),
@@ -422,6 +449,46 @@ pub(crate) fn set_write_timeout(
         Ok(()) => Ok(Value::Result(Box::new(Ok(Value::Bool(true))))),
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
             format!("set_write_timeout failed: {e}").into(),
+        ))))),
+    }
+}
+
+/// `net.tcp_read_exact(stream: tcp.stream, n: int) -> Result<bytes, str>`
+///
+/// Loops until exactly `n` bytes arrive (RESP bulk reads, framing tests).
+/// Single `tcp_read_bytes` may return short; this never does.
+pub(crate) fn tcp_read_exact(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let stream = match arg(args, 0, "std.net.tcp_read_exact")? {
+        Value::TcpStream(s) => s.clone(),
+        other => {
+            return Err(EvalError::new(
+                format!("std.net.tcp_read_exact: expected a tcp.stream, found `{other}`"),
+                span,
+            ))
+        }
+    };
+    let n = expect_int(args, 1, "std.net.tcp_read_exact")?;
+    if n <= 0 || n > 64 * 1024 * 1024 {
+        return Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("tcp_read_exact: bad length {n} (want 1..67108864)").into(),
+        )))));
+    }
+    let mut lock = stream
+        .lock()
+        .map_err(|e| EvalError::new(format!("std.net.tcp_read_exact: lock poisoned: {e}"), span))?;
+    let mut out = vec![0u8; n as usize];
+    // `TcpStream` behind a `MutexGuard` derefs to `TcpStream`; `read_exact`
+    // comes from the `Read` trait (already imported).
+    match lock.read_exact(&mut out) {
+        Ok(()) => Ok(Value::Result(Box::new(Ok(Value::Bytes(Box::new(
+            zz_runtime::BytesData::from_vec(out),
+        )))))),
+        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
+            format!("tcp_read_exact failed: {e}").into(),
         ))))),
     }
 }

@@ -8,7 +8,6 @@ Complete grammar and syntax guide for the ZZ language.
 
 ```zz
 // Line comment
-# Alternative line comment
 /* Block comment
    can span multiple lines */
 ```
@@ -20,7 +19,7 @@ Identifiers start with a letter or underscore, followed by letters, digits, or u
 ```zz
 name := "ZZ"
 _private := 42
-camelCase := true
+pascal_case := true
 ```
 
 ### Keywords
@@ -128,7 +127,7 @@ payload construction (`Token.IntLit(1).add(2)` fills the payload with
 `1`, calls `add` with `2`).
 
 Generic enums take plain parameters and name their arguments at use
-sites (`Box[int]`), exactly like generic structs:
+sites (`Box<int>`), exactly like generic structs:
 
 ```zz
 enum Box<T> {
@@ -139,8 +138,18 @@ enum Box<T> {
 b: Box<int> = Box.E
 ```
 
-Known V1 limits: match guards in native builds only see scalar
-payloads and outer bindings (the VM is fully general).
+Match guards (`n if n > 0 =>`) accept the arm's pattern bindings,
+literals, and operator combinations — on both engines. Anything else
+(calls, strings, field/index access) is a check-time error naming the
+exact subexpression, so VM and native builds never diverge silently.
+Outer variables and helper calls belong in the arm body:
+
+```zz
+match x {
+    .some(n) => if n > limit && is_valid(n) { println("ok") } else { println("bad") },
+    .none => println("nothing"),
+}
+```
 
 ## Functions
 
@@ -655,12 +664,12 @@ impl Box<T> {
     }
 }
 
-b := Box{ v: 42 }      // Box[int]
+b := Box{ v: 42 }      // Box<int>
 println(b.get())       // 42
-s := Box{ v: "hi" }    // Box[str]
+s := Box{ v: "hi" }    // Box<str>
 
 struct Pair<A, B> { a: A, b: B }
-p := Pair{ a: 1, b: "s" }   // Pair[int, str]
+p := Pair{ a: 1, b: "s" }   // Pair<int, str>
 ```
 
 Rules:
@@ -731,6 +740,10 @@ match x {
 }
 ```
 
+Separate arms with a comma or a newline — a missing separator names
+itself (`expected `,` or newline between match arms`) and `zz fix`
+inserts the comma.
+
 ### Literal Patterns
 
 ```zz
@@ -749,6 +762,36 @@ match .ok(5) {
     .err(e) => 0,
 }
 ```
+
+`.ok`, `.err`, and `.some` always carry a payload, so their patterns
+require an argument — a bare `.ok` / `.err` is a type error. Use `_`
+to ignore the payload (`.ok(_)`, `.err(e)`). Only payloadless
+variants (`.none`) match bare. `zz fix` rewrites bare patterns
+automatically.
+
+### Must-use Results
+
+A `Result` or `Option` used as a bare statement is a warning, not an
+error — the value (and any error) is silently discarded:
+
+```zz
+fs.write(path, data)   // warning: unused `Result`
+```
+
+Handle it (`match`), propagate it (`?`), or ignore it explicitly
+(`_ := fs.write(path, data)`). Block tails are values, not discards,
+so `-> Result` function bodies never warn. Loop-body tails and
+`defer` expressions do warn — their values are discarded too.
+
+Type mismatches name the fix direction: argument errors name the
+expected parameter (``parameter `greeting` expects `str` ``), and
+annotation errors suggest the corrected annotation.
+
+### Dead Arms
+
+Arms after a catch-all arm (`_` or a bare binding) can never run and
+warn as unreachable. A guarded catch-all (`_ if cond =>`) does not
+count — the guard may fail and fall through.
 
 ### Nested Patterns
 
@@ -801,6 +844,27 @@ println(math.abs(-5))    // 5
 import std.str
 println(str.to_upper("hello"))    // "HELLO"
 ```
+
+### Package Imports
+
+Inside a project (a directory tree with `zz.toml`), the package name
+maps to `src/` from any file — so `tests/` can import `src/` modules
+without fragile `../src/...` paths:
+
+```zz
+import app.math               // <project-root>/src/math.zz, used as math.*
+import app.math(add as f)     // selective: bare `f`
+import app.utils.string_helpers as sh
+import app                     // <project-root>/src/main.zz, used as app.*
+```
+
+Rules: precedence is `std` > package > registry dependency >
+relative file; `-` and `_` spellings agree (`my-app` ⇔ `my_app`).
+One file may be imported under several namespaces at once
+(`import tui.keys` in one module, `import tui.keys as tkeys` in
+another): the first binding wins as canonical and alias references
+rewrite through it, so values and types keep one identity. Two
+*different* files under one namespace stay an error — alias one side.
 
 ## Blocks as Expressions
 

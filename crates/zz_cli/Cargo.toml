@@ -31,5 +31,12 @@ hex = { workspace = true }
 serde = { workspace = true }
 base64 = { workspace = true }
 ureq = { workspace = true }
+# `zz run --watch` supervision: signal flags (all platforms).
+signal-hook = "0.3"
 tar = { workspace = true }
 lzma-rs = { workspace = true }
+
+# `zz run --watch`: SIGTERM delivery to the supervised child on unix
+# (Windows falls back to Child::kill).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

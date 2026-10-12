@@ -158,9 +158,14 @@ impl<'a> Parser<'a> {
             // `const x = expr` / `const x: type = expr` — immutable binding.
             TokenKind::Const => self.parse_const_decl(false),
             // `(a, b) := expr` — tuple destructuring declaration.
+            // Disambiguated from a tuple-expression tail (`(a, a + 1)`)
+            // by the trailing `:=`: only a `)` closed paren list followed
+            // by `:=` is a destructure (#367). Bare `(a, b)` without `:=`
+            // parses as `Stmt::Expr(Tuple)` below.
             TokenKind::LParen
                 if self.peek_kind_at(1) == TokenKind::Ident
-                    && self.peek_kind_at(2) == TokenKind::Comma =>
+                    && self.peek_kind_at(2) == TokenKind::Comma
+                    && self.at_paren_destructure() =>
             {
                 self.parse_destructure_decl(false)
             }
@@ -535,7 +540,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_struct_generics(&mut self) -> Vec<crate::ast::Ident> {
         if !self.eat(TokenKind::Lt) {
             // Rust-style `struct Box[T]`: ZZ declares type parameters with
-            // `<T>` (`[T]` applies a generic type or makes an array type).
+            // `<T>` (`[T]` makes an array type).
             if self.at(TokenKind::LBracket) {
                 return self.parse_misplaced_bracket_struct_generics();
             }
@@ -549,7 +554,7 @@ impl<'a> Parser<'a> {
             if self.eat(TokenKind::Colon) {
                 self.error_here(
                     "struct type parameters do not take bounds\n\
-                     hint: bound the generic function instead (e.g. `func get<T: Num>(b: Box[T])`)",
+                     hint: bound the generic function instead (e.g. `func get<T: Num>(b: Box<T>)`)",
                 );
                 // Skip the bound list so recovery lands on `,`/`>`.
                 while !self.at(TokenKind::Comma)
@@ -835,6 +840,41 @@ impl<'a> Parser<'a> {
         pairs > 0 && self.peek_kind_at(i) == TokenKind::ColonEq
     }
 
+    /// True when the upcoming `(...)` is a destructuring declaration head:
+    /// the matching `)` is followed by `:=`. Disambiguates tuple-expression
+    /// tails like `(a, a + 1)` (no `:=`, parses as `Stmt::Expr`) from real
+    /// destructures like `(a, b) := expr` (#367). Nested parens balance;
+    /// any terminator before the close means "not a destructure".
+    pub(crate) fn at_paren_destructure(&self) -> bool {
+        if self.peek_kind_at(0) != TokenKind::LParen {
+            return false;
+        }
+        let mut depth = 0u32;
+        let mut i = 0usize;
+        loop {
+            match self.peek_kind_at(i) {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.peek_kind_at(i + 1) == TokenKind::ColonEq;
+                    }
+                }
+                TokenKind::Eof | TokenKind::StmtEnd | TokenKind::RBrace | TokenKind::RBracket => {
+                    return false
+                }
+                _ => {}
+            }
+            i += 1;
+            if i > 512 {
+                return false;
+            }
+        }
+    }
+
     /// True when the upcoming tokens declare a type alias: `type` +
     /// name. `type` is contextual — anywhere else it lexes and parses
     /// as a plain identifier (`json.type(x)`, `type := 1`, struct
@@ -1073,7 +1113,7 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         // Rust-style `func first[T](...)`: ZZ declares generics with `<T>`
-        // (`[T]` applies a generic type, e.g. `Box[T]`). Parse the bracketed
+        // (`[T]` makes an array type). Parse the bracketed
         // list for recovery and show the right way with a fix.
         if generics.is_empty() && self.at(TokenKind::LBracket) {
             generics = self.parse_misplaced_bracket_generics();
@@ -1238,7 +1278,7 @@ impl<'a> Parser<'a> {
                 bracket_span,
             )
             .with_note(format!(
-                "write `{fixed}` instead (`[T]` applies a generic type, e.g. `Box[T]`, or makes an array type)"
+                "write `{fixed}` instead (`[T]` makes an array type, e.g. `[int]`; apply a generic type with `<T>`, e.g. `Box<T>`)"
             ))
             .with_fixit(FixIt::safe(bracket_span, fixed, "use `<...>`")),
         );
@@ -1291,7 +1331,7 @@ impl<'a> Parser<'a> {
                 bracket_span,
             )
             .with_note(format!(
-                "write `{fixed}` instead (`[T]` applies a generic type, e.g. `Box[T]`, or makes an array type)"
+                "write `{fixed}` instead (`[T]` makes an array type, e.g. `[int]`; apply a generic type with `<T>`, e.g. `Box<T>`)"
             ))
             .with_fixit(FixIt::safe(bracket_span, fixed, "use `<...>`")),
         );

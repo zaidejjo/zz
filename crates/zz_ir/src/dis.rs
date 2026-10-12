@@ -95,6 +95,62 @@ fn op_text(module: &Module, op: &Op) -> String {
                 str_text(module, *method)
             )
         }
+        Op::SetFieldTake {
+            home_slot,
+            home_var,
+            field,
+        } => {
+            format!(
+                "setfieldtake {} {}",
+                home_text(home_slot, home_var, module),
+                str_text(module, *field)
+            )
+        }
+        Op::SetFieldIndexTake {
+            home_slot,
+            home_var,
+            field,
+        } => {
+            format!(
+                "setfieldindextake {} {}",
+                home_text(home_slot, home_var, module),
+                str_text(module, *field)
+            )
+        }
+        Op::FieldBinopTake {
+            home_slot,
+            home_var,
+            field,
+            op,
+        } => {
+            format!(
+                "fieldbinoptake {} {} {op:?}",
+                home_text(home_slot, home_var, module),
+                str_text(module, *field)
+            )
+        }
+        Op::GetFieldIndex {
+            home_slot,
+            home_var,
+            field,
+        } => {
+            format!(
+                "getfieldindex {} {}",
+                home_text(home_slot, home_var, module),
+                str_text(module, *field)
+            )
+        }
+        Op::LenField {
+            home_slot,
+            home_var,
+            field,
+        } => {
+            format!(
+                "lenfield {} {}",
+                home_text(home_slot, home_var, module),
+                str_text(module, *field)
+            )
+        }
         Op::IntAdd => "iadd".to_string(),
         Op::IntSub => "isub".to_string(),
         Op::IntMul => "imul".to_string(),

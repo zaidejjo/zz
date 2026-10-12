@@ -76,6 +76,7 @@ pub fn parse(source: &str) -> Parsed {
         block_depth: 0,
         delim_stack: Vec::new(),
         pending_gt: 0,
+        no_union: false,
     };
     let program = parser.parse_program();
     let mut errors = parser.errors;
@@ -129,6 +130,13 @@ struct Parser<'a> {
     /// (`Option<Option<int>>`) lex the adjacent closes as one `Shr`;
     /// each split banks one `>` for the enclosing argument list.
     pending_gt: u32,
+    /// Inside closure parameter types (and nested function return types
+    /// within them), a top-level `|` is the parameter list's closing pipe,
+    /// not a union operator: `|f: func(int) -> int|` must not eat the
+    /// closer as `int | ...`. Unions there stay genuinely ambiguous and
+    /// forbidden; delimited positions (parens, `<>`, brackets, braces)
+    /// keep full union parsing.
+    no_union: bool,
 }
 
 impl<'a> Parser<'a> {

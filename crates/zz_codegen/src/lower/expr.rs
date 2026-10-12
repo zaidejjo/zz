@@ -1,7 +1,7 @@
 //! Expression lowering: literals, binary ops, function calls, field access,
 //! collections, variants, closures, and match expressions.
 
-use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, MatchArm, Param, Pattern};
+use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, Ident, MatchArm, Param, Pattern};
 
 use super::green::GreenCtx;
 use super::*;
@@ -930,6 +930,16 @@ impl Lowerer {
                 // threads get scheduled. Elided for concurrency-free
                 // programs (see `needs_safepoint`).
                 self.emit_safepoint(out, "        ");
+                // Literal-length/index-forwarding knowledge (`len(arr)` →
+                // arity, `arr[0]` → element text) is only valid in
+                // straight-line flow. A `while` condition re-runs every
+                // iteration while the body may reassign the variable, so
+                // pre-loop knowledge would bake a stale constant into the
+                // guard (#350: `len(arr) < 5` folded to `0 < 5` while the
+                // body grew the array via `vec.push`). Drop it before the
+                // condition; in-body re-establishment (fresh literals)
+                // still folds within the iteration.
+                names.clear_array_lens();
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
@@ -944,6 +954,11 @@ impl Lowerer {
                     self.emit_stmt(bstmt, names, out, false);
                 }
                 self.loop_scope_end(names, out, while_scope);
+                // End-of-body literal knowledge must not escape the loop:
+                // a later iteration re-enters through the guard (already
+                // cleared above), and zero-trip loops skip the body
+                // entirely, so post-loop reads re-evaluate at runtime.
+                names.clear_array_lens();
                 if let Some(ref name) = loop_arena {
                     self.loop_arenas.borrow_mut().pop();
                     *self.current_loop_arena.borrow_mut() =
@@ -997,6 +1012,11 @@ impl Lowerer {
                 } else {
                     out.push_str("    }\n");
                 }
+                // Branch join: `then`/`else` may have bound the same name
+                // to different literals (or only one side ran), so
+                // literal-length knowledge from either path is unsound
+                // past the merge — post-`if` reads re-evaluate at runtime.
+                names.clear_array_lens();
                 tmp
             }
             Expr::Block(b) => {
@@ -1227,6 +1247,20 @@ impl Lowerer {
                     // the emitted form, not just the AST shape. Anything
                     // else (Index, Call, Field chain, …) is an rvalue —
                     // hoist to a temp.
+                    //
+                    // Prefer borrowing a plain Ident's C local directly:
+                    // `zz_object_get_field` retains the field value it
+                    // returns, so cloning the base just to take its
+                    // address retains a share that is never released
+                    // (~0.5KB/draw in struct loops, #188). The base
+                    // outlives the read, so the borrow is sound.
+                    if let Expr::Ident { name: base, .. } = obj.as_ref() {
+                        if let Some(cid) = names.lookup(base).map(str::to_string) {
+                            if is_simple_ident(&cid) {
+                                return format!("zz_object_get_field(&{cid}, \"{name}\")");
+                            }
+                        }
+                    }
                     if matches!(obj.as_ref(), Expr::Ident { .. }) && is_simple_ident(&obj_val) {
                         format!("zz_object_get_field(&{obj_val}, \"{name}\")")
                     } else {
@@ -1588,9 +1622,8 @@ impl Lowerer {
         // capture). Names resolving to nothing here (plain function
         // names, namespaces) are skipped.
         let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
-        let globals = self.global_name_set();
         let mut caps: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
-        for fv in zz_hir::closure_free_vars(&param_names, body, &globals) {
+        for fv in zz_hir::closure_free_vars(&param_names, body, &self.global_set) {
             // A captured name may be mutated through the shared cell
             // after this point: drop index forwarding for it (plus any
             // literal mentioning it) so later reads stay truthful.
@@ -1607,7 +1640,8 @@ impl Lowerer {
         // Emit a forward declaration so the closure is visible to
         // call sites that appear before the closure definition.
         self.closure_forward_decls.borrow_mut().push(format!(
-            "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv);\n"
+            "{} zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv);\n",
+            self.link_kw()
         ));
         // Green closures (B3 suspendable frames): eligible bodies
         // lower to a state machine and suspend instead of parking.
@@ -1725,7 +1759,8 @@ impl Lowerer {
         }
         let mut o = String::new();
         o.push_str(&format!(
-            "static zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv) {{\n"
+            "{} zz_value zz_closure_{cid}(zz_value *args, size_t argc, void **env, size_t nenv) {{\n",
+            self.link_kw()
         ));
         o.push_str("    (void)argc;\n");
         o.push_str("    (void)nenv;\n");
@@ -1997,11 +2032,41 @@ impl Lowerer {
         Some(format!("(bool)({} {c_op} {})", lraw.0, rraw.0))
     }
 
+    /// True when an argument expression is already a boxed `zz_value`
+    /// (never a raw struct/scalar needing representation conversion):
+    /// plain locals of boxed type only. Conservative by design — anything
+    /// else keeps today's defensive paths.
+    fn arg_is_boxed(a: &Expr, names: &NameCtx) -> bool {
+        match a {
+            Expr::Ident { name, .. } => {
+                matches!(names.lookup_type(name), Some("zz_value"))
+                    && !super::move_elide::is_moved_type(names.lookup_type(name))
+            }
+            _ => false,
+        }
+    }
+
+    /// Read-only verdict for one callee parameter position: true only
+    /// when escape analysis proved the parameter never outlives the call.
+    /// Missing entries (natives, methods, unknown callees, arity drift)
+    /// answer false, preserving today's clone behavior.
+    fn param_is_readonly(
+        masks: &std::collections::HashMap<String, Vec<bool>>,
+        cname: &str,
+        idx: usize,
+    ) -> bool {
+        masks
+            .get(cname)
+            .and_then(|m| m.get(idx))
+            .copied()
+            .unwrap_or(false)
+    }
+
     pub(super) fn emit_call(
         &self,
         callee: &Expr,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
         names: &mut NameCtx,
         out: &mut String,
         stmt_direct: bool,
@@ -2574,12 +2639,31 @@ impl Lowerer {
                         // same runtime fn via native_impl.
                         zz_checker::Type::Db => (format!("sqlz.{method}"), Some(*obj.clone())),
                         _ => {
+                            // Type-based namespace table. Must mirror the
+                            // Path-callee arm above (TcpStream→net etc.):
+                            // a missing entry drops Typed receivers into
+                            // the free-function fallback, which resolves a
+                            // receiver-less bare name — the wrapper then
+                            // emits without the receiver (silent arg drop;
+                            // observed as `f(...)? .method()` losing the
+                            // receiver natively while the VM dispatches
+                            // on the value).
                             let ns: &str = match zzty {
                                 zz_checker::Type::Array(_) => "vec",
                                 zz_checker::Type::Str => "str",
                                 zz_checker::Type::Dict(_, _) => "dict",
                                 zz_checker::Type::Option(_) => "option",
                                 zz_checker::Type::Result(_, _) => "result",
+                                zz_checker::Type::Db => "sqlz",
+                                zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
+                                    "net"
+                                }
+                                zz_checker::Type::HttpServer
+                                | zz_checker::Type::Response
+                                | zz_checker::Type::HttpRequest => "http",
+                                zz_checker::Type::Json => "json",
+                                zz_checker::Type::Bytes => "bytes",
+                                zz_checker::Type::Chan => "chan",
                                 zz_checker::Type::Opaque(tag) => {
                                     Box::leak(tag.clone().into_boxed_str()) as &str
                                 }
@@ -2688,7 +2772,7 @@ impl Lowerer {
                     }
                     // Fill named args by param name
                     for (name, val) in named {
-                        if let Some(idx) = sig.params.iter().position(|(pn, _)| pn == name) {
+                        if let Some(idx) = sig.params.iter().position(|(pn, _)| pn == &name.name) {
                             if slots[idx].is_none() {
                                 slots[idx] = Some(val);
                             }
@@ -2971,8 +3055,28 @@ impl Lowerer {
         };
         for (arg_idx, a) in ordered_args.iter().enumerate() {
             if let Some(sname) = struct_box_for_arg.get(arg_idx).and_then(|o| o.clone()) {
-                arg_items.push(self.emit_boxed_value(&sname, a, names, out));
-                continue;
+                // Escape-analysis borrow (#383): when the callee provably
+                // never lets this parameter outlive the call AND the
+                // argument is already a boxed value, skip the defensive
+                // deep-copy box and pass through to the normal (borrowed)
+                // path below. Guarded to callee names needing no
+                // owned-fallback resolution, so this key matches the call
+                // site's mask lookup.
+                let no_fallback = cname.contains('.')
+                    || self.reachable_funcs.contains(&cname)
+                    || self.tp.funcs.contains_key(&cname);
+                if !self.green_active()
+                    && method_receiver.is_none()
+                    && no_fallback
+                    && named.is_empty()
+                    && Self::arg_is_boxed(a, names)
+                    && Self::param_is_readonly(&self.readonly_params, &cname, arg_idx)
+                {
+                    // fall through to normal emission (borrowed below)
+                } else {
+                    arg_items.push(self.emit_boxed_value(&sname, a, names, out));
+                    continue;
+                }
             }
             let emitted = self.emit_expr(a, names, out);
             // Display builtins (`println`, `print`, `str`, ...) render
@@ -2982,6 +3086,25 @@ impl Lowerer {
                 if let Some(sname) = self.unboxed_struct_of_expr(a, names) {
                     arg_items.push(self.stringify_struct_value(&sname, emitted, names, out));
                     continue;
+                }
+            }
+            // Natives take boxed zz_value args without exception: wrap an
+            // unboxed struct argument into a runtime object. Generic
+            // natives (`vec.push(arr, Pt {...})`) miss this because their
+            // signatures name `T`, not the struct — without the wrap the
+            // raw C struct hits a zz_value parameter (native-only C type
+            // error; the VM boxes everything). User functions keep the
+            // sig-driven paths above and below (raw unboxed params).
+            {
+                let std_name = format!("std.{cname}");
+                let is_native = self.reachable_natives.contains(&cname)
+                    || self.reachable_natives.contains(&std_name)
+                    || native_supported(&cname);
+                if is_native {
+                    if let Some(sname) = self.struct_box_name(a, names) {
+                        arg_items.push(self.emit_boxed_value(&sname, a, names, out));
+                        continue;
+                    }
                 }
             }
             // Auto-box if this argument is a scalar variable or struct field
@@ -3175,6 +3298,19 @@ impl Lowerer {
             // In void context (result discarded), use in-place mutation
             // instead of copy-on-write for vec.push.
             let effective_name = if *self.void_context.borrow() && impl_name == "zz_vec_push" {
+                // Field receivers (`base.field.push(e)` as a statement)
+                // cannot append in place: the receiver lowers to a field
+                // *value* temp, so appending mutates the temp and the
+                // result is lost (silent no-op, diverging from the VM
+                // write-back). Route single-level Ident bases through the
+                // take helper, which does get+push+set internally.
+                // Deeper chains, captures, green bodies, and unboxed bases
+                // keep the old shape (same as before this change).
+                if let Some(take_expr) =
+                    self.void_field_push_take(&method_receiver, &arg_items, names)
+                {
+                    return take_expr;
+                }
                 "zz_vec_append"
             } else {
                 impl_name
@@ -3539,6 +3675,37 @@ impl Lowerer {
             if arg_items.is_empty() {
                 return format!("{cf}(NULL, 0)");
             }
+            // Escape-analysis borrow (#383): arguments to proven read-only
+            // parameters pass the live local instead of a retained share.
+            // Same shape guard as the read-only-native fast path above:
+            // only exact `zz_clone(barecid)` locals (which outlive the
+            // synchronous call); complex temporaries keep owned form.
+            // Skipped under green (suspend/resume) and for method calls,
+            // and requires 1:1 arg alignment as a structural backstop.
+            if !self.green_active()
+                && method_receiver.is_none()
+                && named.is_empty()
+                && arg_items.len() == ordered_args.len()
+            {
+                for (i, item) in arg_items.iter_mut().enumerate() {
+                    if !Self::param_is_readonly(&self.readonly_params, &cname_for_native, i) {
+                        continue;
+                    }
+                    if let Some(inner) = item
+                        .strip_prefix("zz_clone(")
+                        .and_then(|s| s.strip_suffix(')'))
+                    {
+                        if !inner.is_empty()
+                            && inner
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            && !inner.starts_with("zz_")
+                        {
+                            *item = inner.to_string();
+                        }
+                    }
+                }
+            }
             return format!(
                 "({cf}((zz_value[]){{ {joined} }}, {n}))",
                 joined = arg_items.join(", "),
@@ -3667,7 +3834,7 @@ impl Lowerer {
         enum_name: &str,
         variant: String,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {
@@ -4060,6 +4227,29 @@ impl Lowerer {
         if hits.len() == 1 {
             return Some(hits[0].clone());
         }
+        // Same-suffix spellings that lower to one native impl
+        // (`vec.push`/`std.vec.push` → `zz_vec_push`) are not ambiguous:
+        // either spelling emits identical code. Without this, any method
+        // whose free function has a `std.`-qualified twin (resolved
+        // through this fallback, e.g. receiver chains like `b.cmds.push`)
+        // fell through to a bogus direct call. Distinct impls stay
+        // unresolved (loud fallback downstream, never a guess).
+        if hits.len() > 1 {
+            let mut impls: Vec<Option<&str>> = hits
+                .iter()
+                .map(|h| native_impl(h).or_else(|| crate::ffi_impl(h)))
+                .collect();
+            impls.sort_unstable();
+            impls.dedup();
+            if impls.len() == 1 {
+                // Prefer the unqualified spelling (matches free-form
+                // lowering); any choice is code-identical here.
+                if let Some(bare) = hits.iter().find(|h| !h.starts_with("std.")) {
+                    return Some((*bare).clone());
+                }
+                return Some(hits[0].clone());
+            }
+        }
         if self.reachable_natives.contains(method) || native_supported(method) {
             return Some(method.to_string());
         }
@@ -4146,7 +4336,7 @@ impl Lowerer {
     /// value: struct literals of unboxed type plus Ident/Path/Field shapes
     /// rooted at raw values (see `unboxed_struct_of_expr`). Calls, indexes,
     /// arrays, blocks, etc. lower boxed and yield `None`.
-    fn struct_box_name(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+    pub(super) fn struct_box_name(&self, e: &Expr, names: &NameCtx) -> Option<String> {
         if let Expr::StructInit { name, .. } = e {
             if self.is_unboxed_struct(name) {
                 return Some(name.clone());
@@ -4161,7 +4351,7 @@ impl Lowerer {
     /// `zz_value`. Raw producers (locals, literals, field reads) are pure,
     /// so reusing the emitted text per field is side-effect free. The
     /// emitted operand itself is left untouched (no re-emission).
-    fn box_raw_struct(
+    pub(super) fn box_raw_struct(
         &self,
         sname: &str,
         raw: &str,
@@ -4284,7 +4474,7 @@ impl Lowerer {
     /// Box a binary operand that lowers to a raw unboxed struct into a
     /// runtime object; pass through everything else unchanged. `emitted`
     /// is the already scalar-boxed operand text (identity for structs).
-    fn box_struct_operand(
+    pub(super) fn box_struct_operand(
         &self,
         e: &Expr,
         emitted: String,
@@ -4297,6 +4487,51 @@ impl Lowerer {
         } else {
             emitted
         }
+    }
+
+    /// Void-statement `base.field.push(e)`: route through the take helper.
+    /// The generic void shape appends to the receiver *value* temp, so the
+    /// result is lost for field receivers (silent no-op). The take helper
+    /// does get+push+set against the base slot internally. Returns the
+    /// replacement expression, or `None` to keep the old shape (deeper
+    /// chains, captures, green bodies, unboxed bases).
+    fn void_field_push_take(
+        &self,
+        method_receiver: &Option<Expr>,
+        arg_items: &[String],
+        names: &mut NameCtx,
+    ) -> Option<String> {
+        if self.green_active() {
+            return None;
+        }
+        if arg_items.len() != 2 {
+            return None;
+        }
+        let recv = method_receiver.as_ref()?;
+        let (base, field) = match recv {
+            Expr::Path { parts, .. } if parts.len() == 2 => (parts[0].clone(), parts[1].clone()),
+            Expr::Field { obj, name, .. } => match obj.as_ref() {
+                Expr::Ident { name: b, .. } => (b.clone(), name.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if names.cap_deref.contains_key(&base) {
+            return None;
+        }
+        let cid = names.lookup(&base)?.to_string();
+        if names
+            .lookup_type(&base)
+            .map(|ty| ty.starts_with("zz_struct_"))
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let elem = arg_items.get(1)?.clone();
+        let err = names.fresh("_e");
+        Some(format!(
+            "({{ int {err} = 0; zz_object_push_field_take(&{cid}, \"{field}\", {elem}, &{err}); zz_unit(); }})"
+        ))
     }
 
     /// Resolve a multi-segment `Path` callee into a method-dispatch pair
@@ -4941,7 +5176,7 @@ impl Lowerer {
                     .and_then(|(_, p)| p.as_ref())
                     .map(|pty| {
                         // Substitute the scrutinee's arguments so generic
-                        // payloads (`V(T)` under `Box[int]`) unbox.
+                        // payloads (`V(T)` under `Box<int>`) unbox.
                         let generics = self
                             .tp
                             .enums
@@ -5382,7 +5617,35 @@ impl Lowerer {
                     } else {
                         out.push_str(&format!("    if ({full_cond}) {{\n"));
                     }
+                    // Record the payload type for method dispatch: without
+                    // this, calls on match-bound handles (e.g.
+                    // `.ok(ss) => ss.read_line()`) lose their receiver
+                    // type and misroute to another namespace's same-named
+                    // native on AOT (the VM dispatches on the live value
+                    // tag, so only native diverged). Single-binding arms
+                    // only; nested payloads keep the old behavior.
+                    let arm_payload_ty: Option<zz_checker::Type> = if fp.binds.len() == 1 {
+                        self.ty_at(names, scrutinee.span()).and_then(|ty| {
+                            match (ty, name.as_str()) {
+                                (zz_checker::Type::Option(inner), "some") => {
+                                    Some(inner.as_ref().clone())
+                                }
+                                (zz_checker::Type::Result(ok, _), "ok") => {
+                                    Some(ok.as_ref().clone())
+                                }
+                                (zz_checker::Type::Result(_, err), "err") => {
+                                    Some(err.as_ref().clone())
+                                }
+                                _ => None,
+                            }
+                        })
+                    } else {
+                        None
+                    };
                     for (bname, pexpr) in &fp.binds {
+                        if let Some(pty) = arm_payload_ty.clone() {
+                            names.checker_types.insert(bname.clone(), pty);
+                        }
                         if self.green_active() {
                             let (ptr, deref, n) = self.green_cell(names, "zz_value", false, out);
                             out.push_str(&format!("        {deref} = {pexpr};\n"));
@@ -5508,6 +5771,10 @@ impl Lowerer {
             }
         }
         names.pop_scope();
+        // Arm join: arms are exclusive paths that may bind the same name
+        // to different literals, so post-`match` literal knowledge is
+        // unsound — downstream reads re-evaluate at runtime.
+        names.clear_array_lens();
         result_tmp
     }
 }

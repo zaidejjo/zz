@@ -539,6 +539,12 @@ e2e_success_test!(
     "method_chain_recv.zz"
 );
 e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
+e2e_success_test!(
+    e2e_syntax_closure_fn_params,
+    "syntax",
+    "closure_fn_params.zz"
+);
+e2e_success_test!(e2e_types_recursive, "types", "recursive.zz");
 e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
 e2e_success_test!(
     e2e_syntax_extension_methods,
@@ -576,6 +582,11 @@ e2e_success_test!(e2e_stdlib_strings, "stdlib", "strings.zz");
 e2e_success_test!(e2e_stdlib_vectors, "stdlib", "vectors.zz");
 e2e_success_test!(e2e_stdlib_str_utf8_parity, "stdlib", "str_utf8_parity.zz");
 e2e_success_test!(
+    e2e_stdlib_str_trim_unicode_test,
+    "stdlib",
+    "str_trim_unicode_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_vec_nested_str_parity,
     "stdlib",
     "vec_nested_str_parity.zz"
@@ -595,12 +606,32 @@ e2e_success_test!(e2e_stdlib_console, "stdlib", "console.zz");
 e2e_success_test!(e2e_stdlib_envmod, "stdlib", "envmod.zz");
 e2e_success_test!(e2e_stdlib_time_ops, "stdlib", "time_ops.zz");
 e2e_success_test!(e2e_stdlib_fs_test, "stdlib", "fs_test.zz");
+e2e_success_test!(
+    e2e_stdlib_fs_scan_counts_test,
+    "stdlib",
+    "fs_scan_counts_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_fs_is_generated_test,
+    "stdlib",
+    "fs_is_generated_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_fs_read_invalid_utf8_test,
+    "stdlib",
+    "fs_read_invalid_utf8_test.zz"
+);
 e2e_success_test!(e2e_stdlib_fs_comprehensive, "stdlib", "fs_comprehensive.zz");
 e2e_success_test!(e2e_stdlib_result_print, "stdlib", "result_print.zz");
 e2e_success_test!(e2e_stdlib_import_alias, "stdlib", "import_alias.zz");
 e2e_success_test!(e2e_stdlib_fs_path, "stdlib", "fs_path.zz");
 e2e_success_test!(e2e_stdlib_fs_vfs, "stdlib", "fs_vfs.zz");
 e2e_success_test!(e2e_stdlib_bytes, "stdlib", "bytes.zz");
+e2e_success_test!(
+    e2e_stdlib_bytes_finish_test,
+    "stdlib",
+    "bytes_finish_test.zz"
+);
 e2e_success_test!(e2e_stdlib_env_full, "stdlib", "env_full.zz");
 e2e_success_test!(e2e_stdlib_env_test, "stdlib", "env_test.zz");
 e2e_success_test!(e2e_stdlib_time_test, "stdlib", "time_test.zz");
@@ -614,12 +645,22 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_str_find_test, "stdlib", "str_find_test.zz");
 e2e_success_test!(e2e_stdlib_str_bytes_test, "stdlib", "str_bytes_test.zz");
+e2e_success_test!(e2e_stdlib_str_ord_chr_test, "stdlib", "str_ord_chr_test.zz");
 e2e_success_test!(
     e2e_stdlib_str_classify_test,
     "stdlib",
     "str_classify_test.zz"
 );
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+e2e_success_test!(
+    e2e_stdlib_tcp_method_on_try,
+    "stdlib",
+    "tcp_method_on_try.zz"
+);
+e2e_success_test!(e2e_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
+e2e_success_test!(e2e_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
+e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
+e2e_success_test!(e2e_stdlib_vec_push_shapes, "stdlib", "vec_push_shapes.zz");
 e2e_success_test!(e2e_stdlib_input_chained, "stdlib", "input_chained.zz");
 e2e_success_test!(e2e_stdlib_http_client_test, "stdlib", "http_client_test.zz");
 e2e_success_test!(e2e_stdlib_http_server_test, "stdlib", "http_server_test.zz");
@@ -772,6 +813,7 @@ e2e_success_test!(e2e_stdlib_local_wildcard, "stdlib", "local_wildcard.zz");
 e2e_success_test!(e2e_stdlib_sqlz_sqlite, "stdlib", "sqlz_sqlite.zz");
 e2e_success_test!(e2e_stdlib_sqlz_transaction, "stdlib", "sqlz_transaction.zz");
 e2e_success_test!(e2e_stdlib_colors_demo, "stdlib", "colors_demo.zz");
+e2e_success_test!(e2e_stdlib_colors_styles, "stdlib", "colors_styles.zz");
 e2e_success_test!(
     e2e_stdlib_option_interpolation,
     "stdlib",
@@ -849,6 +891,8 @@ e2e_error_test!(e2e_err_assign_in_condition, "assign_in_condition.zz");
 e2e_error_test!(e2e_err_generic_bracket_params, "generic_bracket_params.zz");
 e2e_error_test!(e2e_err_bitwise_float, "bitwise_float.zz");
 e2e_error_test!(e2e_err_bitwise_neg_shift, "bitwise_neg_shift.zz");
+e2e_error_test!(e2e_err_str_ord_multi_char, "str_ord_err.zz");
+e2e_error_test!(e2e_err_str_chr_surrogate, "str_chr_err.zz");
 e2e_error_test!(e2e_err_tuple_index_oob, "tuple_index_oob.zz");
 e2e_error_test!(e2e_err_tuple_index_dynamic, "tuple_index_dynamic.zz");
 e2e_error_test!(e2e_err_compound_type_mismatch, "compound_type_mismatch.zz");
@@ -1426,4 +1470,120 @@ fn e2e_input_reads_piped_line() {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     assert_eq!(exit, 0, "exit {exit}. stderr: {stderr}");
     assert_eq!(stdout.trim_end(), "got:hello", "stdout: {stdout:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Implicit package mapping (#288): temp project with `zz.toml` + `src/`
+// served to both engines. A file under `tests/` imports `src/` via the
+// package name — no fragile `../src/...` relative path.
+// ---------------------------------------------------------------------------
+
+/// Build a temp project for #288: package `app`, `src/math.zz` exporting
+/// `add`, a `tests/` @test file importing it, and a `src/`-adjacent
+/// runnable entry importing it too. Returns (dir, test_file, run_file).
+fn write_package_map_project() -> (PathBuf, PathBuf, PathBuf) {
+    // Unique per call: the package-map tests run in parallel and must not
+    // share one pid-keyed dir (one test's `remove_dir_all` races another's
+    // `create_dir_all` → spurious NotFound).
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zz-e2e-pkgmap-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(
+        dir.join("zz.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/math.zz"),
+        "pub func add(a: int, b: int) -> int { a + b }\n",
+    )
+    .unwrap();
+    let test_file = dir.join("tests/math_test.zz");
+    std::fs::write(
+        &test_file,
+        "import app.math(add as f)\n\n@test\nfunc test_pkg_add() {\n    assert_eq(f(20, 22), 42)\n    println(\"pkgmap ok\")\n}\n",
+    )
+    .unwrap();
+    let run_file = dir.join("tests/run_check.zz");
+    std::fs::write(
+        &run_file,
+        "import app.math\nfunc main() {\n    println(math.add(20, 22))\n}\n",
+    )
+    .unwrap();
+    (dir, test_file, run_file)
+}
+
+#[test]
+fn e2e_package_map_run_from_tests_dir() {
+    let (_dir, _test_file, run_file) = write_package_map_project();
+    let (exit, stdout, stderr) = run_zz(&run_file);
+    assert_eq!(
+        exit, 0,
+        "`zz run` of tests/ file importing src/ should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+    assert!(
+        stdout.lines().last().unwrap_or("").contains("42"),
+        "expected 42 in output. stdout: {stdout:?}",
+    );
+}
+
+#[test]
+fn e2e_package_map_test_runner() {
+    let (_dir, test_file, _run_file) = write_package_map_project();
+    let (exit, stdout, stderr) = run_zz_test(&test_file);
+    assert_eq!(
+        exit, 0,
+        "`zz test` of tests/ file importing src/ should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+}
+
+/// Run `zz` with explicit argv + cwd, returning (exit, stdout, stderr).
+/// Used to prove package mapping is file-anchored, not cwd-anchored (#288).
+fn run_zz_in(cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz {args:?}` in {cwd:?}: {e}"));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn e2e_package_map_cwd_independent() {
+    // Same project file resolves identically no matter where the
+    // command runs from: unrelated cwd with absolute path, project
+    // root with relative path, and filesystem root with `zz test`.
+    // No nested manifests, no symlinks, no `tests/src/` involved.
+    let (dir, test_file, run_file) = write_package_map_project();
+    let run_abs = run_file.display().to_string();
+    let test_abs = test_file.display().to_string();
+
+    let (exit, stdout, stderr) = run_zz_in(Path::new("/tmp"), &["run", run_abs.as_str()]);
+    assert_eq!(
+        exit, 0,
+        "abs path from /tmp should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.lines().last().unwrap_or("").contains("42"));
+
+    let (exit, stdout, stderr) = run_zz_in(&dir, &["run", "tests/run_check.zz"]);
+    assert_eq!(
+        exit, 0,
+        "rel path from root should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.lines().last().unwrap_or("").contains("42"));
+
+    let (exit, stdout, stderr) = run_zz_in(Path::new("/"), &["test", test_abs.as_str()]);
+    assert_eq!(
+        exit, 0,
+        "`zz test` from / should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 }

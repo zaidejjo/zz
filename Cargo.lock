@@ -3580,11 +3580,11 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zz_arena"
-version = "0.2.2"
+version = "0.3.0"
 
 [[package]]
 name = "zz_checker"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3593,18 +3593,20 @@ dependencies = [
 
 [[package]]
 name = "zz_cli"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "codespan-reporting",
  "dirs",
  "hex",
+ "libc",
  "lzma-rs",
  "nu-ansi-term",
  "reedline",
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook",
  "tar",
  "toml",
  "ureq",
@@ -3622,23 +3624,26 @@ dependencies = [
 
 [[package]]
 name = "zz_codegen"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
+ "rayon",
  "zz_checker",
  "zz_frontend",
  "zz_hir",
  "zz_ir",
  "zz_native_rt",
+ "zz_pm",
  "zz_runtime",
  "zz_stdlib",
 ]
 
 [[package]]
 name = "zz_fmt"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "ignore",
  "rayon",
+ "sha2",
  "similar",
  "thiserror 1.0.69",
  "tracing",
@@ -3647,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "zz_frontend"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "codespan-reporting",
  "colored",
@@ -3656,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "zz_hir"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "zz_checker",
  "zz_frontend",
@@ -3664,7 +3669,7 @@ dependencies = [
 
 [[package]]
 name = "zz_ir"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "zz_checker",
  "zz_frontend",
@@ -3674,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "zz_lsp"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "dashmap 6.2.1",
  "env_logger",
@@ -3691,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "zz_native_rt"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3705,9 +3710,11 @@ dependencies = [
  "regex",
  "rsa",
  "rustls",
+ "rustls-pemfile",
  "rustls-pki-types",
  "serde_json",
  "sha2",
+ "socket2",
  "subtle",
  "sysinfo",
  "uuid",
@@ -3729,7 +3736,7 @@ dependencies = [
 
 [[package]]
 name = "zz_pm"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -3748,7 +3755,7 @@ dependencies = [
 
 [[package]]
 name = "zz_runtime"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "codespan-reporting",
  "loom",
@@ -3759,7 +3766,7 @@ dependencies = [
 
 [[package]]
 name = "zz_stdlib"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-deque",
@@ -3773,6 +3780,7 @@ dependencies = [
  "rustls-pemfile",
  "rustls-pki-types",
  "sha1",
+ "socket2",
  "urlencoding",
  "webpki-roots",
  "zz_checker",

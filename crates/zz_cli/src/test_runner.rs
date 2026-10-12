@@ -9,8 +9,9 @@
 //! Design decisions (see docs/test-isolation.md):
 //! - VM: panic isolation via `std::panic::catch_unwind`.
 //! - Timeout: `@test(timeout = ms)` is a hard timeout (VM: watcher thread,
-//!   AOT: child kill). `--timeout <ms>` (default 60s) is a soft budget —
-//!   overruns print a notice but never interrupt or fail the test.
+//!   AOT: child kill). `--timeout <ms>` (default 60s) is a hard per-test
+//!   budget — overruns fail the test. `--soft-timeout` restores the old
+//!   notice-only behavior.
 //! - `--nocapture` forces `--serial` (interleaved output is noise).
 //! - `--jobs N` uses a thread pool with work-stealing (default: logical cores).
 //! - Files run sequentially so output stays grouped per file
@@ -34,9 +35,9 @@ use zz_runtime::{Interp, Value};
 
 use crate::loader;
 
-/// Soft per-test time budget: overruns print a notice but never
-/// interrupt or fail the test. Configurable via `--timeout <ms>`.
-const DEFAULT_SOFT_BUDGET: Duration = Duration::from_secs(60);
+/// Per-test time budget: overruns fail the test unless `--soft-timeout`
+/// restores notice-only mode. Configurable via `--timeout <ms>`.
+const DEFAULT_TIME_BUDGET: Duration = Duration::from_secs(60);
 
 /// Harness files generated for AOT mode. Discovery skips them so a
 /// leftover harness is never picked up as a test file.
@@ -53,7 +54,7 @@ enum TestEngine {
 }
 
 struct TestConfig {
-    path: String,
+    paths: Vec<String>,
     filter: Option<String>,
     exact: bool,
     tag: Option<String>,
@@ -61,7 +62,9 @@ struct TestConfig {
     fail_fast: bool,
     fail_on_empty: bool,
     slow_threshold: Option<Duration>,
-    soft_budget: Duration,
+    time_budget: Duration,
+    /// Notice-only budget overruns (legacy `--timeout` behavior).
+    soft_timeout: bool,
     nocapture: bool,
     serial: bool,
     jobs: usize,
@@ -82,7 +85,7 @@ impl TestConfig {
         // Load zz.toml defaults first (optional; absence is fine).
         let defaults = load_zz_toml_defaults();
 
-        let mut path: Option<String> = None;
+        let mut paths: Vec<String> = Vec::new();
         let mut filter: Option<String> = None;
         let mut exact = false;
         let mut tag: Option<String> = None;
@@ -90,7 +93,8 @@ impl TestConfig {
         let mut fail_fast = defaults.fail_fast;
         let mut fail_on_empty = false;
         let mut slow_threshold = defaults.slow_threshold;
-        let mut soft_budget = defaults.soft_budget;
+        let mut time_budget = defaults.time_budget;
+        let mut soft_timeout = defaults.soft_timeout;
         let mut nocapture = false;
         let mut serial = defaults.serial;
         let mut jobs: Option<usize> = defaults.jobs;
@@ -140,7 +144,7 @@ impl TestConfig {
                     }
                     "--timeout" => {
                         if let Ok(ms) = val.parse::<u64>() {
-                            soft_budget = Duration::from_millis(ms);
+                            time_budget = Duration::from_millis(ms);
                         }
                     }
                     "--engine" => {
@@ -167,7 +171,10 @@ impl TestConfig {
                 "--fail-on-empty" => fail_on_empty = true,
                 "--list" => list_only = true,
                 "--json" => json_output = true,
-                "--native" | "--aot" => engine = TestEngine::Native,
+                "--native" | "--aot" => {
+                    eprintln!("note: `--native` is an alias for `--engine native` (canonical)");
+                    engine = TestEngine::Native;
+                }
                 "-p" | "--release" => native_release = true,
                 "--allow-source-builds" => allow_source_builds = true,
                 "--allow-hooks" => allow_hooks = true,
@@ -200,9 +207,10 @@ impl TestConfig {
                 "--timeout" => {
                     i += 1;
                     if let Some(ms) = args.get(i).and_then(|s| s.parse::<u64>().ok()) {
-                        soft_budget = Duration::from_millis(ms);
+                        time_budget = Duration::from_millis(ms);
                     }
                 }
+                "--soft-timeout" => soft_timeout = true,
                 "--engine" => {
                     i += 1;
                     match args.get(i).map(String::as_str) {
@@ -234,7 +242,7 @@ impl TestConfig {
                 "--changed" => changed = true,
                 "--nocapture-impl" => {}
                 "--help" | "-h" => {
-                    return Err("usage: zz test [file.zz | directory] [FLAGS]\n\n\
+                    return Err("usage: zz test [file.zz | directory]... [FLAGS]\n\n\
                          FLAGS:\n  \
                            --exact          Exact match filter (not substring)\n  \
                            --tag <t>        Only tests with tag = t\n  \
@@ -248,11 +256,12 @@ impl TestConfig {
                            --list           List discovered tests without running\n  \
                            --nocapture      Show stdout/stderr live (forces serial)\n  \
                            --slow-threshold Mark passes slower than N ms\n  \
-                           --timeout <ms>   Soft time budget per test (default 60000);\n  \
-                           overruns print a notice, never interrupt or fail\n  \
-                           --native, --aot  Run tests as AOT binaries (dev build)\n  \
+                           --timeout <ms>   Hard time budget per test (default 60000);\n  \
+                           overruns fail unless --soft-timeout is passed\n  \
+                           --soft-timeout   Budget overruns print a notice only (legacy mode)\n  \
                            --engine=vm|native  Select the test engine (default vm)\n  \
-                           -p, --release    With --native: optimized build (default: dev)\n  \
+                           --native         Alias for --engine native (deprecated)\n  \
+                           -p, --release    With --engine native: optimized build (default: dev)\n  \
                            --allow-source-builds  With --native: compile transitive native deps\n  \
                            from source when no prebuilt covers the host tag\n  \
                            --allow-hooks    With --native: run legacy [native] build hooks\n  \
@@ -276,13 +285,19 @@ impl TestConfig {
                     ));
                 }
                 _ => {
-                    path = Some(args[i].clone());
+                    // Multiple positionals run together
+                    // (`zz test a.zz b.zz dir/`); previously only the
+                    // last one survived, silently dropping the rest.
+                    paths.push(args[i].clone());
                 }
             }
             i += 1;
         }
 
-        let path = path.unwrap_or_else(default_test_path);
+        if paths.is_empty() {
+            paths.push(default_test_path());
+        }
+        let paths = paths;
 
         // --nocapture forces --serial
         if nocapture {
@@ -306,7 +321,7 @@ impl TestConfig {
         });
 
         Ok(Self {
-            path,
+            paths,
             filter,
             exact,
             tag,
@@ -314,7 +329,8 @@ impl TestConfig {
             fail_fast,
             fail_on_empty,
             slow_threshold,
-            soft_budget,
+            time_budget,
+            soft_timeout,
             nocapture,
             serial,
             jobs,
@@ -353,7 +369,9 @@ struct TestDefaults {
     serial: bool,
     fail_fast: bool,
     slow_threshold: Option<Duration>,
-    soft_budget: Duration,
+    time_budget: Duration,
+    /// Notice-only budget overruns (legacy `--timeout` behavior).
+    soft_timeout: bool,
     seed: Option<u64>,
     repeat: usize,
     engine: TestEngine,
@@ -366,7 +384,8 @@ impl Default for TestDefaults {
             serial: false,
             fail_fast: false,
             slow_threshold: None,
-            soft_budget: DEFAULT_SOFT_BUDGET,
+            time_budget: DEFAULT_TIME_BUDGET,
+            soft_timeout: false,
             seed: None,
             repeat: 1,
             engine: TestEngine::Vm,
@@ -411,7 +430,10 @@ fn load_zz_toml_defaults() -> TestDefaults {
         d.repeat = (v.max(1)) as usize;
     }
     if let Some(v) = test_section.get("timeout").and_then(|v| v.as_integer()) {
-        d.soft_budget = Duration::from_millis(v.max(0) as u64);
+        d.time_budget = Duration::from_millis(v.max(0) as u64);
+    }
+    if let Some(v) = test_section.get("soft-timeout").and_then(|v| v.as_bool()) {
+        d.soft_timeout = v;
     }
     if let Some(v) = test_section.get("engine").and_then(|v| v.as_str()) {
         d.engine = match v {
@@ -465,7 +487,8 @@ struct TestResult {
     passed: bool,
     ignored: bool,
     slow: bool,
-    /// Duration exceeded the soft budget (notice only, never fails).
+    /// Duration exceeded the `--timeout` budget. Fails the test unless
+    /// `--soft-timeout` restores notice-only mode.
     over_budget: bool,
     reason: Option<String>,
     duration: Duration,
@@ -525,14 +548,22 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
     let config = TestConfig::parse(args)?;
 
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
-    crate::enforce_project_zz(std::path::Path::new(&config.path))?;
+    for root in &config.paths {
+        crate::enforce_project_zz(std::path::Path::new(root))?;
+    }
 
+    let mut files: Vec<PathBuf> = Vec::new();
+    for root in &config.paths {
+        files.extend(collect_zz_files(root)?);
+    }
+    files.sort();
+    files.dedup();
     let files = if config.changed {
         // When --changed, only load files that git says are modified.
         let changed = git_changed_files().unwrap_or_default();
         let changed_set: std::collections::HashSet<PathBuf> = changed.into_iter().collect();
-        let all = collect_zz_files(&config.path)?;
-        all.into_iter()
+        files
+            .into_iter()
             .filter(|p| {
                 changed_set.contains(p)
                     || std::fs::canonicalize(p)
@@ -542,7 +573,7 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
             })
             .collect::<Vec<_>>()
     } else {
-        collect_zz_files(&config.path)?
+        files
     };
 
     if files.is_empty() {
@@ -552,13 +583,14 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
             format!(
                 "no .zz files found in `{}`\n\n\
                  hint: ensure the path contains .zz source files",
-                config.path
+                config.paths.join(", ")
             )
         };
         if config.json_output {
             println!("[]");
         } else {
-            eprintln!("zz test: {msg}");
+            eprintln!("warning: zz test: {msg}");
+            eprintln!("hint: no .zz files discovered — nothing ran, exit stays 0");
         }
         return Ok(());
     }
@@ -612,7 +644,12 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
         if config.json_output {
             println!("[]");
         } else {
-            eprintln!("zz test: {msg}");
+            eprintln!("warning: zz test: {msg}");
+            if !config.fail_on_empty {
+                eprintln!(
+                    "hint: no tests ran — exit stays 0; use --fail-on-empty to fail CI on empty match"
+                );
+            }
         }
         if config.fail_on_empty {
             return Err(msg);
@@ -1283,11 +1320,28 @@ fn run_single_test_vm(test: &TestInfo, config: &TestConfig) -> TestResult {
                 r.slow = true;
             }
         }
-        if !r.ignored && r.duration > config.soft_budget {
-            r.over_budget = true;
-        }
+        apply_time_budget(&mut r, config);
 
         return r;
+    }
+}
+
+/// Apply the `--timeout` budget to a finished attempt: mark `over_budget`,
+/// and — unless `--soft-timeout` — fail tests that passed functionally but
+/// overran the budget. Genuine failures, ignores, and fail-fast skips are
+/// left untouched.
+fn apply_time_budget(r: &mut TestResult, config: &TestConfig) {
+    if r.ignored || is_failfast_skip(r) || r.duration <= config.time_budget {
+        return;
+    }
+    r.over_budget = true;
+    if !config.soft_timeout && r.passed {
+        r.passed = false;
+        r.error_msg = Some(format!(
+            "timeout: exceeded {} budget (took {})",
+            fmt_dur(config.time_budget),
+            fmt_dur(r.duration),
+        ));
     }
 }
 
@@ -1950,17 +2004,17 @@ fn build_aot_harness(
     Ok((harness_path, bin))
 }
 
-/// Remove harness sources and their published `bin/` copies.
+/// Remove harness sources and their published binaries.
 /// The content cache under `~/.zz/cache` is kept for fast reruns.
 fn cleanup_aot(bins: &mut BTreeMap<PathBuf, (PathBuf, PathBuf)>) {
     for (_, (harness, bin)) in std::mem::take(bins) {
         let _ = std::fs::remove_file(&harness);
-        // Only the `bin/` copy next to the harness goes away; the cache
+        // Only the published copy goes away; the cache
         // entry stays. Never delete anything outside the harness dir.
         if let Some(name) = harness.file_stem().and_then(|s| s.to_str()) {
             if name.starts_with(AOT_HARNESS_PREFIX) {
                 let _ = std::fs::remove_file(&bin);
-                // Drop the now-empty `bin/` dir; keep it if others use it.
+                // Drop the now-empty output dir; keep it if others use it.
                 if let Some(dir) = bin.parent() {
                     let _ = std::fs::remove_dir(dir);
                 }
@@ -1971,8 +2025,8 @@ fn cleanup_aot(bins: &mut BTreeMap<PathBuf, (PathBuf, PathBuf)>) {
 
 /// Run one test as its own AOT process (`t<idx>` selects the dispatch
 /// arm). Exit 0 = pass; anything else = fail (inverted for `should_panic`).
-/// `@test(timeout = ms)` kills the child; the soft `--timeout` budget only
-/// marks `over_budget` (never interrupts).
+/// `@test(timeout = ms)` kills the child; the `--timeout` budget marks
+/// `over_budget` and fails the test unless `--soft-timeout` is passed.
 fn run_single_test_aot(test: &TestInfo, idx: usize, bin: &Path, config: &TestConfig) -> TestResult {
     let max_retries = test.meta.retry.unwrap_or(0);
     let mut attempt = 0;
@@ -1996,9 +2050,7 @@ fn run_single_test_aot(test: &TestInfo, idx: usize, bin: &Path, config: &TestCon
                 r.slow = true;
             }
         }
-        if !r.ignored && r.duration > config.soft_budget {
-            r.over_budget = true;
-        }
+        apply_time_budget(&mut r, config);
         return r;
     }
 }
@@ -2366,11 +2418,19 @@ fn print_test_line(r: &TestResult, config: &TestConfig) {
         extra.push_str(" (slow)");
     }
     if r.over_budget {
-        extra.push_str(&format!(
-            " (took {}; over {} soft budget, not interrupted)",
-            fmt_dur(r.duration),
-            fmt_dur(config.soft_budget),
-        ));
+        if config.soft_timeout {
+            extra.push_str(&format!(
+                " (took {}; over {} soft budget, not interrupted)",
+                fmt_dur(r.duration),
+                fmt_dur(config.time_budget),
+            ));
+        } else {
+            extra.push_str(&format!(
+                " (took {}; exceeded {} budget)",
+                fmt_dur(r.duration),
+                fmt_dur(config.time_budget),
+            ));
+        }
     }
 
     eprintln!(
@@ -2440,10 +2500,17 @@ fn print_file_footer(
         );
     }
     if over > 0 {
-        eprintln!(
-            "note: {over} test(s) exceeded the {} soft budget (not interrupted)",
-            fmt_dur(config.soft_budget),
-        );
+        if config.soft_timeout {
+            eprintln!(
+                "note: {over} test(s) exceeded the {} soft budget (not interrupted)",
+                fmt_dur(config.time_budget),
+            );
+        } else {
+            eprintln!(
+                "note: {over} test(s) exceeded the {} budget (failed; use --soft-timeout for notice-only)",
+                fmt_dur(config.time_budget),
+            );
+        }
     }
 }
 
@@ -2655,8 +2722,8 @@ fn collect_zz_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
                 // holds symlinks into the CAS (often self-referential via
                 // path deps), which would recurse forever. Matches the
                 // skip sets in `zz_pm::hash` / `zz_pm::cas` and the
-                // scaffolded `.gitignore` (vendor/, build/, src/bin/).
-                // `bin/` holds published AOT artifacts next to sources.
+                // scaffolded `.gitignore` (vendor/, build/, bin/).
+                // `bin/` holds published AOT artifacts at the project root.
                 if name.starts_with('.')
                     || name == "target"
                     || name == "vendor"

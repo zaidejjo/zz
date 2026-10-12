@@ -7,8 +7,10 @@ pub mod funcs;
 pub mod http_lint;
 pub mod inference;
 pub mod scope;
+pub mod std_gate;
 pub mod structs;
 pub mod type_check;
+pub mod value_lint;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -86,7 +88,7 @@ pub struct StructSig {
 }
 
 /// A registered type alias: type parameters and the target type with
-/// parameters as `Type::Named` (e.g. `type Pair[T] = (T, T)` stores
+/// parameters as `Type::Named` (e.g. `type Pair<T> = (T, T)` stores
 /// `Tuple([Named("T"), Named("T")])`). Uses resolve to the target, so
 /// aliases never appear at runtime.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -95,7 +97,7 @@ pub struct AliasSig {
     pub target: Type,
 }
 /// A registered user enum: type parameters and variant names with
-/// optional payload types (`enum Box[T] { V(T), E }` stores
+/// optional payload types (`enum Box<T> { V(T), E }` stores
 /// `generics: ["T"]`, `variants: [("V", Some(Named("T"))),
 /// ("E", None)]`). Construction (`Box.V(1)`) and patterns (`.V(v)`)
 /// resolve against this table; values erase to `Object`s at runtime.
@@ -173,6 +175,7 @@ pub fn check_program(
         initial_aliases,
         initial_enums,
         HashMap::new(),
+        "",
     )
     .result
 }
@@ -196,6 +199,7 @@ pub fn check_program_with_consts(
         initial_aliases,
         initial_enums,
         initial_consts,
+        "",
     )
     .result
 }
@@ -219,12 +223,43 @@ pub fn check_program_typed(
         initial_aliases,
         initial_enums,
         HashMap::new(),
+        "",
     );
     (out.result, out.span_types)
 }
 
-/// Core pass shared by [`check_program`], [`check_program_with_consts`], and
-/// [`check_program_typed`].
+/// Like [`check_program`], but names the module under check (`fen` for
+/// `fen.zz`) so bindings shadowing the module's own namespace (or an
+/// imported one) warn instead of failing only at runtime (#376, #361).
+/// The loader passes each module's namespace; merged programs and REPL
+/// snippets pass `""` (no single owner).
+pub fn check_program_with_module_ns(
+    program: &Program,
+    initial_bindings: HashMap<String, Type>,
+    initial_funcs: HashMap<String, FuncSig>,
+    initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
+    module_ns: &str,
+) -> CheckResult {
+    check_program_impl(
+        program,
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        initial_aliases,
+        initial_enums,
+        HashMap::new(),
+        module_ns,
+    )
+    .result
+}
+
+/// Core pass shared by [`check_program`], [`check_program_with_consts`],
+/// [`check_program_with_module_ns`], and [`check_program_typed`].
+// Eight params is the honest shape here (six seed maps + consts +
+// module owner); a struct would churn every call site for no benefit.
+#[allow(clippy::too_many_arguments)]
 fn check_program_impl(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
@@ -233,6 +268,7 @@ fn check_program_impl(
     initial_aliases: HashMap<String, AliasSig>,
     initial_enums: HashMap<String, EnumSig>,
     initial_consts: HashMap<String, Span>,
+    module_ns: &str,
 ) -> CheckerOutcome {
     // Resolve explicit decorators first: `@dec func f` becomes `f__inner` +
     // a same-signature wrapper, so all downstream passes see ordinary
@@ -259,6 +295,27 @@ fn check_program_impl(
         initial_enums,
         initial_consts,
     );
+    // Namespace roots whose shadowing breaks runtime resolution while the
+    // check stays green (#376, #361): the module's own namespace plus
+    // every imported namespace head. Any env binding reusing one hides
+    // the namespace object, so qualified calls through it fail at
+    // runtime (`undefined method`/`undefined variable`). Collected up
+    // front (position-independent): an import below the binding still
+    // breaks the same way.
+    if !module_ns.is_empty() {
+        checker.shadow_roots.insert(module_ns.to_string());
+    }
+    for stmt in &program.stmts {
+        if let Stmt::Import { path, alias, .. } = stmt {
+            let head = alias
+                .clone()
+                .or_else(|| path.last().cloned())
+                .unwrap_or_default();
+            if !head.is_empty() {
+                checker.shadow_roots.insert(head);
+            }
+        }
+    }
     // Offset fresh-var ids above any `Var(id)` carried in seed signatures
     // from already-checked modules. Those ids were allocated by a previous
     // checker's unifier; reusing them here would unify unrelated types
@@ -289,12 +346,44 @@ fn check_program_impl(
         }
     }
     checker.errors.append(&mut decorator_errors);
+    // Import hygiene for fully-qualified std paths (#227): only enforced
+    // for loader-checked user modules (non-empty owner). Stdlib internals,
+    // the REPL, and merged HIR programs pass "" and skip it.
+    if !module_ns.is_empty() {
+        checker
+            .errors
+            .extend(std_gate::lint_std_imports(program, module_ns));
+    }
 
     // Track which items are pub (for cross-module export).
     let mut pub_bindings_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pub_funcs_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pub_structs_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pub_aliases_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Pass 0: pre-register struct/enum names with empty signatures so
+    // fields and payloads may reference their own type (or each other,
+    // in either order). Direct self-embedding (`kid: Node` — no array,
+    // option, or other indirection) stays an error, reported when the
+    // real signature lands in Pass 1/1b. The placeholders are always
+    // overwritten below; a duplicate definition still errors there.
+    for stmt in &program.stmts {
+        match stmt {
+            Stmt::Struct { name, generics, .. } => {
+                checker.structs.entry(name.join(".")).or_insert(StructSig {
+                    generics: generics.iter().map(|g| g.name.clone()).collect(),
+                    fields: Vec::new(),
+                });
+            }
+            Stmt::Enum { name, generics, .. } => {
+                checker.enums.entry(name.join(".")).or_insert(EnumSig {
+                    generics: generics.iter().map(|g| g.name.clone()).collect(),
+                    variants: Vec::new(),
+                });
+            }
+            _ => {}
+        }
+    }
 
     // Pass 1: register struct definitions (fields are resolved against the
     // struct registry, so structs may reference earlier structs). Structs
@@ -493,7 +582,7 @@ fn check_program_impl(
             let builtin_key = Checker::builtin_ext_key(&type_name);
             let is_extension = builtin_key.is_some() || !(is_known_struct || is_known_enum);
             let type_key = builtin_key.unwrap_or_else(|| type_name.clone());
-            // Generic structs need a matching generic impl (`impl Box[T]`);
+            // Generic structs need a matching generic impl (`impl Box<T>`);
             // the parameters scope over every method below. Generic
             // enums follow the identical rule.
             let struct_generics: Vec<String> = checker
@@ -544,7 +633,7 @@ fn check_program_impl(
                     ));
                 }
             } else {
-                // Duplicate parameter names (`impl Box[T, T]`) shadow each
+                // Duplicate parameter names (`impl Box<T, T>`) shadow each
                 // other in substitution maps; reject rather than guess.
                 let mut seen_gen = std::collections::HashSet::new();
                 for g in &impl_gen_names {
@@ -571,7 +660,7 @@ fn check_program_impl(
                     let method_gens: Vec<String> =
                         generics.iter().map(|g| g.name.name.clone()).collect();
                     // Impl parameters scope over every method (so the
-                    // receiver's `Box[int]` unifies `T := int` at call
+                    // receiver's `Box<int>` unifies `T := int` at call
                     // sites through the existing instantiation path).
                     // A method parameter shadowing an impl parameter
                     // would collapse two distinct variables; reject it.
@@ -1021,6 +1110,19 @@ pub(crate) struct Checker {
     /// variable" error.  Used by `check_call` to suppress the secondary
     /// "cannot call a value of type unit" cascading error.
     pub(crate) had_undefined_var: bool,
+    /// Whether a block tail in the current position is the block's
+    /// *value* (implicit return) rather than a discard. `false` at the
+    /// top level and inside loop bodies (their values are discarded),
+    /// `true` inside function/closure bodies. `check_block` ANDs this
+    /// with tail position, so `-> Result` tails never warn while loop
+    /// tails that drop errors do. Saved/restored across nested blocks.
+    pub(crate) tail_is_value: bool,
+    /// Whether the statement currently being checked directly discards
+    /// a `match` value (`match ...` as a bare statement/defer, not the
+    /// tail). `check_match` uses this to warn on bare `Result`/`Option`
+    /// arm bodies, which never pass through `Stmt::Expr` themselves.
+    /// Block arm bodies are covered by the normal statement path.
+    pub(crate) direct_discard: bool,
     /// Imported namespaces: (alias, span). Used to detect unused imports.
     pub(crate) imports: Vec<(String, zz_frontend::span::Span)>,
     /// Selective-import aliases: bare name → qualified `ns.sym`, from
@@ -1046,6 +1148,14 @@ pub(crate) struct Checker {
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
     pub(crate) scope: Vec<Arc<str>>,
+    /// Own module namespace for this check (`fen` for `fen.zz`), plus
+    /// every imported namespace head. Any env binding reusing one of
+    /// these names shadows the namespace object at runtime, so
+    /// same-module (or same-import) qualified calls through it fail
+    /// with `undefined method`/`undefined variable` while the check
+    /// stays green (#376, #361). Empty when unknown (REPL, merged HIR
+    /// programs already covered per-module by the loader).
+    pub(crate) shadow_roots: std::collections::HashSet<String>,
 }
 
 impl Checker {
@@ -1092,6 +1202,8 @@ impl Checker {
             pub_names: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
+            tail_is_value: false,
+            direct_discard: false,
             imports: Vec::new(),
             import_aliases: HashMap::new(),
             module_aliases: HashMap::new(),
@@ -1099,6 +1211,7 @@ impl Checker {
             scope: Vec::new(),
             link_libs: Vec::new(),
             http_lint: http_lint::HttpLintState::default(),
+            shadow_roots: std::collections::HashSet::new(),
         }
     }
 

@@ -454,6 +454,29 @@ fn bare_destructure_does_not_steal_calls_or_decls() {
 }
 
 #[test]
+fn paren_tuple_tail_is_expr_not_destructure() {
+    // #367: `(a, a + 1)` as a bare statement (e.g. a block tail) is a
+    // tuple expression, not a destructuring pattern — only `(...) :=`
+    // declares a destructure.
+    let p = parse_ok("(a, a + 1)");
+    assert!(matches!(
+        p.stmts[0],
+        zz_frontend::ast::Stmt::Expr(E::Tuple { .. })
+    ));
+    let p = parse_ok("(a, b)");
+    assert!(matches!(
+        p.stmts[0],
+        zz_frontend::ast::Stmt::Expr(E::Tuple { .. })
+    ));
+    // With `:=` it stays a destructure.
+    let p = parse_ok("(a, b) := f()");
+    assert!(matches!(
+        p.stmts[0],
+        zz_frontend::ast::Stmt::Destructure { .. }
+    ));
+}
+
+#[test]
 fn parses_compound_assign_all_ops() {
     use zz_frontend::ast::BinOp;
     let cases = [

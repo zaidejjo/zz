@@ -126,19 +126,104 @@ fn namespace_collision_detected() {
 }
 
 #[test]
-fn two_namespaces_for_one_module_detected() {
+fn same_file_two_namespaces_compose_via_alias() {
+    // #380: one file imported bare and aliased composes instead of
+    // erroring. The first binding wins as canonical; alias references
+    // rewrite through it so seeds keep one identity.
     let dir = temp_project(&[
-        ("main.zz", "import utils\nimport utils as u\n1"),
-        ("utils.zz", "func f() -> int { 1 }"),
+        (
+            "main.zz",
+            "import utils\nimport utils as u\nx := utils.f()\ny := u.f()",
+        ),
+        ("utils.zz", "pub func f() -> int { 1 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+    assert_eq!(result.bindings["main.y"], Type::Int);
     assert!(
-        result
-            .errors
+        result.funcs.contains_key("utils.f"),
+        "canonical seed entry missing: {:?}",
+        result.funcs.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn same_file_alias_before_bare_composes() {
+    // Order-independence: aliased-first also binds once and rewrites.
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import utils as u\nimport utils\nx := u.f()\ny := utils.f()",
+        ),
+        ("utils.zz", "pub func f() -> int { 1 }"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+    assert_eq!(result.bindings["main.y"], Type::Int);
+}
+
+#[test]
+fn dep_submodules_share_stem_across_packages() {
+    // #380: ask.keys + tui.keys coexist via aliases while tui.menu's
+    // internal bare `import tui.keys` keeps working. Path deps stand in
+    // for registry deps (same resolver path).
+    let dir = temp_project(&[
+        (
+            "app/zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nask = { path = \"../askpkg\" }\ntui = { path = \"../tuipkg\" }\n",
+        ),
+        (
+            "app/src/main.zz",
+            "import ask.keys as akeys\nimport tui.keys as tkeys\nimport tui.menu\nimport tui.keys(up)\nx := akeys.up()\ny := tkeys.up()\nz := menu.menu_up()\nw := up()",
+        ),
+        ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
+        (
+            "askpkg/src/keys.zz",
+            "pub func up() -> int { 1 }",
+        ),
+        ("tuipkg/zz.toml", "[package]\nname = \"tui\"\nversion = \"0.1.0\"\n"),
+        ("tuipkg/src/keys.zz", "pub func up() -> int { 2 }"),
+        (
+            "tuipkg/src/menu.zz",
+            "import tui.keys\npub func menu_up() -> int { keys.up() }",
+        ),
+    ]);
+    // Minimal path-dep lockfile (checksum via save, like `zz install`).
+    let mut lock = zz_pm::lock::Lockfile::new();
+    for dep in ["ask", "tui"] {
+        lock.deps.push(zz_pm::lock::LockedDep {
+            name: dep.to_string(),
+            version: "*".to_string(),
+            source: "path".to_string(),
+            hash: String::new(),
+            commit: None,
+            native: None,
+        });
+    }
+    lock.save(&dir.join("app/zz.lock")).expect("write lock");
+    let result = load_program(&dir.join("app/src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+    assert_eq!(result.bindings["main.y"], Type::Int);
+    assert_eq!(result.bindings["main.z"], Type::Int);
+    assert_eq!(result.bindings["main.w"], Type::Int);
+    for want in ["akeys.up", "tkeys.up", "menu.menu_up"] {
+        assert!(
+            result.funcs.contains_key(want),
+            "missing seed entry `{want}`: {:?}",
+            result.funcs.keys().collect::<Vec<_>>()
+        );
+    }
+    // Alias-rewritten references must not orphan their import (#380):
+    // no false `unused import` for the multi-bound spellings.
+    assert!(
+        !diag_texts(&result)
             .iter()
-            .any(|e| e.diags.iter().any(|d| d.message.contains("two namespaces"))),
-        "expected two-namespace error, got: {:?}",
-        result.errors
+            .any(|m| m.contains("unused import")),
+        "alias imports must not warn: {:?}",
+        diag_texts(&result)
     );
 }
 
@@ -1444,6 +1529,78 @@ fn check_cache_disabled_via_env() {
 }
 
 #[test]
+fn check_cache_namespaces_do_not_poison() {
+    // #290: the same module imported under two namespaces across entries
+    // (`import area as ar` vs plain `import area`) must not share one
+    // cache entry — cached pubs are stored already-namespaced, so the
+    // second entry would restore the winner's qualifier set and report
+    // spurious `undefined variable` errors.
+    super::cache::with_isolated_cache(|| {
+        let dir = temp_project(&[
+            ("area.zz", "pub func doc_new(t: str) -> str { t }\n"),
+            ("a.zz", "import area as ar\nx := ar.doc_new(\"hi\")\n"),
+            ("b.zz", "import area\ny := area.doc_new(\"hi\")\n"),
+        ]);
+        let first = load_check(&dir.join("a.zz"));
+        assert!(no_errors(&first), "aliased errors: {:?}", first.errors);
+        let second = load_check(&dir.join("b.zz"));
+        assert!(no_errors(&second), "plain errors: {:?}", second.errors);
+        // Reverse order poisons nothing either (warm cache, other winner).
+        let third = load_check(&dir.join("a.zz"));
+        assert!(no_errors(&third), "re-aliased errors: {:?}", third.errors);
+    });
+}
+
+#[test]
+fn failed_dependency_collapses_cascade() {
+    // #274: a broken dependency reports once at its source; each importer
+    // gets one targeted error instead of N `undefined variable` /
+    // `unknown function` follow-ons.
+    let dir = temp_project(&[
+        ("cache.zz", "pub func save(root: str) -> int { root + 1 }\n"),
+        (
+            "main.zz",
+            "import cache\nfunc main() {\n    a := cache.save(\"x\")\n    b := cache.save(\"y\")\n    println(a)\n    println(b)\n}\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    // Root cause still reported once at the dependency itself.
+    let dep_errs: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| e.name.ends_with("cache.zz"))
+        .collect();
+    assert_eq!(dep_errs.len(), 1, "dep must fail once: {:?}", result.errors);
+    // Importer fails once with the collapsed error, not the cascade.
+    let imp_errs: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| e.name.ends_with("main.zz"))
+        .collect();
+    assert_eq!(
+        imp_errs.len(),
+        1,
+        "importer must fail once: {:?}",
+        result.errors
+    );
+    let texts: Vec<String> = imp_errs[0]
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|m| m.contains("failed to check") && m.contains("cache")),
+        "expected collapsed import-failed error: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|m| m.contains("`cache.")),
+        "cascade not collapsed: {texts:?}"
+    );
+}
+
+#[test]
 fn selective_std_call_marks_import_used() {
     // Regression: the loader rewrites `pow(2, 3)` to the canonical
     // `std.math.pow(2, 3)`, while the census only knew the short
@@ -1503,5 +1660,389 @@ fn later_module_selective_reaches_all_funcs() {
     assert!(
         result.funcs.contains_key("PI"),
         "plain selective const must survive into all_funcs"
+    );
+}
+
+/// Manifest helper for package-mapping tests (#288).
+fn pkg_manifest(name: &str) -> String {
+    format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n")
+}
+
+#[test]
+fn package_import_resolves_from_tests_dir() {
+    // `tests/` file imports `src/` module via the package name: the
+    // core acceptance case of #288 (no fragile `../src/...` path).
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        ("tests/check.zz", "import app.math\nx := math.add(1, 2)"),
+    ]);
+    let result = load_program(&dir.join("tests/check.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.programs.len(), 2);
+    assert_eq!(result.bindings["check.x"], Type::Int);
+}
+
+#[test]
+fn package_selective_and_alias_imports() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        (
+            "src/other.zz",
+            "pub func mul(a: int, b: int) -> int { a * b }",
+        ),
+        (
+            "tests/sel.zz",
+            "import app.math(add as f)\nimport app.other as m\nx := f(1, 2)\ny := m.mul(3, 4)",
+        ),
+    ]);
+    let result = load_program(&dir.join("tests/sel.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["sel.x"], Type::Int);
+    assert_eq!(result.bindings["sel.y"], Type::Int);
+}
+
+#[test]
+fn package_wildcard_import() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        ("tests/wc.zz", "import app.math(*)\nx := add(1, 2)"),
+    ]);
+    let result = load_program(&dir.join("tests/wc.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["wc.x"], Type::Int);
+}
+
+#[test]
+fn package_bare_import_binds_package_name() {
+    // Bare `import app` loads `src/main.zz` under the `app` namespace
+    // (not the `main` file stem) so `app.x()` and `import app(x)`
+    // agree with each other.
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("src/main.zz", "pub base := 41"),
+        ("main.zz", "import app\nx := app.base + 1"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+}
+
+#[test]
+fn package_bare_selective_uses_package_ns() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("src/main.zz", "pub func who() -> int { 7 }"),
+        ("main.zz", "import app(who as w)\nx := w()"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+}
+
+#[test]
+fn package_missing_file_diagnostic() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        ("tests/bad.zz", "import app.nope\n1"),
+    ]);
+    let result = load_program(&dir.join("tests/bad.zz")).unwrap();
+    let texts = diag_texts(&result);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("resolved to") && t.contains("src/nope.zz")),
+        "expected mapping diagnostic, got: {texts:?}",
+    );
+}
+
+#[test]
+fn package_bare_missing_main_diagnostic() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[("zz.toml", manifest.as_str()), ("main.zz", "import app\n1")]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    let texts = diag_texts(&result);
+    assert!(
+        texts.iter().any(|t| t.contains("src/main.zz")),
+        "expected src/main.zz hint, got: {texts:?}",
+    );
+}
+
+#[test]
+fn package_hyphen_name_matches_underscore_import() {
+    // `package.name = "my-app"` is importable as `my_app.*`.
+    let manifest = pkg_manifest("my-app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        (
+            "src/math.zz",
+            "pub func add(a: int, b: int) -> int { a + b }",
+        ),
+        ("tests/check.zz", "import my_app.math\nx := math.add(1, 2)"),
+    ]);
+    let result = load_program(&dir.join("tests/check.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["check.x"], Type::Int);
+}
+
+#[test]
+fn package_mapping_beats_relative_lookalike() {
+    // A relative `./app.zz` must not shadow the package mapping: bare
+    // `import app` resolves to `src/main.zz` (precedence from #288).
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("app.zz", "pub marker := 1"),
+        ("src/main.zz", "pub base := 41"),
+        ("main.zz", "import app\nx := app.base + 1"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(
+        result.files.iter().any(|(n, _)| n.ends_with("src/main.zz")),
+        "expected src/main.zz in load set, got: {:?}",
+        result.files.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+    );
+    assert!(
+        !result.files.iter().any(|(n, _)| n.ends_with("/app.zz")),
+        "relative ./app.zz must not load, got: {:?}",
+        result.files.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn package_cycle_reported_at_import_site() {
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("src/a.zz", "import app.b\npub func fa() -> int { 1 }"),
+        ("src/b.zz", "import app.a\npub func fb() -> int { 2 }"),
+        ("tests/e.zz", "import app.a\n1"),
+    ]);
+    let result = load_program(&dir.join("tests/e.zz")).unwrap();
+    assert!(
+        result.errors.iter().any(|e| e
+            .diags
+            .iter()
+            .any(|d| d.message.contains("circular import"))),
+        "expected circular import error, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn non_matching_import_still_resolves_relatively() {
+    // A manifest in scope must not reroute imports whose first segment
+    // is not the package name (regression guard for #288 fallback).
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("helper.zz", "pub base := 41"),
+        ("main.zz", "import helper\nx := helper.base + 1"),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+}
+
+#[test]
+fn package_import_resolves_from_nested_tests_dir() {
+    // Deeper nesting on both sides: importer at `tests/unit/` reaches
+    // `src/nested/` through the root manifest alone (no nested
+    // manifests, no symlinks, no `tests/src/` — regression for #288).
+    let manifest = pkg_manifest("app");
+    let dir = temp_project(&[
+        ("zz.toml", manifest.as_str()),
+        ("src/math.zz", "pub func add(a: int, b: int) -> int { a + b }"),
+        (
+            "src/nested/deep.zz",
+            "import app.math\npub func deep_add(a: int, b: int) -> int { math.add(a, b) + 100 }",
+        ),
+        (
+            "tests/unit/check.zz",
+            "import app.nested.deep\nimport app.math(add as f)\nx := deep.deep_add(1, 2)\ny := f(20, 22)",
+        ),
+    ]);
+    let result = load_program(&dir.join("tests/unit/check.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.programs.len(), 3);
+    assert_eq!(result.bindings["check.x"], Type::Int);
+    assert_eq!(result.bindings["check.y"], Type::Int);
+}
+
+#[test]
+fn stdlib_import_kinds_recorded_for_scoped_runs() {
+    // Full + selective + wildcard + aliased imports across two modules:
+    // scoped run-cache hits must replay exactly this set.
+    let dir = temp_project(&[
+        (
+            "main.zz",
+            "import std.math\nimport std.str(length)\nimport dep.help\nfunc main() {\n    println(math.abs(0 - 1))\n    println(length(\"hey\"))\n    println(help.run())\n}\n",
+        ),
+        (
+            "dep/help.zz",
+            "import std.vec as v\nimport std.map(*)\npub func run() -> int {\n    v.len([1]) + 0\n}\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.stdlib_modules, vec!["map", "math", "str", "vec"]);
+    assert_eq!(
+        result.stdlib_selectives,
+        vec![("str".to_string(), vec![("length".to_string(), None)])]
+    );
+    assert_eq!(result.stdlib_wildcards, vec!["map".to_string()]);
+    // Aliased full import keeps its (module, alias) pair for mirrors.
+    assert!(
+        result
+            .stdlib_aliases
+            .contains(&("vec".to_string(), "v".to_string())),
+        "aliases: {:?}",
+        result.stdlib_aliases
+    );
+}
+
+#[test]
+fn dep_style_warnings_collapse_to_one_note() {
+    // #387: a registry/path dep's style lints are true positives the
+    // consumer can neither fix nor silence — they must not print per
+    // site. Errors from deps still propagate. Path deps stand in for
+    // registry deps (same resolver path).
+    let dir = temp_project(&[
+        (
+            "app/zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nask = { path = \"../askpkg\" }\n",
+        ),
+        (
+            "app/src/main.zz",
+            "import ask.editor\nx := editor.edit()",
+        ),
+        ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
+        (
+            "askpkg/src/helper.zz",
+            "pub func get() -> int { 1 }",
+        ),
+        (
+            // `ed` shadows the `ed` import head: the #381 lint fires
+            // inside the dep (same shape as ask's `ed := env.get(..)`).
+            "askpkg/src/editor.zz",
+            "import ask.helper as ed\npub func edit() -> int {\n    ed := 1\n    ed\n}",
+        ),
+    ]);
+    let mut lock = zz_pm::lock::Lockfile::new();
+    lock.deps.push(zz_pm::lock::LockedDep {
+        name: "ask".to_string(),
+        version: "*".to_string(),
+        source: "path".to_string(),
+        hash: String::new(),
+        commit: None,
+        native: None,
+    });
+    lock.save(&dir.join("app/zz.lock")).expect("write lock");
+    let result = load_program(&dir.join("app/src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    // Messages only (notes echo the first hidden warning for triage).
+    let msgs: Vec<&str> = result
+        .errors
+        .iter()
+        .flat_map(|e| e.diags.iter().map(|d| d.message.as_str()))
+        .collect();
+    // The raw per-site warning must not reach the consumer ...
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| m.contains("shadows a module namespace")),
+        "dep shadow warning must collapse, got: {:?}",
+        msgs
+    );
+    // ... but the collapse note names the dependency.
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("inside dependency") && m.contains("hidden")),
+        "expected collapse note, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn first_party_shadow_warning_still_fires() {
+    // #387 companion: first-party files keep the raw per-site warning.
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "src/main.zz",
+            "import math.utils\nfunc f(utils: str) -> str {\n    utils\n}",
+        ),
+        (
+            "src/math/utils.zz",
+            "pub func double(n: int) -> int { n * 2 }",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(
+        diag_texts(&result)
+            .iter()
+            .any(|m| m.contains("shadows a module namespace")),
+        "first-party shadow warning must fire, got: {:?}",
+        diag_texts(&result)
+    );
+}
+
+#[test]
+fn dep_errors_still_propagate() {
+    // #387 companion: only warnings collapse — dep type errors still
+    // break the consumer build.
+    let dir = temp_project(&[
+        (
+            "app/zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nask = { path = \"../askpkg\" }\n",
+        ),
+        (
+            "app/src/main.zz",
+            "import ask.broken\nx := broken.f()",
+        ),
+        ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
+        ("askpkg/src/broken.zz", "pub func f() -> int { \"nope\" }"),
+    ]);
+    let mut lock = zz_pm::lock::Lockfile::new();
+    lock.deps.push(zz_pm::lock::LockedDep {
+        name: "ask".to_string(),
+        version: "*".to_string(),
+        source: "path".to_string(),
+        hash: String::new(),
+        commit: None,
+        native: None,
+    });
+    lock.save(&dir.join("app/zz.lock")).expect("write lock");
+    let result = load_program(&dir.join("app/src/main.zz")).unwrap();
+    assert!(
+        !no_errors(&result),
+        "dep type error must propagate, got: {:?}",
+        result.errors
     );
 }

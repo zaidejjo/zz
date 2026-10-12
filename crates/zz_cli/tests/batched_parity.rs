@@ -121,6 +121,17 @@ fn batch_inventory_complete() {
     }
 }
 
+/// Truncate driver output in failure messages: enough to see how far a
+/// dying driver got (exit-1 with hidden stdout is otherwise undebuggable),
+/// bounded so a chatty driver can't flood the log.
+fn trunc_out(out: &str) -> String {
+    const LIM: usize = 3000;
+    if out.len() <= LIM {
+        return out.to_string();
+    }
+    format!("{}...[{} bytes total]", &out[..LIM], out.len())
+}
+
 /// Flat sandbox layout: each batched fixture is copied to
 /// `case_<global-index>.zz` (imported as `case_<i>`). Flat names dodge
 /// keyword stems (`syntax.match` is unimportable) and cross-category
@@ -209,7 +220,22 @@ fn run_driver(driver: &Path, native: bool) -> (i32, String, String) {
     cmd.arg(driver)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    // Native builds publish standalone outputs to the invocation dir:
+    // name a unique `-o` destination per driver inside its sandbox so
+    // parallel drivers never share (and race on) one destination. CWD
+    // stays at the workspace root — staged cases can read
+    // repo-root-relative paths exactly like the VM leg does.
+    if native {
+        if let Some(parent) = driver.parent() {
+            let stem = driver
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "zz_out".to_string());
+            cmd.arg("-o").arg(parent.join(&stem));
+        }
+    }
     let mut child = cmd.spawn().expect("spawn zz");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
@@ -333,7 +359,11 @@ fn batched_native_parity() {
         std::fs::write(&driver, &src).expect("write driver");
         let (vm_code, vm_out, vm_err) = run_driver(&driver, false);
         if vm_code != 0 {
-            failures.push(format!("driver {b}: VM exit {vm_code}:\n{vm_err}"));
+            failures.push(format!(
+                "driver {b}: VM exit {vm_code}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                trunc_out(&vm_out),
+                vm_err
+            ));
             continue;
         }
         if vm_only() {
@@ -342,7 +372,11 @@ fn batched_native_parity() {
         }
         let (nat_code, nat_out, nat_err) = run_driver(&driver, true);
         if nat_code != 0 {
-            failures.push(format!("driver {b}: native exit {nat_code}:\n{nat_err}"));
+            failures.push(format!(
+                "driver {b}: native exit {nat_code}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                trunc_out(&nat_out),
+                nat_err
+            ));
             continue;
         }
         let vm_chunks = demux(&vm_out);

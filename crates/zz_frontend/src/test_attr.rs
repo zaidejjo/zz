@@ -108,7 +108,7 @@ pub fn parse_test_meta(dec: &Decorator, diags: &mut Vec<RawDiag>) -> Option<Test
     let mut seen_cases = false;
 
     for (name, expr) in &dec.named {
-        match name.as_str() {
+        match name.name.as_str() {
             "should_panic" => {
                 if seen_should_panic {
                     diags.push(error_at(
@@ -309,8 +309,8 @@ pub fn validate_setup_teardown(dec: &Decorator, diags: &mut Vec<RawDiag>) {
         let (name, expr) = &dec.named[0];
         diags.push(error_at(
             format!(
-                "@{} does not accept arguments (found `{name} = ...`)",
-                dec.path[0]
+                "@{} does not accept arguments (found `{} = ...`)",
+                dec.path[0], name.name
             ),
             expr.span(),
         ));
@@ -417,10 +417,22 @@ mod tests {
     use crate::span::Span;
 
     fn dec_test(named: Vec<(&str, Expr)>, args: Vec<Expr>) -> Decorator {
+        use crate::ast::Ident;
         Decorator {
             path: vec!["test".into()],
             args,
-            named: named.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            named: named
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        Ident {
+                            name: k.into(),
+                            span: Span::new(0, 1),
+                        },
+                        v,
+                    )
+                })
+                .collect(),
             span: Span::new(0, 5),
         }
     }

@@ -3264,6 +3264,47 @@ zz_value zz_tcp_write_bytes(zz_value stream, zz_value data, int *err) {
     return zz_variant_ok((zz_value){ZZ_INT, {.i = (int64_t)total}});
 }
 
+// net.tcp_read_exact(stream, n) → Result<Ok(bytes len n), Err(msg)>
+// Loops until exactly `n` bytes arrive (MSG_WAITALL would also work but
+// hides short-read vs close distinctions; the loop keeps errno mapping
+// identical to the VM side).
+zz_value zz_tcp_read_exact(zz_value stream, zz_value n, int *err) {
+    (void)err;
+    if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
+        return zz_variant_err(zz_str_static("tcp_read_exact failed: not a stream"));
+    }
+    if (n.tag != ZZ_INT || n.i <= 0 || n.i > 64 * 1024 * 1024) {
+        return zz_variant_err(zz_str_static("tcp_read_exact failed: bad length (want 1..67108864)"));
+    }
+    size_t want = (size_t)n.i;
+    unsigned char *buf = (unsigned char *)malloc(want);
+    if (!buf) return zz_variant_err(zz_str_static("tcp_read_exact failed: out of memory"));
+    size_t got = 0;
+    while (got < want) {
+        ssize_t r = recv(stream.net->fd, buf + got, want - got, 0);
+        if (r < 0) {
+            free(buf);
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return zz_variant_err(zz_str_static("tcp_read_exact failed: timed out"));
+            }
+            char msg[192];
+            int m = snprintf(msg, sizeof msg, "tcp_read_exact failed: %s", strerror(errno));
+            return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
+        }
+        if (r == 0) {
+            free(buf);
+            return zz_variant_err(zz_str_static("tcp_read_exact failed: connection closed"));
+        }
+        got += (size_t)r;
+    }
+    zz_value out = zz_bytes_new(buf, want);
+    free(buf);
+    if (out.tag != ZZ_BYTES) {
+        return zz_variant_err(zz_str_static("tcp_read_exact failed: out of memory"));
+    }
+    return zz_variant_ok(out);
+}
+
 // net.tcp_shutdown(stream) → Result<Ok(unit), Err(msg)>
 // Real shutdown: both directions stop. The fd stays valid for
 // address queries; later I/O fails naturally at the syscall layer.
@@ -3283,6 +3324,116 @@ zz_value zz_tcp_shutdown(zz_value stream, int *err) {
         return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
     }
     return zz_variant_ok(zz_unit());
+}
+
+// ---- std.cell shared-mutable slots --------------------------------------
+typedef struct {
+    uint64_t id;
+    int live;
+    zz_value val;
+} zz_cell_slot;
+
+static zz_cell_slot *zz_cells = NULL;
+static size_t zz_cell_n = 0;
+static size_t zz_cell_cap = 0;
+static uint64_t zz_cell_next = 1;
+static pthread_mutex_t zz_cell_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static zz_cell_slot *zz_cell_find(uint64_t id) {
+    for (size_t i = 0; i < zz_cell_n; i++) {
+        if (zz_cells[i].live && zz_cells[i].id == id) return &zz_cells[i];
+    }
+    return NULL;
+}
+
+// cell.new(v) → cell id (plain int; AOT Opaque("cell") lowers to ids,
+// mirroring the int-id convention of the staticlib FFI handles).
+zz_value zz_cell_new(zz_value v, int *err) {
+    (void)err;
+    pthread_mutex_lock(&zz_cell_mu);
+    if (zz_cell_n == zz_cell_cap) {
+        size_t nc = zz_cell_cap == 0 ? 16 : zz_cell_cap * 2;
+        zz_cell_slot *ns = (zz_cell_slot *)realloc(zz_cells, nc * sizeof(zz_cell_slot));
+        if (!ns) {
+            pthread_mutex_unlock(&zz_cell_mu);
+            return zz_variant_err(zz_str_static("cell.new: out of memory"));
+        }
+        zz_cells = ns;
+        zz_cell_cap = nc;
+    }
+    for (size_t i = 0; i < zz_cell_n; i++) {
+        if (!zz_cells[i].live) {
+            zz_cells[i].live = 1;
+            zz_cells[i].val = zz_clone(v);
+            uint64_t id = zz_cells[i].id;
+            pthread_mutex_unlock(&zz_cell_mu);
+            return (zz_value){ZZ_INT, {.i = (int64_t)id}};
+        }
+    }
+    uint64_t id = zz_cell_next++;
+    if (id == 0) id = zz_cell_next++;
+    zz_cells[zz_cell_n].id = id;
+    zz_cells[zz_cell_n].live = 1;
+    zz_cells[zz_cell_n].val = zz_clone(v);
+    zz_cell_n++;
+    pthread_mutex_unlock(&zz_cell_mu);
+    return (zz_value){ZZ_INT, {.i = (int64_t)id}};
+}
+
+// cell.get(id) → Result<ok(value clone), err> (.err when dropped/unknown).
+zz_value zz_cell_get(zz_value id, int *err) {
+    (void)err;
+    if (id.tag != ZZ_INT || id.i <= 0) {
+        return zz_variant_err(zz_str_static("cell.get: not a cell"));
+    }
+    pthread_mutex_lock(&zz_cell_mu);
+    zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
+    if (!s) {
+        pthread_mutex_unlock(&zz_cell_mu);
+        return zz_variant_err(zz_str_static("cell.get: cell was dropped"));
+    }
+    zz_value out = zz_clone(s->val);
+    pthread_mutex_unlock(&zz_cell_mu);
+    return zz_variant_ok(out);
+}
+
+// cell.set(id, v) → Result<ok(true), err>.
+zz_value zz_cell_set(zz_value id, zz_value v, int *err) {
+    (void)err;
+    if (id.tag != ZZ_INT || id.i <= 0) {
+        return zz_variant_err(zz_str_static("cell.set: not a cell"));
+    }
+    pthread_mutex_lock(&zz_cell_mu);
+    zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
+    if (!s) {
+        pthread_mutex_unlock(&zz_cell_mu);
+        return zz_variant_err(zz_str_static("cell.set: cell was dropped"));
+    }
+    zz_release(&s->val);
+    s->val = zz_clone(v);
+    pthread_mutex_unlock(&zz_cell_mu);
+    return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
+}
+
+// cell.drop(id) → plain bool (idempotent). NOTE: the checker signature
+// is plain Bool, NOT Result — so this returns the bare value, unlike
+// get/set (Result). Wrapping it in zz_variant_ok here was a real bug:
+// the call site reads `.b` directly and saw the wrapper payload instead.
+zz_value zz_cell_drop(zz_value id, int *err) {
+    (void)err;
+    if (id.tag != ZZ_INT || id.i <= 0) {
+        return (zz_value){ZZ_BOOL, {.b = false}};
+    }
+    pthread_mutex_lock(&zz_cell_mu);
+    zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
+    if (!s) {
+        pthread_mutex_unlock(&zz_cell_mu);
+        return (zz_value){ZZ_BOOL, {.b = false}};
+    }
+    zz_release(&s->val);
+    s->live = 0;
+    pthread_mutex_unlock(&zz_cell_mu);
+    return (zz_value){ZZ_BOOL, {.b = true}};
 }
 
 static zz_value tcp_addr(zz_value stream, int peer, int *err) {
@@ -7100,6 +7251,7 @@ static void zz_throw_printed_err(const zz_value *payload) {
 #ifndef ZZ_OS_WINDOWS
 #include <dirent.h>
 #endif
+#include <sys/stat.h>
 
 // errno → stable code (mirrors the VM's ErrorKind mapping).
 static const char *zz_fs_code(int e) {
@@ -7125,6 +7277,16 @@ static const char *zz_fs_code(int e) {
     default:
         return "io_error";
     }
+}
+
+// Directories can never be read as text: `ftell` on a directory stream
+// reports garbage sizes on some libcs, so the sized `str_alloc` below
+// would abort the process with out-of-memory. The VM's `IsADirectory`
+// kind falls through to `io_error`, so reject up front with the same
+// code on both engines (EIO maps to `io_error`, byte-identical).
+static int zz_fs_is_dir_path(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
 // `fs:<op>:<code>: <path>` as an `.err(str)`.
@@ -7165,6 +7327,9 @@ zz_value zz_fs_read(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    if (zz_fs_is_dir_path(p)) {
+        return zz_fs_err1("read", p, EIO);
+    }
     zz_fs_top_up();
     FILE *f = fopen(p, "rb");
     if (!f) return zz_fs_err1("read", p, errno);
@@ -7183,7 +7348,302 @@ zz_value zz_fs_read(zz_value path, int *err) {
     }
     zz_str_ptr(out)[n] = '\0';
     out->len = n;
+    // Strict UTF-8 like the VM (`std::fs::read_to_string` rejects invalid
+    // UTF-8; programs branch on read success for binary detection, #277).
+    // EINVAL maps to `invalid_input`, matching the VM's InvalidData.
+    if (!zz_utf8_valid((const unsigned char *)zz_str_ptr(out), n)) {
+        zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&gone);
+        return zz_fs_err1("read", p, EINVAL);
+    }
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
+}
+
+// fs.scan_counts(path, markers, bstart, bend, nested, whole) →
+// Result<[lines, code, comments, blanks, binary]>: fused read +
+// binary-sniff + line classification in one call (one native crossing
+// per file instead of read + NUL check + classify). `binary` is 1 when
+// a NUL byte is present (counts zeroed, caller skips — mirrors the
+// read_to_string + has_nul + classify composition). Missing/unreadable
+// files and invalid UTF-8 are `.err` (`fs:scan_counts:<code>: <path>`,
+// same codes as `read_to_string`).
+zz_value zz_fs_scan_counts(
+    zz_value path,
+    zz_value markers,
+    zz_value bstart,
+    zz_value bend,
+    zz_value nested,
+    zz_value whole,
+    int *err
+) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    // A NUL inside the path can never name a file: Rust's `std::fs::read`
+    // rejects it with `InvalidInput`, so report `invalid_input` here too
+    // instead of opening the truncated prefix (never stale, never surprising).
+    if (path.s && strlen(p) != path.s->len) {
+        return zz_fs_err1("scan_counts", p, EINVAL);
+    }
+    // Directories are rejected before any read (see zz_fs_is_dir_path):
+    // `ftell` on a directory stream reports garbage sizes on some libcs,
+    // which used to abort the process in `str_alloc`.
+    if (zz_fs_is_dir_path(p)) {
+        return zz_fs_err1("scan_counts", p, EIO);
+    }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) return zz_fs_err1("scan_counts", p, errno);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    zz_str *out;
+    size_t n;
+    if (sz > 0) {
+        // Regular files: one sized allocation, one read (same shape as
+        // `zz_fs_read`, so steady-state throughput is identical).
+        out = str_alloc((size_t)sz);
+        n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            zz_value leak = (zz_value){ZZ_STR, {.s = out}};
+            zz_release(&leak);
+            // Reading a directory fails here (Linux: EISDIR). The VM's
+            // `IsADirectory` kind falls through to `io_error`, so
+            // translate rather than reporting `invalid_input`.
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("scan_counts", p, e ? e : EIO);
+        }
+    } else {
+        // Pipes / procfs / sysfs / empty files report size 0: grow to EOF
+        // (same shape as `zz_fs_read_bytes`), then land in one `zz_str`.
+        size_t cap = 65536;
+        unsigned char *buf = (unsigned char *)malloc(cap > 0 ? cap : 1);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("scan_counts", p, ENOMEM);
+        }
+        n = 0;
+        size_t got;
+        int ferr = 0;
+        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                size_t ncap = cap * 2;
+                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
+                if (!nbuf) {
+                    free(buf);
+                    fclose(f);
+                    return zz_fs_err1("scan_counts", p, ENOMEM);
+                }
+                buf = nbuf;
+                cap = ncap;
+            }
+        }
+        ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("scan_counts", p, e ? e : EIO);
+        }
+        out = str_alloc(n);
+        if (n > 0) memcpy(zz_str_ptr(out), buf, n);
+        free(buf);
+    }
+    zz_str_ptr(out)[n] = '\0';
+    out->len = n;
+    const unsigned char *d = (const unsigned char *)zz_str_ptr(out);
+    // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
+    if (memchr(d, 0, n) != NULL) {
+        zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&gone);
+        int sub_err = 0;
+        zz_value arr = zz_array_new();
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+        zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 1}}, &sub_err);
+        return zz_variant_ok(arr);
+    }
+    // Strict UTF-8 like `read_to_string`: non-UTF8 is unreadable
+    // (EINVAL maps to `invalid_input`, matching the VM's InvalidData).
+    if (!zz_utf8_valid(d, n)) {
+        zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+        zz_release(&gone);
+        return zz_fs_err1("scan_counts", p, EINVAL);
+    }
+    zz_value text = (zz_value){ZZ_STR, {.s = out}};
+    int sub_err = 0;
+    zz_value arr = zz_str_classify(text, markers, bstart, bend, nested, whole, &sub_err);
+    zz_release(&text);
+    zz_vec_append(arr, (zz_value){ZZ_INT, {.i = 0}}, &sub_err);
+    return zz_variant_ok(arr);
+}
+
+// Generated-content thresholds (mirror zcc's walker.is_generated_content,
+// the spec): minified gate fires only on tiny files, header scan covers
+// at most the first lines.
+#define ZZ_GEN_MIN_LINE 2000
+#define ZZ_GEN_TINY_LINES 3
+#define ZZ_GEN_HEAD_LINES 5
+
+static unsigned char gen_lower_byte(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') ? (unsigned char)(c + 32) : c;
+}
+
+// Char count of valid UTF-8 (continuation bytes skipped).
+static size_t gen_char_count(const unsigned char *d, size_t n) {
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if ((d[i] & 0xC0) != 0x80) c++;
+    }
+    return c;
+}
+
+// fs.is_generated(path, markers) → Result<bool>: whole-file
+// generated-content heuristic in one call (minified tiny files,
+// case-insensitive header markers in the first lines). Unreadable
+// files are `.err` (`fs:is_generated:<code>: <path>`, same codes as
+// `read_to_string`); NUL bytes and invalid UTF-8 report `false`
+// (callers check those via `scan_counts` first; deterministic here).
+// Byte-exact port of zcc's `walker.is_generated_content`, including
+// split_lines artifact-drop and char-count longest lines. Markers
+// match ASCII-lowercased: exact for ASCII-only marker sets (non-ASCII
+// bytes never equal ASCII marker bytes, and no casing pair unfolds a
+// non-ASCII char into marker-continuing ASCII — pinned by fixture).
+zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err) {
+    (void)err;
+    const char *p = zz_fs_cstr(path);
+    if (!p) { *err = 1; return zz_unit(); }
+    if (path.s && strlen(p) != path.s->len) {
+        return zz_fs_err1("is_generated", p, EINVAL);
+    }
+    if (zz_fs_is_dir_path(p)) {
+        return zz_fs_err1("is_generated", p, EIO);
+    }
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) return zz_fs_err1("is_generated", p, errno);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    unsigned char *buf = NULL;
+    size_t n = 0;
+    if (sz > 0) {
+        buf = (unsigned char *)malloc((size_t)sz);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("is_generated", p, ENOMEM);
+        }
+        n = fread(buf, 1, (size_t)sz, f);
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("is_generated", p, e ? e : EIO);
+        }
+    } else {
+        size_t cap = 65536;
+        buf = (unsigned char *)malloc(cap);
+        if (!buf) {
+            fclose(f);
+            return zz_fs_err1("is_generated", p, ENOMEM);
+        }
+        n = 0;
+        size_t got;
+        int ferr = 0;
+        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                size_t ncap = cap * 2;
+                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
+                if (!nbuf) {
+                    free(buf);
+                    fclose(f);
+                    return zz_fs_err1("is_generated", p, ENOMEM);
+                }
+                buf = nbuf;
+                cap = ncap;
+            }
+        }
+        ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            if (e == EISDIR) e = EIO;
+            return zz_fs_err1("is_generated", p, e ? e : EIO);
+        }
+    }
+    // NUL / invalid UTF-8 / empty all report false (see above).
+    int generated = 0;
+    if (n > 0 && memchr(buf, 0, n) == NULL && zz_utf8_valid(buf, n)) {
+        // Line ends walked once (head gate needs at most 5).
+        size_t eols[ZZ_GEN_HEAD_LINES];
+        size_t neols = 0;
+        size_t pos = 0;
+        while (neols < ZZ_GEN_HEAD_LINES && pos < n) {
+            unsigned char *hit = memchr(buf + pos, '\n', n - pos);
+            if (!hit) break;
+            eols[neols++] = (size_t)(hit - buf);
+            pos = (size_t)(hit - buf) + 1;
+        }
+        // Total lines with artifact-drop: trailing newline adds no line.
+        // Fewer than 5 newlines means the tail was seen, so the count
+        // is exact; 5 found guarantees more than tiny either way.
+        size_t total = 0;
+        int tiny = 0;
+        if (neols < ZZ_GEN_HEAD_LINES) {
+            total = neols + ((n > 0 && buf[n - 1] == '\n') ? 0 : 1);
+            tiny = 1;
+        }
+        if (tiny && total <= ZZ_GEN_TINY_LINES) {
+            size_t longest = 0;
+            size_t prev = 0;
+            for (size_t k = 0; k < neols; k++) {
+                size_t c = gen_char_count(buf + prev, eols[k] - prev);
+                if (c > longest) longest = c;
+                prev = eols[k] + 1;
+            }
+            size_t c = gen_char_count(buf + prev, n - prev);
+            if (c > longest) longest = c;
+            if (longest > ZZ_GEN_MIN_LINE) generated = 1;
+            // Tiny file: the head below covers all of its lines.
+        }
+        if (!generated) {
+            size_t head_end = (neols == ZZ_GEN_HEAD_LINES) ? eols[ZZ_GEN_HEAD_LINES - 1] + 1 : n;
+            // Lowercase the head in place (owned buffer, freed below).
+            for (size_t i = 0; i < head_end; i++) buf[i] = gen_lower_byte(buf[i]);
+            size_t nm = 0;
+            const char *mbuf[32];
+            size_t mlen[32];
+            if (markers.tag == ZZ_ARRAY) {
+                for (size_t i = 0; i < markers.arr->len && nm < 32; i++) {
+                    zz_value v = markers.arr->items[i];
+                    if (v.tag == ZZ_STR) {
+                        mbuf[nm] = zz_str_ptr(v.s);
+                        mlen[nm] = v.s->len;
+                        nm++;
+                    }
+                }
+            }
+            for (size_t k = 0; k < nm && !generated; k++) {
+                if (mlen[k] == 0) continue;
+                if (memmem(buf, head_end, mbuf[k], mlen[k]) != NULL) generated = 1;
+            }
+        }
+    }
+    free(buf);
+    return zz_variant_ok((zz_value){ZZ_BOOL, {.b = generated != 0}});
 }
 
 // fs.read_bytes(path) → Result<bytes> (contiguous buffer, ~1x RSS).

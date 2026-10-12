@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::Checker;
 use crate::type_::Type;
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Lit, Param, Pattern, Stmt, Ty, UnOp};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::suggest_all;
 use zz_frontend::span::Span;
@@ -60,7 +60,7 @@ pub(crate) struct MethodCall<'a> {
     pub promoted_recv: Option<Type>,
     pub method: &'a str,
     pub args: &'a [Expr],
-    pub named: &'a [(String, Expr)],
+    pub named: &'a [(Ident, Expr)],
     pub span: Span,
 }
 
@@ -91,7 +91,17 @@ impl Checker {
                     let gens = self.current_generics.clone();
                     let at = self.ast_to_type(ann, &gens);
                     if let Err(e) = self.unifier.unify(&vt, &at) {
-                        self.report_mismatch(e, ann.span);
+                        // Sherlock: point at the fix direction. Skip the
+                        // note while the value type is still uninferred
+                        // (`?0` helps nobody).
+                        let mut notes = Vec::new();
+                        let vt_r = self.unifier.resolve(&vt);
+                        if !matches!(vt_r, Type::Var(_)) {
+                            notes.push(format!(
+                                "to fix: change the annotation to `{vt_r}` or convert the value"
+                            ));
+                        }
+                        self.report_mismatch_with_notes(e, ann.span, notes);
                     }
                 }
                 let rt = self.unifier.resolve_deep(&vt);
@@ -150,6 +160,12 @@ impl Checker {
                     // Remember the module behind an aliased head (`m` →
                     // `std.math`) for const/call diagnostics.
                     self.module_aliases
+                        .entry(ns.clone())
+                        .or_insert_with(|| path.join("."));
+                    // Full-path uses (`std.chan.send` under
+                    // `import std.chan`) must count for unused-import
+                    // tracking too — see scope.rs.
+                    self.import_aliases
                         .entry(ns)
                         .or_insert_with(|| path.join("."));
                 } else {
@@ -277,7 +293,24 @@ impl Checker {
                     }
                 }
             }
-            Stmt::Expr(e) => self.check_expr(e),
+            Stmt::Expr(e) => {
+                // A bare `match` statement discards the match value: tell
+                // `check_match` so bare `Result`/`Option` arm bodies warn
+                // (they never pass through this arm themselves). Tails
+                // are values, not discards.
+                let prev_discard = std::mem::replace(
+                    &mut self.direct_discard,
+                    matches!(e, Expr::Match { .. }) && !self.tail_is_value,
+                );
+                let t = self.check_expr(e);
+                self.direct_discard = prev_discard;
+                // Sherlock: a discarded `Result`/`Option` silently drops
+                // errors — unless this tail is the block's value.
+                if !self.tail_is_value {
+                    self.warn_if_discarded(e, &t);
+                }
+                t
+            }
             Stmt::Struct { .. } => Type::Unit,
             // Aliases are collected and resolved in pass 1a; checking
             // the declaration itself is a no-op (uses resolve on demand).
@@ -321,9 +354,9 @@ impl Checker {
                             }
                         };
                         self.push_scope();
-                        self.define(&vars[0].name, elem);
+                        self.define_at(&vars[0].name, elem, vars[0].span);
                         self.loop_depth += 1;
-                        self.check_block(body);
+                        self.check_block_discarded(body);
                         self.loop_depth -= 1;
                         self.pop_scope();
                     }
@@ -334,10 +367,10 @@ impl Checker {
                         match it {
                             Type::Dict(k, v) => {
                                 self.push_scope();
-                                self.define(&vars[0].name, *k);
-                                self.define(&vars[1].name, *v);
+                                self.define_at(&vars[0].name, *k, vars[0].span);
+                                self.define_at(&vars[1].name, *v, vars[1].span);
                                 self.loop_depth += 1;
-                                self.check_block(body);
+                                self.check_block_discarded(body);
                                 self.loop_depth -= 1;
                                 self.pop_scope();
                             }
@@ -345,10 +378,18 @@ impl Checker {
                                 match self.unifier.resolve(&elem) {
                                     Type::Tuple(pair) if pair.len() == 2 => {
                                         self.push_scope();
-                                        self.define(&vars[0].name, pair[0].clone());
-                                        self.define(&vars[1].name, pair[1].clone());
+                                        self.define_at(
+                                            &vars[0].name,
+                                            pair[0].clone(),
+                                            vars[0].span,
+                                        );
+                                        self.define_at(
+                                            &vars[1].name,
+                                            pair[1].clone(),
+                                            vars[1].span,
+                                        );
                                         self.loop_depth += 1;
-                                        self.check_block(body);
+                                        self.check_block_discarded(body);
                                         self.loop_depth -= 1;
                                         self.pop_scope();
                                     }
@@ -359,10 +400,10 @@ impl Checker {
                                         let k_var = self.unifier.fresh_var();
                                         let v_var = self.unifier.fresh_var();
                                         self.push_scope();
-                                        self.define(&vars[0].name, k_var);
-                                        self.define(&vars[1].name, v_var);
+                                        self.define_at(&vars[0].name, k_var, vars[0].span);
+                                        self.define_at(&vars[1].name, v_var, vars[1].span);
                                         self.loop_depth += 1;
-                                        self.check_block(body);
+                                        self.check_block_discarded(body);
                                         self.loop_depth -= 1;
                                         self.pop_scope();
                                     }
@@ -374,10 +415,10 @@ impl Checker {
                                             *span,
                                         ));
                                         self.push_scope();
-                                        self.define(&vars[0].name, Type::Unit);
-                                        self.define(&vars[1].name, Type::Unit);
+                                        self.define_at(&vars[0].name, Type::Unit, vars[0].span);
+                                        self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                         self.loop_depth += 1;
-                                        self.check_block(body);
+                                        self.check_block_discarded(body);
                                         self.loop_depth -= 1;
                                         self.pop_scope();
                                     }
@@ -389,10 +430,10 @@ impl Checker {
                                     *span,
                                 ));
                                 self.push_scope();
-                                self.define(&vars[0].name, Type::Unit);
-                                self.define(&vars[1].name, Type::Unit);
+                                self.define_at(&vars[0].name, Type::Unit, vars[0].span);
+                                self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                 self.loop_depth += 1;
-                                self.check_block(body);
+                                self.check_block_discarded(body);
                                 self.loop_depth -= 1;
                                 self.pop_scope();
                             }
@@ -404,10 +445,10 @@ impl Checker {
                                     *span,
                                 ));
                                 self.push_scope();
-                                self.define(&vars[0].name, Type::Unit);
-                                self.define(&vars[1].name, Type::Unit);
+                                self.define_at(&vars[0].name, Type::Unit, vars[0].span);
+                                self.define_at(&vars[1].name, Type::Unit, vars[1].span);
                                 self.loop_depth += 1;
-                                self.check_block(body);
+                                self.check_block_discarded(body);
                                 self.loop_depth -= 1;
                                 self.pop_scope();
                             }
@@ -441,7 +482,14 @@ impl Checker {
                     self.errors
                         .push(error_at("`defer` outside of a function", *span));
                 }
-                self.check_expr(expr);
+                let prev_discard = std::mem::replace(
+                    &mut self.direct_discard,
+                    matches!(expr.as_ref(), Expr::Match { .. }),
+                );
+                let t = self.check_expr(expr);
+                self.direct_discard = prev_discard;
+                // Deferred results still vanish — same must-use rule.
+                self.warn_if_discarded(expr, &t);
                 Type::Unit
             }
             Stmt::Destructure {
@@ -558,7 +606,7 @@ impl Checker {
         }
     }
 
-    /// Field read with generic arguments substituted: `Box[int].v` where
+    /// Field read with generic arguments substituted: `Box<int>.v` where
     /// `v: T` yields `int`. Direct fields hit first; otherwise the lookup
     /// promotes through embedded structs (threading each level's arguments).
     /// Error reporting (unknown struct/field, did-you-mean) matches the
@@ -744,14 +792,21 @@ impl Checker {
         // runs — warn once per statement instead of checking dead code
         // into confusing cascades.
         let mut diverged: Option<&'static str> = None;
-        for stmt in &block.stmts {
+        let last = block.stmts.len().saturating_sub(1);
+        for (i, stmt) in block.stmts.iter().enumerate() {
             if let Some(how) = diverged {
                 self.errors.push(warning_at(
                     format!("unreachable code after diverging {how}"),
                     stmt.span(),
                 ));
             }
+            // The tail expression is the block's value — unless the
+            // block itself is discarded (loop bodies) or top-level code.
+            let outer_tail_is_value = self.tail_is_value;
+            let prev_tail =
+                std::mem::replace(&mut self.tail_is_value, (i == last) && outer_tail_is_value);
             result = self.check_stmt(stmt);
+            self.tail_is_value = prev_tail;
             // A bare `return` types as `unit` (not `Never`), so track
             // syntactic divergence too — it still never falls through.
             let syntactic = matches!(
@@ -775,6 +830,65 @@ impl Checker {
         }
         self.pop_scope();
         result
+    }
+
+    /// Check a block whose value is discarded (loop bodies): tail
+    /// expressions are discards, so must-use warnings apply to them.
+    pub(crate) fn check_block_discarded(&mut self, block: &Block) -> Type {
+        let prev = std::mem::replace(&mut self.tail_is_value, false);
+        let t = self.check_block(block);
+        self.tail_is_value = prev;
+        t
+    }
+
+    /// Check a function/closure body: its tail is the return value even
+    /// when nested inside a discarded block (e.g. a `func` declared in
+    /// a loop body).
+    pub(crate) fn check_fn_body_block(&mut self, block: &Block) -> Type {
+        let prev = std::mem::replace(&mut self.tail_is_value, true);
+        let t = self.check_block(block);
+        self.tail_is_value = prev;
+        t
+    }
+
+    /// Sherlock: warn when a value-position expression discards a
+    /// `Result`/`Option`. Structural expressions (if/match/blocks) flow
+    /// from their inner statements, which are checked on their own.
+    /// Tail exemption lives with the caller: only `Stmt::Expr` tails
+    /// are block values (`defer` tails are not — its value is `unit`).
+    pub(crate) fn warn_if_discarded(&mut self, e: &Expr, t: &Type) {
+        if matches!(
+            e,
+            Expr::If { .. }
+                | Expr::While { .. }
+                | Expr::Match { .. }
+                | Expr::IfLet { .. }
+                | Expr::Block(_)
+        ) {
+            return;
+        }
+        match self.unifier.resolve(t) {
+            Type::Result(_, _) => {
+                self.errors.push(
+                    warning_at("unused `Result` — errors are silently discarded", e.span())
+                        .with_note(
+                            "use `?` to propagate, `match` to handle, or `_ :=` to ignore it explicitly",
+                        ),
+                );
+            }
+            Type::Option(_) => {
+                self.errors.push(
+                    warning_at(
+                        "unused `Option` — a missing value is silently discarded",
+                        e.span(),
+                    )
+                    .with_note(
+                        "use `?` to propagate, `match` to handle, or `_ :=` to ignore it explicitly",
+                    ),
+                );
+            }
+            _ => {}
+        }
     }
 
     // --- expressions ------------------------------------------------------
@@ -938,7 +1052,7 @@ impl Checker {
                 //
                 // Generic parameters instantiate to fresh variables, filled
                 // in by unifying each value with its (substituted) field
-                // type — so `Box{ v: 1 }` infers `Box[int]`, exactly like a
+                // type — so `Box{ v: 1 }` infers `Box<int>`, exactly like a
                 // generic function call infers its type arguments.
                 let gen_vars: Vec<Type> = sig
                     .generics
@@ -1158,8 +1272,34 @@ impl Checker {
                         // if-with-return in a non-unit function, since
                         // the fall-through path yields unit).
                         if !Self::block_has_return(then) {
-                            if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
-                                self.report_mismatch(err, *span);
+                            let tt_r = self.unifier.resolve(&tt);
+                            match tt_r {
+                                Type::Unit | Type::Never | Type::Var(_) => {
+                                    if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
+                                        self.report_mismatch(err, *span);
+                                    }
+                                }
+                                _ => {
+                                    // Trailing value discarded (#388): point
+                                    // at the tail statement that produced
+                                    // it, not the `if` — the old span
+                                    // (whole `if`) read as if the
+                                    // condition failed with reversed
+                                    // types. Vars/aliases keep the unify
+                                    // path (it pins them to unit).
+                                    let tail = then.stmts.last().map(|s| s.span()).unwrap_or(*span);
+                                    self.errors.push(
+                                        error_at(
+                                            format!(
+                                                "value of type `{tt_r}` discarded: `if` without `else` used as a statement must end in `unit`"
+                                            ),
+                                            tail,
+                                        )
+                                        .with_note(
+                                            "assign the value or end the branch with a statement of type `unit`",
+                                        ),
+                                    );
+                                }
                             }
                         }
                         Type::Unit
@@ -1170,7 +1310,7 @@ impl Checker {
                 let ct = self.check_expr(cond);
                 self.ensure_bool(ct, cond.span());
                 self.loop_depth += 1;
-                self.check_block(body);
+                self.check_block_discarded(body);
                 self.loop_depth -= 1;
                 Type::Unit
             }
@@ -1212,8 +1352,28 @@ impl Checker {
                         }
                     }
                     None => {
-                        if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
-                            self.report_mismatch(err, *span);
+                        let tt_r = self.unifier.resolve(&tt);
+                        match tt_r {
+                            Type::Unit | Type::Never | Type::Var(_) => {
+                                if let Err(err) = self.unifier.unify(&Type::Unit, &tt) {
+                                    self.report_mismatch(err, *span);
+                                }
+                            }
+                            _ => {
+                                // Same discarded-tail rule as `if` (#388).
+                                let tail = then.stmts.last().map(|s| s.span()).unwrap_or(*span);
+                                self.errors.push(
+                                    error_at(
+                                        format!(
+                                            "value of type `{tt_r}` discarded: `if let` without `else` used as a statement must end in `unit`"
+                                        ),
+                                        tail,
+                                    )
+                                    .with_note(
+                                        "assign the value or end the branch with a statement of type `unit`",
+                                    ),
+                                );
+                            }
                         }
                         Type::Unit
                     }
@@ -1258,7 +1418,7 @@ impl Checker {
                     }
                 };
                 self.push_scope();
-                self.define(&var.name, elem);
+                self.define_at(&var.name, elem, var.span);
                 if let Some(f) = filter {
                     let ft = self.check_expr(f);
                     let ft = self.unifier.resolve(&ft);
@@ -1711,7 +1871,7 @@ impl Checker {
         &mut self,
         callee: &Expr,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
     ) -> bool {
         let Expr::Path { parts, .. } = callee else {
             return false;
@@ -1764,7 +1924,7 @@ impl Checker {
         &mut self,
         callee: &Expr,
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
         span: Span,
     ) -> Type {
         // Selective-import alias, resolved FIRST so the result flows
@@ -2569,10 +2729,16 @@ impl Checker {
                         })
                         .collect();
                     let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-                    if let Some((suggestion, _)) = suggest_all(&name, &refs).first() {
-                        // Note only: the span covers the whole call, not
-                        // just the name, so a replace fix would eat the args.
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    let all = suggest_all(&name, &refs);
+                    if let Some((suggestion, _)) = all.first() {
+                        // Note only, deliberately: the suggestion names the
+                        // *type* (`name`), not the callee value, and the
+                        // span covers the whole call — replacing the callee
+                        // with the function would silently drop a receiver,
+                        // so no fixit is offered.
+                        diag = diag.with_note(format!(
+                            "did you mean to call `{suggestion}` instead of calling a value of type `{name}`?"
+                        ));
                     }
                     self.errors.push(diag);
                     Type::Unit
@@ -2640,6 +2806,23 @@ impl Checker {
         name.rsplit('.').next().unwrap_or(name)
     }
 
+    /// Sherlock notes for an argument/parameter mismatch: name the
+    /// parameter and its expected type so the error points at the fix,
+    /// not just the conflict. Placeholder names (`_0`, from `func`
+    /// values) still show the type.
+    pub(crate) fn param_mismatch_notes(
+        param_names: &[String],
+        ps: &[Type],
+        i: usize,
+    ) -> Vec<String> {
+        match (param_names.get(i), ps.get(i)) {
+            (Some(name), Some(ty)) => {
+                vec![format!("parameter `{name}` expects `{ty}`")]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     // Eight args is the honest shape here (callee + params + args + span);
     // a struct would churn every call site for no checking benefit.
     #[allow(clippy::too_many_arguments)]
@@ -2650,7 +2833,7 @@ impl Checker {
         ps: &[Type],
         has_default: &[bool],
         args: &[Expr],
-        named: &[(String, Expr)],
+        named: &[(Ident, Expr)],
         span: Span,
     ) {
         let total_provided = args.len() + named.len();
@@ -2686,7 +2869,9 @@ impl Checker {
                     .iter()
                     .zip(ps.iter())
                     .enumerate()
-                    .filter(|(i, (n, _))| *i >= args.len() && !named.iter().any(|(an, _)| an == *n))
+                    .filter(|(i, (n, _))| {
+                        *i >= args.len() && !named.iter().any(|(an, _)| an.name == **n)
+                    })
                     .map(|(_, (n, t))| format!("{n}: {t}"))
                     .collect();
                 if let Some(first) = missing.first() {
@@ -2718,12 +2903,12 @@ impl Checker {
         }
 
         for (name, val) in named {
-            let pos = param_names.iter().position(|pn| pn == name);
+            let pos = param_names.iter().position(|pn| pn == &name.name);
             match pos {
                 Some(i) => {
                     if slots[i].is_some() {
                         self.errors.push(error_at(
-                            format!("argument `{name}` already provided positionally"),
+                            format!("argument `{}` already provided positionally", name.name),
                             val.span(),
                         ));
                         return;
@@ -2731,12 +2916,28 @@ impl Checker {
                     slots[i] = Some(val);
                 }
                 None => {
-                    // Sherlock: typo'd named argument (`nmae:`) suggests the
-                    // real parameter instead of dying with just the name.
-                    let mut diag = error_at(format!("unknown parameter `{name}`"), val.span());
+                    // Sherlock: typo'd named argument (`nmae:`) suggests
+                    // the real parameter with a fix — the name span now
+                    // rides the AST, so the error points at the typo
+                    // itself instead of the value.
+                    let mut diag =
+                        error_at(format!("unknown parameter `{}`", name.name), name.span);
                     let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
-                    if let Some((suggestion, _)) = suggest_all(name, &refs).first() {
+                    let all = suggest_all(&name.name, &refs);
+                    if let Some((suggestion, _)) = all.first() {
                         diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                        let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
+                        let fixit = if alts.len() == 1 {
+                            FixIt::safe(name.span, suggestion.to_string(), "replace parameter")
+                        } else {
+                            FixIt::ambiguous(
+                                name.span,
+                                suggestion.to_string(),
+                                "replace parameter",
+                                alts,
+                            )
+                        };
+                        diag = diag.with_fixit(fixit);
                     }
                     self.errors.push(diag);
                     return;
@@ -2766,7 +2967,11 @@ impl Checker {
                     };
                     let at = self.check_closure(params, ret_ty.as_ref(), body, *span, ep);
                     if let Err(e) = self.unifier.unify(&at, &ps[i]) {
-                        self.report_mismatch(e, arg.span());
+                        self.report_mismatch_with_notes(
+                            e,
+                            arg.span(),
+                            Self::param_mismatch_notes(param_names, ps, i),
+                        );
                     }
                 } else {
                     let at = self.check_expr(arg);
@@ -2788,7 +2993,11 @@ impl Checker {
                         _ => at,
                     };
                     if let Err(e) = self.unifier.unify(&at, &expected) {
-                        self.report_mismatch(e, arg.span());
+                        self.report_mismatch_with_notes(
+                            e,
+                            arg.span(),
+                            Self::param_mismatch_notes(param_names, ps, i),
+                        );
                     }
                 }
             }
@@ -2904,7 +3113,7 @@ impl Checker {
                     }
                 }
             };
-            self.define(&p.name.name, ty.clone());
+            self.define_at(&p.name.name, ty.clone(), p.name.span);
             ptypes.push(ty);
         }
         // Allow `return` inside closures — same semantics as named functions.
@@ -2918,7 +3127,9 @@ impl Checker {
         }
         let ret_var = self.unifier.fresh_var();
         let prev_ret = self.current_ret.replace(ret_var.clone());
+        let prev_tail = std::mem::replace(&mut self.tail_is_value, true);
         let bt = self.check_expr(body);
+        self.tail_is_value = prev_tail;
         self.current_ret = prev_ret;
         self.pop_scope();
         // Unify body type with the return var (from any `return` statements).
@@ -2936,6 +3147,27 @@ impl Checker {
         Type::Func(ptypes, Box::new(resolved_ret))
     }
 
+    /// Innermost span of a match-guard subexpression the native backend
+    /// cannot lower (`None` when the whole guard is in the scalar subset:
+    /// idents, paths, int/float/bool literals, and binary/unary/paren
+    /// combinations). Native guard lowering folds anything else to a
+    /// constant while the VM evaluates it fully — a silent engine
+    /// divergence the caller turns into a loud check-time error.
+    fn native_unsupported_guard(e: &Expr) -> Option<Span> {
+        match e {
+            Expr::Ident { .. }
+            | Expr::Path { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Bool { .. } => None,
+            Expr::Paren { expr, .. } => Self::native_unsupported_guard(expr),
+            Expr::Unary { expr, .. } => Self::native_unsupported_guard(expr),
+            Expr::Binary { left, right, .. } => Self::native_unsupported_guard(left)
+                .or_else(|| Self::native_unsupported_guard(right)),
+            _ => Some(e.span()),
+        }
+    }
+
     pub(crate) fn check_match(
         &mut self,
         scrutinee: &Expr,
@@ -2945,6 +3177,33 @@ impl Checker {
         let st = self.check_expr(scrutinee);
         let st = self.unifier.resolve(&st);
         self.check_exhaustive(&st, arms, span);
+        // Sherlock: arms after a catch-all arm can never run. A guard
+        // disqualifies the catch-all (it may fail and fall through), so
+        // only guard-free `_`/binding patterns count. Warning, not error:
+        // the program still runs, but the arm is dead code.
+        fn pat_is_catchall(pat: &zz_frontend::ast::Pattern) -> bool {
+            match pat {
+                zz_frontend::ast::Pattern::Wildcard { .. } => true,
+                zz_frontend::ast::Pattern::Binding { .. } => true,
+                zz_frontend::ast::Pattern::Or { pats, .. } => pats.iter().any(pat_is_catchall),
+                _ => false,
+            }
+        }
+        let mut seen_catchall = false;
+        for arm in arms {
+            if seen_catchall {
+                self.errors.push(
+                    warning_at(
+                        "unreachable match arm — a previous arm matches everything",
+                        arm.pat.span(),
+                    )
+                    .with_note("remove this arm or move it above the catch-all arm"),
+                );
+            }
+            if arm.guard.is_none() && pat_is_catchall(&arm.pat) {
+                seen_catchall = true;
+            }
+        }
         let mut result: Option<Type> = None;
         let mut saw_arm = false;
         for arm in arms {
@@ -2956,10 +3215,31 @@ impl Checker {
                 let gt = self.check_expr(guard);
                 if let Err(e) = self.unifier.unify(&gt, &Type::Bool) {
                     self.report_mismatch(e, guard.span());
+                } else if let Some(bad) = Self::native_unsupported_guard(guard) {
+                    // Native builds lower guards to raw C scalars (idents,
+                    // paths, scalar literals, binary/unary/paren combos).
+                    // Anything else degrades to a constant there while the
+                    // VM evaluates it fully — a silent engine divergence.
+                    // Reject loudly so both engines agree.
+                    self.errors.push(error_at(
+                        "match guard uses an expression native builds cannot evaluate",
+                        bad,
+                    ).with_note(
+                        "hint: guards support pattern bindings, literals, and operators only; move calls, strings, or field access into the arm body with if/else",
+                    ));
                 }
             }
             let bt = self.check_expr(&arm.body);
             self.pop_scope();
+            // Sherlock: a bare `match` statement discards the match
+            // value, and bare arm bodies never pass through `Stmt::Expr`
+            // — warn here when an arm yields a discarded `Result` or
+            // `Option`. Block arm bodies are covered by the normal
+            // statement path (`direct_discard` is statement-level, so
+            // used positions like call args stay silent).
+            if self.direct_discard && !matches!(arm.body, Expr::Block(_)) {
+                self.warn_if_discarded(&arm.body, &bt);
+            }
             // `break`/`continue` arms diverge (never produce a value),
             // so they don't constrain the match's result type. Arms that
             // diverge via `return` (`Never`) vanish from the join the
@@ -3272,7 +3552,7 @@ impl Checker {
         match pat {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
-                self.define(&name.name, ty.clone());
+                self.define_at(&name.name, ty.clone(), name.span);
                 // Top-level destructured names are module globals (like
                 // top-level `Decl`): record them for `tp.bindings` so
                 // downstream passes (native globals collection) can type
@@ -3294,34 +3574,102 @@ impl Checker {
                 }
             }
             Pattern::Variant { name, arg, span } => {
+                // Sherlock: a builtin pattern constrains an uninferred
+                // scrutinee — `.ok`/`.err` proves `Result`, `.some`/`.none`
+                // proves `Option`. A later arm from the other family then
+                // reports a real mismatch instead of passing silently, and
+                // payloads bind to known types instead of fresh vars.
+                if let Type::Var(id) = self.unifier.resolve(ty) {
+                    let constrained = match name.as_str() {
+                        "ok" | "err" => Some(Type::Result(
+                            Box::new(self.unifier.fresh_var()),
+                            Box::new(self.unifier.fresh_var()),
+                        )),
+                        "some" | "none" => Some(Type::Option(Box::new(self.unifier.fresh_var()))),
+                        _ => None,
+                    };
+                    if let Some(ct) = constrained {
+                        self.unifier.bind(id, ct);
+                    }
+                }
                 let rt = self.unifier.resolve(ty);
                 let inner = match (&rt, name.as_str()) {
                     (Type::Option(inner), "some") => match arg {
                         Some(p) => Some((p.as_ref().clone(), (**inner).clone())),
                         None => {
-                            self.errors
-                                .push(error_at("`.some` pattern requires an argument", *span));
+                            self.errors.push(
+                                error_at("`.some` pattern requires an argument", *span)
+                                    .with_note(
+                                        "`.some` always carries a value — write `.some(v)` to use it or `.some(_)` to ignore it",
+                                    )
+                                    .with_note("run `zz fix` to rewrite this automatically")
+                                    .with_fixit(FixIt::safe(
+                                        *span,
+                                        ".some(_)",
+                                        "add wildcard payload",
+                                    )),
+                            );
                             None
                         }
                     },
                     (Type::Option(_), "none") => {
                         if arg.is_some() {
-                            self.errors
-                                .push(error_at("`.none` pattern takes no argument", *span));
+                            // The fixit only applies to a wildcard payload:
+                            // dropping `.none(x)` would orphan uses of `x`
+                            // in the arm body, so named payloads get the
+                            // error + notes and the user edits by hand.
+                            let mut diag = error_at("`.none` pattern takes no argument", *span)
+                                .with_note("`.none` carries no value — write `.none`");
+                            if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
+                                diag = diag
+                                    .with_note("run `zz fix` to rewrite this automatically")
+                                    .with_fixit(FixIt::safe(*span, ".none", "drop payload"));
+                            }
+                            self.errors.push(diag);
                         }
                         None
                     }
-                    (Type::Result(t, _), "ok") => {
-                        arg.as_ref().map(|p| (p.as_ref().clone(), (**t).clone()))
-                    }
-                    (Type::Result(_, e), "err") => {
-                        arg.as_ref().map(|p| (p.as_ref().clone(), (**e).clone()))
-                    }
+                    (Type::Result(t, _), "ok") => match arg {
+                        Some(p) => Some((p.as_ref().clone(), (**t).clone())),
+                        None => {
+                            self.errors.push(
+                                error_at("`.ok` pattern requires an argument", *span)
+                                .with_note(
+                                    "`.ok` always carries a value — write `.ok(v)` to use it or `.ok(_)` to ignore it",
+                                )
+                                .with_note("run `zz fix` to rewrite this automatically")
+                                .with_fixit(FixIt::safe(
+                                    *span,
+                                    ".ok(_)",
+                                    "add wildcard payload",
+                                )),
+                            );
+                            None
+                        }
+                    },
+                    (Type::Result(_, e), "err") => match arg {
+                        Some(p) => Some((p.as_ref().clone(), (**e).clone())),
+                        None => {
+                            self.errors.push(
+                                error_at("`.err` pattern requires an argument", *span)
+                                .with_note(
+                                    "`.err` always carries a value — write `.err(e)` to use it or `.err(_)` to ignore it",
+                                )
+                                .with_note("run `zz fix` to rewrite this automatically")
+                                .with_fixit(FixIt::safe(
+                                    *span,
+                                    ".err(_)",
+                                    "add wildcard payload",
+                                )),
+                            );
+                            None
+                        }
+                    },
                     (Type::Enum(ename, eargs), vname) => {
                         match self.enum_variant_payload(ename, vname, *span) {
                             Some(Some(pty)) => {
                                 // Substitute the scrutinee's arguments for
-                                // the enum's parameters (`Box[int]` + `T`
+                                // the enum's parameters (`Box<int>` + `T`
                                 // → `int`), exactly like generic struct
                                 // field access.
                                 let inner = self.subst_enum_payload(ename, eargs, &pty);

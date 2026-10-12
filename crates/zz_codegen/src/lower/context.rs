@@ -530,6 +530,26 @@ pub struct Lowerer {
     /// functions). `Return` and tail-value emitters consult it to emit raw
     /// scalar returns instead of boxed `zz_value`s.
     pub(crate) unboxed_ret: std::cell::RefCell<Option<&'static str>>,
+    /// Module globals computed once in `new` (was: rescanned from all
+    /// top-level statements per emitted function — O(F·S)). Same data as
+    /// [`Self::collect_globals`], shared by seeding and partitioning.
+    pub(crate) global_list: Vec<(String, String, String, Option<zz_checker::Type>)>,
+    /// Global ZZ names as a set, computed once (was: rebuilt per function
+    /// and per closure literal for capture analysis).
+    pub(crate) global_set: std::collections::HashSet<String>,
+    /// Scalar-specialized callees as (name, C ret, arity), computed once
+    /// (was: refiltered from `specialized` per emitted function).
+    pub(crate) scalar_fn_list: Vec<(String, &'static str, usize)>,
+    /// Per-parameter read-only verdicts for user functions (name →
+    /// one bool per signature parameter, in order), computed once in
+    /// `new` by [`param_escape::analyze`]. A read-only parameter never
+    /// lets its storage outlive the call, so callers may borrow (pass
+    /// the live local instead of a retained share) instead of cloning.
+    pub(crate) readonly_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Unit-emission mode: definitions/prototypes use external linkage so
+    /// per-module translation units link together. Off = single-TU
+    /// `static` (byte-identical legacy output).
+    pub(crate) unit_mode: std::cell::Cell<bool>,
 }
 
 impl Lowerer {
@@ -541,6 +561,7 @@ impl Lowerer {
     ) -> Self {
         let escape = zz_hir::escape_analyze(&tp);
         let (import_fn_aliases, import_ns_aliases) = Self::collect_import_aliases(&tp);
+        let readonly_params = super::param_escape::analyze(&tp.program, &tp.funcs, &tp.structs);
         let mut lowerer = Lowerer {
             reachable_funcs,
             reachable_natives,
@@ -561,9 +582,41 @@ impl Lowerer {
             stmt_direct: std::cell::Cell::new(false),
             green: std::cell::RefCell::new(None),
             precompiled: false,
+            global_list: Vec::new(),
+            global_set: std::collections::HashSet::new(),
+            scalar_fn_list: Vec::new(),
+            readonly_params,
+            unit_mode: std::cell::Cell::new(false),
         };
         lowerer.specialized = lowerer.compute_specialized();
+        lowerer.global_list = lowerer.collect_globals();
+        lowerer.global_set = lowerer.tp.bindings.keys().cloned().collect();
+        lowerer.scalar_fn_list = lowerer.compute_scalar_fn_list();
         lowerer
+    }
+
+    /// (name, C ret, arity) for every specialized function. Pure function
+    /// of `specialized` + checker sigs; hoisted out of per-function seeding.
+    fn compute_scalar_fn_list(&self) -> Vec<(String, &'static str, usize)> {
+        let mut out = Vec::new();
+        for fname in &self.specialized {
+            if let Some(sig) = self.tp.funcs.get(fname) {
+                if let Some(ret) = Self::scalar_ctype(&sig.ret) {
+                    out.push((fname.clone(), ret, sig.params.len()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Linkage keyword for emitted definitions/prototypes: `static` for
+    /// the single-TU path, empty (external linkage) for per-module units.
+    pub(crate) fn link_kw(&self) -> &'static str {
+        if self.unit_mode.get() {
+            ""
+        } else {
+            "static"
+        }
     }
 
     /// Enable precompiled runtime mode: the generated C omits `RUNTIME_C`
@@ -737,14 +790,8 @@ impl Lowerer {
     /// `scalar_operand_type` recognizes specialized calls anywhere
     /// (function bodies, top-level code, closures).
     pub(super) fn seed_scalar_fns(&self, names: &mut NameCtx) {
-        for fname in &self.specialized {
-            if let Some(sig) = self.tp.funcs.get(fname) {
-                if let Some(ret) = Self::scalar_ctype(&sig.ret) {
-                    names
-                        .scalar_fn_sigs
-                        .insert(fname.clone(), (ret, sig.params.len()));
-                }
-            }
+        for (fname, ret, arity) in &self.scalar_fn_list {
+            names.scalar_fn_sigs.insert(fname.clone(), (*ret, *arity));
         }
     }
 
@@ -1060,14 +1107,29 @@ impl Lowerer {
     }
 
     /// Check if a struct type is unboxed (all scalar or nested unboxed struct fields).
+    /// Cycle-safe: a struct that (transitively) contains itself can never
+    /// be inline — recursion forces the boxed (reference) layout. Without
+    /// the guard, `struct N { kid: N }` would overflow the compiler stack
+    /// when the unboxed set is collected, whether or not N is ever built.
     pub(super) fn is_unboxed_struct(&self, name: &str) -> bool {
-        if let Some(sig) = self.tp.structs.get(name) {
-            sig.fields
-                .iter()
-                .all(|(_, ty)| self.is_scalar_type(ty) || matches!(ty, zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner)))
-        } else {
-            false
+        let mut visiting = std::collections::HashSet::new();
+        self.unboxed_inner(name, &mut visiting)
+    }
+
+    fn unboxed_inner(&self, name: &str, visiting: &mut std::collections::HashSet<String>) -> bool {
+        if !visiting.insert(name.to_string()) {
+            return false;
         }
+        let ok = match self.tp.structs.get(name) {
+            Some(sig) => sig.fields.iter().all(|(_, ty)| {
+                self.is_scalar_type(ty)
+                    || matches!(ty, zz_checker::Type::Struct(inner, _)
+                        if self.unboxed_inner(inner, visiting))
+            }),
+            None => false,
+        };
+        visiting.remove(name);
+        ok
     }
 
     /// Check if a type is scalar (can be unboxed).
@@ -1107,16 +1169,12 @@ impl Lowerer {
     }
 
     /// C identifier for a module-level global: `zz_global_<mangled>`.
-    pub(super) fn global_cid(zz_name: &str) -> String {
+    pub(crate) fn global_cid(zz_name: &str) -> String {
         format!("zz_global_{}", mangle(zz_name))
     }
 
     /// Names visible as C globals (module-level bindings). Closure free
     /// variables matching these need no environment cell.
-    pub(super) fn global_name_set(&self) -> std::collections::HashSet<String> {
-        self.tp.bindings.keys().cloned().collect()
-    }
-
     /// Names in `block` captured by a nested closure literal: bindings for
     /// these must be heap-cell-allocated so environments share them.
     pub(super) fn body_capture_set(
@@ -1124,8 +1182,7 @@ impl Lowerer {
         params: &[String],
         block: &zz_frontend::ast::Block,
     ) -> std::collections::HashSet<String> {
-        let globals = self.global_name_set();
-        zz_hir::captured_in_block(params, block, &globals)
+        zz_hir::captured_in_block(params, block, &self.global_set)
     }
 
     /// Same as [`body_capture_set`](Self::body_capture_set) for closure
@@ -1135,8 +1192,7 @@ impl Lowerer {
         params: &[String],
         body: &zz_frontend::ast::Expr,
     ) -> std::collections::HashSet<String> {
-        let globals = self.global_name_set();
-        zz_hir::captured_in_expr(params, body, &globals)
+        zz_hir::captured_in_expr(params, body, &self.global_set)
     }
 
     /// Emit a heap cell allocation + initialization for a captured binding.
@@ -1220,8 +1276,8 @@ impl Lowerer {
 
     /// Seed a NameCtx with all module-level globals.
     pub(super) fn seed_globals(&self, names: &mut NameCtx) {
-        for (zz_name, cid, ctype, checker_ty) in self.collect_globals() {
-            names.insert_global(&zz_name, &cid, &ctype, checker_ty);
+        for (zz_name, cid, ctype, checker_ty) in &self.global_list {
+            names.insert_global(zz_name, cid, ctype, checker_ty.clone());
         }
     }
 

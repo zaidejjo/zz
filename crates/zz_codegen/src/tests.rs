@@ -419,15 +419,28 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.colors.bg_magenta", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.bg_cyan", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.bg_white", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_bright_black", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_bright_red", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_bright_green", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_bright_yellow", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_bright_blue", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_bright_magenta", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_bright_cyan", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_bright_white", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.bold", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.dim", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.italic", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.underline", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.blink", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.reverse", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.strikethrough", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.reset", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.strip", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.clamp255", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.rgb", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.bg_rgb", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.color256", "pure ZZ; lowered as ZZ fn"),
+    ("std.colors.bg_256", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.hex_val", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.hex_byte", "pure ZZ; lowered as ZZ fn"),
     ("std.colors.hex", "pure ZZ; lowered as ZZ fn"),
@@ -457,15 +470,28 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("colors.bg_magenta", "pure ZZ alias"),
     ("colors.bg_cyan", "pure ZZ alias"),
     ("colors.bg_white", "pure ZZ alias"),
+    ("colors.bg_bright_black", "pure ZZ alias"),
+    ("colors.bg_bright_red", "pure ZZ alias"),
+    ("colors.bg_bright_green", "pure ZZ alias"),
+    ("colors.bg_bright_yellow", "pure ZZ alias"),
+    ("colors.bg_bright_blue", "pure ZZ alias"),
+    ("colors.bg_bright_magenta", "pure ZZ alias"),
+    ("colors.bg_bright_cyan", "pure ZZ alias"),
+    ("colors.bg_bright_white", "pure ZZ alias"),
     ("colors.bold", "pure ZZ alias"),
     ("colors.dim", "pure ZZ alias"),
     ("colors.italic", "pure ZZ alias"),
     ("colors.underline", "pure ZZ alias"),
+    ("colors.blink", "pure ZZ alias"),
+    ("colors.reverse", "pure ZZ alias"),
+    ("colors.strikethrough", "pure ZZ alias"),
     ("colors.reset", "pure ZZ alias"),
     ("colors.strip", "pure ZZ alias"),
     ("colors.clamp255", "pure ZZ alias"),
     ("colors.rgb", "pure ZZ alias"),
     ("colors.bg_rgb", "pure ZZ alias"),
+    ("colors.color256", "pure ZZ alias"),
+    ("colors.bg_256", "pure ZZ alias"),
     ("colors.hex_val", "pure ZZ alias"),
     ("colors.hex_byte", "pure ZZ alias"),
     ("colors.hex", "pure ZZ alias"),
@@ -747,6 +773,132 @@ fn generated_source_contains_expected_sections() {
     assert!(
         !has_http_get && !has_http_post,
         "http natives should not be reachable when unused"
+    );
+}
+
+/// Lower `src` to C (no clang involved).
+fn lower_c(src: &str) -> String {
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    lowerer.lower().source
+}
+
+/// `len(arr)` over a runtime call, not a baked arity.
+fn assert_len_is_live(c: &str, what: &str) {
+    assert!(
+        c.contains("zz_len"),
+        "{what}: expected a live `zz_len` call in:\n{c}"
+    );
+}
+
+/// Literal-length folds (`len(v)` → arity) are only valid in straight-line
+/// flow. Loop bodies re-run (and may reassign) while conditions
+/// re-evaluate; branch joins merge exclusive paths — folding across any
+/// of these boundaries bakes a stale constant (#350: `len(arr) < 5`
+/// folded to `0 < 5` while the body grew the array, so native looped to
+/// the iteration guard and paid O(n²) copies).
+
+#[test]
+fn while_cond_len_sees_body_push() {
+    let c = lower_c(
+        r#"
+import std.vec
+func main() {
+    arr := []
+    i := 0
+    while len(arr) < 5 {
+        arr = vec.push(arr, i)
+        i = i + 1
+        if i > 100000 {
+            break
+        }
+    }
+    println("n={len(arr)} i={i}")
+}
+"#,
+    );
+    assert_len_is_live(&c, "while guard");
+    assert!(
+        !c.contains("zz_binop(ZZOP_LT, zz_int(0), zz_int(5))"),
+        "while guard must not fold `len(arr)` to the pre-loop arity"
+    );
+}
+
+#[test]
+fn for_body_len_sees_body_push() {
+    let c = lower_c(
+        r#"
+import std.vec
+func main() {
+    arr := [1]
+    for i in 0..3 {
+        println("n={len(arr)}")
+        arr = vec.push(arr, i)
+    }
+}
+"#,
+    );
+    assert_len_is_live(&c, "for body");
+}
+
+#[test]
+fn if_join_len_not_folded_from_branch() {
+    let c = lower_c(
+        r#"
+func main() {
+    arr := [1, 2, 3]
+    if false {
+        arr = [9, 9, 9, 9]
+    }
+    println("n={len(arr)}")
+}
+"#,
+    );
+    assert_len_is_live(&c, "post-if join");
+    assert!(
+        !c.contains("zz_int(4)"),
+        "post-if `len(arr)` must not fold to the untaken branch arity"
+    );
+}
+
+#[test]
+fn match_join_len_not_folded_from_arm() {
+    let c = lower_c(
+        r#"
+func main() {
+    arr := [1, 2, 3]
+    x := 1
+    match x {
+        1 => { arr = [9, 9] }
+        _ => { arr = [7, 7, 7, 7, 7] }
+    }
+    println("n={len(arr)}")
+}
+"#,
+    );
+    assert_len_is_live(&c, "post-match join");
+}
+
+#[test]
+fn straight_line_len_still_folds() {
+    // The peephole must keep working where it is sound: same-block
+    // literal binds with no intervening control flow.
+    let c = lower_c(
+        r#"
+func main() {
+    arr := [1, 2, 3]
+    println("n={len(arr)}")
+}
+"#,
+    );
+    assert!(
+        !c.contains("zz_call_native1(zz_len"),
+        "straight-line `len` of a literal should still fold, got:\n{c}"
     );
 }
 
@@ -1895,4 +2047,101 @@ match w {
 "#,
     );
     assert_eq!(out, "-1\n");
+}
+
+#[test]
+fn boxed_field_read_borrows_ident_base() {
+    // #188: boxing an already-boxed struct argument for a call rebuilds
+    // it member-wise; each synthesized `r.s0` read must borrow the
+    // local for `zz_object_get_field` (which retains the field value)
+    // instead of cloning the base into a `_field_obj` temp that nothing
+    // releases (~0.5KB/draw retained in struct loops).
+    // A caller passing its own (already boxed) struct parameter through
+    // hits the box-for-arg path with a non-literal base: the shape that
+    // retained per-iteration temps in loops.
+    let src = r#"
+struct Rng { s0: int, s1: int, s2: int, s3: int }
+func next(r: Rng) -> (int, Rng) {
+    return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1, s2: r.s2, s3: r.s3 })
+}
+func mid(r: Rng) -> (int, Rng) {
+    next(r)
+}
+func main() {
+    r := Rng{ s0: 0, s1: 0, s2: 0, s3: 0 }
+    println("{mid(r)}")
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let c = lowerer.lower().source;
+    assert!(
+        !c.contains("_field_obj"),
+        "ident-base field reads must not hoist clone temps, got:\n{c}"
+    );
+    assert!(
+        c.contains("zz_object_get_field(&v"),
+        "expected a borrowed field read, got:\n{c}"
+    );
+}
+
+#[test]
+fn readonly_call_arg_borrows_instead_of_cloning() {
+    // #188/#383: `next(r)` with a proven read-only parameter must pass
+    // the live local (`v0`), not a retained `zz_clone` share and not a
+    // member-wise rebuilt box (`__obj`), neither of which anything
+    // releases (~300B retained per call).
+    let src = r#"
+struct Rng { s0: int, s1: int, s2: int, s3: int }
+func next(r: Rng) -> (int, Rng) {
+    return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1, s2: r.s2, s3: r.s3 })
+}
+func step(r: Rng, n: int) -> int {
+    acc := 0
+    i := 0
+    while i < n {
+        p := next(r)
+        r = p[1]
+        acc = (acc + p[0]) & 4294967295
+        i += 1
+    }
+    return acc
+}
+func main() {
+    r := Rng{ s0: 0, s1: 0, s2: 0, s3: 0 }
+    println("{step(r, 200000)}")
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let c = lowerer.lower().source;
+    // Scope assertions to generated code (the embedded runtime headers
+    // legitimately contain clones and temps).
+    let gen = c
+        .find("// ---- generated code ----")
+        .map(|i| &c[i..])
+        .unwrap_or(&c);
+    // The step loop must call next with the live local (harness
+    // builds without loader namespacing, so the callee is `zz_fn_next`).
+    assert!(
+        gen.contains("zz_fn_next((zz_value[]){ v0 }"),
+        "expected a borrowed call arg, got:\n{gen}"
+    );
+    // ...and neither clone the loop-carried struct nor rebuild it via a
+    // field-clone temp. (`zz_clone(v1)` for the int loop bound is
+    // pre-existing, harmless, and out of scope.)
+    assert!(
+        !gen.contains("zz_clone(v0)") && !gen.contains("_field_obj"),
+        "read-only call args must not clone, got:\n{gen}"
+    );
 }

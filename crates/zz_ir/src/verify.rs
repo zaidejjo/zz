@@ -27,6 +27,10 @@ fn effect(op: &Op) -> i64 {
         Op::DefineVar(_) => 0,
         Op::StoreVar(_) | Op::StorePath(_) | Op::StoreSlot(_) => -1,
         Op::VecPushField { .. } | Op::VecPushMethod { .. } => -1,
+        Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => -1,
+        Op::SetFieldIndexTake { .. } => -2,
+        Op::GetFieldIndex { .. } => 0,
+        Op::LenField { .. } => 1,
         Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => -1,
         Op::IntNeg => 0,
         Op::BinOp(_) => -1,
@@ -190,6 +194,36 @@ fn verify_func(
                 home_var,
                 method: field,
                 ..
+            }
+            | Op::SetFieldTake {
+                home_slot,
+                home_var,
+                field,
+                ..
+            }
+            | Op::SetFieldIndexTake {
+                home_slot,
+                home_var,
+                field,
+                ..
+            }
+            | Op::FieldBinopTake {
+                home_slot,
+                home_var,
+                field,
+                ..
+            }
+            | Op::GetFieldIndex {
+                home_slot,
+                home_var,
+                field,
+                ..
+            }
+            | Op::LenField {
+                home_slot,
+                home_var,
+                field,
+                ..
             } => {
                 if home_slot.is_some() == home_var.is_some() {
                     return Err(IrError::spanned("push home must be a slot xor a var", span));
@@ -295,9 +329,14 @@ fn verify_func(
     }
     // Param slots are authoritative from the signature: entries must
     // match structurally (lowering seeds them; mismatch is corruption).
+    // Bounds-checked (not indexed): closure/spawn shapes can carry params
+    // with a shorter locals table — that must fail closed, never panic.
     for (i, t) in func.sig.params.iter().enumerate() {
+        let Some(local) = func.locals.get(i) else {
+            return Err(IrError::new("locals: fewer slots than signature params"));
+        };
         let (Some(a), Some(b)) = (
-            module.types.get(func.locals[i].0 as usize),
+            module.types.get(local.0 as usize),
             module.types.get(t.0 as usize),
         ) else {
             return Err(IrError::new("locals: type id out of range"));
@@ -1118,6 +1157,20 @@ fn infer_func(
             }
             Op::VecPushField { .. } | Op::VecPushMethod { .. } => {
                 pop(&mut st, pc)?;
+            }
+            Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => {
+                pop(&mut st, pc)?;
+            }
+            Op::SetFieldIndexTake { .. } => {
+                pop(&mut st, pc)?;
+                pop(&mut st, pc)?;
+            }
+            Op::GetFieldIndex { .. } => {
+                pop(&mut st, pc)?;
+                st.push(TV::U);
+            }
+            Op::LenField { .. } => {
+                st.push(TV::U);
             }
             Op::IntAdd => {
                 let r = pop(&mut st, pc)?;

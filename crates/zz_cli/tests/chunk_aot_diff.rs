@@ -5,6 +5,11 @@
 //! Corpus stays small and fast (dynamic `-O0` builds, sub-second runs)
 //! so PR CI keeps it; the bench-timing gate (fib35/tak/sieve/arraysum
 //! within 5%) is measured manually, not here.
+//!
+//! Sieve slice: `sieve_small` ([bool] + while + store-index fusion),
+//! `nested_vec` (take-push fusion on two live slots), and `bool_iter`
+//! ([bool] iteration through the boxed path) pin chunk↔HIR parity for
+//! the shapes the sieve bench exercises at scale.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,9 +21,10 @@ fn zz_bin() -> PathBuf {
     debug.join("zz")
 }
 
-fn run_zz(args: &[&str]) -> (i32, String, String) {
+fn run_zz_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(zz_bin())
         .args(args)
+        .current_dir(dir)
         .output()
         .expect("zz binary should run");
     (
@@ -192,6 +198,182 @@ func main() {
 }
 "#;
 
+// Sieve slice at test scale: [bool] bitset, index stores, a `while`
+// inner loop, and int accumulation. Same shapes as bench/ir_gate/sieve.zz
+// (n=200000 there); n=20000 here keeps both dynamic builds + runs fast.
+const SIEVE_SMALL: &str = r#"
+func main() {
+    n := 20000
+    is_prime := []
+    for i in 0..n {
+        is_prime = vec.push(is_prime, true)
+    }
+    is_prime[0] = false
+    is_prime[1] = false
+    count := 0
+    for i in 2..n {
+        if is_prime[i] {
+            count = count + 1
+            j := i * 2
+            while j < n {
+                is_prime[j] = false
+                j = j + i
+            }
+        }
+    }
+    println(count)
+}
+"#;
+
+// Nested vectors at test scale: take-push fusion on two live array
+// slots (row + grid) plus value-semantics on inner capture.
+const NESTED_VEC: &str = r#"
+func main() {
+    a := []
+    for i in 0..50 {
+        row := []
+        for j in 0..50 {
+            row = vec.push(row, (i + j) % 97)
+        }
+        a = vec.push(a, row)
+    }
+    s := 0
+    for row in a {
+        for v in row {
+            s = s + v
+        }
+    }
+    println(s)
+    println(len(a))
+}
+"#;
+
+// Bool-array iteration through the boxed path (branchy body: never a
+// single fused int window, so no peel — parity must hold without it).
+const BOOL_ITER: &str = r#"
+func main() {
+    a := []
+    for i in 0..1000 {
+        a = vec.push(a, i % 3 == 0)
+    }
+    n := 0
+    for b in a {
+        if b {
+            n = n + 1
+        }
+    }
+    println(n)
+}
+"#;
+
+// String-append fusion pin: shared-string append must not leak into the
+// other binding (fresh-alloc path), unicode/empty appends exact.
+const STRAPP_ALIAS: &str = r#"
+func main() {
+    a := "hello"
+    b := a
+    a = a + "!"
+    println(a)
+    println(b)
+    u := "héllo"
+    u = u + "→✓"
+    println(u)
+    e := ""
+    e = e + ""
+    println(len(e))
+}
+"#;
+
+// Index-read fusion pins: accumulate-through-read (prefix operand
+// below the base), bare/branch reads, and trap parity (OOB + negative
+// normalize) on the fused paths. Trap cases exit 1 on both backends
+// (message text is not gated, exit codes are).
+const IDX_ACCUM: &str = r#"
+func main() {
+    a := [10, 20, 30, 40]
+    s := 0
+    i := 0
+    n := len(a)
+    while i < n {
+        s = s + a[i]
+        i = i + 1
+    }
+    println(s)
+    x := 0
+    x = a[0] + 100
+    println(x)
+    y := 0
+    y = a[3]
+    println(y)
+    z := 0
+    k := 1
+    z = a[k + 1] * 2
+    println(z)
+}
+"#;
+
+const IDX_BRANCH: &str = r#"
+func main() {
+    b := [true, false, true]
+    if b[0] {
+        println("t")
+    }
+    if b[1] {
+        println("f")
+    } else {
+        println("not-f")
+    }
+    n := 0
+    for v in b {
+        if v {
+            n = n + 1
+        }
+    }
+    println(n)
+}
+"#;
+
+const IDX_TRAP: &str = r#"
+func main() {
+    a := [1, 2, 3]
+    x := 0
+    x = a[5]
+    println(x)
+}
+"#;
+
+const IDX_NEG: &str = r#"
+func main() {
+    a := [10, 20, 30]
+    x := 0
+    x = a[-1]
+    println(x)
+}
+"#;
+
+// Nonzero-start ranges visit start..end (the chunk backend once seeded
+// every range index with 0 — extra iterations with wrong values).
+const RANGE_START: &str = r#"
+func main() {
+    s := 0
+    n := 0
+    for i in 2..10 {
+        s = s + i
+        n = n + 1
+    }
+    println(s)
+    println(n)
+    t := 0
+    m := 0
+    for i in 5..8 {
+        t = t + i
+        m = m + 1
+    }
+    println(t)
+    println(m)
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -200,6 +382,15 @@ const CASES: &[(&str, &str)] = &[
     ("str_concat", STR_CONCAT),
     ("tak", TAK),
     ("loop_mutate", LOOP_MUTATE),
+    ("sieve_small", SIEVE_SMALL),
+    ("nested_vec", NESTED_VEC),
+    ("bool_iter", BOOL_ITER),
+    ("strapp_alias", STRAPP_ALIAS),
+    ("idx_accum", IDX_ACCUM),
+    ("idx_branch", IDX_BRANCH),
+    ("idx_trap", IDX_TRAP),
+    ("idx_neg", IDX_NEG),
+    ("range_start", RANGE_START),
 ];
 
 #[test]
@@ -207,7 +398,7 @@ fn chunk_matches_hir_stdout_and_exit() {
     if !require_native() {
         return;
     }
-    // One dir per backend so `bin/` names never collide.
+    // One dir per backend so output names never collide.
     let root = std::env::temp_dir().join(format!("zz-chunk-diff-{}", std::process::id()));
     for (name, src) in CASES {
         for backend in ["hir", "chunk"] {
@@ -220,9 +411,9 @@ fn chunk_matches_hir_stdout_and_exit() {
                 args.push("--chunk");
             }
             args.push(f.to_str().unwrap());
-            let (code, _out, err) = run_zz(&args);
+            let (code, _out, err) = run_zz_in(&dir, &args);
             assert_eq!(code, 0, "{backend} build of {name} failed: {err}");
-            let bin = dir.join(format!("bin/{name}"));
+            let bin = dir.join(name);
             assert!(bin.exists(), "{backend} binary missing for {name}");
             let (rcode, stdout) = run_bin(&bin);
             std::fs::write(dir.join("got.stdout"), &stdout).unwrap();

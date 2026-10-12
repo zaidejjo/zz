@@ -43,7 +43,7 @@
 //! - `ThreadCall(x)`: `x = f(x, ...)` — the argument in `x`'s position is
 //!   moved into the call. Per-engine guards apply on top (see clause 3).
 
-use crate::ast::{Block, Expr, Stmt};
+use crate::ast::{Block, Expr, Ident, Stmt};
 
 /// Classified self-reassignment shape (see module docs).
 #[derive(Debug, Clone, PartialEq)]
@@ -1042,7 +1042,7 @@ fn classify_with(target: &Expr, rhs: &Expr, is_push: &dyn Fn(&Expr) -> bool) -> 
         Expr::Ident { name, .. } => name,
         _ => return None,
     };
-    let (callee, args, named): (&Expr, &Vec<Expr>, &Vec<(String, Expr)>) = match rhs {
+    let (callee, args, named): (&Expr, &Vec<Expr>, &Vec<(Ident, Expr)>) = match rhs {
         Expr::Call {
             callee,
             args,

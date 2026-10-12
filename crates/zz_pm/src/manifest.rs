@@ -71,6 +71,7 @@ impl Default for Manifest {
                 category: None,
                 keywords: Vec::new(),
                 zz: None,
+                entry: None,
             },
             dependencies: HashMap::new(),
             native: None,
@@ -113,6 +114,13 @@ pub struct PackageSpec {
     /// documents intent for humans and registries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zz: Option<String>,
+    /// Entry-point override, relative to the package root
+    /// (e.g. `entry = "src/cli.zz"`). Opt-in; absent means conventional
+    /// discovery (`src/main.zz`, then `main.zz`). Same unknown-key note
+    /// as `zz` above: old compilers ignore it and build the
+    /// conventional entry instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 /// Options for scaffolding a new manifest (`zz init` / `zz new` flags).
@@ -596,10 +604,12 @@ pub enum DepSpec {
     /// Git dependency with version constraint.
     Git(GitDep),
     /// Path dependency (local filesystem).
-    // TODO(workspace): cross-source version conflicts (same package name available
-    // as both a registry version and a path dep, e.g. once [workspace] ships)
-    // are currently undefined behavior — not resolved now, just flagged so it
-    // isn't silently assumed away later.
+    // Cross-source pins (same name locked from another source, e.g. a
+    // registry entry left over from before the manifest flipped to a path
+    // dep) are stale by definition: the manifest declaration always wins
+    // (see resolve.rs notes, #266). True same-name-different-source
+    // declarations across workspace members stay future work until
+    // [workspace] ships.
     Path(PathDep),
 }
 
@@ -665,6 +675,56 @@ impl Manifest {
         }
     }
 
+    /// Configured entry override (`[package] entry = "src/cli.zz"`).
+    ///
+    /// Returns `None` when unset (callers fall back to conventional
+    /// discovery). A configured entry is an explicit promise: it must be
+    /// relative, stay inside the package (symlinks included), name a
+    /// `.zz` file, and exist — any violation is a loud error, never a
+    /// silent fallback to the conventional entry.
+    pub fn entry_path(&self, pkg_root: &Path) -> Result<Option<PathBuf>, String> {
+        let Some(rel) = self.package.entry.as_deref() else {
+            return Ok(None);
+        };
+        let bad = |why: &str| {
+            format!(
+                "invalid [package] entry `{rel}`: {why}\n\
+                 hint: use a relative .zz path inside the package, e.g. entry = \"src/cli.zz\""
+            )
+        };
+        if rel.is_empty() {
+            return Err(bad("must not be empty"));
+        }
+        let p = Path::new(rel);
+        if p.is_absolute()
+            || p.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(bad("must be relative and stay inside the package"));
+        }
+        if p.extension().and_then(|e| e.to_str()) != Some("zz") {
+            return Err(bad("must name a .zz file"));
+        }
+        let joined = pkg_root.join(p);
+        let canon = joined
+            .canonicalize()
+            .map_err(|_| bad("file does not exist"))?;
+        let root_canon = pkg_root
+            .canonicalize()
+            .unwrap_or_else(|_| pkg_root.to_path_buf());
+        if !canon.starts_with(&root_canon) {
+            return Err(bad("must stay inside the package (symlink escape)"));
+        }
+        if !canon.is_file() {
+            return Err(bad("is not a file"));
+        }
+        Ok(Some(joined))
+    }
+
     /// Resolve a path dep relative to the manifest directory.
     pub fn resolve_path_dep(&self, manifest_dir: &Path, dep_name: &str) -> Option<PathBuf> {
         match self.dependencies.get(dep_name)? {
@@ -691,6 +751,7 @@ impl Manifest {
                 category: None,
                 keywords: Vec::new(),
                 zz: None,
+                entry: None,
             },
             dependencies: HashMap::new(),
             native: None,
@@ -705,7 +766,10 @@ impl Manifest {
     /// outputs, and compiled binaries. `zz.toml` and `zz.lock` are
     /// deliberately absent — both are committed (lockfile = reproducibility
     /// source of truth, same convention as Cargo).
-    const GITIGNORE_ENTRIES: &[&str] = &["vendor/", "build/", "src/bin/"];
+    /// `src/bin/` is a legacy entry from when builds published next to the
+    /// source file; builds now publish to `<root>/bin/`. It stays until
+    /// existing checkouts are migrated, then gets removed.
+    const GITIGNORE_ENTRIES: &[&str] = &["vendor/", "build/", "bin/", "src/bin/"];
 
     /// Create `.gitignore` if absent, or append missing ZZ entries if
     /// present. Existing content is never removed or reordered.
@@ -733,6 +797,21 @@ impl Manifest {
         Ok(())
     }
 
+    /// Starter `src/main.zz` for a template. Single source of truth shared
+    /// by `zz new` (below) and `zz init` (in `zz_cli::pm`): the default is
+    /// a bare `main` with no imports, so a fresh project checks warning-free.
+    pub fn starter_content(template: Option<&str>) -> &'static str {
+        match template {
+            Some("lib") => {
+                "/// Add one to a number.\npub func add_one(n: int) -> int {\n    n + 1\n}\n"
+            }
+            Some("web") => {
+                "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"
+            }
+            _ => "func main() {\n    println(\"Hello, ZZ!\")\n}\n",
+        }
+    }
+
     /// Create a new project directory with manifest and starter code.
     pub fn create_new(
         parent_dir: &Path,
@@ -758,18 +837,8 @@ impl Manifest {
         // Write manifest
         Self::create_init_opts(&project_dir, name, opts)?;
 
-        // Write starter source
-        let main_content = match template {
-            Some("lib") => {
-                "/// Add one to a number.\npub func add_one(n: int) -> int {\n    n + 1\n}\n"
-            }
-            Some("web") => {
-                "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"
-            }
-            _ => {
-                "import std.http\n\nfunc main() {\n    println(\"Hello, ZZ!\")\n}\n"
-            }
-        };
+        // Write starter source (single-sourced: see `starter_content`).
+        let main_content = Self::starter_content(template);
         std::fs::write(project_dir.join("src/main.zz"), main_content)
             .map_err(|e| format!("cannot write src/main.zz: {e}"))?;
 
@@ -803,6 +872,7 @@ mod tests {
                 category: None,
                 keywords: Vec::new(),
                 zz: None,
+                entry: None,
             },
             dependencies: {
                 let mut d = HashMap::new();
@@ -912,6 +982,67 @@ foo = "^1.0"
         assert!(!m.has_path_deps());
     }
 
+    fn entry_project(tag: &str, manifest_toml: &str, files: &[&str]) -> PathBuf {
+        let d = tmp_dir(tag);
+        fs::write(d.join("zz.toml"), manifest_toml).unwrap();
+        for f in files {
+            let p = d.join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "println(\"hi\")\n").unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn entry_path_unset_is_none() {
+        let d = entry_project(
+            "entry_none",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+            &["src/main.zz"],
+        );
+        let m = Manifest::load(&d.join("zz.toml")).unwrap();
+        assert_eq!(m.entry_path(&d).unwrap(), None);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entry_path_resolves_configured_file() {
+        let d = entry_project(
+            "entry_ok",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nentry = \"src/cli.zz\"\n",
+            &["src/cli.zz"],
+        );
+        let m = Manifest::load(&d.join("zz.toml")).unwrap();
+        assert_eq!(m.entry_path(&d).unwrap(), Some(d.join("src/cli.zz")));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entry_path_rejects_bad_values() {
+        // (manifest entry value, files present, expected error fragment)
+        let cases: &[(&str, &[&str], &str)] = &[
+            ("../evil.zz", &[], "stay inside"),
+            ("/abs.zz", &[], "relative"),
+            ("", &[], "empty"),
+            ("src/cli.txt", &["src/cli.txt"], ".zz file"),
+            ("src/missing.zz", &[], "does not exist"),
+        ];
+        for (i, (entry, files, fragment)) in cases.iter().enumerate() {
+            let d = entry_project(
+                &format!("entry_bad_{i}"),
+                &format!("[package]\nname = \"a\"\nversion = \"0.1.0\"\nentry = \"{entry}\"\n"),
+                files,
+            );
+            let m = Manifest::load(&d.join("zz.toml")).unwrap();
+            let err = m.entry_path(&d).expect_err("bad entry must fail");
+            assert!(
+                err.contains(fragment),
+                "entry `{entry}`: expected `{fragment}` in:\n{err}"
+            );
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
     #[test]
     fn create_new_cli_template() {
         let d = tmp_dir("new_cli");
@@ -920,6 +1051,8 @@ foo = "^1.0"
         assert!(project.join("src/main.zz").exists());
         let src = fs::read_to_string(project.join("src/main.zz")).unwrap();
         assert!(src.contains("Hello, ZZ!"));
+        // No unused imports: a fresh project must check warning-free.
+        assert!(!src.contains("import"));
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -948,6 +1081,7 @@ foo = "^1.0"
         let content = fs::read_to_string(d.join(".gitignore")).unwrap();
         assert!(content.contains("vendor/"));
         assert!(content.contains("build/"));
+        assert!(content.lines().any(|l| l.trim() == "bin/"));
         assert!(content.contains("src/bin/"));
         assert!(!content.contains("zz.toml"));
         assert!(!content.contains("zz.lock"));
@@ -963,6 +1097,7 @@ foo = "^1.0"
         assert!(content.contains("target/"));
         assert_eq!(content.matches("vendor/").count(), 1);
         assert!(content.contains("build/"));
+        assert!(content.lines().any(|l| l.trim() == "bin/"));
         assert!(content.contains("src/bin/"));
         // Idempotent: second run changes nothing.
         Manifest::ensure_gitignore(&d).unwrap();
@@ -992,6 +1127,7 @@ foo = "^1.0"
                 category: Some("cli".into()),
                 keywords: vec!["tool".into()],
                 zz: None,
+                entry: Some("src/cli.zz".into()),
             },
             dependencies: HashMap::new(),
             native: None,

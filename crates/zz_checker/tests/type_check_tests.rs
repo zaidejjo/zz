@@ -1,7 +1,8 @@
 mod common;
 
 use common::{
-    check_src, check_src_with_funcs, check_src_with_funcs_and_structs, errors_contain, has_errors,
+    check_src, check_src_with_funcs, check_src_with_funcs_and_module_ns,
+    check_src_with_funcs_and_structs, check_src_with_module_ns, errors_contain, has_errors,
 };
 use std::collections::HashMap;
 use zz_checker::type_::Type;
@@ -32,6 +33,50 @@ fn annotation_unifies() {
 #[test]
 fn annotation_mismatch_errors() {
     errors_contain("x: str = 1 + 2", "type mismatch");
+}
+
+#[test]
+fn annotation_mismatch_names_fix_direction() {
+    let r = check_src("x: str = 1");
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("change the annotation to `int`")),
+        "expected annotation fix note, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn arg_mismatch_names_parameter() {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "greet".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("greeting".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    let r = check_src_with_funcs("x := greet(42)", funcs);
+    assert!(
+        r.errors.iter().any(|e| e.message.contains("type mismatch")),
+        "errors: {:?}",
+        r.errors
+    );
+    let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("parameter `greeting` expects `str`")),
+        "expected parameter note, got: {:?}",
+        r.errors
+    );
 }
 
 #[test]
@@ -398,6 +443,26 @@ fn struct_unknown_type_errors() {
 }
 
 #[test]
+fn struct_self_reference_resolves() {
+    // Recursive fields (behind arrays/options) resolve: the type name is
+    // pre-registered before fields are collected.
+    let r = check_src("struct Node { n: int, kids: [Node] }\nleaf := Node { n: 1, kids: [] }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn struct_mutual_reference_resolves_in_either_order() {
+    let r = check_src("struct A { b: B, n: int }\nstruct B { a: Option<A>, n: int }\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn enum_self_reference_resolves() {
+    let r = check_src("enum R { Null, Int(int), List([R]) }\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
 fn struct_in_func_signature() {
     let r = check_src(
         "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nz := dist(Point{ x: 1, y: 2 })",
@@ -519,6 +584,54 @@ fn calling_closure() {
 }
 
 #[test]
+fn zero_arg_closure_no_space() {
+    // #261: `|| body` parses as a zero-arg closure (no space needed).
+    let r = check_src("f := || 42\ny := f()");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["y"], Type::Int);
+}
+
+#[test]
+fn or_op_spacing_variants_stay_boolean_or() {
+    // #261: every spacing of `||` after an operand stays boolean-or.
+    for src in ["a||b", "a ||b", "a|| b", "a || b"] {
+        let prog = format!("a := true\nb := false\nc := {src}");
+        let r = check_src(&prog);
+        assert!(!has_errors(&r), "{src}: {:?}", r.errors);
+        assert_eq!(r.bindings["c"], Type::Bool, "{src}");
+    }
+}
+
+#[test]
+fn unused_tuple_binding_span_points_at_binding() {
+    // #293: an unused destructured binding points at its own site, not 1:1.
+    let src = "func pair() -> (int, int) {\n    return (1, 2)\n}\nfunc main() {\n    m, n := pair()\n    println(n)\n}\n";
+    let r = check_src(src);
+    let warn = r
+        .errors
+        .iter()
+        .find(|d| d.message.contains("unused variable `m`"))
+        .expect("expected unused-`m` warning");
+    let span = warn.span.expect("warning must carry a span");
+    assert_eq!(&src[span.to_range()], "m", "span {span:?} must cover `m`");
+}
+
+#[test]
+fn unused_for_loop_var_span_points_at_binding() {
+    // #293 (same class): unused loop variables point at their own site.
+    let src = "func main() {\n    total := 0\n    for i, x in [(1, 10), (2, 20)] {\n        total = total + x\n    }\n}\n";
+    let r = check_src(src);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let warn = r
+        .errors
+        .iter()
+        .find(|d| d.message.contains("unused variable `i`"))
+        .expect("expected unused-`i` warning");
+    let span = warn.span.expect("warning must carry a span");
+    assert_eq!(&src[span.to_range()], "i", "span {span:?} must cover `i`");
+}
+
+#[test]
 fn match_option() {
     let r = check_src("v := .some(1)\nx := match v { .some(n) => n, .none => 0 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
@@ -530,6 +643,274 @@ fn match_result() {
     let r = check_src("v: Result<int, str> = .ok(1)\nx := match v { .ok(n) => n, .err(_) => 0 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn match_bare_ok_on_result_errors() {
+    errors_contain(
+        "v: Result<int, str> = .ok(1)\nmatch v { .ok => 1, .err(e) => 0 }",
+        "`.ok` pattern requires an argument",
+    );
+    let r = check_src("v: Result<int, str> = .ok(1)\nmatch v { .ok => 1, .err(e) => 0 }");
+    let fix = r
+        .errors
+        .iter()
+        .flat_map(|d| d.fixits.iter())
+        .find(|f| f.replacement == ".ok(_)")
+        .expect("expected safe `.ok(_)` fixit");
+    assert_eq!(fix.message, "add wildcard payload");
+}
+
+#[test]
+fn match_bare_err_on_result_errors() {
+    errors_contain(
+        "v: Result<int, str> = .err(\"x\")\nmatch v { .ok(n) => n, .err => 0 }",
+        "`.err` pattern requires an argument",
+    );
+    let r = check_src("v: Result<int, str> = .err(\"x\")\nmatch v { .ok(n) => n, .err => 0 }");
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".err(_)"),
+        "expected safe `.err(_)` fixit, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn match_bare_some_suggests_fixit() {
+    let r = check_src("v := .some(1)\nmatch v { .some => 1, .none => 0 }");
+    assert!(has_errors(&r), "expected error, got: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".some(_)"),
+        "expected safe `.some(_)` fixit, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_result_statement_warns() {
+    let r = check_src(".ok(1)");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Result`")),
+        "expected unused-Result warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_option_statement_warns() {
+    let r = check_src(".some(1)");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Option`")),
+        "expected unused-Option warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn handled_result_statement_does_not_warn() {
+    let r = check_src("v := .ok(1)\nmatch v { .ok(n) => n, .err(_) => 0 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors.iter().any(|d| d.message.contains("unused")),
+        "unexpected unused warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn block_tail_result_is_a_value_not_a_discard() {
+    // Tail expressions are the block's value (implicit return) — warning
+    // here would be a false positive on `-> Result` functions.
+    let r = check_src("func f() -> Result<int, str> { .ok(1) }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors.iter().any(|d| d.message.contains("unused")),
+        "tail value must not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn loop_body_tail_result_warns() {
+    // Loop bodies discard their value every iteration — a tail `Result`
+    // there drops errors just like a statement does.
+    let r = check_src("for x in [1] { .ok(x) }");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Result`")),
+        "expected unused-Result warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn func_nested_in_loop_tail_does_not_warn() {
+    // A function boundary resets the discard context: the inner tail is
+    // a return value even inside a loop body (closures: named nested
+    // functions are not supported, so this uses closure syntax).
+    let r = check_src("for x in [1] { _c := |y: int| -> Result<int, str> { .ok(y) } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Result`")),
+        "nested closure tail must not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn builtin_pattern_constrains_uninferred_scrutinee() {
+    // `.ok`/`.err` proves `Result`: no errors, payloads get real types.
+    let r = check_src("func f(x) { match x { .ok(v) => v, .err(_) => 0 } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn cross_family_arm_after_inference_errors() {
+    // Once `.ok` pins the scrutinee to `Result`, a `.some` arm is a
+    // genuine mismatch — not silent acceptance.
+    let r = check_src("func f(x) { match x { .ok(v) => v, .some(n) => n, _ => 0 } }");
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("does not match")),
+        "expected cross-family mismatch, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn deferred_result_warns() {
+    let r = check_src("func f() { defer .ok(1) }");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused `Result`")),
+        "expected unused-Result warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn dead_arm_after_wildcard_warns() {
+    let r = check_src("match 1 { _ => 0, 1 => 1 }");
+    assert!(
+        !has_errors(&r),
+        "warning must not be an error: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unreachable match arm")),
+        "expected dead-arm warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn scalar_match_guard_passes() {
+    let r = check_src("match 1 { n if n > 0 => 0, _ => 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn outer_binding_in_match_guard_resolves() {
+    let r = check_src("limit := 5\nmatch 10 { n if n > limit => 0, _ => 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn call_in_match_guard_errors_loudly() {
+    // Native guard lowering folds calls to a constant while the VM
+    // evaluates them — reject at check time so engines never diverge.
+    errors_contain(
+        "func big(n: int) -> bool { n > 1 }\nmatch 1 { n if big(n) => 0, _ => 1 }",
+        "native builds cannot evaluate",
+    );
+}
+
+#[test]
+fn string_literal_in_match_guard_errors() {
+    errors_contain(
+        "match \"a\" { s if s == \"a\" => 0, _ => 1 }",
+        "native builds cannot evaluate",
+    );
+}
+
+#[test]
+fn guarded_catchall_does_not_kill_next_arm() {
+    let r = check_src("match 1 { _ if 1 > 0 => 0, 1 => 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|d| d.message.contains("unreachable match arm")),
+        "guarded catch-all must not mark next arm dead, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn discarded_match_bare_arms_warn() {
+    // Bare arm bodies never pass through `Stmt::Expr`: a discarded
+    // `match` must warn on `Result`/`Option` arms itself.
+    let r = check_src("v := .ok(1)\nmatch v { .ok(n) => .err(\"x\"), .err(_) => .ok(1) }");
+    assert!(
+        !has_errors(&r),
+        "warnings must not be errors: {:?}",
+        r.errors
+    );
+    let count = r
+        .errors
+        .iter()
+        .filter(|d| d.message.contains("unused `Result`"))
+        .count();
+    assert_eq!(count, 2, "expected both arms to warn, got: {:?}", r.errors);
+}
+
+#[test]
+fn used_match_bare_arms_do_not_warn() {
+    // Same arms, but the match value feeds a binding — nothing discarded.
+    let r = check_src("v := .ok(1)\n_w := match v { .ok(_) => .err(\"x\"), .err(_) => .ok(1) }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors.iter().any(|d| d.message.contains("unused")),
+        "used match must not warn, got: {:?}",
+        r.errors
+    );
 }
 
 #[test]
@@ -975,6 +1356,47 @@ fn method_funcs() -> HashMap<String, FuncSig> {
 }
 
 #[test]
+fn call_on_named_type_suggests_function() {
+    // `x: Line` called as `x("s")`: the suggestion names the type, so
+    // the diagnostic says so explicitly (replacing the callee would
+    // drop the receiver — deliberately no fixit).
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "line".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("s".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Int,
+        },
+    );
+    let r = check_src_with_funcs("func f<Line>(x: Line) { x(\"s\") }", funcs);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unknown function")),
+        "errors: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.notes.iter())
+            .any(|n| n.contains("did you mean to call `line`")),
+        "expected callee/type disambiguation note, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors.iter().flat_map(|d| d.fixits.iter()).any(|_| true),
+        "must not offer a fixit here, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn method_call_type_checks() {
     let r = check_src_with_funcs(
         "struct Point { x: int }\np := Point{ x: 3 }\nz := p.dist(2)",
@@ -982,6 +1404,130 @@ fn method_call_type_checks() {
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["z"], Type::Int);
+}
+
+#[test]
+fn unknown_named_param_suggests_fixit() {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "greet".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("greeting".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    let src = "x := greet(greetnig: \"hi\")";
+    let r = check_src_with_funcs(src, funcs);
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("unknown parameter `greetnig`"))
+        .expect("expected unknown-parameter error");
+    // The error points at the typo'd name itself (span 11..19), not the value.
+    assert_eq!(diag.span, Some(Span::new(11, 19)), "span: {:?}", diag.span);
+    let fix = diag
+        .fixits
+        .iter()
+        .find(|f| f.replacement == "greeting")
+        .expect("expected `greeting` fixit");
+    assert_eq!(fix.safety, zz_frontend::diag::FixSafety::Safe);
+}
+
+#[test]
+fn ambiguous_named_param_offers_choices() {
+    // Two live candidates → Ambiguous fixit with alternatives, never a
+    // silent single pick.
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "draw".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![
+                ("count".to_string(), Type::Int),
+                ("court".to_string(), Type::Int),
+            ],
+            has_default: vec![],
+            ret: Type::Int,
+        },
+    );
+    let r = check_src_with_funcs("x := draw(1, cout: 2)", funcs);
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("unknown parameter `cout`"))
+        .expect("expected unknown-parameter error");
+    let fix = diag
+        .fixits
+        .iter()
+        .find(|f| f.safety == zz_frontend::diag::FixSafety::Ambiguous)
+        .expect("expected ambiguous fixit");
+    assert!(
+        fix.alternatives.contains(&"count".to_string())
+            && fix.alternatives.contains(&"court".to_string()),
+        "alternatives: {:?}",
+        fix.alternatives
+    );
+}
+
+#[test]
+fn or_catchall_dead_arm_warns() {
+    let r = check_src("match 1 { 1 | _ => 0, 2 => 1 }");
+    assert!(
+        !has_errors(&r),
+        "warnings must not be errors: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unreachable match arm")),
+        "expected dead-arm warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn if_let_constrains_uninferred_scrutinee() {
+    let r = check_src("func f(x) { if let .ok(v) = x { v } else { 0 } }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn bare_none_with_wildcard_suggests_fixit() {
+    let r = check_src("v: Option<int> = .none\nmatch v { .none(_) => 0, .some(n) => n }");
+    assert!(has_errors(&r), "expected error, got: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".none"),
+        "expected `.none` fixit, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn bare_none_with_binding_has_no_fixit() {
+    // Dropping `.none(x)` would orphan uses of `x` in the arm body, so
+    // the fixit is withheld — error + guidance only.
+    let r = check_src("v: Option<int> = .none\nmatch v { .none(x) => x, .some(n) => n }");
+    assert!(has_errors(&r), "expected error, got: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .any(|f| f.replacement == ".none"),
+        "must not offer the `.none` drop-payload fixit here, got: {:?}",
+        r.errors
+    );
 }
 
 #[test]
@@ -1688,6 +2234,14 @@ fn opaque_handle_types_resolve_in_annotations() {
         ("tcp.listener", Type::TcpListener),
         ("http.response", Type::Response),
         ("http.request", Type::HttpRequest),
+        // Native module handles (Opaque tags): connection/listener/file
+        // values became annotatable so helpers can take them.
+        ("tls", Type::Opaque("tls".to_string())),
+        ("tls_listener", Type::Opaque("tls_listener".to_string())),
+        ("unix", Type::Opaque("unix".to_string())),
+        ("unix_listener", Type::Opaque("unix_listener".to_string())),
+        ("file", Type::Opaque("file".to_string())),
+        ("regexp", Type::Opaque("regexp".to_string())),
     ] {
         let src = format!("func w(c: {ann}) {{ }}\n");
         let r = check_src(&src);
@@ -2092,8 +2646,8 @@ fn cross_module_nonunit_block_still_rejected() {
     let r = check_src_with_funcs(main, seed);
     let errs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
     assert!(
-        errs.iter().any(|e| e.contains("type mismatch")),
-        "expected a type-mismatch error, got: {errs:?}"
+        errs.iter().any(|e| e.contains("discarded")),
+        "expected a discarded-value error, got: {errs:?}"
     );
 }
 
@@ -2372,5 +2926,433 @@ fn unreachable_after_return_warns() {
     assert!(
         !has_errors(&r),
         "unreachable must be a warning, not an error"
+    );
+}
+
+#[test]
+fn param_shadowing_module_name_warns() {
+    // #376: a param named after its own module shadows the namespace
+    // object, so same-module helper calls fail at runtime while the
+    // check stays green. Must warn (not error) with a rename fix.
+    let r = check_src_with_module_ns("func parse(fen: str) -> str {\n    fen\n}", "fen");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    let w = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("shadows a module namespace"))
+        .expect("expected shadow warning");
+    assert!(
+        w.fixits.iter().any(|f| f.replacement == "fen_local"),
+        "expected rename fixit, got: {:?}",
+        w.fixits
+    );
+}
+
+#[test]
+fn local_shadowing_module_name_warns() {
+    // #361: `lib9 := []` inside `lib9` breaks `helper(...)` at runtime.
+    let r = check_src_with_module_ns("func outer() -> int {\n    lib9 := 1\n    lib9\n}", "lib9");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("`lib9` shadows a module namespace")),
+        "expected shadow warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn binding_shadowing_imported_namespace_warns() {
+    // Same hazard through imports: a local named `vec` hides
+    // `vec.push` resolution the same way.
+    let r = check_src_with_module_ns(
+        "import std.vec\nfunc f() -> int {\n    vec := 1\n    vec\n}",
+        "m",
+    );
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("`vec` shadows a module namespace")),
+        "expected shadow warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unrelated_names_do_not_shadow_warn() {
+    let r = check_src_with_module_ns("func parse(text: str) -> str {\n    text\n}", "fen");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("shadows a module namespace")),
+        "no shadow warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shadow_lint_needs_module_owner() {
+    // Without a module owner (REPL, merged programs) nothing fires.
+    let r = check_src("func parse(fen: str) -> str {\n    fen\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("shadows a module namespace")),
+        "no shadow warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_of_array_param_warns() {
+    // #278: `buf[i] = v` on a `[int]` param is lost (values) — warn.
+    let r = check_src("func f(buf: [int]) -> int {\n    buf[0] = 32\n    return 0\n}");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `buf`")),
+        "expected dead-mutation warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_returned_param_silent() {
+    // Returning (or otherwise observing) the param silences the lint.
+    let r = check_src("func f(buf: [int]) -> int {\n    buf[0] = 32\n    return buf[0]\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_passed_to_call_silent() {
+    let r = check_src("func g(x: [int]) -> int {\n    return 0\n}\nfunc f(buf: [int]) -> int {\n    buf[0] = 1\n    return g(buf)\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_scalar_param_silent() {
+    // Scalars are Copy — rebinding them is ordinary, never a dead store.
+    let r = check_src("func f(x: int) -> int {\n    return x + 1\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_local_scratch_silent() {
+    // Locals are never linted — scratch buffers are idiomatic.
+    let r =
+        check_src("func f() -> int {\n    buf := [1, 2]\n    buf[0] = 32\n    return buf[0]\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_shadowed_param_silent() {
+    // A shadowing local hides the param: stores hit the local, not the param.
+    let r =
+        check_src("func f(buf: [int]) -> int {\n    buf := [9]\n    buf[0] = 1\n    return 0\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `buf`")),
+        "no warning expected (shadowed), got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_struct_field_warns() {
+    let r = check_src("struct P { x: int }\nfunc f(p: P) -> int {\n    p.x = 1\n    return 0\n}");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `p`")),
+        "expected dead-mutation warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_rebinding_is_not_a_store() {
+    // Plain `buf = ...` rebinds (ordinary assignment), not a dead store.
+    let r = check_src("func f(buf: [int]) -> int {\n    buf = [9]\n    return 0\n}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter")),
+        "no warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+fn std_fs_seed() -> HashMap<String, FuncSig> {
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "std.fs.read_dir".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("path".to_string(), Type::Str)],
+            has_default: vec![],
+            ret: Type::Str,
+        },
+    );
+    funcs
+}
+
+#[test]
+fn std_path_without_import_errors() {
+    // #227: fully-qualified std use with no import is an error naming
+    // the missing import.
+    let r = check_src_with_funcs_and_module_ns(
+        "x := std.fs.read_dir(\".\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("`std.fs.read_dir` requires `import std.fs`")),
+        "expected import-hygiene error, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(has_errors(&r), "must be an error, not a warning");
+}
+
+#[test]
+fn std_path_with_import_ok() {
+    let r = check_src_with_funcs_and_module_ns(
+        "import std.fs\nx := std.fs.read_dir(\".\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import")),
+        "no hygiene error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn std_path_with_alias_import_ok() {
+    // Importing under any spelling unlocks the canonical paths.
+    let r = check_src_with_funcs_and_module_ns(
+        "import std.fs as f\nx := std.fs.read_dir(\".\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import")),
+        "no hygiene error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn std_path_selective_import_ok() {
+    let r = check_src_with_funcs_and_module_ns(
+        "import std.fs(read_dir)\nx := std.fs.read_dir(\".\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import")),
+        "no hygiene error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn std_path_other_module_still_errors() {
+    // Importing std.fs does not unlock std.math.
+    let mut funcs = std_fs_seed();
+    funcs.insert(
+        "std.math.sin".to_string(),
+        FuncSig {
+            is_extern: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: vec![],
+            params: vec![("x".to_string(), Type::Float)],
+            has_default: vec![],
+            ret: Type::Float,
+        },
+    );
+    let r = check_src_with_funcs_and_module_ns(
+        "import std.fs\ny := std.math.sin(1.0)",
+        funcs,
+        HashMap::new(),
+        "main",
+    );
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("`std.math.sin` requires `import std.math`")),
+        "expected import-hygiene error, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn std_path_type_position_gated() {
+    // Annotations name types too.
+    let mut structs = HashMap::new();
+    structs.insert(
+        "std.fs.Dir".to_string(),
+        StructSig {
+            generics: vec![],
+            fields: vec![("path".to_string(), Type::Str)],
+        },
+    );
+    let r = check_src_with_funcs_and_module_ns(
+        "x: std.fs.Dir = std.fs.Dir{ path: \".\" }",
+        HashMap::new(),
+        structs,
+        "main",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import std.fs`")),
+        "expected import-hygiene error, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn std_gate_dedupes_per_path() {
+    let r = check_src_with_funcs_and_module_ns(
+        "x := std.fs.read_dir(\".\")\ny := std.fs.read_dir(\"/tmp\")",
+        std_fs_seed(),
+        HashMap::new(),
+        "main",
+    );
+    let n = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("requires `import std.fs`"))
+        .count();
+    assert_eq!(n, 1, "one error per path, got: {:?}", r.errors);
+}
+
+#[test]
+fn std_gate_needs_module_owner() {
+    // No owner (REPL, stdlib internals, merged programs): silent.
+    let r = check_src_with_funcs("x := std.fs.read_dir(\".\")", std_fs_seed());
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("requires `import")),
+        "no hygiene error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn branch_trailing_call_reports_at_call_not_cond() {
+    // #388: `if` without `else` used as a statement whose branch ends in
+    // a value call must point at the discarded call — not the condition
+    // with reversed types.
+    let src = "func push_hist(h: [int], x: int) -> [int] { h }\nfunc probe(hist: [int]) -> bool {\n    side := 1\n    if side != 0 {\n        push_hist(hist, side)\n    }\n    true\n}";
+    let r = check_src(src);
+    assert!(has_errors(&r), "must stay an error: {:?}", r.errors);
+    let e = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("discarded"))
+        .expect("expected discarded-value error");
+    assert!(
+        e.message.contains("`[int]`"),
+        "must name the discarded type, got: {}",
+        e.message
+    );
+    let call_at = src.find("push_hist(hist, side)").unwrap();
+    assert_eq!(
+        e.span.map(|s| s.start),
+        Some(call_at as u32),
+        "must point at the call, got: {:?}",
+        e.span
+    );
+}
+
+#[test]
+fn branch_trailing_call_bound_is_fine() {
+    let r = check_src("func push_hist(h: [int], x: int) -> [int] { h }\nfunc probe(hist: [int]) -> bool {\n    side := 1\n    if side != 0 {\n        _h2 := push_hist(hist, side)\n        side = side\n    }\n    true\n}");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("discarded")),
+        "no discarded error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn branch_unit_tail_is_fine() {
+    let r = check_src("func probe(hist: [int]) -> bool {\n    side := 1\n    if side != 0 {\n        side = side + 1\n    }\n    true\n}");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("discarded")),
+        "no discarded error expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn if_let_trailing_call_reports_at_call() {
+    // Same discarded-tail rule for `if let` without `else`.
+    let src = "func push_hist(h: [int], x: int) -> [int] { h }\nfunc probe(v: [int]) -> bool {\n    o := .some(1)\n    if let .some(h) = o {\n        push_hist(v, h)\n    }\n    true\n}";
+    let r = check_src(src);
+    assert!(has_errors(&r), "must stay an error: {:?}", r.errors);
+    let e = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("discarded"))
+        .expect("expected discarded-value error");
+    assert!(e.message.contains("`if let`"), "got: {}", e.message);
+    let call_at = src.find("push_hist(v, h)").unwrap();
+    assert_eq!(
+        e.span.map(|s| s.start),
+        Some(call_at as u32),
+        "must point at the call, got: {:?}",
+        e.span
     );
 }

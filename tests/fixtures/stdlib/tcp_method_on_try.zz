@@ -1,0 +1,63 @@
+// features: bytes, comparison, elvis, func-call, imports, int-arith, locals, match, option-result, print, std-env, std-net, std-process, std-str, string-literal
+// tests/fixtures/stdlib/tcp_method_on_try.zz — method calls whose
+// receiver is a `?`-expression (`dial(addr)?.write(..)`) resolve like
+// locals on both engines: receiver kept, native impl hit. Regression:
+// the AOT backend dropped the receiver and emitted a bodyless
+// `zz_fn_net__*` wrapper (link failure on some shapes, silent
+// miscompile on others) while the VM dispatched on the value.
+import std.env
+import std.net
+import std.process(pid)
+import std.str
+
+func dial(addr: str) -> Result<tcp.stream, str> {
+    net.tcp_connect(addr, 5000)
+}
+
+func wrap(c: tcp.stream) -> Result<tcp.stream, str> {
+    .ok(c)
+}
+
+func main() -> Result<int, str> {
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    base_port := 20000 + pid() % 20000 + tok_num % 20000
+    addr := "127.0.0.1:{base_port}"
+    l := net.tcp_listen(addr)?
+    c := net.tcp_connect(addr, 5000)?
+    ss := l.accept()?
+    // read_line on a Try receiver over a live conn with pending data.
+    _u0 := ss.write("srv-hi\n")?
+    line := wrap(c)?.read_line()?
+    assert(line == "srv-hi")
+    println("try_read_ok")
+    // write on a Try receiver.
+    _u1 := wrap(c)?.write("cli-hi\n")?
+    got := ss.read_line()?
+    assert(got == "cli-hi")
+    println("try_write_ok")
+    // write_bytes on a Try receiver over a second connection.
+    c2 := net.tcp_connect(addr, 5000)?
+    s2 := l.accept()?
+    _u2 := wrap(c2)?.write_bytes(bytes.finish([99, 50, 10])?)?
+    got2 := s2.read_line()?
+    assert(got2 == "c2")
+    println("try_write_bytes_ok")
+    // Direct call-Try receiver (`dial(addr)?.write(..)`): the exact
+    // shape that lost its receiver.
+    _u3 := dial(addr)?.write("third-hi\n")?
+    s3 := l.accept()?
+    got3 := s3.read_line()?
+    assert(got3 == "third-hi")
+    println("direct_try_write_ok")
+    // Timeout + close on Try receivers.
+    _u4 := wrap(c)?.set_read_timeout(1000)?
+    println("try_timeout_ok")
+    _u5 := wrap(c)?.close()?
+    _u6 := wrap(c2)?.close()?
+    _u7 := ss.close()?
+    _u8 := s2.close()?
+    _u9 := s3.close()?
+    println("tcp_method_on_try_ok")
+    .ok(0)
+}

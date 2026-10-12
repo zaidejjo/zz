@@ -93,6 +93,39 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// True when a `.name` continuation at the cursor is really the next
+    /// match arm (`... .err(_) => ...`): an `Arrow` awaits at bracket
+    /// depth 0 before any terminator. Neither `=>` nor `->` can continue
+    /// an expression, so refusing the chain here is always correct —
+    /// without it the arm boundary is eaten and the user gets a cascade
+    /// (`_` invalid, expected `,`/`}`, stray `}`) instead of one error.
+    pub(crate) fn dot_starts_match_arm(&self) -> bool {
+        debug_assert!(self.at(TokenKind::Dot));
+        let mut depth = 0u32;
+        // Skip the `.name` pair itself; scan what follows it.
+        let mut i = 2usize;
+        loop {
+            match self.peek_kind_at(i) {
+                TokenKind::Arrow if depth == 0 => return true,
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                TokenKind::StmtEnd | TokenKind::Comma | TokenKind::Eof => return false,
+                _ => {}
+            }
+            i += 1;
+            // Terminators always arrive first in real code; the cap only
+            // guards pathological token runs without them.
+            if i > 512 {
+                return false;
+            }
+        }
+    }
+
     pub(crate) fn peek(&self) -> &Token<'a> {
         &self.toks[self.pos]
     }

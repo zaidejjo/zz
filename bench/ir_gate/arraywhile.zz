@@ -1,0 +1,20 @@
+import std.vec
+
+// Arraysum while-variant: same 1M-element [int] + accumulation as
+// arraysum.zz, but the sum loop is a `while` over an index (not a
+// `for v in a`). Proves store-index fusion + int promotion are not
+// tied to the `for`-peel shape.
+
+func main() {
+    a := []
+    for i in 0..1000000 {
+        a = vec.push(a, i % 97)
+    }
+    s := 0
+    i := 0
+    while i < len(a) {
+        s = s + a[i]
+        i = i + 1
+    }
+    println(s)
+}

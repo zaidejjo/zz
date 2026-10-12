@@ -77,10 +77,11 @@ zz test --list
 | `--repeat N` | Run suite N times |
 | `--fail-fast` | Stop after first failure |
 | `--fail-on-empty` | Exit 1 when no tests matched (default: exit 0) |
-| `--native`, `--aot` | AOT engine: compile each file once (dev), one process per test |
+| `--native` | AOT engine alias for `--engine native` (deprecated, prints a note) |
 | `--engine=vm\|native` | Select the test engine (default `vm`) |
-| `-p`, `--release` | With `--native`: optimized build (default: dev) |
-| `--timeout <ms>` | Soft time budget per test (default 60000): overruns print a notice, never interrupt or fail |
+| `-p`, `--release` | With `--engine native`: optimized build (default: dev) |
+| `--timeout <ms>` | Hard time budget per test (default 60000): overruns fail the test |
+| `--soft-timeout` | Budget overruns print a notice only, never fail (legacy mode) |
 | `--json` | Structured per-test JSON to stdout |
 | `--junit <path>` | JUnit XML for CI |
 | `--slow-threshold <ms>` | Mark passing tests slower than threshold as slow |
@@ -134,12 +135,16 @@ Failure output includes `file:line` + source snippet. Structural diffing:
 test test_addition ... ok (2ms)
 test test_flaky ... ok (5ms) (retried 2x)
 test test_slow ... ok (1.20s) (slow)
-test test_over ... ok (65.20s) (took 65.20s; over 60s soft budget, not interrupted)
+test test_over ... FAILED (65.20s) (took 65.20s; exceeded 60s budget)
+  timeout: exceeded 60s budget (took 65.20s)
 test test_broken ... FAILED (3ms)
   error: Assertion Failed: Expected equality
   - Left:  15
   + Right: 18
 ```
+
+With `--soft-timeout`, the over-budget test stays `ok` with a
+`(took 65.20s; over 60s soft budget, not interrupted)` suffix instead.
 
 ## Terminal UI & Output Modes
 
@@ -149,8 +154,8 @@ test test_broken ... FAILED (3ms)
   `ok` is green, `FAILED` red, `ignored` yellow; piped output is plain.
   No symbols — `grep FAILED` / `grep "^test .* ok"` work in CI.
 - Durations print as `898ms` below a second, `1.20s` at/above it.
-- The 60s soft budget (`--timeout <ms>`) only prints a notice; tests are
-  never interrupted or failed by it. Hard timeouts come only from
+- The 60s budget (`--timeout <ms>`) fails overrunning tests; pass
+  `--soft-timeout` for notice-only mode. Hard timeouts come only from
   `@test(timeout = ms)`: VM runs the test in a worker subprocess and
   kills it on overrun (true wall-clock, even for blocking natives);
   AOT kills the test process the same way.
@@ -178,7 +183,8 @@ Non-TTY detection via `IsTerminal`; colors via `std.colors` with plain fallback.
 | `1` | Any test failed |
 | `2` | Compilation/discovery error before any test ran |
 
-**Zero tests matched:** `zz test <substring>` matching 0 tests exits `0` with message `0 tests matched (filter: "<s>")`. Reasoning: filter is a local developer convenience, not a failure signal; CI gates that need a non-empty suite should assert on `passed == 0` via `--json`/`--junit` or a wrapper script. A future `--fail-on-empty` flag is reserved if CI users want `exit 1` on empty match without parsing output. This keeps `zz test` consistent with `cargo test -- --skip` semantics where empty filter is not an error.
+**Zero tests matched:** `zz test <substring>` matching 0 tests prints
+`warning:` + a hint and exits `0` (use `--fail-on-empty` for exit 1). Reasoning: filter is a local developer convenience, not a failure signal; CI gates that need a non-empty suite should assert on `passed == 0` via `--json`/`--junit` or a wrapper script. A future `--fail-on-empty` flag is reserved if CI users want `exit 1` on empty match without parsing output. This keeps `zz test` consistent with `cargo test -- --skip` semantics where empty filter is not an error.
 
 ## `zz.toml` `[test]` Config
 
@@ -188,7 +194,8 @@ jobs = 4
 serial = false
 fail-fast = false
 slow-threshold = 200   # ms
-timeout = 60000        # ms, soft budget (notice only)
+timeout = 60000        # ms, hard budget (overruns fail)
+soft-timeout = false   # true = notice-only budget (legacy mode)
 seed = 42
 repeat = 1
 engine = "vm"          # or "native"

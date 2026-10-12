@@ -648,13 +648,17 @@ fn nested_for_loops_verify() {
     // setup_depth+1, but `ForNext` exhaustion truncates to the result
     // placeholder (setup_depth-1). Single loops never noticed
     // (single-predecessor exits); the outer back-edge exposed it.
-    // Covers for-for and for-in-while (same signature, also failed).
+    // Covers for-for, for-in-while, while-while, while-in-for and
+    // triple-nested for loops (same signature, also failed).
     use std::collections::HashMap;
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     for src in [
         "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n s = s + i + j\n }\n }\n s\n}\nm()",
         "func m() {\n s := 0\n j := 0\n while j < 3 {\n for k in 0..3 {\n s = s + j + k\n }\n j = j + 1\n }\n s\n}\nm()",
+        "func m() {\n s := 0\n i := 0\n while i < 3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n i = i + 1\n }\n s\n}\nm()",
+        "func m() {\n s := 0\n for i in 0..3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n }\n s\n}\nm()",
+        "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n for k in 0..3 {\n s = s + i + j + k\n }\n }\n }\n s\n}\nm()",
     ] {
         let module = lower_typed_spanmap(src, &sigs);
         // lower_typed runs max_stack_for + full verify internally, so a
@@ -719,4 +723,43 @@ fn verify_accepts_error_declared_iterable() {
         entry: zz_ir::FuncId(0),
     };
     verify::verify(&module).expect("Error-declared iterable rejected");
+}
+
+#[test]
+fn verify_short_locals_fails_closed() {
+    // Regression: `func.sig.params` longer than `func.locals` (closure /
+    // spawn shapes from lowering) panicked with index-OOB instead of
+    // failing closed. Broke 29 e2e fixtures once `zz run` lowered on the
+    // miss path for the run cache. Must return Err, never panic.
+    use zz_ir::{FuncDef, FuncId, FuncSig, IrType, Module, Param, StrId, TypeId};
+    let module = Module {
+        types: vec![IrType::Unknown],
+        strings: vec!["f".to_string()],
+        consts: vec![],
+        funcs: vec![FuncDef {
+            name: StrId(0),
+            arity: 1,
+            params: vec![Param {
+                name: StrId(0),
+                default: None,
+            }],
+            sig: FuncSig {
+                params: vec![TypeId(0)],
+                ret: TypeId(0),
+            },
+            locals: vec![],
+            vartab: vec![],
+            toplevel_slots: vec![],
+            code: vec![],
+            spans: vec![],
+            max_stack: 0,
+        }],
+        entry: FuncId(0),
+    };
+    let err = verify::verify(&module).expect_err("short locals must fail closed");
+    assert!(
+        err.message.contains("fewer slots"),
+        "unexpected error: {}",
+        err.message
+    );
 }

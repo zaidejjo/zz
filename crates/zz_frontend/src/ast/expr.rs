@@ -122,7 +122,7 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
-        named: Vec<(String, Expr)>,
+        named: Vec<(Ident, Expr)>,
         span: Span,
     },
     Closure {

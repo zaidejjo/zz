@@ -376,6 +376,48 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             encode_home(v, home_slot, home_var);
             put_u32(v, method.0);
         }
+        Op::SetFieldTake {
+            home_slot,
+            home_var,
+            field,
+        } => {
+            encode_home(v, home_slot, home_var);
+            put_u32(v, field.0);
+        }
+        Op::SetFieldIndexTake {
+            home_slot,
+            home_var,
+            field,
+        } => {
+            encode_home(v, home_slot, home_var);
+            put_u32(v, field.0);
+        }
+        Op::FieldBinopTake {
+            home_slot,
+            home_var,
+            field,
+            op,
+        } => {
+            encode_home(v, home_slot, home_var);
+            put_u32(v, field.0);
+            encode_binop(v, *op);
+        }
+        Op::GetFieldIndex {
+            home_slot,
+            home_var,
+            field,
+        } => {
+            encode_home(v, home_slot, home_var);
+            put_u32(v, field.0);
+        }
+        Op::LenField {
+            home_slot,
+            home_var,
+            field,
+        } => {
+            encode_home(v, home_slot, home_var);
+            put_u32(v, field.0);
+        }
         Op::BinOp(op) => encode_binop(v, *op),
         Op::UnOp(op) => encode_unop(v, *op),
         Op::CompoundIndexOp { op } => encode_binop(v, *op),
@@ -1131,6 +1173,48 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
                 home_slot,
                 home_var,
                 method: StrId(r.u32()?),
+            })
+        }
+        75 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            Ok(Op::SetFieldTake {
+                home_slot,
+                home_var,
+                field: StrId(r.u32()?),
+            })
+        }
+        76 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            Ok(Op::SetFieldIndexTake {
+                home_slot,
+                home_var,
+                field: StrId(r.u32()?),
+            })
+        }
+        77 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            let field = StrId(r.u32()?);
+            Ok(Op::FieldBinopTake {
+                home_slot,
+                home_var,
+                field,
+                op: decode_binop(r)?,
+            })
+        }
+        78 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            Ok(Op::GetFieldIndex {
+                home_slot,
+                home_var,
+                field: StrId(r.u32()?),
+            })
+        }
+        79 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            Ok(Op::LenField {
+                home_slot,
+                home_var,
+                field: StrId(r.u32()?),
             })
         }
         14 => Ok(Op::IntAdd),
