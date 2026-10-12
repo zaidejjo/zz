@@ -402,6 +402,31 @@ impl Interp {
                                 }
                                 return Ok(Flow::Value(Value::Unit));
                             }
+                        } else if parts.len() >= 3 {
+                            // Chained receiver (`base.field.push(x)`,
+                            // deeper chains alike): the method is the last
+                            // segment, the receiver is everything before
+                            // it. Call on the receiver value, then store
+                            // back through the chain (any depth).
+                            let method_name = parts.last().unwrap();
+                            let dotted = parts.join(".");
+                            if !self.natives.contains_key(&dotted)
+                                && MUTATING_METHODS.contains(&method_name.as_str())
+                            {
+                                let recv_parts = parts[..parts.len() - 1].to_vec();
+                                let recv = self.resolve_path_value(&recv_parts, *pspan)?;
+                                let f = self.lookup_method(&recv, method_name, *pspan)?;
+                                let mut arg_vals = vec![recv];
+                                for a in args {
+                                    arg_vals.push(self.eval(a)?.into_value()?);
+                                }
+                                for (_, v) in named {
+                                    arg_vals.push(self.eval(v)?.into_value()?);
+                                }
+                                let result = self.call(f, arg_vals, *pspan)?;
+                                self.assign_path(&recv_parts, result, *pspan)?;
+                                return Ok(Flow::Value(Value::Unit));
+                            }
                         }
                     }
                     // Handle `obj.method(x)` — parsed as Field { obj, name }
@@ -412,6 +437,40 @@ impl Interp {
                     } = callee.as_ref()
                     {
                         if MUTATING_METHODS.contains(&method_name.as_str()) {
+                            // One-level field receiver (`base.field.push(x)`):
+                            // call on the field value, then store back into
+                            // the base variable. Deeper chains keep the old
+                            // evaluate-and-discard behavior (same quirk as
+                            // `assign_target` for non-Ident roots).
+                            if let Expr::Field {
+                                obj: inner,
+                                name: field,
+                                ..
+                            } = field_obj.as_ref()
+                            {
+                                if let Expr::Ident { name: base, .. } = inner.as_ref() {
+                                    let recv = self.eval(field_obj)?.into_value()?;
+                                    let f =
+                                        self.lookup_method(&recv, method_name, field_obj.span())?;
+                                    let mut arg_vals = vec![recv];
+                                    for a in args {
+                                        arg_vals.push(self.eval(a)?.into_value()?);
+                                    }
+                                    for (_, v) in named {
+                                        arg_vals.push(self.eval(v)?.into_value()?);
+                                    }
+                                    let result = self.call(f, arg_vals, field_obj.span())?;
+                                    let mut basev = self.eval(inner)?.into_value()?;
+                                    set_object_field(&mut basev, field, result, field_obj.span())?;
+                                    if !self.env.assign(base, basev) {
+                                        return Err(EvalError::new(
+                                            format!("undefined variable `{base}`"),
+                                            field_obj.span(),
+                                        ));
+                                    }
+                                    return Ok(Flow::Value(Value::Unit));
+                                }
+                            }
                             if let Expr::Ident { name, span } = field_obj.as_ref() {
                                 let recv = self.eval(field_obj)?.into_value()?;
                                 let f = self.lookup_method(&recv, method_name, *span)?;

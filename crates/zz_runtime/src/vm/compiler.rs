@@ -2500,6 +2500,38 @@ impl Compiler {
                             }
                         }
                     }
+                    // Chained receiver (`base.field.push(x)`, deeper chains
+                    // alike): method is the last segment; call on the chain
+                    // value, then store back through the chain (any depth).
+                    // Without this the result was discarded — a silent no-op
+                    // that diverged from the assign form (`b.cmds = ...`).
+                    if let Expr::Path { parts, .. } = callee.as_ref() {
+                        if parts.len() >= 3 {
+                            let method_name = parts.last().unwrap();
+                            let dotted = parts.join(".");
+                            let is_native = self
+                                .native_names
+                                .as_ref()
+                                .is_some_and(|n| n.contains(&dotted));
+                            if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
+                                let recv_parts = parts[..parts.len() - 1].to_vec();
+                                self.compile_path_load(&recv_parts, e.span());
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                                for (_, val) in named {
+                                    self.compile_expr(val);
+                                }
+                                self.emit(Op::CallMethod {
+                                    name: method_name.clone(),
+                                    argc: (args.len() + named.len()) as u16,
+                                    span: e.span(),
+                                });
+                                self.compile_path_store(&recv_parts, e.span());
+                                return StmtValue::None;
+                            }
+                        }
+                    }
                     // Handle `obj.method(x)` — parsed as Field { obj, name }
                     if let Expr::Field {
                         obj: field_obj,
