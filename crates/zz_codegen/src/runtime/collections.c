@@ -4,14 +4,17 @@
 #include "runtime.h"
 
 // ---- arena healing -------------------------------------------------------
-// Retaining stores (array/dict/object slots, `zz_assign`) must never alias
-// arena-owned values: the per-iteration `zz_arena_reset` reuses the buffer,
-// so a stored alias reads back garbage on the next iteration — the nested
-// `[[str]]` first-element corruption + SIGSEGV class (loop-built inner
-// arrays stored into an outer array, then the arena reset overwrote them).
-// Strings already heal via `zz_str_heal_arena`; arrays and dicts need the
-// same treatment (deep: nested arena values copied recursively, heap
-// elements shared via `zz_clone`).
+// Retaining stores (array/dict/object slots, `zz_assign`, `std.cell`
+// pool) must never alias arena-owned values: the per-iteration
+// `zz_arena_reset` reuses the buffer, so a stored alias reads back
+// garbage on the next iteration — the nested `[[str]]` first-element
+// corruption + SIGSEGV class (loop-built inner arrays stored into an
+// outer array, then the arena reset overwrote them), and the `std.cell`
+// variant (loop-built values stored into cells, then read back across
+// iterations — garbage data, garbage `len` → wild free, issue #410).
+// Strings already heal via `zz_str_heal_arena`; arrays, dicts and boxed
+// structs need the same treatment (deep: nested arena values copied
+// recursively, heap elements shared via `zz_clone`).
 //
 // Two flavors, mirroring the string path:
 //   - `zz_clone_for_store` (share convention, callers pass borrowed):
@@ -38,10 +41,14 @@ int zz_dict_is_arena(const zz_dict *d) {
 }
 
 // True when storing `v` must copy instead of share: top-level arena
-// ownership, or a variant/tuple wrapper around a value that does.
+// ownership, a boxed struct transitively containing one, or a
+// variant/tuple wrapper around a value that does.
 // Heap-rooted arrays/dicts are guaranteed clean (every ingress path
 // heals), so no deep element walk is needed — O(1) for containers,
-// O(wrapper depth) otherwise.
+// O(wrapper depth) otherwise. Objects walk their fields: a struct is
+// heap-allocated itself, but its field slots may alias arena values
+// (e.g. `Outer{inner: Slot{val: arena_arr}}` or a `TT` struct stored
+// into a cell), and the loop-arena reset would corrupt those aliases.
 static int value_needs_heal(zz_value v, int depth) {
     if (depth > ZZ_HEAL_MAX_DEPTH) return 0;
     switch (v.tag) {
@@ -51,6 +58,13 @@ static int value_needs_heal(zz_value v, int depth) {
         return v.arr && zz_array_is_arena(v.arr);
     case ZZ_DICT:
         return v.dict && zz_dict_is_arena(v.dict);
+    case ZZ_OBJECT: {
+        if (!v.obj) return 0;
+        for (size_t i = 0; i < v.obj->len * 2; i++) {
+            if (value_needs_heal(v.obj->fields[i], depth + 1)) return 1;
+        }
+        return 0;
+    }
     case ZZ_TUPLE:
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
@@ -111,6 +125,27 @@ static zz_value heal_deep_copy(zz_value v, int depth) {
         out.payload = slot;
         return out;
     }
+    case ZZ_OBJECT: {
+        if (!v.obj) return v;
+        // Clean structs stay shared (header bump only). Only structs
+        // transitively containing arena values get a fresh header with
+        // healed fields — otherwise a struct stored into a cell (or a
+        // container slot) would dangle its inner aliases past the reset.
+        if (!value_needs_heal(v, depth)) return zz_clone(v);
+        size_t n = v.obj->len;
+        zz_object *o = (zz_object *)malloc(sizeof(zz_object) + n * 2 * sizeof(zz_value));
+        if (!o) return zz_clone(v);
+        o->refs = 1;
+        o->type_name = v.obj->type_name; // static C string: share
+        o->len = n;
+        for (size_t i = 0; i < n * 2; i++) {
+            o->fields[i] = heal_deep_copy(v.obj->fields[i], depth + 1);
+        }
+        zz_value out;
+        out.tag = ZZ_OBJECT;
+        out.obj = o;
+        return out;
+    }
     default:
         return zz_clone(v);
     }
@@ -122,10 +157,10 @@ zz_value zz_heal_for_move(zz_value v) {
 }
 
 // Ownership-sharing store of a value into a container slot: arena-owned
-// values (strings, arrays, dicts, wrappers around them) are healed to
-// independent heap copies (else the loop-arena reset corrupts the stored
-// element); every other value is shared via zz_clone.
-static zz_value zz_clone_for_store(zz_value v) {
+// values (strings, arrays, dicts, arena-containing structs/wrappers)
+// are healed to independent heap copies (else the loop-arena reset
+// corrupts the stored element); every other value is shared via zz_clone.
+zz_value zz_clone_for_store(zz_value v) {
     if (value_needs_heal(v, 0)) return heal_deep_copy(v, 0);
     return zz_clone(v);
 }

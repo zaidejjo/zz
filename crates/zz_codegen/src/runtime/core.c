@@ -3348,14 +3348,52 @@ static zz_cell_slot *zz_cell_find(uint64_t id) {
 
 // cell.new(v) → cell id (plain int; AOT Opaque("cell") lowers to ids,
 // mirroring the int-id convention of the staticlib FFI handles).
+//
+// Retaining-store contract (matches `zz_assign`, `zz_array_push`,
+// `zz_dict_set`, `zz_object_set_field`): the argument may alias the
+// per-iteration loop arena (e.g. `tmp := [..]; cell.new(tmp)` — the Decl
+// site is NonEscaping/arena while the call marks only the Ident use as
+// escaping). A bare `zz_clone` would store that alias: arena strings
+// (refs==0), LIT/ARENA_MAGIC arrays and arena dicts are never retained,
+// so the next `zz_arena_reset` reuses the memory and the pool dangles
+// (garbage reads; garbage `len` → wild `free(): invalid pointer` on
+// release — issue #410). `zz_clone_for_store` is the share convention:
+// heap values arrive with exactly one extra share for the pool, arena
+// values arrive as fresh heap copies.
+//
+// Ids are process-unique and never reused within a process (mirroring
+// the VM's monotonic `NEXT_ID`): slot storage is recycled, but every
+// allocation mints a fresh id. Reusing a dead slot's old id would alias
+// a stale copied handle (e.g. a `TT` struct passed by value through
+// search recursion) onto an unrelated new cell.
+static uint64_t zz_cell_fresh_id(void) {
+    uint64_t id = zz_cell_next++;
+    if (id == 0) id = zz_cell_next++;
+    // 0 is the invalid sentinel and ZZ_INT ids must be positive: the
+    // pool contract rejects `id.i <= 0`, so never mint those. Exhaustion
+    // (2^63 ids) is practically impossible; abort loudly like `alloc`
+    // instead of aliasing two live cells.
+    if (id == 0 || (int64_t)id <= 0) {
+        fprintf(stderr, "zz: cell id space exhausted\n");
+        abort();
+    }
+    return id;
+}
 zz_value zz_cell_new(zz_value v, int *err) {
     (void)err;
+    // Heal before taking the lock: the copy may malloc (no pool state
+    // touched), keeping the critical section to the slot insert.
+    // Share convention (`zz_clone_for_store`): the caller keeps its own
+    // share; the pool takes exactly one of its own (heap bump, or a fresh
+    // heap copy for arena-owned values — see issue #410).
+    zz_value stored = zz_clone_for_store(v);
     pthread_mutex_lock(&zz_cell_mu);
     if (zz_cell_n == zz_cell_cap) {
         size_t nc = zz_cell_cap == 0 ? 16 : zz_cell_cap * 2;
         zz_cell_slot *ns = (zz_cell_slot *)realloc(zz_cells, nc * sizeof(zz_cell_slot));
         if (!ns) {
             pthread_mutex_unlock(&zz_cell_mu);
+            zz_release(&stored);
             return zz_variant_err(zz_str_static("cell.new: out of memory"));
         }
         zz_cells = ns;
@@ -3364,17 +3402,17 @@ zz_value zz_cell_new(zz_value v, int *err) {
     for (size_t i = 0; i < zz_cell_n; i++) {
         if (!zz_cells[i].live) {
             zz_cells[i].live = 1;
-            zz_cells[i].val = zz_clone(v);
-            uint64_t id = zz_cells[i].id;
+            zz_cells[i].val = stored;
+            uint64_t id = zz_cell_fresh_id();
+            zz_cells[i].id = id;
             pthread_mutex_unlock(&zz_cell_mu);
             return (zz_value){ZZ_INT, {.i = (int64_t)id}};
         }
     }
-    uint64_t id = zz_cell_next++;
-    if (id == 0) id = zz_cell_next++;
+    uint64_t id = zz_cell_fresh_id();
     zz_cells[zz_cell_n].id = id;
     zz_cells[zz_cell_n].live = 1;
-    zz_cells[zz_cell_n].val = zz_clone(v);
+    zz_cells[zz_cell_n].val = stored;
     zz_cell_n++;
     pthread_mutex_unlock(&zz_cell_mu);
     return (zz_value){ZZ_INT, {.i = (int64_t)id}};
@@ -3403,14 +3441,19 @@ zz_value zz_cell_set(zz_value id, zz_value v, int *err) {
     if (id.tag != ZZ_INT || id.i <= 0) {
         return zz_variant_err(zz_str_static("cell.set: not a cell"));
     }
+    // Same retaining-store contract as `zz_cell_new`: heal the incoming
+    // value to heap ownership before publishing it into the pool, so a
+    // loop-arena alias can never dangle past the iteration reset.
+    zz_value stored = zz_clone_for_store(v);
     pthread_mutex_lock(&zz_cell_mu);
     zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
     if (!s) {
         pthread_mutex_unlock(&zz_cell_mu);
+        zz_release(&stored);
         return zz_variant_err(zz_str_static("cell.set: cell was dropped"));
     }
     zz_release(&s->val);
-    s->val = zz_clone(v);
+    s->val = stored;
     pthread_mutex_unlock(&zz_cell_mu);
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
 }
@@ -3431,6 +3474,7 @@ zz_value zz_cell_drop(zz_value id, int *err) {
         return (zz_value){ZZ_BOOL, {.b = false}};
     }
     zz_release(&s->val);
+    s->val = zz_unit();
     s->live = 0;
     pthread_mutex_unlock(&zz_cell_mu);
     return (zz_value){ZZ_BOOL, {.b = true}};

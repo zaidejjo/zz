@@ -1791,6 +1791,30 @@ fn run_native(
 /// (`zz run` without `--native` is the only command that executes
 /// through the VM, leaving no build artifacts.)
 fn build_cmd(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [-o <name>] [<file.zz>]\n\
+             \n\
+             compile a native binary (cached; defaults to a static self-contained build).\n\
+             \n\
+             MODES:\n  \
+               (default)            static build (self-contained)\n  \
+               -p, --release        optimized build (-O3 -flto=thin, dynamic, stripped)\n  \
+               --dynamic            fast dynamic debug build (-O0 -g)\n  \
+               --static             static build, explicit\n  \
+               --full               max optimization (full LTO; with `-- <args>` runs PGO training first)\n  \
+               --pgo                profile-guided optimization build\n\
+             \n\
+             FLAGS:\n  \
+               --target <triple>    cross-compile via clang --target=\n  \
+               --cc <clang|zig>     select the Clang provider\n  \
+               --embed <dir>        bake a static asset directory into the binary\n  \
+               -o, --output <name>  name the output binary\n  \
+               --verbose            print the exact clang command line\n  \
+               -h, --help           show this help"
+        );
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--emit-ir") {
         return emit_ir_cmd(args);
     }

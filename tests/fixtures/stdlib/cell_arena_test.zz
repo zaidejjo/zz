@@ -1,0 +1,168 @@
+// features: arrays, assert, comparison, for-loop, func-call, imports, indexing, int-arith, locals, match, option-result, print, return, short-circuit, std-cell, std-vec, string-literal, string-ops, structs, vec-push
+// tests/fixtures/stdlib/cell_arena_test.zz — retaining-store contract for cells.
+// Regression for #410 (native `free(): invalid pointer` under cell churn):
+// loop-built values (arena-owned) stored via cell.new/set must heal to heap
+// ownership, and dropped ids must never be recycled onto a new cell while a
+// stale copied handle is live.
+import std.cell
+import std.vec
+
+struct Slot {
+    val: [int],
+}
+
+func at(v: [int], idx: int) -> int {
+    v[idx]
+}
+
+func slot_val(s: Slot) -> [int] {
+    s.val
+}
+
+func main() -> Result<int, str> {
+    errs := 0
+    // Loop-built arrays (arena) stored in cells, read back across resets.
+    cells := []
+    for i in 0..64 {
+        tmp := [i, i + 1, i + 2]
+        c := cell.new(tmp)
+        cells = vec.push(cells, c)
+    }
+    bad := 0
+    for i in 0..64 {
+        c := cells[i]
+        match cell.get(c) {
+            .ok(v) => {
+                a0 := at(v, 0)
+                a1 := at(v, 1)
+                a2 := at(v, 2)
+                t0 := a0 == i
+                t1 := a1 == (i + 1)
+                t2 := a2 == (i + 2)
+                ok1 := t0 && t1
+                ok2 := ok1 && t2
+                if ok2 {
+                    bad = bad
+                } else {
+                    bad = bad + 1
+                }
+            }
+            .err(_) => {
+                bad = bad + 1
+            }
+        }
+    }
+    println("arr_ok: {bad}")
+    if bad == 0 {
+        bad = bad
+    } else {
+        errs = errs + 1
+    }
+    // Loop-built strings (arena) stored in cells.
+    scells := []
+    for i in 0..64 {
+        tmp := "v" + str(i)
+        c := cell.new(tmp)
+        scells = vec.push(scells, c)
+    }
+    sbad := 0
+    for i in 0..64 {
+        c := scells[i]
+        want := "v" + str(i)
+        match cell.get(c) {
+            .ok(v) => {
+                if v == want {
+                    sbad = sbad
+                } else {
+                    sbad = sbad + 1
+                }
+            }
+            .err(_) => {
+                sbad = sbad + 1
+            }
+        }
+    }
+    println("str_ok: {sbad}")
+    if sbad == 0 {
+        sbad = sbad
+    } else {
+        errs = errs + 1
+    }
+    // cell.set with a loop-arena value heals as well.
+    k := cell.new([0, 0, 0])
+    for i in 0..32 {
+        nv := [i, i, i]
+        _ := cell.set(k, nv)?
+        match cell.get(k) {
+            .ok(v) => {
+                a0 := at(v, 0)
+                if a0 == i {
+                    a0 = a0
+                } else {
+                    errs = errs + 1
+                }
+            }
+            .err(_) => {
+                errs = errs + 1
+            }
+        }
+    }
+    println("set_ok")
+    // Structs containing arena arrays stored in cells heal deeply.
+    h := cell.new(Slot{val: [1, 2]})
+    for i in 0..16 {
+        s := Slot{val: [i, i]}
+        _ := cell.set(h, s)?
+    }
+    match cell.get(h) {
+        .ok(v) => {
+            arr := slot_val(v)
+            last := at(arr, 0)
+            println("struct_ok: {last}")
+            if last == 15 {
+                last = last
+            } else {
+                errs = errs + 1
+            }
+        }
+        .err(_) => {
+            errs = errs + 1
+        }
+    }
+    // Dropped ids are never recycled: a stale handle stays dead.
+    c1 := cell.new(100)
+    _ := c1.drop()
+    c2 := cell.new(200)
+    match cell.get(c1) {
+        .ok(_) => {
+            errs = errs + 1
+        }
+        .err(_) => println("stale_ok")
+    }
+    match cell.get(c2) {
+        .ok(v) => {
+            if v == 200 {
+                println("fresh_ok")
+            } else {
+                errs = errs + 1
+            }
+        }
+        .err(_) => {
+            errs = errs + 1
+        }
+    }
+    // Cleanup: every live cell drops exactly once.
+    for i in 0..64 {
+        _ := cells[i].drop()
+    }
+    for i in 0..64 {
+        _ := scells[i].drop()
+    }
+    _ := k.drop()
+    _ := h.drop()
+    _ := c2.drop()
+    println("errs={errs}")
+    assert(errs == 0)
+    println("cell_arena_test_ok")
+    .ok(0)
+}

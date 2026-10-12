@@ -1390,6 +1390,11 @@ parity_strict!(parity_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 parity_strict!(parity_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
 parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
 parity_strict!(
+    parity_stdlib_cell_arena_test,
+    "stdlib",
+    "cell_arena_test.zz"
+);
+parity_strict!(
     parity_stdlib_vec_push_shapes,
     "stdlib",
     "vec_push_shapes.zz"
