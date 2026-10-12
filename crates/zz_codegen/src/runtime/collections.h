@@ -29,6 +29,13 @@ int zz_dict_is_arena(const zz_dict *d);
 // recursively, heap elements shared via clone) become independent
 // heap-owned copies; heap values pass through unchanged (adopted).
 zz_value zz_heal_for_move(zz_value v);
+// Heal for share paths (callers pass borrowed: `std.cell` pool,
+// container slots): arena-owned values become independent heap-owned
+// copies; heap values are shared via `zz_clone` (one extra share for
+// the store). Using `zz_heal_for_move(zz_clone(v))` here instead would
+// leak one header share for dirty boxed structs (the intermediate clone
+// bumps the header, but the deep copy drops that share unreleased).
+zz_value zz_clone_for_store(zz_value v);
 
 // ---- arena-aware constructors -------------------------------------------
 // When arena is non-NULL, the object header is bump-allocated on the arena
