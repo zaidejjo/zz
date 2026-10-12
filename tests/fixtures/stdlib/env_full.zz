@@ -67,7 +67,7 @@ func main() {
                         .ok(after) => println(after == env.temp_dir())
                         .err(e) => println("cwd2_err")
                     }
-                    env.set_cwd(before)
+                    _u1 := env.set_cwd(before)
                     match env.cwd() {
                         .ok(restored) => println(restored == before)
                         .err(e) => println("cwd3_err")

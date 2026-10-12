@@ -7,8 +7,8 @@ func classify(n: int) -> str {
     out := ""
     m := int(str(n))
     match m {
-        .some(v) => out = "some",
-        .none => out = "none",
+        .some(_v) => out = "some"
+        .none => out = "none"
     }
     out
 }
@@ -16,9 +16,9 @@ func classify(n: int) -> str {
 func first_or_zero(n: int) -> int {
     v := 0
     match n {
-        0 => v = 0 - 1,
-        1 => v = 10,
-        _ => v = n * 2,
+        0 => v = 0 - 1
+        1 => v = 10
+        _ => v = n * 2
     }
     v
 }
@@ -28,21 +28,21 @@ func main() {
     x := .some(7)
     y := 0
     match x {
-        .some(v) => y = v,
-        .none => y = 0 - 1,
+        .some(v) => y = v
+        .none => y = 0 - 1
     }
     println(y)
     z := 0
     match .ok(3) {
-        .ok(v) => z = v * 2,
-        .err(e) => z = 0 - 1,
+        .ok(v) => z = v * 2
+        .err(_e) => z = 0 - 1
     }
     println(z)
     w := 0
     m2 := int("abc")
     match m2 {
-        .some(v) => w = v,
-        .none => w = 99,
+        .some(v) => w = v
+        .none => w = 99
     }
     println(w)
     println(first_or_zero(0))

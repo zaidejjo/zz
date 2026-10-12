@@ -45,7 +45,6 @@ func main() {
         }
         .err(e) => println("memfs_err: {e}")
     }
-
     // osfs: same calls, real disk.
     match fs.osfs() {
         .ok(o) => {
@@ -65,7 +64,6 @@ func main() {
         }
         .err(e) => println("osfs_err: {e}")
     }
-
     // tarfs: read-only view over the checked-in sample archive.
     match fs.tarfs("tests/fixtures/stdlib/data/sample.tar") {
         .ok(t) => {
@@ -89,7 +87,6 @@ func main() {
         }
         .err(e) => println("tarfs_err: {e}")
     }
-
     // embedfs without `--embed`: empty but total.
     match fs.embedfs() {
         .ok(e2) => {
@@ -101,7 +98,6 @@ func main() {
         }
         .err(e) => println("embedfs_err: {e}")
     }
-
     // read_chunk_bytes: binary-safe streaming (byte-exact on archives).
     match File.open("tests/fixtures/stdlib/data/sample.tar", "r") {
         .ok(f) => {
@@ -109,7 +105,7 @@ func main() {
                 .ok(b) => println("chunk5: {b[0]},{b[1]},{b[2]},{b[3]},{b[4]}")
                 .err(e) => println("chunk_err: {e}")
             }
-            fs.close(f)
+            _u1 := fs.close(f)
             0
         }
         .err(e) => {
@@ -117,6 +113,5 @@ func main() {
             0
         }
     }
-
     println("fs_vfs_ok")
 }

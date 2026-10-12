@@ -28,8 +28,8 @@ println("{opt_int:?}")
 println("{opt_none:?}")
 
 // `dbg` preserves wrappers on stderr and returns its argument.
-dbg(opt_int)
-dbg(opt_none)
+_u1 := dbg(opt_int)
+_u2 := dbg(opt_none)
 // `dbg` returns its argument, so display of the result still unwraps.
 println("{dbg(opt_int)}")
 println("{dbg(opt_none)}")

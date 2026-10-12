@@ -1,7 +1,7 @@
 // features: closures, destructuring, int-arith, locals, print, string-literal, tuples
 // Regression: top-level destructured names must be visible to
 // closures on both engines (native module globals, not main-locals).
-(a, b) := (10, 20)
+(a, _b) := (10, 20)
 c := |x: int| a + x
 println(c(1))
 println("closure_capture_destructure_ok")

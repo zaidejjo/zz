@@ -11,7 +11,7 @@ func f2(p3: int) -> int {
 cl4 := |d5: int| v1 + d5
 println(cl4(1))
 acc6 := 0
-for i7 in 1..7 {
+for _i7 in 1..7 {
     acc6 = acc6 + (13 - -2)
 }
 println(acc6)

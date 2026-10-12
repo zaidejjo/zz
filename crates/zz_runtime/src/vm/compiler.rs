@@ -400,9 +400,15 @@ impl Compiler {
                 c.emit(Op::Pop);
             }
         }
-        if program.stmts.is_empty() {
-            c.emit_const(Value::Unit);
-        }
+        // Top-level chunk value is the program result (`run_entry_main`
+        // prints it when non-unit). Promoted slot cells live on the value
+        // stack, so a trailing declaration's stored value would otherwise
+        // surface as the result (e.g. `x := 41` printing `41`) — a VM-only
+        // echo the native backend never had (#407). Typed top-level
+        // programs always yield Unit (the 0.2.2 `zz run` contract, both
+        // engines); the untyped twin keeps last-value semantics for
+        // REPL-style eval (pinned by eval/tests.rs).
+        c.emit_const(Value::Unit);
         c.chunk
     }
 
