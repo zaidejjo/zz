@@ -711,6 +711,13 @@ fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, Ffi
         if let Some(lib_mtime) = file_mtime(&lib) {
             let src_dir = root.join("crates").join("zz_native_rt").join("src");
             if !src_dir_mtime_newer_than(&src_dir, lib_mtime) {
+                // Sources unchanged — but the archive may predate
+                // debug-stripping (built before this guard existed).
+                // The stamp makes the check O(1): missing/stale stamp
+                // means strip once, then never again for this archive.
+                if release {
+                    ensure_stripped(&lib);
+                }
                 return Ok(lib);
             }
         }
@@ -749,7 +756,66 @@ fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, Ffi
             lib.display()
         )));
     }
+    // Release archives ship debug info (workspace profile keeps it:
+    // ~200M with DWARF) and every downstream `-O3 -flto=thin` link
+    // would page it all in — the link-time OOM on small boxes. The
+    // final binaries are stripped anyway (`-s`), so debug info in the
+    // archive is pure link cost: drop it in place. Best-effort and
+    // silent (linking works regardless; any chatter here would merge
+    // with program output on `zz run --native`, breaking piped
+    // captures). Debug (`zz build`) archives keep their symbols.
+    if release {
+        ensure_stripped(&lib);
+    }
     Ok(lib)
+}
+
+/// Stamp-guarded debug strip: brings pre-existing release archives
+/// (built before stripping existed) up to date without re-scanning on
+/// every build. The stamp sits next to the archive; a missing stamp or
+/// one older than the archive means strip once, then stamp.
+fn ensure_stripped(lib: &std::path::Path) {
+    let stamp = lib.with_extension("stripped");
+    let lib_mtime = file_mtime(lib);
+    let fresh = match (file_mtime(&stamp), lib_mtime) {
+        (Some(s), Some(l)) => s >= l,
+        _ => false,
+    };
+    if fresh {
+        return;
+    }
+    strip_debug_symbols(lib);
+    let _ = std::fs::write(&stamp, b"stripped\n");
+}
+
+/// Drop DWARF/debug sections from `path` in place, keeping the symbol
+/// table (linking unaffected). Returns whether anything was stripped.
+/// Silent on all paths: failures (missing binutils, foreign formats)
+/// just mean a heavier downstream link, never a build error.
+fn strip_debug_symbols(path: &std::path::Path) -> bool {
+    // COFF import/static libs are not handled here.
+    if cfg!(windows) {
+        return false;
+    }
+    // GNU strip uses -g, BSD/macOS strip uses -S for the same.
+    let flag = if cfg!(target_vendor = "apple") {
+        "-S"
+    } else {
+        "-g"
+    };
+    let before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let status = std::process::Command::new("strip")
+        .arg(flag)
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => std::fs::metadata(path)
+            .map(|m| m.len() < before)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Return the modification time of a file, or `None` on error.
@@ -1243,5 +1309,80 @@ mod tests {
         assert_eq!(run.status.code(), Some(0), "exit != 0");
         assert_eq!(String::from_utf8_lossy(&run.stdout), "ffi_link_ok\n");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `strip_debug_symbols` shrinks a debug-laden archive and fails
+    /// gracefully on non-archives. This is the link-time OOM guard for
+    /// small boxes: the release `libzz_native_rt.a` carries ~200M with
+    /// DWARF (workspace profile keeps debuginfo) and every downstream
+    /// `-O3 -flto=thin` link pages it in.
+    #[test]
+    #[cfg(not(windows))]
+    fn strip_debug_symbols_shrinks_debug_archive() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let tmp = std::env::temp_dir().join(format!(
+            "zz-strip-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cleanup = || {
+            std::fs::remove_dir_all(&tmp).ok();
+        };
+        let src = tmp.join("tiny.c");
+        std::fs::write(&src, "int zz_strip_probe_fn(void){return 41;}\n").unwrap();
+        // No C toolchain here (minimal images): skip, don't fail —
+        // the helper itself degrades gracefully by contract.
+        let cc = std::process::Command::new("cc")
+            .arg("-g")
+            .arg("-c")
+            .arg(&src)
+            .arg("-o")
+            .arg(tmp.join("tiny.o"))
+            .output();
+        let Ok(cc) = cc else {
+            cleanup();
+            return;
+        };
+        if !cc.status.success() {
+            cleanup();
+            return;
+        }
+        let ar = std::process::Command::new("ar")
+            .arg("rcs")
+            .arg(tmp.join("tiny.a"))
+            .arg(tmp.join("tiny.o"))
+            .output();
+        let Ok(ar) = ar else {
+            cleanup();
+            return;
+        };
+        if !ar.status.success() {
+            cleanup();
+            return;
+        }
+        let arch = tmp.join("tiny.a");
+        let before = std::fs::metadata(&arch).unwrap().len();
+        assert!(
+            strip_debug_symbols(&arch),
+            "expected the debug archive to shrink"
+        );
+        let after = std::fs::metadata(&arch).unwrap().len();
+        assert!(
+            after < before,
+            "stripped archive ({after}) not smaller than debug one ({before})"
+        );
+        // Non-archives fail gracefully (false, no panic, no rewrite):
+        // link inputs stay usable, downstream links just stay heavy.
+        assert!(!strip_debug_symbols(&src));
+        // Stamp-guard: first ensure strips, second is a no-op, and the
+        // stamp trails the archive mtime so stale archives heal once.
+        ensure_stripped(&arch);
+        let stamped_len = std::fs::metadata(&arch).unwrap().len();
+        assert_eq!(stamped_len, after);
+        ensure_stripped(&arch);
+        assert_eq!(std::fs::metadata(&arch).unwrap().len(), after);
+        cleanup();
     }
 }
