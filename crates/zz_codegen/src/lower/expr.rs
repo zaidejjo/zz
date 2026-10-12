@@ -2639,12 +2639,31 @@ impl Lowerer {
                         // same runtime fn via native_impl.
                         zz_checker::Type::Db => (format!("sqlz.{method}"), Some(*obj.clone())),
                         _ => {
+                            // Type-based namespace table. Must mirror the
+                            // Path-callee arm above (TcpStream→net etc.):
+                            // a missing entry drops Typed receivers into
+                            // the free-function fallback, which resolves a
+                            // receiver-less bare name — the wrapper then
+                            // emits without the receiver (silent arg drop;
+                            // observed as `f(...)? .method()` losing the
+                            // receiver natively while the VM dispatches
+                            // on the value).
                             let ns: &str = match zzty {
                                 zz_checker::Type::Array(_) => "vec",
                                 zz_checker::Type::Str => "str",
                                 zz_checker::Type::Dict(_, _) => "dict",
                                 zz_checker::Type::Option(_) => "option",
                                 zz_checker::Type::Result(_, _) => "result",
+                                zz_checker::Type::Db => "sqlz",
+                                zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
+                                    "net"
+                                }
+                                zz_checker::Type::HttpServer
+                                | zz_checker::Type::Response
+                                | zz_checker::Type::HttpRequest => "http",
+                                zz_checker::Type::Json => "json",
+                                zz_checker::Type::Bytes => "bytes",
+                                zz_checker::Type::Chan => "chan",
                                 zz_checker::Type::Opaque(tag) => {
                                     Box::leak(tag.clone().into_boxed_str()) as &str
                                 }

@@ -652,6 +652,11 @@ e2e_success_test!(
     "str_classify_test.zz"
 );
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+e2e_success_test!(
+    e2e_stdlib_tcp_method_on_try,
+    "stdlib",
+    "tcp_method_on_try.zz"
+);
 e2e_success_test!(e2e_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 e2e_success_test!(e2e_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
 e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
