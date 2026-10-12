@@ -46,6 +46,13 @@ pub const RUNTIME_C: &str = concat!(
 /// Version marker for generated binaries.
 pub const C_BUILD_VERSION: &str = "0.1.0";
 
+/// Content hash of the embedded C runtime sources, stamped by build.rs
+/// (`ZZ_RUNTIME_HASH`). Referenced so the hash is load-bearing: any runtime
+/// edit changes this constant, which changes the crate fingerprint and
+/// forces a rebuild + fresh embed. Without it, `include_str!` edits were
+/// silently ignored until an unrelated Rust change rebuilt the crate.
+pub const RUNTIME_SRC_HASH: &str = env!("ZZ_RUNTIME_HASH");
+
 /// Lower a pruned typed program to C without compiling.
 ///
 /// Used by dev builds (`zz build` default): the C is dumped to `bin/app.c`

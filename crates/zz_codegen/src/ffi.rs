@@ -181,6 +181,53 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         | "std.tls.shutdown"
         | "net.tls_shutdown"
         | "std.net.tls_shutdown" => Some("zz_tls_close"),
+        "net.unix_connect" | "std.net.unix_connect" => Some("zz_unix_connect"),
+        "net.unix_listen" | "std.net.unix_listen" => Some("zz_unix_listen"),
+        "net.unix_accept"
+        | "std.net.unix_accept"
+        | "unix_listener.accept"
+        | "std.unix_listener.accept" => Some("zz_unix_accept"),
+        "net.unix_listener_close"
+        | "std.net.unix_listener_close"
+        | "unix_listener.close"
+        | "std.unix_listener.close" => Some("zz_unix_listener_close"),
+        "net.unix_write" | "std.net.unix_write" | "unix.write" | "std.unix.write" => {
+            Some("zz_unix_write")
+        }
+        "net.unix_write_bytes"
+        | "std.net.unix_write_bytes"
+        | "unix.write_bytes"
+        | "std.unix.write_bytes" => Some("zz_unix_write_bytes"),
+        "net.unix_read" | "std.net.unix_read" | "unix.read" | "std.unix.read" => {
+            Some("zz_unix_read")
+        }
+        "net.unix_read_bytes"
+        | "std.net.unix_read_bytes"
+        | "unix.read_bytes"
+        | "std.unix.read_bytes" => Some("zz_unix_read_bytes"),
+        "net.unix_read_exact"
+        | "std.net.unix_read_exact"
+        | "unix.read_exact"
+        | "std.unix.read_exact" => Some("zz_unix_read_exact"),
+        "net.unix_readline" | "std.net.unix_readline" | "unix.read_line" | "std.unix.read_line" => {
+            Some("zz_unix_read_line")
+        }
+        "net.unix_set_read_timeout"
+        | "std.net.unix_set_read_timeout"
+        | "unix.set_read_timeout"
+        | "std.unix.set_read_timeout" => Some("zz_unix_set_read_timeout"),
+        "net.unix_set_write_timeout"
+        | "std.net.unix_set_write_timeout"
+        | "unix.set_write_timeout"
+        | "std.unix.set_write_timeout" => Some("zz_unix_set_write_timeout"),
+        "net.unix_close"
+        | "std.net.unix_close"
+        | "unix.close"
+        | "std.unix.close"
+        | "unix.shutdown"
+        | "std.unix.shutdown"
+        | "net.unix_shutdown"
+        | "std.net.unix_shutdown" => Some("zz_unix_close"),
         "net.tls_listen" | "std.net.tls_listen" => Some("zz_tls_listen"),
         "net.tls_accept"
         | "std.net.tls_accept"
@@ -475,6 +522,33 @@ fn ffi_decl(symbol: &str) -> Option<&'static str> {
         }
         "zz_tls_close" => Some("zz_value zz_tls_close(zz_value id, int *err);"),
         "zz_tls_peer_addr" => Some("zz_value zz_tls_peer_addr(zz_value id, int *err);"),
+        "zz_unix_connect" => {
+            Some("zz_value zz_unix_connect(zz_value path, zz_value timeout, int *err);")
+        }
+        "zz_unix_listen" => Some("zz_value zz_unix_listen(zz_value path, int *err);"),
+        "zz_unix_accept" => Some("zz_value zz_unix_accept(zz_value id, int *err);"),
+        "zz_unix_listener_close" => {
+            Some("zz_value zz_unix_listener_close(zz_value id, int *err);")
+        }
+        "zz_unix_write" => Some("zz_value zz_unix_write(zz_value id, zz_value data, int *err);"),
+        "zz_unix_write_bytes" => {
+            Some("zz_value zz_unix_write_bytes(zz_value id, zz_value data, int *err);")
+        }
+        "zz_unix_read" => Some("zz_value zz_unix_read(zz_value id, zz_value max, int *err);"),
+        "zz_unix_read_bytes" => {
+            Some("zz_value zz_unix_read_bytes(zz_value id, zz_value max, int *err);")
+        }
+        "zz_unix_read_exact" => {
+            Some("zz_value zz_unix_read_exact(zz_value id, zz_value n, int *err);")
+        }
+        "zz_unix_read_line" => Some("zz_value zz_unix_read_line(zz_value id, int *err);"),
+        "zz_unix_set_read_timeout" => {
+            Some("zz_value zz_unix_set_read_timeout(zz_value id, zz_value ms, int *err);")
+        }
+        "zz_unix_set_write_timeout" => {
+            Some("zz_value zz_unix_set_write_timeout(zz_value id, zz_value ms, int *err);")
+        }
+        "zz_unix_close" => Some("zz_value zz_unix_close(zz_value id, int *err);"),
         "zz_tls_listen" => Some(
             "zz_value zz_tls_listen(zz_value addr, zz_value cert, zz_value key, int *err);",
         ),
