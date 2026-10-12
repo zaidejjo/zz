@@ -1878,6 +1878,171 @@ fn call_named_fn(interp: &mut Interp, name: &str, span: Span) -> Result<(), Stri
 // ---------------------------------------------------------------------------
 
 /// Compile one dispatch binary for a test file (dev by default, release
+/// Alias bare `*.main` imports in AOT harness sources (#401).
+///
+/// The harness appends its own `func main` entrypoint to the inlined test
+/// file, so a test `import nrepro.main` (bare local name `main`) collides:
+/// value scope shadows the module and `main.answer()` fails to check with
+/// "cannot access field `answer` ...". The VM never injects `func main`,
+/// hence the VM/native split (plus a spurious `unused import` warning).
+///
+/// Fix: rewrite the import with a file-local alias — the documented `as`
+/// workaround, applied by the harness — and retarget qualified `main.`
+/// references through it. Token-span surgery (lexer tokens, edits applied
+/// back-to-front), never string search: strings, comments, and `main(`
+/// call sites are untouched. Imports that already alias, and selective
+/// `import m(sym)` lists (which bind values, never a `main.` qualifier),
+/// are left alone.
+fn alias_main_imports(source: &str) -> String {
+    use zz_frontend::lexer::lex;
+    use zz_frontend::token::TokenKind;
+
+    const ALIAS_BASE: &str = "__zz_harness_main_mod";
+
+    let lexed = lex(source);
+    if !lexed.errors.is_empty() {
+        return source.to_string();
+    }
+    let toks = &lexed.tokens;
+
+    // Significant tokens: everything but statement separators (a `main` /
+    // `.` pair split across lines is still one qualified access — such
+    // code type-checks in the VM today, so the harness must see it too).
+    let sig: Vec<usize> = toks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.kind != TokenKind::StmtEnd)
+        .map(|(i, _)| i)
+        .collect();
+
+    // First pass: locate bare `*.main` imports. Records (a) insertion of
+    // ` as <alias>` after the import path, and (b) the import statement's
+    // token range, whose path idents are never reference candidates.
+    struct ImportEdit {
+        /// Byte offset just past the import path: insert ` as <alias>`.
+        insert_at: usize,
+        /// Token index range of the whole import statement.
+        range: (usize, usize),
+    }
+    let mut imports: Vec<ImportEdit> = Vec::new();
+    let mut s = 0;
+    while s < sig.len() {
+        if toks[sig[s]].kind != TokenKind::Import {
+            s += 1;
+            continue;
+        }
+        // Import path: Ident (Dot Ident)*.
+        let mut p = s + 1;
+        let mut path: Vec<usize> = Vec::new();
+        while p < sig.len() && toks[sig[p]].kind == TokenKind::Ident {
+            path.push(sig[p]);
+            p += 1;
+            if p + 1 < sig.len()
+                && toks[sig[p]].kind == TokenKind::Dot
+                && toks[sig[p + 1]].kind == TokenKind::Ident
+            {
+                p += 1; // consume the Dot, loop takes the Ident
+            } else {
+                break;
+            }
+        }
+        if path.is_empty() {
+            s += 1;
+            continue;
+        }
+        // Optional `as` alias.
+        let mut aliased = false;
+        if p + 1 < sig.len()
+            && toks[sig[p]].kind == TokenKind::As
+            && toks[sig[p + 1]].kind == TokenKind::Ident
+        {
+            aliased = true;
+            p += 2;
+        }
+        // Optional selective list: balanced parens (idents/commas/stars).
+        let mut selective = false;
+        if p < sig.len() && toks[sig[p]].kind == TokenKind::LParen {
+            selective = true;
+            let mut depth = 0usize;
+            while p < sig.len() {
+                match toks[sig[p]].kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            p += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                p += 1;
+            }
+        }
+        let stmt_end = p; // exclusive end of the import statement
+        let last = *path.last().expect("path is non-empty");
+        if !aliased && !selective && toks[last].text == "main" {
+            let insert_at = toks[last].span.end as usize;
+            imports.push(ImportEdit {
+                insert_at,
+                range: (sig[s], sig[stmt_end.saturating_sub(1)]),
+            });
+        }
+        s = stmt_end.max(s + 1);
+    }
+    if imports.is_empty() {
+        return source.to_string();
+    }
+
+    // Collision-free alias: the dunder prefix makes this near-impossible,
+    // but a test file could still declare it — suffix until it is absent.
+    let taken = |cand: &str| {
+        toks.iter()
+            .any(|t| (t.kind == TokenKind::Ident || t.kind == TokenKind::Str) && t.text == cand)
+    };
+    let mut alias = ALIAS_BASE.to_string();
+    let mut n = 2u32;
+    while taken(&alias) {
+        alias = format!("{ALIAS_BASE}_{n}");
+        n += 1;
+    }
+
+    // Second pass: `main` idents followed by `.`, outside import
+    // statements, name the imported module — retarget through the alias.
+    // Everything else (`main(` calls, strings, comments, the import paths
+    // themselves) is byte-identical.
+    let in_import = |idx: usize| {
+        imports
+            .iter()
+            .any(|im| idx >= im.range.0 && idx <= im.range.1)
+    };
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for (k, &ti) in sig.iter().enumerate() {
+        if toks[ti].kind != TokenKind::Ident || toks[ti].text != "main" {
+            continue;
+        }
+        if in_import(ti) {
+            continue;
+        }
+        let is_qualified = k + 1 < sig.len() && toks[sig[k + 1]].kind == TokenKind::Dot;
+        if !is_qualified {
+            continue;
+        }
+        let span = toks[ti].span;
+        edits.push((span.start as usize, span.end as usize, alias.clone()));
+    }
+    for im in &imports {
+        edits.push((im.insert_at, im.insert_at, format!(" as {alias}")));
+    }
+    // Back-to-front so earlier spans stay valid.
+    edits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let mut out = source.to_string();
+    for (start, end, text) in edits {
+        out.replace_range(start..end, &text);
+    }
+    out
+}
+
 /// with `-p/--release`). The harness inlines the test file's source plus a
 /// generated `main(args)` that runs a single test selected by argv[0].
 /// Returns `(harness_source_path, binary_path)`; both are cleaned up by
@@ -1896,6 +2061,11 @@ fn build_aot_harness(
         .replace("func main (", "func __zz_user_main (")
         .replace("pub func main(", "pub func __zz_user_main(")
         .replace("pub func main (", "pub func __zz_user_main (");
+    // A bare `*.main` import would collide the same way: the harness
+    // entrypoint occupies value scope as `main`, shadowing the module, so
+    // `main.answer()` fails to check (native only — the VM never injects
+    // `func main`). Retarget such imports through a file-local alias (#401).
+    let source = alias_main_imports(&source);
     let orig_ns = file
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -2772,5 +2942,54 @@ mod tests {
             assert_eq!(back, f, "roundtrip failed for {lit}");
         }
         assert_eq!(float_literal(f64::INFINITY), "1.0/0.0");
+    }
+
+    #[test]
+    fn alias_main_imports_retargets_qualified_uses() {
+        // #401: bare `*.main` import + qualified use → aliased import +
+        // retargeted uses. Strings, comments, and `main(` calls untouched.
+        let src = "import nrepro.main\n@test\nfunc t() {\n    assert_eq(main.answer(), 42)\n    println(\"main.answer() in a string\")\n    // main.answer() in a comment\n}\n";
+        let out = alias_main_imports(src);
+        assert!(
+            out.contains("import nrepro.main as __zz_harness_main_mod"),
+            "import not aliased: {out}"
+        );
+        assert!(
+            out.contains("assert_eq(__zz_harness_main_mod.answer(), 42)"),
+            "qualified use not retargeted: {out}"
+        );
+        assert!(
+            out.contains("\"main.answer() in a string\""),
+            "string literal rewritten: {out}"
+        );
+        assert!(
+            out.contains("// main.answer() in a comment"),
+            "comment rewritten: {out}"
+        );
+    }
+
+    #[test]
+    fn alias_main_imports_leaves_clean_sources_alone() {
+        // Already-aliased, selective, and unrelated imports are byte-identical.
+        for src in [
+            "import nrepro.main as app\nprintln(app.answer())\n",
+            "import nrepro.main(answer)\nprintln(answer())\n",
+            "import redis.client\nprintln(client.ping())\n",
+            "println(\"no imports here\")\n",
+        ] {
+            assert_eq!(alias_main_imports(src), src, "rewrote clean source: {src}");
+        }
+    }
+
+    #[test]
+    fn alias_main_imports_ignores_main_call_sites() {
+        // `main(` calls name the harness entrypoint, not the module.
+        let src = "import nrepro.main\nfunc t() {\n    main()\n    println(main.answer())\n}\n";
+        let out = alias_main_imports(src);
+        assert!(out.contains("\n    main()\n"), "call site rewritten: {out}");
+        assert!(
+            out.contains("println(__zz_harness_main_mod.answer())"),
+            "qualified use missed: {out}"
+        );
     }
 }
