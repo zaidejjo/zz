@@ -1107,14 +1107,29 @@ impl Lowerer {
     }
 
     /// Check if a struct type is unboxed (all scalar or nested unboxed struct fields).
+    /// Cycle-safe: a struct that (transitively) contains itself can never
+    /// be inline — recursion forces the boxed (reference) layout. Without
+    /// the guard, `struct N { kid: N }` would overflow the compiler stack
+    /// when the unboxed set is collected, whether or not N is ever built.
     pub(super) fn is_unboxed_struct(&self, name: &str) -> bool {
-        if let Some(sig) = self.tp.structs.get(name) {
-            sig.fields
-                .iter()
-                .all(|(_, ty)| self.is_scalar_type(ty) || matches!(ty, zz_checker::Type::Struct(inner, _) if self.is_unboxed_struct(inner)))
-        } else {
-            false
+        let mut visiting = std::collections::HashSet::new();
+        self.unboxed_inner(name, &mut visiting)
+    }
+
+    fn unboxed_inner(&self, name: &str, visiting: &mut std::collections::HashSet<String>) -> bool {
+        if !visiting.insert(name.to_string()) {
+            return false;
         }
+        let ok = match self.tp.structs.get(name) {
+            Some(sig) => sig.fields.iter().all(|(_, ty)| {
+                self.is_scalar_type(ty)
+                    || matches!(ty, zz_checker::Type::Struct(inner, _)
+                        if self.unboxed_inner(inner, visiting))
+            }),
+            None => false,
+        };
+        visiting.remove(name);
+        ok
     }
 
     /// Check if a type is scalar (can be unboxed).

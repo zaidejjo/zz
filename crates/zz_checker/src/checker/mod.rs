@@ -361,6 +361,30 @@ fn check_program_impl(
     let mut pub_structs_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pub_aliases_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Pass 0: pre-register struct/enum names with empty signatures so
+    // fields and payloads may reference their own type (or each other,
+    // in either order). Direct self-embedding (`kid: Node` — no array,
+    // option, or other indirection) stays an error, reported when the
+    // real signature lands in Pass 1/1b. The placeholders are always
+    // overwritten below; a duplicate definition still errors there.
+    for stmt in &program.stmts {
+        match stmt {
+            Stmt::Struct { name, generics, .. } => {
+                checker.structs.entry(name.join(".")).or_insert(StructSig {
+                    generics: generics.iter().map(|g| g.name.clone()).collect(),
+                    fields: Vec::new(),
+                });
+            }
+            Stmt::Enum { name, generics, .. } => {
+                checker.enums.entry(name.join(".")).or_insert(EnumSig {
+                    generics: generics.iter().map(|g| g.name.clone()).collect(),
+                    variants: Vec::new(),
+                });
+            }
+            _ => {}
+        }
+    }
+
     // Pass 1: register struct definitions (fields are resolved against the
     // struct registry, so structs may reference earlier structs). Structs
     // must be registered before functions so `func f(p: Point)` resolves.

@@ -160,6 +160,12 @@ impl Checker {
                     // Remember the module behind an aliased head (`m` →
                     // `std.math`) for const/call diagnostics.
                     self.module_aliases
+                        .entry(ns.clone())
+                        .or_insert_with(|| path.join("."));
+                    // Full-path uses (`std.chan.send` under
+                    // `import std.chan`) must count for unused-import
+                    // tracking too — see scope.rs.
+                    self.import_aliases
                         .entry(ns)
                         .or_insert_with(|| path.join("."));
                 } else {

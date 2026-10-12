@@ -217,10 +217,15 @@ impl Checker {
                 // `std.`-rooted spelling counts too, or every selectively
                 // imported std call warns falsely.
                 || self.import_aliases.get(alias).is_some_and(|q| {
-                    self.used_names.contains(q)
-                        || self
-                            .used_names
-                            .contains(format!("std.{q}").as_str())
+                    let qdot = format!("{q}.");
+                    let stdq = format!("std.{q}");
+                    let stdqdot = format!("{stdq}.");
+                    self.used_names.iter().any(|n| {
+                        n == q
+                            || n.starts_with(&qdot)
+                            || n == &stdq
+                            || n.starts_with(&stdqdot)
+                    })
                 });
             if !used {
                 self.errors.push(
