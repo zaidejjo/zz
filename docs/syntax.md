@@ -395,6 +395,46 @@ println("{\"a\": {}}") // {"a": {}} — both closes preserved
 `\{` / `\}` remain accepted for backwards compatibility and mean
 the same as `{{` / a matched `}}`, but prefer the doubled form.
 
+#### Raw strings
+
+Backtick strings are fully literal — no interpolation, no `\`
+escapes, no brace collapsing. Braces, quotes, and backslashes stay
+exactly as typed, which makes them the right home for JSON, regex,
+and Windows paths:
+
+```zz
+j := json.parse(`{"Club": {"g": 3}}`)
+pat := `^[0-9a-f]{8}$`   // matches 8 hex digits, no doubling
+win := `C:\new\test`
+```
+
+A doubled backtick is the only escape, yielding one literal
+backtick (same doubling philosophy as `{{` / `}}`):
+
+```zz
+println(`a``b`)   // a`b
+```
+
+Two limits to know: inside triple-backtick strings a lone or
+doubled backtick is plain content — only ``` closes — so a
+triple-backtick fence itself cannot appear inside one (split the
+string or use single-line raw there). And ``` `` ``` means one
+backtick in single-line raw but two in triple raw: each form keeps
+exactly one way to spell a literal backtick.
+
+Triple-backtick strings span lines and dedent exactly like
+`"""..."""`, without any interpolation or escapes:
+
+```zz
+q := ```
+    {"x": 1}
+    {"y": [1, 2]}
+    """
+```
+
+Brace-heavy payloads with no interpolation belong in backticks;
+keep `{{` / `}}` for literal braces *inside* interpolated strings.
+
 #### What `{...}` expands
 
 Both `"..."` and `"""..."""` strings open an interpolation when `{` is
@@ -412,11 +452,13 @@ double the braces for a literal `{`:
 println("{{1 + 2}}") // {1 + 2} (no interpolation)
 ```
 
-The same rule covers regular-expression quantifiers, which must be
-doubled like in Python f-strings or Rust `format!`:
+Regular-expression quantifiers inside `"..."` must still be
+doubled like in Python f-strings or Rust `format!` — or sidestep
+the issue with a raw string:
 
 ```zz
 pat := "^[0-9a-f]{{8}}$"   // matches 8 hex digits
+pat := `^[0-9a-f]{8}$`    // same, preferred
 ```
 
 When a string DOES interpolate elsewhere, a bare `{` that cannot expand

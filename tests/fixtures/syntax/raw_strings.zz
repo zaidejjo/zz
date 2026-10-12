@@ -1,0 +1,30 @@
+// features: comparison, locals, print, string-literal, string-ops, fstrings, std-json
+// E2E: backtick raw strings — fully literal, no interpolation or escapes.
+import std.json
+
+// 1-4: braces, quotes, backslashes stay verbatim
+println(`{"a": {"b": 1}}` == "{\"a\": {\"b\": 1}}")
+println(`^[0-9a-f]{8}$` == "^[0-9a-f]{{8}}$")
+println(`C:\new\test` == "C:\\new\\test")
+println(`{name} {1} {(a)}` == `{` + `name} {1} {(a)}`)
+
+// 5: doubled backticks collapse to one literal backtick
+println(`a``b` == "a`b")
+
+// 6: raw JSON parses without any escaping
+j := json.parse(`{"Club": {"g": 3}}`) ?? json.null()
+println(json.type(j))
+club := json.get(j, "Club") ?? json.null()
+println(json.is_object(club))
+
+// 7: multiline raw keeps newlines, dedents on the closing fence
+q := ```
+    {"x": 1}
+    {"y": [1, 2]}
+    ```
+println(q == "{\"x\": 1}\n{\"y\": [1, 2]}")
+
+// 8: lone backticks inside triple raw are content
+println(```a`b``` == "a`b")
+
+println("raw_strings_ok")
