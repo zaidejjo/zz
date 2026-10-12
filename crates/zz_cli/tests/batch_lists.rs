@@ -88,6 +88,10 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "math_consts.zz", false),
     ("stdlib", "fs_path.zz", true),
     ("stdlib", "bytes.zz", true),
+    ("stdlib", "cell_test.zz", true),
+    ("stdlib", "vec_push_shapes.zz", true),
+    ("types", "recursive.zz", true),
+    ("syntax", "closure_fn_params.zz", true),
     ("stdlib", "bytes_finish_test.zz", true),
     ("syntax", "brace_escapes.zz", false),
     ("syntax", "brace_escapes_multiline.zz", false),
@@ -127,6 +131,10 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("stdlib/fs_comprehensive.zz", "spawn/timing-sensitive"),
     ("stdlib/net_tcp_test.zz", "binds ports (collide in batch)"),
     ("stdlib/net_tls_test.zz", "binds ports (collide in batch)"),
+    (
+        "stdlib/net_unix_test.zz",
+        "binds socket files (collide in batch)",
+    ),
     ("stdlib/input_chained.zz", "needs .stdin (shared in batch)"),
     (
         "stdlib/http_request_response.zz",

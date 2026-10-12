@@ -738,6 +738,11 @@ parity_strict!(parity_syntax_operators, "syntax", "operators.zz");
 parity_strict!(parity_syntax_short_circuit, "syntax", "short_circuit.zz");
 parity_strict!(parity_syntax_bitwise_ops, "syntax", "bitwise_ops.zz");
 parity_strict!(parity_syntax_tuple_ops, "syntax", "tuple_ops.zz");
+parity_strict!(
+    parity_syntax_closure_fn_params,
+    "syntax",
+    "closure_fn_params.zz"
+);
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
     parity_syntax_tuple_unboxed_struct,
@@ -1311,6 +1316,7 @@ parity_strict!(parity_syntax_control_flow, "syntax", "control_flow.zz");
 
 // --- Fixed: nested field access boxing ---
 parity_strict!(parity_types_structs, "types", "structs.zz");
+parity_strict!(parity_types_recursive, "types", "recursive.zz");
 parity_strict!(parity_types_aliases, "types", "aliases.zz");
 parity_strict!(parity_types_alias_import, "types", "alias_import.zz");
 parity_strict!(parity_types_enums, "types", "enums.zz");
@@ -1376,6 +1382,13 @@ parity_strict!(
 parity_strict!(parity_stdlib_env_full, "stdlib", "env_full.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 parity_strict!(parity_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
+parity_strict!(parity_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
+parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
+parity_strict!(
+    parity_stdlib_vec_push_shapes,
+    "stdlib",
+    "vec_push_shapes.zz"
+);
 parity_strict!(parity_stdlib_input_chained, "stdlib", "input_chained.zz");
 parity_strict!(
     parity_stdlib_http_request_response,

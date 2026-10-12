@@ -539,6 +539,12 @@ e2e_success_test!(
     "method_chain_recv.zz"
 );
 e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
+e2e_success_test!(
+    e2e_syntax_closure_fn_params,
+    "syntax",
+    "closure_fn_params.zz"
+);
+e2e_success_test!(e2e_types_recursive, "types", "recursive.zz");
 e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
 e2e_success_test!(
     e2e_syntax_extension_methods,
@@ -647,6 +653,9 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 e2e_success_test!(e2e_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
+e2e_success_test!(e2e_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
+e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
+e2e_success_test!(e2e_stdlib_vec_push_shapes, "stdlib", "vec_push_shapes.zz");
 e2e_success_test!(e2e_stdlib_input_chained, "stdlib", "input_chained.zz");
 e2e_success_test!(e2e_stdlib_http_client_test, "stdlib", "http_client_test.zz");
 e2e_success_test!(e2e_stdlib_http_server_test, "stdlib", "http_server_test.zz");
