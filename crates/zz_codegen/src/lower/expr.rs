@@ -3524,8 +3524,15 @@ impl Lowerer {
         // Bare-name fallback: the loader qualifies same-file calls, but a
         // bare `greet_user` can still arrive here (generated code, REPL).
         // A unique `*.name` reachable function is that same-file target.
+        // A local binding (param, local, or closure capture) shadows any
+        // module-level function of the same name (#437): skip the
+        // fallback so the direct-call branch below cannot steal it —
+        // the call falls through to the indirect closure-call branch,
+        // which dispatches through the binding.
+        let shadowed = names.lookup(&cname_for_native).is_some();
         let owned_fallback: Option<String>;
-        let cname_ref: &str = if !cname_for_native.contains('.')
+        let cname_ref: &str = if !shadowed
+            && !cname_for_native.contains('.')
             && !self.reachable_funcs.contains(&cname_for_native)
             && !self.tp.funcs.contains_key(&cname_for_native)
         {
@@ -3553,7 +3560,8 @@ impl Lowerer {
         let cname_for_native: String = cname_ref.to_string();
         let _ = &owned_fallback;
 
-        if self.reachable_funcs.contains(&cname_for_native)
+        if !shadowed
+            && self.reachable_funcs.contains(&cname_for_native)
             && (self.tp.funcs.contains_key(&cname_for_native)
                 || self.is_impl_method(&cname_for_native))
         {
