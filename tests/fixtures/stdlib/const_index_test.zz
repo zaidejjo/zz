@@ -1,0 +1,18 @@
+// features: comparison, const, int-arith, locals, print, string-literal
+// E2E: module-level const arrays index correctly on both engines (#421).
+// A const array lowered as a stack temporary dangles once the global
+// initializer returns — reads produced `<value>` garbage natively (and
+// segfaulted downstream consumers). Escape analysis marks top-level
+// initializers escaping so globals heap-allocate.
+const CBOUNDS = [0, 54, 102, 146]
+const CNAMES = ["a", "b", "c"]
+
+func main() {
+    println("const-lit:{CBOUNDS[1]}")
+    i := 2
+    println("const-var:{CBOUNDS[i]}")
+    println("arith:{CBOUNDS[1] + 1}")
+    println("str-const:{CNAMES[0]}")
+    println("len:{CBOUNDS.len()}")
+    println("const_index_ok")
+}
