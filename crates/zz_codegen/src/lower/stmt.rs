@@ -952,7 +952,19 @@ impl Lowerer {
                     *self.void_context.borrow_mut() = false;
                     out.push_str(&format!("    (void)({val});\n"));
                 } else if !is_leaf_expr(e) {
+                    // Statement-position `if/else` discards its temp:
+                    // lower it void so arm pushes take the in-place path
+                    // (see the `If` arm — the condition stays non-void).
+                    // Function/branch tails return above via `is_tail`.
+                    let void_if = matches!(e, Expr::If { .. });
+                    let saved_void = *self.void_context.borrow();
+                    if void_if {
+                        *self.void_context.borrow_mut() = true;
+                    }
                     let _ = self.emit_expr(e, names, out);
+                    if void_if {
+                        *self.void_context.borrow_mut() = saved_void;
+                    }
                 }
             }
             Stmt::Return { value, .. } => match value {

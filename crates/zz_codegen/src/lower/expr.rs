@@ -978,7 +978,15 @@ impl Lowerer {
                 // into a shared temp (statement position discards it).
                 // Chained `else if` arrives as a bare If — recurse so
                 // nested branches emit instead of collapsing to unit.
+                // The condition always evaluates in non-void context
+                // (a mutating call there keeps its value); the arms
+                // inherit the ambient context, so statement-position
+                // `if/else` (void) lowers pushes in-place instead of
+                // discarding copy-on-write results (#427).
+                let saved_void = *self.void_context.borrow();
+                *self.void_context.borrow_mut() = false;
                 let c = self.emit_expr(cond, names, out);
+                *self.void_context.borrow_mut() = saved_void;
                 // `_u` fast path: a raw scalar condition tests directly
                 // (`zz_truthy` on `int`/`float` is `!= 0`, matching the
                 // runtime). Boxed mode keeps `zz_truthy` byte-identical.
