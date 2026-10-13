@@ -768,6 +768,11 @@ parity_strict!(
     "brace_escapes_multiline.zz"
 );
 parity_strict!(parity_syntax_dicts, "syntax", "dicts.zz");
+parity_strict!(
+    parity_syntax_destructure_method_test,
+    "syntax",
+    "destructure_method_test.zz"
+);
 parity_strict!(parity_syntax_string_blocks, "syntax", "string_blocks.zz");
 parity_strict!(parity_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
 parity_strict!(parity_syntax_scalar_copy, "syntax", "scalar_copy.zz");

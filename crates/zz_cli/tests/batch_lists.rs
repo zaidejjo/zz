@@ -100,6 +100,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "raw_strings.zz", false),
     ("syntax", "brace_escapes_multiline.zz", false),
     ("syntax", "destructuring.zz", false),
+    ("syntax", "destructure_method_test.zz", true),
     ("syntax", "short_circuit.zz", true),
     ("stdlib", "json_extended_test.zz", false),
 ];

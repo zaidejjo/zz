@@ -210,6 +210,11 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
+e2e_success_test!(
+    e2e_syntax_destructure_method_test,
+    "syntax",
+    "destructure_method_test.zz"
+);
 e2e_success_test!(e2e_syntax_defer, "syntax", "defer.zz");
 e2e_success_test!(e2e_syntax_string_blocks, "syntax", "string_blocks.zz");
 e2e_success_test!(

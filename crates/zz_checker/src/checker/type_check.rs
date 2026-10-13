@@ -3553,6 +3553,12 @@ impl Checker {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
                 self.define_at(&name.name, ty.clone(), name.span);
+                // Record the binding-site span type: destructured (and
+                // match-arm) names otherwise leave no span entry, so
+                // lowering resolves their method calls untyped and
+                // multi-namespace methods misresolve (#417).
+                self.span_types
+                    .insert(self.scope_key(name.span), ty.clone());
                 // Top-level destructured names are module globals (like
                 // top-level `Decl`): record them for `tp.bindings` so
                 // downstream passes (native globals collection) can type
