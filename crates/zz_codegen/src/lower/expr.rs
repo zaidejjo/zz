@@ -4627,6 +4627,90 @@ impl Lowerer {
             }
         }
 
+        // Strategy 1.5: field-path receiver with a native-handle leaf
+        // type (#423). parts = ["b", "slot", "get"]: `b` is a local
+        // struct but `get` is no `Box` method — it is `cell.get` on the
+        // field. Walk struct fields from the head's checker type; when
+        // the leaf maps to a native namespace with a reachable/supported
+        // `{ns}.{method}`, dispatch with the receiver path as first
+        // argument. Longest receiver first, mirroring strategy 1.
+        // Only exact leaf types: options/generics stay on the old paths.
+        for split in (2..parts.len()).rev() {
+            let recv_parts = &parts[..split];
+            let head = &recv_parts[0];
+            if names.lookup(head).is_none() {
+                continue;
+            }
+            let mut cur = match names.checker_types.get(head) {
+                Some(t) => t.clone(),
+                None => continue,
+            };
+            let mut ok = true;
+            for seg in &recv_parts[1..] {
+                let sname = match &cur {
+                    zz_checker::Type::Struct(s, _) => s.clone(),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                };
+                let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
+                let field_ty = self
+                    .tp
+                    .structs
+                    .get(&sname)
+                    .or_else(|| self.tp.structs.get(&bare))
+                    .and_then(|sig| sig.fields.iter().find(|(n, _)| n == seg))
+                    .map(|(_, t)| t.clone());
+                match field_ty {
+                    Some(t) => cur = t,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
+            // Same type→namespace mapping as the 2-part local arm above.
+            let ns: Option<String> = match &cur {
+                zz_checker::Type::Str => Some("str".to_string()),
+                zz_checker::Type::Array(_) => Some("vec".to_string()),
+                zz_checker::Type::Dict(_, _) => Some("dict".to_string()),
+                zz_checker::Type::Option(_) => Some("option".to_string()),
+                zz_checker::Type::Result(_, _) => Some("result".to_string()),
+                zz_checker::Type::Db => Some("sqlz".to_string()),
+                zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
+                    Some("net".to_string())
+                }
+                zz_checker::Type::HttpServer
+                | zz_checker::Type::Response
+                | zz_checker::Type::HttpRequest => Some("http".to_string()),
+                zz_checker::Type::Json => Some("json".to_string()),
+                zz_checker::Type::Bytes => Some("bytes".to_string()),
+                zz_checker::Type::Chan => Some("chan".to_string()),
+                zz_checker::Type::Opaque(tag) => Some(tag.clone()),
+                _ => None,
+            };
+            let Some(ns) = ns else { continue };
+            let candidate = format!("{ns}.{method}");
+            let std_candidate = format!("std.{ns}.{method}");
+            if self.reachable_natives.contains(&candidate)
+                || self.reachable_natives.contains(&std_candidate)
+                || native_supported(&candidate)
+            {
+                let span = zz_frontend::span::Span::new(0, 0);
+                return Some((
+                    candidate,
+                    Expr::Path {
+                        parts: recv_parts.to_vec(),
+                        span,
+                    },
+                ));
+            }
+        }
+
         // Strategy 2: type-name-as-receiver (static form).
         // parts = ["mod", "Rectangle", "area"] → try "mod.Rectangle.area"
         // and "Rectangle.area" against `reachable_funcs` directly. This

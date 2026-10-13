@@ -662,6 +662,7 @@ e2e_success_test!(
 e2e_success_test!(e2e_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 e2e_success_test!(e2e_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
 e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
+e2e_success_test!(e2e_stdlib_cell_struct_test, "stdlib", "cell_struct_test.zz");
 e2e_success_test!(e2e_stdlib_cell_arena_test, "stdlib", "cell_arena_test.zz");
 e2e_success_test!(e2e_stdlib_vec_push_shapes, "stdlib", "vec_push_shapes.zz");
 e2e_success_test!(e2e_stdlib_input_chained, "stdlib", "input_chained.zz");
