@@ -2075,6 +2075,48 @@ fn missing_bare_import_hints_transitive_provider() {
 }
 
 #[test]
+fn transitive_path_import_resolves_when_locked() {
+    // #420 fixed behavior: `leaf` is only declared by direct dep `mid`,
+    // but once locked (full-tree `zz install`) `import leaf` resolves —
+    // no `zz add leaf`, no transitive hint.
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n[dependencies]\nmid = { path = \"./midlib\" }\n",
+        ),
+        (
+            "midlib/zz.toml",
+            "[package]\nname = \"mid\"\nversion = \"0.1.0\"\n[dependencies]\nleaf = { path = \"../leaflib\" }\n",
+        ),
+        (
+            "leaflib/zz.toml",
+            "[package]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
+        ),
+        ("midlib/src/main.zz", "import leaf\npub func midval() -> int { leaf.leafval() }"),
+        ("leaflib/src/main.zz", "pub func leafval() -> int { 41 }"),
+        (
+            "src/main.zz",
+            "import mid\nimport leaf\nx := mid.midval() + leaf.leafval()",
+        ),
+    ]);
+    let mut lock = zz_pm::lock::Lockfile::new();
+    for name in ["mid", "leaf"] {
+        lock.deps.push(zz_pm::lock::LockedDep {
+            name: name.to_string(),
+            version: "*".to_string(),
+            source: "path".to_string(),
+            hash: String::new(),
+            commit: None,
+            native: None,
+        });
+    }
+    lock.save(&dir.join("zz.lock")).expect("write lock");
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+}
+
+#[test]
 fn missing_bare_import_hints_uninstalled_declaration() {
     // #420: declared in zz.toml but never installed — point at install.
     let dir = temp_project(&[

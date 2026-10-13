@@ -356,9 +356,19 @@ pub(crate) fn resolve_pkg_dir(
 ) -> Option<PathBuf> {
     let dir = if dep.source == "path" {
         let m = manifest?;
-        match m.dependencies.get(&dep.name)? {
-            zz_pm::manifest::DepSpec::Path(path_dep) => project_root.join(&path_dep.path),
-            _ => return None,
+        match m.dependencies.get(&dep.name) {
+            Some(zz_pm::manifest::DepSpec::Path(path_dep)) => project_root.join(&path_dep.path),
+            // Transitive path pins (#420) have no manifest entry: they
+            // are linked under vendor/ by `zz install` like everything
+            // else in the lock.
+            _ => {
+                let linked = project_root.join("vendor").join(&dep.name);
+                if linked.exists() {
+                    linked
+                } else {
+                    return None;
+                }
+            }
         }
     } else {
         zz_pm::paths::cas_entry(&dep.hash)

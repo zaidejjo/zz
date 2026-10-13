@@ -834,6 +834,21 @@ pub fn install(args: &[String]) -> Result<(), String> {
     let manifest = zz_pm::manifest::Manifest::load(&toml_path)?;
 
     if manifest.dependencies.is_empty() {
+        // No declared deps: the lock must not keep orphaned (transitive)
+        // pins and vendor/ must not keep stale links (#420 lifecycle).
+        // Reset both so a removal is fully reconciled, not just unlisted.
+        let lock_path = dir.join("zz.lock");
+        if let Ok(mut lock) = zz_pm::lock::Lockfile::load(&lock_path) {
+            if !lock.deps.is_empty() {
+                lock.deps.clear();
+                lock.set_manifest_deps_hash(manifest.deps_hash());
+                let _ = lock.save(&lock_path);
+            }
+        }
+        let vendor_dir = dir.join("vendor");
+        if vendor_dir.exists() {
+            let _ = std::fs::remove_dir_all(&vendor_dir);
+        }
         println!("no dependencies to install");
         return Ok(());
     }
@@ -846,11 +861,17 @@ pub fn install(args: &[String]) -> Result<(), String> {
     let deps_hash = manifest.deps_hash();
     if let Some(ref lock) = existing_lock {
         if lock.deps_match(&deps_hash) {
-            // Declaration hashes match — but path deps might have changed content
+            // Declaration hashes match — but path deps might have changed
+            // content, or upstream manifests might have changed transitive
+            // requirements (#420), so both close over the full closure.
             if zz_pm::resolve::path_deps_stale(&manifest, Some(lock), &dir)
                 .map_err(|e| e.to_string())?
             {
                 println!("path dependency content changed, re-resolving...");
+            } else if zz_pm::resolve::transitive_reqs_stale(&manifest, lock, &dir)
+                .map_err(|e| e.to_string())?
+            {
+                println!("transitive requirements changed, re-resolving...");
             } else if !zz_pm::link::links_valid(&dir, &manifest, lock) {
                 // #323: resolved but not materialized (fresh clone, wiped
                 // vendor/, GC'd CAS) — fall through to fetch + link.
@@ -987,6 +1008,23 @@ pub fn install(args: &[String]) -> Result<(), String> {
             dep_manifest
                 .check_zz_version(crate::VERSION)
                 .map_err(|e| format!("cannot install dependency `{dep_name}`: {e}"))?;
+        }
+    }
+    // Transitive pins (#420) get the same compiler check through their
+    // vendor/ links (a transitive dep can require a newer zz, too).
+    for dep in lock
+        .deps
+        .iter()
+        .filter(|d| !manifest.dependencies.contains_key(&d.name))
+    {
+        let dep_toml = dir.join("vendor").join(&dep.name).join("zz.toml");
+        if !dep_toml.exists() {
+            continue;
+        }
+        if let Ok(dep_manifest) = zz_pm::manifest::Manifest::load(&dep_toml) {
+            dep_manifest
+                .check_zz_version(crate::VERSION)
+                .map_err(|e| format!("cannot install dependency `{}`: {e}", dep.name))?;
         }
     }
     // Native plugins: build now so `zz run` works without a prior
@@ -1794,11 +1832,20 @@ fn locked_dep_manifest(
     dep: &zz_pm::lock::LockedDep,
 ) -> Option<zz_pm::manifest::Manifest> {
     if dep.source == "path" {
-        let rel = match manifest.dependencies.get(&dep.name)? {
-            zz_pm::manifest::DepSpec::Path(p) => p.path.clone(),
-            _ => return None,
+        // Direct path deps resolve against the manifest; transitive path
+        // pins (#420) resolve through their vendor/ link.
+        let rel = match manifest.dependencies.get(&dep.name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => dir.join(&p.path),
+            _ => {
+                let linked = dir.join("vendor").join(&dep.name);
+                if linked.exists() {
+                    linked
+                } else {
+                    return None;
+                }
+            }
         };
-        return zz_pm::manifest::Manifest::load(&dir.join(&rel).join("zz.toml")).ok();
+        return zz_pm::manifest::Manifest::load(&rel.join("zz.toml")).ok();
     }
     if dep.source.starts_with("registry+") {
         if dep.hash.is_empty() {
