@@ -48,6 +48,32 @@ pub fn init(args: &[String]) -> Result<(), String> {
 /// Files support `{{name}}` / `{{Name}}` substitution. Conflicts refuse
 /// unless `--force`. Always `git init -b main` unless `--no-git`.
 pub fn new(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "usage: zz new <name> [--template cli|lib|web|pkg:NAME|URL|PATH] [--force] [--no-git]\n\
+             \n\
+             scaffold a new project (zz.toml, src/main.zz, .gitignore, git init).\n\
+             \n\
+             TEMPLATES:\n  \
+               (default)            cli starter\n  \
+               cli, lib, web        builtin starters\n  \
+               pkg:<registry-name>  registry package template\n  \
+               URL                  git URL template\n  \
+               PATH                 local path template (a `template/` subdir wins)\n\
+             \n\
+             FLAGS:\n  \
+               --template <spec>    template to scaffold from\n  \
+               --force              scaffold into a non-empty directory anyway\n  \
+               --no-git             skip `git init`\n  \
+               -h, --help           show this help\n\
+             \n\
+             EXAMPLES:\n  \
+               zz new myapp\n  \
+               zz new mylib --template lib\n  \
+               zz new myapp --template pkg:starter-web --force"
+        );
+        return Ok(());
+    }
     let template = parse_flag_value(args, "--template");
     let force = args.iter().any(|a| a == "--force");
     let no_git = args.iter().any(|a| a == "--no-git");
@@ -455,6 +481,25 @@ fn clean_in(dir: &Path, with_deps: bool) -> Result<(), String> {
 /// warning for unreachable registries (the dep is still recorded; `zz install`
 /// will retry with a precise error).
 pub fn add(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "usage: zz add <pkg>[@version] [--git URL] [--rev REV] [--path PATH]\n\
+             \n\
+             add a dependency (registry, git, or local path) to zz.toml.\n\
+             \n\
+             FLAGS:\n  \
+               --git <url>          add a git dependency\n  \
+               --rev <rev>          pin a git revision (with --git)\n  \
+               --path <path>        add a local path dependency\n  \
+               -h, --help           show this help\n\
+             \n\
+             EXAMPLES:\n  \
+               zz add redis\n  \
+               zz add redis@0.1.1\n  \
+               zz add mylib --path ../mylib"
+        );
+        return Ok(());
+    }
     let spec = args
         .iter()
         .find(|a| !a.starts_with('-'))
@@ -2261,6 +2306,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn new_help_short_circuits_without_name() {
+        // #418: `--help` prints usage (Ok) instead of erroring about the
+        // missing name. No filesystem side effects on this path.
+        assert!(super::new(&["--help".to_string()]).is_ok());
+        assert!(super::new(&["-h".to_string()]).is_ok());
+        assert!(super::new(&[]).is_err());
+    }
+
+    #[test]
+    fn add_help_short_circuits_without_spec() {
+        // Same missing-help class as `new --help`.
+        assert!(super::add(&["--help".to_string()]).is_ok());
+        assert!(super::add(&["-h".to_string()]).is_ok());
+        assert!(super::add(&[]).is_err());
     }
 
     #[test]
