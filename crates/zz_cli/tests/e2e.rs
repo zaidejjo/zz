@@ -659,6 +659,7 @@ e2e_success_test!(
     "str_classify_test.zz"
 );
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+e2e_success_test!(e2e_stdlib_net_dns_test, "stdlib", "net_dns_test.zz");
 e2e_success_test!(
     e2e_stdlib_net_write_after_close_test,
     "stdlib",

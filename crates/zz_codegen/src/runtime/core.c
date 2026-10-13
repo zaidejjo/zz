@@ -2993,6 +2993,7 @@ void zz_safepoint(void) {
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <poll.h>
+#include <netdb.h>
 #ifdef __linux__
 #include <malloc.h>
 #endif
@@ -3086,43 +3087,90 @@ zz_value zz_tcp_listen(zz_value addr, int *err) {
 zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err) {
     (void)err;
     if (addr.tag != ZZ_STR) return zz_variant_err(zz_str_static("tcp_connect: expected a string"));
-    struct sockaddr_in sa;
-    if (tcp_resolve(zz_str_cptr(addr.s), &sa) != 0) {
+    const char *hostport = zz_str_cptr(addr.s);
+    const char *colon = strrchr(hostport, ':');
+    if (!colon || colon == hostport || !colon[1]) {
         char buf[192];
-        int n = snprintf(buf, sizeof buf, "invalid address: `%s`", zz_str_cptr(addr.s));
+        int n = snprintf(buf, sizeof buf, "invalid address: `%s`", hostport);
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return zz_variant_err(zz_str_static("tcp_connect failed: socket"));
+    char host[256];
+    size_t hl = (size_t)(colon - hostport);
+    if (hl >= sizeof host) {
+        char buf[192];
+        int n = snprintf(buf, sizeof buf, "invalid address: `%s`", hostport);
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+    }
+    memcpy(host, hostport, hl);
+    host[hl] = '\0';
+    const char *port = colon + 1;
     long toms = timeout_ms.tag == ZZ_INT ? (long)timeout_ms.i : 5000;
-    // Non-blocking connect so the timeout is honored.
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    int rc = connect(fd, (struct sockaddr *)&sa, sizeof sa);
-    if (rc != 0 && errno != EINPROGRESS) {
-        char buf[192];
-        int n = snprintf(buf, sizeof buf, "tcp_connect failed: %s", strerror(errno));
-        close(fd);
+    // System resolution (#426): getaddrinfo handles IP literals,
+    // "localhost" (hosts file) and DNS names. Every returned address
+    // is tried in order so IPv6-first "localhost" still reaches an
+    // IPv4 listener and vice versa (#425). First success wins.
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *list = NULL;
+    int gai = getaddrinfo(host, port, &hints, &list);
+    if (gai != 0 || !list) {
+        if (list) freeaddrinfo(list);
+        char buf[256];
+        int n = snprintf(buf, sizeof buf, "invalid address: `%s` (%s)", hostport, gai_strerror(gai));
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
-    if (rc != 0) {
-        struct pollfd pfd = { fd, POLLOUT, 0 };
-        int pr = poll(&pfd, 1, (int)toms);
-        if (pr <= 0) {
-            close(fd);
-            return zz_variant_err(zz_str_static("tcp_connect failed: timed out"));
+    char last_err[192];
+    snprintf(last_err, sizeof last_err, "tcp_connect failed: connection refused");
+    int any = 0;
+    int fd = -1;
+    for (struct addrinfo *ai = list; ai; ai = ai->ai_next) {
+        any = 1;
+        int cfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (cfd < 0) {
+            snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
+            continue;
         }
-        int soerr = 0;
-        socklen_t slen = sizeof soerr;
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
-        if (soerr != 0) {
-            char buf[192];
-            int n = snprintf(buf, sizeof buf, "tcp_connect failed: %s", strerror(soerr));
-            close(fd);
-            return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+        // Non-blocking connect so the timeout is honored.
+        int flags = fcntl(cfd, F_GETFL, 0);
+        fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+        int ok = 0;
+        int rc = connect(cfd, ai->ai_addr, ai->ai_addrlen);
+        if (rc == 0) {
+            ok = 1;
+        } else if (errno == EINPROGRESS) {
+            struct pollfd pfd = { cfd, POLLOUT, 0 };
+            int pr = poll(&pfd, 1, (int)toms);
+            if (pr > 0) {
+                int soerr = 0;
+                socklen_t slen = sizeof soerr;
+                getsockopt(cfd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
+                if (soerr == 0) {
+                    ok = 1;
+                } else {
+                    snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(soerr));
+                }
+            } else if (pr == 0) {
+                snprintf(last_err, sizeof last_err, "tcp_connect failed: timed out");
+            } else {
+                snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
+            }
+        } else {
+            snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
         }
+        if (ok) {
+            fd = cfd;
+            fcntl(fd, F_SETFL, flags);
+            break;
+        }
+        close(cfd);
     }
-    fcntl(fd, F_SETFL, flags);
+    freeaddrinfo(list);
+    if (fd < 0) {
+        if (!any) return zz_variant_err(zz_str_static("tcp_connect failed: no addresses found"));
+        return zz_variant_err(zz_str_owned(copy_cstr(last_err, strlen(last_err))));
+    }
     return zz_variant_ok((zz_value){ZZ_TCP_STREAM, {.net = tcp_alloc(fd)}});
 }
 

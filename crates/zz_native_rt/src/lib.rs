@@ -30,6 +30,8 @@ pub mod crypto_asym;
 pub mod crypto_core;
 /// `std.crypto` password hashing (Argon2id, bcrypt).
 pub mod crypto_pw;
+/// Hostname-aware TCP dial with per-address fallback (#425, #426).
+pub mod dial;
 /// `std.encoding` text codecs (base64-bytes preserving binary payloads).
 pub mod encoding;
 /// Canonical float formatting (IR spec §4): shortest round-trip `Display`
