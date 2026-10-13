@@ -1397,6 +1397,7 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_env_full, "stdlib", "env_full.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+parity_strict!(parity_stdlib_net_dns_test, "stdlib", "net_dns_test.zz");
 parity_strict!(
     parity_stdlib_net_write_after_close_test,
     "stdlib",

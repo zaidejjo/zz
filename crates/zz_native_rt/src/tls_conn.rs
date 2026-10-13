@@ -250,12 +250,8 @@ fn insecure_config() -> Result<Arc<rustls::ClientConfig>, String> {
 }
 
 fn dial(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
-    let socket_addr = addr
-        .to_socket_addrs()
-        .map_err(|e| format!("tls:handshake_failed: invalid address `{addr}` ({e})"))?
-        .next()
-        .ok_or_else(|| format!("tls:handshake_failed: no addresses found for `{addr}`"))?;
-    TcpStream::connect_timeout(&socket_addr, timeout)
+    // System resolution, every address tried in order (#425, #426).
+    crate::dial::dial_multi(addr, timeout)
         .map_err(|e| format!("tls:handshake_failed: tcp connect to `{addr}` failed ({e})"))
 }
 
