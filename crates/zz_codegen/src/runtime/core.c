@@ -175,8 +175,14 @@ static int zz_values_equal(zz_value a, zz_value b) {
             return a.payload == b.payload;
         return zz_values_equal(*a.payload, *b.payload);
     }
-    case ZZ_RANGE:
-        return a.i == b.i;
+    case ZZ_RANGE: {
+        // Structural equality on (start, end, step), mirroring the VM.
+        // A missing payload degrades to the old start-marker comparison
+        // so partially-initialized values still compare sanely.
+        const zz_range *ra = a.range, *rb = b.range;
+        if (!ra || !rb) return a.i == b.i;
+        return ra->start == rb->start && ra->end == rb->end && ra->step == rb->step;
+    }
     default:
         return 0;
     }
@@ -1282,6 +1288,22 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         if (!v.bytes) return v;
         zz_retain_bytes(v.bytes);
         return v;
+    }
+    case ZZ_RANGE: {
+        // Ranges are immutable and tiny: deep-copy the triple so the
+        // worker owns its box outright (no cross-thread refcount
+        // traffic, no aliasing of the spawner's box).
+        if (!v.range) return v;
+        zz_range *r = (zz_range *)malloc(sizeof(zz_range));
+        if (!r) return v;
+        r->refs = 1;
+        r->start = v.range->start;
+        r->end = v.range->end;
+        r->step = v.range->step;
+        zz_value out;
+        out.tag = ZZ_RANGE;
+        out.range = r;
+        return out;
     }
     case ZZ_DICT: {
         if (!v.dict) return v;

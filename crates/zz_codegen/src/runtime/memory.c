@@ -259,6 +259,11 @@ void zz_retain_arc(zz_value *v) {
     case ZZ_FUNC:
         zz_retain_func(v->fn);
         break;
+    case ZZ_RANGE:
+        if (v->range) {
+            __atomic_add_fetch(&v->range->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
@@ -296,6 +301,13 @@ void zz_release_arc(zz_value *v) {
     case ZZ_FUNC:
         zz_release_func(v->fn);
         break;
+    case ZZ_RANGE:
+        if (v->range) {
+            if (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                free(v->range);
+            }
+        }
+        break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
@@ -325,6 +337,11 @@ zz_value zz_clone_arc(zz_value v) {
         break;
     case ZZ_FUNC:
         zz_retain_func(v.fn);
+        break;
+    case ZZ_RANGE:
+        if (v.range) {
+            __atomic_add_fetch(&v.range->refs, 1, __ATOMIC_RELAXED);
+        }
         break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:

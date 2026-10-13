@@ -507,7 +507,15 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
         fputs(")", out);
         break;
     case ZZ_RANGE:
-        fprintf(out, "%lld..%lld", (long long)v->i, (long long)v->i);
+        if (v->range && v->range->step != 1) {
+            fprintf(out, "%lld..%lld..%lld", (long long)v->range->start,
+                    (long long)v->range->end, (long long)v->range->step);
+        } else if (v->range) {
+            fprintf(out, "%lld..%lld", (long long)v->range->start,
+                    (long long)v->range->end);
+        } else {
+            fputs("0..0", out);
+        }
         break;
     case ZZ_FUNC:
         fputs("<func>", out);
@@ -656,7 +664,15 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
         fputs(")", out);
         break;
     case ZZ_RANGE:
-        fprintf(out, "%lld..%lld", (long long)v->i, (long long)v->i);
+        if (v->range && v->range->step != 1) {
+            fprintf(out, "%lld..%lld..%lld", (long long)v->range->start,
+                    (long long)v->range->end, (long long)v->range->step);
+        } else if (v->range) {
+            fprintf(out, "%lld..%lld", (long long)v->range->start,
+                    (long long)v->range->end);
+        } else {
+            fputs("0..0", out);
+        }
         break;
     case ZZ_FUNC:
         fputs("<func>", out);
@@ -881,7 +897,15 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
         sb_append_c(sb, ')');
         break;
     case ZZ_RANGE:
-        snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->i, (long long)v->i);
+        if (v->range && v->range->step != 1) {
+            snprintf(buf, sizeof buf, "%lld..%lld..%lld", (long long)v->range->start,
+                     (long long)v->range->end, (long long)v->range->step);
+        } else if (v->range) {
+            snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->range->start,
+                     (long long)v->range->end);
+        } else {
+            snprintf(buf, sizeof buf, "0..0");
+        }
         sb_append_str(sb, buf);
         break;
     case ZZ_FUNC:
@@ -1051,7 +1075,15 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
         sb_append_c(sb, ')');
         break;
     case ZZ_RANGE:
-        snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->i, (long long)v->i);
+        if (v->range && v->range->step != 1) {
+            snprintf(buf, sizeof buf, "%lld..%lld..%lld", (long long)v->range->start,
+                     (long long)v->range->end, (long long)v->range->step);
+        } else if (v->range) {
+            snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->range->start,
+                     (long long)v->range->end);
+        } else {
+            snprintf(buf, sizeof buf, "0..0");
+        }
         sb_append_str(sb, buf);
         break;
     case ZZ_FUNC:

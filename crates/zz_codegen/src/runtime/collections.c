@@ -1027,12 +1027,31 @@ int zz_object_is_enum_shape(const zz_object *o) {
     return fname->tag == ZZ_STR && fname->s && strcmp(zz_str_cptr(fname->s), "value") == 0;
 }
 zz_value zz_range_build(zz_value start, zz_value end) {
-    (void)end;
-    // Represent a range inline; used in `for`. Return an int start marker
-    // (codegen for `for` emits two-path C loop directly, so this is mostly
-    // unused).
-    zz_value v = {ZZ_RANGE, {0}};
-    v.i = start.tag == ZZ_INT ? start.i : 0;
+    return zz_range_build_step(start, end, zz_int(1));
+}
+
+// First-class range value: heap-allocated (start, end, step) shared by
+// both AOT backends (#254). Bounds must be ints (mirrors the VM, which
+// rejects non-int bounds); non-int inputs degrade to `0..0`, same as
+// the old degenerate marker. Step 0 normalizes to 1 (a zero step can
+// never advance iteration).
+zz_value zz_range_build_step(zz_value start, zz_value end, zz_value step) {
+    int64_t s = start.tag == ZZ_INT ? start.i : 0;
+    int64_t e = end.tag == ZZ_INT ? end.i : 0;
+    int64_t st = step.tag == ZZ_INT ? step.i : 1;
+    if (st == 0) st = 1;
+    zz_range *r = (zz_range *)malloc(sizeof(zz_range));
+    if (!r) {
+        fprintf(stderr, "zz error: out of memory (range)\n");
+        exit(1);
+    }
+    r->refs = 1;
+    r->start = s;
+    r->end = e;
+    r->step = st;
+    zz_value v;
+    v.tag = ZZ_RANGE;
+    v.range = r;
     return v;
 }
 
