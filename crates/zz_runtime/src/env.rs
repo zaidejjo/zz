@@ -650,6 +650,18 @@ impl EnvLink {
     /// frozen copy is independent, so later spawner writes can never
     /// disturb workers holding it (point-in-time semantics, exactly like
     /// the old deep-clone snapshots).
+    ///
+    /// `Func` bindings are OMITTED, not shared (#398): a frozen `Func`
+    /// carries its spawner-owned capture env (`Rc<RefCell>`), and workers
+    /// resolve globals env-first — so every worker would execute the SAME
+    /// function value on the SAME live env, racing the spawner and each
+    /// other on one borrow flag (panics + hangs with 2+ workers calling
+    /// one global). Workers resolve table-covered functions through their
+    /// per-spawn detached table copies instead; a name the table lacks
+    /// fails loudly as undefined rather than aliasing live state.
+    /// Non-function values are plain data (or thread-safe handles) and
+    /// stay shared: reachable containers ride the per-spawn leaf as
+    /// private deep clones, so frozen ones are unreachable in practice.
     pub fn frozen_scope(link: &EnvLink) -> Arc<FrozenScope> {
         match link {
             EnvLink::Frozen(f) => Arc::clone(f),
@@ -658,6 +670,10 @@ impl EnvLink {
                     let borrowed = rc.borrow();
                     (borrowed.vars.clone(), borrowed.parent.clone())
                 };
+                let vars: HashMap<String, Value> = vars
+                    .into_iter()
+                    .filter(|(_, v)| !matches!(v, Value::Func(_)))
+                    .collect();
                 Arc::new(FrozenScope {
                     vars,
                     parent: parent.as_ref().map(Self::frozen_scope),

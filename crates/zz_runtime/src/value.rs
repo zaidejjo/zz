@@ -124,9 +124,11 @@ pub struct TaskJoinState {
 /// Mutex-guarded join payload: the task outcome plus green-thread waiters
 /// parked in `task.join` / `task.try_join`-style waits.
 ///
-/// `result` is consumed by the first main-thread `task.join`/`task.try_join`
-/// take; `completed` stays set so late joiners get a loud "already consumed"
-/// error instead of hanging forever on a result that will never arrive.
+/// `result` is consumed by the first main-thread `task.join` take;
+/// `task.try_join` only clones (never consumes), so any number of polls
+/// plus one taking join resolve from a single completion. `completed`
+/// stays set so late joiners get a loud "already consumed" error instead
+/// of hanging forever on a result that will never arrive.
 /// Green-thread waiters always receive clones at completion time and never
 /// consume.
 #[derive(Debug, Default)]
