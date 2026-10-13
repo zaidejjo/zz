@@ -743,6 +743,7 @@ parity_strict!(
     "syntax",
     "closure_fn_params.zz"
 );
+parity_strict!(parity_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
     parity_syntax_tuple_unboxed_struct,

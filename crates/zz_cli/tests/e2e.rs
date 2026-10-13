@@ -550,6 +550,7 @@ e2e_success_test!(
     "syntax",
     "closure_fn_params.zz"
 );
+e2e_success_test!(e2e_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 e2e_success_test!(e2e_types_recursive, "types", "recursive.zz");
 e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
 e2e_success_test!(
