@@ -86,6 +86,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "path_join.zz", true),
     ("stdlib", "time_date.zz", true),
     ("stdlib", "math_consts.zz", false),
+    ("stdlib", "const_index_test.zz", true),
     ("stdlib", "fs_path.zz", true),
     ("stdlib", "bytes.zz", true),
     ("stdlib", "cell_test.zz", true),

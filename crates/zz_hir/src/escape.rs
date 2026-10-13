@@ -176,11 +176,20 @@ fn analyze_block(
 
 fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut EscapeResult) {
     match stmt {
-        Stmt::Decl { value, .. } => {
-            let cls = classify_expr(value, tp, ctx);
-            result.classes.insert(value.span(), cls);
-            // Also classify sub-expressions within the initializer.
-            analyze_expr(value, tp, ctx, result);
+        Stmt::Decl { name, value, .. } => {
+            // Top-level bindings live in `zz_global_*` past every frame:
+            // their initializers escape by definition (#421: a const
+            // array lowered as a stack temporary dangles once `zz_main`
+            // returns). Same for any binding shadowing a global name
+            // (conservative: over-marking only costs an allocation).
+            if ctx.func_name == TOP || ctx.global_names.contains(&name.name) {
+                mark_escaping_recursive(value, tp, ctx.func_name, result);
+            } else {
+                let cls = classify_expr(value, tp, ctx);
+                result.classes.insert(value.span(), cls);
+                // Also classify sub-expressions within the initializer.
+                analyze_expr(value, tp, ctx, result);
+            }
         }
         Stmt::Assign { target, value, .. } => {
             // Assignment to a global name = escaping.
@@ -681,6 +690,27 @@ func main() {
         // The returned arr should be marked escaping.
         let has_escaping = result.classes.values().any(|c| *c == AllocClass::Escaping);
         assert!(has_escaping, "returned value should be marked escaping");
+    }
+
+    #[test]
+    fn global_array_escapes() {
+        // #421: top-level bindings outlive every frame (`zz_global_*`),
+        // so their initializers must never lower as stack temporaries.
+        let src = "const CBOUNDS = [0, 54, 102, 146]\nfunc main() {\n    println(1)\n}\n";
+        let tp = build_tp(src);
+        let result = analyze(&tp);
+        assert!(
+            !result.classes.is_empty(),
+            "expected classified initializers, got none"
+        );
+        for cls in result.classes.values() {
+            assert_eq!(
+                *cls,
+                AllocClass::Escaping,
+                "top-level initializer must escape, got: {:?}",
+                result.classes
+            );
+        }
     }
 
     #[test]

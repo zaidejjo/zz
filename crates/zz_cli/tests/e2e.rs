@@ -594,6 +594,7 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_math_ops, "stdlib", "math_ops.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
+e2e_success_test!(e2e_stdlib_const_index_test, "stdlib", "const_index_test.zz");
 e2e_success_test!(e2e_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");
 e2e_success_test!(e2e_stdlib_path_join, "stdlib", "path_join.zz");
 e2e_success_test!(e2e_stdlib_map_set, "stdlib", "map_set.zz");
