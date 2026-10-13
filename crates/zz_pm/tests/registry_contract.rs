@@ -29,6 +29,8 @@ struct PkgVersion {
     tarball: Vec<u8>,
     sha256: String,
     license: String,
+    docs_md: String,
+    languages: HashMap<String, f64>,
 }
 
 struct MockState {
@@ -58,6 +60,8 @@ impl MockState {
                 tarball,
                 sha256,
                 license: "MIT".to_string(),
+                docs_md: String::new(),
+                languages: HashMap::new(),
             },
         );
         Self { meta, versions }
@@ -301,6 +305,15 @@ fn serve_mock(state: Arc<Mutex<MockState>>, done: Arc<std::sync::atomic::AtomicB
                         tarball: bytes,
                         sha256: actual.clone(),
                         license: v["license"].as_str().unwrap_or("").to_string(),
+                        docs_md: v["docs_md"].as_str().unwrap_or("").to_string(),
+                        languages: v["languages"]
+                            .as_object()
+                            .map(|o| {
+                                o.iter()
+                                    .filter_map(|(k, val)| val.as_f64().map(|f| (k.clone(), f)))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     },
                 );
                 st.meta.entry(name.clone()).or_insert((
@@ -446,6 +459,8 @@ fn publish_fixture(client: &RegistryClient, name: &str, version: &str) -> String
         tarball_b64: base64::engine::general_purpose::STANDARD.encode(&tarball),
         tarball_sha256: sha.clone(),
         readme_md: Some(format!("# {name}\n")),
+        docs_md: Some(format!("# {name} docs\n")),
+        languages: [("ZZ".to_string(), 100.0)].into_iter().collect(),
         deps: HashMap::new(),
         description: format!("{name} package"),
         repo: String::new(),
@@ -547,6 +562,22 @@ fn publish_round_trip_then_visible_everywhere() {
 }
 
 #[test]
+fn publish_captures_docs_and_languages() {
+    // #395: the mock records docs_md + languages from the payload.
+    let (base, st, done) = start();
+    let client = RegistryClient::new(&base);
+    publish_fixture(&client, "docspkg", "0.1.0");
+    let st = st.lock().unwrap();
+    let pv = st
+        .versions
+        .get(&("docspkg".to_string(), "0.1.0".to_string()))
+        .expect("published version recorded");
+    assert_eq!(pv.docs_md, "# docspkg docs\n");
+    assert_eq!(pv.languages.get("ZZ"), Some(&100.0));
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
 fn republish_same_version_conflicts() {
     let (base, _st, done) = start();
     let client = RegistryClient::new(&base);
@@ -559,6 +590,8 @@ fn republish_same_version_conflicts() {
         tarball_b64: base64::engine::general_purpose::STANDARD.encode(&tarball),
         tarball_sha256: zz_pm::hash::hash_bytes(&tarball),
         readme_md: None,
+        docs_md: None,
+        languages: HashMap::new(),
         deps: HashMap::new(),
         description: String::new(),
         repo: String::new(),
@@ -583,6 +616,8 @@ fn bad_token_is_unauthorized() {
         tarball_b64: base64::engine::general_purpose::STANDARD.encode(&tarball),
         tarball_sha256: zz_pm::hash::hash_bytes(&tarball),
         readme_md: None,
+        docs_md: None,
+        languages: HashMap::new(),
         deps: HashMap::new(),
         description: String::new(),
         repo: String::new(),

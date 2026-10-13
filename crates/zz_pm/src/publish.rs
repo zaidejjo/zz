@@ -8,6 +8,7 @@
 //!
 //! No real upload target in M2 — validation + packing only.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::Manifest;
@@ -311,6 +312,132 @@ fn collect_native_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+/// Long-form docs payload for `PublishRequest::docs_md` (#395).
+///
+/// `DOCS.md` at the project root wins; otherwise every
+/// `docs/**/*.md` bundles in sorted path order under `# `-level
+/// per-file headings; otherwise `None` (key omitted). Capped at the
+/// 200KB server max on a char boundary.
+pub fn docs_md_for(project_dir: &Path) -> Option<String> {
+    const MAX_BYTES: usize = 200 * 1024;
+    fn cap(mut s: String) -> String {
+        if s.len() <= MAX_BYTES {
+            return s;
+        }
+        s.truncate(MAX_BYTES);
+        while !s.is_char_boundary(s.len()) {
+            s.pop();
+        }
+        s
+    }
+    let single = project_dir.join("DOCS.md");
+    if single.is_file() {
+        return std::fs::read_to_string(&single).ok().map(cap);
+    }
+    let docs = project_dir.join("docs");
+    if !docs.is_dir() {
+        return None;
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_md_files(&docs, &mut files);
+    files.sort();
+    if files.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for f in &files {
+        let rel = f.strip_prefix(project_dir).unwrap_or(f);
+        let body = std::fs::read_to_string(f).unwrap_or_default();
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!("# {}\n\n{body}", rel.display()));
+        if out.len() >= MAX_BYTES {
+            break;
+        }
+    }
+    Some(cap(out))
+}
+
+fn collect_md_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            collect_md_files(&path, files);
+        } else if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+            files.push(path);
+        }
+    }
+}
+
+/// Stacked-language-bar payload for `PublishRequest::languages`
+/// (#395): extension → byte share over the packed tarball, integer
+/// percentages, top 8 by bytes (largest-remainder rounding).
+/// Unknown extensions fold out (renormalized over known bytes);
+/// no known bytes → empty map (key omitted).
+pub fn languages_for(tarball: &Path) -> HashMap<String, f64> {
+    fn lang_of(path: &std::path::Path) -> Option<&'static str> {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("zz") => Some("ZZ"),
+            Some("c") | Some("h") => Some("C"),
+            Some("cpp") | Some("hpp") => Some("C++"),
+            Some("rs") => Some("Rust"),
+            Some("py") => Some("Python"),
+            Some("js") => Some("JavaScript"),
+            Some("ts") => Some("TypeScript"),
+            Some("go") => Some("Go"),
+            Some("zig") => Some("Zig"),
+            Some("sh") => Some("Shell"),
+            _ => None,
+        }
+    }
+    let file = match std::fs::File::open(tarball) {
+        Ok(f) => f,
+        Err(_) => return HashMap::new(),
+    };
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+    let entries = match archive.entries() {
+        Ok(e) => e,
+        Err(_) => return HashMap::new(),
+    };
+    let mut bytes: HashMap<&'static str, u64> = HashMap::new();
+    for entry in entries.flatten() {
+        let Ok(p) = entry.path() else { continue };
+        let Some(lang) = lang_of(&p) else { continue };
+        *bytes.entry(lang).or_default() += entry.size();
+    }
+    let total: u64 = bytes.values().sum();
+    if total == 0 {
+        return HashMap::new();
+    }
+    // Largest-remainder integer split over the top 8 languages.
+    let mut ranked: Vec<(&str, u64)> = bytes.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    ranked.truncate(8);
+    let subtotal: u64 = ranked.iter().map(|(_, b)| b).sum();
+    let mut shares: Vec<(&str, u64, f64)> = ranked
+        .iter()
+        .map(|(l, b)| {
+            let exact = (*b as f64) * 100.0 / (subtotal as f64);
+            (*l, exact.floor() as u64, exact.fract())
+        })
+        .collect();
+    let missing = 100u64.saturating_sub(shares.iter().map(|(_, f, _)| f).sum::<u64>());
+    shares.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    for s in shares.iter_mut().take(missing as usize) {
+        s.1 += 1;
+    }
+    shares
+        .into_iter()
+        .map(|(l, pct, _)| (l.to_string(), pct as f64))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +585,69 @@ mod tests {
         manifest.package.description = Some("d".to_string());
         manifest.package.license = Some("MIT".to_string());
         assert!(warnings(&manifest).is_empty());
+    }
+
+    #[test]
+    fn docs_md_prefers_single_file() {
+        // #395: DOCS.md wins over docs/ bundle.
+        let d = tmp();
+        fs::write(d.join("DOCS.md"), "# top\n").unwrap();
+        fs::create_dir_all(d.join("docs")).unwrap();
+        fs::write(d.join("docs/a.md"), "# a\n").unwrap();
+        assert_eq!(docs_md_for(&d), Some("# top\n".to_string()));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn docs_md_bundles_sorted_with_headings() {
+        // #395: docs/**/*.md concatenate in sorted order under `# path`.
+        let d = tmp();
+        fs::create_dir_all(d.join("docs/sub")).unwrap();
+        fs::write(d.join("docs/b.md"), "B\n").unwrap();
+        fs::write(d.join("docs/sub/a.md"), "A\n").unwrap();
+        fs::write(d.join("docs/skip.txt"), "nope\n").unwrap();
+        let got = docs_md_for(&d).expect("bundle expected");
+        assert_eq!(got, "# docs/b.md\n\nB\n\n\n# docs/sub/a.md\n\nA\n");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn docs_md_absent_without_sources() {
+        let d = tmp();
+        assert_eq!(docs_md_for(&d), None);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn languages_mix_from_tarball() {
+        // #395: extension → byte share, integers, unknown folded out.
+        let d = tmp();
+        let mut manifest = Manifest::default();
+        manifest.package.name = "mix".to_string();
+        manifest.package.version = "0.1.0".to_string();
+        manifest.native = Some(crate::manifest::NativeSpec {
+            backend: None,
+            manifest: None,
+            build: None,
+            build_cc: None,
+            prebuilt: None,
+            pkg_config: None,
+        });
+        fs::write(d.join("zz.toml"), "").unwrap();
+        fs::create_dir_all(d.join("src")).unwrap();
+        fs::write(d.join("src/main.zz"), "func main() { }\n").unwrap();
+        fs::write(d.join("src/big.zz"), "x\n".repeat(300)).unwrap();
+        fs::create_dir_all(d.join("csrc")).unwrap();
+        fs::write(d.join("csrc/wrap.c"), "y\n".repeat(100)).unwrap();
+        fs::write(d.join("README.md"), "docs\n").unwrap();
+        let tarball = pack(&d, &manifest).unwrap();
+        let langs = languages_for(&tarball);
+        // Only ZZ + C counted (toml/md folded out); ZZ dominates.
+        assert_eq!(langs.len(), 2);
+        let total: f64 = langs.values().sum();
+        assert_eq!(total, 100.0);
+        assert!(langs["ZZ"] > langs["C"]);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

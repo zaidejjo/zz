@@ -1483,8 +1483,28 @@ pub fn publish(args: &[String]) -> Result<(), String> {
     let tarball = zz_pm::publish::pack(&dir, &manifest).map_err(|e| e.to_string())?;
     println!("created: {}", tarball.display());
 
+    // Long-form docs + language mix for the publish payload (#395).
+    let docs_md = zz_pm::publish::docs_md_for(&dir);
+    let languages = zz_pm::publish::languages_for(&tarball);
+
     if args.iter().any(|a| a == "--dry-run") {
         println!("dry run: skipping upload");
+        match &docs_md {
+            Some(docs) => println!("docs: {} bytes from {}", docs.len(), docs_source(&dir)),
+            None => println!("docs: none (no DOCS.md or docs/**/*.md)"),
+        }
+        if languages.is_empty() {
+            println!("languages: none");
+        } else {
+            let mut mix: Vec<(&String, &f64)> = languages.iter().collect();
+            mix.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let mix = mix
+                .iter()
+                .map(|(l, p)| format!("{l} {p:.0}%"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("languages: {mix}");
+        }
         return Ok(());
     }
 
@@ -1501,6 +1521,8 @@ pub fn publish(args: &[String]) -> Result<(), String> {
         tarball_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
         tarball_sha256: sha256,
         readme_md: std::fs::read_to_string(dir.join("README.md")).ok(),
+        docs_md,
+        languages,
         deps: manifest
             .dependencies
             .iter()
@@ -1573,6 +1595,16 @@ fn resolve_publish_token(base: &str) -> Result<String, String> {
 }
 
 /// Stringify a dep spec for the registry `deps` table.
+/// Where `--dry-run` docs came from (#395): mirrors
+/// `publish::docs_md_for` without rereading contents.
+fn docs_source(dir: &std::path::Path) -> String {
+    if dir.join("DOCS.md").is_file() {
+        "DOCS.md".to_string()
+    } else {
+        "docs/**/*.md bundle".to_string()
+    }
+}
+
 fn dep_spec_string(spec: &zz_pm::manifest::DepSpec) -> String {
     match spec {
         zz_pm::manifest::DepSpec::Version(v) => v.clone(),
