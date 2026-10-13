@@ -362,6 +362,14 @@ pub struct PublishRequest {
     pub tarball_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readme_md: Option<String>,
+    /// Long-form docs (`DOCS.md`, else bundled `docs/**/*.md`), max 200KB.
+    /// Non-empty values overwrite; absent keeps website-edited docs (#395).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_md: Option<String>,
+    /// Stacked language bar (`{"ZZ": 82, "C": 18}`, max 8 entries,
+    /// values 0–100). Empty omits the key (#395).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub languages: std::collections::HashMap<String, f64>,
     #[serde(default)]
     pub deps: std::collections::HashMap<String, String>,
     #[serde(default)]
