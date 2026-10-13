@@ -1255,6 +1255,11 @@ parity_strict!(
     "concurrency_try_join_test.zz"
 );
 parity_strict!(
+    parity_stdlib_concurrency_shared_fn_test,
+    "stdlib",
+    "concurrency_shared_fn_test.zz"
+);
+parity_strict!(
     parity_stdlib_concurrency_capture_test,
     "stdlib",
     "concurrency_capture_test.zz"

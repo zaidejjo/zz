@@ -726,6 +726,11 @@ e2e_success_test!(
     "concurrency_try_join_test.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_concurrency_shared_fn_test,
+    "stdlib",
+    "concurrency_shared_fn_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_concurrency_capture_test,
     "stdlib",
     "concurrency_capture_test.zz"

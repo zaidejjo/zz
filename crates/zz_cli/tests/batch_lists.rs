@@ -123,6 +123,10 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "spawn/timing-sensitive",
     ),
     (
+        "stdlib/concurrency_shared_fn_test.zz",
+        "spawn/timing-sensitive",
+    ),
+    (
         "stdlib/concurrency_capture_test.zz",
         "spawn/timing-sensitive",
     ),
