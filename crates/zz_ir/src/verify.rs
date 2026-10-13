@@ -443,8 +443,13 @@ fn simulate(code: &[Op], spans: &[Span]) -> Result<u32, IrError> {
         // Fall-through edge. Jump/Return/Break/Continue never fall
         // through at runtime (break/continue unwind the loop, so code
         // after them is dead): excluding them keeps dead stack
-        // pollution out of downstream joins.
-        let falls_through = !matches!(op, Op::Jump(_) | Op::Return | Op::Break | Op::Continue);
+        // pollution out of downstream joins. MatchError traps the same
+        // way (non-exhaustive match aborts) — its fallthrough edge
+        // would carry a dead scrutinee-restore state into the join.
+        let falls_through = !matches!(
+            op,
+            Op::Jump(_) | Op::Return | Op::Break | Op::Continue | Op::MatchError
+        );
         //
         // Restoring match ops push the scrutinee back on their MISS edge
         // (net 0 there, -1 on the taken edge): model each edge exactly.
@@ -1215,8 +1220,15 @@ fn infer_func(
                 let v = pop(&mut st, pc)?;
                 let ret = TV::of_id(module, func.sig.ret);
                 if !compatible_tv(module, &v, &ret) {
+                    let fname = module
+                        .strings
+                        .get(func.name.0 as usize)
+                        .cloned()
+                        .unwrap_or_default();
                     return Err(IrError::spanned(
-                        "type mismatch: return type mismatch".to_string(),
+                        format!(
+                            "type mismatch: return type mismatch in `{fname}` at op {pc}: have {v:?}, want {ret:?}"
+                        ),
                         span,
                     ));
                 }
@@ -1627,7 +1639,12 @@ fn infer_func(
             }
         }
         // Successor edges (mirror the depth simulation exactly).
-        let falls = !matches!(op, Op::Jump(_) | Op::Return | Op::Break | Op::Continue);
+        // MatchError included with the non-fallthroughs: it traps, so
+        // the edge into whatever follows is dead (see above).
+        let falls = !matches!(
+            op,
+            Op::Jump(_) | Op::Return | Op::Break | Op::Continue | Op::MatchError
+        );
         let miss = match op {
             Op::MatchArm {
                 next,
@@ -1652,8 +1669,15 @@ fn infer_func(
                 if let Some(top) = st.last() {
                     let ret = TV::of_id(module, func.sig.ret);
                     if !compatible_tv(module, top, &ret) {
+                        let fname = module
+                            .strings
+                            .get(func.name.0 as usize)
+                            .cloned()
+                            .unwrap_or_default();
                         return Err(IrError::spanned(
-                            "type mismatch: return type mismatch".to_string(),
+                            format!(
+                                "type mismatch: terminal-edge return mismatch in `{fname}` at op {pc}->(end): have {top:?}, want {ret:?}"
+                            ),
                             span,
                         ));
                     }
@@ -1697,8 +1721,15 @@ fn infer_func(
             if let Some(top) = st.last() {
                 let ret = TV::of_id(module, func.sig.ret);
                 if !compatible_tv(module, top, &ret) {
+                    let fname = module
+                        .strings
+                        .get(func.name.0 as usize)
+                        .cloned()
+                        .unwrap_or_default();
                     return Err(IrError::spanned(
-                        "type mismatch: return type mismatch".to_string(),
+                        format!(
+                            "type mismatch: falloff return mismatch in `{fname}` at op {pc}: have {top:?}, want {ret:?}"
+                        ),
                         span,
                     ));
                 }

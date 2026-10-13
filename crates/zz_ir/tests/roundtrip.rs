@@ -132,6 +132,61 @@ fn verify_rejects_bad_jump() {
 }
 
 #[test]
+fn verify_matcherror_is_terminal() {
+    // Tail match with a dead non-exhaustive trap + slot cleanup (#253):
+    // `MatchError` aborts at runtime, so the verifier must not feed its
+    // restored-scrutinee state into the join — nor check the epilogue
+    // against it. Before the fix this failed with a spurious falloff
+    // return mismatch (the trap's `Result` outliving the arms' `Str`).
+    use zz_ir::{FuncDef, FuncSig, Module, Op, Pattern, Span};
+    let module = Module {
+        types: vec![
+            zz_ir::IrType::Unknown,
+            zz_ir::IrType::Str,
+            zz_ir::IrType::Result(zz_ir::TypeId(1), zz_ir::TypeId(1)),
+        ],
+        strings: vec!["f".to_string(), "x".to_string()],
+        consts: vec![
+            zz_ir::Const::Str(zz_ir::StrId(1)),
+            zz_ir::Const::Str(zz_ir::StrId(1)),
+        ],
+        funcs: vec![FuncDef {
+            name: zz_ir::StrId(0),
+            arity: 0,
+            params: vec![],
+            sig: FuncSig {
+                params: vec![],
+                ret: zz_ir::TypeId(1),
+            },
+            toplevel_slots: vec![],
+            vartab: vec![],
+            locals: vec![zz_ir::TypeId(1), zz_ir::TypeId(2)],
+            // base, scrutinee (declared Result), arm to trap terminator,
+            // keep-top cleanup: the trap edge is dead, the arm value
+            // (Str) is what the epilogue returns.
+            code: vec![
+                Op::PushConst(zz_ir::ConstId(0)),
+                Op::LoadSlot(1),
+                Op::MatchArm {
+                    pat: Pattern::Wildcard,
+                    next: 5,
+                    has_env: false,
+                    restore: true,
+                },
+                Op::PushConst(zz_ir::ConstId(1)),
+                Op::Jump(6),
+                Op::MatchError,
+                Op::PopN(1),
+            ],
+            spans: vec![Span::new(0, 0); 7],
+            max_stack: 2,
+        }],
+        entry: zz_ir::FuncId(0),
+    };
+    verify::verify(&module).expect("matcherror trap edge must be dead");
+}
+
+#[test]
 fn verify_rejects_join_mismatch() {
     // if/else shape with unbalanced arms: join depths diverge.
     use zz_ir::{FuncDef, FuncSig, Module, Op, Span};

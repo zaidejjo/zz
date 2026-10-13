@@ -374,6 +374,19 @@ func main() {
 }
 "#;
 
+// Pure-ZZ stdlib helper coverage (#253): helpers implemented in ZZ
+// (not natives) must resolve under `--chunk` via the referenced-only
+// stdlib merge, matching HIR output exactly.
+const STDLIB_STR: &str = r#"
+import std.str
+
+func main() {
+    println(str.repeat("ab", 3))
+    println(str.repeat("x", 0))
+    println(str.pad_left("hi", 5, "-"))
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -391,6 +404,7 @@ const CASES: &[(&str, &str)] = &[
     ("idx_trap", IDX_TRAP),
     ("idx_neg", IDX_NEG),
     ("range_start", RANGE_START),
+    ("stdlib_str", STDLIB_STR),
 ];
 
 #[test]
