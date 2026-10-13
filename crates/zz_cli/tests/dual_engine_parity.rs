@@ -1425,6 +1425,7 @@ parity_strict!(
     "stdlib",
     "vec_push_shapes.zz"
 );
+parity_strict!(parity_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
 parity_strict!(parity_stdlib_input_chained, "stdlib", "input_chained.zz");
 parity_strict!(
     parity_stdlib_http_request_response,
