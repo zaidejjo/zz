@@ -916,14 +916,20 @@ fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
     if has_errors {
         return Err("program failed to type-check".into());
     }
-    // Merged user program. Pure-ZZ stdlib sources are deliberately NOT
-    // merged here: their bodies trip the VM compiler's join verifier
-    // when compiled outside their home module (latent gap — stdlib only
-    // ever runs through the tree-walker today). Calls to pure-ZZ
-    // helpers (e.g. `str.repeat`) therefore fail `coverage` with a clean
+    // Merged program: referenced pure-ZZ stdlib sources first
+    // (mirroring the VM, which executes them before user code, and
+    // `typed_program_for`). Only the import closure is merged
+    // (`stdlib_program_closure` over the loaded stdlib modules), so an
+    // import-free program compiles zero stdlib sources and unreferenced
+    // helpers never enter the module (#253: only-when-referenced
+    // inclusion; closes the #243 umbrella). Without them, calls to
+    // pure-ZZ helpers (e.g. `str.repeat`) fail coverage with a clean
     // "cannot resolve call target" error instead of miscompiling.
-    // Slice-2 (cross-module IR merge, #253) will include them.
     let mut merged_stmts = Vec::new();
+    for idx in zz_stdlib::stdlib_program_closure(&loaded.stdlib_modules) {
+        let zz_prog = zz_stdlib::zz_stdlib_program_at(idx);
+        merged_stmts.extend(zz_prog.program.stmts.iter().cloned());
+    }
     let merged_span = loaded
         .programs
         .last()

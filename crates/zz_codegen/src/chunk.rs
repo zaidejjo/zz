@@ -136,7 +136,12 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
         }
     }
     fn falls(op: &Op) -> bool {
-        !matches!(op, Op::Jump(_) | Op::Return | Op::Break | Op::Continue)
+        // MatchError traps (non-exhaustive match aborts) — never falls
+        // through; a fallthrough edge would feed dead state downstream.
+        !matches!(
+            op,
+            Op::Jump(_) | Op::Return | Op::Break | Op::Continue | Op::MatchError
+        )
     }
     /// Apply `op` to an entry stack, yielding the exit stack.
     /// Exact pop/push counts (net effects lie for calls); unknown
