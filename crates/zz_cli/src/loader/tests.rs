@@ -2046,3 +2046,52 @@ fn dep_errors_still_propagate() {
         result.errors
     );
 }
+
+#[test]
+fn missing_bare_import_hints_transitive_provider() {
+    // #420: `rand` is declared by direct dep `faker` but not installed
+    // for direct use — the error must name the provider and the fix.
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n[dependencies]\nfaker = { path = \"./fakerlib\" }\n",
+        ),
+        (
+            "fakerlib/zz.toml",
+            "[package]\nname = \"faker\"\nversion = \"0.1.0\"\n[dependencies]\nrand = \"^0.4.1\"\n",
+        ),
+        (
+            "src/main.zz",
+            "import faker\nimport rand\nfunc main() {\n    println(1)\n}\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    let texts = diag_texts(&result);
+    let joined = texts.join("\n");
+    assert!(
+        joined.contains("transitively via `faker`") && joined.contains("zz add rand"),
+        "expected transitive hint, got: {joined}"
+    );
+}
+
+#[test]
+fn missing_bare_import_hints_uninstalled_declaration() {
+    // #420: declared in zz.toml but never installed — point at install.
+    let dir = temp_project(&[
+            (
+                "zz.toml",
+                "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n[dependencies]\nrand = \"^0.4.1\"\n",
+            ),
+            (
+                "src/main.zz",
+                "import rand\nfunc main() {\n    println(1)\n}\n",
+            ),
+        ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    let texts = diag_texts(&result);
+    let joined = texts.join("\n");
+    assert!(
+        joined.contains("declared in zz.toml but not installed") && joined.contains("zz install"),
+        "expected install hint, got: {joined}"
+    );
+}
