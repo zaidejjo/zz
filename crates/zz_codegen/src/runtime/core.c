@@ -3011,6 +3011,18 @@ void zz_net_init(void) {
 }
 #endif
 
+// Ignore SIGPIPE process-wide (#424): writes to peer-closed sockets
+// (client `send`, server `write`) must surface EPIPE as `Result`
+// errors, not kill the process with exit 141. Matches Go/Rust runtime
+// behavior; the VM side never delivers SIGPIPE either. POSIX-only
+// (Windows has no SIGPIPE). Constructor runs before main, so no
+// per-send-site auditing is needed — including future socket paths.
+#ifndef ZZ_OS_WINDOWS
+__attribute__((constructor)) static void zz_init_sigpipe(void) {
+    signal(SIGPIPE, SIG_IGN);
+}
+#endif
+
 struct zz_tcp {
     int fd;
     int closed;
