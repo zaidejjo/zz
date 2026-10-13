@@ -599,8 +599,10 @@ fn parse_dotted(s: &str) -> Option<(u32, u32)> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum DepSpec {
-    /// Simple version range: `"^1.2.0"`.
-    Version(String),
+    /// Simple version range: `"^1.2.0"`, or the table form
+    /// `{ version = "^1.2.0" }` (#419: `[dependencies.x]` tables and
+    /// Cargo-style inline tables spell the same registry dep).
+    Version(#[serde(deserialize_with = "version_or_table")] String),
     /// Git dependency with version constraint.
     Git(GitDep),
     /// Path dependency (local filesystem).
@@ -611,6 +613,55 @@ pub enum DepSpec {
     // declarations across workspace members stay future work until
     // [workspace] ships.
     Path(PathDep),
+}
+
+/// `{ version = "x" }` table with unknown keys denied: extras (a `git`
+/// without `rev`, a stray `features`) must stay loud errors rather than
+/// silently degrading to a registry dep.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionTable {
+    version: String,
+}
+
+/// Accept a bare version string or its table form for `DepSpec::Version`.
+/// Serialization stays canonical (plain string); only parsing widens.
+fn version_or_table<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct VersionOrTable;
+    impl<'de> serde::de::Visitor<'de> for VersionOrTable {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a version string or `{ version = \"...\" }`")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<String, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v.to_string())
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<String, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v)
+        }
+
+        fn visit_map<A>(self, map: A) -> Result<String, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let table =
+                VersionTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(table.version)
+        }
+    }
+    deserializer.deserialize_any(VersionOrTable)
 }
 
 /// Git dependency spec.
@@ -902,6 +953,62 @@ mod tests {
         let loaded = Manifest::load(&path).unwrap();
         assert_eq!(m, loaded);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn version_table_forms_parse_as_version() {
+        // #419: `[dependencies.x]` tables, Cargo-style inline tables, and
+        // bare strings all spell a registry dep — including mixed in one
+        // manifest (the issue's exact shape).
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "faker-tests"
+version = "0.1.0"
+
+[dependencies.faker]
+path = ".."
+
+[dependencies.rand]
+version = "^0.4.1"
+
+[dependencies]
+inline_bare = "^1.0.0"
+inline_table = { version = "^2.0.0" }
+"#,
+        )
+        .expect("mixed dependency spellings must parse");
+        assert_eq!(
+            m.dependencies.get("rand"),
+            Some(&DepSpec::Version("^0.4.1".to_string()))
+        );
+        assert_eq!(
+            m.dependencies.get("inline_bare"),
+            Some(&DepSpec::Version("^1.0.0".to_string()))
+        );
+        assert_eq!(
+            m.dependencies.get("inline_table"),
+            Some(&DepSpec::Version("^2.0.0".to_string()))
+        );
+        assert!(matches!(
+            m.dependencies.get("faker"),
+            Some(DepSpec::Path(_))
+        ));
+    }
+
+    #[test]
+    fn version_table_extras_stay_loud() {
+        // Unknown keys must not silently degrade to a registry dep: a
+        // `git` without `rev` (or any stray key) is still an error.
+        for bad in [
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", git = \"https://example.com/r\" }\n",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", features = [\"a\"] }\n",
+        ] {
+            assert!(
+                Manifest::parse(bad).is_err(),
+                "extra keys must not parse silently: {bad}"
+            );
+        }
     }
 
     #[test]
