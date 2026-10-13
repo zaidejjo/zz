@@ -1119,6 +1119,33 @@ impl Loader {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join(format!("{}.zz", imp.join("/")));
+            // Standalone file with a bare-name import and no project
+            // (#419): the name is almost certainly a registry package,
+            // but registry resolution needs a project (zz.toml + lock).
+            // Say so instead of falling through to the relative-path
+            // error, which sends standalone-file users down the wrong
+            // path. Dotted paths keep the relative error (they read as
+            // local layouts), as do files inside a project (missing dep
+            // or missing install — different problems with their own
+            // messages elsewhere).
+            if imp.len() == 1 && cache::canon(&rel).is_err() && find_project_root(&canon).is_none()
+            {
+                self.errors.push(LoadError {
+                    name: path.display().to_string(),
+                    source: source.clone(),
+                    diags: vec![error_at(
+                        format!(
+                            "cannot resolve import `{}`: no project (zz.toml) found above `{}`\n\
+                             hint: outside a project, `import {0}` resolves as a relative file; \
+                             for a registry package, scaffold a project (`zz new <name>`) and `zz install` it first",
+                            imp[0],
+                            canon.display(),
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                continue;
+            }
             // Report cycles at the import site, against the importer's source.
             if let Ok(rel_canon) = cache::canon(&rel) {
                 if self.visiting.contains(&rel_canon) {
