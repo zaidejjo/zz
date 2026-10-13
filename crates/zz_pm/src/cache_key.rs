@@ -282,9 +282,14 @@ fn hash_zz_sources(project_dir: &Path) -> String {
 }
 
 /// Path dependencies of a project: (name, live directory), from the
-/// manifest at `project_dir/zz.toml`. Missing manifest or manifest-dirs
-/// yield an empty/partial list exactly like [`compute`] treats them
-/// (nonexistent dep paths are skipped, not errors).
+/// manifest at `project_dir/zz.toml` plus transitive path pins from the
+/// closure walk when `zz.lock` is present (#420: editing a transitive
+/// path dep must bust the build/run caches exactly like a direct one).
+/// Missing manifest or manifest-dirs yield an empty/partial list exactly
+/// like [`compute`] treats them (nonexistent dep paths are skipped, not
+/// errors); an unreadable lock or unresolvable closure falls back to the
+/// direct layer instead of failing cache bookkeeping. Output is sorted by
+/// name for deterministic keys.
 pub fn path_dep_dirs(project_dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let toml_path = project_dir.join("zz.toml");
     if !toml_path.exists() {
@@ -300,6 +305,24 @@ pub fn path_dep_dirs(project_dir: &Path) -> Result<Vec<(String, PathBuf)>, Strin
             }
         }
     }
+    // Transitive path layer: registry/git content is CAS-immutable (its
+    // lock hash already keys the cache), but path pins are live dirs.
+    if let Ok(lock_content) = std::fs::read_to_string(project_dir.join("zz.lock")) {
+        if let Ok(lock) = crate::lock::Lockfile::parse(&lock_content) {
+            if let Ok(dirs) = crate::resolve::closure(&manifest, &lock, project_dir) {
+                for (name, dir) in dirs {
+                    if manifest.dependencies.contains_key(&name) {
+                        continue;
+                    }
+                    let is_live_path = lock.find(&name).is_some_and(|l| l.source == "path");
+                    if is_live_path && dir.exists() && !out.iter().any(|(n, _)| n == &name) {
+                        out.push((name, dir));
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
@@ -652,6 +675,60 @@ dep_a = { path = "dep_a" }
             k2.to_slug(),
             "full cache slug did not change after path dep edit"
         );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn transitive_path_dep_change_produces_different_cache_key() {
+        // #420: a transitive path dep's content feeds the cache key, so
+        // editing it busts the build/run caches without `zz install`.
+        let d = tmp();
+        let src = d.join("main.zz");
+        fs::write(&src, "func main() { }").unwrap();
+        let content = fs::read_to_string(&src).unwrap();
+
+        let mid = d.join("mid");
+        let leaf = d.join("leaf");
+        fs::create_dir_all(&mid).unwrap();
+        fs::create_dir_all(&leaf).unwrap();
+        fs::write(
+            mid.join("zz.toml"),
+            "[package]\nname = \"mid\"\nversion = \"0.1.0\"\n[dependencies]\nleaf = { path = \"../leaf\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            leaf.join("zz.toml"),
+            "[package]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(leaf.join("lib.zz"), "pub func helper() -> int { 42 }").unwrap();
+        fs::write(
+            d.join("zz.toml"),
+            "[package]\nname = \"test_project\"\nversion = \"0.1.0\"\n\n[dependencies]\nmid = { path = \"mid\" }\n",
+        )
+        .unwrap();
+        // Lock pins both path deps (as `zz install` would write them).
+        fs::write(
+            d.join("zz.lock"),
+            "# lock\nversion = 1\n[[deps]]\nname = \"mid\"\nversion = \"*\"\nsource = \"path\"\nhash = \"h1\"\n[[deps]]\nname = \"leaf\"\nversion = \"*\"\nsource = \"path\"\nhash = \"h2\"\n",
+        )
+        .unwrap();
+
+        let k1 = CacheKey::compute(&src, &content, 42, None, None).unwrap();
+        assert!(
+            k1.dep_hashes.contains_key("leaf"),
+            "transitive path dep keyed: {:?}",
+            k1.dep_hashes.keys().collect::<Vec<_>>()
+        );
+
+        fs::write(leaf.join("lib.zz"), "pub func helper() -> int { 99 }").unwrap();
+        let k2 = CacheKey::compute(&src, &content, 42, None, None).unwrap();
+        assert_ne!(
+            k1.dep_hashes.get("leaf"),
+            k2.dep_hashes.get("leaf"),
+            "transitive path dep content changed but cache key hash did not update"
+        );
+        assert_ne!(k1.to_slug(), k2.to_slug());
         let _ = fs::remove_dir_all(&d);
     }
 

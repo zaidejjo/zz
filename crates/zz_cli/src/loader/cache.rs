@@ -412,6 +412,45 @@ pub(crate) fn ancestor_roots_memo(
     v
 }
 
+/// Reverse dependency edges for import resolution (#420): canonical
+/// package dir → project roots that loaded it as a dependency. A path
+/// dependency (sibling dir, not under `vendor/`) has no ancestor link to
+/// its consumer, so bare imports *inside* the dep (`import leaf` in
+/// `mid/`) would otherwise never try the consumer's lock. Entries are
+/// recorded as each dep entry resolves (parents always load before their
+/// imports are processed), keyed by canonical dir so parallel tests on
+/// unique temp dirs never cross-talk.
+static DEP_CONSUMERS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Vec<PathBuf>>>> =
+    std::sync::OnceLock::new();
+
+/// Record that `root` loaded the package at `pkg_dir` as a dependency.
+pub(crate) fn record_dep_consumer(pkg_dir: &std::path::Path, root: &std::path::Path) {
+    let pkg = canon(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
+    let root = canon(root).unwrap_or_else(|_| root.to_path_buf());
+    if pkg == root {
+        return;
+    }
+    if let Ok(mut m) = DEP_CONSUMERS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        let entry = m.entry(pkg).or_default();
+        if !entry.contains(&root) {
+            entry.push(root);
+        }
+    }
+}
+
+/// Consumer roots recorded for a package dir (empty when unknown).
+pub(crate) fn dep_consumers(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
+    let pkg = canon(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
+    DEP_CONSUMERS
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|m| m.get(&pkg).cloned())
+        .unwrap_or_default()
+}
+
 /// Memoized manifest+lock loads per project root, validated by both
 /// files' mtimes on every hit. Partial states memoize too (manifest
 /// without lock is the common lockless-project shape): any file

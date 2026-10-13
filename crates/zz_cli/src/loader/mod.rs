@@ -366,12 +366,17 @@ fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf
     let (manifest, lock) = cache::manifest_lock(project_root)?;
     let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
     // Path deps resolve against the manifest path (same as plugins).
+    // Transitive path pins (#420) have no manifest entry: resolve them
+    // through the dependency-closure BFS instead.
     if locked.source == "path" {
         match manifest.dependencies.get(dep_name) {
             Some(zz_pm::manifest::DepSpec::Path(p)) => {
                 return entry_in(&project_root.join(&p.path), dep_name);
             }
-            _ => return None,
+            _ => {
+                return resolve_transitive_path_dir(project_root, dep_name)
+                    .and_then(|dir| entry_in(&dir, dep_name));
+            }
         }
     }
     // Registry/git deps: the vendor link first, CAS entry as fallback.
@@ -436,10 +441,12 @@ fn resolve_dep_dir(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
     let (manifest, lock) = cache::manifest_lock(project_root)?;
     let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
     if locked.source == "path" {
-        return match manifest.dependencies.get(dep_name) {
-            Some(zz_pm::manifest::DepSpec::Path(p)) => Some(project_root.join(&p.path)),
-            _ => None,
-        };
+        // Direct path deps resolve against the manifest path; transitive
+        // path pins (#420) resolve through the dep-closure BFS below.
+        if let Some(zz_pm::manifest::DepSpec::Path(p)) = manifest.dependencies.get(dep_name) {
+            return Some(project_root.join(&p.path));
+        }
+        return resolve_transitive_path_dir(project_root, dep_name);
     }
     let linked = project_root.join("vendor").join(dep_name);
     if linked.exists() {
@@ -448,20 +455,143 @@ fn resolve_dep_dir(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
     Some(zz_pm::paths::cas_entry(&locked.hash))
 }
 
+/// Content dir of a transitive path dependency (#420): BFS over dep
+/// manifests starting from the root's direct deps. Path children resolve
+/// against their parent dir; registry/git children via the root lock
+/// (vendor link, then CAS). Depth-capped and canonical-dir-guarded so
+/// dependency cycles terminate.
+fn resolve_transitive_path_dir(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
+    fn cas_dir_of(lock: &zz_pm::lock::Lockfile, name: &str) -> Option<PathBuf> {
+        let locked = lock.deps.iter().find(|d| d.name == name)?;
+        let dir = if let Some(commit) = &locked.commit {
+            zz_pm::paths::cas_entry(commit)
+        } else if locked.hash.is_empty() {
+            return None;
+        } else {
+            zz_pm::paths::cas_entry(&locked.hash)
+        };
+        dir.is_dir().then_some(dir)
+    }
+    let (manifest, lock) = cache::manifest_lock(project_root)?;
+    // Seed with every direct dep's content dir.
+    let mut queue: Vec<PathBuf> = Vec::new();
+    for (direct, spec) in &manifest.dependencies {
+        let dir = match spec {
+            zz_pm::manifest::DepSpec::Path(p) => project_root.join(&p.path),
+            _ => {
+                let linked = project_root.join("vendor").join(direct);
+                if linked.is_dir() {
+                    linked
+                } else {
+                    match cas_dir_of(&lock, direct) {
+                        Some(d) => d,
+                        None => continue,
+                    }
+                }
+            }
+        };
+        if dir.is_dir() {
+            queue.push(dir);
+        }
+    }
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut depth = 0;
+    while !queue.is_empty() && depth < 32 {
+        depth += 1;
+        let mut next: Vec<PathBuf> = Vec::new();
+        for dir in queue {
+            let canon = cache::canon(&dir).unwrap_or_else(|_| dir.clone());
+            if !visited.insert(canon) {
+                continue;
+            }
+            let Some(child_manifest) = cache::manifest_of(&dir) else {
+                continue;
+            };
+            for (child, spec) in &child_manifest.dependencies {
+                match spec {
+                    zz_pm::manifest::DepSpec::Path(p) => {
+                        let target = dir.join(&p.path);
+                        if child == dep_name {
+                            if target.is_dir() {
+                                return Some(target);
+                            }
+                        } else if target.is_dir() {
+                            next.push(target);
+                        }
+                    }
+                    _ => {
+                        if child == dep_name {
+                            // Non-path transitive matches resolve via the
+                            // lock + vendor link elsewhere, not here.
+                            continue;
+                        }
+                        let linked = project_root.join("vendor").join(child);
+                        if linked.is_dir() {
+                            next.push(linked);
+                        } else if let Some(cas) = cas_dir_of(&lock, child) {
+                            next.push(cas);
+                        }
+                    }
+                }
+            }
+        }
+        queue = next;
+    }
+    None
+}
 /// Resolve a dotted dependency import (`import tui.screen`) to its
 /// submodule file: `<depdir>/src/screen.zz` via [`resolve_dep_dir`] +
-/// [`submodule_in`]. Every ancestor root is tried so transitive imports
-/// (from inside `vendor/`) resolve against the outer project lock — the
-/// same discipline as bare registry imports.
-fn resolve_dep_submodule(start: &Path, imp: &[String]) -> Option<PathBuf> {
-    for root in ancestor_roots(start) {
+/// [`submodule_in`]. Every search root is tried (ancestors plus consumer
+/// roots, see [`search_roots`]) so transitive imports — from inside
+/// `vendor/` or a sibling path dep — resolve against the outer project
+/// lock, the same discipline as bare registry imports.
+fn resolve_dep_submodule(start: &Path, imp: &[String]) -> Option<(PathBuf, PathBuf)> {
+    for root in search_roots(start) {
         if let Some(dir) = resolve_dep_dir(&root, &imp[0]) {
             if let Some(file) = submodule_in(&dir, &imp[1..]) {
-                return Some(file);
+                return Some((root, file));
             }
         }
     }
     None
+}
+
+/// Package dir holding an entry file: nearest ancestor (or self) with
+/// `zz.toml`. Used to attribute a loaded dep file to its package for
+/// consumer-root tracking.
+fn pkg_dir_of_entry(entry: &Path) -> Option<PathBuf> {
+    let canon = cache::canon(entry).unwrap_or_else(|_| entry.to_path_buf());
+    let mut dir = if canon.is_file() {
+        canon.parent()?.to_path_buf()
+    } else {
+        canon.clone()
+    };
+    loop {
+        if dir.join("zz.toml").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Project roots to try for an import from `start`: ancestor roots plus
+/// the consumer roots of the enclosing package (#420). A sibling path
+/// dep is not under its consumer on disk, so ancestors alone never reach
+/// the consumer lock; the reverse edges recorded at each dep load close
+/// the loop (parents load before their imports are processed).
+fn search_roots(start: &Path) -> Vec<PathBuf> {
+    let mut out = ancestor_roots(start);
+    let mut seen: HashSet<PathBuf> = out.iter().cloned().collect();
+    if let Some(pkg) = pkg_dir_of_entry(start) {
+        for root in cache::dep_consumers(&pkg) {
+            if seen.insert(root.clone()) {
+                out.push(root);
+            }
+        }
+    }
+    out
 }
 
 /// All ancestor project roots (nearest first) for `import <dep>` lookup.
@@ -499,7 +629,16 @@ fn resolve_plugin_pkg(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
     let pkg_dir = if locked.source == "path" {
         match manifest.dependencies.get(dep_name) {
             Some(zz_pm::manifest::DepSpec::Path(p)) => project_root.join(&p.path),
-            _ => return None,
+            // Transitive path pins (#420) live under vendor/ like every
+            // other locked dep.
+            _ => {
+                let linked = project_root.join("vendor").join(dep_name);
+                if linked.exists() {
+                    linked
+                } else {
+                    return None;
+                }
+            }
         }
     } else {
         zz_pm::paths::cas_entry(&locked.hash)
@@ -1004,6 +1143,9 @@ impl Loader {
             if imp.len() == 1 {
                 if let Some(root) = find_project_root(&canon) {
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
+                        // Reverse edge for nested imports (#420), same as
+                        // the registry branches.
+                        cache::record_dep_consumer(&pkg_dir, &root);
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
                         if !imp_items.is_empty() {
                             let ns = imp_alias.as_deref().unwrap_or(&imp[0]);
@@ -1074,14 +1216,19 @@ impl Loader {
                 // (imported from inside vendor/) resolve against the outer
                 // project lock.
                 {
-                    let mut resolved = None;
-                    for root in ancestor_roots(&canon) {
+                    let mut resolved: Option<(PathBuf, PathBuf)> = None;
+                    for root in search_roots(&canon) {
                         if let Some(entry) = resolve_registry_entry(&root, &imp[0]) {
-                            resolved = Some(entry);
+                            resolved = Some((root, entry));
                             break;
                         }
                     }
-                    if let Some(entry) = resolved {
+                    if let Some((root, entry)) = resolved {
+                        // Reverse edge for nested imports (#420): files
+                        // inside this package resolve against `root` too.
+                        if let Some(pkg_dir) = pkg_dir_of_entry(&entry) {
+                            cache::record_dep_consumer(&pkg_dir, &root);
+                        }
                         let alias = imp_alias.clone().unwrap_or_else(|| imp[0].clone());
                         self.load_file(&entry, Some(alias.as_str()))?;
                         // S1 dep edge (registry package file).
@@ -1118,7 +1265,12 @@ impl Loader {
             // falls through to legacy relative resolution untouched, so
             // local `a/b.zz` layouts never change meaning.
             if imp.len() > 1 {
-                if let Some(candidate) = resolve_dep_submodule(&canon, &imp) {
+                if let Some((root, candidate)) = resolve_dep_submodule(&canon, &imp) {
+                    // Reverse edge for nested imports (#420), same as the
+                    // bare-registry branch above.
+                    if let Some(pkg_dir) = pkg_dir_of_entry(&candidate) {
+                        cache::record_dep_consumer(&pkg_dir, &root);
+                    }
                     // Effective namespace mirrors local imports: the `as`
                     // alias when present, else the last segment
                     // (`import tui.screen` binds `screen.*`, #368).
