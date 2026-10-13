@@ -660,6 +660,11 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
 e2e_success_test!(
+    e2e_stdlib_net_write_after_close_test,
+    "stdlib",
+    "net_write_after_close_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_tcp_method_on_try,
     "stdlib",
     "tcp_method_on_try.zz"
