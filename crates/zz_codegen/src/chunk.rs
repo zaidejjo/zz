@@ -2314,7 +2314,7 @@ impl<'a> Emitter<'a> {
                 // the VM and HIR), so no tag check and a plain
                 // zero-trip-correct `<` loop (rule 5: no guards in
                 // proved code).
-                out.push_str("      zz_crange *_pr = (zz_crange*)_pit.payload;\n");
+                out.push_str("      zz_range *_pr = _pit.range;\n");
                 out.push_str("      for (int64_t _pv = _pr->start; _pv < _pr->end; _pv++) {\n");
                 subs.insert(v, "_pv".to_string());
                 Self::emit_fused_window(
@@ -2853,7 +2853,7 @@ impl<'a> Emitter<'a> {
                     let eq = matches!(b, zz_ir::op::BinOp::Eq);
                     let op = if eq { "==" } else { "!=" };
                     out.push_str(&format!(
-                        "    {{ zz_value _b = st[--sp]; zz_value _a = st[--sp]; if (_a.tag == ZZ_RANGE && _b.tag == ZZ_RANGE) {{ zz_crange *_x = (zz_crange*)_a.payload; zz_crange *_y = (zz_crange*)_b.payload; int _eq = _x && _y && _x->start == _y->start && _x->end == _y->end && _x->step == _y->step; st[sp++] = zz_bool(_eq {op} 1); }} else {{ st[sp++] = zz_binop({c}, _a, _b); }} zz_release(&_a); zz_release(&_b); }}\n"
+                        "    {{ zz_value _b = st[--sp]; zz_value _a = st[--sp]; if (_a.tag == ZZ_RANGE && _b.tag == ZZ_RANGE) {{ zz_range *_x = _a.range; zz_range *_y = _b.range; int _eq = _x && _y && _x->start == _y->start && _x->end == _y->end && _x->step == _y->step; st[sp++] = zz_bool(_eq {op} 1); }} else {{ st[sp++] = zz_binop({c}, _a, _b); }} zz_release(&_a); zz_release(&_b); }}\n"
                     ));
                 } else if matches!(
                     b,
@@ -2971,7 +2971,9 @@ impl<'a> Emitter<'a> {
                 // modules — `MakeRange` never builds one) falls back
                 // to 0 and traps loudly at the first `ForNext`.
                 out.push_str("      { int64_t _i0 = 0;\n");
-                out.push_str("        if (_it.tag == ZZ_RANGE && _it.payload) { _i0 = ((zz_crange*)_it.payload)->start; }\n");
+                out.push_str(
+                    "        if (_it.tag == ZZ_RANGE && _it.range) { _i0 = _it.range->start; }\n",
+                );
                 out.push_str("        st[sp++] = zz_int(_i0); }\n");
                 for _ in 0..nvars {
                     out.push_str("      st[sp++] = zz_unit();\n");
@@ -2996,7 +2998,7 @@ impl<'a> Emitter<'a> {
                 out.push_str("      int _done = 0;\n");
                 // Range fast path (chunk-local box: start/end/step).
                 out.push_str("      if (_it.tag == ZZ_RANGE) {\n");
-                out.push_str("        zz_crange *_rg = (zz_crange*)_it.payload;\n");
+                out.push_str("        zz_range *_rg = _it.range;\n");
                 out.push_str("        if (!_rg) ");
                 out.push_str(&format!("{};\n", ctrap("cannot iterate this value")));
                 out.push_str("        int64_t _cur = _idx.i;\n");
@@ -3187,17 +3189,14 @@ impl<'a> Emitter<'a> {
             }
             Op::MakeRange => {
                 // Stack holds [start, end]; step is always 1 here.
-                // Ranges box (start, end, step) on the heap via a
-                // chunk-local immortal box: the C runtime's range is a
-                // degenerate start-marker (HIR parity only), which
-                // cannot drive a loop. Boxes are immutable, so sharing
-                // under clone is sound; they are never freed (32B per
-                // MakeRange execution — a designed ownership pass will
-                // intern them (#188.1, #254).
+                // Ranges are first-class refcounted values shared with
+                // the HIR backend (`zz_range_build_step`); the bounds
+                // trap names the failure exactly like the VM (the
+                // constructor itself would only degrade to `0..0`).
                 out.push_str("    { zz_value _e5 = st[--sp]; zz_value _s5 = st[--sp];\n");
                 out.push_str("      if (_s5.tag != ZZ_INT || _e5.tag != ZZ_INT) ");
                 out.push_str(&format!("{};\n", ctrap("range bounds must be integers")));
-                out.push_str("      zz_value _r = zz_crange_new(_s5.i, _e5.i, 1);\n");
+                out.push_str("      zz_value _r = zz_range_build_step(_s5, _e5, zz_int(1));\n");
                 out.push_str("      zz_release(&_s5); zz_release(&_e5);\n");
                 out.push_str("      st[sp++] = _r; }\n");
             }
@@ -3496,21 +3495,11 @@ __attribute__((cold)) static void zz_ftrap(const char *msg) {
     exit(1);
 }
 
-// IR ranges box (start, end, step). The C runtime's range is a
-// degenerate start-marker (enough for HIR's special-cased loops but
-// not for a value-driven loop); boxes are immutable after creation,
-// so clone-sharing is sound. Immortal by design: `zz_clone` shares
-// and `zz_release` ignores them (no UAF, no double-free); each
-// `MakeRange` execution leaks 32 bytes until the ownership pass
-// interns them (#188.1, #254).
-typedef struct { int64_t start, end, step; } zz_crange;
-static inline zz_value zz_crange_new(int64_t s, int64_t e, int64_t st) {
-    zz_crange *b = (zz_crange*)malloc(sizeof(zz_crange));
-    if (!b) { fprintf(stderr, "zz error: out of memory\n"); exit(1); }
-    b->start = s; b->end = e; b->step = st;
-    zz_value v; v.tag = ZZ_RANGE; v.payload = (zz_value*)b;
-    return v;
-}
+// IR ranges use the shared first-class C runtime representation
+// (`zz_range`: refcounted start/end/step, same as the HIR backend —
+// see `zz_range_build_step`). The old chunk-local immortal `zz_crange`
+// boxes are gone: printing a range renders `s..e` through the shared
+// printer instead of box-pointer bits, and boxes free normally (#254).
 "#;
 
 /// Compile a verified IR module to C source behind the HIR backend's

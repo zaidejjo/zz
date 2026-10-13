@@ -387,6 +387,19 @@ func main() {
 }
 "#;
 
+// Bare range values print s..e through the shared first-class range
+// (chunk boxes once rendered pointer bits, #254), with structural
+// equality on both backends.
+const RANGE_DISPLAY: &str = r#"
+func main() {
+    r := 0..5
+    println(r)
+    println(2..7)
+    println((0..5) == (0..5))
+    println((0..5) == (0..6))
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -405,6 +418,7 @@ const CASES: &[(&str, &str)] = &[
     ("idx_neg", IDX_NEG),
     ("range_start", RANGE_START),
     ("stdlib_str", STDLIB_STR),
+    ("range_display", RANGE_DISPLAY),
 ];
 
 #[test]

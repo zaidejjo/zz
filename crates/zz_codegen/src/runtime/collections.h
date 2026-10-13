@@ -15,7 +15,6 @@ extern "C" {
 zz_value zz_array_new(void);
 zz_value zz_dict_new(void);
 zz_value zz_dict_new_sized(size_t hint);
-zz_value zz_range(int64_t start, int64_t end, int64_t step);
 
 // ---- arena healing -----------------------------------------------------
 // True when the container header lives on an arena (or the C stack), so a
@@ -249,6 +248,7 @@ zz_value zz_match_some(zz_value v);
 
 // ---- codegen shims -----------------------------------------------------
 zz_value zz_range_build(zz_value start, zz_value end);
+zz_value zz_range_build_step(zz_value start, zz_value end, zz_value step);
 zz_value zz_elvis(zz_value left, zz_value right);
 
 #ifdef __cplusplus

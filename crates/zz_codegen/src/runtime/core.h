@@ -83,6 +83,7 @@ typedef struct zz_value zz_value;
 typedef struct zz_array zz_array;
 typedef struct zz_dict zz_dict;
 typedef struct zz_dict_entry zz_dict_entry;
+typedef struct zz_range zz_range;
 typedef struct zz_chan zz_chan;
 typedef struct zz_task_join zz_task_join;
 typedef struct zz_object zz_object;
@@ -158,6 +159,7 @@ struct zz_value {
         zz_chan *chan;
         zz_task_join *task;
         zz_value *payload;   // Option/Result inner value (heap-allocated)
+        zz_range *range;     // integer range (heap-allocated, refcounted)
         zz_object *obj;      // boxed struct instance
         zz_tcp *net;         // TCP stream or listener (ZZ_TCP_STREAM/LISTENER)
         void *db;            // opaque sqlite3* handle (ZZ_DB)
@@ -226,6 +228,19 @@ struct zz_dict {
 struct zz_dict_entry {
     zz_str *key;
     zz_value val;
+};
+
+// First-class integer range `start..end` (+ `step`, always 1 from ZZ
+// source today; carried for VM iteration parity and future step
+// syntax). Immutable after creation: clones share via the refcount,
+// stores never mutate in place. Replaces the old degenerate
+// start-marker (bare `.i`) and the chunk backend's immortal
+// `zz_crange` boxes (#254).
+struct zz_range {
+    size_t refs; // atomic reference count (ARC)
+    int64_t start;
+    int64_t end;
+    int64_t step;
 };
 
 // Boxed struct instance (reference-counted).
@@ -532,6 +547,11 @@ static inline void zz_retain(zz_value *v) {
     case ZZ_FUNC:
         zz_retain_func(v->fn);
         break;
+    case ZZ_RANGE:
+        if (v->range) {
+            __atomic_add_fetch(&v->range->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
     case ZZ_OBJECT:
         zz_retain_object(v->obj);
         break;
@@ -580,6 +600,13 @@ static inline void zz_release(zz_value *v) {
     case ZZ_JSON:
         zz_release_variant(v);
         break;
+    case ZZ_RANGE:
+        if (v->range) {
+            if (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                free(v->range);
+            }
+        }
+        break;
     case ZZ_OBJECT:
         zz_release_object(v);
         break;
@@ -607,6 +634,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
     if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
         dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
+        dst->tag == ZZ_RANGE ||
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
         zz_release(dst);
@@ -628,7 +656,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     *dst = src;
     // Retain the new value for refcounted types.
     if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
-        src.tag == ZZ_OBJECT ||
+        src.tag == ZZ_OBJECT || src.tag == ZZ_RANGE ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
         src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON)) {
         zz_retain(dst);
@@ -661,6 +689,11 @@ static inline zz_value zz_clone(zz_value v) {
         // without this bump, overwriting a field frees the object while
         // other owners still reference it.
         zz_retain_object(v.obj);
+        break;
+    case ZZ_RANGE:
+        if (v.range) {
+            __atomic_add_fetch(&v.range->refs, 1, __ATOMIC_RELAXED);
+        }
         break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
