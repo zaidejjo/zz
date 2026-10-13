@@ -5094,6 +5094,16 @@ impl Lowerer {
     ) -> usize {
         match pat {
             Pattern::Binding { name } => {
+                // Record the checker's type for method dispatch:
+                // destructured/match bindings otherwise lower untyped,
+                // and multi-namespace methods (str/vec.contains)
+                // misresolve through the generic fallback (#417).
+                // Name-keyed (scope-free): use-site spans do not resolve
+                // for these bindings, so only this record reaches the
+                // 2-part method arm. Mirrors the Decl path.
+                if let Some(ty) = self.ty_at(names, name.span) {
+                    names.checker_types.insert(name.name.clone(), ty.clone());
+                }
                 // Green: arm bindings live in frame cells (a yield in
                 // the arm body resumes past this declaration).
                 if self.green_active() {
