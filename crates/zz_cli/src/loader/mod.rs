@@ -675,6 +675,61 @@ impl Loader {
         }
     }
 
+    /// Direct dependencies of `root` whose own manifests declare `name`
+    /// (#420): `rand` via `faker` — present in the tree (vendor/path)
+    /// but not importable without `zz add`. Reads are failure-path-only
+    /// (a handful of small TOML parses on an otherwise fatal path).
+    fn transitive_providers(root: &Path, name: &str) -> Vec<String> {
+        let Some(manifest) = cache::manifest_of(root) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (dep_name, spec) in &manifest.dependencies {
+            let dir = match spec {
+                zz_pm::manifest::DepSpec::Path(p) => root.join(&p.path),
+                _ => root.join("vendor").join(dep_name),
+            };
+            if !dir.is_dir() {
+                continue;
+            }
+            if let Some(dep_man) = cache::manifest_of(&dir) {
+                if dep_man.dependencies.contains_key(name) {
+                    out.push(dep_name.clone());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Actionable diagnostic for a bare-name import with no resolvable
+    /// file inside a project (#420). Returns `None` when neither case
+    /// applies (caller keeps the relative-path error).
+    fn missing_dep_hint(root: &Path, name: &str) -> Option<String> {
+        let manifest = cache::manifest_of(root)?;
+        // Declared but not installed (no vendor link / no lock entry).
+        if manifest.dependencies.contains_key(name) {
+            return Some(format!(
+                "cannot resolve import `{name}`: declared in zz.toml but not installed\n\
+                 hint: run `zz install`, then build again"
+            ));
+        }
+        // Transitive: declared by a direct dependency's manifest.
+        let providers = Self::transitive_providers(root, name);
+        if providers.is_empty() {
+            return None;
+        }
+        let via = providers
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "cannot resolve import `{name}`: not a direct dependency of this project\n\
+             hint: `{name}` is available transitively via {via} — run `zz add {name}` to use it directly"
+        ))
+    }
+
     /// Parse a file and recursively load its imports (DFS post-order, so
     /// dependencies land in `order` before their dependents).
     fn load_file(&mut self, path: &Path, alias: Option<&str>) -> Result<(), String> {
@@ -1119,6 +1174,27 @@ impl Loader {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join(format!("{}.zz", imp.join("/")));
+            // Actionable missing-dependency hints (#420): the file is
+            // missing and this is a bare-name import. Two cases the
+            // relative-path error obscures:
+            //   1. the name is declared in zz.toml but not installed
+            //      (`zz install` materializes vendor/ + lock), and
+            //   2. the name is a transitive dep (declared by a direct
+            //      dependency's manifest) — usable after `zz add`.
+            // Dotted paths, existing files, and project-less imports
+            // keep their current messages (the no-project hint above).
+            if imp.len() == 1 && cache::canon(&rel).is_err() {
+                if let Some(root) = find_project_root(&canon) {
+                    if let Some(diag) = Self::missing_dep_hint(&root, &imp[0]) {
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(diag, Span::new(0, 0))],
+                        });
+                        continue;
+                    }
+                }
+            }
             // Standalone file with a bare-name import and no project
             // (#419): the name is almost certainly a registry package,
             // but registry resolution needs a project (zz.toml + lock).
