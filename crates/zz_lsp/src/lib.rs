@@ -9,6 +9,7 @@ pub mod formatting;
 pub mod import_seed;
 pub mod inlay_hints;
 pub mod lookup;
+pub mod refactor;
 pub mod semantic_tokens;
 pub mod server;
 pub mod signature_help;

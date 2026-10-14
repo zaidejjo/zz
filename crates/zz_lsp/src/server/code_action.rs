@@ -14,6 +14,14 @@ pub(crate) async fn handle_code_action(
     };
 
     let mut actions = crate::code_action::code_actions_for_range(&params, &doc.source, uri);
+    if let Some(program) = &doc.program {
+        actions.extend(crate::refactor::refactor_actions(
+            program,
+            &doc.source,
+            uri,
+            params.range,
+        ));
+    }
     // Workspace + installed-package providers for undefined names (the
     // checker only suggests `std.*` imports itself).
     if let Some(program) = &doc.program {
