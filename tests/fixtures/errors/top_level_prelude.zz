@@ -1,4 +1,4 @@
-// features: error-case, imports, generics, prelude
+// features: error-case, imports, selective-import, generics, print, fstrings, pub-visibility
 // PARITY (#264): top-level statements using prelude builtins (`println`,
 // `input`), a selective std import (`repeat`), a namespaced std import
 // (`math.pow`), and a generic function. Both sides must agree on exactly
