@@ -1655,3 +1655,84 @@ fn e2e_package_map_cwd_independent() {
         "`zz test` from / should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+// --- Bench framework (`zz bench`) ---
+
+fn run_zz_bench(file: &Path, extra: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("bench")
+        .arg(file)
+        .args(extra)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz bench {file:?}`: {e}"));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn e2e_bench_basic_vm() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("bench").join("basic_bench.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_bench(&path, &["--iters", "5", "--warmup", "1"]);
+    assert_eq!(exit, 0, "`zz bench` should exit 0.\nstderr:\n{stderr}");
+    // Timing values vary run to run: assert shape, never numbers.
+    for bench in ["bench_add", "bench_mul", "bench_math"] {
+        assert!(stderr.contains(bench), "missing {bench} in:\n{stderr}");
+    }
+    assert!(stderr.contains("/iter"), "missing timing in:\n{stderr}");
+}
+
+#[test]
+fn e2e_bench_basic_native() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("bench").join("basic_bench.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_bench(
+        &path,
+        &["--engine", "native", "--iters", "5", "--warmup", "1"],
+    );
+    assert_eq!(
+        exit, 0,
+        "`zz bench --engine native` should exit 0.\nstderr:\n{stderr}"
+    );
+    for bench in ["bench_add", "bench_mul", "bench_math"] {
+        assert!(stderr.contains(bench), "missing {bench} in:\n{stderr}");
+    }
+    assert!(stderr.contains("/iter"), "missing timing in:\n{stderr}");
+}
+
+#[test]
+fn e2e_bench_list_and_filter() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("bench").join("basic_bench.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_bench(&path, &["--list"]);
+    assert_eq!(
+        exit, 0,
+        "`zz bench --list` should exit 0.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("bench_add"),
+        "missing bench_add in:\n{stderr}"
+    );
+
+    let (exit, _stdout, stderr) = run_zz_bench(&path, &["--filter", "bench_mul"]);
+    assert_eq!(exit, 0, "filtered bench should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("bench_mul"),
+        "missing bench_mul in:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("bench_add"),
+        "unfiltered bench_add ran:\n{stderr}"
+    );
+}

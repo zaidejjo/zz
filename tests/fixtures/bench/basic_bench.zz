@@ -1,0 +1,42 @@
+// features: decorators, func-call, int-arith, float-arith, locals, while-loop, zz-bench
+// E2E: @bench discovery + timing on both engines (VM + AOT).
+
+@bench
+func bench_add() {
+    x := 0
+    i := 0
+    while i < 100 {
+        x = x + i
+        i = i + 1
+    }
+}
+
+@bench(iters: 50, warmup: 5)
+func bench_mul() {
+    x := 1
+    i := 1
+    while i < 50 {
+        x = x * i
+        i = i + 1
+    }
+}
+
+@bench(tag: "math")
+func bench_math() {
+    x := 0.0
+    i := 0
+    while i < 50 {
+        x = x + 1.5
+        i = i + 1
+    }
+}
+
+@setup
+func setup_module() {
+    
+}
+
+@teardown
+func teardown_module() {
+    
+}
