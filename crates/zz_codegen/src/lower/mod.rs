@@ -865,11 +865,39 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "input" => Some("zz_io_input"),
         // Test assertions — success returns unit, failure aborts with
         // `error:` on stderr (mirrors the VM's EvalError).
-        "assert" | "std.test.assert" => Some("zz_assert"),
-        "assert_eq" | "std.test.assert_eq" => Some("zz_assert_eq"),
-        "assert_ne" | "std.test.assert_ne" => Some("zz_assert_ne"),
-        "assert_approx_eq" | "std.test.assert_approx_eq" => Some("zz_assert_approx_eq"),
-        "fail" | "panic" | "std.test.fail" | "std.test.panic" => Some("zz_fail"),
+        // Three spellings: bare (no import), `test.*` (via `import std.test`),
+        // `std.test.*` (canonical).
+        "assert" | "test.assert" | "std.test.assert" => Some("zz_assert"),
+        "assert_eq" | "test.assert_eq" | "std.test.assert_eq" => Some("zz_assert_eq"),
+        "assert_ne" | "test.assert_ne" | "std.test.assert_ne" => Some("zz_assert_ne"),
+        "assert_approx_eq" | "test.assert_approx_eq" | "std.test.assert_approx_eq" => {
+            Some("zz_assert_approx_eq")
+        }
+        "fail" | "panic" | "test.fail" | "test.panic" | "std.test.fail" | "std.test.panic" => {
+            Some("zz_fail")
+        }
+        "assert_contains" | "test.assert_contains" | "std.test.assert_contains" => {
+            Some("zz_assert_contains")
+        }
+        "assert_starts_with" | "test.assert_starts_with" | "std.test.assert_starts_with" => {
+            Some("zz_assert_starts_with")
+        }
+        "assert_ends_with" | "test.assert_ends_with" | "std.test.assert_ends_with" => {
+            Some("zz_assert_ends_with")
+        }
+        "assert_len" | "test.assert_len" | "std.test.assert_len" => Some("zz_assert_len"),
+        "assert_gt" | "test.assert_gt" | "std.test.assert_gt" => Some("zz_assert_gt"),
+        "assert_lt" | "test.assert_lt" | "std.test.assert_lt" => Some("zz_assert_lt"),
+        "assert_is_some" | "test.assert_is_some" | "std.test.assert_is_some" => {
+            Some("zz_assert_is_some")
+        }
+        "assert_is_none" | "test.assert_is_none" | "std.test.assert_is_none" => {
+            Some("zz_assert_is_none")
+        }
+        "assert_is_ok" | "test.assert_is_ok" | "std.test.assert_is_ok" => Some("zz_assert_is_ok"),
+        "assert_is_err" | "test.assert_is_err" | "std.test.assert_is_err" => {
+            Some("zz_assert_is_err")
+        }
         // Debug print preserving Option wrappers; returns its argument.
         "dbg" => Some("zz_dbg"),
         "len" => Some("zz_len"),

@@ -926,6 +926,222 @@ zz_value zz_fail(zz_value v, int *err) {
     exit(1);
 }
 
+// ---- std.test pro assertions (P1) --------------------------------------
+// Byte-identical semantics + messages to `natives/assert`. All failures
+// print `error:` prefix + exit 1 (VM raises EvalError rendered the same).
+// `s->len` is bytes; contains/starts/ends use byte comparison matching
+// Rust `str::contains/starts_with/ends_with`. Length uses char count via
+// `zz_str_char_len` matching `str.length` / VM `chars().count()`.
+
+zz_value zz_assert_contains(zz_value hay, zz_value needle, int *err) {
+    (void)err;
+    if (hay.tag != ZZ_STR || needle.tag != ZZ_STR || !hay.s || !needle.s) {
+        char *hs = zz_value_to_string(&hay);
+        char *ns = zz_value_to_string(&needle);
+        fprintf(stderr, "error: `assert_contains` expects `str` (haystack, needle), got (%s, %s)\n", hs, ns);
+        free(hs);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    const char *h = zz_str_cptr(hay.s);
+    size_t hlen = hay.s->len;
+    const char *n = zz_str_cptr(needle.s);
+    size_t nlen = needle.s->len;
+    int found = 0;
+    if (nlen == 0) {
+        found = 1;
+    } else if (nlen <= hlen) {
+        for (size_t i = 0; i + nlen <= hlen; i++) {
+            if (memcmp(h + i, n, nlen) == 0) { found = 1; break; }
+        }
+    }
+    if (found) return zz_unit();
+    char *hs = zz_value_to_string(&hay);
+    char *ns = zz_value_to_string(&needle);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to contain \"%s\"\n", hs, ns);
+    free(hs);
+    free(ns);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_starts_with(zz_value s, zz_value prefix, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || prefix.tag != ZZ_STR || !s.s || !prefix.s) {
+        char *ss = zz_value_to_string(&s);
+        char *ps = zz_value_to_string(&prefix);
+        fprintf(stderr, "error: `assert_starts_with` expects `str` (s, prefix), got (%s, %s)\n", ss, ps);
+        free(ss);
+        free(ps);
+        fflush(stderr);
+        exit(1);
+    }
+    int ok = prefix.s->len <= s.s->len &&
+        memcmp(zz_str_cptr(s.s), zz_str_cptr(prefix.s), prefix.s->len) == 0;
+    if (ok) return zz_unit();
+    char *ss = zz_value_to_string(&s);
+    char *ps = zz_value_to_string(&prefix);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to start with \"%s\"\n", ss, ps);
+    free(ss);
+    free(ps);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_ends_with(zz_value s, zz_value suffix, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || suffix.tag != ZZ_STR || !s.s || !suffix.s) {
+        char *ss = zz_value_to_string(&s);
+        char *xs = zz_value_to_string(&suffix);
+        fprintf(stderr, "error: `assert_ends_with` expects `str` (s, suffix), got (%s, %s)\n", ss, xs);
+        free(ss);
+        free(xs);
+        fflush(stderr);
+        exit(1);
+    }
+    int ok = suffix.s->len <= s.s->len &&
+        memcmp(zz_str_cptr(s.s) + s.s->len - suffix.s->len, zz_str_cptr(suffix.s), suffix.s->len) == 0;
+    if (ok) return zz_unit();
+    char *ss = zz_value_to_string(&s);
+    char *xs = zz_value_to_string(&suffix);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to end with \"%s\"\n", ss, xs);
+    free(ss);
+    free(xs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_len(zz_value v, zz_value n, int *err) {
+    (void)err;
+    if (n.tag != ZZ_INT) {
+        char *ns = zz_value_to_string(&n);
+        fprintf(stderr, "error: `assert_len` expects `int` for n, got %s\n", ns);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    if (n.i < 0) {
+        fprintf(stderr, "error: `assert_len` expects n >= 0\n");
+        fflush(stderr);
+        exit(1);
+    }
+    int64_t got = -1;
+    if (v.tag == ZZ_ARRAY && v.arr) got = (int64_t)v.arr->len;
+    else if (v.tag == ZZ_STR && v.s) got = (int64_t)zz_str_char_len(v.s);
+    else if (v.tag == ZZ_DICT && v.dict) got = (int64_t)v.dict->len;
+    else if (v.tag == ZZ_BYTES) got = (int64_t)(v.bytes ? v.bytes->len : 0);
+    if (got < 0) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: `assert_len` expects array/str/dict/bytes, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    if (got == n.i) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected length %lld, got %lld\n", (long long)n.i, (long long)got);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_gt(zz_value a, zz_value b, int *err) {
+    (void)err;
+    int bad = 0;
+    double x = zz_assert_num(a, &bad);
+    double y = zz_assert_num(b, &bad);
+    if (bad) {
+        fprintf(stderr, "error: `assert_gt` expects numeric (left, right)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    if (x > y) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected %g > %g\n", x, y);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_lt(zz_value a, zz_value b, int *err) {
+    (void)err;
+    int bad = 0;
+    double x = zz_assert_num(a, &bad);
+    double y = zz_assert_num(b, &bad);
+    if (bad) {
+        fprintf(stderr, "error: `assert_lt` expects numeric (left, right)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    if (x < y) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected %g < %g\n", x, y);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_some(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_OPTION_SOME) return zz_unit();
+    if (v.tag == ZZ_OPTION_NONE) {
+        fprintf(stderr, "error: Assertion Failed: Expected Some, got none\n");
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_some` expects `option`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_none(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_OPTION_NONE) return zz_unit();
+    if (v.tag == ZZ_OPTION_SOME) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected none, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_none` expects `option`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_ok(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_RESULT_OK) return zz_unit();
+    if (v.tag == ZZ_RESULT_ERR) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected ok, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_ok` expects `result`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_err(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_RESULT_ERR) return zz_unit();
+    if (v.tag == ZZ_RESULT_OK) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected err, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_err` expects `result`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
 zz_value zz_io_print(zz_value v, int *err) {
     (void)err;
     for (;;) {
