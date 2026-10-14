@@ -135,49 +135,40 @@ pub(crate) async fn handle_references(
     let pos = params.text_document_position.position;
 
     let doc = match backend.state.documents.get(uri) {
-        Some(doc) => doc.clone(),
+        Some(doc) => doc.value().clone(),
         None => return Ok(None),
     };
     let program = match &doc.program {
-        Some(p) => p,
+        Some(p) => p.clone(),
+        None => return Ok(None),
+    };
+    let _ = program;
+
+    let offset = doc.line_index.position_to_offset(&doc.source, pos);
+    // Shared cross-file scope (same resolver as rename): defining file
+    // plus importers, fresh buffers preferred, foreign definition sites
+    // and unqualified foreign field hits excluded.
+    let scope = match crate::symbol_refs::resolve_symbol_scope(&backend.state, uri, offset) {
+        Some(s) => s,
         None => return Ok(None),
     };
 
-    let offset = doc.line_index.position_to_offset(&doc.source, pos);
-    let refs = crate::lookup::find_references_in_program(program, &doc.source, offset);
-
-    let mut locations: Vec<Location> = refs
-        .iter()
-        .map(|r| Location {
-            uri: uri.clone(),
-            range: doc.line_index.span_to_range(&doc.source, r.span),
-        })
-        .collect();
-
-    let name = crate::lookup::find_node_at(program, &doc.source, offset)
-        .name
-        .unwrap_or_default();
-    if !name.is_empty() {
-        let index = backend.state.module_index.read().unwrap();
-        for (target_uri, entry) in &index.entries {
-            if target_uri == uri {
+    let mut locations: Vec<Location> = Vec::new();
+    for file in &scope.files {
+        let refs = crate::lookup::find_references_to_name_in_program(
+            &file.program,
+            &file.source,
+            &scope.name,
+        );
+        let line_index = LineIndex::new(&file.source);
+        for r in &refs {
+            if !crate::symbol_refs::hit_counts_in_file(&scope, &file.uri, r, &file.source) {
                 continue;
             }
-            if let Some(target_program) = &entry.program {
-                let target_source = &entry.source;
-                let target_line_index = LineIndex::new(target_source);
-                let target_refs = crate::lookup::find_references_to_name_in_program(
-                    target_program,
-                    target_source,
-                    &name,
-                );
-                for r in &target_refs {
-                    locations.push(Location {
-                        uri: target_uri.clone(),
-                        range: target_line_index.span_to_range(target_source, r.span),
-                    });
-                }
-            }
+            locations.push(Location {
+                uri: file.uri.clone(),
+                range: line_index.span_to_range(&file.source, r.span),
+            });
         }
     }
 

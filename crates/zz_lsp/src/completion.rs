@@ -2477,6 +2477,65 @@ mod workspace_audit_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // ── installed-package member completion ──────────────────────────
+    /// Project root with a vendored `tiny` package (mirrors the deps.rs
+    /// harvest fixture): `tiny.shout` must complete after `tiny.`.
+    fn dep_member_project(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("zz-lsp-depcomp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("vendor/tiny/src")).unwrap();
+        std::fs::write(
+            root.join("zz.toml"),
+            "[package]\nname = \"proj\"\nversion = \"0.1.0\"\n\n[dependencies]\ntiny = \"^0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("vendor/tiny/zz.toml"),
+            "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("vendor/tiny/src/tiny.zz"),
+            "pub func shout(name: str) -> str {\n    \"Hey {name}!\"\n}\n",
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn dep_member_completion_serves_harvested_ns() {
+        let root = dep_member_project("member");
+        let state = ws_state();
+        let file = root.join("src/main.zz");
+        let src = "import tiny\nfunc main() {\n    println(tiny.shout(\"a\"))\n}\n";
+        let probe = format!("{src}\nprobe := tiny.");
+        let (program, cr, cenv) = ws_check(&state, &file, &probe);
+        assert!(
+            cr.funcs.contains_key("tiny.shout"),
+            "dep seed merged into check"
+        );
+        let items = match completions_for_position(
+            &program,
+            &probe,
+            probe.len() as u32,
+            Some(&cr),
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        assert!(
+            items.iter().any(|i| i.label == "shout"),
+            "dep member serves: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // ── selective lists ───────────────────────────────────────────────
     #[test]
     fn audit_ws_selective_list() {

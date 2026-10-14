@@ -410,6 +410,242 @@ async fn references_missing_doc_returns_none() {
     assert!(refs.is_none());
 }
 
+fn watched_tmp(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("zz-lsp-watch-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn watched_change_reindexes_and_rechecks_dependents() {
+    let (service, state) = setup();
+    let dir = watched_tmp("reindex");
+    let dep_path = dir.join("dep.zz");
+    std::fs::write(&dep_path, "pub func answer() -> int {\n    return 1\n}\n").unwrap();
+    let dep_uri = Url::from_file_path(&dep_path).unwrap();
+    state.set_root(dir.clone());
+
+    let main_src = "import dep(answer)\nfunc main() {\n    println(answer())\n}\n";
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &main_uri, main_src);
+    state.record_dependency(dep_uri.clone(), main_uri.clone());
+    // Wipe main's result: the watched change must restore it.
+    state.documents.get_mut(&main_uri).unwrap().check_result = None;
+
+    std::fs::write(&dep_path, "pub func answer() -> int {\n    return 2\n}\n").unwrap();
+    service
+        .inner()
+        .did_change_watched_files(DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: dep_uri.clone(),
+                typ: FileChangeType::CHANGED,
+            }],
+        })
+        .await;
+
+    assert!(
+        state
+            .module_index
+            .read()
+            .unwrap()
+            .entries
+            .contains_key(&dep_uri),
+        "changed file re-indexed"
+    );
+    assert!(
+        state
+            .documents
+            .get(&main_uri)
+            .unwrap()
+            .check_result
+            .is_some(),
+        "open dependent rechecked"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn watched_delete_forgets_file() {
+    let (service, state) = setup();
+    let dir = watched_tmp("delete");
+    let dep_path = dir.join("dep.zz");
+    std::fs::write(&dep_path, "pub func answer() -> int {\n    return 1\n}\n").unwrap();
+    let dep_uri = Url::from_file_path(&dep_path).unwrap();
+    state.set_root(dir.clone());
+    index_test_file(
+        &state,
+        &dep_uri,
+        "dep",
+        "pub func answer() -> int {\n    return 1\n}\n",
+    );
+    std::fs::remove_file(&dep_path).unwrap();
+
+    service
+        .inner()
+        .did_change_watched_files(DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: dep_uri.clone(),
+                typ: FileChangeType::DELETED,
+            }],
+        })
+        .await;
+
+    assert!(
+        !state
+            .module_index
+            .read()
+            .unwrap()
+            .entries
+            .contains_key(&dep_uri),
+        "deleted file forgotten"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn save_rechecks_open_dependents() {
+    let (service, state) = setup();
+    let dep_uri: Url = "file:///dep.zz".parse().unwrap();
+    open_and_check(
+        &state,
+        &dep_uri,
+        "pub func answer() -> int {\n    return 1\n}\n",
+    );
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &main_uri, "func main() {\n    println(1)\n}\n");
+    state.record_dependency(dep_uri.clone(), main_uri.clone());
+    state.documents.get_mut(&main_uri).unwrap().check_result = None;
+
+    service
+        .inner()
+        .did_save(DidSaveTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: dep_uri.clone(),
+            },
+            text: None,
+        })
+        .await;
+
+    assert!(
+        state
+            .documents
+            .get(&dep_uri)
+            .unwrap()
+            .check_result
+            .is_some(),
+        "saved file rechecked"
+    );
+    assert!(
+        state
+            .documents
+            .get(&main_uri)
+            .unwrap()
+            .check_result
+            .is_some(),
+        "open dependent rechecked on save"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn code_lens_lists_tests() {
+    let (service, state) = setup();
+    let uri: Url = "file:///tests.zz".parse().unwrap();
+    let src = "@test\nfunc adds() {\n    assert_eq(1 + 1, 2)\n}\nfunc helper() -> int {\n    return 1\n}\n";
+    open_and_check(&state, &uri, src);
+
+    let lenses = service
+        .inner()
+        .code_lens(CodeLensParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("lenses");
+    assert_eq!(lenses.len(), 1, "one lens per @test");
+    let command = lenses[0].command.clone().expect("command");
+    assert_eq!(command.command, "zz.runTest");
+    assert_eq!(lenses[0].range.start.line, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_unknown_command_rejected() {
+    let (service, _) = setup();
+    let err = service
+        .inner()
+        .execute_command(ExecuteCommandParams {
+            command: "zz.nope".to_string(),
+            arguments: vec![],
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect_err("unknown command rejected");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::MethodNotFound);
+}
+
+fn index_test_file(state: &GlobalState, uri: &Url, module: &str, src: &str) {
+    let entry =
+        crate::cross_file::parse_file_entry(uri.clone(), src.to_string(), module.to_string());
+    let mut index = state.module_index.write().unwrap();
+    index.module_to_uri.insert(module.to_string(), uri.clone());
+    index.uri_to_module.insert(uri.clone(), module.to_string());
+    index.entries.insert(uri.clone(), entry);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_reaches_importing_file_not_unrelated() {
+    let (service, state) = setup();
+    let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+    let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+    open_and_check(&state, &lib_uri, lib_src);
+    index_test_file(&state, &lib_uri, "lib", lib_src);
+
+    let main_src = "import lib(circle)\nfunc main() {\n    y := circle(1.0)\n    println(y)\n}\n";
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &main_uri, main_src);
+
+    // Same name, no import: must not be touched.
+    let other_src = "func circle() -> int {\n    return 1\n}\nc := circle()\n";
+    let other_uri: Url = "file:///other.zz".parse().unwrap();
+    open_and_check(&state, &other_uri, other_src);
+
+    let edit = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: main_uri.clone(),
+                },
+                position: Position {
+                    line: 2,
+                    character: 10,
+                },
+            },
+            new_name: "round".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("rename should produce edits");
+    let changes = edit.changes.expect("changes");
+    assert!(changes.contains_key(&lib_uri), "defining file edited");
+    assert!(changes.contains_key(&main_uri), "importing file edited");
+    assert!(
+        !changes.contains_key(&other_uri),
+        "unrelated same-name file untouched"
+    );
+    // Member edit in main covers exactly `circle` in `circle(1.0)`.
+    let main_edits = &changes[&main_uri];
+    assert!(
+        main_edits
+            .iter()
+            .any(|e| e.range.start == Position::new(2, 9) && e.range.end == Position::new(2, 15)),
+        "usage range exact: {main_edits:?}"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_rename_on_symbol() {
     let (service, state) = setup();

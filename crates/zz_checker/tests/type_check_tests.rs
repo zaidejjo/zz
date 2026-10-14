@@ -3367,3 +3367,39 @@ fn if_let_trailing_call_reports_at_call() {
         e.span
     );
 }
+
+#[test]
+fn unimported_std_module_suggests_import() {
+    let r = check_src("y := math.sin(1.0)");
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("undefined variable `math.sin`"))
+        .expect("expected undefined math.sin error");
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("add `import std.math`")),
+        "expected import hint, got notes: {:?}",
+        diag.notes
+    );
+    let fixit = diag
+        .fixits
+        .iter()
+        .find(|f| f.message == "add import")
+        .expect("expected add-import fixit");
+    assert_eq!(fixit.replacement, "import std.math\n");
+}
+
+#[test]
+fn unknown_root_gets_no_import_suggestion() {
+    // `wat` is no std module: typo machinery only, never an import hint.
+    let r = check_src("y := wat.sin(1.0)");
+    assert!(
+        r.errors
+            .iter()
+            .all(|e| e.fixits.iter().all(|f| f.message != "add import")),
+        "no import fixit for unknown modules: {:?}",
+        r.errors
+    );
+}

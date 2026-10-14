@@ -8,12 +8,23 @@ pub(crate) async fn handle_code_action(
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
     let uri = &params.text_document.uri;
-    let source = match backend.state.documents.get(uri) {
-        Some(doc) => doc.source.clone(),
+    let doc = match backend.state.documents.get(uri) {
+        Some(doc) => doc.value().clone(),
         None => return Ok(None),
     };
 
-    let actions = crate::code_action::code_actions_for_range(&params, &source, uri);
+    let mut actions = crate::code_action::code_actions_for_range(&params, &doc.source, uri);
+    // Workspace + installed-package providers for undefined names (the
+    // checker only suggests `std.*` imports itself).
+    if let Some(program) = &doc.program {
+        actions.extend(crate::code_action::auto_import_actions(
+            &backend.state,
+            uri,
+            &doc.source,
+            program,
+            &params.context.diagnostics,
+        ));
+    }
     if actions.is_empty() {
         Ok(None)
     } else {

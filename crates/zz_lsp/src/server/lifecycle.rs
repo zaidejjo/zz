@@ -44,9 +44,19 @@ pub(crate) async fn handle_initialize(
             code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
-            rename_provider: Some(OneOf::Left(true)),
+            rename_provider: Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            })),
             references_provider: Some(OneOf::Left(true)),
             document_highlight_provider: Some(OneOf::Left(true)),
+            code_lens_provider: Some(CodeLensOptions {
+                resolve_provider: Some(false),
+            }),
+            execute_command_provider: Some(ExecuteCommandOptions {
+                commands: vec![crate::test_lens::RUN_TEST_COMMAND.to_string()],
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            }),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
                 trigger_characters: Some(vec![".".to_string()]),
@@ -81,6 +91,7 @@ pub(crate) async fn handle_initialize(
 }
 
 pub(crate) async fn handle_initialized(backend: &Backend, _: InitializedParams) {
+    crate::watch::register_watches(&backend.client).await;
     backend
         .client
         .log_message(MessageType::INFO, "zz-lsp ready")

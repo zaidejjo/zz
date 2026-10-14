@@ -6,6 +6,15 @@ use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::{suggest_all, suggest_dotted};
 use zz_frontend::span::Span;
 
+/// Top-level std module names the checker suggests imports for.
+/// Keep in sync with `zz_stdlib::STDLIB_MODULES` (this crate cannot
+/// depend on `zz_stdlib`: the dependency points the other way).
+const KNOWN_STD_MODULES: &[&str] = &[
+    "args", "bytes", "cell", "chan", "colors", "csv", "crypto", "db", "dec", "encoding", "env",
+    "fs", "http", "json", "log", "map", "math", "net", "path", "process", "regexp", "set", "sqlz",
+    "str", "sys", "task", "term", "test", "time", "unix", "uuid", "vec",
+];
+
 impl Checker {
     // --- environments -----------------------------------------------------
 
@@ -297,16 +306,15 @@ impl Checker {
                 // If the name looks like `module.func` and matches a known
                 // stdlib pattern, suggest adding the import.
                 if let Some((module, _func)) = name.split_once('.') {
-                    let std_module = match module {
-                        "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time"
-                        | "sqlz" | "db" => Some(module.to_string()),
+                    let std_module = if KNOWN_STD_MODULES.contains(&module) {
+                        Some(module.to_string())
+                    } else {
                         // Generalized: any other std module present in the
-                        // seed (`std.M.*` keys), not just the hardcoded list.
-                        _ => self
-                            .funcs
+                        // seed (`std.M.*` keys), not just the table above.
+                        self.funcs
                             .keys()
                             .any(|k| k.starts_with(&format!("std.{module}.")))
-                            .then(|| module.to_string()),
+                            .then(|| module.to_string())
                     };
                     if let Some(mod_name) = std_module {
                         let import_stmt = format!("import std.{mod_name}");
@@ -424,6 +432,23 @@ impl Checker {
                 }
             }
             let mut diag = error_at(format!("undefined variable `{joined}`"), span);
+            // Unimported-but-known std module root (`math.sin` without
+            // `import std.math`): suggest the import alongside any typo
+            // hint below. Reaching here means the root did not resolve,
+            // so a known module name is necessarily unimported. Attached
+            // before the typo branches because the dotted branch returns
+            // early.
+            if parts.len() >= 2 && KNOWN_STD_MODULES.contains(&parts[0].as_str()) {
+                let import_stmt = format!("import std.{}", parts[0]);
+                diag = diag.with_note(format!(
+                    "add `{import_stmt}` at the top of the file to use `{joined}`"
+                ));
+                diag = diag.with_fixit(FixIt::safe(
+                    Span::new(0, 0),
+                    format!("{import_stmt}\n"),
+                    "add import",
+                ));
+            }
             // Dotted paths (`env.tmp_dir`) match segment-wise first:
             // whole-string Levenshtein drowns a 1-char tail typo in the
             // shared prefix. Falls back to root-name suggestions.
