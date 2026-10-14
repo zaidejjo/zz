@@ -62,6 +62,7 @@ Only C-ABI-safe types are permitted in plugin functions:
 | `float` | `double` | 64-bit float |
 | `bool` | `bool` | |
 | `str` | `const char *` | Borrowed for the call only (NUL-terminated, same `zz_str_cptr(v.s)` convention stdlib natives use); the C side must not retain it. Not allowed as a return type |
+| `bytes` | `const uint8_t *` + `size_t` | Borrowed window into the buffer (no copy, no NUL termination — interior NULs are visible); one ZZ param becomes two C params `(ptr, len)`. The C side must not retain either half. Empty views pass a valid pointer with length 0 |
 | `*const void` | `const void*` | Opaque pointer (read-only) |
 | `*mut void` | `void*` | Opaque pointer (mutable) |
 | `void` | (no return) | Functions returning nothing |

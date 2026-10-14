@@ -17,6 +17,9 @@
 //! - `Bool` ⇄ `bool`
 //! - `Str` → `const char *` via `zz_str_cptr` (borrowed for the call only;
 //!   the C side must not retain it)
+//! - `Bytes` → `const uint8_t *` + `size_t` (borrowed window, no copy, no
+//!   NUL; materialized through a temp so side-effecting args evaluate
+//!   once; the C side must not retain either half)
 //! - `*mut void` ⇄ `void *`, `*const void` ⇄ `const void *` (opaque only;
 //!   handles cross as `(void *)(intptr_t)<int>`)
 //! - `Void`/`Unit` returns lower to `(call, zz_unit())`
@@ -61,6 +64,18 @@ fn c_abi_type(ty: &zz_checker::Type) -> Option<&'static str> {
     }
 }
 
+/// Map one checker type to its C declaration types for extern calls.
+/// Most types are one C param; `Bytes` is two (`const uint8_t *` + `size_t`,
+/// the borrowed view from #234). Returns `None` for types that cannot
+/// cross the boundary. (`uint8_t`/`size_t` come from the prelude's
+/// `<stdint.h>`/`<stddef.h>`, already included for `int64_t`.)
+fn c_abi_types(ty: &zz_checker::Type) -> Option<Vec<&'static str>> {
+    match ty {
+        zz_checker::Type::Bytes => Some(vec!["const uint8_t *", "size_t"]),
+        other => c_abi_type(other).map(|t| vec![t]),
+    }
+}
+
 /// Map an extern signature to C declaration types: `(return, params)`.
 /// Returns `None` when any type cannot cross the boundary; callers fall
 /// back to `zz_unit()` in that case.
@@ -78,7 +93,7 @@ pub(super) fn extern_c_sig(sig: &zz_checker::FuncSig) -> Option<(String, Vec<Str
             zz_checker::Type::Void | zz_checker::Type::Unit => return None,
             _ => {}
         }
-        params.push(c_abi_type(ty)?.to_string());
+        params.extend(c_abi_types(ty)?.iter().map(|s| s.to_string()));
     }
     Some((ret, params))
 }
@@ -132,11 +147,11 @@ impl Lowerer {
         let mut parts: Vec<String> = Vec::with_capacity(args.len());
         for (arg, (_, pty)) in args.iter().zip(sig.params.iter()) {
             let emitted = self.emit_expr(arg, names, out);
-            let Some(conv) = self.extern_arg_conv(arg, &emitted, names, pty) else {
+            let Some(convs) = self.extern_arg_conv(arg, &emitted, names, out, pty) else {
                 *self.void_context.borrow_mut() = saved_void;
                 return "zz_unit()".to_string();
             };
-            parts.push(conv);
+            parts.extend(convs);
         }
         *self.void_context.borrow_mut() = saved_void;
 
@@ -152,33 +167,49 @@ impl Lowerer {
         }
     }
 
-    /// Convert one already-emitted argument to its C parameter type.
-    /// Returns `None` when the parameter type cannot cross the boundary.
+    /// Convert one already-emitted argument to its C parameter type(s).
+    /// Most types are one C expression; `bytes` is two (ptr + len) and
+    /// materializes the value into a temp first so side-effecting
+    /// arguments evaluate exactly once. Returns `None` when the
+    /// parameter type cannot cross the boundary.
     fn extern_arg_conv(
         &self,
         arg: &Expr,
         emitted: &str,
-        names: &NameCtx,
+        names: &mut NameCtx,
+        out: &mut String,
         pty: &zz_checker::Type,
-    ) -> Option<String> {
+    ) -> Option<Vec<String>> {
         match pty {
-            zz_checker::Type::Int => Some(self.extern_unbox(arg, emitted, names, "int64_t")),
-            zz_checker::Type::Float => Some(self.extern_unbox(arg, emitted, names, "double")),
-            zz_checker::Type::Bool => Some(self.extern_unbox(arg, emitted, names, "bool")),
+            zz_checker::Type::Int => Some(vec![self.extern_unbox(arg, emitted, names, "int64_t")]),
+            zz_checker::Type::Float => Some(vec![self.extern_unbox(arg, emitted, names, "double")]),
+            zz_checker::Type::Bool => Some(vec![self.extern_unbox(arg, emitted, names, "bool")]),
             // Strings cross borrowed for the call only, reusing the
             // native convention (`zz_str_cptr(v.s)`); the C side must
             // not retain the pointer. Non-boxed shapes (literals lower
             // as `zz_str_static(...)`) and boxed values both expose `.s`.
-            zz_checker::Type::Str => Some(format!("zz_str_cptr(({emitted}).s)")),
+            zz_checker::Type::Str => Some(vec![format!("zz_str_cptr(({emitted}).s)")]),
+            // Borrowed byte view (#234): pointer + length into the
+            // buffer, no copy, no NUL. The temp keeps one evaluation
+            // for side-effecting arguments; the C side must not retain
+            // either half (same contract as borrowed `str`).
+            zz_checker::Type::Bytes => {
+                let tmp = names.fresh("__extbytes");
+                out.push_str(&format!("    zz_value {tmp} = {emitted};\n"));
+                Some(vec![
+                    format!("(const uint8_t *)(({tmp}).bytes->buf->data + ({tmp}).bytes->off)"),
+                    format!("(({tmp}).bytes->len)"),
+                ])
+            }
             zz_checker::Type::Ptr { mutable, inner } => {
                 if !matches!(inner.as_ref(), zz_checker::Type::Void) {
                     return None;
                 }
                 let raw = self.extern_unbox(arg, emitted, names, "int64_t");
                 if *mutable {
-                    Some(format!("(void *)(intptr_t)({raw})"))
+                    Some(vec![format!("(void *)(intptr_t)({raw})")])
                 } else {
-                    Some(format!("(const void *)(intptr_t)({raw})"))
+                    Some(vec![format!("(const void *)(intptr_t)({raw})")])
                 }
             }
             _ => None,
@@ -356,6 +387,17 @@ mod tests {
         let (ret, params) = extern_c_sig(&s).unwrap();
         assert_eq!(ret, "int64_t");
         assert_eq!(params, vec!["int64_t", "double"]);
+    }
+
+    #[test]
+    fn bytes_param_maps_to_ptr_plus_len() {
+        let s = sig(
+            vec![("buf", zz_checker::Type::Bytes)],
+            zz_checker::Type::Int,
+        );
+        let (ret, params) = extern_c_sig(&s).unwrap();
+        assert_eq!(ret, "int64_t");
+        assert_eq!(params, vec!["const uint8_t *", "size_t"]);
     }
 
     #[test]

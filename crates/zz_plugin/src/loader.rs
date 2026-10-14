@@ -35,7 +35,9 @@ pub const CURRENT_C_ABI_VERSION: u32 = zz_runtime::c_abi::C_ABI_VERSION;
 
 /// Map a manifest signature to its C-ABI descriptor. Only the scalar
 /// subset travels directly (`int`/`float`/`str` params, `int`/`float`/`void`
-/// returns); anything else is an actionable load error, never UB.
+/// returns) plus borrowed `bytes` views (one ZZ arg → `*const u8` + `usize`
+/// C params, no copy, no NUL — the C side must not retain the pointer);
+/// anything else is an actionable load error, never UB.
 fn c_sig_of(
     params: &[(String, zz_checker::Type)],
     ret: &zz_checker::Type,
@@ -47,9 +49,10 @@ fn c_sig_of(
             Type::Int => zz_runtime::c_abi::CParam::Int,
             Type::Float => zz_runtime::c_abi::CParam::Float,
             Type::Str => zz_runtime::c_abi::CParam::Str,
+            Type::Bytes => zz_runtime::c_abi::CParam::Bytes,
             other => {
                 return Err(format!(
-                    "parameter `{name}` has non-C type `{other}` (C plugins take int/float/str only)"
+                    "parameter `{name}` has non-C type `{other}` (C plugins take int/float/str/bytes only)"
                 ));
             }
         });
@@ -317,6 +320,15 @@ mod tests {
             c_sig_of(&params, &ret).unwrap().ret,
             zz_runtime::c_abi::CRet::Void
         );
+    }
+
+    #[test]
+    fn test_c_sig_bytes_param() {
+        use zz_checker::Type;
+        let (params, ret) = sig(vec![("buf", Type::Bytes)], Type::Int);
+        let csig = c_sig_of(&params, &ret).unwrap();
+        assert_eq!(csig.params, vec![zz_runtime::c_abi::CParam::Bytes]);
+        assert_eq!(csig.ret, zz_runtime::c_abi::CRet::Int);
     }
 
     #[test]
