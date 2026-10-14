@@ -13,6 +13,13 @@ use super::op::Op;
 pub struct Chunk {
     pub code: Vec<Op>,
     pub constants: Vec<Value>,
+    /// File label this chunk was compiled from (`None` = unattributed:
+    /// stdlib, `.zzc` loads, REPL snippets). Stamped post-compile by
+    /// `Interp::register_coverage_chunk`; see `crate::coverage`.
+    pub source: Option<Arc<str>>,
+    /// Dense coverage id per opcode, parallel to `code`/`spans`
+    /// (`COV_UNMAPPED` = skip). Filled by `register_coverage_chunk`.
+    pub cov_ids: Vec<u32>,
     /// Parameter list when this chunk is a function body (empty otherwise).
     pub params: Vec<Param>,
     /// Source span for each opcode. Same length as `code`.
@@ -45,6 +52,8 @@ impl Chunk {
         Chunk {
             code: Vec::new(),
             constants: Vec::new(),
+            source: None,
+            cov_ids: Vec::new(),
             params: Vec::new(),
             spans: Vec::new(),
             toplevel_slots: Vec::new(),

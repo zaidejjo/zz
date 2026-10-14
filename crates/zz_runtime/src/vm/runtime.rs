@@ -281,6 +281,12 @@ impl Vm {
         let mut cached_code: *const Vec<Op>;
         let mut cached_constants: *const Vec<Value>;
         let mut ip: usize;
+        // Coverage: parallel span-id array + resolved file index for the
+        // current frame's chunk (`usize::MAX` = skip: unattributed chunk
+        // or coverage disabled). Re-resolved per frame change; the per-op
+        // hook then costs one integer compare when disabled.
+        let mut cached_cov_ids: *const Vec<u32>;
+        let mut cached_cov_file: usize;
 
         // Re-cache from the current top frame (after any frame push/pop).
         macro_rules! re_cache {
@@ -290,6 +296,15 @@ impl Vm {
                 cached_code = &c.code;
                 cached_constants = &c.constants;
                 ip = f.ip;
+                cached_cov_ids = &c.cov_ids;
+                cached_cov_file = match &interp.coverage {
+                    Some(cov) => c
+                        .source
+                        .as_deref()
+                        .and_then(|label| cov.file_index(label))
+                        .unwrap_or(usize::MAX),
+                    None => usize::MAX,
+                };
             }};
         }
 
@@ -428,6 +443,20 @@ impl Vm {
             let op = &code[ip];
             ip += 1;
             // NO frame.ip write-back here — ip lives in a register.
+            // Coverage: one integer compare when disabled; two array reads
+            // plus a counter bump when recording (see `crate::coverage`).
+            if cached_cov_file != usize::MAX {
+                let ids: &Vec<u32> = unsafe { &*cached_cov_ids };
+                if let Some(&id) = ids.get(ip - 1) {
+                    if id != crate::coverage::COV_UNMAPPED {
+                        if let Some(cov) = interp.coverage.as_mut() {
+                            if let Some(h) = cov.hits.get_mut(id as usize) {
+                                *h += 1;
+                            }
+                        }
+                    }
+                }
+            }
 
             match op {
                 Op::PushConst(i) => {
