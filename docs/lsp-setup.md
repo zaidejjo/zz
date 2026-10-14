@@ -112,7 +112,7 @@ auto-format = true
 | Refactors | Extract variable (cursor on expression) and extract function (statement range) with escape analysis; placeholder names are rename-ready |
 | Manifest diagnostics | Malformed `zz.toml` surfaces as a file-level error so broken imports stop being a mystery |
 | Formatting | `zz fmt` style via `textDocument/formatting` |
-| Inlay hints | Parameter names at call sites |
+| Inlay hints | Parameter names at call sites + inferred types on unannotated bindings |
 | Semantic tokens | Syntax highlighting from the AST |
 | Folding ranges | Collapse function bodies, structs, loops |
 | Workspace symbols | Search symbols across the workspace |
