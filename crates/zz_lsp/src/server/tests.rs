@@ -717,6 +717,194 @@ async fn rename_to_same_name_is_noop() {
     assert!(edit.is_none(), "same-name rename is a no-op");
 }
 
+fn undefined_diag_for(message: &str) -> Diagnostic {
+    let raw = zz_frontend::diag::RawDiag {
+        severity: zz_frontend::diag::Severity::Error,
+        message: message.to_string(),
+        span: Some(zz_frontend::span::Span::new(0, 1)),
+        notes: vec![],
+        fixits: vec![],
+        secondary: None,
+    };
+    Diagnostic {
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 5,
+            },
+        },
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: None,
+        code_description: None,
+        source: Some("zz".to_string()),
+        message: message.to_string(),
+        related_information: None,
+        tags: None,
+        data: Some(serde_json::to_value(raw).unwrap()),
+    }
+}
+
+fn import_action_titles(actions: &[CodeActionOrCommand]) -> Vec<String> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(a) => Some(a.title.clone()),
+            _ => None,
+        })
+        .filter(|t| t.starts_with("add import"))
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_import_silent_for_member_typo() {
+    // `lib.squre` with `lib` imported is a member error, not a missing
+    // import — no matter what the workspace contains.
+    let (service, state) = setup();
+    let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+    let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+    open_and_check(&state, &lib_uri, lib_src);
+    index_test_file(&state, &lib_uri, "lib", lib_src);
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    let main_src = "import lib\nfunc main() {\n    y := lib.squre(1.0)\n    println(y)\n}\n";
+    open_and_check(&state, &main_uri, main_src);
+
+    let actions = service
+        .inner()
+        .code_action(CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: main_uri },
+            range: Range {
+                start: Position {
+                    line: 2,
+                    character: 0,
+                },
+                end: Position {
+                    line: 2,
+                    character: 20,
+                },
+            },
+            context: CodeActionContext {
+                trigger_kind: None,
+                diagnostics: vec![undefined_diag_for("undefined variable `lib.squre`")],
+                only: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        import_action_titles(&actions).is_empty(),
+        "member typos must not offer imports"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_import_silent_for_local_typo() {
+    // `prntln` matches no provider anywhere: silence, not guesses.
+    let (service, state) = setup();
+    let uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &uri, "func main() {\n    prntln(\"hi\")\n}\n");
+
+    let actions = service
+        .inner()
+        .code_action(CodeActionParams {
+            text_document: TextDocumentIdentifier { uri },
+            range: Range {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 14,
+                },
+            },
+            context: CodeActionContext {
+                trigger_kind: None,
+                diagnostics: vec![undefined_diag_for("undefined variable `prntln`")],
+                only: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        import_action_titles(&actions).is_empty(),
+        "unresolvable names must not offer imports"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_field_renames_def_label_and_typed_usages() {
+    let (service, state) = setup();
+    let uri: Url = "file:///lib.zz".parse().unwrap();
+    let src = "struct Point {\n    x: int,\n    y: int,\n}\nstruct Other {\n    x: int,\n}\np := Point{x: 1, y: 2}\nq := Other{x: 3}\na := p.x\nb := q.x\n";
+    open_and_check(&state, &uri, src);
+
+    let edit = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position {
+                    line: 1,
+                    character: 4,
+                },
+            },
+            new_name: "z".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("field rename produces edits");
+    let changes = edit.changes.expect("changes");
+    assert_eq!(changes.len(), 1, "single file touched");
+    let edits = &changes[&uri];
+    // Def site + literal label + typed usage; sibling struct untouched.
+    assert_eq!(edits.len(), 3, "def + label + usage, got: {edits:?}");
+    assert!(edits.iter().all(|e| e.new_text == "z"));
+    let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
+    assert!(lines.contains(&1), "def site renamed");
+    assert!(lines.contains(&7), "literal label renamed");
+    assert!(lines.contains(&9), "typed usage renamed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_field_collision_blocked() {
+    // `Other.y` blocks renaming `Point.x` to `y`, same file.
+    let (service, state) = setup();
+    let uri: Url = "file:///lib.zz".parse().unwrap();
+    open_and_check(
+        &state,
+        &uri,
+        "struct Point {\n    x: int,\n}\nstruct Other {\n    y: int,\n}\n",
+    );
+
+    let err = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 1,
+                    character: 4,
+                },
+            },
+            new_name: "y".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect_err("field collision must fail");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+}
+
 fn index_test_file(state: &GlobalState, uri: &Url, module: &str, src: &str) {
     let entry =
         crate::cross_file::parse_file_entry(uri.clone(), src.to_string(), module.to_string());
