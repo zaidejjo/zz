@@ -135,6 +135,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("assert_is_err", 1, assert::assert_is_err_fn),
         ("temp_dir", 1, test_helpers::test_temp_dir),
         ("free_port", 0, test_helpers::test_free_port),
+        ("assert_snapshot", 2, assert::assert_snapshot_fn),
     ] {
         m.insert(name.into(), NativeEntry { arity, f: func });
     }
@@ -180,6 +181,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.test.assert_is_err", 1, assert::assert_is_err_fn),
         ("std.test.temp_dir", 1, test_helpers::test_temp_dir),
         ("std.test.free_port", 0, test_helpers::test_free_port),
+        ("std.test.assert_snapshot", 2, assert::assert_snapshot_fn),
     ] {
         m.insert(short.into(), NativeEntry { arity, f: func });
     }

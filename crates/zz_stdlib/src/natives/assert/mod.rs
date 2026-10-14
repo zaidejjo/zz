@@ -709,3 +709,105 @@ pub(crate) fn assert_is_err_fn(
         )),
     }
 }
+
+// ── snapshot assertion (P3) ──────────────────────────────────────────
+// File-backed golden values. Directory resolution (mirrored in C twin):
+// `$ZZ_SNAPSHOTS_DIR` when set and non-empty (the `zz test` runner sets it
+// per test file), else `./snapshots` under the process CWD.
+// `$ZZ_UPDATE_SNAPSHOTS=1` writes instead of comparing.
+// Names are single components: empty, `/`, `\`, `..`, NUL rejected so a
+// snapshot can never escape its directory. Stored as raw bytes with a
+// fixed `.snap` suffix (exact-byte comparison, no normalization).
+
+pub(crate) const SNAPSHOT_ENV_DIR: &str = "ZZ_SNAPSHOTS_DIR";
+pub(crate) const SNAPSHOT_ENV_UPDATE: &str = "ZZ_UPDATE_SNAPSHOTS";
+
+fn snapshot_name_valid(name: &str) -> bool {
+    if name.is_empty() || name.len() > 128 {
+        return false;
+    }
+    if name.bytes().any(|b| b == 0 || b == b'/' || b == b'\\') {
+        return false;
+    }
+    // Reject `.`, `..`, and any `..` segment so the join stays inside.
+    if name == "." || name == ".." {
+        return false;
+    }
+    // Legit names like `v1..v2` contain `..` without being traversal, but
+    // rejecting them keeps both engines' validation trivially identical.
+    if name.contains("..") {
+        return false;
+    }
+    true
+}
+
+fn snapshot_dir() -> std::path::PathBuf {
+    match std::env::var(SNAPSHOT_ENV_DIR) {
+        Ok(v) if !v.is_empty() => std::path::PathBuf::from(v),
+        _ => std::path::PathBuf::from("snapshots"),
+    }
+}
+
+fn snapshot_update_mode() -> bool {
+    matches!(std::env::var(SNAPSHOT_ENV_UPDATE), Ok(v) if v == "1")
+}
+
+pub(crate) fn assert_snapshot_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::new(
+            "`assert_snapshot` expects 2 arguments (actual: str, name: str)",
+            span,
+        ));
+    }
+    let actual = expect_str_arg(args, 0, "assert_snapshot", span)?;
+    let name = expect_str_arg(args, 1, "assert_snapshot", span)?;
+    if !snapshot_name_valid(&name) {
+        return Err(EvalError::new(
+            "`assert_snapshot` expects a snapshot name without path separators (`/`, `\\`, `..`)",
+            span,
+        ));
+    }
+    let path = snapshot_dir().join(format!("{name}.snap"));
+    if snapshot_update_mode() {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Err(EvalError::new(
+                    format!("test.snapshot: cannot create snapshots dir: ({e})"),
+                    span,
+                ));
+            }
+        }
+        if let Err(e) = std::fs::write(&path, actual.as_bytes()) {
+            return Err(EvalError::new(
+                format!("test.snapshot: cannot write snapshot \"{name}\": ({e})"),
+                span,
+            ));
+        }
+        return Ok(Value::Unit);
+    }
+    let expected = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            return Err(EvalError::new(
+                format!("Snapshot missing: \"{name}\" (run with --update-snapshots to create)"),
+                span,
+            ));
+        }
+    };
+    if expected == actual.as_bytes() {
+        return Ok(Value::Unit);
+    }
+    let exp_str = String::from_utf8_lossy(&expected);
+    let diff = diff_values(
+        &Value::Str(exp_str.into_owned().into()),
+        &Value::Str(actual.clone().into()),
+    );
+    Err(EvalError::new(
+        format!("Assertion Failed: Snapshot mismatch for \"{name}\"\n{diff}"),
+        span,
+    ))
+}

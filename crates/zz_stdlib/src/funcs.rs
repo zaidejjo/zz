@@ -4642,6 +4642,23 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     for name in ["free_port", "std.test.free_port"] {
         m.insert(name.into(), free_port_sig.clone());
     }
+    // Snapshot assertion: file-backed golden values under a snapshots dir.
+    // Lockstep with `natives/assert::assert_snapshot_fn` + C twin.
+    let snapshot_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![
+            ("actual".to_string(), Type::Str),
+            ("name".to_string(), Type::Str),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["assert_snapshot", "std.test.assert_snapshot"] {
+        m.insert(name.into(), snapshot_sig.clone());
+    }
     let fail_sig = FuncSig {
         generics: Vec::new(),
         bounds: Vec::new(),
@@ -5060,10 +5077,12 @@ mod tests {
             "std.test.temp_dir",
             "free_port",
             "std.test.free_port",
+            "assert_snapshot",
+            "std.test.assert_snapshot",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1086);
+        assert_eq!(funcs.len(), 1088);
     }
 
     #[test]
