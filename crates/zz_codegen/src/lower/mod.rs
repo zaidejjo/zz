@@ -903,6 +903,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "assert_snapshot" | "test.assert_snapshot" | "std.test.assert_snapshot" => {
             Some("zz_assert_snapshot")
         }
+        "black_box" | "test.black_box" | "std.test.black_box" => Some("zz_black_box"),
         // Debug print preserving Option wrappers; returns its argument.
         "dbg" => Some("zz_dbg"),
         "len" => Some("zz_len"),
