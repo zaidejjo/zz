@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 mod bench_runner;
 mod build;
+mod cover;
 mod doctor;
 mod loader;
 mod pm;
@@ -65,6 +66,7 @@ USAGE:
     zz dis [<file.zzc|file.zz>]   disassemble bytecode to stable text
     zz test <file.zz | dir>       run @test-annotated functions
     zz bench <file.zz | dir>      run @bench-annotated functions and report timings
+    zz cover [<file.zz>]          run a program and report line coverage
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
@@ -480,6 +482,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("cover") => match cover::cover_command(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         // Package manager commands
         Some("init") => match pm::init(rest) {
             Ok(()) => ExitCode::SUCCESS,
@@ -848,13 +857,14 @@ fn load_vm_plugins(
 
 /// A `.zz` program ready to execute: loaded modules, HIR types, and a
 /// fully seeded interpreter (natives, consts, pure-ZZ stdlib, aliases).
-struct PreparedRun {
-    interp: Interp,
-    programs: Vec<zz_frontend::ast::Program>,
-    files: Vec<(String, String)>,
-    types: std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
-    structs: std::collections::HashMap<String, zz_checker::StructSig>,
-    enums: std::collections::HashMap<String, zz_checker::EnumSig>,
+pub(crate) struct PreparedRun {
+    pub(crate) interp: Interp,
+    pub(crate) programs: Vec<zz_frontend::ast::Program>,
+    pub(crate) files: Vec<(String, String)>,
+    pub(crate) types:
+        std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
+    pub(crate) structs: std::collections::HashMap<String, zz_checker::StructSig>,
+    pub(crate) enums: std::collections::HashMap<String, zz_checker::EnumSig>,
     funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
     entry_path: String,
     /// Threaded out for the run cache: interpreter inputs that cannot be
@@ -1006,7 +1016,7 @@ fn setup_interp(
 }
 
 /// Load, check, and seed a `.zz` program for execution.
-fn prepare_run(
+pub(crate) fn prepare_run(
     path: &str,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
@@ -1194,7 +1204,7 @@ pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
         println!("pre-compiled entry cache for instant runs");
     }
 }
-fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> String {
+pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> String {
     if source.is_empty() {
         eprintln!(
             "error: {} (bytecode span {}..{})",
@@ -1228,7 +1238,7 @@ fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> Str
 
 /// Print a non-unit program result, then auto-call `main()` when the
 /// entry namespace defines it (with script args iff it takes params).
-fn run_entry_main(
+pub(crate) fn run_entry_main(
     interp: &mut Interp,
     last: Value,
     entry_path: &str,
@@ -1541,7 +1551,11 @@ fn resolve_default_entry(usage: &str, hint: &str) -> Result<String, String> {
 
 /// Resolve the entry file for `run` / `run --native`: explicit argument
 /// wins, otherwise [`resolve_default_entry`].
-fn resolve_run_entry(path: Option<&String>, usage: &str, hint: &str) -> Result<String, String> {
+pub(crate) fn resolve_run_entry(
+    path: Option<&String>,
+    usage: &str,
+    hint: &str,
+) -> Result<String, String> {
     match path {
         Some(p) => Ok(p.clone()),
         None => resolve_default_entry(usage, hint),
