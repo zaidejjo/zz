@@ -4,6 +4,7 @@
 //! phase. The frontend stays shared between all execution modes.
 
 pub mod c_abi;
+pub mod coverage;
 pub mod env;
 pub mod eval;
 pub mod json;
@@ -12,6 +13,7 @@ pub mod runtime;
 pub mod value;
 pub mod vm;
 
+pub use coverage::{CoverageState, COV_UNMAPPED};
 pub use env::Env;
 pub use env::EnvLink;
 pub use eval::{EvalError, Interp, NativeEntry, NativeFn, SpawnHook, SPAWN_HOOK};

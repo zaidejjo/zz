@@ -72,6 +72,15 @@ pub struct Interp {
     /// miss (env, funcs, natives); this is how bare calls to *generic*
     /// functions resolve, since generics have no value binding to find.
     pub import_aliases: HashMap<String, String>,
+    /// Line-coverage state (`zz cover`). `None` = disabled (zero overhead
+    /// beyond one predictable branch per op). See `crate::coverage`.
+    pub coverage: Option<crate::coverage::CoverageState>,
+    /// File label for the next `run_typed` call, set by the CLI driver.
+    /// Consumed (taken) at the start of `run_typed`, so a label can never
+    /// leak into a later unattributed run. All chunks a module compiles
+    /// (top-level and nested function bodies, which are prebuilt at
+    /// compile time) are stamped in one post-hoc walk there.
+    pub pending_source: Option<(Arc<str>, Arc<str>)>,
 }
 
 /// Fused-spawn constructor (Phase 6): builds a green-thread task directly
@@ -119,6 +128,8 @@ impl Interp {
             reach_cache: HashMap::new(),
             task_mode: false,
             import_aliases: HashMap::new(),
+            coverage: None,
+            pending_source: None,
         }
     }
 
@@ -137,6 +148,8 @@ impl Interp {
             reach_cache: HashMap::new(),
             task_mode: false,
             import_aliases: HashMap::new(),
+            coverage: None,
+            pending_source: None,
         }
     }
 
@@ -158,6 +171,8 @@ impl Interp {
             reach_cache: HashMap::new(),
             task_mode: false,
             import_aliases: HashMap::new(),
+            coverage: None,
+            pending_source: None,
         }
     }
 
@@ -175,6 +190,45 @@ impl Interp {
         let mut this = Self::with_natives_shared(natives);
         this.env = env;
         this
+    }
+
+    /// Enable line-coverage recording on this interpreter (idempotent).
+    /// Sources and file labels are registered per `run_typed` module via
+    /// [`set_coverage_source`](Self::set_coverage_source).
+    pub fn enable_coverage(&mut self) {
+        if self.coverage.is_none() {
+            self.coverage = Some(crate::coverage::CoverageState::default());
+        }
+    }
+
+    /// Set the (label, source text) pair consumed by the next `run_typed`
+    /// call for coverage attribution. Enables coverage as a side effect.
+    /// Labels are display names (usually module paths); they are never
+    /// joined to filesystem paths inside the runtime.
+    pub fn set_coverage_source(&mut self, label: &str, source: &str) {
+        self.enable_coverage();
+        let label: Arc<str> = label.into();
+        let source: Arc<str> = source.into();
+        self.pending_source = Some((label, source));
+    }
+
+    /// Stamp a freshly compiled module chunk tree with its file label and
+    /// register every emitted span as coverable. No-op unless coverage is
+    /// enabled (stdlib and `.zzc` chunks stay unattributed).
+    pub(crate) fn register_coverage_chunk(
+        &mut self,
+        label: &str,
+        source: &str,
+        chunk: &mut crate::vm::Chunk,
+    ) {
+        if self.coverage.is_none() {
+            return;
+        }
+        let label: Arc<str> = label.into();
+        crate::coverage::stamp_chunk_tree(chunk, &label);
+        if let Some(cov) = self.coverage.as_mut() {
+            crate::coverage::fill_cov_ids(cov, &label, source, chunk);
+        }
     }
 
     /// Compile and execute a raw AST program (no type information).
@@ -219,15 +273,22 @@ impl Interp {
         structs: HashMap<String, zz_checker::StructSig>,
         enums: HashMap<String, zz_checker::EnumSig>,
     ) -> Result<Value, EvalError> {
+        // Coverage file label for this module (if any): consumed here so it
+        // can never leak into a later unattributed run.
+        let pending = self.pending_source.take();
         let native_names: Arc<std::collections::HashSet<String>> =
             Arc::new(self.natives.keys().cloned().collect());
-        let chunk = Arc::new(crate::vm::Compiler::compile_program_typed(
+        let mut chunk = crate::vm::Compiler::compile_program_typed(
             program,
             types,
             structs,
             enums,
             native_names,
-        ));
+        );
+        if let Some((label, source)) = pending {
+            self.register_coverage_chunk(&label, &source, &mut chunk);
+        }
+        let chunk = Arc::new(chunk);
         let mut vm = crate::vm::Vm::new();
         match vm.run_chunk(&chunk, self)? {
             Flow::Value(v) => Ok(v),
