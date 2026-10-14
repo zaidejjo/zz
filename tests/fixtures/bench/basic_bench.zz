@@ -31,12 +31,25 @@ func bench_math() {
     }
 }
 
+@bench(iters: 100, warmup: 10)
+func bench_black_box() {
+    x := 0
+    i := 0
+    while i < 100 {
+        x = black_box(x + i)
+        i = i + 1
+    }
+    black_box(x)
+}
+
 @setup
 func setup_module() {
+    
     
 }
 
 @teardown
 func teardown_module() {
+    
     
 }
