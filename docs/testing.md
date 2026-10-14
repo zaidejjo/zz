@@ -74,14 +74,23 @@ func double(n: int) -> int { n * 2 }
 
 - Only explicit `zz` fences are extracted; plain ``` fences stay prose.
 - The header accepts `,ignore` and `,should_panic` (same meaning as
-  `@test` metadata). Unknown options and unterminated fences are load
-  errors with file positions — never silently skipped.
+  `@test` metadata), plus:
+  - `,compile_fail` — asserts the snippet fails to parse, check, or run
+    (any error inverts into a pass; a clean pass fails). VM-only: AOT
+    compiles whole files upfront, so these report as ignored there.
+  - `,no_run` — type-checks the snippet but never executes it (reported
+    as ignored with reason `no_run doctest`).
+  - `,prelude` — shared setup, prepended to every test fence in the
+    file; never a test itself and takes no other options.
+  Unknown options, `no_run`+`compile_fail`, and unterminated fences are
+  load errors with file positions — never silently skipped.
 - Body lines starting with `#` compile but stay hidden from rendered
   docs (Rust convention); they occupy their file lines so failure
   locations stay exact.
 - Fences report as `doctest <file>#<n>` and get the file's
   `@setup`/`@teardown` like any test. Sibling references resolve
-  identically to `@test` bodies (same namespace rewriting).
+  identically to `@test` bodies (same namespace rewriting). `--json`
+  carries `"kind": "doctest"` (vs `"test"`).
 - `--no-doctests` skips running/listing them (malformed fences still
   fail the file at load). Fences inside function bodies are ignored.
 - `zz run`, `zz check`, and `zz fmt` never see synthetic tests.

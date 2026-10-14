@@ -1907,11 +1907,15 @@ fn e2e_test_doctest_names() {
     let (exit, _stdout, stderr) = run_zz_test_with(&path, &[]);
     assert_eq!(exit, 0, "doctests should exit 0.\nstderr:\n{stderr}");
     // Display names use the `doctest <stem>#<n>` convention; the ignored
-    // fence reports as ignored, never silently skipped.
+    // fence reports as ignored, never silently skipped. compile_fail
+    // inverts into a pass with its reason; no_run reports ignored.
     for expected in [
         "doctest doctests#0",
         "doctest doctests#1",
         "doctest doctests#2",
+        "doctest doctests#3",
+        "doctest doctests#4",
+        "doctest doctests#5",
     ] {
         assert!(
             stderr.contains(expected),
@@ -1919,6 +1923,32 @@ fn e2e_test_doctest_names() {
         );
     }
     assert!(stderr.contains("ignored"), "missing ignored in:\n{stderr}");
+    assert!(
+        stderr.contains("compile_fail"),
+        "missing compile_fail reason in:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no_run doctest"),
+        "missing no_run reason in:\n{stderr}"
+    );
+}
+
+#[test]
+fn e2e_test_doctest_json_kind() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("doctests.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, stdout, _stderr) = run_zz_test_with(&path, &["--json"]);
+    assert_eq!(exit, 0, "doctests --json should exit 0.\nstdout:\n{stdout}");
+    assert!(
+        stdout.contains("\"kind\": \"doctest\""),
+        "missing doctest kind in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"kind\": \"test\""),
+        "missing test kind in:\n{stdout}"
+    );
 }
 
 #[test]

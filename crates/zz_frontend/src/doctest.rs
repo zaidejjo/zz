@@ -39,17 +39,28 @@ pub struct Doctest {
     pub lines: Vec<Option<String>>,
     pub ignore: bool,
     pub should_panic: bool,
+    /// Assert the snippet fails to compile (never executed).
+    pub compile_fail: bool,
+    /// Check the snippet but never execute it.
+    pub no_run: bool,
+    /// Shared setup: prepended to every test fence in the file, never a
+    /// test itself and never named.
+    pub is_prelude: bool,
+    /// Test-only sequence (preludes excluded) driving synthetic names, so
+    /// displays read `doctest m#0, m#1` with no gaps. `usize::MAX` for
+    /// preludes (never named).
+    pub test_index: usize,
 }
 
 impl Doctest {
     /// Synthetic function name: reserved `__zz_` prefix, no dots.
     pub fn func_name(&self) -> String {
-        format!("__zz_doctest_{}", self.index)
+        format!("__zz_doctest_{}", self.test_index)
     }
 
     /// Display name used by the runner (`--filter`, output, JSON).
     pub fn display_name(&self, stem: &str) -> String {
-        format!("doctest {stem}#{}", self.index)
+        format!("doctest {stem}#{}", self.test_index)
     }
 
     /// Body text with hidden lines blanked (line count preserved).
@@ -76,18 +87,25 @@ impl Doctest {
 
     /// Generated source-text twin for the AOT harness (positions are
     /// approximate there; AOT failures carry no file:line anyway).
-    pub fn harness_func(&self) -> String {
+    /// `prelude` (already-extracted shared setup text) is inlined at the
+    /// top of the body.
+    pub fn harness_func(&self, prelude: &str) -> String {
         let mut meta = String::new();
         if self.ignore {
             meta.push_str("(ignore = true)");
         } else if self.should_panic {
             meta.push_str("(should_panic = true)");
         }
+        let body = if prelude.is_empty() {
+            self.body_text()
+        } else {
+            format!("{prelude}\n{}", self.body_text())
+        };
         format!(
             "@test{} func {}() {{\n{}\n}}\n",
             meta,
             self.func_name(),
-            self.body_text()
+            body
         )
     }
 }
@@ -97,7 +115,8 @@ impl Doctest {
 /// human-readable positions inside messages.
 pub fn extract(source: &str, path: &str) -> (Vec<Doctest>, Vec<RawDiag>) {
     let mut diags = Vec::new();
-    let mut out = Vec::new();
+    let mut out: Vec<Doctest> = Vec::new();
+    let mut test_count = 0usize;
     // Byte offset of each line start (for header spans).
     let mut line_starts: Vec<usize> = vec![0];
     for (i, b) in source.bytes().enumerate() {
@@ -126,6 +145,9 @@ pub fn extract(source: &str, path: &str) -> (Vec<Doctest>, Vec<RawDiag>) {
         let rest = rest.strip_prefix(',').unwrap_or(rest);
         let mut ignore = false;
         let mut should_panic = false;
+        let mut compile_fail = false;
+        let mut no_run = false;
+        let mut is_prelude = false;
         let mut bad_option: Option<&str> = None;
         for opt in rest.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             // Allow a single space separator too (` ```zz ignore `).
@@ -133,16 +155,35 @@ pub fn extract(source: &str, path: &str) -> (Vec<Doctest>, Vec<RawDiag>) {
                 match word {
                     "ignore" => ignore = true,
                     "should_panic" => should_panic = true,
+                    "compile_fail" => compile_fail = true,
+                    "no_run" => no_run = true,
+                    "prelude" => is_prelude = true,
                     other => bad_option = Some(other),
                 }
             }
         }
         let header_start = line_starts.get(i).copied().unwrap_or(0);
         let header_span = Span::new(header_start as u32, (header_start + lines[i].len()) as u32);
+        if no_run && compile_fail {
+            diags.push(error_at(
+                format!("doctest cannot combine `no_run` with `compile_fail` in {path}"),
+                header_span,
+            ));
+            i += 1;
+            continue;
+        }
+        if is_prelude && (ignore || should_panic || compile_fail || no_run) {
+            diags.push(error_at(
+                format!("doctest `prelude` takes no other options in {path}"),
+                header_span,
+            ));
+            i += 1;
+            continue;
+        }
         if let Some(bad) = bad_option {
             diags.push(error_at(
                 format!(
-                    "unknown doctest option `{bad}` (expected `ignore`, `should_panic`) in {path}"
+                    "unknown doctest option `{bad}` (expected `ignore`, `should_panic`, `compile_fail`, `no_run`, `prelude`) in {path}"
                 ),
                 header_span,
             ));
@@ -179,6 +220,13 @@ pub fn extract(source: &str, path: &str) -> (Vec<Doctest>, Vec<RawDiag>) {
             continue;
         }
         let index = out.len();
+        let test_index = if is_prelude {
+            usize::MAX
+        } else {
+            let n = test_count;
+            test_count += 1;
+            n
+        };
         out.push(Doctest {
             index,
             header_span,
@@ -186,6 +234,10 @@ pub fn extract(source: &str, path: &str) -> (Vec<Doctest>, Vec<RawDiag>) {
             lines: body,
             ignore,
             should_panic,
+            compile_fail,
+            no_run,
+            is_prelude,
+            test_index,
         });
         i = j + 1;
     }
@@ -224,7 +276,7 @@ mod tests {
         assert_eq!(docs.len(), 2);
         assert!(docs[0].ignore);
         assert!(!docs[1].ignore && docs[1].should_panic);
-        assert!(docs[0].harness_func().contains("@test(ignore = true)"));
+        assert!(docs[0].harness_func("").contains("@test(ignore = true)"));
     }
 
     #[test]
@@ -271,5 +323,31 @@ mod tests {
         let (docs, diags) = extract(src, "m.zz");
         assert!(docs.is_empty());
         assert!(diags.iter().any(|d| d.message.contains("unterminated")));
+    }
+
+    #[test]
+    fn new_options_and_conflicts() {
+        let src = "/// ```zz,compile_fail\n/// x\n/// ```\n\
+                   /// ```zz,no_run\n/// y\n/// ```\n\
+                   /// ```zz,prelude\n/// z\n/// ```\n";
+        let (docs, diags) = extract(src, "m.zz");
+        assert!(diags.is_empty());
+        assert_eq!(docs.len(), 3);
+        assert!(docs[0].compile_fail && !docs[0].no_run && !docs[0].is_prelude);
+        assert!(docs[1].no_run);
+        assert!(docs[2].is_prelude);
+        // Test numbering skips preludes.
+        assert_eq!(docs[0].test_index, 0);
+        assert_eq!(docs[1].test_index, 1);
+
+        let bad = "/// ```zz,no_run,compile_fail\n/// x\n/// ```\n";
+        let (_, diags) = extract(bad, "m.zz");
+        assert!(diags.iter().any(|d| d.message.contains("cannot combine")));
+
+        let bad2 = "/// ```zz,prelude,ignore\n/// x\n/// ```\n";
+        let (_, diags) = extract(bad2, "m.zz");
+        assert!(diags
+            .iter()
+            .any(|d| d.message.contains("takes no other options")));
     }
 }
