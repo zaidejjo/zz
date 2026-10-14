@@ -139,6 +139,51 @@ assert_is_err(res)
 fail("msg")
 ```
 
+## Test Helpers (`std.test`)
+
+Same rule: bare or `test.*` via `import std.test`. Both return
+`Result<_, str>` so setup failures surface with `?`/match/`unwrap`:
+
+```zz
+import std.test
+import std.fs
+
+@test
+func test_export() {
+    d := ""
+    match test.temp_dir("export") {   // unique 0700 subdir under OS temp
+        .ok(v) => d = v
+        .err(_) => fail("temp_dir failed")
+    }
+    f := "{d}/out.txt"
+    assert_is_ok(fs.write_file(f, "hi"))
+    assert(fs.exists(f))
+    assert_is_ok(fs.remove_dir_all(d))      // or in @teardown
+}
+
+@test(tag = "serial")   // free_port is TOCTOU: re-bind immediately, retry on collision
+func test_serves() {
+    port := 0
+    match test.free_port() {
+        .ok(v) => port = v
+        .err(_) => fail("free_port failed")
+    }
+    assert_gt(port, 0)
+}
+```
+
+Notes:
+
+- `temp_dir(prefix)` sanitizes the prefix to one path component (`/`, `\`
+  become `_`, `..` collapses, 64-char cap) and never escapes the temp base.
+  Dirs are per-call unique (pid + counter + nanos) so parallel tests never
+  share. Always clean up (`fs.remove_dir_all`, usually in `@teardown`).
+- `free_port()` binds `127.0.0.1:0` and closes the socket before returning.
+  Re-bind immediately; on collision retry or bind `:0` directly.
+- Env mutation: no new API — use existing `std.env.set/remove` with
+  `@test(tag = "serial")` (process-global, see `docs/test-isolation.md`).
+- HTTP: no wrapper — call `std.http.test(server, method, path, body)` directly.
+
 Failure output includes `file:line` + source snippet. Structural diffing:
 
 - Multi-line strings → Myers line diff, word-level highlight within changed lines.

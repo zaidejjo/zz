@@ -687,6 +687,11 @@ e2e_success_test!(
     "test_asserts_test.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_test_helpers_test,
+    "stdlib",
+    "test_helpers_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_range_display_test,
     "stdlib",
     "range_display_test.zz"
