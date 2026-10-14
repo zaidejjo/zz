@@ -9,6 +9,7 @@
 
 use std::process::ExitCode;
 
+mod bench_runner;
 mod build;
 mod doctor;
 mod loader;
@@ -63,6 +64,7 @@ USAGE:
                                   loads .zzc directly with no frontend)
     zz dis [<file.zzc|file.zz>]   disassemble bytecode to stable text
     zz test <file.zz | dir>       run @test-annotated functions
+    zz bench <file.zz | dir>      run @bench-annotated functions and report timings
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
@@ -465,6 +467,13 @@ fn main() -> ExitCode {
             }
         }
         Some("test") => match test_runner::test_command(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("bench") => match bench_runner::bench_command(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
