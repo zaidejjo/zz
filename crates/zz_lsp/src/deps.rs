@@ -123,7 +123,7 @@ pub fn read_dep_names(root: &Path) -> Vec<(String, Option<String>)> {
 
 /// Resolve a dependency to its package directory: manifest `path` first,
 /// then the `vendor/<dep>` link the installer creates.
-fn resolve_dep_dir(root: &Path, name: &str, path_opt: Option<&str>) -> Option<PathBuf> {
+pub fn resolve_dep_dir(root: &Path, name: &str, path_opt: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = path_opt {
         let dir = root.join(p);
         if dir.is_dir() {
@@ -138,7 +138,7 @@ fn resolve_dep_dir(root: &Path, name: &str, path_opt: Option<&str>) -> Option<Pa
 }
 
 /// Entry-file convention inside a dependency package directory.
-fn entry_in(pkg_dir: &Path, dep_name: &str) -> Option<PathBuf> {
+pub fn entry_in(pkg_dir: &Path, dep_name: &str) -> Option<PathBuf> {
     [
         pkg_dir.join("src").join("main.zz"),
         pkg_dir.join("src").join(format!("{dep_name}.zz")),

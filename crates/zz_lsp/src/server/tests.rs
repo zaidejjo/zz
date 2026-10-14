@@ -585,6 +585,138 @@ async fn execute_unknown_command_rejected() {
     assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::MethodNotFound);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn goto_selective_member_jumps_to_def() {
+    let (service, state) = setup();
+    let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+    let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+    open_and_check(&state, &lib_uri, lib_src);
+    index_test_file(&state, &lib_uri, "lib", lib_src);
+
+    let main_src = "import lib(circle)\nfunc main() {\n    y := circle(1.0)\n    println(y)\n}\n";
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &main_uri, main_src);
+
+    let def = service
+        .inner()
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: main_uri },
+                position: Position {
+                    line: 0,
+                    character: 13,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("selective member resolves");
+    match def {
+        GotoDefinitionResponse::Scalar(loc) => {
+            assert_eq!(loc.uri, lib_uri);
+            assert_eq!(loc.range.start.line, 0, "lands on the def");
+        }
+        _ => panic!("expected scalar location"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn goto_dep_path_jumps_to_package_entry() {
+    let (service, state) = setup();
+    let dir = watched_tmp("gotodep");
+    std::fs::create_dir_all(dir.join("vendor/tiny/src")).unwrap();
+    std::fs::write(
+        dir.join("zz.toml"),
+        "[package]\nname = \"proj\"\nversion = \"0.1.0\"\n\n[dependencies]\ntiny = \"^0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("vendor/tiny/src/tiny.zz"),
+        "pub func shout(name: str) -> str {\n    \"Hey {name}!\"\n}\n",
+    )
+    .unwrap();
+    state.set_root(dir.clone());
+
+    let main_uri = Url::from_file_path(dir.join("main.zz")).unwrap();
+    let main_src = "import tiny\nfunc main() {\n    println(tiny.shout(\"a\"))\n}\n";
+    open_and_check(&state, &main_uri, main_src);
+
+    let def = service
+        .inner()
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: main_uri },
+                position: Position {
+                    line: 0,
+                    character: 9,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("dep path resolves");
+    let tiny_uri = Url::from_file_path(dir.join("vendor/tiny/src/tiny.zz")).unwrap();
+    match def {
+        GotoDefinitionResponse::Scalar(loc) => {
+            assert_eq!(loc.uri, tiny_uri);
+        }
+        _ => panic!("expected scalar location"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_onto_existing_name_blocked() {
+    let (service, state) = setup();
+    let uri: Url = "file:///test.zz".parse().unwrap();
+    open_and_check(&state, &uri, "a := 1\nb := 2\nc := a + b\n");
+
+    let err = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            new_name: "b".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect_err("collision must fail");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_to_same_name_is_noop() {
+    let (service, state) = setup();
+    let uri: Url = "file:///test.zz".parse().unwrap();
+    open_and_check(&state, &uri, "a := 1\nb := a + 1\n");
+
+    let edit = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            new_name: "a".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap();
+    assert!(edit.is_none(), "same-name rename is a no-op");
+}
+
 fn index_test_file(state: &GlobalState, uri: &Url, module: &str, src: &str) {
     let entry =
         crate::cross_file::parse_file_entry(uri.clone(), src.to_string(), module.to_string());
