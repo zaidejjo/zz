@@ -68,7 +68,7 @@ impl Checker {
                     if !Self::is_c_abi_type(&ct) {
                         self.errors.push(zz_frontend::diag::error_at(
                             format!(
-                                "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, str, *const T, *mut T, void, ())",
+                                "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, str, bytes, *const T, *mut T, void, ())",
                                 name.name, p.name.name, ct
                             ),
                             p.span,
@@ -103,7 +103,7 @@ impl Checker {
                 } else if !Self::is_c_abi_type(&ct) {
                     self.errors.push(zz_frontend::diag::error_at(
                         format!(
-                            "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, str, *const T, *mut T, void, ())",
+                            "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, str, bytes, *const T, *mut T, void, ())",
                             name.name, ct
                         ),
                         t.span,
@@ -138,6 +138,8 @@ impl Checker {
         match ty {
             Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void | Type::Error => true,
             Type::Str => true,
+            // Borrowed byte views (#234).
+            Type::Bytes => true,
             Type::Ptr { inner, .. } => Self::is_c_abi_scalar(inner),
             _ => false,
         }
