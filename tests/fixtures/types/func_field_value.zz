@@ -1,4 +1,4 @@
-// features: comparison, func-call, func-typed-params, indexing, locals, print, return, string-literal, structs
+// features: closures, comparison, func-call, indexing, locals, print, return, string-literal, structs
 // E2E: bare function names as values in func-typed struct fields —
 // `Entry{run: greet}` must resolve `greet` to its Func type, exactly
 // like call arguments already do (#385: collections `Entry{name, run}`
