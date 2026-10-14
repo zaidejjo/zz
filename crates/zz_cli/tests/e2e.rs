@@ -682,6 +682,11 @@ e2e_success_test!(e2e_stdlib_vec_push_shapes, "stdlib", "vec_push_shapes.zz");
 e2e_success_test!(e2e_stdlib_clone_test, "stdlib", "clone_test.zz");
 e2e_success_test!(e2e_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
 e2e_success_test!(
+    e2e_stdlib_test_asserts_test,
+    "stdlib",
+    "test_asserts_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_range_display_test,
     "stdlib",
     "range_display_test.zz"

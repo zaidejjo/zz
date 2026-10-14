@@ -118,11 +118,24 @@ Content-hash manifest `.zz_test_cache` keyed by file mtime+hash plus import grap
 
 ## Assertions & Diffing
 
+`@test` needs no import. All asserts work bare and as `std.test.*`
+(`import std.test` only for the namespaced spelling):
+
 ```zz
-assert(cond, "msg")
+assert(cond)
 assert_eq(left, right)
 assert_ne(left, right)
 assert_approx_eq(a, b, epsilon)
+assert_contains(hay, needle)        // str, empty needle passes
+assert_starts_with(s, prefix)
+assert_ends_with(s, suffix)
+assert_len(val, n)                  // array/str/dict/bytes, chars for str
+assert_gt(a, b)                     // numeric, int+float mixed ok
+assert_lt(a, b)
+assert_is_some(opt)
+assert_is_none(opt)
+assert_is_ok(res)
+assert_is_err(res)
 fail("msg")
 ```
 
