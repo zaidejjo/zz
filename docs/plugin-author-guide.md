@@ -257,6 +257,13 @@ Docs promise "no arbitrary build scripts" — never "secure plugins".
 Treat every `[native]` dependency as code execution with C
 privileges: pin versions, review the sources, keep native deps few.
 
+`zz audit` verifies the closure: registry pins (published? hash?
+licensed?) plus, per native dep, the locked backend/tag/compiler/
+`pkg-config` record against the live machine. Compiler or system
+library drift, tampered sources, and legacy hooks fail the audit
+(hooks pass only behind `--allow-hooks`); `zz install` re-pins after
+any legitimate change.
+
 ### Legacy build hook (`build = "build.sh"`, deprecated)
 
 One-release deprecation window only. Direct-dependency hooks run

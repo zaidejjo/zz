@@ -2214,10 +2214,12 @@ fn deps_why(target: &str) -> Result<(), String> {
 }
 
 /// Handle `zz audit`: integrity of locked pins (published? hash matches?
-/// licensed? content present?). This is tamper/rot detection — not
-/// vulnerability scanning (the registry publishes no advisory feed).
+/// licensed? content present?) plus the native closure (backend identity,
+/// compiler/pkg-config drift, source tampering, hook detection). This is
+/// tamper/rot detection — not vulnerability scanning (the registry
+/// publishes no advisory feed).
 pub fn audit(args: &[String]) -> Result<(), String> {
-    let (_dir, _manifest, lock) = load_manifest_and_lock()?;
+    let (dir, manifest, lock) = load_manifest_and_lock()?;
     let lock = lock.ok_or_else(|| {
         "no zz.lock found\n\
           hint: run `zz install` first"
@@ -2228,63 +2230,69 @@ pub fn audit(args: &[String]) -> Result<(), String> {
         .iter()
         .filter(|d| d.source.starts_with("registry+"))
         .collect();
-    if locked.is_empty() {
-        println!("no registry pins to audit");
-        return Ok(());
-    }
-    let base = registry_base_from(args);
-    let client = zz_pm::remote::RegistryClient::new(&base);
-    crate::ui::header(&format!("auditing {} pins on {base}", locked.len()));
     let mut errors = 0u32;
     let mut warnings = 0u32;
-    for (i, dep) in locked.iter().enumerate() {
-        crate::ui::progress(i + 1, locked.len(), &dep.name);
-        let Some((_, name, version)) = zz_pm::remote::parse_registry_source(&dep.source) else {
-            crate::ui::warn(&format!("{}: unreadable lockfile source", dep.name));
-            warnings += 1;
-            continue;
-        };
-        let info = match client.fetch_metadata(&name) {
-            Ok(info) => info,
-            Err(e) => {
-                crate::ui::warn(&format!("{}: cannot verify ({e})", dep.name));
+    if locked.is_empty() {
+        println!("no registry pins to audit");
+    } else {
+        let base = registry_base_from(args);
+        let client = zz_pm::remote::RegistryClient::new(&base);
+        crate::ui::header(&format!("auditing {} pins on {base}", locked.len()));
+        for (i, dep) in locked.iter().enumerate() {
+            crate::ui::progress(i + 1, locked.len(), &dep.name);
+            let Some((_, name, version)) = zz_pm::remote::parse_registry_source(&dep.source) else {
+                crate::ui::warn(&format!("{}: unreadable lockfile source", dep.name));
                 warnings += 1;
                 continue;
+            };
+            let info = match client.fetch_metadata(&name) {
+                Ok(info) => info,
+                Err(e) => {
+                    crate::ui::warn(&format!("{}: cannot verify ({e})", dep.name));
+                    warnings += 1;
+                    continue;
+                }
+            };
+            if !info.metadata.versions.contains(&version) {
+                crate::ui::warn(&format!("{}@{version}: no longer published!", dep.name));
+                errors += 1;
+                continue;
             }
-        };
-        if !info.metadata.versions.contains(&version) {
-            crate::ui::warn(&format!("{}@{version}: no longer published!", dep.name));
-            errors += 1;
-            continue;
-        }
-        let expected = zz_pm::remote::expected_sha(&info, &version);
-        if !expected.is_empty() && expected != dep.hash {
-            crate::ui::warn(&format!(
-                "{}@{version}: lockfile hash does not match registry!",
-                dep.name
-            ));
-            errors += 1;
-            continue;
-        }
-        let licensed = info
-            .metadata
-            .version_details
-            .get(&version)
-            .map(|d| !d.license.is_empty())
-            .unwrap_or(false)
-            || !info.metadata.license.is_empty();
-        if !licensed {
-            crate::ui::warn(&format!("{}@{version}: no license metadata", dep.name));
-            warnings += 1;
-        }
-        if !dep.hash.is_empty() && !zz_pm::paths::cas_entry(&dep.hash).exists() {
-            crate::ui::warn(&format!(
-                "{}@{version}: content missing locally (run `zz install`)",
-                dep.name
-            ));
-            warnings += 1;
+            let expected = zz_pm::remote::expected_sha(&info, &version);
+            if !expected.is_empty() && expected != dep.hash {
+                crate::ui::warn(&format!(
+                    "{}@{version}: lockfile hash does not match registry!",
+                    dep.name
+                ));
+                errors += 1;
+                continue;
+            }
+            let licensed = info
+                .metadata
+                .version_details
+                .get(&version)
+                .map(|d| !d.license.is_empty())
+                .unwrap_or(false)
+                || !info.metadata.license.is_empty();
+            if !licensed {
+                crate::ui::warn(&format!("{}@{version}: no license metadata", dep.name));
+                warnings += 1;
+            }
+            if !dep.hash.is_empty() && !zz_pm::paths::cas_entry(&dep.hash).exists() {
+                crate::ui::warn(&format!(
+                    "{}@{version}: content missing locally (run `zz install`)",
+                    dep.name
+                ));
+                warnings += 1;
+            }
         }
     }
+    // ---- native closure -------------------------------------------------
+    // Everything that becomes machine code inside the user's process:
+    // backend identity, compiler/pkg-config drift, source tampering, and
+    // hook detection (integrity + identity — not vulnerability scanning).
+    let native_count =
+        audit_native_closure(&dir, &manifest, &lock, args, &mut errors, &mut warnings);
     if errors > 0 {
         return Err(format!(
             "audit failed: {errors} error(s), {warnings} warning(s)\n\
@@ -2294,9 +2302,221 @@ pub fn audit(args: &[String]) -> Result<(), String> {
     if warnings > 0 {
         println!("audit passed with {warnings} warning(s)");
     } else {
-        println!("audit passed: {} pins verified", locked.len());
+        println!(
+            "audit passed: {} registry pin(s), {} native dep(s) verified",
+            locked.len(),
+            native_count
+        );
     }
     Ok(())
+}
+
+/// Audit the native closure (#265): for every locked dep whose own
+/// manifest declares `[native]`, surface the build record from `zz.lock`
+/// and verify it against the current machine.
+///
+/// Per dep:
+/// - hook backend: fails unless `--allow-hooks` (same rule as install).
+/// - `cc` drift: host tag, `cc --version`, and resolved `pkg-config`
+///   versions must match the lock (drift = error, `zz install` re-pins).
+/// - source tampering: path-dep content re-hash must match the lock
+///   (build outputs excluded from hashing, same as install).
+/// - license: a missing package license warns (mirrors the registry
+///   license check).
+///
+/// Offline: never touches the network; unavailable content is a warning.
+#[allow(clippy::too_many_lines)]
+fn audit_native_closure(
+    dir: &std::path::Path,
+    manifest: &zz_pm::manifest::Manifest,
+    lock: &zz_pm::lock::Lockfile,
+    args: &[String],
+    errors: &mut u32,
+    warnings: &mut u32,
+) -> usize {
+    use zz_pm::lock::LockedDep;
+    let allow_hooks = args.iter().any(|a| a == "--allow-hooks");
+    // (dep, own manifest, content dir): `None` when the content is not
+    // available locally — warned about by the registry section above for
+    // registry pins; skipped quietly otherwise.
+    let mut native: Vec<(&LockedDep, zz_pm::manifest::Manifest)> = Vec::new();
+    for dep in &lock.deps {
+        if let Some(dep_manifest) = locked_dep_manifest(dir, manifest, dep) {
+            if dep_manifest.native.is_some() {
+                native.push((dep, dep_manifest));
+            }
+        }
+    }
+    if native.is_empty() {
+        return 0;
+    }
+    crate::ui::header(&format!("auditing {} native dep(s)", native.len()));
+    for (dep, dep_manifest) in &native {
+        let spec = dep_manifest.native.as_ref().unwrap();
+        let rec = dep.native.as_ref();
+        let is_hook = spec.build.is_some();
+        if is_hook {
+            if !allow_hooks {
+                crate::ui::warn(&format!(
+                    "{}: uses legacy [native] build hook (audit refuses hooks)\n\
+                     hint: re-run with --allow-hooks to acknowledge, or ask the maintainer to migrate to [native.build-cc]",
+                    dep.name
+                ));
+                *errors += 1;
+                continue;
+            }
+            crate::ui::warn(&format!(
+                "{}: legacy [native] hook acknowledged via --allow-hooks",
+                dep.name
+            ));
+            *warnings += 1;
+        }
+        match rec.map(|r| r.backend.as_str()) {
+            Some("cc") => {
+                let r = rec.unwrap();
+                let cc = if r.compiler.is_empty() {
+                    "-".to_string()
+                } else {
+                    r.compiler.clone()
+                };
+                let pkg = if r.pkg_config_resolved.is_empty() {
+                    "-".to_string()
+                } else {
+                    r.pkg_config_resolved.clone()
+                };
+                println!(
+                    "  {}@{}: backend=cc tag={} cc={cc} pkg-config={pkg}",
+                    dep.name, dep.version, r.tag
+                );
+                // Host/compiler/pkg-config drift against the live machine.
+                let modules = spec
+                    .build_cc
+                    .as_ref()
+                    .map(|b| b.pkg_config.clone())
+                    .unwrap_or_default();
+                let drift = zz_pm::native_build::check_native_drift(&dep.name, r, &modules);
+                for e in drift.errors {
+                    crate::ui::warn(&e);
+                    *errors += 1;
+                }
+                for w in drift.warnings {
+                    crate::ui::warn(&w);
+                    *warnings += 1;
+                }
+            }
+            Some("prebuilt") => {
+                let r = rec.unwrap();
+                println!(
+                    "  {}@{}: backend=prebuilt tag={} sha256={}",
+                    dep.name,
+                    dep.version,
+                    r.tag,
+                    short_hash(&r.artifact_sha256),
+                );
+                // Host drift via the shared checker (compiler/pkg-config
+                // are empty by design for prebuilt artifacts, so only
+                // the tag is compared).
+                let drift = zz_pm::native_build::check_native_drift(&dep.name, r, &[]);
+                for e in drift.errors {
+                    crate::ui::warn(&e);
+                    *errors += 1;
+                }
+                for w in drift.warnings {
+                    crate::ui::warn(&w);
+                    *warnings += 1;
+                }
+            }
+            Some(other) => {
+                crate::ui::warn(&format!(
+                    "{}: unknown native backend `{other}` in zz.lock",
+                    dep.name
+                ));
+                *warnings += 1;
+            }
+            None if !is_hook => {
+                crate::ui::warn(&format!(
+                    "{}: declares [native] but zz.lock has no build record (run `zz install`)",
+                    dep.name
+                ));
+                *warnings += 1;
+            }
+            None => {}
+        }
+        // Source tampering: path deps re-hash against the lock.
+        if dep.source == "path" {
+            if let Some(dep_dir) = locked_dep_dir(dir, manifest, dep) {
+                match zz_pm::hash::hash_dir(&dep_dir, &zz_pm::hash::HashOptions::default()) {
+                    Ok(current) if current != dep.hash => {
+                        crate::ui::warn(&format!(
+                            "{}: content changed (lock `{}`, now `{}`) (re-run `zz install`)",
+                            dep.name,
+                            short_hash(&dep.hash),
+                            short_hash(&current),
+                        ));
+                        *errors += 1;
+                    }
+                    Err(e) => {
+                        crate::ui::warn(&format!("{}: cannot re-hash content ({e})", dep.name));
+                        *warnings += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // License surface: flag missing package licenses.
+        if dep_manifest
+            .package
+            .license
+            .as_ref()
+            .is_none_or(|l| l.is_empty())
+        {
+            crate::ui::warn(&format!("{}: no license metadata", dep.name));
+            *warnings += 1;
+        }
+    }
+    native.len()
+}
+
+/// First 12 hex chars for log lines (full values stay in `zz.lock`).
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// Content dir of a locked dep (offline): path deps from disk (direct
+/// path or `vendor/` link), registry/git deps from the CAS. Mirrors
+/// [`locked_dep_manifest`] but returns the dir instead of the manifest.
+fn locked_dep_dir(
+    dir: &std::path::Path,
+    manifest: &zz_pm::manifest::Manifest,
+    dep: &zz_pm::lock::LockedDep,
+) -> Option<std::path::PathBuf> {
+    if dep.source == "path" {
+        let rel = match manifest.dependencies.get(&dep.name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => dir.join(&p.path),
+            _ => {
+                let linked = dir.join("vendor").join(&dep.name);
+                if linked.exists() {
+                    linked
+                } else {
+                    return None;
+                }
+            }
+        };
+        return rel.exists().then_some(rel);
+    }
+    if dep.source.starts_with("registry+") {
+        if dep.hash.is_empty() {
+            return None;
+        }
+        let entry = zz_pm::paths::cas_entry(&dep.hash);
+        return entry.exists().then_some(entry);
+    }
+    if dep.source.starts_with("git+") {
+        let commit = dep.commit.as_deref()?;
+        let entry = zz_pm::paths::cas_entry(commit);
+        return entry.exists().then_some(entry);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

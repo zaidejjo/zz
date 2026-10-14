@@ -254,6 +254,60 @@ pub fn pkg_config_flags(modules: &[String]) -> Result<(Vec<String>, Vec<String>)
     Ok((cflags, libs))
 }
 
+/// Audit verdict for one locked native build record (#265): `errors`
+/// fail `zz audit` (drift = re-run `zz install`), `warnings` do not.
+/// Probes the live machine (host tag, compiler, pkg-config) and diffs
+/// against the lock. `modules` are the manifest's `pkg_config` modules.
+pub struct NativeDrift {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+pub fn check_native_drift(
+    name: &str,
+    rec: &crate::lock::LockedNative,
+    modules: &[String],
+) -> NativeDrift {
+    let mut out = NativeDrift {
+        errors: Vec::new(),
+        warnings: Vec::new(),
+    };
+    match host_tag() {
+        Ok(host) if host != rec.tag => {
+            out.errors.push(format!(
+                "{name}: recorded for `{}` but host is `{host}` (re-run `zz install`)",
+                rec.tag
+            ));
+        }
+        Err(e) => out
+            .warnings
+            .push(format!("{name}: cannot probe host tag ({e})")),
+        _ => {}
+    }
+    if rec.backend == "cc" {
+        match probe_cc() {
+            Ok(cc) if cc.version != rec.compiler => {
+                out.errors.push(format!(
+                    "{name}: compiler drift (lock `{}`, now `{}`) (re-run `zz install`)",
+                    rec.compiler, cc.version
+                ));
+            }
+            Err(e) => out
+                .warnings
+                .push(format!("{name}: cannot probe compiler ({e})")),
+            _ => {}
+        }
+        let now = pkg_config_versions(modules);
+        if now != rec.pkg_config_resolved {
+            out.errors.push(format!(
+                "{name}: pkg-config drift (lock `{}`, now `{now}`) (re-run `zz install`)",
+                rec.pkg_config_resolved
+            ));
+        }
+    }
+    out
+}
+
 /// Resolved `pkg-config` module versions for the lock audit record:
 /// `name=version,...` sorted by name. Unresolvable modules record `?`
 /// with a warning (audit-only; the build already validated the flags).
@@ -1045,6 +1099,67 @@ mod tests {
             );
             crate::manifest::validate_platform_tag(&tag).expect("host tag valid");
         }
+    }
+
+    /// Build a `cc` record matching the live machine (no drift expected).
+    fn live_cc_record() -> crate::lock::LockedNative {
+        crate::lock::LockedNative {
+            backend: "cc".to_string(),
+            tag: host_tag().unwrap_or_default(),
+            compiler: probe_cc().map(|c| c.version).unwrap_or_default(),
+            artifact_sha256: String::new(),
+            pkg_config_resolved: pkg_config_versions(&[]),
+        }
+    }
+
+    #[test]
+    fn drift_clean_record_passes() {
+        let rec = live_cc_record();
+        let verdict = check_native_drift("toy", &rec, &[]);
+        assert!(
+            verdict.errors.is_empty(),
+            "unexpected drift errors: {:?}",
+            verdict.errors
+        );
+    }
+
+    #[test]
+    fn drift_compiler_tag_and_pkg_config_fail() {
+        let mut rec = live_cc_record();
+        rec.compiler = "cc-tampered (audit test)".to_string();
+        rec.tag = "plan9-arm64-none".to_string();
+        rec.pkg_config_resolved = "vips=9.9.9".to_string();
+        let verdict = check_native_drift("toy", &rec, &[]);
+        let joined = verdict.errors.join("\n");
+        // Compiler assertion needs a live compiler (CI and the C-plugin
+        // e2e both require one; without it the checker warns, not errors).
+        if probe_cc().is_ok() {
+            assert!(
+                joined.contains("compiler drift"),
+                "missing compiler drift: {joined}"
+            );
+        }
+        assert!(
+            joined.contains("recorded for `plan9-arm64-none`"),
+            "missing tag drift: {joined}"
+        );
+        assert!(
+            joined.contains("pkg-config drift"),
+            "missing pkg-config drift: {joined}"
+        );
+    }
+
+    #[test]
+    fn drift_prebuilt_skips_compiler_and_pkg_config() {
+        let mut rec = live_cc_record();
+        rec.backend = "prebuilt".to_string();
+        rec.compiler = String::new();
+        let verdict = check_native_drift("toy", &rec, &[]);
+        assert!(
+            verdict.errors.is_empty(),
+            "prebuilt must not check compiler/pkg-config: {:?}",
+            verdict.errors
+        );
     }
 
     #[test]

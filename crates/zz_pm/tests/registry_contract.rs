@@ -41,7 +41,10 @@ struct MockState {
 
 impl MockState {
     fn seeded() -> Self {
-        let tarball = make_tarball(&[("zz.toml", "[package]\nname = \"widget\"\n")]);
+        let tarball = make_tarball(&[(
+            "zz.toml",
+            "[package]\nname = \"widget\"\nversion = \"1.0.0\"\n",
+        )]);
         let sha256 = zz_pm::hash::hash_bytes(&tarball);
         let mut meta = HashMap::new();
         meta.insert(
@@ -450,7 +453,10 @@ fn start() -> (
 }
 
 fn publish_fixture(client: &RegistryClient, name: &str, version: &str) -> String {
-    let tarball = make_tarball(&[("zz.toml", &format!("[package]\nname = \"{name}\"\n"))]);
+    let tarball = make_tarball(&[(
+        "zz.toml",
+        &format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n"),
+    )]);
     let sha = zz_pm::hash::hash_bytes(&tarball);
     use base64::Engine as _;
     let req = PublishRequest {
