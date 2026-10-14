@@ -1,0 +1,36 @@
+// features: assert, func-call, imports, locals, match, option-result, print, string-literal, std-env, std-fs
+// E2E: assert_snapshot — match, update-mode roundtrip, multiline goldens. Self-contained via ZZ_SNAPSHOTS_DIR override.
+import std.env
+import std.fs
+import std.test
+
+func main() {
+    d := ""
+    match test.temp_dir("zz-snapfix") {
+        .ok(v) => d = v
+        .err(_) => fail("temp setup failed")
+    }
+    match env.set("ZZ_SNAPSHOTS_DIR", d) {
+        .ok(_) => assert(true)
+        .err(_) => fail("env setup failed")
+    }
+    // pre-seeded golden, bare + namespaced match
+    assert_is_ok(fs.write_file("{d}/greeting.snap", "hello world"))
+    assert_snapshot("hello world", "greeting")
+    test.assert_snapshot("hello world", "greeting")
+    // update mode writes, verify mode reads back
+    match env.set("ZZ_UPDATE_SNAPSHOTS", "1") {
+        .ok(_) => assert(true)
+        .err(_) => fail("env setup failed")
+    }
+    assert_snapshot("v2 content", "auto")
+    env.remove("ZZ_UPDATE_SNAPSHOTS")
+    assert_snapshot("v2 content", "auto")
+    // multiline golden
+    assert_is_ok(fs.write_file("{d}/multi.snap", "line1\nline2\n"))
+    assert_snapshot("line1\nline2\n", "multi")
+    // cleanup leaves no trace
+    env.remove("ZZ_SNAPSHOTS_DIR")
+    assert_is_ok(fs.remove_dir_all(d))
+    println("test_snapshot_ok")
+}

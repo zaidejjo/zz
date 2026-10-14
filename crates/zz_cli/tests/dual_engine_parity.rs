@@ -1446,6 +1446,11 @@ parity_strict!(
     "test_helpers_test.zz"
 );
 parity_strict!(
+    parity_stdlib_test_snapshot_test,
+    "stdlib",
+    "test_snapshot_test.zz"
+);
+parity_strict!(
     parity_stdlib_range_display_test,
     "stdlib",
     "range_display_test.zz"

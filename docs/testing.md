@@ -86,6 +86,7 @@ zz test --list
 | `--junit <path>` | JUnit XML for CI |
 | `--slow-threshold <ms>` | Mark passing tests slower than threshold as slow |
 | `--changed` | Only tests affected by files changed since last success (content hash, conservative) |
+| `--update-snapshots` | Write `assert_snapshot` goldens instead of comparing |
 | `-h/--help` | Help |
 
 ### Engines
@@ -184,6 +185,65 @@ Notes:
   `@test(tag = "serial")` (process-global, see `docs/test-isolation.md`).
 - HTTP: no wrapper — call `std.http.test(server, method, path, body)` directly.
 
+## Snapshot Testing
+
+`assert_snapshot(actual, name)` compares `actual` against a golden file
+(`<snapshots>/<name>.snap`, exact bytes, `.snap` appended for you):
+
+```zz
+@test
+func test_render() {
+    assert_snapshot(render_page("hi"), "homepage")
+}
+```
+
+- First run fails with `Snapshot missing: "homepage" (run with
+  `--update-snapshots` to create)`. Review, then
+  `zz test --update-snapshots` to write goldens. Re-run green.
+- Mismatch fails with a diff (Myers line diff on VM). Intentional change?
+  re-run with `--update-snapshots`, diff the `*.snap` files in git, commit.
+- Names are single components (`/`, `\`, `..` rejected) so snapshots can
+  never escape their directory.
+- Store: `<test file parent>/snapshots` under `zz test` (per file, so
+  parallel tests in one file share safely; files run sequentially).
+  Outside `zz test` (`zz run`), `$ZZ_SNAPSHOTS_DIR` wins, else `./snapshots`.
+- CI: never pass `--update-snapshots` in CI — a changed rendering must fail.
+
+## Mocks & Fakes
+
+No mock framework — ZZ func values are enough. Inject dependencies as
+function parameters; in tests pass named fakes with canned behavior:
+
+```zz
+func send_all(send: func(str) -> Result<int, str>, msgs: [str]) -> int {
+    n := 0
+    for m in msgs {
+        match send(m) {
+            .ok(_) => n = n + 1
+            .err(_) => n = n
+        }
+    }
+    n
+}
+
+func fail_on_b(m: str) -> Result<int, str> {
+    out: Result<int, str> = .ok(0)
+    match m {
+        "b" => out = .err("boom")
+        _ => out = .ok(1)
+    }
+    out
+}
+
+@test
+func test_send_all() {
+    assert_eq(send_all(fail_on_b, ["a", "b", "c"]), 2)
+}
+```
+
+Keep fakes next to the test. For time/random, pass a clock/seed parameter
+instead of calling the ambient source — deterministic tests need no mocks.
+
 Failure output includes `file:line` + source snippet. Structural diffing:
 
 - Multi-line strings → Myers line diff, word-level highlight within changed lines.
@@ -257,6 +317,7 @@ soft-timeout = false   # true = notice-only budget (legacy mode)
 seed = 42
 repeat = 1
 engine = "vm"          # or "native"
+update-snapshots = false  # true = write assert_snapshot goldens (never in CI)
 ```
 
 CLI flags always override file config. No config file is required.
