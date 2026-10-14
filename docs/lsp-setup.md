@@ -93,7 +93,9 @@ auto-format = true
 | Find references | Find all uses of a symbol (defining file + importers; fresh buffers preferred) |
 | Rename | Rename a symbol across the defining file and its importers (qualified `ns.name` keeps its qualifier) |
 | File watching | External edits to `.zz`/`zz.toml`/`zz.lock` re-index and recheck open dependents; saving a file rechecks its open dependents |
-| Code actions | Quick fixes for diagnostics (unused vars, typos) |
+| Code actions | Quick fixes for diagnostics (unused vars, typos) + auto-import for workspace and installed-package symbols |
+| Code lenses | `Run test` buttons above `@test` functions (executes `zz test --filter <name> --exact`) |
+| Manifest diagnostics | Malformed `zz.toml` surfaces as a file-level error so broken imports stop being a mystery |
 | Formatting | `zz fmt` style via `textDocument/formatting` |
 | Inlay hints | Parameter names at call sites |
 | Semantic tokens | Syntax highlighting from the AST |

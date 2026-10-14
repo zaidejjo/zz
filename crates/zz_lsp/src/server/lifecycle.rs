@@ -50,6 +50,13 @@ pub(crate) async fn handle_initialize(
             })),
             references_provider: Some(OneOf::Left(true)),
             document_highlight_provider: Some(OneOf::Left(true)),
+            code_lens_provider: Some(CodeLensOptions {
+                resolve_provider: Some(false),
+            }),
+            execute_command_provider: Some(ExecuteCommandOptions {
+                commands: vec![crate::test_lens::RUN_TEST_COMMAND.to_string()],
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            }),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
                 trigger_characters: Some(vec![".".to_string()]),

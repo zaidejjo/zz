@@ -547,6 +547,44 @@ async fn save_rechecks_open_dependents() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn code_lens_lists_tests() {
+    let (service, state) = setup();
+    let uri: Url = "file:///tests.zz".parse().unwrap();
+    let src = "@test\nfunc adds() {\n    assert_eq(1 + 1, 2)\n}\nfunc helper() -> int {\n    return 1\n}\n";
+    open_and_check(&state, &uri, src);
+
+    let lenses = service
+        .inner()
+        .code_lens(CodeLensParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("lenses");
+    assert_eq!(lenses.len(), 1, "one lens per @test");
+    let command = lenses[0].command.clone().expect("command");
+    assert_eq!(command.command, "zz.runTest");
+    assert_eq!(lenses[0].range.start.line, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_unknown_command_rejected() {
+    let (service, _) = setup();
+    let err = service
+        .inner()
+        .execute_command(ExecuteCommandParams {
+            command: "zz.nope".to_string(),
+            arguments: vec![],
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect_err("unknown command rejected");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::MethodNotFound);
+}
+
 fn index_test_file(state: &GlobalState, uri: &Url, module: &str, src: &str) {
     let entry =
         crate::cross_file::parse_file_entry(uri.clone(), src.to_string(), module.to_string());

@@ -6,6 +6,7 @@ mod lifecycle;
 mod navigation;
 mod rename;
 mod symbols;
+mod test_run;
 #[cfg(test)]
 mod tests;
 
@@ -179,6 +180,17 @@ impl LanguageServer for Backend {
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         crate::watch::handle_watched_changes(self.state.clone(), &self.client, params).await;
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        test_run::handle_code_lens(self, params).await
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        test_run::handle_execute_command(self, params).await
     }
 
     async fn shutdown(&self) -> Result<()> {

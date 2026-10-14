@@ -327,7 +327,7 @@ fn workspace_candidates(
         if imported_modules.iter().any(|m| m == module) {
             continue;
         }
-        let last_is_head = module.split('.').last().is_some_and(|last| last == head);
+        let last_is_head = module.rsplit('.').next().is_some_and(|last| last == head);
         for (item, _kind) in pub_importables(file_program) {
             if let Some(member) = member {
                 // Dotted usage: the head names the module.
@@ -399,7 +399,7 @@ fn dep_candidates(
     }
     out.truncate(MAX_IMPORT_CANDIDATES);
     // Prefer shorter (closer) module paths for stable output.
-    out.sort_by(|a, b| a.module.len().cmp(&b.module.len()));
+    out.sort_by_key(|a| a.module.len());
     out.dedup();
     out
 }
@@ -410,7 +410,7 @@ fn consider_dep_key(out: &mut Vec<ImportCandidate>, head: &str, member: Option<&
         return;
     };
     if let Some(member) = member {
-        if (module == head || module.split('.').last() == Some(head)) && item == member {
+        if (module == head || module.rsplit('.').next() == Some(head)) && item == member {
             out.push(ImportCandidate {
                 module: module.to_string(),
                 member: None,

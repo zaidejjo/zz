@@ -15,4 +15,5 @@ pub mod signature_help;
 pub mod state;
 pub mod symbol_refs;
 pub mod symbols;
+pub mod test_lens;
 pub mod watch;
