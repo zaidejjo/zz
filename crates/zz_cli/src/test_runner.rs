@@ -594,6 +594,10 @@ pub(crate) struct TestInfo {
     teardown_fn: Option<String>,
     /// If this is a parameterized case, the runtime values for this invocation.
     case_values: Option<Vec<Value>>,
+    /// Doc-test that must fail to compile or run (inverts every error into
+    /// a pass; a clean pass becomes a failure). Always `false` for
+    /// ordinary tests.
+    expect_compile_fail: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,12 +1277,13 @@ fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
         }
     }
 
-    // Synthetic doctest funcs get human display names (`doctest stem#n`);
-    // `func_name` stays the real (callable) identifier.
+    // Synthetic doctest funcs get human display names (`doctest stem#n`)
+    // and the compile_fail flag; `func_name` stays the real identifier.
     for test in tests.iter_mut() {
         if test.func_name.len() == 1 {
-            if let Some(display) = doctest_names.get(&test.func_name[0]) {
+            if let Some((display, compile_fail)) = doctest_names.get(&test.func_name[0]) {
                 test.name = display.clone();
+                test.expect_compile_fail = *compile_fail;
             }
         }
     }
@@ -1352,7 +1357,7 @@ fn doctest_rewrite_context(
 fn graft_doctests(
     loaded: &mut loader::LoadResult,
     path: &Path,
-) -> Result<std::collections::HashMap<String, String>, String> {
+) -> Result<std::collections::HashMap<String, (String, bool)>, String> {
     use zz_frontend::ast::{Block, Decorator, Expr, Ident};
     use zz_frontend::parser::parse;
 
@@ -1378,17 +1383,38 @@ fn graft_doctests(
                     .unwrap_or_default()
             });
         let (docs, mut diags) = doctest::extract(&source, &name);
-        // Parse each fence body with newline padding so spans sit on the
-        // original file lines; render against the original source, whose
-        // lines then match exactly.
-        for doc in &docs {
-            let padded = doc.padded_source();
-            let parsed = parse(&padded);
+        // File preludes (` ```zz,prelude `) compile once and prepend to
+        // every test fence in this file (hidden shared setup). Parsed with
+        // the same line-exact padding as bodies.
+        let mut prelude_stmts = Vec::new();
+        for doc in docs.iter().filter(|d| d.is_prelude) {
+            let parsed = parse(&doc.padded_source());
             diags.extend(parsed.errors);
             if diags
                 .iter()
                 .any(|d| d.severity == zz_frontend::diag::Severity::Error)
             {
+                let mut files = Files::new();
+                let id = files.add(name.clone(), source.clone());
+                eprint!("{}", render_to_string(&files, id, &diags));
+                return Err(format!("failed doctests in `{}`", path.display()));
+            }
+            prelude_stmts.extend(parsed.program.stmts);
+        }
+        // Parse each fence body with newline padding so spans sit on the
+        // original file lines; render against the original source, whose
+        // lines then match exactly.
+        for doc in docs.iter().filter(|d| !d.is_prelude) {
+            let padded = doc.padded_source();
+            let parsed = parse(&padded);
+            diags.extend(parsed.errors);
+            // A `compile_fail` fence is *supposed* to break: a parse
+            // failure becomes a runtime `fail()` stub (raised → inverted
+            // to a pass at execution); anything else is still fatal.
+            let parse_failed = diags
+                .iter()
+                .any(|d| d.severity == zz_frontend::diag::Severity::Error);
+            if parse_failed && !doc.compile_fail {
                 let mut files = Files::new();
                 let id = files.add(name.clone(), source.clone());
                 eprint!("{}", render_to_string(&files, id, &diags));
@@ -1419,6 +1445,49 @@ fn graft_doctests(
                     },
                 ));
             }
+            if doc.no_run {
+                // Check-only: reuse the ignore machinery (reported with a
+                // reason, never executed) — uniform across VM, AOT, cover.
+                named.push((
+                    Ident {
+                        name: "ignore".to_string(),
+                        span: doc.header_span,
+                    },
+                    Expr::Bool {
+                        value: true,
+                        span: doc.header_span,
+                    },
+                ));
+                named.push((
+                    Ident {
+                        name: "reason".to_string(),
+                        span: doc.header_span,
+                    },
+                    Expr::Str {
+                        value: "no_run doctest".to_string(),
+                        span: doc.header_span,
+                    },
+                ));
+            }
+            let mut stmts = prelude_stmts.clone();
+            if parse_failed {
+                // `compile_fail` body didn't parse: stand in a runtime
+                // failure so execution inverts it into a pass.
+                stmts.push(Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident {
+                        name: "fail".to_string(),
+                        span: doc.header_span,
+                    }),
+                    args: vec![Expr::Str {
+                        value: "compile_fail fence".to_string(),
+                        span: doc.header_span,
+                    }],
+                    named: Vec::new(),
+                    span: doc.header_span,
+                }));
+            } else {
+                stmts.extend(parsed.program.stmts);
+            }
             let block_span = parsed.program.span;
             let mut func = Stmt::Func {
                 name: vec![doc.func_name()],
@@ -1426,7 +1495,7 @@ fn graft_doctests(
                 params: Vec::new(),
                 ret: None,
                 body: Block {
-                    stmts: parsed.program.stmts,
+                    stmts,
                     span: block_span,
                 },
                 span: doc.header_span,
@@ -1451,7 +1520,7 @@ fn graft_doctests(
                 rw.pop_scope();
             }
             loaded.programs[i].stmts.push(func);
-            names.insert(doc.func_name(), doc.display_name(&stem));
+            names.insert(doc.func_name(), (doc.display_name(&stem), doc.compile_fail));
         }
         if !diags.is_empty() {
             let mut files = Files::new();
@@ -1535,6 +1604,7 @@ fn discover_in_stmt(stmt: &Stmt, file: &Path, module_index: usize) -> Vec<TestIn
                 setup_fn: None,
                 teardown_fn: None,
                 case_values: None,
+                expect_compile_fail: false,
             }]
         }
         Stmt::Impl {
@@ -1574,6 +1644,7 @@ fn discover_in_stmt(stmt: &Stmt, file: &Path, module_index: usize) -> Vec<TestIn
                         setup_fn: None,
                         teardown_fn: None,
                         case_values: None,
+                        expect_compile_fail: false,
                     });
                 }
             }
@@ -1733,21 +1804,34 @@ fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
     };
 
     match result {
-        Ok(Ok(())) => TestResult {
-            name: test.name.clone(),
-            file: test.file.clone(),
-            passed: true,
-            ignored: false,
-            slow: false,
-            over_budget: false,
-            reason: None,
-            duration: start.elapsed(),
-            error_msg: None,
-            stdout: String::new(),
-            retried: 0,
-        },
+        Ok(Ok(())) => {
+            // A `compile_fail` doctest that compiled AND ran clean is a
+            // failure: the snippet was supposed to break.
+            let passed = !test.expect_compile_fail;
+            let error_msg = if test.expect_compile_fail {
+                if nocapture {
+                    eprintln!("  FAILED: {}: expected compile failure", test.name);
+                }
+                Some("expected compile failure, but the snippet compiled and ran".to_string())
+            } else {
+                None
+            };
+            TestResult {
+                name: test.name.clone(),
+                file: test.file.clone(),
+                passed,
+                ignored: false,
+                slow: false,
+                over_budget: false,
+                reason: None,
+                duration: start.elapsed(),
+                error_msg,
+                stdout: String::new(),
+                retried: 0,
+            }
+        }
         Ok(Err(e)) => {
-            let passed = test.meta.should_panic;
+            let passed = test.meta.should_panic || test.expect_compile_fail;
             let error_msg = Some(e.clone());
             if !passed && nocapture {
                 eprintln!("  FAILED: {}: {e}", test.name);
@@ -1763,6 +1847,8 @@ fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
                 over_budget: false,
                 reason: if test.meta.should_panic {
                     Some("should_panic".to_string())
+                } else if test.expect_compile_fail {
+                    Some("compile_fail".to_string())
                 } else {
                     None
                 },
@@ -1781,7 +1867,7 @@ fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
                 "unknown panic".to_string()
             };
 
-            let passed = test.meta.should_panic;
+            let passed = test.meta.should_panic || test.expect_compile_fail;
             if !passed && nocapture {
                 eprintln!("  FAILED: {}: panic: {msg}", test.name);
             } else if passed && nocapture {
@@ -1797,6 +1883,8 @@ fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
                 over_budget: false,
                 reason: if test.meta.should_panic {
                     Some("should_panic".to_string())
+                } else if test.expect_compile_fail {
+                    Some("compile_fail".to_string())
                 } else {
                     None
                 },
@@ -2478,9 +2566,26 @@ fn build_aot_harness(
     let source = alias_main_imports(&source);
     // Append the doctest twins after all transforms (generated code has no
     // mains or imports to rewrite, and must not be rewritten itself).
+    // File preludes inline at the top of every twin body. `compile_fail`
+    // fences append a `fail()` stub: the real body may not compile, which
+    // would break the whole harness build — and the AOT run path reports
+    // them as ignored before any arm runs, so the stub never executes.
     let mut source = source;
-    for doc in &doctests {
-        source.push_str(&doc.harness_func());
+    let prelude_text = doctests
+        .iter()
+        .filter(|d| d.is_prelude)
+        .map(|d| d.body_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for doc in doctests.iter().filter(|d| !d.is_prelude) {
+        if doc.compile_fail {
+            source.push_str(&format!(
+                "@test func {}() {{\n    fail(\"compile_fail fence\")\n}}\n",
+                doc.func_name()
+            ));
+        } else {
+            source.push_str(&doc.harness_func(&prelude_text));
+        }
     }
     let orig_ns = file
         .file_stem()
@@ -2658,6 +2763,24 @@ fn run_aot_attempt(
             slow: false,
             over_budget: false,
             reason: test.meta.reason.clone(),
+            duration: start.elapsed(),
+            error_msg: None,
+            stdout: String::new(),
+            retried: 0,
+        };
+    }
+    // `compile_fail` doctests are VM-only: AOT compiles the whole file
+    // upfront, so a negative-compile test cannot be isolated per test.
+    // Reported as ignored (never silently skipped).
+    if test.expect_compile_fail {
+        return TestResult {
+            name: test.name.clone(),
+            file: test.file.clone(),
+            passed: true,
+            ignored: true,
+            slow: false,
+            over_budget: false,
+            reason: Some("compile_fail is VM-only".to_string()),
             duration: start.elapsed(),
             error_msg: None,
             stdout: String::new(),
@@ -3167,14 +3290,22 @@ fn print_json_results(results: &[TestResult]) -> Result<(), String> {
             .unwrap_or_else(|| "null".to_string());
 
         let comma = if i + 1 < results.len() { "," } else { "" };
+        // Doctest identity rides the display-name convention
+        // (`doctest <stem>#<n>`, set at discovery); no struct churn.
+        let kind = if r.name.starts_with("doctest ") {
+            "doctest"
+        } else {
+            "test"
+        };
 
         writeln!(
             stdout,
-            "  {{\"name\": \"{}\", \"file\": \"{}\", \"status\": \"{}\", \
+            "  {{\"name\": \"{}\", \"file\": \"{}\", \"kind\": \"{}\", \"status\": \"{}\", \
              \"duration_ms\": {}, \"attempts\": {}, \"slow\": {}, \
              \"error\": {}, \"reason\": {}, \"stdout\": \"{}\"}}{comma}",
             json_escape(&r.name),
             json_escape(&file),
+            kind,
             status,
             r.duration.as_millis(),
             r.retried + 1,
