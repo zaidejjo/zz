@@ -482,7 +482,7 @@ pub(crate) fn str_chr(
 ) -> Result<Value, EvalError> {
     let cp = expect_int(args, 0, "chr")?;
     match u32::try_from(cp).ok().and_then(char::from_u32) {
-        Some(c) => Ok(Value::Str(Box::new(c.to_string()))),
+        Some(c) => Ok(Value::Str(std::sync::Arc::new(c.to_string()))),
         None => Err(EvalError::new(
             format!(
                 "`chr` expects a Unicode scalar value (0-0x10FFFF, no surrogates), found `{cp}`"
@@ -505,9 +505,9 @@ pub(crate) fn bytes_to_str(
         match v {
             Value::Int(n) => {
                 if !(0..=255).contains(n) {
-                    return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
-                        "bytes.to_str: value {n} out of range 0-255"
-                    )))))));
+                    return Ok(Value::Result(Box::new(Err(Value::Str(
+                        std::sync::Arc::new(format!("bytes.to_str: value {n} out of range 0-255")),
+                    )))));
                 }
                 buf.push(*n as u8);
             }
@@ -520,10 +520,12 @@ pub(crate) fn bytes_to_str(
         }
     }
     match String::from_utf8(buf) {
-        Ok(s) => Ok(Value::Result(Box::new(Ok(Value::Str(Box::new(s)))))),
-        Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(Box::new(
-            "bytes.to_str: invalid UTF-8".to_string(),
-        )))))),
+        Ok(s) => Ok(Value::Result(Box::new(Ok(Value::Str(
+            std::sync::Arc::new(s),
+        ))))),
+        Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(
+            std::sync::Arc::new("bytes.to_str: invalid UTF-8".to_string()),
+        ))))),
     }
 }
 
@@ -556,19 +558,21 @@ pub(crate) fn bytes_finish(
     use crate::natives::expect_array;
     let vs = expect_array(args, 0, "bytes.finish")?;
     if vs.len() > 64 * 1024 * 1024 {
-        return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
-            "bytes.finish: length {} exceeds 67108864",
-            vs.len()
-        )))))));
+        return Ok(Value::Result(Box::new(Err(Value::Str(
+            std::sync::Arc::new(format!(
+                "bytes.finish: length {} exceeds 67108864",
+                vs.len()
+            )),
+        )))));
     }
     let mut buf = Vec::with_capacity(vs.len());
     for v in &vs {
         match v {
             Value::Int(n) => {
                 if !(0..=255).contains(n) {
-                    return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
-                        "bytes.finish: value {n} out of range 0-255"
-                    )))))));
+                    return Ok(Value::Result(Box::new(Err(Value::Str(
+                        std::sync::Arc::new(format!("bytes.finish: value {n} out of range 0-255")),
+                    )))));
                 }
                 buf.push(*n as u8);
             }

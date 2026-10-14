@@ -55,7 +55,7 @@ impl<'a> Raiser<'a> {
             Const::Bool(b) => Ok(VmValue::Bool(*b)),
             Const::Int(i) => Ok(VmValue::Int(*i)),
             Const::Float(f) => Ok(VmValue::Float(*f)),
-            Const::Str(s) => Ok(VmValue::Str(Box::new(self.str(*s)?))),
+            Const::Str(s) => Ok(VmValue::Str(std::sync::Arc::new(self.str(*s)?))),
             Const::Array(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {

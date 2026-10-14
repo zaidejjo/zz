@@ -78,11 +78,11 @@ fn ok_unit() -> Value {
 }
 
 fn ok_str(s: String) -> Value {
-    Value::Result(Box::new(Ok(Value::Str(Box::new(s)))))
+    Value::Result(Box::new(Ok(Value::Str(std::sync::Arc::new(s)))))
 }
 
 fn err_str(msg: String) -> Value {
-    Value::Result(Box::new(Err(Value::Str(Box::new(msg)))))
+    Value::Result(Box::new(Err(Value::Str(std::sync::Arc::new(msg)))))
 }
 
 fn ok_value(v: Value) -> Value {
@@ -681,7 +681,10 @@ pub(crate) fn fs_read_dir(
     let path = expect_str(args, 0, "std.fs.read_dir")?;
     run_fs(interp, span, move || match sorted_dir_entries(&path) {
         Ok(names) => ok_value(Value::Array(Box::new(
-            names.into_iter().map(|n| Value::Str(Box::new(n))).collect(),
+            names
+                .into_iter()
+                .map(|n| Value::Str(std::sync::Arc::new(n)))
+                .collect(),
         ))),
         Err(e) => fs_err("read_dir", &path, &e),
     })
@@ -735,7 +738,10 @@ pub(crate) fn fs_walk_dir(
     let path = expect_str(args, 0, "std.fs.walk_dir")?;
     run_fs(interp, span, move || match walk_sorted(&path) {
         Ok(paths) => ok_value(Value::Array(Box::new(
-            paths.into_iter().map(|p| Value::Str(Box::new(p))).collect(),
+            paths
+                .into_iter()
+                .map(|p| Value::Str(std::sync::Arc::new(p)))
+                .collect(),
         ))),
         Err(e) => fs_err("walk_dir", &path, &e),
     })
@@ -767,28 +773,28 @@ pub(crate) fn fs_stat(
                 .unwrap_or_else(|_| "0".into());
             let pairs = vec![
                 (
-                    Value::Str(Box::new("size".to_string())),
-                    Value::Str(Box::new(m.len().to_string())),
+                    Value::Str(std::sync::Arc::new("size".to_string())),
+                    Value::Str(std::sync::Arc::new(m.len().to_string())),
                 ),
                 (
-                    Value::Str(Box::new("modified_ms".to_string())),
-                    Value::Str(Box::new(modified)),
+                    Value::Str(std::sync::Arc::new("modified_ms".to_string())),
+                    Value::Str(std::sync::Arc::new(modified)),
                 ),
                 (
-                    Value::Str(Box::new("created_ms".to_string())),
-                    Value::Str(Box::new(created)),
+                    Value::Str(std::sync::Arc::new("created_ms".to_string())),
+                    Value::Str(std::sync::Arc::new(created)),
                 ),
                 (
-                    Value::Str(Box::new("is_file".to_string())),
-                    Value::Str(Box::new(m.is_file().to_string())),
+                    Value::Str(std::sync::Arc::new("is_file".to_string())),
+                    Value::Str(std::sync::Arc::new(m.is_file().to_string())),
                 ),
                 (
-                    Value::Str(Box::new("is_dir".to_string())),
-                    Value::Str(Box::new(m.is_dir().to_string())),
+                    Value::Str(std::sync::Arc::new("is_dir".to_string())),
+                    Value::Str(std::sync::Arc::new(m.is_dir().to_string())),
                 ),
                 (
-                    Value::Str(Box::new("readonly".to_string())),
-                    Value::Str(Box::new(m.permissions().readonly().to_string())),
+                    Value::Str(std::sync::Arc::new("readonly".to_string())),
+                    Value::Str(std::sync::Arc::new(m.permissions().readonly().to_string())),
                 ),
             ];
             ok_value(Value::Dict(Box::new(pairs)))
@@ -1053,7 +1059,10 @@ pub(crate) fn fs_normalize(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let p = expect_str(args, 0, "std.fs.normalize")?;
-    Ok(Value::Str(Box::new(path::normalize(&p, path_style()))))
+    Ok(Value::Str(std::sync::Arc::new(path::normalize(
+        &p,
+        path_style(),
+    ))))
 }
 
 pub(crate) fn fs_join(
@@ -1063,7 +1072,11 @@ pub(crate) fn fs_join(
 ) -> Result<Value, EvalError> {
     let a = expect_str(args, 0, "std.fs.join")?;
     let b = expect_str(args, 1, "std.fs.join")?;
-    Ok(Value::Str(Box::new(path::join(&a, &b, path_style()))))
+    Ok(Value::Str(std::sync::Arc::new(path::join(
+        &a,
+        &b,
+        path_style(),
+    ))))
 }
 
 pub(crate) fn fs_basename(
@@ -1072,7 +1085,10 @@ pub(crate) fn fs_basename(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let p = expect_str(args, 0, "std.fs.basename")?;
-    Ok(Value::Str(Box::new(path::basename(&p, path_style()))))
+    Ok(Value::Str(std::sync::Arc::new(path::basename(
+        &p,
+        path_style(),
+    ))))
 }
 
 pub(crate) fn fs_dirname(
@@ -1081,7 +1097,10 @@ pub(crate) fn fs_dirname(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let p = expect_str(args, 0, "std.fs.dirname")?;
-    Ok(Value::Str(Box::new(path::dirname(&p, path_style()))))
+    Ok(Value::Str(std::sync::Arc::new(path::dirname(
+        &p,
+        path_style(),
+    ))))
 }
 
 pub(crate) fn fs_is_absolute(
@@ -1099,5 +1118,8 @@ pub(crate) fn fs_extension(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let p = expect_str(args, 0, "std.fs.extension")?;
-    Ok(Value::Str(Box::new(path::extension(&p, path_style()))))
+    Ok(Value::Str(std::sync::Arc::new(path::extension(
+        &p,
+        path_style(),
+    ))))
 }

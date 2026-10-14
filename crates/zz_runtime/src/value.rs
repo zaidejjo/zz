@@ -282,7 +282,12 @@ pub enum Value {
     Int(i64),
     Float(f64),
     /// A heap-allocated string (thin pointer).
-    Str(Box<String>),
+    ///
+    /// `Arc<String>` shares the backing store on clone (O(1) bump);
+    /// ZZ strings are immutable through every engine path, so no
+    /// copy-on-write gate is needed — concat/slice produce fresh
+    /// values. Thin pointer keeps `Value` at 16 bytes.
+    Str(std::sync::Arc<String>),
     Bool(bool),
     Unit,
     /// `.some(v)` / `.none`.

@@ -983,6 +983,6 @@ impl Executor {
 pub(crate) fn outcome_to_value(outcome: Result<Value, String>) -> Value {
     match outcome {
         Ok(v) => v,
-        Err(msg) => Value::Result(Box::new(Err(Value::Str(Box::new(msg))))),
+        Err(msg) => Value::Result(Box::new(Err(Value::Str(std::sync::Arc::new(msg))))),
     }
 }
