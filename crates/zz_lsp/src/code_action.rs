@@ -457,7 +457,7 @@ fn module_path_for(state: &GlobalState, current_uri: &Url, uri: &Url) -> Option<
 /// Insertion range for a new import: after the trailing import block, or
 /// file top when there are no imports (never splits header comments from
 /// the code they describe... rather: never lands mid-file).
-fn import_insert_range(source: &str) -> Range {
+pub(crate) fn import_insert_range(source: &str) -> Range {
     let mut line: u32 = 0;
     for (i, text) in source.lines().enumerate() {
         let trimmed = text.trim_start();
