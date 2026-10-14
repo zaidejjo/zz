@@ -239,8 +239,11 @@ collecting what `recheck_and_publish` sends). Both sides normalize to
 (the publish path never sends those), loader file-stem qualification
 stripped on the check side — then compare per file.
 
-To add a case: drop a `.zz` file in `tests/fixtures/errors/` (or a
-known-clean file in the harness `CLEAN_FILES` list). It joins
+To add a case: drop a `.zz` file in `tests/fixtures/errors/` (error
+fixtures — e2e discovery mandates they fail at runtime), in
+`tests/fixtures/lsp_parity/` (agreement files that are not errors:
+warning-only or clean programs), or a
+known-clean file in the harness `CLEAN_FILES` list. It joins
 automatically; no registration. If the gate reports a divergence, fix
 the analysis gap; if the divergence is intentional (e.g. partial-program
 recovery), record it in `tests/fixtures/lsp_parity_allowlist.toml`

@@ -1,0 +1,30 @@
+// features: error-case, imports, selective-import, generics, print, fstrings, pub-visibility
+// PARITY (#264): top-level statements using prelude builtins (`println`,
+// `input`), a selective std import (`repeat`), a namespaced std import
+// (`math.pow`), and a generic function. Both sides must agree on exactly
+// one diagnostic: `username` is never read. Regression guard for a report
+// where the editor showed `undefined variable 'println'/'input'`,
+// `unused import`, and `unused variable 'user1'` — all stale-server
+// artifacts, unreproducible on current dev.
+import std.math
+import std.str(repeat)
+
+println(repeat(s: "Hello, world\n", n: 3))
+
+pub func area<T: Num>(width: T, height: T) {
+    return width * height
+}
+username := input("Enter your name: ")
+println(math.pow(2, 3))
+struct User {
+    id: int,
+    name: str,
+    age: int,
+}
+
+user1 := User{id: 1, name: "zaid", age: 3}
+
+println(user1)
+
+println("{1+2}")
+println("{[1+2]}")
