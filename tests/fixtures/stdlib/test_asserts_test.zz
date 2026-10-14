@@ -1,0 +1,43 @@
+// features: assert, func-call, imports, locals, print, string-literal, arrays, comparison, option-result
+// E2E: std.test pro assertions — contains/starts/ends/len/gt/lt/is_some/is_none/is_ok/is_err (bare + std.test.*).
+import std.test
+
+func main() {
+    // contains (bare + namespaced)
+    assert_contains("hello world", "world")
+    assert_contains("hello", "")
+    test.assert_contains("hello", "ell")
+    test.assert_contains("abc", "b")
+    // starts_with / ends_with
+    assert_starts_with("hello", "he")
+    assert_starts_with("hello", "")
+    test.assert_starts_with("hello", "hello")
+    assert_ends_with("hello", "lo")
+    assert_ends_with("hello", "")
+    test.assert_ends_with("hello", "hello")
+    // len: array + str (chars) + namespaced alias
+    assert_len([1, 2, 3], 3)
+    assert_len([], 0)
+    assert_len("hello", 5)
+    assert_len("héllo", 5)
+    test.assert_len([1], 1)
+    test.assert_len("abc", 3)
+    // gt / lt (int + float mixed)
+    assert_gt(2, 1)
+    assert_gt(2.5, 2)
+    assert_lt(1, 2)
+    assert_lt(2, 2.5)
+    test.assert_gt(10, 9)
+    test.assert_lt(9, 10)
+    // option
+    assert_is_some(.some(1))
+    assert_is_none(.none)
+    test.assert_is_some(.some("x"))
+    test.assert_is_none(.none)
+    // result
+    assert_is_ok(.ok(1))
+    assert_is_err(.err("boom"))
+    test.assert_is_ok(.ok("v"))
+    test.assert_is_err(.err("e"))
+    println("test_asserts_ok")
+}

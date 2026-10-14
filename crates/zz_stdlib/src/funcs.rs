@@ -4493,6 +4493,172 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     for name in ["assert_approx_eq", "std.test.assert_approx_eq"] {
         m.insert(name.into(), approx_sig.clone());
     }
+    // ── std.test pro assertions (P1) ─────────────────────────────
+    // All dual-spelling (bare + `std.test.*`), lockstep with
+    // `natives/assert`, `runtime/core.c`, `lower/native_impl`.
+    let str_pair_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![
+            ("hay".to_string(), Type::Str),
+            ("needle".to_string(), Type::Str),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    // assert_contains reuses (Str, Str) shape; starts/ends need own names
+    // for diagnostics but identical types.
+    let starts_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![
+            ("s".to_string(), Type::Str),
+            ("prefix".to_string(), Type::Str),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    let ends_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![
+            ("s".to_string(), Type::Str),
+            ("suffix".to_string(), Type::Str),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["assert_contains", "std.test.assert_contains"] {
+        m.insert(name.into(), str_pair_sig.clone());
+    }
+    for name in ["assert_starts_with", "std.test.assert_starts_with"] {
+        m.insert(name.into(), starts_sig.clone());
+    }
+    for name in ["assert_ends_with", "std.test.assert_ends_with"] {
+        m.insert(name.into(), ends_sig.clone());
+    }
+    // assert_len accepts any value (array/str/dict/bytes); runtime validates.
+    // Generic `T` keeps the checker permissive, mirrors `len`.
+    let len_sig = FuncSig {
+        generics: vec!["T".to_string()],
+        bounds: Vec::new(),
+        params: vec![
+            ("val".to_string(), Type::Named("T".to_string())),
+            ("n".to_string(), Type::Int),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["assert_len", "std.test.assert_len"] {
+        m.insert(name.into(), len_sig.clone());
+    }
+    // Numeric comparisons accept int|float (mixed ok); runtime uses to_float.
+    let cmp_sig = FuncSig {
+        generics: vec!["T".to_string(), "U".to_string()],
+        bounds: Vec::new(),
+        params: vec![
+            ("left".to_string(), Type::Named("T".to_string())),
+            ("right".to_string(), Type::Named("U".to_string())),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["assert_gt", "std.test.assert_gt"] {
+        m.insert(name.into(), cmp_sig.clone());
+    }
+    for name in ["assert_lt", "std.test.assert_lt"] {
+        m.insert(name.into(), cmp_sig.clone());
+    }
+    let opt_t = Type::Named("T".to_string());
+    let is_some_sig = FuncSig {
+        generics: vec!["T".to_string()],
+        bounds: Vec::new(),
+        params: vec![("val".to_string(), Type::Option(Box::new(opt_t.clone())))],
+        has_default: vec![false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["assert_is_some", "std.test.assert_is_some"] {
+        m.insert(name.into(), is_some_sig.clone());
+    }
+    for name in ["assert_is_none", "std.test.assert_is_none"] {
+        m.insert(name.into(), is_some_sig.clone());
+    }
+    let res_t = Type::Named("T".to_string());
+    let res_e = Type::Named("E".to_string());
+    let is_ok_sig = FuncSig {
+        generics: vec!["T".to_string(), "E".to_string()],
+        bounds: Vec::new(),
+        params: vec![(
+            "val".to_string(),
+            Type::Result(Box::new(res_t.clone()), Box::new(res_e.clone())),
+        )],
+        has_default: vec![false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["assert_is_ok", "std.test.assert_is_ok"] {
+        m.insert(name.into(), is_ok_sig.clone());
+    }
+    for name in ["assert_is_err", "std.test.assert_is_err"] {
+        m.insert(name.into(), is_ok_sig.clone());
+    }
+    // ── std.test pro helpers (P2) ──────────────────────────────
+    // Bare builtins + `std.test.*` (lockstep with `natives/test_helpers`,
+    // `runtime/core.c` `zz_test_*`, `lower/native_impl`).
+    let temp_dir_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![("prefix".to_string(), Type::Str)],
+        has_default: vec![false],
+        ret: Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["temp_dir", "std.test.temp_dir"] {
+        m.insert(name.into(), temp_dir_sig.clone());
+    }
+    let free_port_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: Vec::new(),
+        has_default: Vec::new(),
+        ret: Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["free_port", "std.test.free_port"] {
+        m.insert(name.into(), free_port_sig.clone());
+    }
+    // Snapshot assertion: file-backed golden values under a snapshots dir.
+    // Lockstep with `natives/assert::assert_snapshot_fn` + C twin.
+    let snapshot_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![
+            ("actual".to_string(), Type::Str),
+            ("name".to_string(), Type::Str),
+        ],
+        has_default: vec![false, false],
+        ret: Type::Unit,
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["assert_snapshot", "std.test.assert_snapshot"] {
+        m.insert(name.into(), snapshot_sig.clone());
+    }
     let fail_sig = FuncSig {
         generics: Vec::new(),
         bounds: Vec::new(),
@@ -4887,10 +5053,36 @@ mod tests {
             "chr",
             "str.chr",
             "std.str.chr",
+            "assert_contains",
+            "std.test.assert_contains",
+            "assert_starts_with",
+            "std.test.assert_starts_with",
+            "assert_ends_with",
+            "std.test.assert_ends_with",
+            "assert_len",
+            "std.test.assert_len",
+            "assert_gt",
+            "std.test.assert_gt",
+            "assert_lt",
+            "std.test.assert_lt",
+            "assert_is_some",
+            "std.test.assert_is_some",
+            "assert_is_none",
+            "std.test.assert_is_none",
+            "assert_is_ok",
+            "std.test.assert_is_ok",
+            "assert_is_err",
+            "std.test.assert_is_err",
+            "temp_dir",
+            "std.test.temp_dir",
+            "free_port",
+            "std.test.free_port",
+            "assert_snapshot",
+            "std.test.assert_snapshot",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1062);
+        assert_eq!(funcs.len(), 1088);
     }
 
     #[test]

@@ -580,3 +580,99 @@ fn every_funcs_key_has_a_native() {
         "stdlib_natives keys without a stdlib_funcs signature: {untyped:?}"
     );
 }
+
+/// Snapshot tests share two process-global env vars; serialize them so
+/// parallel libtest workers never interleave dir/mode settings.
+static SNAPSHOT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Env helpers for snapshot tests: the lock above serializes them, so the
+/// process-global unsafety contract holds (same as `std.env.set`).
+fn snap_set_var(k: &str, v: &std::path::Path) {
+    unsafe { std::env::set_var(k, v) };
+}
+fn snap_set_str(k: &str, v: &str) {
+    unsafe { std::env::set_var(k, v) };
+}
+fn snap_remove_var(k: &str) {
+    unsafe { std::env::remove_var(k) };
+}
+
+fn snap_str(s: &str) -> Value {
+    Value::Str(s.to_string().into())
+}
+
+fn snap_call(actual: &str, name: &str) -> Result<Value, EvalError> {
+    call("assert_snapshot", vec![snap_str(actual), snap_str(name)])
+}
+
+fn unique_snap_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "zz-snap-unit-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn snapshot_match_and_missing() {
+    let _guard = SNAPSHOT_ENV_LOCK.lock().unwrap();
+    let dir = unique_snap_dir("match");
+    snap_set_var("ZZ_SNAPSHOTS_DIR", &dir);
+    snap_remove_var("ZZ_UPDATE_SNAPSHOTS");
+    std::fs::write(dir.join("hi.snap"), "hello").unwrap();
+    assert_eq!(snap_call("hello", "hi").unwrap(), Value::Unit);
+    let err = snap_call("hello", "nope").unwrap_err();
+    assert!(
+        err.message.contains("Snapshot missing"),
+        "got {}",
+        err.message
+    );
+    snap_remove_var("ZZ_SNAPSHOTS_DIR");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn snapshot_mismatch_and_update_roundtrip() {
+    let _guard = SNAPSHOT_ENV_LOCK.lock().unwrap();
+    let dir = unique_snap_dir("mis");
+    snap_set_var("ZZ_SNAPSHOTS_DIR", &dir);
+    snap_remove_var("ZZ_UPDATE_SNAPSHOTS");
+    std::fs::write(dir.join("m.snap"), "aaa\nbbb\n").unwrap();
+    let err = snap_call("aaa\nCCC\n", "m").unwrap_err();
+    assert!(
+        err.message.contains("Snapshot mismatch"),
+        "got {}",
+        err.message
+    );
+    // Update mode writes, verify mode reads back.
+    snap_set_str("ZZ_UPDATE_SNAPSHOTS", "1");
+    assert_eq!(snap_call("fresh", "auto").unwrap(), Value::Unit);
+    assert_eq!(std::fs::read(dir.join("auto.snap")).unwrap(), b"fresh");
+    snap_remove_var("ZZ_UPDATE_SNAPSHOTS");
+    assert_eq!(snap_call("fresh", "auto").unwrap(), Value::Unit);
+    snap_remove_var("ZZ_SNAPSHOTS_DIR");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn snapshot_rejects_traversal_names() {
+    let _guard = SNAPSHOT_ENV_LOCK.lock().unwrap();
+    let dir = unique_snap_dir("trav");
+    snap_set_var("ZZ_SNAPSHOTS_DIR", &dir);
+    snap_remove_var("ZZ_UPDATE_SNAPSHOTS");
+    for bad in ["", "../x", "a/b", "a\\b", "..", ".", "v1..v2"] {
+        let err = snap_call("x", bad).unwrap_err();
+        assert!(
+            err.message.contains("without path separators"),
+            "name {bad:?} got {}",
+            err.message
+        );
+    }
+    snap_remove_var("ZZ_SNAPSHOTS_DIR");
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -86,6 +86,7 @@ zz test --list
 | `--junit <path>` | JUnit XML for CI |
 | `--slow-threshold <ms>` | Mark passing tests slower than threshold as slow |
 | `--changed` | Only tests affected by files changed since last success (content hash, conservative) |
+| `--update-snapshots` | Write `assert_snapshot` goldens instead of comparing |
 | `-h/--help` | Help |
 
 ### Engines
@@ -118,13 +119,130 @@ Content-hash manifest `.zz_test_cache` keyed by file mtime+hash plus import grap
 
 ## Assertions & Diffing
 
+`@test` needs no import. All asserts work bare and as `std.test.*`
+(`import std.test` only for the namespaced spelling):
+
 ```zz
-assert(cond, "msg")
+assert(cond)
 assert_eq(left, right)
 assert_ne(left, right)
 assert_approx_eq(a, b, epsilon)
+assert_contains(hay, needle)        // str, empty needle passes
+assert_starts_with(s, prefix)
+assert_ends_with(s, suffix)
+assert_len(val, n)                  // array/str/dict/bytes, chars for str
+assert_gt(a, b)                     // numeric, int+float mixed ok
+assert_lt(a, b)
+assert_is_some(opt)
+assert_is_none(opt)
+assert_is_ok(res)
+assert_is_err(res)
 fail("msg")
 ```
+
+## Test Helpers (`std.test`)
+
+Same rule: bare or `test.*` via `import std.test`. Both return
+`Result<_, str>` so setup failures surface with `?`/match/`unwrap`:
+
+```zz
+import std.test
+import std.fs
+
+@test
+func test_export() {
+    d := ""
+    match test.temp_dir("export") {   // unique 0700 subdir under OS temp
+        .ok(v) => d = v
+        .err(_) => fail("temp_dir failed")
+    }
+    f := "{d}/out.txt"
+    assert_is_ok(fs.write_file(f, "hi"))
+    assert(fs.exists(f))
+    assert_is_ok(fs.remove_dir_all(d))      // or in @teardown
+}
+
+@test(tag = "serial")   // free_port is TOCTOU: re-bind immediately, retry on collision
+func test_serves() {
+    port := 0
+    match test.free_port() {
+        .ok(v) => port = v
+        .err(_) => fail("free_port failed")
+    }
+    assert_gt(port, 0)
+}
+```
+
+Notes:
+
+- `temp_dir(prefix)` sanitizes the prefix to one path component (`/`, `\`
+  become `_`, `..` collapses, 64-char cap) and never escapes the temp base.
+  Dirs are per-call unique (pid + counter + nanos) so parallel tests never
+  share. Always clean up (`fs.remove_dir_all`, usually in `@teardown`).
+- `free_port()` binds `127.0.0.1:0` and closes the socket before returning.
+  Re-bind immediately; on collision retry or bind `:0` directly.
+- Env mutation: no new API — use existing `std.env.set/remove` with
+  `@test(tag = "serial")` (process-global, see `docs/test-isolation.md`).
+- HTTP: no wrapper — call `std.http.test(server, method, path, body)` directly.
+
+## Snapshot Testing
+
+`assert_snapshot(actual, name)` compares `actual` against a golden file
+(`<snapshots>/<name>.snap`, exact bytes, `.snap` appended for you):
+
+```zz
+@test
+func test_render() {
+    assert_snapshot(render_page("hi"), "homepage")
+}
+```
+
+- First run fails with `Snapshot missing: "homepage" (run with
+  `--update-snapshots` to create)`. Review, then
+  `zz test --update-snapshots` to write goldens. Re-run green.
+- Mismatch fails with a diff (Myers line diff on VM). Intentional change?
+  re-run with `--update-snapshots`, diff the `*.snap` files in git, commit.
+- Names are single components (`/`, `\`, `..` rejected) so snapshots can
+  never escape their directory.
+- Store: `<test file parent>/snapshots` under `zz test` (per file, so
+  parallel tests in one file share safely; files run sequentially).
+  Outside `zz test` (`zz run`), `$ZZ_SNAPSHOTS_DIR` wins, else `./snapshots`.
+- CI: never pass `--update-snapshots` in CI — a changed rendering must fail.
+
+## Mocks & Fakes
+
+No mock framework — ZZ func values are enough. Inject dependencies as
+function parameters; in tests pass named fakes with canned behavior:
+
+```zz
+func send_all(send: func(str) -> Result<int, str>, msgs: [str]) -> int {
+    n := 0
+    for m in msgs {
+        match send(m) {
+            .ok(_) => n = n + 1
+            .err(_) => n = n
+        }
+    }
+    n
+}
+
+func fail_on_b(m: str) -> Result<int, str> {
+    out: Result<int, str> = .ok(0)
+    match m {
+        "b" => out = .err("boom")
+        _ => out = .ok(1)
+    }
+    out
+}
+
+@test
+func test_send_all() {
+    assert_eq(send_all(fail_on_b, ["a", "b", "c"]), 2)
+}
+```
+
+Keep fakes next to the test. For time/random, pass a clock/seed parameter
+instead of calling the ambient source — deterministic tests need no mocks.
 
 Failure output includes `file:line` + source snippet. Structural diffing:
 
@@ -199,6 +317,7 @@ soft-timeout = false   # true = notice-only budget (legacy mode)
 seed = 42
 repeat = 1
 engine = "vm"          # or "native"
+update-snapshots = false  # true = write assert_snapshot goldens (never in CI)
 ```
 
 CLI flags always override file config. No config file is required.

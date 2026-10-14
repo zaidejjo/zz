@@ -1436,6 +1436,21 @@ parity_strict!(
 parity_strict!(parity_stdlib_clone_test, "stdlib", "clone_test.zz");
 parity_strict!(parity_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
 parity_strict!(
+    parity_stdlib_test_asserts_test,
+    "stdlib",
+    "test_asserts_test.zz"
+);
+parity_strict!(
+    parity_stdlib_test_helpers_test,
+    "stdlib",
+    "test_helpers_test.zz"
+);
+parity_strict!(
+    parity_stdlib_test_snapshot_test,
+    "stdlib",
+    "test_snapshot_test.zz"
+);
+parity_strict!(
     parity_stdlib_range_display_test,
     "stdlib",
     "range_display_test.zz"

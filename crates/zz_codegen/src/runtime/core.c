@@ -926,6 +926,222 @@ zz_value zz_fail(zz_value v, int *err) {
     exit(1);
 }
 
+// ---- std.test pro assertions (P1) --------------------------------------
+// Byte-identical semantics + messages to `natives/assert`. All failures
+// print `error:` prefix + exit 1 (VM raises EvalError rendered the same).
+// `s->len` is bytes; contains/starts/ends use byte comparison matching
+// Rust `str::contains/starts_with/ends_with`. Length uses char count via
+// `zz_str_char_len` matching `str.length` / VM `chars().count()`.
+
+zz_value zz_assert_contains(zz_value hay, zz_value needle, int *err) {
+    (void)err;
+    if (hay.tag != ZZ_STR || needle.tag != ZZ_STR || !hay.s || !needle.s) {
+        char *hs = zz_value_to_string(&hay);
+        char *ns = zz_value_to_string(&needle);
+        fprintf(stderr, "error: `assert_contains` expects `str` (haystack, needle), got (%s, %s)\n", hs, ns);
+        free(hs);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    const char *h = zz_str_cptr(hay.s);
+    size_t hlen = hay.s->len;
+    const char *n = zz_str_cptr(needle.s);
+    size_t nlen = needle.s->len;
+    int found = 0;
+    if (nlen == 0) {
+        found = 1;
+    } else if (nlen <= hlen) {
+        for (size_t i = 0; i + nlen <= hlen; i++) {
+            if (memcmp(h + i, n, nlen) == 0) { found = 1; break; }
+        }
+    }
+    if (found) return zz_unit();
+    char *hs = zz_value_to_string(&hay);
+    char *ns = zz_value_to_string(&needle);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to contain \"%s\"\n", hs, ns);
+    free(hs);
+    free(ns);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_starts_with(zz_value s, zz_value prefix, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || prefix.tag != ZZ_STR || !s.s || !prefix.s) {
+        char *ss = zz_value_to_string(&s);
+        char *ps = zz_value_to_string(&prefix);
+        fprintf(stderr, "error: `assert_starts_with` expects `str` (s, prefix), got (%s, %s)\n", ss, ps);
+        free(ss);
+        free(ps);
+        fflush(stderr);
+        exit(1);
+    }
+    int ok = prefix.s->len <= s.s->len &&
+        memcmp(zz_str_cptr(s.s), zz_str_cptr(prefix.s), prefix.s->len) == 0;
+    if (ok) return zz_unit();
+    char *ss = zz_value_to_string(&s);
+    char *ps = zz_value_to_string(&prefix);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to start with \"%s\"\n", ss, ps);
+    free(ss);
+    free(ps);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_ends_with(zz_value s, zz_value suffix, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || suffix.tag != ZZ_STR || !s.s || !suffix.s) {
+        char *ss = zz_value_to_string(&s);
+        char *xs = zz_value_to_string(&suffix);
+        fprintf(stderr, "error: `assert_ends_with` expects `str` (s, suffix), got (%s, %s)\n", ss, xs);
+        free(ss);
+        free(xs);
+        fflush(stderr);
+        exit(1);
+    }
+    int ok = suffix.s->len <= s.s->len &&
+        memcmp(zz_str_cptr(s.s) + s.s->len - suffix.s->len, zz_str_cptr(suffix.s), suffix.s->len) == 0;
+    if (ok) return zz_unit();
+    char *ss = zz_value_to_string(&s);
+    char *xs = zz_value_to_string(&suffix);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to end with \"%s\"\n", ss, xs);
+    free(ss);
+    free(xs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_len(zz_value v, zz_value n, int *err) {
+    (void)err;
+    if (n.tag != ZZ_INT) {
+        char *ns = zz_value_to_string(&n);
+        fprintf(stderr, "error: `assert_len` expects `int` for n, got %s\n", ns);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    if (n.i < 0) {
+        fprintf(stderr, "error: `assert_len` expects n >= 0\n");
+        fflush(stderr);
+        exit(1);
+    }
+    int64_t got = -1;
+    if (v.tag == ZZ_ARRAY && v.arr) got = (int64_t)v.arr->len;
+    else if (v.tag == ZZ_STR && v.s) got = (int64_t)zz_str_char_len(v.s);
+    else if (v.tag == ZZ_DICT && v.dict) got = (int64_t)v.dict->len;
+    else if (v.tag == ZZ_BYTES) got = (int64_t)(v.bytes ? v.bytes->len : 0);
+    if (got < 0) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: `assert_len` expects array/str/dict/bytes, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    if (got == n.i) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected length %lld, got %lld\n", (long long)n.i, (long long)got);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_gt(zz_value a, zz_value b, int *err) {
+    (void)err;
+    int bad = 0;
+    double x = zz_assert_num(a, &bad);
+    double y = zz_assert_num(b, &bad);
+    if (bad) {
+        fprintf(stderr, "error: `assert_gt` expects numeric (left, right)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    if (x > y) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected %g > %g\n", x, y);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_lt(zz_value a, zz_value b, int *err) {
+    (void)err;
+    int bad = 0;
+    double x = zz_assert_num(a, &bad);
+    double y = zz_assert_num(b, &bad);
+    if (bad) {
+        fprintf(stderr, "error: `assert_lt` expects numeric (left, right)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    if (x < y) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected %g < %g\n", x, y);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_some(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_OPTION_SOME) return zz_unit();
+    if (v.tag == ZZ_OPTION_NONE) {
+        fprintf(stderr, "error: Assertion Failed: Expected Some, got none\n");
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_some` expects `option`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_none(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_OPTION_NONE) return zz_unit();
+    if (v.tag == ZZ_OPTION_SOME) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected none, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_none` expects `option`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_ok(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_RESULT_OK) return zz_unit();
+    if (v.tag == ZZ_RESULT_ERR) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected ok, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_ok` expects `result`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_err(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_RESULT_ERR) return zz_unit();
+    if (v.tag == ZZ_RESULT_OK) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected err, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_err` expects `result`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
 zz_value zz_io_print(zz_value v, int *err) {
     (void)err;
     for (;;) {
@@ -7220,6 +7436,269 @@ zz_value zz_env_temp_dir(zz_value unused, int *err) {
     if (v && *v) return zz_str_new(v, strlen(v));
     return zz_str_static("/tmp");
 #endif
+}
+
+// ---- std.test pro helpers (P2) -----------------------------------------
+// Value convention (NOT abort): success → `.ok(v)`, failure → `.err(msg)`
+// mirroring `zz_fs_*`. Sanitization mirrors `natives/test_helpers`.
+
+static unsigned long long zz_test_counter = 0;
+
+zz_value zz_test_temp_dir(zz_value prefix, int *err) {
+    (void)err;
+    const char *pre = "";
+    size_t pre_len = 0;
+    if (prefix.tag == ZZ_STR && prefix.s) {
+        pre = zz_str_cptr(prefix.s);
+        pre_len = prefix.s->len;
+    } else if (prefix.tag != ZZ_STR) {
+        *err = 1;
+        return zz_unit();
+    }
+    // Sanitize into single component (max 64): separators/NUL → `_`.
+    char clean[65];
+    size_t cn = 0;
+    if (pre_len == 0) {
+        memcpy(clean, "zz-test", 7);
+        cn = 7;
+    } else {
+        for (size_t i = 0; i < pre_len && cn < 64; i++) {
+            char c = pre[i];
+            clean[cn++] = (c == '/' || c == '\\' || c == '\0') ? '_' : c;
+        }
+    }
+    clean[cn] = '\0';
+    // Collapse `..` runs (bounded passes: length only shrinks).
+    for (int pass = 0; pass < 4; pass++) {
+        char *dot = strstr(clean, "..");
+        if (!dot) break;
+        dot[0] = '_';
+        dot[1] = '_';
+    }
+    // Base dir (same rule as zz_env_temp_dir).
+#ifdef ZZ_OS_WINDOWS
+    char wbase[32768];
+    DWORD wn = GetTempPathA((DWORD)sizeof wbase, wbase);
+    const char *base;
+    char basebuf[32768];
+    if (wn == 0 || wn >= sizeof wbase) {
+        base = "C:\\Windows\\Temp";
+    } else {
+        while (wn > 1 && (wbase[wn - 1] == '\\' || wbase[wn - 1] == '/')) wbase[--wn] = '\0';
+        memcpy(basebuf, wbase, wn + 1);
+        base = basebuf;
+    }
+#else
+    const char *tmpd = getenv("TMPDIR");
+    const char *base = (tmpd && *tmpd) ? tmpd : "/tmp";
+#endif
+    unsigned long long seq = __atomic_fetch_add(&zz_test_counter, 1ULL, __ATOMIC_RELAXED);
+#ifdef ZZ_OS_WINDOWS
+    unsigned long long pid = (unsigned long long)GetCurrentProcessId();
+#else
+    unsigned long long pid = (unsigned long long)getpid();
+#endif
+#ifdef ZZ_OS_WINDOWS
+    unsigned long long nano = (unsigned long long)GetTickCount64() * 1000000ULL + seq;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    unsigned long long nano = (unsigned long long)ts.tv_nsec + seq;
+#endif
+    char path[4096];
+    int n = snprintf(path, sizeof path, "%s/%s-%llu-%llu-%llu", base, clean, pid, seq, nano);
+    if (n <= 0 || (size_t)n >= sizeof path) {
+        return zz_variant_err(zz_str_static("test.temp_dir:path_too_long"));
+    }
+#ifdef ZZ_OS_WINDOWS
+    int r = _mkdir(path);
+#else
+    int r = mkdir(path, 0700);
+#endif
+    if (r != 0) {
+        char buf[4128];
+        int m = snprintf(buf, sizeof buf, "test.temp_dir:io_error: %s (%s)", path, strerror(errno));
+        if (m < 0) return zz_variant_err(zz_str_static("test.temp_dir:io_error"));
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)m)));
+    }
+    return zz_variant_ok(zz_str_new(path, (size_t)n));
+}
+
+zz_value zz_test_free_port(zz_value unused, int *err) {
+    (void)unused;
+    (void)err;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return zz_variant_err(zz_str_static("test.free_port:socket"));
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        char buf[192];
+        int n = snprintf(buf, sizeof buf, "test.free_port:bind: %s", strerror(errno));
+        close(fd);
+        if (n < 0) return zz_variant_err(zz_str_static("test.free_port:bind"));
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+    }
+    socklen_t sl = sizeof sa;
+    if (getsockname(fd, (struct sockaddr *)&sa, &sl) != 0) {
+        close(fd);
+        return zz_variant_err(zz_str_static("test.free_port:addr"));
+    }
+    int port = ntohs(sa.sin_port);
+    close(fd);
+    if (port <= 0 || port > 65535) {
+        return zz_variant_err(zz_str_static("test.free_port:addr"));
+    }
+    return zz_variant_ok(zz_int((int64_t)port));
+}
+
+// ---- snapshot assertion (P3) -------------------------------------------
+// Mirrors `natives/assert::assert_snapshot_fn`: dir from $ZZ_SNAPSHOTS_DIR
+// (else `./snapshots`), update on $ZZ_UPDATE_SNAPSHOTS=1, same name rules,
+// same first-line messages. Mismatch body is a simple Left/Right pair
+// (matching the C twin convention of zz_assert_eq, not the VM Myers diff);
+// success paths are byte-identical and failure paths share the `error:`
+// prefix + exit code.
+
+static int zz_snap_name_valid(const char *s, size_t n) {
+    if (n == 0 || n > 128) return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\0' || s[i] == '/' || s[i] == '\\') return 0;
+    }
+    // Reject `.`, `..`, and anything containing `..` (keeps both engines
+    // trivially identical; legit `v1..v2` names are out of scope).
+    if ((n == 1 && s[0] == '.') || (n == 2 && s[0] == '.' && s[1] == '.')) return 0;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (s[i] == '.' && s[i + 1] == '.') return 0;
+    }
+    return 1;
+}
+
+// mkdir -p (bounded depth; tolerates EEXIST races).
+static int zz_snap_mkdir_p(const char *path) {
+    char tmp[4096];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof tmp) return -1;
+    memcpy(tmp, path, len + 1);
+    for (size_t i = 1; i <= len; i++) {
+        if (tmp[i] == '/' || tmp[i] == '\\' || tmp[i] == '\0') {
+            char save = tmp[i];
+            tmp[i] = '\0';
+            if (strlen(tmp) > 0) {
+#ifdef ZZ_OS_WINDOWS
+                _mkdir(tmp);
+#else
+                if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+#endif
+            }
+            tmp[i] = save;
+        }
+    }
+    return 0;
+}
+
+zz_value zz_assert_snapshot(zz_value actual, zz_value name, int *err) {
+    (void)err;
+    if (actual.tag != ZZ_STR || !actual.s || name.tag != ZZ_STR || !name.s) {
+        char *as = zz_value_to_string(&actual);
+        char *ns = zz_value_to_string(&name);
+        fprintf(stderr, "error: `assert_snapshot` expects `str` (actual, name), got (%s, %s)\n", as, ns);
+        free(as);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    const char *nptr = zz_str_cptr(name.s);
+    size_t nlen = name.s->len;
+    if (!zz_snap_name_valid(nptr, nlen)) {
+        fprintf(stderr, "error: `assert_snapshot` expects a snapshot name without path separators (`/`, `\\`, `..`)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    char namebuf[129];
+    memcpy(namebuf, nptr, nlen);
+    namebuf[nlen] = '\0';
+    const char *dir = getenv("ZZ_SNAPSHOTS_DIR");
+    if (!dir || !*dir) dir = "snapshots";
+    char path[4352];
+    int pn = snprintf(path, sizeof path, "%s/%s.snap", dir, namebuf);
+    if (pn <= 0 || (size_t)pn >= sizeof path) {
+        fprintf(stderr, "error: test.snapshot: snapshot path too long\n");
+        fflush(stderr);
+        exit(1);
+    }
+    const char *upd = getenv("ZZ_UPDATE_SNAPSHOTS");
+    const char *abuf = zz_str_cptr(actual.s);
+    size_t alen = actual.s->len;
+    if (upd && strcmp(upd, "1") == 0) {
+        // Split dir for mkdir (path is "<dir>/<name>.snap").
+        char dbuf[4224];
+        size_t dn = (size_t)pn - (nlen + 6);
+        if (dn >= sizeof dbuf) {
+            fprintf(stderr, "error: test.snapshot: snapshot path too long\n");
+            fflush(stderr);
+            exit(1);
+        }
+        memcpy(dbuf, path, dn);
+        dbuf[dn] = '\0';
+        if (zz_snap_mkdir_p(dbuf) != 0) {
+            fprintf(stderr, "error: test.snapshot: cannot create snapshots dir\n");
+            fflush(stderr);
+            exit(1);
+        }
+        FILE *f = fopen(path, "wb");
+        if (!f) {
+            fprintf(stderr, "error: test.snapshot: cannot write snapshot \"%s\"\n", namebuf);
+            fflush(stderr);
+            exit(1);
+        }
+        if (alen > 0 && fwrite(abuf, 1, alen, f) != alen) {
+            fclose(f);
+            fprintf(stderr, "error: test.snapshot: cannot write snapshot \"%s\"\n", namebuf);
+            fflush(stderr);
+            exit(1);
+        }
+        fclose(f);
+        return zz_unit();
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: Snapshot missing: \"%s\" (run with --update-snapshots to create)\n", namebuf);
+        fflush(stderr);
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    char *exp = (char *)malloc((size_t)sz + 1);
+    if (!exp) {
+        fclose(f);
+        fprintf(stderr, "error: test.snapshot: out of memory\n");
+        fflush(stderr);
+        exit(1);
+    }
+    size_t got = fread(exp, 1, (size_t)sz, f);
+    fclose(f);
+    int same = (got == alen) && (alen == 0 || memcmp(exp, abuf, alen) == 0);
+    if (same) {
+        free(exp);
+        return zz_unit();
+    }
+    // Binary-safe body: lengths + raw bytes (VM renders a Myers diff here;
+    // the C twin keeps the same first line, `error:` prefix, and exit code,
+    // matching the zz_assert_eq twin convention).
+    fprintf(stderr, "error: Assertion Failed: Snapshot mismatch for \"%s\"\n", namebuf);
+    fprintf(stderr, "- Stored (%zu bytes):\n", got);
+    if (got > 0) fwrite(exp, 1, got, stderr);
+    fprintf(stderr, "\n+ Actual (%zu bytes):\n", alen);
+    if (alen > 0) fwrite(abuf, 1, alen, stderr);
+    fprintf(stderr, "\n");
+    free(exp);
+    fflush(stderr);
+    exit(1);
 }
 
 // env.user() → Option<str>
