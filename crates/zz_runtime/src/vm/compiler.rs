@@ -87,6 +87,10 @@ pub struct Compiler {
     structs: Option<HashMap<String, zz_checker::StructSig>>,
     /// Known native function names, for direct native call dispatch.
     native_names: Option<Arc<std::collections::HashSet<String>>>,
+    /// User enum signatures, keyed by fully-qualified name. Lets the
+    /// call compiler verify the trailing path component is really a
+    /// variant before treating an enum-typed call as construction.
+    enums: Option<HashMap<String, zz_checker::EnumSig>>,
     /// True while compiling the SQL argument of `sqlz.query`/`sqlz.exec`
     /// (`db.*` alias included):
     /// the Fmt lowers to template + bound params (DbQuery) instead of
@@ -141,6 +145,7 @@ impl Compiler {
             types: None,
             structs: None,
             native_names: None,
+            enums: None,
             in_db_query: false,
             move_take: None,
             top_globals: std::collections::HashSet::new(),
@@ -297,21 +302,18 @@ impl Compiler {
     /// type map and struct definitions from the HIR into the compiler and all
     /// sub-compilers (functions, closures). The type map enables type-driven
     /// optimizations in future phases.
-    /// Compile with HIR type info. `enums` is accepted for call-shape
-    /// uniformity with `run_typed` (the typed enum paths resolve through
-    /// `types`, and untyped paths through the runtime table, so the seed
-    /// itself is intentionally unused).
     pub fn compile_program_typed(
         program: &Program,
         types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
         structs: HashMap<String, zz_checker::StructSig>,
-        _enums: HashMap<String, zz_checker::EnumSig>,
+        enums: HashMap<String, zz_checker::EnumSig>,
         native_names: Arc<std::collections::HashSet<String>>,
     ) -> Chunk {
         let mut c = Compiler::new();
         c.is_main = true;
         c.types = Some(types);
         c.structs = Some(structs);
+        c.enums = Some(enums);
         c.native_names = Some(native_names);
         // Collect top-level declared names (post-rewrite, so namespaced).
         let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2678,6 +2680,8 @@ impl Compiler {
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
+        sub.func_info = self.func_info.clone();
+        sub.enums = self.enums.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_block_captured(block, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name))
@@ -3020,6 +3024,8 @@ impl Compiler {
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
+        sub.func_info = self.func_info.clone();
+        sub.enums = self.enums.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_closure_captured(body, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name));
@@ -3220,23 +3226,57 @@ impl Compiler {
                         if let Some(zz_checker::Type::Enum(enum_name, _)) =
                             self.type_of(*span).cloned()
                         {
+                            // Real functions keep their meaning: a call
+                            // whose path names a known function (e.g. an
+                            // enum-typed helper declared after the enum)
+                            // is a call, never construction — even when
+                            // its inferred type is that enum. Likewise the
+                            // trailing component must really be a variant
+                            // of that enum (locals holding enum-typed
+                            // closures are invisible here; they keep the
+                            // runtime CallPath fallback below). Mirrors
+                            // the checker's and tree-walker's miss-only
+                            // rules.
                             let variant = parts.last().cloned().unwrap_or_default();
-                            for a in args {
-                                self.compile_expr(a);
+                            let known_func = self.func_info.contains_key(&func_name)
+                                || {
+                                    let suffix = format!(".{func_name}");
+                                    let mut hits: Vec<&String> = self
+                                        .func_info
+                                        .keys()
+                                        .filter(|k| k.ends_with(suffix.as_str()))
+                                        .collect();
+                                    hits.sort_unstable();
+                                    hits.dedup();
+                                    hits.len() == 1
+                                }
+                                || self
+                                    .native_names
+                                    .as_ref()
+                                    .is_some_and(|n| n.contains(&func_name));
+                            let is_variant = self
+                                .enums
+                                .as_ref()
+                                .and_then(|t| t.get(&enum_name))
+                                .is_some_and(|sig| sig.variants.iter().any(|(v, _)| v == &variant));
+                            if !known_func && is_variant {
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                                // Named args are a checker error; compile
+                                // positionally so codegen never drops values
+                                // silently on unchecked paths.
+                                for (_, v) in named {
+                                    self.compile_expr(v);
+                                }
+                                self.emit(Op::MakeEnum {
+                                    enum_name,
+                                    variant,
+                                    argc: (args.len() + named.len()) as u16,
+                                    span: *span,
+                                });
+                                return;
                             }
-                            // Named args are a checker error; compile
-                            // positionally so codegen never drops values
-                            // silently on unchecked paths.
-                            for (_, v) in named {
-                                self.compile_expr(v);
-                            }
-                            self.emit(Op::MakeEnum {
-                                enum_name,
-                                variant,
-                                argc: (args.len() + named.len()) as u16,
-                                span: *span,
-                            });
-                            return;
                         }
                     }
                     // Untyped compiles intentionally fall through to the

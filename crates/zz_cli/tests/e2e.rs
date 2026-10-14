@@ -552,6 +552,7 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 e2e_success_test!(e2e_types_recursive, "types", "recursive.zz");
+e2e_success_test!(e2e_types_enum_call_order, "types", "enum_call_order.zz");
 e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
 e2e_success_test!(
     e2e_syntax_extension_methods,

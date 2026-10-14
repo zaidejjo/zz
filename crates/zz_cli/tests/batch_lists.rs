@@ -97,6 +97,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "shadow_test.zz", true),
     ("stdlib", "range_display_test.zz", false),
     ("types", "recursive.zz", true),
+    ("types", "enum_call_order.zz", true),
     ("syntax", "closure_fn_params.zz", true),
     ("stdlib", "bytes_finish_test.zz", true),
     ("syntax", "brace_escapes.zz", false),
