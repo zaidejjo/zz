@@ -105,6 +105,7 @@ pub const VOCABULARY: &[&str] = &[
     "vm-only",
     "while-loop",
     "wildcard-import",
+    "zz-bench",
     "zz-test",
 ];
 

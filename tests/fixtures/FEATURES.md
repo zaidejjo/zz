@@ -54,13 +54,14 @@ Standard library (one per `std.*` module; `import std.math` implies both
 `std-term`, `std-time`, `std-uuid`, `std-vec`
 
 Runner and verdict:
-`print`, `stdin`, `cli-args`, `embed`, `vfs`, `zz-test`,
+`print`, `stdin`, `cli-args`, `embed`, `vfs`, `zz-test`, `zz-bench`,
 `error-case`, `nondeterministic`, `vm-only`, `known-divergence`
 
 Tagging rules:
 
 - `error-case` on every fixture under `errors/` (they must fail on the VM).
 - `zz-test` on every fixture under `test/` (run via `zz test`, not `zz run`).
+- `zz-bench` on every fixture under `bench/` (run via `zz bench`, not `zz run`).
 - `nondeterministic` when output varies run to run (timestamps, ports);
   the parity harness skips these via `native_skip_reason`.
 - `known-divergence` when VM and native verifiably disagree (tracked in
