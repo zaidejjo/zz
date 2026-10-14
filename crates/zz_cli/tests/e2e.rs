@@ -1330,6 +1330,7 @@ e2e_test_success!(e2e_test_tags, "tags.zz");
 e2e_test_success!(e2e_test_assertions, "assertions.zz");
 e2e_test_success!(e2e_test_timeout, "timeout.zz");
 e2e_test_success!(e2e_test_retry, "retry.zz");
+e2e_test_success!(e2e_test_doctests, "doctests.zz");
 
 // --- CLI flag integration tests ---
 
@@ -1816,4 +1817,79 @@ fn e2e_cover_fail_under_and_lcov() {
     assert!(content.contains("LF:6"), "missing LF in:\n{content}");
     assert!(content.contains("LH:5"), "missing LH in:\n{content}");
     let _ = std::fs::remove_file(&lcov);
+}
+
+// --- Doc-tests (`/// ```zz` fences) ---
+
+fn run_zz_test_with(file: &Path, extra: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let mut cmd = Command::new(zz_bin);
+    cmd.arg("test").arg(file);
+    for a in extra {
+        cmd.arg(a);
+    }
+    let output = cmd
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz test {file:?}`: {e}"));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn e2e_test_doctest_names() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("doctests.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_test_with(&path, &[]);
+    assert_eq!(exit, 0, "doctests should exit 0.\nstderr:\n{stderr}");
+    // Display names use the `doctest <stem>#<n>` convention; the ignored
+    // fence reports as ignored, never silently skipped.
+    for expected in [
+        "doctest doctests#0",
+        "doctest doctests#1",
+        "doctest doctests#2",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing `{expected}` in:\n{stderr}"
+        );
+    }
+    assert!(stderr.contains("ignored"), "missing ignored in:\n{stderr}");
+}
+
+#[test]
+fn e2e_test_doctest_native() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("doctests.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_test_with(&path, &["--engine", "native"]);
+    assert_eq!(exit, 0, "doctests should exit 0 on AOT.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("doctest doctests#0"),
+        "missing doctest in AOT output:\n{stderr}"
+    );
+}
+
+#[test]
+fn e2e_test_doctest_no_doctests_flag() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("doctests.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_test_with(&path, &["--no-doctests"]);
+    assert_eq!(exit, 0, "--no-doctests should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        !stderr.contains("doctest doctests#"),
+        "doctests ran despite --no-doctests:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("test_double"),
+        "missing @test in --no-doctests output:\n{stderr}"
+    );
 }
