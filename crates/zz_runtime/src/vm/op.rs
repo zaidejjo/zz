@@ -210,6 +210,19 @@ pub enum Op {
     IntRem(Span),
     /// Pop one int, push `-a`.
     IntNeg(Span),
+    /// Pop two ints, push `a < b` (#364: mirrors the IntAdd fast path;
+    /// comparisons previously always took generic `BinOp` dispatch).
+    IntLt(Span),
+    /// Pop two ints, push `a > b`.
+    IntGt(Span),
+    /// Pop two ints, push `a <= b`.
+    IntLe(Span),
+    /// Pop two ints, push `a >= b`.
+    IntGe(Span),
+    /// Pop two ints, push `a == b`.
+    IntEq(Span),
+    /// Pop two ints, push `a != b`.
+    IntNe(Span),
 
     // ---- generic arithmetic (fallback) ----
     /// Pop `b`, pop `a`, push `a op b` (int/float/str semantics).

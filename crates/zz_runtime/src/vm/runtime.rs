@@ -1204,6 +1204,87 @@ impl Vm {
                         }
                     }
                 }
+                // Typed int comparisons (#364): inline `(Int, Int)`
+                // (plain i64 semantics, exactly like `eval_binary`);
+                // anything else keeps generic dispatch.
+                Op::IntLt(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a < b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Lt, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntGt(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a > b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Gt, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntLe(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a <= b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Le, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntGe(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a >= b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Ge, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntEq(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a == b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Eq, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntNe(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a != b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Ne, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
                 Op::UnOp(op, span) => {
                     let v = self.stack.pop().unwrap();
                     let v = eval_unary(*op, v, *span)?;
@@ -2028,6 +2109,18 @@ impl Vm {
                         let is_direct = interp.env.get(joined).is_some()
                             || interp.funcs.contains_key(joined)
                             || interp.natives.contains_key(joined);
+                        // Fast path (#364): a direct hit skips every
+                        // fallback probe below (head-shadow joins, enum
+                        // tables, and a second full path resolution) —
+                        // identical semantics, one resolution per call.
+                        if is_direct {
+                            let callee = interp.resolve_path_value(parts, pspan)?;
+                            self.frames.last_mut().unwrap().ip = ip;
+                            self.call_value(callee, args, span, interp)?;
+                            re_cache!();
+                            yield_check!();
+                            continue;
+                        }
                         // Enum construction fallback (untyped compiles,
                         // cross-snippet REPL): the head names an enum and
                         // resolves to no value — build the variant object
@@ -2042,7 +2135,7 @@ impl Vm {
                                 || interp
                                     .funcs
                                     .contains_key(&parts[..parts.len() - 1].join(".")));
-                        if !is_direct && !head_shadowed && parts.len() >= 2 {
+                        if !head_shadowed {
                             let head = parts[..parts.len() - 1].join(".");
                             let canonical = if interp.enums.contains_key(&head) {
                                 Some(head.clone())
@@ -2100,7 +2193,7 @@ impl Vm {
                                 || interp
                                     .funcs
                                     .contains_key(&parts[..parts.len() - 2].join(".")));
-                        if !is_direct && !head2_shadowed && parts.len() >= 3 {
+                        if !head2_shadowed {
                             let head2 = parts[..parts.len() - 2].join(".");
                             let canonical2 = if interp.enums.contains_key(&head2) {
                                 Some(head2.clone())
@@ -2142,7 +2235,7 @@ impl Vm {
                                 }
                             }
                         }
-                        if !is_direct && interp.resolve_path_value(parts, pspan).is_err() {
+                        if interp.resolve_path_value(parts, pspan).is_err() {
                             let method = parts.last().unwrap();
                             let recv =
                                 interp.resolve_path_value(&parts[..parts.len() - 1], pspan)?;
