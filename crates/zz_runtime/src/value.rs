@@ -156,6 +156,10 @@ pub enum YieldReason {
     /// the task ran longer than its timeslice without blocking. No object
     /// is involved — the executor just requeues it so siblings run.
     Timeslice,
+    /// Debugger breakpoint hit (line, 1-based). Only ever produced on
+    /// the main thread under an attached debug session — never on the
+    /// executor, which treats it as an internal error.
+    DebugBreak { line: u32 },
 }
 
 // ── Executor thread-locals ────────────────────────────────────────────────

@@ -127,6 +127,9 @@ pub struct Vm {
     /// safepoint expiry (lazy: programs without loops never pay for a
     /// clock read, not even in `Vm::new`).
     slice_start: Option<std::time::Instant>,
+    /// Attached debugger session. `None` (the default) disables the
+    /// per-op breakpoint check to a single `Option` discriminant test.
+    pub debug: Option<crate::debug::DebugSession>,
 }
 
 /// State saved during defer-before-return execution.
@@ -160,7 +163,34 @@ impl Vm {
             try_convert_depths: Vec::new(),
             slice_budget: SAFEPOINT_BUDGET,
             slice_start: None,
+            debug: None,
         }
+    }
+
+    /// Attach a debugger session: line breakpoints suspend the run loop
+    /// via [`YieldReason::DebugBreak`](crate::value::YieldReason).
+    /// Detaching (`None`) restores full speed.
+    pub fn attach_debug(&mut self, session: crate::debug::DebugSession) {
+        self.debug = Some(session);
+    }
+
+    /// Look up a variable where execution currently stands: the top
+    /// frame's slots first (top-level lets live there until frame exit
+    /// syncs them into the environment), then the interpreter env.
+    /// Deeper frames and closure captures follow in later work.
+    pub fn debug_lookup(
+        &self,
+        interp: &crate::eval::Interp,
+        name: &str,
+    ) -> Option<crate::value::Value> {
+        if let Some(frame) = self.frames.last() {
+            if let Some((_, slot)) = frame.chunk.toplevel_slots.iter().find(|(n, _)| n == name) {
+                if let Some(v) = self.stack.get(frame.stack_base + *slot as usize) {
+                    return Some(v.clone());
+                }
+            }
+        }
+        interp.env.get(name)
     }
 
     /// Reset for shell-pool reuse (Phase 6 arena): clear all execution
@@ -178,6 +208,9 @@ impl Vm {
         self.try_convert_depths.clear();
         self.slice_budget = SAFEPOINT_BUDGET;
         self.slice_start = None;
+        // Debugger sessions never survive pooling: a leftover breakpoint
+        // set would suspend unrelated reused tasks.
+        self.debug = None;
     }
 
     /// Push a value onto the VM stack. Used by `Interp::call_func` to set up
@@ -287,6 +320,10 @@ impl Vm {
         // hook then costs one integer compare when disabled.
         let mut cached_cov_ids: *const Vec<u32>;
         let mut cached_cov_file: usize;
+        // Parallel op spans + this frame's source label for debugger
+        // breakpoints (same caching discipline as coverage).
+        let mut cached_spans: *const Vec<Span>;
+        let mut cached_dbg_label: Option<Arc<str>>;
         // Branch ids parallel to `code` (`COV_UNMAPPED` = not a branch).
         // Recording goes through `record_branch!` inside the five
         // conditional handlers below.
@@ -310,6 +347,8 @@ impl Vm {
                     None => usize::MAX,
                 };
                 cached_cov_branch = &c.cov_branch;
+                cached_spans = &c.spans;
+                cached_dbg_label = c.source.clone();
             }};
         }
 
@@ -484,6 +523,25 @@ impl Vm {
                             }
                         }
                     }
+                }
+            }
+
+            // Debugger breakpoints: one discriminant check when detached.
+            // Attributed ops resolve (label, line) through the session and
+            // suspend on a line-change hit with the frame ip rewound to the
+            // breaking op (`ip` already advanced past it), so resume_chunk
+            // executes it instead of skipping it, with the environment
+            // intact for inspection.
+            if self.debug.is_some() {
+                let spans: &Vec<Span> = unsafe { &*cached_spans };
+                let hit = spans.get(ip - 1).and_then(|span| {
+                    self.debug
+                        .as_mut()
+                        .and_then(|dbg| dbg.check_span(cached_dbg_label.as_deref(), *span))
+                });
+                if let Some(line) = hit {
+                    self.frames.last_mut().unwrap().ip = ip - 1;
+                    return Ok(Flow::Yield(crate::value::YieldReason::DebugBreak { line }));
                 }
             }
 

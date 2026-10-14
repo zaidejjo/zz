@@ -718,6 +718,12 @@ impl Executor {
                 entry.inner.lock().unwrap().task = Some(task);
                 Self::enqueue(id);
             }
+            YieldReason::DebugBreak { line } => {
+                // Debugger breakpoints only fire on the main thread under
+                // an attached session. Reaching the executor means debug
+                // state leaked into a spawned task — loud failure.
+                panic!("debug breakpoint (line {line}) escaped onto the executor");
+            }
         }
     }
 

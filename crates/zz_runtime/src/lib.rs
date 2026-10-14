@@ -5,6 +5,7 @@
 
 pub mod c_abi;
 pub mod coverage;
+pub mod debug;
 pub mod env;
 pub mod eval;
 pub mod json;
