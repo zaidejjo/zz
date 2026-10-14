@@ -95,6 +95,7 @@ pub const STDLIB_MODULES: &[&str] = &[
     "dec",
     "bytes",
     "csv",
+    "property",
     "cell",
     "unix",
 ];

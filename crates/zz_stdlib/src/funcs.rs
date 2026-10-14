@@ -4127,6 +4127,109 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         }
     }
 
+    // std.property — pure-ZZ property testing (zz/property/mod.zz). Both
+    // spellings registered. Higher-order signatures use `Type::Func` so
+    // named functions and `|x| ...` closures both check as arguments.
+    {
+        let t = Type::Named("T".to_string());
+        let arr_t = Type::Array(Box::new(t.clone()));
+        let gen_t = Type::Func(vec![Type::Int, Type::Int], Box::new(t.clone()));
+        let shrink_t = Type::Func(vec![t.clone()], Box::new(arr_t.clone()));
+        let prop_t = Type::Func(vec![t.clone()], Box::new(Type::Bool));
+        let prop_int = Type::Func(vec![Type::Int], Box::new(Type::Bool));
+        for (name, s) in [
+            ("seed", sig(vec![("n", Type::Int)], Type::Int)),
+            ("norm_state", sig(vec![("s", Type::Int)], Type::Int)),
+            ("step", sig(vec![("state", Type::Int)], Type::Int)),
+            (
+                "stream",
+                sig(vec![("seed", Type::Int), ("i", Type::Int)], Type::Int),
+            ),
+            (
+                "int_in",
+                sig(
+                    vec![
+                        ("seed", Type::Int),
+                        ("i", Type::Int),
+                        ("lo", Type::Int),
+                        ("hi", Type::Int),
+                    ],
+                    Type::Int,
+                ),
+            ),
+            (
+                "pick",
+                sig(
+                    vec![("seed", Type::Int), ("i", Type::Int), ("n", Type::Int)],
+                    Type::Int,
+                ),
+            ),
+            (
+                "boolean",
+                sig(vec![("seed", Type::Int), ("i", Type::Int)], Type::Bool),
+            ),
+            (
+                "alpha_char",
+                sig(vec![("seed", Type::Int), ("i", Type::Int)], Type::Str),
+            ),
+            (
+                "alpha_str",
+                sig(
+                    vec![("seed", Type::Int), ("i", Type::Int), ("len", Type::Int)],
+                    Type::Str,
+                ),
+            ),
+            (
+                "shrink_int",
+                sig(vec![("v", Type::Int)], Type::Array(Box::new(Type::Int))),
+            ),
+            (
+                "shrink_str",
+                sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Str))),
+            ),
+            (
+                "shrink_value",
+                sig_t(
+                    vec![
+                        ("prop", prop_t.clone()),
+                        ("shrink", shrink_t.clone()),
+                        ("v", t.clone()),
+                    ],
+                    t.clone(),
+                ),
+            ),
+            (
+                "check",
+                sig_t(
+                    vec![
+                        ("gen", gen_t.clone()),
+                        ("shrink", shrink_t.clone()),
+                        ("prop", prop_t.clone()),
+                        ("iters", Type::Int),
+                        ("seed", Type::Int),
+                    ],
+                    Type::Unit,
+                ),
+            ),
+            (
+                "for_all_int",
+                sig(
+                    vec![
+                        ("lo", Type::Int),
+                        ("hi", Type::Int),
+                        ("prop", prop_int.clone()),
+                        ("iters", Type::Int),
+                        ("seed", Type::Int),
+                    ],
+                    Type::Unit,
+                ),
+            ),
+        ] {
+            m.insert(format!("std.property.{name}"), s.clone());
+            m.insert(format!("property.{name}"), s);
+        }
+    }
+
     // std.colors — pure-ZZ ANSI styling (zz/colors/mod.zz). Every wrapper
     // takes the text first so it composes with `|>` pipelines. Both
     // spellings registered (like `std.json.*` / `json.*`).
@@ -5028,6 +5131,14 @@ mod tests {
             "csv.stringify",
             "std.csv.to_json",
             "csv.to_json",
+            "std.property.seed",
+            "property.seed",
+            "std.property.int_in",
+            "property.int_in",
+            "std.property.check",
+            "property.check",
+            "std.property.for_all_int",
+            "property.for_all_int",
             "std.time.parse_rfc3339",
             "time.parse_rfc3339",
             "std.time.format_rfc3339",
@@ -5099,7 +5210,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1090);
+        assert_eq!(funcs.len(), 1118);
     }
 
     #[test]
