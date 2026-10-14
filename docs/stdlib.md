@@ -50,6 +50,7 @@ Available without imports:
 | `std.dec` | Exact decimal math on strings |
 | `std.bytes` | Linear string/byte builders |
 | `std.csv` | CSV parsing/serialization |
+| `std.property` | Seeded generators + shrinking for property tests |
 | `std.colors` | ANSI styling: palette, styles, truecolor |
 
 ---
@@ -877,6 +878,48 @@ println(csv.to_json(rows))         // JSON array of objects
 
 TOML is intentionally **not** in the stdlib: use the external `toml`
 package (`~/Projects/toml`, pure-ZZ, versioned separately).
+
+---
+
+## `std.property` -- Property Testing
+
+Seeded generators + shrinking, pure ZZ (no engine support needed).
+Values derive from `(seed, index)` pairs, so a failing seed replays the
+exact same cases. `check`/`for_all_int` abort with the seed and the
+shrunk minimal case:
+
+```zz
+import std.property
+
+func gen_small(seed: int, i: int) -> int {
+    property.int_in(seed, i, 0, 10)
+}
+
+func small(x: int) -> bool {
+    x < 100
+}
+
+property.check(gen_small, property.shrink_int, small, 200, 7)
+property.for_all_int(0, 10, small, 200, 7)
+```
+
+| Function | Description |
+|----------|-------------|
+| `property.seed(n)` | Normalize any int into LCG state |
+| `property.int_in(seed, i, lo, hi)` | Uniform int in range (swaps reversed) |
+| `property.pick(seed, i, n)` | Uniform int in `[0, n)` (`0` when `n <= 0`) |
+| `property.boolean(seed, i)` | Uniform bool |
+| `property.alpha_char(seed, i)` | Lowercase letter |
+| `property.alpha_str(seed, i, len)` | Lowercase string of `len` chars |
+| `property.shrink_int(v)` | Simpler ints toward zero |
+| `property.shrink_str(s)` | Shorter prefixes |
+| `property.shrink_value(prop, shrink, v)` | Minimize a falsifying value |
+| `property.check(gen, shrink, prop, iters, seed)` | Assert `prop` over generated cases |
+| `property.for_all_int(lo, hi, prop, iters, seed)` | `check` for int ranges |
+
+Custom generators are plain `func(seed: int, i: int) -> T` values, and
+custom shrinkers plain `func(T) -> [T]` — named functions and `|x| ...`
+closures both work as arguments.
 
 ---
 

@@ -1,0 +1,34 @@
+// features: func-call, imports, comparison, int-arith, bool-logic, locals, print, string-literal, arrays, option-result
+// E2E: std.property generators are deterministic + in range, shrinking
+// terminates, and passing properties check quietly on both engines.
+import std.property
+
+func is_small(x: int) -> bool {
+    x < 100
+}
+
+func gen_small(seed: int, i: int) -> int {
+    property.int_in(seed, i, 0, 10)
+}
+
+func main() {
+    // determinism: same seed + index reproduces the value
+    assert_eq(property.int_in(42, 7, 0, 100), property.int_in(42, 7, 0, 100))
+    assert_eq(property.alpha_str(9, 3, 5), property.alpha_str(9, 3, 5))
+    // ranges respected
+    v := property.int_in(1, 2, 5, 9)
+    assert(v >= 5)
+    assert(v <= 9)
+    assert_eq(property.pick(1, 1, 1), 0)
+    assert_eq(property.pick(1, 1, 0), 0)
+    assert_eq(str.length(property.alpha_str(3, 4, 6)), 6)
+    assert_eq(property.alpha_str(3, 4, 0), "")
+    // shrinking terminates at minimal values
+    assert_eq(property.shrink_int(0), [])
+    assert_eq(property.shrink_str(""), [])
+    assert_eq(property.shrink_value(is_small, property.shrink_int, 5), 5)
+    // passing properties stay quiet
+    property.for_all_int(0, 10, is_small, 200, 7)
+    property.check(gen_small, property.shrink_int, is_small, 200, 7)
+    println("property_ok")
+}
