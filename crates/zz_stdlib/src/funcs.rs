@@ -4642,6 +4642,21 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     for name in ["free_port", "std.test.free_port"] {
         m.insert(name.into(), free_port_sig.clone());
     }
+    // Optimization barrier for benchmarks: identity function the AOT C
+    // compiler cannot see through (lockstep with `natives/test_helpers`
+    // + `zz_black_box` C twin, which escapes the value via asm).
+    let black_box_sig = FuncSig {
+        generics: vec!["T".to_string()],
+        bounds: Vec::new(),
+        params: vec![("val".to_string(), Type::Named("T".to_string()))],
+        has_default: vec![false],
+        ret: Type::Named("T".to_string()),
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["black_box", "std.test.black_box"] {
+        m.insert(name.into(), black_box_sig.clone());
+    }
     // Snapshot assertion: file-backed golden values under a snapshots dir.
     // Lockstep with `natives/assert::assert_snapshot_fn` + C twin.
     let snapshot_sig = FuncSig {
@@ -5079,10 +5094,12 @@ mod tests {
             "std.test.free_port",
             "assert_snapshot",
             "std.test.assert_snapshot",
+            "black_box",
+            "std.test.black_box",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1088);
+        assert_eq!(funcs.len(), 1090);
     }
 
     #[test]

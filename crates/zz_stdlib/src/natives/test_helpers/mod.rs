@@ -1,13 +1,12 @@
-//! `test.temp_dir` / `test.free_port` natives (VM side).
+//! `test.temp_dir` / `test.free_port` / `test.black_box` natives (VM side).
 //!
-//! Test-only helpers, also reachable bare (`temp_dir`, `free_port`) like the
-//! assertions. Both return `Result<_, str>` so setup failures surface with
-//! `?`/match instead of aborting the whole runner:
-//! - `temp_dir(prefix)` creates a unique private (`0700`) subdir under the
-//!   OS temp dir and returns its path. Clean up with `fs.remove_dir_all`
-//!   (usually in `@teardown`).
-//! - `free_port()` binds `127.0.0.1:0`, reports the assigned port, and
-//!   closes the socket. TOCTOU: re-bind immediately; retry on collision.
+//! Test-only helpers, also reachable bare like the assertions.
+//! - `temp_dir(prefix)` / `free_port()` return `Result<_, str>` so setup
+//!   failures surface with `?`/match instead of aborting the whole runner.
+//! - `black_box(val)` is the identity function: the tree-walking VM never
+//!   optimizes, so it returns its argument unchanged. Its twin purpose is
+//!   the AOT side, where the C implementation escapes the value through an
+//!   opaque asm boundary so clang cannot eliminate benchmarked code.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -100,6 +99,20 @@ pub(crate) fn test_free_port(
     }
 }
 
+/// `black_box(val)` — identity function and optimization barrier.
+/// The VM never optimizes, so this returns its argument unchanged; the AOT
+/// C twin escapes the value through an opaque asm boundary.
+pub(crate) fn test_black_box(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    match args.first() {
+        Some(v) => Ok(v.clone()),
+        None => Err(EvalError::new("`black_box` expects 1 argument (val)", span)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +154,23 @@ mod tests {
         // Range only: re-binding here would be TOCTOU-flaky under parallel
         // libtest (kernel may hand the closed port to another thread first).
         assert!((1..=65535).contains(&port), "got {port}");
+    }
+
+    #[test]
+    fn black_box_is_identity() {
+        let mut interp = Interp::new();
+        for v in [
+            Value::Int(41),
+            Value::Str("hi".to_string().into()),
+            Value::Array(std::sync::Arc::new(vec![Value::Int(1)])),
+        ] {
+            let mut args = vec![v.clone()];
+            assert_eq!(
+                test_black_box(&mut interp, &mut args, Span::new(0, 0)).unwrap(),
+                v
+            );
+        }
+        let mut empty: Vec<Value> = vec![];
+        assert!(test_black_box(&mut interp, &mut empty, Span::new(0, 0)).is_err());
     }
 }
