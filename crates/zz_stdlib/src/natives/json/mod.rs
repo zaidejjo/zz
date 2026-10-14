@@ -167,7 +167,7 @@ pub(crate) fn json_keys(
     let j = expect_json(args, 0, "std.json.keys")?;
     let keys = zz_runtime::json::json_keys(&j);
     let arr: Vec<Value> = keys.into_iter().map(|k| Value::Str(k.into())).collect();
-    Ok(Value::Array(Box::new(arr)))
+    Ok(Value::Array(std::sync::Arc::new(arr)))
 }
 
 pub(crate) fn json_has(

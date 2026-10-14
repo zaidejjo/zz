@@ -104,8 +104,8 @@ pub(crate) fn regexp_captures(
                 .collect::<Vec<_>>()
         })
     }) {
-        Some(Some(groups)) => Ok(Value::Array(Box::new(groups))),
-        Some(None) => Ok(Value::Array(Box::default())),
+        Some(Some(groups)) => Ok(Value::Array(std::sync::Arc::new(groups))),
+        Some(None) => Ok(Value::Array(std::sync::Arc::new(Vec::new()))),
         None => Err(gone("std.regexp.captures", span)),
     }
 }

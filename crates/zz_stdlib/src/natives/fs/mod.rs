@@ -382,7 +382,7 @@ pub(crate) fn fs_scan_counts(
         };
         // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
         if bytes.contains(&0) {
-            return ok_value(Value::Array(Box::new(vec![
+            return ok_value(Value::Array(std::sync::Arc::new(vec![
                 Value::Int(0),
                 Value::Int(0),
                 Value::Int(0),
@@ -404,7 +404,7 @@ pub(crate) fn fs_scan_counts(
             nested,
             whole,
         );
-        ok_value(Value::Array(Box::new(vec![
+        ok_value(Value::Array(std::sync::Arc::new(vec![
             Value::Int(lines),
             Value::Int(code),
             Value::Int(comments),
@@ -680,7 +680,7 @@ pub(crate) fn fs_read_dir(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.read_dir")?;
     run_fs(interp, span, move || match sorted_dir_entries(&path) {
-        Ok(names) => ok_value(Value::Array(Box::new(
+        Ok(names) => ok_value(Value::Array(std::sync::Arc::new(
             names
                 .into_iter()
                 .map(|n| Value::Str(std::sync::Arc::new(n)))
@@ -737,7 +737,7 @@ pub(crate) fn fs_walk_dir(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.walk_dir")?;
     run_fs(interp, span, move || match walk_sorted(&path) {
-        Ok(paths) => ok_value(Value::Array(Box::new(
+        Ok(paths) => ok_value(Value::Array(std::sync::Arc::new(
             paths
                 .into_iter()
                 .map(|p| Value::Str(std::sync::Arc::new(p)))
@@ -797,7 +797,7 @@ pub(crate) fn fs_stat(
                     Value::Str(std::sync::Arc::new(m.permissions().readonly().to_string())),
                 ),
             ];
-            ok_value(Value::Dict(Box::new(pairs)))
+            ok_value(Value::Dict(std::sync::Arc::new(pairs)))
         }
         Err(e) => fs_err("stat", &path, &e),
     })

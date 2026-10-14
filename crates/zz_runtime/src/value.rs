@@ -297,14 +297,21 @@ pub enum Value {
     /// A closure or named function, with its captured environment.
     Func(Box<FuncValue>),
     /// `[v1, v2, ...]`.
-    Array(Box<Vec<Value>>),
+    ///
+    /// `Arc`-backed: cloning an array bumps the store (O(1)) and every
+    /// mutation goes through `Arc::make_mut` / `try_unwrap`, which reuses
+    /// the buffer when uniquely owned and copies once otherwise — the
+    /// same copy value semantics always required.
+    Array(std::sync::Arc<Vec<Value>>),
     /// Contiguous byte buffer (produced by `fs.read_bytes`,
     /// `fs.read_chunk_bytes`). Shares its backing store on clone/slice
     /// (`Arc` + window), so slicing is O(1) and whole-file reads cost
     /// ~1 byte of RSS per byte of file instead of ~31.
     Bytes(Box<BytesData>),
     /// `{k1: v1, k2: v2, ...}` — insertion-ordered key/value pairs.
-    Dict(Box<Vec<(Value, Value)>>),
+    ///
+    /// `Arc`-backed like arrays: clones bump, mutations copy once.
+    Dict(std::sync::Arc<Vec<(Value, Value)>>),
     /// A native (Rust-backed) function from the standard library.
     Native(Box<NativeFunc>),
     /// A parsed JSON value (opaque to the type system).
@@ -326,11 +333,16 @@ pub enum Value {
     /// An HTTP request (method/path/body/headers/query/params).
     HttpRequest(Box<HttpRequest>),
     /// A struct instance: its type name and insertion-ordered fields.
-    Object(Box<ObjectValue>),
+    ///
+    /// `Arc`-backed like arrays: clones bump, field writes copy once.
+    Object(std::sync::Arc<ObjectValue>),
     /// `a..b` or `a..b..step` — an integer range (used by `for` loops).
     Range(Box<RangeValue>),
     /// `(v1, v2, ...)` — tuple value.
-    Tuple(Box<Vec<Value>>),
+    ///
+    /// `Arc`-backed like arrays (tuples share the array representation
+    /// and support index-set).
+    Tuple(std::sync::Arc<Vec<Value>>),
     /// Thread-safe channel (unbounded queue + condvar).
     Chan(Arc<ChanState>),
     /// Join handle from spawn — recv() blocks until task completes.
@@ -810,13 +822,20 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
             seen.insert(key, cloned.clone());
             cloned
         }
-        Value::Array(arr) => Value::Array(Box::new(
-            arr.into_iter().map(|v| deep_clone_value(v, seen)).collect(),
+        Value::Array(arr) => Value::Array(std::sync::Arc::new(
+            arr.iter()
+                .map(|v| deep_clone_value(v.clone(), seen))
+                .collect(),
         )),
-        Value::Dict(pairs) => Value::Dict(Box::new(
+        Value::Dict(pairs) => Value::Dict(std::sync::Arc::new(
             pairs
-                .into_iter()
-                .map(|(k, v)| (deep_clone_value(k, seen), deep_clone_value(v, seen)))
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        deep_clone_value(k.clone(), seen),
+                        deep_clone_value(v.clone(), seen),
+                    )
+                })
                 .collect(),
         )),
         Value::Option(opt) => Value::Option(opt.map(|v| Box::new(deep_clone_value(*v, seen)))),
@@ -824,18 +843,18 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
             Ok(v) => Ok(deep_clone_value(v, seen)),
             Err(e) => Err(deep_clone_value(e, seen)),
         })),
-        Value::Tuple(items) => Value::Tuple(Box::new(
+        Value::Tuple(items) => Value::Tuple(std::sync::Arc::new(
             items
-                .into_iter()
-                .map(|v| deep_clone_value(v, seen))
+                .iter()
+                .map(|v| deep_clone_value(v.clone(), seen))
                 .collect(),
         )),
-        Value::Object(obj) => Value::Object(Box::new(ObjectValue {
-            name: obj.name,
+        Value::Object(obj) => Value::Object(std::sync::Arc::new(ObjectValue {
+            name: obj.name.clone(),
             fields: obj
                 .fields
-                .into_iter()
-                .map(|(n, v)| (n, deep_clone_value(v, seen)))
+                .iter()
+                .map(|(n, v)| (n.clone(), deep_clone_value(v.clone(), seen)))
                 .collect(),
         })),
         // Primitives and opaque Arc-wrapped types: cheap clone is fine.
@@ -1385,7 +1404,7 @@ mod tests {
     #[test]
     fn array_displays() {
         assert_eq!(
-            Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)])).to_string(),
+            Value::Array(std::sync::Arc::new(vec![Value::Int(1), Value::Int(2)])).to_string(),
             "[1, 2]"
         );
     }
@@ -1393,7 +1412,7 @@ mod tests {
     #[test]
     fn dict_displays() {
         assert_eq!(
-            Value::Dict(Box::new(vec![
+            Value::Dict(std::sync::Arc::new(vec![
                 (Value::Str("a".to_string().into()), Value::Int(1)),
                 (Value::Str("b".to_string().into()), Value::Int(2)),
             ]))
@@ -1439,7 +1458,7 @@ mod tests {
             ".some(42)"
         );
         // Containers unwrap nested Options for display but keep them for debug.
-        let arr = Value::Array(Box::new(vec![
+        let arr = Value::Array(std::sync::Arc::new(vec![
             Value::Option(Some(Box::new(Value::Int(1)))),
             Value::Option(None),
             Value::Int(3),

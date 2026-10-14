@@ -659,13 +659,13 @@ pub(crate) fn fs_read_dir_at(
                         }
                     }
                     out.sort_by(|a, b| format!("{a}").cmp(&format!("{b}")));
-                    ok_value(Value::Array(Box::new(out)))
+                    ok_value(Value::Array(std::sync::Arc::new(out)))
                 }
                 Err(e) => super::fs_err("read_dir", &raw, &e),
             },
             Provider::Mem(_) | Provider::Tar(_) | Provider::Embed(_) => {
                 match guard.tree().unwrap().read_dir(&key) {
-                    Ok(names) => ok_value(Value::Array(Box::new(
+                    Ok(names) => ok_value(Value::Array(std::sync::Arc::new(
                         names
                             .into_iter()
                             .map(|s| Value::Str(std::sync::Arc::new(s)))

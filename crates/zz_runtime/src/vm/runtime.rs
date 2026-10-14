@@ -480,12 +480,12 @@ impl Vm {
                                 // through to the value lookup so the error
                                 // names the path, not the enum.
                                 Some(true) | None => None,
-                                Some(false) => {
-                                    Some(Value::Object(Box::new(crate::value::ObjectValue {
+                                Some(false) => Some(Value::Object(std::sync::Arc::new(
+                                    crate::value::ObjectValue {
                                         name: format!("{canonical}.{variant}"),
                                         fields: Vec::new(),
-                                    })))
-                                }
+                                    },
+                                ))),
                             }
                         } else {
                             None
@@ -557,7 +557,9 @@ impl Vm {
                         ));
                     };
                     let mut vs = match taken {
-                        Value::Array(b) => *b,
+                        Value::Array(b) => {
+                            std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone())
+                        }
                         other => {
                             let msg = format!("`vec.push` expects an array, found `{other}`");
                             Self::restore_home(self, interp, home, other);
@@ -566,7 +568,7 @@ impl Vm {
                         }
                     };
                     vs.push(elem);
-                    Self::restore_home(self, interp, home, Value::Array(Box::new(vs)));
+                    Self::restore_home(self, interp, home, Value::Array(std::sync::Arc::new(vs)));
                 }
                 Op::VecPushField { home, field, span } => {
                     let elem = self.stack.pop().unwrap();
@@ -611,9 +613,15 @@ impl Vm {
                     };
                     match taken {
                         Value::Array(b) => {
-                            let mut vs = *b;
+                            let mut vs =
+                                std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone());
                             vs.push(elem);
-                            Self::restore_home(self, interp, home, Value::Array(Box::new(vs)));
+                            Self::restore_home(
+                                self,
+                                interp,
+                                home,
+                                Value::Array(std::sync::Arc::new(vs)),
+                            );
                         }
                         other => {
                             // Not an array: restore first (no transient
@@ -682,6 +690,7 @@ impl Vm {
                     // restores the exact pre-op object.
                     let mut field_val = match &mut taken {
                         Value::Object(o) if o.fields.iter().any(|(n, _)| n == field) => {
+                            let o = std::sync::Arc::make_mut(o);
                             let slot = o
                                 .fields
                                 .iter_mut()
@@ -1085,11 +1094,12 @@ impl Vm {
                             ));
                         }
                     };
-                    self.stack
-                        .push(Value::Object(Box::new(crate::value::ObjectValue {
+                    self.stack.push(Value::Object(std::sync::Arc::new(
+                        crate::value::ObjectValue {
                             name: format!("{lookup}.{variant}"),
                             fields,
-                        })));
+                        },
+                    )));
                 }
                 Op::BinOp(op, span) => {
                     let r = self.stack.pop().unwrap();
@@ -1373,8 +1383,14 @@ impl Vm {
                                         // evaluate to 2-element arrays —
                                         // accept both.
                                         let pair_vec: Option<Vec<Value>> = match item {
-                                            Value::Tuple(pair) => Some(*pair),
-                                            Value::Array(items) if items.len() == 2 => Some(*items),
+                                            Value::Tuple(pair) => Some(
+                                                std::sync::Arc::try_unwrap(pair)
+                                                    .unwrap_or_else(|a| (*a).clone()),
+                                            ),
+                                            Value::Array(items) if items.len() == 2 => Some(
+                                                std::sync::Arc::try_unwrap(items)
+                                                    .unwrap_or_else(|a| (*a).clone()),
+                                            ),
                                             _ => None,
                                         };
                                         match pair_vec {
@@ -1513,7 +1529,7 @@ impl Vm {
                         items.push(self.stack.pop().unwrap());
                     }
                     items.reverse();
-                    self.stack.push(Value::Array(Box::new(items)));
+                    self.stack.push(Value::Array(std::sync::Arc::new(items)));
                 }
                 Op::UnpackTuple(n) => {
                     let val = self.stack.pop().unwrap();
@@ -1531,7 +1547,11 @@ impl Vm {
                                 ));
                             }
                             // Push elements in reverse so first is on top
-                            for item in items.into_iter().rev() {
+                            for item in std::sync::Arc::try_unwrap(items)
+                                .unwrap_or_else(|a| (*a).clone())
+                                .into_iter()
+                                .rev()
+                            {
                                 self.stack.push(item);
                             }
                         }
@@ -1554,7 +1574,8 @@ impl Vm {
                             ));
                         }
                     };
-                    arr.push(value);
+                    // Owned pop: mutate in place when uniquely owned.
+                    std::sync::Arc::make_mut(&mut arr).push(value);
                     self.stack.push(Value::Array(arr));
                 }
                 Op::MakeDict(n) => {
@@ -1565,7 +1586,7 @@ impl Vm {
                         pairs.push((k, v));
                     }
                     pairs.reverse();
-                    self.stack.push(Value::Dict(Box::new(pairs)));
+                    self.stack.push(Value::Dict(std::sync::Arc::new(pairs)));
                 }
                 Op::IndexOp(span) => {
                     let iv = self.stack.pop().unwrap();
@@ -1656,7 +1677,7 @@ impl Vm {
                         *span,
                         0,
                     )?;
-                    self.stack.push(Value::Object(Box::new(obj)));
+                    self.stack.push(Value::Object(std::sync::Arc::new(obj)));
                 }
                 Op::GetField(name, span) => {
                     let ov = self.stack.pop().unwrap();
@@ -1706,6 +1727,7 @@ impl Vm {
                     let value = self.stack.pop().unwrap();
                     match &mut ov {
                         Value::Object(o) => {
+                            let o = std::sync::Arc::make_mut(o);
                             if (*idx as usize) < o.fields.len() {
                                 o.fields[*idx as usize].1 = value;
                             } else {
@@ -2050,7 +2072,7 @@ impl Vm {
                                             } else {
                                                 Vec::new()
                                             };
-                                            self.stack.push(Value::Object(Box::new(
+                                            self.stack.push(Value::Object(std::sync::Arc::new(
                                                 crate::value::ObjectValue {
                                                     name: format!("{ename}.{variant}"),
                                                     fields,
@@ -2100,10 +2122,12 @@ impl Vm {
                                     })
                                     .is_some_and(|has| !has);
                                 if is_unit {
-                                    let recv = Value::Object(Box::new(crate::value::ObjectValue {
-                                        name: format!("{ename}.{variant}"),
-                                        fields: Vec::new(),
-                                    }));
+                                    let recv = Value::Object(std::sync::Arc::new(
+                                        crate::value::ObjectValue {
+                                            name: format!("{ename}.{variant}"),
+                                            fields: Vec::new(),
+                                        },
+                                    ));
                                     if let Ok((f, recv)) =
                                         interp.lookup_method_recv(&recv, &method, span)
                                     {
@@ -2712,16 +2736,19 @@ impl Vm {
         span: Span,
     ) -> Result<(), String> {
         if let Value::Object(o) = home {
+            let o = std::sync::Arc::make_mut(o);
             if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == field) {
                 let mut vs = match std::mem::replace(slot, Value::Unit) {
-                    Value::Array(b) => *b,
+                    Value::Array(b) => {
+                        std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone())
+                    }
                     other => {
                         *slot = other;
                         return Err(format!("`vec.push` expects an array, found `{}`", slot));
                     }
                 };
                 vs.push(elem);
-                *slot = Value::Array(Box::new(vs));
+                *slot = Value::Array(std::sync::Arc::new(vs));
                 return Ok(());
             }
         }
@@ -2733,13 +2760,13 @@ impl Vm {
             }
         };
         let mut vs = match cur {
-            Value::Array(b) => *b,
+            Value::Array(b) => std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone()),
             other => {
                 return Err(format!("`vec.push` expects an array, found `{other}`"));
             }
         };
         vs.push(elem);
-        let pushed = Value::Array(Box::new(vs));
+        let pushed = Value::Array(std::sync::Arc::new(vs));
         match set_object_field(home, field, pushed, span) {
             Ok(()) => Ok(()),
             Err(e) => Err(e.message),

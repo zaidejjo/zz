@@ -79,7 +79,7 @@ pub(crate) fn term_get_size(
     _span: Span,
 ) -> Result<Value, EvalError> {
     match zz_native_rt::term::get_size() {
-        Ok((cols, rows)) => Ok(ok_wrap(Value::Array(Box::new(vec![
+        Ok((cols, rows)) => Ok(ok_wrap(Value::Array(std::sync::Arc::new(vec![
             Value::Int(cols),
             Value::Int(rows),
         ])))),

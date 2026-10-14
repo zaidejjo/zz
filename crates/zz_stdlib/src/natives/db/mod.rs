@@ -459,12 +459,12 @@ fn build_row_objects(obj_name: &str, fields: &[String], rows: Vec<Vec<Value>>) -
                 .zip(cols)
                 .collect::<Vec<(String, Value)>>()
         };
-        out.push(Value::Object(Box::new(ObjectValue {
+        out.push(Value::Object(std::sync::Arc::new(ObjectValue {
             name: obj_name.to_string(),
             fields: flds,
         })));
     }
-    Value::Array(Box::new(out))
+    Value::Array(std::sync::Arc::new(out))
 }
 
 /// Convert a ZZ bound value to a Postgres text-format parameter.

@@ -27,7 +27,7 @@ pub(crate) fn vec_push(
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument `x` for vec.push", span))?;
     vs.push(x);
-    Ok(Value::Array(Box::new(vs)))
+    Ok(Value::Array(std::sync::Arc::new(vs)))
 }
 
 /// Move the array argument out of `args[i]`, leaving `Unit` behind.
@@ -43,7 +43,9 @@ fn take_array_arg(args: &mut Vec<Value>, i: usize, name: &str) -> Result<Vec<Val
     }
     let slot = &mut args[i];
     match std::mem::replace(slot, Value::Unit) {
-        Value::Array(vs) => Ok(*vs),
+        // Owned take: reuse the buffer when uniquely owned, copy once
+        // otherwise (the copy value semantics always required).
+        Value::Array(vs) => Ok(std::sync::Arc::try_unwrap(vs).unwrap_or_else(|a| (*a).clone())),
         other => {
             let msg = format!("`{name}` expects an array, found `{other}`");
             *slot = other;
@@ -57,7 +59,7 @@ pub(crate) fn vec_pop(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.pop")?;
+    let mut vs = take_array_arg(args, 0, "vec.pop")?;
     if vs.is_empty() {
         return Err(EvalError::new(
             "vec.pop: cannot pop from an empty array",
@@ -65,7 +67,7 @@ pub(crate) fn vec_pop(
         ));
     }
     vs.pop();
-    Ok(Value::Array(Box::new(vs)))
+    Ok(Value::Array(std::sync::Arc::new(vs)))
 }
 
 pub(crate) fn vec_reverse(
@@ -73,9 +75,9 @@ pub(crate) fn vec_reverse(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.reverse")?;
+    let mut vs = take_array_arg(args, 0, "vec.reverse")?;
     vs.reverse();
-    Ok(Value::Array(Box::new(vs)))
+    Ok(Value::Array(std::sync::Arc::new(vs)))
 }
 
 pub(crate) fn vec_join(
@@ -108,7 +110,7 @@ pub(crate) fn vec_sort(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.sort")?;
+    let mut vs = take_array_arg(args, 0, "vec.sort")?;
     // Sort by type name first, then by value for same types
     vs.sort_by(|a, b| {
         let ta = a.type_name();
@@ -123,7 +125,7 @@ pub(crate) fn vec_sort(
             _ => std::cmp::Ordering::Equal,
         })
     });
-    Ok(Value::Array(Box::new(vs)))
+    Ok(Value::Array(std::sync::Arc::new(vs)))
 }
 
 pub(crate) fn vec_insert(
@@ -131,7 +133,7 @@ pub(crate) fn vec_insert(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.insert")?;
+    let mut vs = take_array_arg(args, 0, "vec.insert")?;
     let idx = expect_int(args, 1, "vec.insert")?;
     let x = args
         .get(2)
@@ -146,7 +148,7 @@ pub(crate) fn vec_insert(
         ));
     }
     vs.insert(idx as usize, x);
-    Ok(Value::Array(Box::new(vs)))
+    Ok(Value::Array(std::sync::Arc::new(vs)))
 }
 
 pub(crate) fn vec_remove(
@@ -154,7 +156,7 @@ pub(crate) fn vec_remove(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let mut vs = expect_array(args, 0, "vec.remove")?;
+    let mut vs = take_array_arg(args, 0, "vec.remove")?;
     let idx = expect_int(args, 1, "vec.remove")?;
     let len = vs.len() as i64;
     let idx = if idx < 0 { len + idx } else { idx };
@@ -165,5 +167,5 @@ pub(crate) fn vec_remove(
         ));
     }
     vs.remove(idx as usize);
-    Ok(Value::Array(Box::new(vs)))
+    Ok(Value::Array(std::sync::Arc::new(vs)))
 }

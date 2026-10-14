@@ -661,9 +661,15 @@ pub(crate) fn math_matrix_mul(
     // Convert to Value::Array of Value::Array of Value::Float
     let out: Vec<Value> = result
         .into_iter()
-        .map(|row| Value::Array(Box::new(row.into_iter().map(Value::Float).collect())))
+        .map(|row| {
+            Value::Array(std::sync::Arc::new(
+                row.into_iter().map(Value::Float).collect(),
+            ))
+        })
         .collect();
-    Ok(Value::Result(Box::new(Ok(Value::Array(Box::new(out))))))
+    Ok(Value::Result(Box::new(Ok(Value::Array(
+        std::sync::Arc::new(out),
+    )))))
 }
 
 // ── Basic Statistics & Random ───────────────────────────────────────────────

@@ -21,7 +21,7 @@ pub(crate) fn str_split(
         .split(&sep)
         .map(|p| Value::Str(p.to_string().into()))
         .collect();
-    Ok(Value::Array(Box::new(parts)))
+    Ok(Value::Array(std::sync::Arc::new(parts)))
 }
 
 pub(crate) fn str_contains(
@@ -175,7 +175,7 @@ pub(crate) fn str_classify(
         nested,
         whole,
     );
-    Ok(Value::Array(Box::new(vec![
+    Ok(Value::Array(std::sync::Arc::new(vec![
         Value::Int(lines),
         Value::Int(code),
         Value::Int(comments),
@@ -430,7 +430,7 @@ pub(crate) fn str_bytes(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let s = expect_str(args, 0, "std.str.bytes")?;
-    Ok(Value::Array(Box::new(
+    Ok(Value::Array(std::sync::Arc::new(
         s.as_bytes().iter().map(|b| Value::Int(*b as i64)).collect(),
     )))
 }
@@ -536,7 +536,7 @@ pub(crate) fn bytes_to_ints(
     _span: Span,
 ) -> Result<Value, EvalError> {
     match arg(args, 0, "bytes.to_ints")? {
-        Value::Bytes(b) => Ok(Value::Array(Box::new(
+        Value::Bytes(b) => Ok(Value::Array(std::sync::Arc::new(
             b.as_slice().iter().map(|x| Value::Int(*x as i64)).collect(),
         ))),
         other => Err(EvalError::new(
@@ -723,7 +723,10 @@ pub(crate) fn str_trim_span(
     let start = expect_int(args, 1, "std.str.trim_span")?;
     let end = expect_int(args, 2, "std.str.trim_span")?;
     let (ns, ne) = trim_span(&s, start, end);
-    Ok(Value::Array(Box::new(vec![Value::Int(ns), Value::Int(ne)])))
+    Ok(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(ns),
+        Value::Int(ne),
+    ])))
 }
 
 fn starts_at(s: &str, sub: &str, pos: i64) -> bool {

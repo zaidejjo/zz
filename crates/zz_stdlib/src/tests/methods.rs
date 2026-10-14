@@ -45,7 +45,11 @@ fn literal_str_method_triple_chain() {
 fn literal_array_method_reverse() {
     assert_eq!(
         run("[1, 2, 3].reverse()").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(3), Value::Int(2), Value::Int(1),]))
+        Value::Array(std::sync::Arc::new(vec![
+            Value::Int(3),
+            Value::Int(2),
+            Value::Int(1),
+        ]))
     );
 }
 
@@ -53,7 +57,11 @@ fn literal_array_method_reverse() {
 fn literal_array_method_sort() {
     assert_eq!(
         run("[3, 1, 2].sort()").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(1), Value::Int(2), Value::Int(3),]))
+        Value::Array(std::sync::Arc::new(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ]))
     );
 }
 

@@ -40,7 +40,7 @@ fn expect_argv(
 }
 
 fn triple_value(status: i64, stdout: String, stderr: String) -> Value {
-    Value::Array(Box::new(vec![
+    Value::Array(std::sync::Arc::new(vec![
         Value::Int(status),
         Value::Str(stdout.into()),
         Value::Str(stderr.into()),

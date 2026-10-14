@@ -61,14 +61,14 @@ impl<'a> Raiser<'a> {
                 for item in items {
                     out.push(self.raise_const(*item, seen)?);
                 }
-                Ok(VmValue::Array(Box::new(out)))
+                Ok(VmValue::Array(std::sync::Arc::new(out)))
             }
             Const::Dict(pairs) => {
                 let mut out = Vec::with_capacity(pairs.len());
                 for (k, v) in pairs {
                     out.push((self.raise_const(*k, seen)?, self.raise_const(*v, seen)?));
                 }
-                Ok(VmValue::Dict(Box::new(out)))
+                Ok(VmValue::Dict(std::sync::Arc::new(out)))
             }
             Const::Option(inner) => Ok(VmValue::Option(match inner {
                 Some(x) => Some(Box::new(self.raise_const(*x, seen)?)),

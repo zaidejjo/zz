@@ -100,7 +100,10 @@ pub(crate) fn append_fn(
     match &args[0] {
         Value::Array(arr) => {
             let mut new_arr = arr.clone();
-            new_arr.push(val);
+            // Copy-on-write: uniquely-owned buffers grow in place,
+            // shared ones copy once here — the caller's array is
+            // never mutated either way.
+            std::sync::Arc::make_mut(&mut new_arr).push(val);
             Ok(Value::Array(new_arr))
         }
         other => Err(EvalError::new(

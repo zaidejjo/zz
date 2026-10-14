@@ -48,7 +48,7 @@ fn env_args_returns_script_args() {
     let v = interp.run(&parsed.program).unwrap();
     assert_eq!(
         v,
-        Value::Array(Box::new(vec![
+        Value::Array(std::sync::Arc::new(vec![
             Value::Str("one".to_string().into()),
             Value::Str("two".to_string().into())
         ]))

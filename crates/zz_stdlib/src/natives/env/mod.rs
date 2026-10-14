@@ -38,7 +38,7 @@ pub(crate) fn env_args(
     _args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    Ok(Value::Array(Box::new(
+    Ok(Value::Array(std::sync::Arc::new(
         interp
             .args
             .iter()
@@ -121,7 +121,7 @@ pub(crate) fn env_vars(
         };
         ka.cmp(&kb)
     });
-    Ok(Value::Dict(Box::new(pairs)))
+    Ok(Value::Dict(std::sync::Arc::new(pairs)))
 }
 
 /// `env.cwd() -> Result<str, str>`.
