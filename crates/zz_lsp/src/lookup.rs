@@ -400,12 +400,18 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
                 walk_expr(expr, source, offset, result);
             }
         }
-        Stmt::Struct { name, .. } => {
+        Stmt::Struct { name, fields, .. } => {
             let joined = name.join(".");
             if let Some(name_span) = find_name_in_source(source, &joined) {
                 if offset >= name_span.start && offset < name_span.end {
-                    result.name = Some(joined);
+                    result.name = Some(joined.clone());
                     result.name_span = Some(name_span);
+                }
+            }
+            for (fname, _) in fields {
+                if offset >= fname.span.start && offset < fname.span.end {
+                    result.name = Some(format!("{joined}.{}", fname.name));
+                    result.name_span = Some(fname.span);
                 }
             }
         }
@@ -883,6 +889,191 @@ pub fn find_references_to_name_in_program(
         collect_name_refs_in_stmt(stmt, name, &mut refs);
     }
     refs
+}
+
+/// Find all references to one struct field: the definition site, struct
+/// literal labels (`Point{x: 1}`), and qualified usages (`p.x`) whose
+/// receiver resolves to `struct_name`.
+///
+/// `resolve_obj` maps a receiver name to its struct (`p` → `Point`);
+/// usages with unresolvable receivers are skipped rather than guessed,
+/// so same-named fields on other structs are never touched. Literal
+/// labels have no spans in the AST: the first word-boundary occurrence
+/// followed by `:` inside the init span is used (documented heuristic).
+pub fn find_field_references(
+    program: &Program,
+    source: &str,
+    struct_name: &str,
+    field: &str,
+    resolve_obj: &dyn Fn(&str) -> Option<String>,
+) -> Vec<Reference> {
+    let mut refs = Vec::new();
+    for stmt in &program.stmts {
+        collect_field_refs_in_stmt(stmt, source, struct_name, field, resolve_obj, &mut refs);
+    }
+    refs
+}
+
+fn collect_field_refs_in_stmt(
+    stmt: &Stmt,
+    source: &str,
+    struct_name: &str,
+    field: &str,
+    resolve_obj: &dyn Fn(&str) -> Option<String>,
+    refs: &mut Vec<Reference>,
+) {
+    match stmt {
+        Stmt::Struct { name, fields, .. } => {
+            if name.join(".") == struct_name {
+                for (fname, _) in fields {
+                    if fname.name == field {
+                        refs.push(Reference {
+                            span: fname.span,
+                            is_definition: true,
+                        });
+                    }
+                }
+            }
+        }
+        Stmt::Func { body, .. } => {
+            for stmt in &body.stmts {
+                collect_field_refs_in_stmt(stmt, source, struct_name, field, resolve_obj, refs);
+            }
+        }
+        Stmt::Decl { value, .. } => {
+            collect_field_refs_in_expr(value, source, struct_name, field, resolve_obj, refs)
+        }
+        Stmt::Expr(e) => {
+            collect_field_refs_in_expr(e, source, struct_name, field, resolve_obj, refs)
+        }
+        Stmt::Return { value: Some(e), .. } => {
+            collect_field_refs_in_expr(e, source, struct_name, field, resolve_obj, refs);
+        }
+        Stmt::Return { value: None, .. } => {}
+        Stmt::For {
+            vars: _,
+            iter,
+            body,
+            ..
+        } => {
+            collect_field_refs_in_expr(iter, source, struct_name, field, resolve_obj, refs);
+            for stmt in &body.stmts {
+                collect_field_refs_in_stmt(stmt, source, struct_name, field, resolve_obj, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_field_refs_in_expr(
+    expr: &Expr,
+    source: &str,
+    struct_name: &str,
+    field: &str,
+    resolve_obj: &dyn Fn(&str) -> Option<String>,
+    refs: &mut Vec<Reference>,
+) {
+    match expr {
+        Expr::Field { obj, name, span } => {
+            if name == field {
+                if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                    if resolve_obj(obj_name).as_deref() == Some(struct_name) {
+                        if let Some(field_span) = field_segment_span(source, *span, field) {
+                            refs.push(Reference {
+                                span: field_span,
+                                is_definition: false,
+                            });
+                        }
+                    }
+                }
+            }
+            collect_field_refs_in_expr(obj, source, struct_name, field, resolve_obj, refs);
+        }
+        Expr::Path { parts, span } => {
+            if parts.len() >= 2
+                && parts.last().is_some_and(|last| last == field)
+                && resolve_obj(&parts[0]).as_deref() == Some(struct_name)
+            {
+                // Last-segment span for precise renames.
+                let span = field_segment_span(source, *span, field).unwrap_or(*span);
+                refs.push(Reference {
+                    span,
+                    is_definition: false,
+                });
+            }
+        }
+        Expr::StructInit {
+            name, fields, span, ..
+        } => {
+            if name == struct_name {
+                for (fname, _) in fields {
+                    if fname == field {
+                        if let Some(label) = init_label_span(source, *span, field) {
+                            refs.push(Reference {
+                                span: label,
+                                is_definition: false,
+                            });
+                        }
+                    }
+                }
+            }
+            for (_, value) in fields {
+                collect_field_refs_in_expr(value, source, struct_name, field, resolve_obj, refs);
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_field_refs_in_expr(callee, source, struct_name, field, resolve_obj, refs);
+            for arg in args {
+                collect_field_refs_in_expr(arg, source, struct_name, field, resolve_obj, refs);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_field_refs_in_expr(left, source, struct_name, field, resolve_obj, refs);
+            collect_field_refs_in_expr(right, source, struct_name, field, resolve_obj, refs);
+        }
+        Expr::Unary { expr, .. } | Expr::Paren { expr, .. } => {
+            collect_field_refs_in_expr(expr, source, struct_name, field, resolve_obj, refs)
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_field_refs_in_expr(cond, source, struct_name, field, resolve_obj, refs);
+            for stmt in &then.stmts {
+                collect_field_refs_in_stmt(stmt, source, struct_name, field, resolve_obj, refs);
+            }
+            if let Some(els) = els {
+                collect_field_refs_in_expr(els, source, struct_name, field, resolve_obj, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Span of the last `field` segment inside a dotted span (`p.x` → `x`).
+fn field_segment_span(source: &str, span: Span, field: &str) -> Option<Span> {
+    let slice = source.get(span.start as usize..span.end as usize)?;
+    let pos = slice.rfind(field)?;
+    let start = span.start + pos as u32;
+    Some(Span::new(start, start + field.len() as u32))
+}
+
+/// Label span of `field` in a struct-init span: first word-boundary
+/// occurrence followed by optional whitespace and `:`.
+fn init_label_span(source: &str, span: Span, field: &str) -> Option<Span> {
+    let slice = source.get(span.start as usize..span.end as usize)?;
+    let mut start = 0;
+    while let Some(pos) = slice[start..].find(field) {
+        let abs = start + pos;
+        let before = slice[..abs].chars().next_back();
+        let boundary = before.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        let after = slice[abs + field.len()..].trim_start();
+        if boundary && after.starts_with(':') {
+            let s = span.start + abs as u32;
+            return Some(Span::new(s, s + field.len() as u32));
+        }
+        start = abs + 1;
+    }
+    None
 }
 
 fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>) {
