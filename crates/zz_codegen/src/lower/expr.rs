@@ -2220,6 +2220,13 @@ impl Lowerer {
                             (c, Some(r))
                         } else if let Some((c, r)) = enum_dispatch {
                             (c, Some(r))
+                        } else if self.is_func_field_call(parts, names) {
+                            // Func-typed struct field (`e.run(...)` where
+                            // `run: func...`): not a method — the sentinel
+                            // routes past every resolver to the
+                            // indirect-closure path, which evaluates the
+                            // field read and emits `zz_call_closure`.
+                            (Self::FUNC_FIELD_CNAME.to_string(), None)
                         } else {
                             // Use the receiver's type from the type checker to
                             // select the correct namespace. Without this, the
@@ -2568,14 +2575,21 @@ impl Lowerer {
                             parts: parts[..parts.len() - 1].to_vec(),
                             span: callee.span(),
                         };
-                        match self.field_free_target(&method, None) {
-                            Some(t) => (t, Some(recv_expr)),
-                            None => {
-                                let mut fixed = parts.clone();
-                                if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
-                                    fixed[0] = head.clone();
+                        // Func-typed struct field on a longer path
+                        // (`a.b.run(...)`): same value-call route as the
+                        // 2-part arm (sentinel → indirect closure).
+                        if self.is_func_field_call(parts, names) {
+                            (Self::FUNC_FIELD_CNAME.to_string(), None)
+                        } else {
+                            match self.field_free_target(&method, None) {
+                                Some(t) => (t, Some(recv_expr)),
+                                None => {
+                                    let mut fixed = parts.clone();
+                                    if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                                        fixed[0] = head.clone();
+                                    }
+                                    (fixed.join("."), None)
                                 }
-                                (fixed.join("."), None)
                             }
                         }
                     } else {
@@ -2595,8 +2609,11 @@ impl Lowerer {
                 obj, name: method, ..
             } => {
                 // Expr::Field callee — rare since parser consumes ident chains as Path.
-                // Look up receiver type and dispatch.
-                if let Some(zzty) = self.ty_at(names, obj.span()) {
+                // Func-typed struct field: value call via the sentinel
+                // (same route as the Path arms above).
+                if self.is_func_field_callee(callee, names) {
+                    (Self::FUNC_FIELD_CNAME.to_string(), None)
+                } else if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
                         zz_checker::Type::Enum(ename, _) => {
                             // Enum values erase to boxed objects: methods
@@ -3752,7 +3769,11 @@ impl Lowerer {
                 }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
-                    if names.lookup(&joined).is_some() {
+                    if self.is_func_field_call(parts, names) {
+                        // Func-typed struct field value (`e.run`): evaluate
+                        // the field read, then `zz_call_closure`.
+                        Indirect::Other
+                    } else if names.lookup(&joined).is_some() {
                         Indirect::Known
                     } else if parts
                         .last()
@@ -3767,8 +3788,14 @@ impl Lowerer {
                 }
                 // Arbitrary callee expression (e.g. `make_adder()(5)`):
                 // evaluate it, then dispatch. `Field` callees are method-ish
-                // and keep the old unit fallback.
-                _ if !matches!(callee, Expr::Field { .. }) => Indirect::Other,
+                // and keep the old unit fallback — except func-typed struct
+                // fields, which evaluate to a function value like any
+                // other indirect callee.
+                _ if !matches!(callee, Expr::Field { .. })
+                    || self.is_func_field_callee(callee, names) =>
+                {
+                    Indirect::Other
+                }
                 _ => Indirect::No,
             };
             let closure_val: Option<String> = match kind {
@@ -4210,6 +4237,91 @@ impl Lowerer {
     /// namespaced), unique `*.{method}` suffix, bare native. Returns
     /// `None` when nothing resolves — callers then keep the old
     /// `(method, None)` fallthrough.
+    /// Func-typed struct field call (`e.run(...)` where `run: func...`):
+    /// not a method — the field holds a first-class function the call
+    /// invokes as a value (`zz_call_closure`), mirroring the checker's
+    /// type-driven callee resolution and the VM (#385: collections
+    /// `Entry{name, run}` structs depend on this). Walks the receiver
+    /// path through struct field types; the leaf field must be `Func`.
+    /// `false` for methods, natives, and plain paths (which keep the
+    /// existing dispatch below).
+    fn is_func_field_call(&self, parts: &[String], names: &NameCtx) -> bool {
+        if parts.len() < 2 {
+            return false;
+        }
+        let head = &parts[0];
+        if names.lookup(head).is_none() {
+            return false;
+        }
+        let mut cur = match names.checker_types.get(head) {
+            Some(t) => t.clone(),
+            None => return false,
+        };
+        for seg in &parts[1..parts.len() - 1] {
+            let sname = match &cur {
+                zz_checker::Type::Struct(s, _) => s.clone(),
+                _ => return false,
+            };
+            let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
+            let field_ty = self
+                .tp
+                .structs
+                .get(&sname)
+                .or_else(|| self.tp.structs.get(&bare))
+                .and_then(|sig| sig.fields.iter().find(|(n, _)| n == seg))
+                .map(|(_, t)| t.clone());
+            match field_ty {
+                Some(t) => cur = t,
+                None => return false,
+            }
+        }
+        // Leaf: `method` must be a Func-typed field of a struct.
+        // (Direct fields only; promoted func fields keep the old path.)
+        let sname = match &cur {
+            zz_checker::Type::Struct(s, _) => s.clone(),
+            _ => return false,
+        };
+        let method = parts.last().unwrap();
+        let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
+        self.tp
+            .structs
+            .get(&sname)
+            .or_else(|| self.tp.structs.get(&bare))
+            .and_then(|sig| sig.fields.iter().find(|(n, _)| n == method))
+            .is_some_and(|(_, t)| matches!(t, zz_checker::Type::Func(_, _)))
+    }
+
+    /// Callee-shape wrapper over [`Self::is_func_field_call`]: accepts the
+    /// `Path` and `Field` callee forms (the parser emits the former;
+    /// lowering synthesizes the latter).
+    fn is_func_field_callee(&self, callee: &Expr, names: &NameCtx) -> bool {
+        match callee {
+            Expr::Path { parts, .. } => self.is_func_field_call(parts, names),
+            Expr::Field {
+                obj, name: method, ..
+            } => match obj.as_ref() {
+                Expr::Ident { name, .. } => {
+                    self.is_func_field_call(&[name.clone(), method.clone()], names)
+                }
+                Expr::Path { parts, .. } => {
+                    let mut p = parts.clone();
+                    p.push(method.clone());
+                    self.is_func_field_call(&p, names)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Sentinel callee name for func-typed struct field calls. Resolves
+    /// to nothing downstream (every use is a miss-guarded table lookup),
+    /// so emission always reaches the indirect-closure path, which
+    /// evaluates the field read and emits `zz_call_closure`. The NUL byte
+    /// keeps it unforgeable: no ZZ identifier (and hence no real func,
+    /// native, or specialization key) can contain it.
+    const FUNC_FIELD_CNAME: &'static str = "\0funfield";
+
     fn field_free_target(&self, method: &str, sname: Option<&str>) -> Option<String> {
         // Bare names count only with a real definition: reachable_funcs
         // can hold phantom short names (the callgraph records

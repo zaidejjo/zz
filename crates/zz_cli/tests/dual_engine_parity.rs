@@ -1328,6 +1328,11 @@ parity_strict!(parity_syntax_control_flow, "syntax", "control_flow.zz");
 
 // --- Fixed: nested field access boxing ---
 parity_strict!(parity_types_structs, "types", "structs.zz");
+parity_strict!(
+    parity_types_func_field_value,
+    "types",
+    "func_field_value.zz"
+);
 parity_strict!(parity_types_recursive, "types", "recursive.zz");
 parity_strict!(parity_types_enum_call_order, "types", "enum_call_order.zz");
 parity_strict!(parity_types_aliases, "types", "aliases.zz");
