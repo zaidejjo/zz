@@ -177,6 +177,10 @@ impl LanguageServer for Backend {
         display::handle_folding_range(self, params).await
     }
 
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        crate::watch::handle_watched_changes(self.state.clone(), &self.client, params).await;
+    }
+
     async fn shutdown(&self) -> Result<()> {
         log::info!("zz-lsp shutting down");
         Ok(())

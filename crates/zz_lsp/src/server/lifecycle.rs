@@ -44,7 +44,10 @@ pub(crate) async fn handle_initialize(
             code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
-            rename_provider: Some(OneOf::Left(true)),
+            rename_provider: Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            })),
             references_provider: Some(OneOf::Left(true)),
             document_highlight_provider: Some(OneOf::Left(true)),
             completion_provider: Some(CompletionOptions {
@@ -81,6 +84,7 @@ pub(crate) async fn handle_initialize(
 }
 
 pub(crate) async fn handle_initialized(backend: &Backend, _: InitializedParams) {
+    crate::watch::register_watches(&backend.client).await;
     backend
         .client
         .log_message(MessageType::INFO, "zz-lsp ready")

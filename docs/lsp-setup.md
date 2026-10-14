@@ -90,8 +90,9 @@ auto-format = true
 | Completion | Context-aware completions for variables, functions, fields, import paths (stdlib, local modules, installed `zz.toml` dependencies) |
 | Hover | Type and documentation on hover |
 | Go-to-definition | Navigate to symbol definitions (cross-file) |
-| Find references | Find all uses of a symbol (cross-file) |
-| Rename | Rename a symbol across all files |
+| Find references | Find all uses of a symbol (defining file + importers; fresh buffers preferred) |
+| Rename | Rename a symbol across the defining file and its importers (qualified `ns.name` keeps its qualifier) |
+| File watching | External edits to `.zz`/`zz.toml`/`zz.lock` re-index and recheck open dependents; saving a file rechecks its open dependents |
 | Code actions | Quick fixes for diagnostics (unused vars, typos) |
 | Formatting | `zz fmt` style via `textDocument/formatting` |
 | Inlay hints | Parameter names at call sites |
