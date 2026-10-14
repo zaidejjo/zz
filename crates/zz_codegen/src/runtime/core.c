@@ -7438,6 +7438,122 @@ zz_value zz_env_temp_dir(zz_value unused, int *err) {
 #endif
 }
 
+// ---- std.test pro helpers (P2) -----------------------------------------
+// Value convention (NOT abort): success → `.ok(v)`, failure → `.err(msg)`
+// mirroring `zz_fs_*`. Sanitization mirrors `natives/test_helpers`.
+
+static unsigned long long zz_test_counter = 0;
+
+zz_value zz_test_temp_dir(zz_value prefix, int *err) {
+    (void)err;
+    const char *pre = "";
+    size_t pre_len = 0;
+    if (prefix.tag == ZZ_STR && prefix.s) {
+        pre = zz_str_cptr(prefix.s);
+        pre_len = prefix.s->len;
+    } else if (prefix.tag != ZZ_STR) {
+        *err = 1;
+        return zz_unit();
+    }
+    // Sanitize into single component (max 64): separators/NUL → `_`.
+    char clean[65];
+    size_t cn = 0;
+    if (pre_len == 0) {
+        memcpy(clean, "zz-test", 7);
+        cn = 7;
+    } else {
+        for (size_t i = 0; i < pre_len && cn < 64; i++) {
+            char c = pre[i];
+            clean[cn++] = (c == '/' || c == '\\' || c == '\0') ? '_' : c;
+        }
+    }
+    clean[cn] = '\0';
+    // Collapse `..` runs (bounded passes: length only shrinks).
+    for (int pass = 0; pass < 4; pass++) {
+        char *dot = strstr(clean, "..");
+        if (!dot) break;
+        dot[0] = '_';
+        dot[1] = '_';
+    }
+    // Base dir (same rule as zz_env_temp_dir).
+#ifdef ZZ_OS_WINDOWS
+    char wbase[32768];
+    DWORD wn = GetTempPathA((DWORD)sizeof wbase, wbase);
+    const char *base;
+    char basebuf[32768];
+    if (wn == 0 || wn >= sizeof wbase) {
+        base = "C:\\Windows\\Temp";
+    } else {
+        while (wn > 1 && (wbase[wn - 1] == '\\' || wbase[wn - 1] == '/')) wbase[--wn] = '\0';
+        memcpy(basebuf, wbase, wn + 1);
+        base = basebuf;
+    }
+#else
+    const char *tmpd = getenv("TMPDIR");
+    const char *base = (tmpd && *tmpd) ? tmpd : "/tmp";
+#endif
+    unsigned long long seq = __atomic_fetch_add(&zz_test_counter, 1ULL, __ATOMIC_RELAXED);
+#ifdef ZZ_OS_WINDOWS
+    unsigned long long pid = (unsigned long long)GetCurrentProcessId();
+#else
+    unsigned long long pid = (unsigned long long)getpid();
+#endif
+#ifdef ZZ_OS_WINDOWS
+    unsigned long long nano = (unsigned long long)GetTickCount64() * 1000000ULL + seq;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    unsigned long long nano = (unsigned long long)ts.tv_nsec + seq;
+#endif
+    char path[4096];
+    int n = snprintf(path, sizeof path, "%s/%s-%llu-%llu-%llu", base, clean, pid, seq, nano);
+    if (n <= 0 || (size_t)n >= sizeof path) {
+        return zz_variant_err(zz_str_static("test.temp_dir:path_too_long"));
+    }
+#ifdef ZZ_OS_WINDOWS
+    int r = _mkdir(path);
+#else
+    int r = mkdir(path, 0700);
+#endif
+    if (r != 0) {
+        char buf[4128];
+        int m = snprintf(buf, sizeof buf, "test.temp_dir:io_error: %s (%s)", path, strerror(errno));
+        if (m < 0) return zz_variant_err(zz_str_static("test.temp_dir:io_error"));
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)m)));
+    }
+    return zz_variant_ok(zz_str_new(path, (size_t)n));
+}
+
+zz_value zz_test_free_port(zz_value unused, int *err) {
+    (void)unused;
+    (void)err;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return zz_variant_err(zz_str_static("test.free_port:socket"));
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        char buf[192];
+        int n = snprintf(buf, sizeof buf, "test.free_port:bind: %s", strerror(errno));
+        close(fd);
+        if (n < 0) return zz_variant_err(zz_str_static("test.free_port:bind"));
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+    }
+    socklen_t sl = sizeof sa;
+    if (getsockname(fd, (struct sockaddr *)&sa, &sl) != 0) {
+        close(fd);
+        return zz_variant_err(zz_str_static("test.free_port:addr"));
+    }
+    int port = ntohs(sa.sin_port);
+    close(fd);
+    if (port <= 0 || port > 65535) {
+        return zz_variant_err(zz_str_static("test.free_port:addr"));
+    }
+    return zz_variant_ok(zz_int((int64_t)port));
+}
+
 // env.user() → Option<str>
 zz_value zz_env_user(zz_value unused, int *err) {
     (void)unused; (void)err;

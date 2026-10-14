@@ -825,6 +825,8 @@ zz_value zz_assert_is_some(zz_value v, int *err);
 zz_value zz_assert_is_none(zz_value v, int *err);
 zz_value zz_assert_is_ok(zz_value v, int *err);
 zz_value zz_assert_is_err(zz_value v, int *err);
+zz_value zz_test_temp_dir(zz_value prefix, int *err);
+zz_value zz_test_free_port(zz_value unused, int *err);
 zz_value zz_math_abs(zz_value v, int *err);
 zz_value zz_math_sqrt(zz_value v, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);
