@@ -1,0 +1,12 @@
+# Known LSP-vs-`zz check` diagnostic divergences (#264).
+#
+# Each entry is a divergence under active investigation: file (fixture
+# name matched by the parity gate), reason, and tracking issue. Fix the
+# underlying analysis gap instead of extending this list; the gate fails
+# loudly (`FIXED!`) when an entry starts passing.
+[[allow]]
+file = "parse_error.zz"
+reason = "intentional recovery difference: the server checks partial programs so editors see diagnostics mid-typing (unused-variable warning fires), while batch `zz check` stops after parse errors"
+[[allow]]
+file = "assign_in_condition.zz"
+reason = "intentional recovery difference (same as parse_error.zz): the `=`-in-condition parse error suppresses the follow-on condition type error under `zz check`, but the server checks the partial program and reports both"

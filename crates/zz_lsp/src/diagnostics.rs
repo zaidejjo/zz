@@ -104,8 +104,18 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
     // Absorb new results into global seed.
     state.absorb_result(&uri, &checked);
 
-    // Combine parse errors + checker diagnostics.
+    // Combine parse errors + unknown-import errors + checker
+    // diagnostics. Unknown `std` imports never reach the checker (it
+    // checks seeded tables), so they are surfaced here to match
+    // `zz check` (#264: the server used to stay silent on them).
     let mut all_errors = parse_errors;
+    if let Some(program) = state
+        .documents
+        .get(&uri_clone)
+        .and_then(|doc| doc.program.clone())
+    {
+        all_errors.extend(crate::import_seed::unknown_import_diags(&program));
+    }
     all_errors.extend(checked.errors);
 
     let diagnostics: Vec<Diagnostic> = all_errors

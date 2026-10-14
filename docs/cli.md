@@ -274,6 +274,7 @@ zz check src/
 | `--hard` | Apply all fixes including ambiguous (no prompts) |
 | `--interactive` / `-i` | Prompt for ambiguous fixes |
 | `--stats` | Print per-file and total check stats (modules, cache hits/misses, seed size, wall time) |
+| `--format json` | Emit machine-readable diagnostics (`{"files": [{"file", "diagnostics"}]}` on stdout); exit codes unchanged; cannot combine with `--fix` |
 
 > Note: `--check` / `-c` is a `zz fmt` flag only. `zz check --check`
 > is rejected — `zz check` already checks without writing; use

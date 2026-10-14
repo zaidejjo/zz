@@ -552,7 +552,13 @@ fn check_program_impl(
             }
         }
     }
-    let alias_names: Vec<String> = checker.alias_asts.keys().cloned().collect();
+    let mut alias_names: Vec<String> = checker.alias_asts.keys().cloned().collect();
+    // Deterministic order: HashMap iteration is random per process, and
+    // whichever alias converts first names the cycle (`A -> B` vs
+    // `B -> A`). Sorting pins one spelling across runs, processes, and
+    // consumers (CLI, LSP, build cache) — the parity gate (#264) caught
+    // this flapping between runs.
+    alias_names.sort();
     for alias_name in alias_names {
         checker.convert_alias(&alias_name);
     }

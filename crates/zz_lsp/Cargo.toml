@@ -20,3 +20,7 @@ dashmap     = "6"
 serde_json  = "1"
 log         = "0.4"
 env_logger  = "0.11"
+
+[dev-dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
