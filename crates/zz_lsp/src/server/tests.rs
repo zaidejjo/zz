@@ -1243,17 +1243,28 @@ async fn code_action_missing_doc_returns_none() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn code_action_empty_range_returns_none() {
+async fn code_action_blank_position_returns_none() {
     let (service, state) = setup();
     let uri: Url = "file:///test.zz".parse().unwrap();
     let src = "x := 1\n";
     open_and_check(&state, &uri, src);
 
+    // Position (0, 2) sits on `:=`: no diagnostic, no symbol, no
+    // statement range — nothing to offer (a cursor *on* `x` would offer
+    // inline/remove refactors).
+    let pos = Position {
+        line: 0,
+        character: 2,
+    };
+    let range = Range {
+        start: pos,
+        end: pos,
+    };
     let actions = service
         .inner()
         .code_action(CodeActionParams {
             text_document: TextDocumentIdentifier { uri },
-            range: Range::default(),
+            range,
             context: CodeActionContext {
                 diagnostics: vec![],
                 only: None,

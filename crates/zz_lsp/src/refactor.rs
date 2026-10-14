@@ -20,8 +20,10 @@ use zz_frontend::span::Span;
 
 use crate::convert::LineIndex;
 
-/// Compute extract actions for the cursor/range in `source`.
+/// Compute refactor actions for the cursor/range in `source`:
+/// extract variable/function, inline variable, and move-to-new-file.
 pub fn refactor_actions(
+    state: &crate::state::GlobalState,
     program: &Program,
     source: &str,
     file_uri: &Url,
@@ -33,6 +35,12 @@ pub fn refactor_actions(
     let end = line_index.position_to_offset(source, range.end);
 
     if let Some(action) = extract_variable(program, source, file_uri, start) {
+        actions.push(action.into());
+    }
+    if let Some(action) = inline_variable(program, source, file_uri, start) {
+        actions.push(action.into());
+    }
+    if let Some(action) = move_to_new_file(state, program, source, file_uri, start) {
         actions.push(action.into());
     }
     if start != end {
@@ -804,7 +812,9 @@ mod tests {
     fn variable_action(source: &str, line: u32, character: u32) -> Option<CodeAction> {
         let program = zz_frontend::parse(source).program;
         let uri = test_uri();
+        let state = crate::state::GlobalState::new();
         let actions = refactor_actions(
+            &state,
             &program,
             source,
             &uri,
@@ -856,7 +866,9 @@ mod tests {
         let uri = test_uri();
         let start = offset_at(src, 1, 0);
         let end = offset_at(src, 2, 14);
+        let state = crate::state::GlobalState::new();
         let actions = refactor_actions(
+            &state,
             &program,
             src,
             &uri,
@@ -899,7 +911,9 @@ mod tests {
         let src = "func main() {\n    x := 1\n    y := 2\n    println(x)\n    println(y)\n}\n";
         let program = zz_frontend::parse(src).program;
         let uri = test_uri();
+        let state = crate::state::GlobalState::new();
         let actions = refactor_actions(
+            &state,
             &program,
             src,
             &uri,
@@ -929,7 +943,9 @@ mod tests {
         let src = "func main() {\n    x := 1\n    y := x + 1\n    x := 3\n    println(x)\n}\n";
         let program = zz_frontend::parse(src).program;
         let uri = test_uri();
+        let state = crate::state::GlobalState::new();
         let actions = refactor_actions(
+            &state,
             &program,
             src,
             &uri,
@@ -974,7 +990,9 @@ mod tests {
         let src = "func main() {\n    b := [a, c]\n    println(b)\n}\n";
         let program = zz_frontend::parse(src).program;
         let uri = test_uri();
+        let state = crate::state::GlobalState::new();
         let actions = refactor_actions(
+            &state,
             &program,
             src,
             &uri,
@@ -1018,7 +1036,9 @@ mod tests {
             "fixture must parse"
         );
         let uri = test_uri();
+        let state = crate::state::GlobalState::new();
         let actions = refactor_actions(
+            &state,
             &program,
             src,
             &uri,
@@ -1047,7 +1067,9 @@ mod tests {
         let src = "func main() {\n    x := 0\n    x = 1\n    println(x)\n}\n";
         let program = zz_frontend::parse(src).program;
         let uri = test_uri();
+        let state = crate::state::GlobalState::new();
         let actions = refactor_actions(
+            &state,
             &program,
             src,
             &uri,
@@ -1068,6 +1090,777 @@ mod tests {
                 _ => true,
             }),
             "outer assignment refuses"
+        );
+    }
+}
+
+// ── Inline variable ────────────────────────────────────────────────────
+
+/// Effect-free expressions: duplicating them at several use sites
+/// changes nothing observable. Calls (and control flow) may run code.
+fn is_effect_free(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { .. } => false,
+        Expr::Ident { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. } => true,
+        Expr::Binary { left, right, .. } => is_effect_free(left) && is_effect_free(right),
+        Expr::Unary { expr, .. } | Expr::Paren { expr, .. } => is_effect_free(expr),
+        Expr::Field { obj, .. } => is_effect_free(obj),
+        Expr::Index { obj, index, .. } => is_effect_free(obj) && is_effect_free(index),
+        Expr::Array { elems, .. } => elems.iter().all(is_effect_free),
+        Expr::Tuple { items, .. } => items.iter().all(is_effect_free),
+        _ => false,
+    }
+}
+
+/// Atomic expressions need no parentheses when inlined into an operand
+/// position; everything else gets wrapped.
+fn needs_parens(expr: &Expr) -> bool {
+    !matches!(
+        expr,
+        Expr::Ident { .. }
+            | Expr::Path { .. }
+            | Expr::Call { .. }
+            | Expr::Field { .. }
+            | Expr::Index { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Str { .. }
+            | Expr::Bool { .. }
+            | Expr::Array { .. }
+            | Expr::Tuple { .. }
+            | Expr::Paren { .. }
+            | Expr::StructInit { .. }
+            | Expr::Variant { .. }
+            | Expr::Closure { .. }
+            | Expr::Fmt { .. }
+    )
+}
+
+/// True when `name` is bound anywhere nested inside `stmts`
+/// (shadowing an outer binding of the same name).
+fn nested_shadow(stmts: &[&Stmt], name: &str, decl_span: Span) -> bool {
+    for stmt in stmts {
+        if stmt.span() == decl_span {
+            continue;
+        }
+        if stmt_binds(stmt, name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_binds(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Func { params, body, .. } => {
+            params.iter().any(|p| p.name.name == name)
+                || body.stmts.iter().any(|s| stmt_binds_deep(s, name))
+        }
+        _ => stmt_binds_deep(stmt, name),
+    }
+}
+
+fn stmt_binds_deep(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Decl { name: n, .. } => n.name == name,
+        Stmt::Func { params, body, .. } => {
+            params.iter().any(|p| p.name.name == name)
+                || body.stmts.iter().any(|s| stmt_binds_deep(s, name))
+        }
+        Stmt::For { vars, body, .. } => {
+            vars.iter().any(|v| v.name == name)
+                || body.stmts.iter().any(|s| stmt_binds_deep(s, name))
+        }
+        _ => false,
+    }
+}
+
+/// Bare-name usage spans of `name` at/after `from` inside `stmts`
+/// (struct labels and qualified members are not variable refs).
+fn usage_spans(stmts: &[&Stmt], name: &str, from: u32) -> Vec<Span> {
+    let mut out = Vec::new();
+    for stmt in stmts {
+        collect_usages_in_stmt(stmt, name, from, &mut out);
+    }
+    out
+}
+
+fn collect_usages_in_stmt(stmt: &Stmt, name: &str, from: u32, out: &mut Vec<Span>) {
+    match stmt {
+        Stmt::Decl { value, .. } => collect_usages_in_expr(value, name, from, out),
+        Stmt::Expr(e) => collect_usages_in_expr(e, name, from, out),
+        Stmt::Return { value: Some(e), .. } => {
+            collect_usages_in_expr(e, name, from, out);
+        }
+        Stmt::Return { value: None, .. } => {}
+        Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+            collect_usages_in_expr(target, name, from, out);
+            collect_usages_in_expr(value, name, from, out);
+        }
+        Stmt::Func { body, .. } => {
+            for s in &body.stmts {
+                collect_usages_in_stmt(s, name, from, out);
+            }
+        }
+        Stmt::For { iter, body, .. } => {
+            collect_usages_in_expr(iter, name, from, out);
+            for s in &body.stmts {
+                collect_usages_in_stmt(s, name, from, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_usages_in_expr(expr: &Expr, name: &str, from: u32, out: &mut Vec<Span>) {
+    match expr {
+        Expr::Ident { name: n, span } => {
+            if n == name && span.start >= from {
+                out.push(*span);
+            }
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_usages_in_expr(callee, name, from, out);
+            for arg in args {
+                collect_usages_in_expr(arg, name, from, out);
+            }
+            for (_, value) in named {
+                collect_usages_in_expr(value, name, from, out);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_usages_in_expr(left, name, from, out);
+            collect_usages_in_expr(right, name, from, out);
+        }
+        Expr::Unary { expr, .. } | Expr::Paren { expr, .. } => {
+            collect_usages_in_expr(expr, name, from, out)
+        }
+        Expr::Field { obj, .. } => collect_usages_in_expr(obj, name, from, out),
+        Expr::Index { obj, index, .. } => {
+            collect_usages_in_expr(obj, name, from, out);
+            collect_usages_in_expr(index, name, from, out);
+        }
+        Expr::Array { elems, .. } => {
+            for e in elems {
+                collect_usages_in_expr(e, name, from, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn inline_variable(
+    program: &Program,
+    source: &str,
+    file_uri: &Url,
+    offset: u32,
+) -> Option<CodeAction> {
+    // The declaration under the cursor: a direct child of top level or
+    // of one function body (deeper nesting is refused — scope analysis
+    // would have to cross block boundaries).
+    let mut found: Option<(Vec<&Stmt>, usize)> = None;
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        if let Stmt::Decl { name, .. } = stmt {
+            if offset >= name.span.start && offset < name.span.end {
+                found = Some((program.stmts.iter().collect(), i));
+                break;
+            }
+        }
+        if let Stmt::Func { body, .. } = stmt {
+            for (j, inner) in body.stmts.iter().enumerate() {
+                if let Stmt::Decl { name, .. } = inner {
+                    if offset >= name.span.start && offset < name.span.end {
+                        found = Some((body.stmts.iter().collect(), j));
+                        break;
+                    }
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+    }
+    let (container, idx) = found?;
+    let (decl_name, decl_value, decl_span) = match container[idx] {
+        Stmt::Decl {
+            name, value, span, ..
+        } => (name.name.clone(), value, *span),
+        _ => return None,
+    };
+
+    // Rebinding anywhere in scope would make replacement ambiguous.
+    let rebindings = container
+        .iter()
+        .filter(|s| match s {
+            Stmt::Decl { name, .. } => name.name == decl_name,
+            _ => false,
+        })
+        .count();
+    if rebindings > 1 {
+        return None;
+    }
+    let decl_end = decl_span.end;
+    if nested_shadow(&container, &decl_name, decl_span) {
+        return None;
+    }
+
+    let usages = usage_spans(&container, &decl_name, decl_end);
+    // Effectful values inline at most once (same evaluation count);
+    // effect-free values inline anywhere. Control flow never inlines.
+    if has_control_escape(decl_value) {
+        return None;
+    }
+    if !is_effect_free(decl_value) && usages.len() > 1 {
+        return None;
+    }
+
+    let line_index = LineIndex::new(source);
+    let value_text = source
+        .get(decl_value.span().start as usize..decl_value.span().end as usize)
+        .unwrap_or("");
+    let replacement = if needs_parens(decl_value) {
+        format!("({value_text})")
+    } else {
+        value_text.to_string()
+    };
+
+    // Delete the whole declaration line (consuming its newline when one
+    // follows, the preceding one when it is the last line).
+    let decl_range = line_index.span_to_range(source, decl_span);
+    let first_line = decl_range.start.line;
+    let last_line = decl_range.end.line;
+    let line_count = source.lines().count() as u32;
+    let (del_start, del_end) = if last_line + 1 < line_count {
+        (
+            line_index.position_to_offset(
+                source,
+                Position {
+                    line: first_line,
+                    character: 0,
+                },
+            ),
+            line_index.position_to_offset(
+                source,
+                Position {
+                    line: last_line + 1,
+                    character: 0,
+                },
+            ),
+        )
+    } else if first_line > 0 {
+        let prev_end = line_index.position_to_offset(
+            source,
+            Position {
+                line: first_line - 1,
+                character: u32::MAX,
+            },
+        );
+        (prev_end.min(source.len() as u32), source.len() as u32)
+    } else {
+        (
+            line_index.position_to_offset(
+                source,
+                Position {
+                    line: first_line,
+                    character: 0,
+                },
+            ),
+            source.len() as u32,
+        )
+    };
+
+    let mut edits = Vec::new();
+    for span in &usages {
+        edits.push(TextEdit {
+            range: line_index.span_to_range(source, *span),
+            new_text: replacement.clone(),
+        });
+    }
+    edits.push(TextEdit {
+        range: Range {
+            start: line_index.offset_to_position(source, del_start),
+            end: line_index.offset_to_position(source, del_end),
+        },
+        new_text: String::new(),
+    });
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(file_uri.clone(), edits);
+    let title = if usages.is_empty() {
+        format!("Remove unused variable `{decl_name}`")
+    } else {
+        format!("Inline variable `{decl_name}`")
+    };
+    Some(CodeAction {
+        title,
+        kind: Some(CodeActionKind::REFACTOR_INLINE),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
+// ── Move to new file ───────────────────────────────────────────────────
+
+/// Move a top-level item (`func`, `struct`, `enum`, alias) to a new
+/// sibling file named after it, leaving a selective import behind.
+///
+/// Preconditions (refusals are silent — no action offered):
+/// - cursor on the definition's name;
+/// - no decorators (they may not survive the move textually);
+/// - no references outside the defining file;
+/// - no qualified self-references (`lib.x` inside `lib` would dangle);
+/// - destination file does not exist yet;
+/// - the client applies `documentChanges` + `create` resource ops.
+fn move_to_new_file(
+    state: &crate::state::GlobalState,
+    program: &Program,
+    source: &str,
+    file_uri: &Url,
+    offset: u32,
+) -> Option<CodeAction> {
+    if !create_supported(state) {
+        return None;
+    }
+    // The definition under the cursor: top-level items only.
+    let defs = crate::lookup::collect_definitions(program, source);
+    let def = defs.values().find(|d| {
+        offset >= d.span.start
+            && offset < d.span.end
+            && matches!(
+                d.kind,
+                crate::lookup::DefKind::Func | crate::lookup::DefKind::Struct
+            )
+    })?;
+    let (stmt, item_name) = program
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Func { name, .. } => Some((s, name.join("."))),
+            Stmt::Struct { name, .. } => Some((s, name.join("."))),
+            Stmt::Enum { name, .. } => Some((s, name.join("."))),
+            Stmt::TypeAlias { name, .. } => Some((s, name.join("."))),
+            _ => None,
+        })
+        .find(|(_, name)| *name == def.name)?;
+    // Decorated items stay put (decorator lines may sit outside the
+    // statement span; moving would drop them).
+    let decorated = match stmt {
+        Stmt::Func { decorators, .. } => !decorators.is_empty(),
+        _ => false,
+    };
+    if decorated {
+        return None;
+    }
+
+    // No references outside the defining file (same-file bare usages
+    // keep working through the import left behind).
+    let scope = crate::symbol_refs::resolve_symbol_scope(state, file_uri, offset)?;
+    if scope.files.len() > 1 {
+        return None;
+    }
+    // No qualified self-references: `lib.x` inside `lib` would dangle.
+    let refs = crate::lookup::find_references_to_name_in_program(program, source, &scope.name);
+    for r in &refs {
+        if r.is_definition {
+            continue;
+        }
+        let text = source
+            .get(r.span.start as usize..r.span.end as usize)
+            .unwrap_or("");
+        if text.contains('.') {
+            return None;
+        }
+    }
+
+    // Destination: `<lowercase-name>.zz` beside the source file.
+    let dir = file_uri.to_file_path().ok()?.parent()?.to_path_buf();
+    let stem = item_name.to_lowercase();
+    let dest_path = dir.join(format!("{stem}.zz"));
+    if dest_path.is_file() {
+        return None;
+    }
+    let dest_uri = Url::from_file_path(&dest_path).ok()?;
+
+    let line_index = LineIndex::new(source);
+    let def_span = stmt.span();
+    // Moved text: exact slice, normalized to one trailing newline.
+    let mut moved = source
+        .get(def_span.start as usize..def_span.end as usize)
+        .unwrap_or("")
+        .to_string();
+    while moved.ends_with('\n') {
+        moved.pop();
+    }
+    moved.push('\n');
+
+    // Delete the definition's whole lines (same rule as inline).
+    let def_range = line_index.span_to_range(source, def_span);
+    let line_count = source.lines().count() as u32;
+    let (del_start, del_end) = if def_range.end.line + 1 < line_count {
+        (
+            line_index.position_to_offset(
+                source,
+                Position {
+                    line: def_range.start.line,
+                    character: 0,
+                },
+            ),
+            line_index.position_to_offset(
+                source,
+                Position {
+                    line: def_range.end.line + 1,
+                    character: 0,
+                },
+            ),
+        )
+    } else if def_range.start.line > 0 {
+        let prev_end = line_index.position_to_offset(
+            source,
+            Position {
+                line: def_range.start.line - 1,
+                character: u32::MAX,
+            },
+        );
+        (prev_end.min(source.len() as u32), source.len() as u32)
+    } else {
+        (
+            line_index.position_to_offset(
+                source,
+                Position {
+                    line: def_range.start.line,
+                    character: 0,
+                },
+            ),
+            source.len() as u32,
+        )
+    };
+
+    // Import left behind (inserted after the import block like auto-import).
+    let import_stmt = format!("import {stem}({item_name})");
+    let import_range = crate::code_action::import_insert_range(source);
+
+    let operations = vec![
+        DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+            uri: dest_uri.clone(),
+            options: Some(CreateFileOptions {
+                overwrite: None,
+                ignore_if_exists: Some(true),
+            }),
+            annotation_id: None,
+        })),
+        DocumentChangeOperation::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: dest_uri,
+                version: None,
+            },
+            edits: vec![OneOf::Left(TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                },
+                new_text: moved,
+            })],
+        }),
+        DocumentChangeOperation::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: file_uri.clone(),
+                version: None,
+            },
+            edits: vec![
+                OneOf::Left(TextEdit {
+                    range: Range {
+                        start: line_index.offset_to_position(source, del_start),
+                        end: line_index.offset_to_position(source, del_end),
+                    },
+                    new_text: String::new(),
+                }),
+                OneOf::Left(TextEdit {
+                    range: import_range,
+                    new_text: format!("{import_stmt}\n"),
+                }),
+            ],
+        }),
+    ];
+
+    Some(CodeAction {
+        title: format!("Move `{item_name}` to new file `{stem}.zz`"),
+        kind: Some(CodeActionKind::REFACTOR),
+        edit: Some(WorkspaceEdit {
+            changes: None,
+            document_changes: Some(DocumentChanges::Operations(operations)),
+            change_annotations: None,
+        }),
+        ..Default::default()
+    })
+}
+
+/// Whether the client applies file-creating workspace edits.
+fn create_supported(state: &crate::state::GlobalState) -> bool {
+    state
+        .create_supported
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod move_inline_tests {
+    use super::*;
+
+    fn test_uri() -> Url {
+        "file:///ref.zz".parse().unwrap()
+    }
+
+    fn offset_at(source: &str, line: u32, character: u32) -> u32 {
+        LineIndex::new(source).position_to_offset(source, Position { line, character })
+    }
+
+    fn apply_changes(source: &str, action: &CodeAction, uri: &Url) -> String {
+        let mut edits = action
+            .edit
+            .as_ref()
+            .expect("edit")
+            .changes
+            .as_ref()
+            .expect("changes")[uri]
+            .clone();
+        let line_index = LineIndex::new(source);
+        edits.sort_by_key(|e| {
+            std::cmp::Reverse(line_index.position_to_offset(source, e.range.start))
+        });
+        let mut text = source.to_string();
+        for edit in edits {
+            let start = line_index.position_to_offset(&text, edit.range.start) as usize;
+            let end = line_index.position_to_offset(&text, edit.range.end) as usize;
+            text.replace_range(start..end, &edit.new_text);
+        }
+        text
+    }
+
+    fn inline_action(source: &str, line: u32, character: u32) -> Option<CodeAction> {
+        let program = zz_frontend::parse(source).program;
+        let uri = test_uri();
+        let offset = offset_at(source, line, character);
+        inline_variable(&program, source, &uri, offset)
+    }
+
+    #[test]
+    fn inline_parenthesizes_binary() {
+        let src = "func main() {\n    y := a + b\n    z := y * 2\n    println(z)\n}\n";
+        let action = inline_action(src, 1, 4).expect("inline action");
+        assert!(action.title.contains("Inline variable"));
+        let out = apply_changes(src, &action, &test_uri());
+        assert_eq!(
+            out, "func main() {\n    z := (a + b) * 2\n    println(z)\n}\n",
+            "got:\n{out}"
+        );
+        assert!(zz_frontend::parse(&out).errors.is_empty());
+    }
+
+    #[test]
+    fn inline_single_use_call_no_parens() {
+        let src = "func main() {\n    y := f(a)\n    z := y\n    println(z)\n}\n";
+        let action = inline_action(src, 1, 4).expect("inline action");
+        let out = apply_changes(src, &action, &test_uri());
+        assert_eq!(
+            out, "func main() {\n    z := f(a)\n    println(z)\n}\n",
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn inline_refuses_multi_use_call() {
+        let src = "func main() {\n    y := f(a)\n    z := y + y\n    println(z)\n}\n";
+        assert!(
+            inline_action(src, 1, 4).is_none(),
+            "effectful multi-use must refuse"
+        );
+    }
+
+    #[test]
+    fn inline_multi_use_pure_duplicates() {
+        let src = "func main() {\n    y := a\n    z := y + y\n    println(z)\n}\n";
+        let action = inline_action(src, 1, 4).expect("inline action");
+        let out = apply_changes(src, &action, &test_uri());
+        assert_eq!(
+            out, "func main() {\n    z := a + a\n    println(z)\n}\n",
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn inline_removes_unused() {
+        let src = "func main() {\n    y := 1\n    println(2)\n}\n";
+        let action = inline_action(src, 1, 4).expect("remove action");
+        assert!(action.title.contains("Remove unused"));
+        let out = apply_changes(src, &action, &test_uri());
+        assert_eq!(out, "func main() {\n    println(2)\n}\n", "got:\n{out}");
+    }
+
+    #[test]
+    fn inline_refuses_shadowed_scope() {
+        let src = "func main() {\n    y := 1\n    for y in [1, 2] {\n        println(y)\n    }\n    println(y)\n}\n";
+        assert!(
+            inline_action(src, 1, 4).is_none(),
+            "shadowed scopes must refuse"
+        );
+    }
+
+    // ── move ──
+
+    fn move_tmp() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zz-lsp-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn move_action(
+        state: &crate::state::GlobalState,
+        uri: &Url,
+        src: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<CodeAction> {
+        let program = zz_frontend::parse(src).program;
+        let offset = offset_at(src, line, character);
+        move_to_new_file(state, &program, src, uri, offset)
+    }
+
+    #[test]
+    fn move_creates_file_import_and_delete() {
+        let state = crate::state::GlobalState::new();
+        state
+            .create_supported
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir = move_tmp();
+        let main_path = dir.join("main.zz");
+        std::fs::write(&main_path, "").unwrap();
+        let uri = Url::from_file_path(&main_path).unwrap();
+        let src = "pub func circle(r: float) -> float {\n    return r * 2.0\n}\nfunc main() {\n    println(circle(1.0))\n}\n";
+        state.update_document(uri.clone(), 1, src.to_string());
+
+        let action = move_action(&state, &uri, src, 0, 9).expect("move action");
+        assert!(
+            action.title.contains("circle.zz"),
+            "title: {}",
+            action.title
+        );
+        let ops = match action.edit.expect("edit").document_changes.expect("ops") {
+            DocumentChanges::Operations(ops) => ops,
+            _ => panic!("expected operations"),
+        };
+        assert_eq!(ops.len(), 3, "create + fill + delete/import");
+        // Create op targets circle.zz beside main.zz.
+        match &ops[0] {
+            DocumentChangeOperation::Op(ResourceOp::Create(create)) => {
+                assert_eq!(
+                    create.uri,
+                    Url::from_file_path(dir.join("circle.zz")).unwrap()
+                );
+            }
+            _ => panic!("first op creates the file"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_refuses_without_client_support() {
+        let state = crate::state::GlobalState::new();
+        let uri: Url = "file:///main.zz".parse().unwrap();
+        let src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+        assert!(
+            move_action(&state, &uri, src, 0, 9).is_none(),
+            "no documentChanges support, no offer"
+        );
+    }
+
+    #[test]
+    fn move_refuses_existing_destination() {
+        let state = crate::state::GlobalState::new();
+        state
+            .create_supported
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir = move_tmp();
+        std::fs::write(
+            dir.join("circle.zz"),
+            "pub func circle() -> int {\n    return 1\n}\n",
+        )
+        .unwrap();
+        let main_path = dir.join("main.zz");
+        std::fs::write(&main_path, "").unwrap();
+        let uri = Url::from_file_path(&main_path).unwrap();
+        let src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+        state.update_document(uri.clone(), 1, src.to_string());
+        assert!(
+            move_action(&state, &uri, src, 0, 9).is_none(),
+            "existing destination refuses"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_refuses_external_references() {
+        let state = crate::state::GlobalState::new();
+        state
+            .create_supported
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir = move_tmp();
+        let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+        let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+        state.update_document(lib_uri.clone(), 1, lib_src.to_string());
+        {
+            let entry = crate::cross_file::parse_file_entry(
+                lib_uri.clone(),
+                lib_src.to_string(),
+                "lib".to_string(),
+            );
+            let mut index = state.module_index.write().unwrap();
+            index
+                .module_to_uri
+                .insert("lib".to_string(), lib_uri.clone());
+            index
+                .uri_to_module
+                .insert(lib_uri.clone(), "lib".to_string());
+            index.entries.insert(lib_uri.clone(), entry);
+        }
+        let other_src = "import lib(circle)\nfunc other() {\n    println(circle(1.0))\n}\n";
+        let other_uri: Url = "file:///other.zz".parse().unwrap();
+        state.update_document(other_uri.clone(), 1, other_src.to_string());
+        assert!(
+            move_action(&state, &lib_uri, lib_src, 0, 9).is_none(),
+            "external references refuse"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_refuses_decorated_items() {
+        let state = crate::state::GlobalState::new();
+        state
+            .create_supported
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let uri: Url = "file:///main.zz".parse().unwrap();
+        let src = "@test\nfunc adds() {\n    assert_eq(1 + 1, 2)\n}\n";
+        assert!(
+            move_action(&state, &uri, src, 1, 5).is_none(),
+            "decorated items stay put"
         );
     }
 }

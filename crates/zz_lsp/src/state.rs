@@ -99,6 +99,9 @@ pub struct GlobalState {
     pub module_index: std::sync::RwLock<ModuleIndex>,
     /// Whether workspace scan has completed (lazy scan).
     pub workspace_scanned: AtomicBool,
+    /// Whether the client applies file-creating workspace edits
+    /// (`documentChanges` + `create` resource op): gates move-to-file.
+    pub create_supported: AtomicBool,
     /// Files that need re-checking after a dependency changes.
     /// Maps file URI → list of dependent URIs that import it.
     pub dependents: DashMap<Url, Vec<Url>>,
@@ -134,6 +137,7 @@ impl GlobalState {
             root: std::sync::RwLock::new(None),
             sequence: AtomicU32::new(0),
             module_index: std::sync::RwLock::new(ModuleIndex::default()),
+            create_supported: AtomicBool::new(false),
             workspace_scanned: AtomicBool::new(false),
             dependents: DashMap::new(),
             dep_cache: std::sync::RwLock::new(std::collections::HashMap::new()),

@@ -8,6 +8,24 @@ pub(crate) async fn handle_initialize(
     params: InitializeParams,
 ) -> Result<InitializeResult> {
     log::info!("zz-lsp initializing");
+    // File-creating edits need explicit client support: advertise
+    // move-to-file only when it will apply.
+    let create_supported = params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|w| w.workspace_edit.as_ref())
+        .is_some_and(|edit| {
+            edit.document_changes == Some(true)
+                && edit
+                    .resource_operations
+                    .as_ref()
+                    .is_some_and(|ops| ops.contains(&ResourceOperationKind::Create))
+        });
+    backend
+        .state
+        .create_supported
+        .store(create_supported, std::sync::atomic::Ordering::SeqCst);
     if let Some(folders) = &params.workspace_folders {
         if let Some(folder) = folders.first() {
             if let Ok(path) = folder.uri.to_file_path() {
