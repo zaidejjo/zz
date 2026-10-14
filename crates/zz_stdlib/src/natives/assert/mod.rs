@@ -395,3 +395,317 @@ pub(crate) fn fail_fn(
     };
     Err(EvalError::new(format!("fail: {msg}"), span))
 }
+
+// ── std.test pro assertions (P1) ────────────────────────────────────
+// Messages mirror the C twins in `zz_codegen/src/runtime/core.c` exactly
+// (same wording, same `error:` prefix via EvalError rendering). Keep them
+// in lockstep: changing one requires changing the other + parity fixture.
+
+fn expect_str_arg(args: &[Value], idx: usize, name: &str, span: Span) -> Result<String, EvalError> {
+    match args.get(idx) {
+        Some(Value::Str(s)) => Ok(s.to_string()),
+        Some(other) => Err(EvalError::new(
+            format!(
+                "`{name}` expects `str` for arg {}, found `{other}` ({})",
+                idx,
+                other.type_name()
+            ),
+            span,
+        )),
+        None => Err(EvalError::new(
+            format!("`{name}` expects {} arguments", idx + 1),
+            span,
+        )),
+    }
+}
+
+fn expect_int_arg(args: &[Value], idx: usize, name: &str, span: Span) -> Result<i64, EvalError> {
+    match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(other) => Err(EvalError::new(
+            format!(
+                "`{name}` expects `int` for arg {}, found `{other}` ({})",
+                idx,
+                other.type_name()
+            ),
+            span,
+        )),
+        None => Err(EvalError::new(
+            format!("`{name}` expects {} arguments", idx + 1),
+            span,
+        )),
+    }
+}
+
+fn measurable_len(v: &Value) -> Option<usize> {
+    match v {
+        Value::Array(a) => Some(a.len()),
+        Value::Str(s) => Some(s.chars().count()),
+        Value::Dict(pairs) => Some(pairs.len()),
+        Value::Bytes(b) => Some(b.len()),
+        _ => None,
+    }
+}
+
+pub(crate) fn assert_contains_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::new(
+            "`assert_contains` expects 2 arguments (haystack: str, needle: str)",
+            span,
+        ));
+    }
+    let hay = expect_str_arg(args, 0, "assert_contains", span)?;
+    let needle = expect_str_arg(args, 1, "assert_contains", span)?;
+    if hay.contains(needle.as_str()) {
+        Ok(Value::Unit)
+    } else {
+        Err(EvalError::new(
+            format!("Assertion Failed: Expected \"{hay}\" to contain \"{needle}\""),
+            span,
+        ))
+    }
+}
+
+pub(crate) fn assert_starts_with_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::new(
+            "`assert_starts_with` expects 2 arguments (s: str, prefix: str)",
+            span,
+        ));
+    }
+    let s = expect_str_arg(args, 0, "assert_starts_with", span)?;
+    let prefix = expect_str_arg(args, 1, "assert_starts_with", span)?;
+    if s.starts_with(prefix.as_str()) {
+        Ok(Value::Unit)
+    } else {
+        Err(EvalError::new(
+            format!("Assertion Failed: Expected \"{s}\" to start with \"{prefix}\""),
+            span,
+        ))
+    }
+}
+
+pub(crate) fn assert_ends_with_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::new(
+            "`assert_ends_with` expects 2 arguments (s: str, suffix: str)",
+            span,
+        ));
+    }
+    let s = expect_str_arg(args, 0, "assert_ends_with", span)?;
+    let suffix = expect_str_arg(args, 1, "assert_ends_with", span)?;
+    if s.ends_with(suffix.as_str()) {
+        Ok(Value::Unit)
+    } else {
+        Err(EvalError::new(
+            format!("Assertion Failed: Expected \"{s}\" to end with \"{suffix}\""),
+            span,
+        ))
+    }
+}
+
+pub(crate) fn assert_len_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::new(
+            "`assert_len` expects 2 arguments (val, n: int)",
+            span,
+        ));
+    }
+    let n = expect_int_arg(args, 1, "assert_len", span)?;
+    if n < 0 {
+        return Err(EvalError::new("`assert_len` expects n >= 0", span));
+    }
+    match measurable_len(&args[0]) {
+        Some(got) if got as i64 == n => Ok(Value::Unit),
+        Some(got) => Err(EvalError::new(
+            format!("Assertion Failed: Expected length {n}, got {got}"),
+            span,
+        )),
+        None => Err(EvalError::new(
+            format!(
+                "`assert_len` expects array/str/dict/bytes, found {} ({})",
+                args[0],
+                args[0].type_name()
+            ),
+            span,
+        )),
+    }
+}
+
+pub(crate) fn assert_gt_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::new(
+            "`assert_gt` expects 2 arguments (left, right)",
+            span,
+        ));
+    }
+    let l = args[0]
+        .to_float()
+        .ok_or_else(|| EvalError::new("`assert_gt` expects numeric (left, right)", span))?;
+    let r = args[1]
+        .to_float()
+        .ok_or_else(|| EvalError::new("`assert_gt` expects numeric (left, right)", span))?;
+    if l > r {
+        Ok(Value::Unit)
+    } else {
+        Err(EvalError::new(
+            format!("Assertion Failed: Expected {l} > {r}"),
+            span,
+        ))
+    }
+}
+
+pub(crate) fn assert_lt_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.len() < 2 {
+        return Err(EvalError::new(
+            "`assert_lt` expects 2 arguments (left, right)",
+            span,
+        ));
+    }
+    let l = args[0]
+        .to_float()
+        .ok_or_else(|| EvalError::new("`assert_lt` expects numeric (left, right)", span))?;
+    let r = args[1]
+        .to_float()
+        .ok_or_else(|| EvalError::new("`assert_lt` expects numeric (left, right)", span))?;
+    if l < r {
+        Ok(Value::Unit)
+    } else {
+        Err(EvalError::new(
+            format!("Assertion Failed: Expected {l} < {r}"),
+            span,
+        ))
+    }
+}
+
+pub(crate) fn assert_is_some_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::new(
+            "`assert_is_some` expects 1 argument (option)",
+            span,
+        ));
+    }
+    match &args[0] {
+        Value::Option(Some(_)) => Ok(Value::Unit),
+        Value::Option(None) => Err(EvalError::new(
+            "Assertion Failed: Expected Some, got none".to_string(),
+            span,
+        )),
+        other => Err(EvalError::new(
+            format!(
+                "`assert_is_some` expects `option`, found `{other}` ({})",
+                other.type_name()
+            ),
+            span,
+        )),
+    }
+}
+
+pub(crate) fn assert_is_none_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::new(
+            "`assert_is_none` expects 1 argument (option)",
+            span,
+        ));
+    }
+    match &args[0] {
+        Value::Option(None) => Ok(Value::Unit),
+        Value::Option(Some(_)) => Err(EvalError::new(
+            format!("Assertion Failed: Expected none, got {}", args[0]),
+            span,
+        )),
+        other => Err(EvalError::new(
+            format!(
+                "`assert_is_none` expects `option`, found `{other}` ({})",
+                other.type_name()
+            ),
+            span,
+        )),
+    }
+}
+
+pub(crate) fn assert_is_ok_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::new(
+            "`assert_is_ok` expects 1 argument (result)",
+            span,
+        ));
+    }
+    match &args[0] {
+        Value::Result(b) if b.is_ok() => Ok(Value::Unit),
+        Value::Result(_) => Err(EvalError::new(
+            format!("Assertion Failed: Expected ok, got {}", args[0]),
+            span,
+        )),
+        other => Err(EvalError::new(
+            format!(
+                "`assert_is_ok` expects `result`, found `{other}` ({})",
+                other.type_name()
+            ),
+            span,
+        )),
+    }
+}
+
+pub(crate) fn assert_is_err_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::new(
+            "`assert_is_err` expects 1 argument (result)",
+            span,
+        ));
+    }
+    match &args[0] {
+        Value::Result(b) if b.is_err() => Ok(Value::Unit),
+        Value::Result(_) => Err(EvalError::new(
+            format!("Assertion Failed: Expected err, got {}", args[0]),
+            span,
+        )),
+        other => Err(EvalError::new(
+            format!(
+                "`assert_is_err` expects `result`, found `{other}` ({})",
+                other.type_name()
+            ),
+            span,
+        )),
+    }
+}

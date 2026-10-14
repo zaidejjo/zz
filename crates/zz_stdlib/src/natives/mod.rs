@@ -116,6 +116,25 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: assert::assert_approx_eq_fn,
         },
     );
+    // std.test pro assertions (P1): bare builtins + `std.test.*` aliases.
+    for (name, arity, func) in [
+        (
+            "assert_contains",
+            2,
+            assert::assert_contains_fn as zz_runtime::NativeFn,
+        ),
+        ("assert_starts_with", 2, assert::assert_starts_with_fn),
+        ("assert_ends_with", 2, assert::assert_ends_with_fn),
+        ("assert_len", 2, assert::assert_len_fn),
+        ("assert_gt", 2, assert::assert_gt_fn),
+        ("assert_lt", 2, assert::assert_lt_fn),
+        ("assert_is_some", 1, assert::assert_is_some_fn),
+        ("assert_is_none", 1, assert::assert_is_none_fn),
+        ("assert_is_ok", 1, assert::assert_is_ok_fn),
+        ("assert_is_err", 1, assert::assert_is_err_fn),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
     m.insert(
         "fail".into(),
         NativeEntry {
@@ -142,6 +161,20 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.test.assert_approx_eq", 3, assert::assert_approx_eq_fn),
         ("std.test.fail", 1, assert::fail_fn),
         ("std.test.panic", 1, assert::fail_fn),
+        ("std.test.assert_contains", 2, assert::assert_contains_fn),
+        (
+            "std.test.assert_starts_with",
+            2,
+            assert::assert_starts_with_fn,
+        ),
+        ("std.test.assert_ends_with", 2, assert::assert_ends_with_fn),
+        ("std.test.assert_len", 2, assert::assert_len_fn),
+        ("std.test.assert_gt", 2, assert::assert_gt_fn),
+        ("std.test.assert_lt", 2, assert::assert_lt_fn),
+        ("std.test.assert_is_some", 1, assert::assert_is_some_fn),
+        ("std.test.assert_is_none", 1, assert::assert_is_none_fn),
+        ("std.test.assert_is_ok", 1, assert::assert_is_ok_fn),
+        ("std.test.assert_is_err", 1, assert::assert_is_err_fn),
     ] {
         m.insert(short.into(), NativeEntry { arity, f: func });
     }
