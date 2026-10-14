@@ -1124,6 +1124,26 @@ fn e2e_eval_multi_interpolation() {
 }
 
 #[test]
+fn e2e_check_unimported_std_module_suggests_import() {
+    let tmp = std::env::temp_dir().join("zz_unimported_std_test.zz");
+    std::fs::write(
+        &tmp,
+        r#"func main() {
+    y := math.sin(1.0)
+    println(y)
+}"#,
+    )
+    .unwrap();
+    let (exit, _, stderr) = run_zz_check(&tmp);
+    assert_ne!(exit, 0, "check should fail without the import.\nstderr: {stderr}");
+    assert!(
+        stderr.contains("import std.math"),
+        "expected import hint.\nstderr: {stderr}"
+    );
+    std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
 fn e2e_check_string_before_while_block() {
     let tmp = std::env::temp_dir().join("zz_str_while_test.zz");
     std::fs::write(
