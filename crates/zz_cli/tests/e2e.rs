@@ -1741,3 +1741,79 @@ fn e2e_bench_list_and_filter() {
         "unfiltered bench_add ran:\n{stderr}"
     );
 }
+
+// --- Coverage (`zz cover`) ---
+
+fn run_zz_cover(file: &Path, extra: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("cover")
+        .arg(file)
+        .args(extra)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz cover {file:?}`: {e}"));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn e2e_cover_basic() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("cover").join("basic_cover.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, stdout, _stderr) = run_zz_cover(&path, &[]);
+    assert_eq!(exit, 0, "`zz cover` should exit 0.\nstdout:\n{stdout}");
+    // Program output still prints, then the deterministic report.
+    // Percentages and uncovered lines are exact (no timings involved).
+    assert!(
+        stdout.contains("42"),
+        "missing program output in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Coverage: 83.3% lines (5/6)"),
+        "missing total in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("uncovered: 15"),
+        "missing uncovered line in:\n{stdout}"
+    );
+}
+
+#[test]
+fn e2e_cover_fail_under_and_lcov() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("cover").join("basic_cover.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, stdout, stderr) = run_zz_cover(&path, &["--fail-under", "90"]);
+    assert_eq!(
+        exit, 1,
+        "--fail-under 90 should exit 1.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("below --fail-under"),
+        "missing gate msg in:\n{stderr}"
+    );
+
+    let lcov = std::env::temp_dir().join("zz_e2e_cover.info");
+    let (exit, _stdout, _stderr) = run_zz_cover(
+        &path,
+        &[
+            "--lcov",
+            lcov.to_string_lossy().as_ref(),
+            "--fail-under",
+            "80",
+        ],
+    );
+    assert_eq!(exit, 0, "passing gate should exit 0");
+    let content = std::fs::read_to_string(&lcov).expect("lcov file should exist");
+    assert!(content.contains("TN:"), "missing TN in:\n{content}");
+    assert!(content.contains("LF:6"), "missing LF in:\n{content}");
+    assert!(content.contains("LH:5"), "missing LH in:\n{content}");
+    let _ = std::fs::remove_file(&lcov);
+}
