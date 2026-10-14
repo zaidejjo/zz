@@ -31,7 +31,7 @@ fn str_split_splits() {
             ]
         )
         .unwrap(),
-        Value::Array(Box::new(vec![
+        Value::Array(std::sync::Arc::new(vec![
             Value::Str("a".to_string().into()),
             Value::Str("b".to_string().into()),
             Value::Str("c".to_string().into()),
@@ -70,7 +70,10 @@ fn vec_len_counts() {
     assert_eq!(
         call(
             "std.vec.len",
-            vec![Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]))]
+            vec![Value::Array(std::sync::Arc::new(vec![
+                Value::Int(1),
+                Value::Int(2)
+            ]))]
         )
         .unwrap(),
         Value::Int(2)
@@ -82,10 +85,13 @@ fn vec_push_appends() {
     assert_eq!(
         call(
             "std.vec.push",
-            vec![Value::Array(Box::new(vec![Value::Int(1)])), Value::Int(2),]
+            vec![
+                Value::Array(std::sync::Arc::new(vec![Value::Int(1)])),
+                Value::Int(2),
+            ]
         )
         .unwrap(),
-        Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]))
+        Value::Array(std::sync::Arc::new(vec![Value::Int(1), Value::Int(2)]))
     );
 }
 
@@ -94,16 +100,23 @@ fn vec_pop_removes_last() {
     assert_eq!(
         call(
             "std.vec.pop",
-            vec![Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]))]
+            vec![Value::Array(std::sync::Arc::new(vec![
+                Value::Int(1),
+                Value::Int(2)
+            ]))]
         )
         .unwrap(),
-        Value::Array(Box::new(vec![Value::Int(1)]))
+        Value::Array(std::sync::Arc::new(vec![Value::Int(1)]))
     );
 }
 
 #[test]
 fn vec_pop_empty_errors() {
-    let err = call("std.vec.pop", vec![Value::Array(Box::default())]).unwrap_err();
+    let err = call(
+        "std.vec.pop",
+        vec![Value::Array(std::sync::Arc::new(Vec::new()))],
+    )
+    .unwrap_err();
     assert!(err.message.contains("empty array"), "{}", err.message);
 }
 

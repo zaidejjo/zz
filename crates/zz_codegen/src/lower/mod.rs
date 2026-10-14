@@ -880,6 +880,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "enumerate" | "vec.enumerate" | "std.vec.enumerate" => Some("zz_iter_enumerate"),
         "zip" | "vec.zip" | "std.vec.zip" => Some("zz_iter_zip"),
         "append" => Some("zz_vec_push"),
+        "clone" => Some("zz_clone_deep"),
         "range" => Some("zz_range3"),
         "typeof" => Some("zz_typeof"),
         "int" => Some("zz_int_cast"),

@@ -340,3 +340,14 @@ fixture corpus must read identically with every optimization on or
 off. If a future analysis ever made a move observable, that would be
 a language change requiring a checker error (use-after-move), not a
 silent optimization.
+
+Backing stores are shared, values are not: on the VM, cloning an
+array, dict, tuple, struct, or string bumps a reference count (O(1))
+instead of duplicating the contents. Any mutation goes through a
+copy-on-write gate — uniquely-owned buffers mutate in place, shared
+ones copy once at the write. Programs cannot observe the sharing
+(equality stays deep, mutation never leaks across bindings).
+
+`clone(v)` pins a fully independent deep copy regardless of sharing:
+use it when a value must survive later mutation of its source, or to
+force a snapshot before handing data to tasks and plugins.

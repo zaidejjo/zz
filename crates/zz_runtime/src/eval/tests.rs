@@ -326,7 +326,7 @@ fn variant_constructors() {
 fn array_literal() {
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores").unwrap(),
-        Value::Array(Box::new(vec![
+        Value::Array(std::sync::Arc::new(vec![
             Value::Int(10),
             Value::Int(20),
             Value::Int(30)
@@ -338,7 +338,7 @@ fn array_literal() {
 fn array_explicit_decl() {
     assert_eq!(
         eval_src("scores: [int] = [1, 2]\nscores").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]))
+        Value::Array(std::sync::Arc::new(vec![Value::Int(1), Value::Int(2)]))
     );
 }
 
@@ -346,7 +346,7 @@ fn array_explicit_decl() {
 fn dict_literal() {
     assert_eq!(
         eval_src("ages := {\"Zaid\": 20}\nages").unwrap(),
-        Value::Dict(Box::new(vec![(
+        Value::Dict(std::sync::Arc::new(vec![(
             Value::Str("Zaid".to_string().into()),
             Value::Int(20)
         )]))
@@ -357,7 +357,7 @@ fn dict_literal() {
 fn dict_explicit_decl() {
     assert_eq!(
         eval_src("ages: {str: int} = {\"a\": 1}\nages").unwrap(),
-        Value::Dict(Box::new(vec![(
+        Value::Dict(std::sync::Arc::new(vec![(
             Value::Str("a".to_string().into()),
             Value::Int(1)
         )]))
@@ -368,7 +368,7 @@ fn dict_explicit_decl() {
 fn dict_union_value_type() {
     assert_eq!(
         eval_src("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}\nuser").unwrap(),
-        Value::Dict(Box::new(vec![
+        Value::Dict(std::sync::Arc::new(vec![
             (
                 Value::Str("name".to_string().into()),
                 Value::Str("Zaid".to_string().into())
@@ -465,7 +465,7 @@ fn struct_field_mutation_visible_in_object() {
         eval_src("struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x = 10\np").unwrap();
     assert_eq!(
         v,
-        Value::Object(Box::new(ObjectValue {
+        Value::Object(std::sync::Arc::new(ObjectValue {
             name: "Point".into(),
             fields: vec![("x".into(), Value::Int(10)), ("y".into(), Value::Int(2)),],
         }))
@@ -683,7 +683,7 @@ fn array_slice() {
     let v = eval_src("scores := [10, 20, 30, 40]\nscores[1:3]").unwrap();
     assert_eq!(
         v,
-        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
+        Value::Array(std::sync::Arc::new(vec![Value::Int(20), Value::Int(30)]))
     );
 }
 
@@ -691,15 +691,15 @@ fn array_slice() {
 fn slice_open_bounds() {
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores[:2]").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(10), Value::Int(20)]))
+        Value::Array(std::sync::Arc::new(vec![Value::Int(10), Value::Int(20)]))
     );
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores[1:]").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
+        Value::Array(std::sync::Arc::new(vec![Value::Int(20), Value::Int(30)]))
     );
     assert_eq!(
         eval_src("scores := [10, 20, 30]\nscores[:]").unwrap(),
-        Value::Array(Box::new(vec![
+        Value::Array(std::sync::Arc::new(vec![
             Value::Int(10),
             Value::Int(20),
             Value::Int(30)
@@ -718,7 +718,7 @@ fn slice_clamps_bounds() {
     let v = eval_src("scores := [10, 20, 30]\nscores[1:99]").unwrap();
     assert_eq!(
         v,
-        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
+        Value::Array(std::sync::Arc::new(vec![Value::Int(20), Value::Int(30)]))
     );
 }
 

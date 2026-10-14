@@ -181,7 +181,9 @@ impl Interp {
             }
         };
         let mut vs = match taken {
-            Value::Array(vs) => *vs,
+            // Owned take: reuse the buffer when uniquely owned, copy
+            // once otherwise (the copy value semantics requires).
+            Value::Array(vs) => std::sync::Arc::try_unwrap(vs).unwrap_or_else(|a| (*a).clone()),
             other => {
                 let msg = format!("`vec.push` expects an array, found `{other}`");
                 restore(self, var, other)?;
@@ -191,7 +193,7 @@ impl Interp {
         // `vec.push` is infallible on arrays: inline the wrap instead of
         // re-entering the native (identical value, zero dispatch).
         vs.push(elem);
-        restore(self, var, Value::Array(Box::new(vs)))?;
+        restore(self, var, Value::Array(std::sync::Arc::new(vs)))?;
         Ok(true)
     }
 
@@ -237,11 +239,13 @@ impl Interp {
         );
         if direct {
             if let Value::Object(o) = &mut taken {
+                let o = std::sync::Arc::make_mut(o);
                 if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == field) {
                     if let Value::Array(vs) = std::mem::replace(slot, Value::Unit) {
-                        let mut vs = *vs;
+                        let mut vs =
+                            std::sync::Arc::try_unwrap(vs).unwrap_or_else(|a| (*a).clone());
                         vs.push(elem);
-                        *slot = Value::Array(Box::new(vs));
+                        *slot = Value::Array(std::sync::Arc::new(vs));
                         restore(self, obj, taken)?;
                         return Ok(true);
                     }

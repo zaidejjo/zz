@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn nested_options_unwrap_in_containers() {
-        let arr = Value::Array(Box::new(vec![some_int(1), Value::Option(None)]));
+        let arr = Value::Array(std::sync::Arc::new(vec![some_int(1), Value::Option(None)]));
         assert_eq!(format_value_with_spec(&arr, ""), "[1, none]");
     }
 }

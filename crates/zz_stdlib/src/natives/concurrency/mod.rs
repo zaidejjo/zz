@@ -557,7 +557,9 @@ pub(crate) fn task_join(
             })?;
             match guard.result.take() {
                 Some(Ok(v)) => Ok(v),
-                Some(Err(msg)) => Ok(Value::Result(Box::new(Err(Value::Str(Box::new(msg)))))),
+                Some(Err(msg)) => Ok(Value::Result(Box::new(Err(Value::Str(
+                    std::sync::Arc::new(msg),
+                ))))),
                 None => Err(EvalError::new(
                     "task.join: result already consumed (try_join took it)",
                     span,
@@ -596,7 +598,7 @@ pub(crate) fn task_try_join(
                     v,
                 ))))))),
                 Some(Err(msg)) => Ok(Value::Option(Some(Box::new(Value::Result(Box::new(Err(
-                    Value::Str(Box::new(msg)),
+                    Value::Str(std::sync::Arc::new(msg)),
                 ))))))),
                 None => Ok(Value::Option(None)),
             }

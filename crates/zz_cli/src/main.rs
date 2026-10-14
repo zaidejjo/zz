@@ -1243,7 +1243,7 @@ fn run_entry_main(
         let call_args = if fv.params.is_empty() {
             vec![]
         } else {
-            vec![Value::Array(Box::new(
+            vec![Value::Array(std::sync::Arc::new(
                 script_args
                     .iter()
                     .map(|a| Value::Str(a.clone().into()))

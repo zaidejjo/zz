@@ -949,7 +949,7 @@ fn indexing_and_slicing_in_module() {
     }
     assert_eq!(
         last,
-        Value::Array(Box::new(vec![Value::Int(20), Value::Int(30)]))
+        Value::Array(std::sync::Arc::new(vec![Value::Int(20), Value::Int(30)]))
     );
 }
 

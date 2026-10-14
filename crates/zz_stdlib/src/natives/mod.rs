@@ -3629,6 +3629,15 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // Built-in: `clone(v)` — deep copy, fully independent value (#267).
+    m.insert(
+        "clone".into(),
+        NativeEntry {
+            arity: 1,
+            f: builtins::clone_fn,
+        },
+    );
+
     // Built-in conversions.
     m.insert(
         "str".into(),

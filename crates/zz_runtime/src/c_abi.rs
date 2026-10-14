@@ -504,7 +504,7 @@ mod tests {
         );
         expect_int(
             "cabi_t_greet",
-            vec![Value::Str(Box::new("hello".to_string()))],
+            vec![Value::Str(std::sync::Arc::new("hello".to_string()))],
             5,
         );
     }
@@ -550,7 +550,7 @@ mod tests {
             "cabi_t_save",
             vec![
                 Value::Int(100),
-                Value::Str(Box::new("a.png".to_string())),
+                Value::Str(std::sync::Arc::new("a.png".to_string())),
                 Value::Int(5),
             ],
             105,
@@ -569,7 +569,10 @@ mod tests {
             vec![CParam::Int, CParam::Int],
             CRet::Int,
         );
-        let mut args = vec![Value::Str(Box::new("x".to_string())), Value::Int(2)];
+        let mut args = vec![
+            Value::Str(std::sync::Arc::new("x".to_string())),
+            Value::Int(2),
+        ];
         let out = call("cabi_t_add", &mut args, span()).expect("registered");
         assert!(out.is_err());
     }

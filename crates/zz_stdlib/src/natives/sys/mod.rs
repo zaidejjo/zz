@@ -13,7 +13,9 @@ macro_rules! str_native {
             _args: &mut Vec<Value>,
             _span: Span,
         ) -> Result<Value, EvalError> {
-            Ok(Value::Str(Box::new(zz_native_rt::sys::$func().to_string())))
+            Ok(Value::Str(std::sync::Arc::new(
+                zz_native_rt::sys::$func().to_string(),
+            )))
         }
     };
 }

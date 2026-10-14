@@ -21,7 +21,7 @@ pub(crate) fn str_split(
         .split(&sep)
         .map(|p| Value::Str(p.to_string().into()))
         .collect();
-    Ok(Value::Array(Box::new(parts)))
+    Ok(Value::Array(std::sync::Arc::new(parts)))
 }
 
 pub(crate) fn str_contains(
@@ -175,7 +175,7 @@ pub(crate) fn str_classify(
         nested,
         whole,
     );
-    Ok(Value::Array(Box::new(vec![
+    Ok(Value::Array(std::sync::Arc::new(vec![
         Value::Int(lines),
         Value::Int(code),
         Value::Int(comments),
@@ -430,7 +430,7 @@ pub(crate) fn str_bytes(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let s = expect_str(args, 0, "std.str.bytes")?;
-    Ok(Value::Array(Box::new(
+    Ok(Value::Array(std::sync::Arc::new(
         s.as_bytes().iter().map(|b| Value::Int(*b as i64)).collect(),
     )))
 }
@@ -482,7 +482,7 @@ pub(crate) fn str_chr(
 ) -> Result<Value, EvalError> {
     let cp = expect_int(args, 0, "chr")?;
     match u32::try_from(cp).ok().and_then(char::from_u32) {
-        Some(c) => Ok(Value::Str(Box::new(c.to_string()))),
+        Some(c) => Ok(Value::Str(std::sync::Arc::new(c.to_string()))),
         None => Err(EvalError::new(
             format!(
                 "`chr` expects a Unicode scalar value (0-0x10FFFF, no surrogates), found `{cp}`"
@@ -505,9 +505,9 @@ pub(crate) fn bytes_to_str(
         match v {
             Value::Int(n) => {
                 if !(0..=255).contains(n) {
-                    return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
-                        "bytes.to_str: value {n} out of range 0-255"
-                    )))))));
+                    return Ok(Value::Result(Box::new(Err(Value::Str(
+                        std::sync::Arc::new(format!("bytes.to_str: value {n} out of range 0-255")),
+                    )))));
                 }
                 buf.push(*n as u8);
             }
@@ -520,10 +520,12 @@ pub(crate) fn bytes_to_str(
         }
     }
     match String::from_utf8(buf) {
-        Ok(s) => Ok(Value::Result(Box::new(Ok(Value::Str(Box::new(s)))))),
-        Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(Box::new(
-            "bytes.to_str: invalid UTF-8".to_string(),
-        )))))),
+        Ok(s) => Ok(Value::Result(Box::new(Ok(Value::Str(
+            std::sync::Arc::new(s),
+        ))))),
+        Err(_) => Ok(Value::Result(Box::new(Err(Value::Str(
+            std::sync::Arc::new("bytes.to_str: invalid UTF-8".to_string()),
+        ))))),
     }
 }
 
@@ -534,7 +536,7 @@ pub(crate) fn bytes_to_ints(
     _span: Span,
 ) -> Result<Value, EvalError> {
     match arg(args, 0, "bytes.to_ints")? {
-        Value::Bytes(b) => Ok(Value::Array(Box::new(
+        Value::Bytes(b) => Ok(Value::Array(std::sync::Arc::new(
             b.as_slice().iter().map(|x| Value::Int(*x as i64)).collect(),
         ))),
         other => Err(EvalError::new(
@@ -556,19 +558,21 @@ pub(crate) fn bytes_finish(
     use crate::natives::expect_array;
     let vs = expect_array(args, 0, "bytes.finish")?;
     if vs.len() > 64 * 1024 * 1024 {
-        return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
-            "bytes.finish: length {} exceeds 67108864",
-            vs.len()
-        )))))));
+        return Ok(Value::Result(Box::new(Err(Value::Str(
+            std::sync::Arc::new(format!(
+                "bytes.finish: length {} exceeds 67108864",
+                vs.len()
+            )),
+        )))));
     }
     let mut buf = Vec::with_capacity(vs.len());
     for v in &vs {
         match v {
             Value::Int(n) => {
                 if !(0..=255).contains(n) {
-                    return Ok(Value::Result(Box::new(Err(Value::Str(Box::new(format!(
-                        "bytes.finish: value {n} out of range 0-255"
-                    )))))));
+                    return Ok(Value::Result(Box::new(Err(Value::Str(
+                        std::sync::Arc::new(format!("bytes.finish: value {n} out of range 0-255")),
+                    )))));
                 }
                 buf.push(*n as u8);
             }
@@ -719,7 +723,10 @@ pub(crate) fn str_trim_span(
     let start = expect_int(args, 1, "std.str.trim_span")?;
     let end = expect_int(args, 2, "std.str.trim_span")?;
     let (ns, ne) = trim_span(&s, start, end);
-    Ok(Value::Array(Box::new(vec![Value::Int(ns), Value::Int(ne)])))
+    Ok(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(ns),
+        Value::Int(ne),
+    ])))
 }
 
 fn starts_at(s: &str, sub: &str, pos: i64) -> bool {

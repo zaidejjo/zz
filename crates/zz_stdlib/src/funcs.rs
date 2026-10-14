@@ -3375,6 +3375,9 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig_t(vec![("arr", t_arr.clone()), ("val", t.clone())], t_arr),
     );
 
+    // Built-in: `clone(v)` — deep copy, fully independent value (#267).
+    m.insert("clone".into(), sig_t(vec![("v", t.clone())], t.clone()));
+
     // Built-in conversions.
     // `str(v)` — stringify any value (total).
     m.insert("str".into(), sig_t(vec![("v", t.clone())], Type::Str));
@@ -4610,6 +4613,7 @@ mod tests {
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
         assert!(funcs.contains_key("append"));
+        assert!(funcs.contains_key("clone"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
         assert!(funcs.contains_key("std.task.try_join"));
@@ -4886,7 +4890,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1061);
+        assert_eq!(funcs.len(), 1062);
     }
 
     #[test]

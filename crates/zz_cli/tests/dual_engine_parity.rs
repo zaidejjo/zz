@@ -1428,6 +1428,7 @@ parity_strict!(
     "stdlib",
     "vec_push_shapes.zz"
 );
+parity_strict!(parity_stdlib_clone_test, "stdlib", "clone_test.zz");
 parity_strict!(parity_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
 parity_strict!(
     parity_stdlib_range_display_test,

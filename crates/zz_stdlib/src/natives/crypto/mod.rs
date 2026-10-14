@@ -152,7 +152,10 @@ fn err_wrap(msg: String) -> Value {
 }
 
 fn str_pair(a: String, b: String) -> Value {
-    Value::Array(Box::new(vec![Value::Str(a.into()), Value::Str(b.into())]))
+    Value::Array(std::sync::Arc::new(vec![
+        Value::Str(a.into()),
+        Value::Str(b.into()),
+    ]))
 }
 
 pub(crate) fn crypto_ed25519_keypair(

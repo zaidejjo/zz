@@ -89,7 +89,7 @@ pub(crate) fn build_struct_literal(
                 span,
                 depth + 1,
             )?;
-            out.push((fname.clone(), Value::Object(Box::new(inner))));
+            out.push((fname.clone(), Value::Object(std::sync::Arc::new(inner))));
         } else {
             return Err(EvalError::new(
                 format!("missing field `{fname}` in struct literal"),
@@ -154,7 +154,7 @@ fn object_field_depth(
                     "query" => &req.query,
                     _ => &req.params,
                 };
-                Ok(Value::Dict(Box::new(
+                Ok(Value::Dict(std::sync::Arc::new(
                     pairs
                         .iter()
                         .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
@@ -193,6 +193,9 @@ fn set_object_field_depth(
 ) -> Result<(), EvalError> {
     match obj {
         Value::Object(o) => {
+            // Copy-on-write: uniquely-owned objects mutate in place,
+            // shared ones copy once here.
+            let o = std::sync::Arc::make_mut(o);
             if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == name) {
                 *slot = value;
                 Ok(())
@@ -251,7 +254,7 @@ pub(crate) fn fill_default_headers(name: &str, args: &mut Vec<Value>, arity: usi
         "http.post_json",
     ];
     if OPTIONAL_HEADERS.contains(&name) && args.len() + 1 == arity {
-        args.push(Value::Dict(Box::default()));
+        args.push(Value::Dict(std::sync::Arc::new(Vec::new())));
         return true;
     }
     // Unified client defaults, in signature order:
@@ -273,7 +276,7 @@ pub(crate) fn fill_default_headers(name: &str, args: &mut Vec<Value>, arity: usi
             tail.push(Value::Str(String::new().into()));
         }
         if missing >= 3 {
-            tail.push(Value::Dict(Box::default()));
+            tail.push(Value::Dict(std::sync::Arc::new(Vec::new())));
         }
         if missing >= 4 {
             tail.push(Value::Str("GET".to_string().into()));
@@ -348,16 +351,20 @@ pub(crate) fn set_index(
     match (obj, index) {
         (Value::Array(items), Value::Int(i)) => {
             let idx = normalize_index(*i, items.len(), span)?;
-            items[idx] = value;
+            // Copy-on-write: uniquely-owned buffers mutate in place,
+            // shared ones copy once here (the copy value semantics
+            // always required).
+            std::sync::Arc::make_mut(items)[idx] = value;
             Ok(())
         }
         (Value::Tuple(items), Value::Int(i)) => {
             // Tuples share the array representation at runtime.
             let idx = normalize_index(*i, items.len(), span)?;
-            items[idx] = value;
+            std::sync::Arc::make_mut(items)[idx] = value;
             Ok(())
         }
         (Value::Dict(entries), key) => {
+            let entries = std::sync::Arc::make_mut(entries);
             if let Some((_, slot)) = entries.iter_mut().find(|(k, _)| k == key) {
                 *slot = value;
             } else {
@@ -411,7 +418,7 @@ pub(crate) fn slice_value(
     match obj {
         Value::Array(items) => {
             let (a, b) = slice_bounds(start, end, items.len());
-            Ok(Value::Array(Box::new(items[a..b].to_vec())))
+            Ok(Value::Array(std::sync::Arc::new(items[a..b].to_vec())))
         }
         Value::Bytes(b) => {
             let (a, c) = slice_bounds(start, end, b.len());

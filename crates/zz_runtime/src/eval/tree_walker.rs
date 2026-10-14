@@ -150,7 +150,9 @@ impl Interp {
                 match it {
                     Value::Array(items) => {
                         let mut result = Value::Unit;
-                        for item in *items {
+                        let owned =
+                            std::sync::Arc::try_unwrap(items).unwrap_or_else(|a| (*a).clone());
+                        for item in owned {
                             let mut scope = Env::with_parent(&self.env);
                             if vars.len() == 2 {
                                 // `for i, x in xs.enumerate()` — each item
@@ -253,7 +255,9 @@ impl Interp {
                     }
                     Value::Dict(pairs) => {
                         let mut result = Value::Unit;
-                        for (k, v) in *pairs {
+                        let owned =
+                            std::sync::Arc::try_unwrap(pairs).unwrap_or_else(|a| (*a).clone());
+                        for (k, v) in owned {
                             let mut scope = Env::with_parent(&self.env);
                             if vars.len() == 2 {
                                 scope.define(&vars[0].name, k);
@@ -706,7 +710,7 @@ impl Interp {
                 crate::runtime::ops::embedded_layout_name(&self.structs, fname)
             {
                 let inner = self.build_struct_value(&inner_name, &leftovers, span, depth + 1)?;
-                out.push((fname.clone(), Value::Object(Box::new(inner))));
+                out.push((fname.clone(), Value::Object(std::sync::Arc::new(inner))));
             } else {
                 return Err(EvalError::new(
                     format!("missing field `{fname}` in struct literal"),
@@ -788,7 +792,7 @@ impl Interp {
                 ));
             }
         };
-        Ok(Value::Object(Box::new(ObjectValue {
+        Ok(Value::Object(std::sync::Arc::new(ObjectValue {
             name: format!("{enum_name}.{variant}"),
             fields,
         })))
@@ -1432,14 +1436,14 @@ impl Interp {
                 for e in elems {
                     vs.push(self.eval(e)?.into_value()?);
                 }
-                Ok(Flow::Value(Value::Array(Box::new(vs))))
+                Ok(Flow::Value(Value::Array(std::sync::Arc::new(vs))))
             }
             Expr::Tuple { items, .. } => {
                 let mut vs = Vec::with_capacity(items.len());
                 for e in items {
                     vs.push(self.eval(e)?.into_value()?);
                 }
-                Ok(Flow::Value(Value::Array(Box::new(vs))))
+                Ok(Flow::Value(Value::Array(std::sync::Arc::new(vs))))
             }
             Expr::ListComp {
                 body,
@@ -1452,7 +1456,9 @@ impl Interp {
                 let mut results = Vec::new();
                 match it {
                     Value::Array(items) => {
-                        for item in *items {
+                        let owned =
+                            std::sync::Arc::try_unwrap(items).unwrap_or_else(|a| (*a).clone());
+                        for item in owned {
                             let mut scope = Env::with_parent(&self.env);
                             scope.define(&var.name, item);
                             let prev = std::mem::replace(&mut self.env, scope);
@@ -1517,7 +1523,7 @@ impl Interp {
                         ));
                     }
                 }
-                Ok(Flow::Value(Value::Array(Box::new(results))))
+                Ok(Flow::Value(Value::Array(std::sync::Arc::new(results))))
             }
             Expr::Dict { entries, .. } => {
                 let mut pairs = Vec::with_capacity(entries.len());
@@ -1526,7 +1532,7 @@ impl Interp {
                     let vv = self.eval(v)?.into_value()?;
                     pairs.push((kv, vv));
                 }
-                Ok(Flow::Value(Value::Dict(Box::new(pairs))))
+                Ok(Flow::Value(Value::Dict(std::sync::Arc::new(pairs))))
             }
             Expr::Variant { name, arg, span } => {
                 let av = match arg {
@@ -1568,7 +1574,7 @@ impl Interp {
             }
             Expr::StructInit { name, fields, span } => {
                 let obj = self.build_struct_value(name, fields, *span, 0)?;
-                Ok(Flow::Value(Value::Object(Box::new(obj))))
+                Ok(Flow::Value(Value::Object(std::sync::Arc::new(obj))))
             }
             Expr::Index { obj, index, span } => {
                 // Move fusion (#242): indexed field reads take the

@@ -683,7 +683,7 @@ fn vec_push_fake(
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument `x` for vec.push".to_string(), span))?;
     vs.push(x);
-    Ok(Value::Array(Box::new(vs)))
+    Ok(Value::Array(std::sync::Arc::new(vs)))
 }
 
 /// Run `src` on the VM with `vec.push` registered (like `run_typed`).
