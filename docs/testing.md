@@ -181,6 +181,10 @@ Notes:
   share. Always clean up (`fs.remove_dir_all`, usually in `@teardown`).
 - `free_port()` binds `127.0.0.1:0` and closes the socket before returning.
   Re-bind immediately; on collision retry or bind `:0` directly.
+- `black_box(val)` returns its argument unchanged and acts as an
+  optimization barrier for benchmarks (see `docs/bench.md`): the AOT C
+  compiler cannot see through it, so measured code is never eliminated
+  as dead code.
 - Env mutation: no new API — use existing `std.env.set/remove` with
   `@test(tag = "serial")` (process-global, see `docs/test-isolation.md`).
 - HTTP: no wrapper — call `std.http.test(server, method, path, body)` directly.

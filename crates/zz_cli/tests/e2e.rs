@@ -697,6 +697,11 @@ e2e_success_test!(
     "test_snapshot_test.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_test_black_box_test,
+    "stdlib",
+    "test_black_box_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_range_display_test,
     "stdlib",
     "range_display_test.zz"

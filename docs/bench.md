@@ -107,6 +107,22 @@ CLI flags always override file config. No config file is required.
 
 - Size the work so one iteration takes microseconds or more; sub-100ns
   bodies drown in timer granularity — loop inside the function instead.
+- Feed inputs and consume outputs through `black_box` (bare or
+  `test.black_box`): without it, the AOT C compiler can prove a
+  side-effect-free bench body is dead code and eliminate it, timing an
+  empty loop while the VM measures the real work.
+  ```zz
+  @bench
+  func bench_sum() {
+      x := 0
+      i := 0
+      while i < 100 {
+          x = black_box(x + i)
+          i = i + 1
+      }
+      black_box(x)
+  }
+  ```
 - Avoid printing inside bench functions (output is captured and
   discarded on the VM; on AOT it pollutes the child pipe).
 - Avoid global state across iterations; `@setup` runs once, not per iter.

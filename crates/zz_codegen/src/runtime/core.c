@@ -7701,6 +7701,25 @@ zz_value zz_assert_snapshot(zz_value actual, zz_value name, int *err) {
     exit(1);
 }
 
+// ---- std.test pro helpers: black_box -----------------------------------
+// Optimization barrier for benchmarks (mirrors `test.black_box`): the
+// identity function the C compiler cannot see through. The volatile store
+// of the value's address forces clang to materialize `v` (it cannot prove
+// the address doesn't escape), and the memory clobber stops load/store
+// motion across the call — the standard DoNotOptimize shape. Without this,
+// clang eliminates side-effect-free bench bodies and AOT timings measure
+// nothing while the VM measures the real work.
+static zz_value const * volatile zz_black_box_ptr;
+
+zz_value zz_black_box(zz_value v, int *err) {
+    (void)err;
+    zz_black_box_ptr = &v;
+#if !defined(ZZ_OS_WINDOWS)
+    __asm__ volatile("" : : "r"(&v) : "memory");
+#endif
+    return zz_clone(v);
+}
+
 // env.user() → Option<str>
 zz_value zz_env_user(zz_value unused, int *err) {
     (void)unused; (void)err;
