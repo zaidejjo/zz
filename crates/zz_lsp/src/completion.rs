@@ -343,7 +343,8 @@ fn import_completion_at(
     // Module path: identifier/dot/slash characters only.
     // `std` roots always complete; local paths complete when their first
     // segment resolves beside the document (otherwise `import foo` stays
-    // plain scope — nothing to offer yet).
+    // plain scope — nothing to offer yet). Installed package names count
+    // as resolvable (prefix match: `import mi` may become `mid`).
     // An empty path (`import |`) offers `std` plus local top-level modules.
     let path_ok = after
         .chars()
@@ -353,7 +354,11 @@ fn import_completion_at(
             let first = after.split(['.', '/']).next().unwrap_or("");
             cenv.and_then(|e| e.doc_dir.clone()).is_some_and(|dir| {
                 !first.is_empty()
-                    && (dir.join(first).with_extension("zz").is_file() || dir.join(first).is_dir())
+                    && (dir.join(first).with_extension("zz").is_file()
+                        || dir.join(first).is_dir()
+                        || installed_deps(&dir)
+                            .iter()
+                            .any(|(n, _)| n.starts_with(first)))
             })
         })
     {
@@ -493,6 +498,19 @@ fn import_path_completions(
                     ..Default::default()
                 });
             }
+            // Installed packages from the enclosing project (`zz.toml`
+            // + locked versions from `zz.lock`).
+            for (name, detail) in installed_deps(&dir) {
+                if !items.iter().any(|i| i.label == name) {
+                    items.push(CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some(detail),
+                        text_edit: text_edit(name),
+                        ..Default::default()
+                    });
+                }
+            }
         }
         return items;
     }
@@ -518,13 +536,13 @@ fn import_path_completions(
     // paths; the textEdit swaps the whole typed path so prefixes never
     // double. Only resolvable files are offered — the loader accepts
     // nothing else.
-    if let Some(dir) = doc_dir {
+    if let Some(ref dir) = doc_dir {
         let (parent, last) = match partial_prefix.rsplit_once('.') {
             Some((p, l)) => (p, l),
             None => ("", partial_prefix),
         };
         let parent_dir = if parent.is_empty() {
-            dir
+            dir.clone()
         } else {
             dir.join(parent.replace('.', "/"))
         };
@@ -585,6 +603,23 @@ fn import_path_completions(
                     ..Default::default()
                 });
             }
+            // Installed packages, bare names only (`import mid|` →
+            // `mid`; dotted member paths like `mid.sub` stay future
+            // work — they need dep-source harvesting). Labels already
+            // offered as local modules win the dedupe.
+            if parent.is_empty() {
+                for (name, detail) in installed_deps(dir) {
+                    if name.starts_with(last) && !items.iter().any(|i| i.label == name) {
+                        items.push(CompletionItem {
+                            label: name.clone(),
+                            kind: Some(CompletionItemKind::MODULE),
+                            detail: Some(detail),
+                            text_edit: text_edit(name),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
         }
     }
     items
@@ -604,6 +639,57 @@ fn local_tops(dir: &std::path::Path) -> Vec<String> {
         }
     }
     tops
+}
+
+/// Installed packages visible from `dir`: `(name, detail)` pairs from
+/// the nearest `zz.toml` at or above `dir`, with locked versions from
+/// `zz.lock` when present. Powers dependency-name completion in import
+/// paths (`import mid|` → `mid`); member completion inside a package
+/// (`mid.|`) stays future work (needs dep-source harvesting).
+/// Missing/unreadable manifests yield nothing — never an error.
+fn installed_deps(dir: &std::path::Path) -> Vec<(String, String)> {
+    // Nearest project root at or above the document.
+    let mut root: Option<std::path::PathBuf> = None;
+    let mut cursor = Some(dir.to_path_buf());
+    while let Some(d) = cursor {
+        if d.join("zz.toml").is_file() {
+            root = Some(d);
+            break;
+        }
+        cursor = d.parent().map(|p| p.to_path_buf());
+    }
+    let Some(root) = root else {
+        return Vec::new();
+    };
+    let Ok(manifest) = zz_pm::manifest::Manifest::load(&root.join("zz.toml")) else {
+        return Vec::new();
+    };
+    // Best-effort versions: absent/unreadable locks degrade to the
+    // declared requirement instead of hiding the package.
+    let lock = zz_pm::lock::Lockfile::load(&root.join("zz.lock")).ok();
+    let mut names: Vec<String> = manifest.dependencies.keys().cloned().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let detail = match lock.as_ref().and_then(|l| l.find(&name)) {
+                Some(locked) => format!("dependency {}", locked.version),
+                None => match manifest.dependencies.get(&name) {
+                    Some(zz_pm::manifest::DepSpec::Path(p)) => {
+                        format!("dependency (path {})", p.path)
+                    }
+                    Some(zz_pm::manifest::DepSpec::Git(g)) => {
+                        format!("dependency (git {})", g.rev)
+                    }
+                    Some(zz_pm::manifest::DepSpec::Version(req)) => {
+                        format!("dependency ({req})")
+                    }
+                    None => "dependency".to_string(),
+                },
+            };
+            (name, detail)
+        })
+        .collect()
 }
 
 /// Complete member names inside a selective import list:
@@ -2222,6 +2308,125 @@ mod workspace_audit_tests {
             Some(CompletionItemKind::STRUCT),
             "structs serve"
         );
+    }
+
+    // ── installed-package import completion ──────────────────────────
+    /// Project root with `zz.toml` declaring a path dep (`mid`) and a
+    /// registry dep (`rand`), `src/main.zz` importing nothing. With
+    /// `locked`, `zz.lock` pins `rand` at 0.4.1 (written through the
+    /// lock API so the checksum verifies).
+    fn dep_project(tag: &str, locked: bool) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("zz-lsp-dep-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("zz.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmid = { path = \"../mid\" }\nrand = \"^0.4.1\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/main.zz"), "func main() {\n}\n").unwrap();
+        if locked {
+            let manifest =
+                zz_pm::manifest::Manifest::load(&root.join("zz.toml")).expect("manifest");
+            let mut lock = zz_pm::lock::Lockfile::new();
+            lock.upsert(zz_pm::lock::LockedDep {
+                name: "rand".to_string(),
+                version: "0.4.1".to_string(),
+                source: "registry+https://example.com/rand#0.4.1".to_string(),
+                hash: "abc123".to_string(),
+                commit: None,
+                native: None,
+            });
+            lock.set_manifest_deps_hash(manifest.deps_hash());
+            lock.save(&root.join("zz.lock")).expect("lock");
+        }
+        root
+    }
+
+    fn import_labels(root: &std::path::Path, src: &str) -> Vec<(String, String)> {
+        let parsed = parse(src);
+        let cenv = CompletionEnv {
+            doc_dir: Some(root.join("src")),
+            seed_bindings: HashMap::new(),
+        };
+        match completions_for_position(&parsed.program, src, src.len() as u32, None, Some(&cenv))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v
+                .into_iter()
+                .map(|i| (i.label, i.detail.unwrap_or_default()))
+                .collect(),
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn dep_names_offered_on_empty_prefix() {
+        let root = dep_project("empty", true);
+        let labels = import_labels(&root, "import ");
+        assert!(
+            labels.iter().any(|(l, d)| l == "mid" && d.contains("path")),
+            "path dep offered: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|(l, d)| l == "rand" && d.contains("0.4.1")),
+            "locked version shown: {labels:?}"
+        );
+        assert!(labels.iter().any(|(l, _)| l == "std"), "std root kept");
+    }
+
+    #[test]
+    fn dep_names_filtered_by_prefix() {
+        let root = dep_project("prefix", true);
+        let labels = import_labels(&root, "import mi");
+        assert!(
+            labels.iter().any(|(l, _)| l == "mid"),
+            "prefix match: {labels:?}"
+        );
+        assert!(
+            labels.iter().all(|(l, _)| l != "rand"),
+            "non-match excluded: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn dep_names_degrade_without_lock() {
+        // No zz.lock: the requirement string stands in for the version.
+        let root = dep_project("unlocked", false);
+        let labels = import_labels(&root, "import ");
+        assert!(
+            labels
+                .iter()
+                .any(|(l, d)| l == "rand" && d.contains("^0.4.1")),
+            "req shown unlocked: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn dep_names_absent_without_project() {
+        let root = std::env::temp_dir().join(format!("zz-lsp-nodep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let labels = import_labels(&root, "import ");
+        assert!(
+            labels.iter().all(|(l, _)| l != "mid" && l != "rand"),
+            "no project, no deps: {labels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dep_name_dedupes_local_module() {
+        // A local `mid.zz` and a `mid` dependency share the label: one
+        // item, local wins.
+        let root = dep_project("dedupe", true);
+        std::fs::write(root.join("src/mid.zz"), "pub func x() -> int { 1 }\n").unwrap();
+        let labels = import_labels(&root, "import mi");
+        let count = labels.iter().filter(|(l, _)| l == "mid").count();
+        assert_eq!(count, 1, "single mid label: {labels:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ── selective lists ───────────────────────────────────────────────
