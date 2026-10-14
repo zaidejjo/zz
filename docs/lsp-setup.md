@@ -87,7 +87,7 @@ auto-format = true
 | Feature | Description |
 |---|---|
 | Diagnostics | Real-time error and warning reporting |
-| Completion | Context-aware completions for variables, functions, fields |
+| Completion | Context-aware completions for variables, functions, fields, import paths (stdlib, local modules, installed `zz.toml` dependencies) |
 | Hover | Type and documentation on hover |
 | Go-to-definition | Navigate to symbol definitions (cross-file) |
 | Find references | Find all uses of a symbol (cross-file) |
