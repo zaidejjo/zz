@@ -74,7 +74,7 @@ pub fn completions_for_position(
             partial_prefix,
         } => dot_access_completions(program, check_result, &obj_name, &partial_prefix, cenv),
         CompletionContext::Scope { partial_prefix } => {
-            scope_completions(program, check_result, &partial_prefix, offset, cenv)
+            scope_completions(program, source, check_result, &partial_prefix, offset, cenv)
         }
         CompletionContext::ImportPath {
             partial_prefix,
@@ -112,7 +112,9 @@ pub fn completions_for_position(
                     &key,
                     &partial_prefix,
                 ),
-                None => scope_completions(program, check_result, &partial_prefix, offset, cenv),
+                None => {
+                    scope_completions(program, source, check_result, &partial_prefix, offset, cenv)
+                }
             }
         }
     };
@@ -1322,24 +1324,72 @@ fn find_local_in_block(
 
 // ── Scope completions ────────────────────────────────────────────────────
 
+/// Ranking tiers for scope completion (lower serves first). Frequency
+/// within a tier comes from whole-word use counts in the buffer, so a
+/// file's own vocabulary floats above the stdlib without any
+/// persistence or protocol extensions.
+const TIER_LOCAL: u8 = 0;
+const TIER_IMPORTED: u8 = 1;
+const TIER_GLOBAL: u8 = 2;
+const TIER_LANGUAGE: u8 = 3;
+
+/// Sort tiered items by (tier, use frequency, label) and stamp the
+/// protocol `sortText` so every client renders the same order.
+fn rank_scope_items(ranked: Vec<(u8, CompletionItem)>, source: &str) -> Vec<CompletionItem> {
+    // Whole-word counts over identifier characters.
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut current = String::new();
+    for ch in source.chars().chain(std::iter::once(' ')) {
+        if ch.is_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            *counts.entry(std::mem::take(&mut current)).or_insert(0) += 1;
+        }
+    }
+    let mut ranked = ranked;
+    ranked.sort_by(|a, b| {
+        let fa = counts.get(a.1.label.as_str()).copied().unwrap_or(0);
+        let fb = counts.get(b.1.label.as_str()).copied().unwrap_or(0);
+        (a.0, std::cmp::Reverse(fa), &a.1.label).cmp(&(b.0, std::cmp::Reverse(fb), &b.1.label))
+    });
+    ranked
+        .into_iter()
+        .map(|(tier, mut item)| {
+            let freq = counts
+                .get(item.label.as_str())
+                .copied()
+                .unwrap_or(0)
+                .min(9999);
+            item.sort_text = Some(format!("{tier:01}:{:04}:{}", 9999 - freq, item.label));
+            item
+        })
+        .collect()
+}
+
 fn scope_completions(
     program: &Program,
+    source: &str,
     check_result: Option<&CheckResult>,
     partial_prefix: &str,
     offset: u32,
     cenv: Option<&CompletionEnv>,
 ) -> Vec<CompletionItem> {
-    let mut items = Vec::new();
+    let mut ranked: Vec<(u8, CompletionItem)> = Vec::new();
+    let seen =
+        |ranked: &[(u8, CompletionItem)], label: &str| ranked.iter().any(|(_, i)| i.label == label);
 
     // Keywords.
     for kw in KEYWORDS {
         if kw.starts_with(partial_prefix) {
-            items.push(CompletionItem {
-                label: kw.to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("keyword".to_string()),
-                ..Default::default()
-            });
+            ranked.push((
+                TIER_LANGUAGE,
+                CompletionItem {
+                    label: kw.to_string(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    detail: Some("keyword".to_string()),
+                    ..Default::default()
+                },
+            ));
         }
     }
 
@@ -1348,22 +1398,28 @@ fn scope_completions(
     // positions (harmless there — the checker rejects misuse).
     for ty in PRIMITIVE_TYPES {
         if ty.starts_with(partial_prefix) {
-            items.push(CompletionItem {
-                label: ty.to_string(),
-                kind: Some(CompletionItemKind::CLASS),
-                detail: Some("builtin type".to_string()),
-                ..Default::default()
-            });
+            ranked.push((
+                TIER_LANGUAGE,
+                CompletionItem {
+                    label: ty.to_string(),
+                    kind: Some(CompletionItemKind::CLASS),
+                    detail: Some("builtin type".to_string()),
+                    ..Default::default()
+                },
+            ));
         }
     }
     for bound in BUILTIN_BOUNDS {
         if bound.starts_with(partial_prefix) {
-            items.push(CompletionItem {
-                label: bound.to_string(),
-                kind: Some(CompletionItemKind::INTERFACE),
-                detail: Some("builtin bound".to_string()),
-                ..Default::default()
-            });
+            ranked.push((
+                TIER_LANGUAGE,
+                CompletionItem {
+                    label: bound.to_string(),
+                    kind: Some(CompletionItemKind::INTERFACE),
+                    detail: Some("builtin bound".to_string()),
+                    ..Default::default()
+                },
+            ));
         }
     }
 
@@ -1379,13 +1435,16 @@ fn scope_completions(
         }
     }
     for name in &generic_names {
-        if name.starts_with(partial_prefix) && !items.iter().any(|i| i.label == *name) {
-            items.push(CompletionItem {
-                label: name.clone(),
-                kind: Some(CompletionItemKind::TYPE_PARAMETER),
-                detail: Some("generic parameter".to_string()),
-                ..Default::default()
-            });
+        if name.starts_with(partial_prefix) && !seen(&ranked, name) {
+            ranked.push((
+                TIER_LOCAL,
+                CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::TYPE_PARAMETER),
+                    detail: Some("generic parameter".to_string()),
+                    ..Default::default()
+                },
+            ));
         }
     }
 
@@ -1393,34 +1452,56 @@ fn scope_completions(
         // Global functions.
         for name in cr.funcs.keys() {
             if name.starts_with(partial_prefix) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some(format!("func {name}")),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_GLOBAL,
+                    CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some(format!("func {name}")),
+                        ..Default::default()
+                    },
+                ));
             }
         }
         // Global structs.
         for name in cr.structs.keys() {
             if name.starts_with(partial_prefix) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    detail: Some(format!("struct {name}")),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_GLOBAL,
+                    CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::STRUCT),
+                        detail: Some(format!("struct {name}")),
+                        ..Default::default()
+                    },
+                ));
             }
         }
-        // Global bindings: own-file lets plus seeded dep/workspace globals.
-        for (name, ty) in cr.bindings.iter().chain(env_bindings(cenv)) {
+        // Own-file lets outrank seeded dep/workspace globals.
+        for (name, ty) in cr.bindings.iter() {
             if name.starts_with(partial_prefix) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some(format!("{name}: {ty}")),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_LOCAL,
+                    CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some(format!("{name}: {ty}")),
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+        for (name, ty) in env_bindings(cenv) {
+            if name.starts_with(partial_prefix) && !seen(&ranked, name) {
+                ranked.push((
+                    TIER_IMPORTED,
+                    CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some(format!("{name}: {ty}")),
+                        ..Default::default()
+                    },
+                ));
             }
         }
     }
@@ -1466,17 +1547,20 @@ fn scope_completions(
                 if !target.starts_with(partial_prefix) {
                     continue;
                 }
-                if items.iter().any(|i| i.label == target) {
+                if seen(&ranked, &target) {
                     continue;
                 }
                 let qualified = format!("{ns}.{name}");
                 if cr.funcs.contains_key(&qualified) {
-                    items.push(CompletionItem {
-                        label: target.clone(),
-                        kind: Some(CompletionItemKind::FUNCTION),
-                        detail: Some(format!("{qualified} (selective)")),
-                        ..Default::default()
-                    });
+                    ranked.push((
+                        TIER_IMPORTED,
+                        CompletionItem {
+                            label: target.clone(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            detail: Some(format!("{qualified} (selective)")),
+                            ..Default::default()
+                        },
+                    ));
                 }
             }
         }
@@ -1496,12 +1580,15 @@ fn scope_completions(
                 .or_else(|| path.last().cloned())
                 .unwrap_or_default();
             if ns.starts_with(partial_prefix) {
-                items.push(CompletionItem {
-                    label: ns.clone(),
-                    kind: Some(CompletionItemKind::MODULE),
-                    detail: Some(format!("import {}", path.join("."))),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_IMPORTED,
+                    CompletionItem {
+                        label: ns.clone(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some(format!("import {}", path.join("."))),
+                        ..Default::default()
+                    },
+                ));
             }
         }
     }
@@ -1509,30 +1596,33 @@ fn scope_completions(
     // The `std` root itself: typing `st` should discover the stdlib
     // (`std.` then lists modules). Needs no import.
     if "std".starts_with(partial_prefix) {
-        items.push(CompletionItem {
-            label: "std".to_string(),
-            kind: Some(CompletionItemKind::MODULE),
-            detail: Some("stdlib root — `std.<module>`".to_string()),
-            ..Default::default()
-        });
+        ranked.push((
+            TIER_IMPORTED,
+            CompletionItem {
+                label: "std".to_string(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some("stdlib root — `std.<module>`".to_string()),
+                ..Default::default()
+            },
+        ));
     }
 
     // Local names from AST.
-    collect_local_names(program, &mut items, partial_prefix);
+    collect_local_names(program, &mut ranked, partial_prefix);
 
-    // Deduplicate by label.
-    items.sort_by(|a, b| a.label.cmp(&b.label));
-    items.dedup_by(|a, b| a.label == b.label);
-    items
+    // Deduplicate by label, keeping the best (lowest) tier, then rank.
+    ranked.sort_by(|a, b| (a.0, &a.1.label).cmp(&(b.0, &b.1.label)));
+    ranked.dedup_by(|a, b| a.1.label == b.1.label);
+    rank_scope_items(ranked, source)
 }
 
-fn collect_local_names(program: &Program, items: &mut Vec<CompletionItem>, prefix: &str) {
+fn collect_local_names(program: &Program, ranked: &mut Vec<(u8, CompletionItem)>, prefix: &str) {
     for stmt in &program.stmts {
-        collect_locals_in_stmt(stmt, items, prefix);
+        collect_locals_in_stmt(stmt, ranked, prefix);
     }
 }
 
-fn collect_locals_in_stmt(stmt: &Stmt, items: &mut Vec<CompletionItem>, prefix: &str) {
+fn collect_locals_in_stmt(stmt: &Stmt, ranked: &mut Vec<(u8, CompletionItem)>, prefix: &str) {
     match stmt {
         Stmt::Func { params, body, .. } => {
             for param in params {
@@ -1541,78 +1631,87 @@ fn collect_locals_in_stmt(stmt: &Stmt, items: &mut Vec<CompletionItem>, prefix: 
                         Some(ty) => format!("param: {ty:?}"),
                         None => "param".to_string(),
                     };
-                    items.push(CompletionItem {
-                        label: param.name.name.clone(),
-                        kind: Some(CompletionItemKind::VARIABLE),
-                        detail: Some(detail),
-                        insert_text: Some(param.name.name.clone()),
-                        ..Default::default()
-                    });
+                    ranked.push((
+                        TIER_LOCAL,
+                        CompletionItem {
+                            label: param.name.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(detail),
+                            insert_text: Some(param.name.name.clone()),
+                            ..Default::default()
+                        },
+                    ));
                 }
             }
-            collect_locals_in_block(body, items, prefix);
+            collect_locals_in_block(body, ranked, prefix);
         }
         Stmt::Decl { name, .. } => {
             if name.name.starts_with(prefix) {
-                items.push(CompletionItem {
-                    label: name.name.clone(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some(format!("let {}", name.name)),
-                    insert_text: Some(name.name.clone()),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_LOCAL,
+                    CompletionItem {
+                        label: name.name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some(format!("let {}", name.name)),
+                        insert_text: Some(name.name.clone()),
+                        ..Default::default()
+                    },
+                ));
             }
         }
         Stmt::For { vars, body, .. } => {
             for v in vars {
                 if v.name.starts_with(prefix) {
-                    items.push(CompletionItem {
-                        label: v.name.clone(),
-                        kind: Some(CompletionItemKind::VARIABLE),
-                        detail: Some(format!("for var {}", v.name)),
-                        insert_text: Some(v.name.clone()),
-                        ..Default::default()
-                    });
+                    ranked.push((
+                        TIER_LOCAL,
+                        CompletionItem {
+                            label: v.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(format!("for var {}", v.name)),
+                            insert_text: Some(v.name.clone()),
+                            ..Default::default()
+                        },
+                    ));
                 }
             }
-            collect_locals_in_block(body, items, prefix);
+            collect_locals_in_block(body, ranked, prefix);
         }
-        Stmt::Expr(expr) => collect_locals_in_expr(expr, items, prefix),
+        Stmt::Expr(expr) => collect_locals_in_expr(expr, ranked, prefix),
         _ => {}
     }
 }
 
 fn collect_locals_in_block(
     block: &zz_frontend::ast::Block,
-    items: &mut Vec<CompletionItem>,
+    ranked: &mut Vec<(u8, CompletionItem)>,
     prefix: &str,
 ) {
     for stmt in &block.stmts {
-        collect_locals_in_stmt(stmt, items, prefix);
+        collect_locals_in_stmt(stmt, ranked, prefix);
     }
 }
 
-fn collect_locals_in_expr(expr: &Expr, items: &mut Vec<CompletionItem>, prefix: &str) {
+fn collect_locals_in_expr(expr: &Expr, ranked: &mut Vec<(u8, CompletionItem)>, prefix: &str) {
     match expr {
-        Expr::Block(b) => collect_locals_in_block(b, items, prefix),
+        Expr::Block(b) => collect_locals_in_block(b, ranked, prefix),
         Expr::If { then, els, .. } => {
-            collect_locals_in_block(then, items, prefix);
+            collect_locals_in_block(then, ranked, prefix);
             if let Some(Expr::Block(b)) = els.as_deref() {
-                collect_locals_in_block(b, items, prefix);
+                collect_locals_in_block(b, ranked, prefix);
             }
         }
-        Expr::While { body, .. } => collect_locals_in_block(body, items, prefix),
+        Expr::While { body, .. } => collect_locals_in_block(body, ranked, prefix),
         Expr::Match { arms, .. } => {
             for arm in arms {
                 if let Expr::Block(b) = &arm.body {
-                    collect_locals_in_block(b, items, prefix);
+                    collect_locals_in_block(b, ranked, prefix);
                 }
             }
         }
         Expr::IfLet { then, els, .. } => {
-            collect_locals_in_block(then, items, prefix);
+            collect_locals_in_block(then, ranked, prefix);
             if let Some(Expr::Block(b)) = els.as_deref() {
-                collect_locals_in_block(b, items, prefix);
+                collect_locals_in_block(b, ranked, prefix);
             }
         }
         _ => {}
@@ -1792,7 +1891,7 @@ mod tests {
     fn scope_keywords() {
         let src = "x := 1\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "ret", src.len() as u32, None);
+        let items = scope_completions(&program, src, cr.as_ref(), "ret", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "return"));
         assert!(!items.iter().any(|i| i.label == "func"));
     }
@@ -1801,7 +1900,7 @@ mod tests {
     fn scope_globals() {
         let src = "func add(a: int, b: int) -> int { return a + b }\nx := 1\nxy := 2\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "x", src.len() as u32, None);
+        let items = scope_completions(&program, src, cr.as_ref(), "x", src.len() as u32, None);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"x"));
         assert!(labels.contains(&"xy"));
@@ -1812,7 +1911,7 @@ mod tests {
     fn scope_local_params() {
         let src = "func f(param_a: int) -> int {\n  let local_b = param_a\n  return local_b\n}\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "par", src.len() as u32, None);
+        let items = scope_completions(&program, src, cr.as_ref(), "par", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "param_a"));
     }
 
@@ -1820,7 +1919,7 @@ mod tests {
     fn scope_local_let() {
         let src = "alpha := 1\nbeta := 2\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "al", src.len() as u32, None);
+        let items = scope_completions(&program, src, cr.as_ref(), "al", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "alpha"));
         assert!(!items.iter().any(|i| i.label == "beta"));
     }
@@ -2534,6 +2633,62 @@ mod workspace_audit_tests {
             items.iter().map(|i| &i.label).collect::<Vec<_>>()
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── ranking ──────────────────────────────────────────────────────
+    fn ranked_labels(src: &str) -> Vec<(String, Option<String>)> {
+        let parsed = parse(src);
+        let cenv = CompletionEnv::default();
+        match completions_for_position(&parsed.program, src, src.len() as u32, None, Some(&cenv))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v.into_iter().map(|i| (i.label, i.sort_text)).collect(),
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn locals_rank_before_keywords() {
+        let labels = ranked_labels("func main() {\n    retries := 3\n    ret");
+        let pos = |l: &str| labels.iter().position(|(x, _)| x == l).expect(l);
+        assert!(
+            pos("retries") < pos("return"),
+            "local beats keyword: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn frequency_boosts_within_tier() {
+        let src = "func main() {\n    alpha := 1\n    alpine := 2\n    x := alpha + alpha + alpha\n    al";
+        let labels = ranked_labels(src);
+        let pos = |l: &str| labels.iter().position(|(x, _)| x == l).expect(l);
+        assert!(
+            pos("alpha") < pos("alpine"),
+            "used name floats up: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn every_item_carries_ordered_sort_text() {
+        let labels = ranked_labels("func main() {\n    x := 1\n    ");
+        assert!(!labels.is_empty());
+        let texts: Vec<&str> = labels
+            .iter()
+            .map(|(_, s)| s.as_deref().expect("sort_text set"))
+            .collect();
+        let mut sorted = texts.clone();
+        sorted.sort();
+        assert_eq!(texts, sorted, "vec order matches sortText");
+    }
+
+    #[test]
+    fn imported_namespace_ranks_above_keyword() {
+        let labels = ranked_labels("import math\nfunc main() {\n    ma");
+        let pos = |l: &str| labels.iter().position(|(x, _)| x == l).expect(l);
+        assert!(
+            pos("math") < pos("match"),
+            "imported ns beats keyword: {labels:?}"
+        );
     }
 
     // ── selective lists ───────────────────────────────────────────────
