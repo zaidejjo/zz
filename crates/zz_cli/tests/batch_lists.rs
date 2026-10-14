@@ -99,6 +99,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "test_asserts_test.zz", true),
     ("stdlib", "test_helpers_test.zz", true),
     ("stdlib", "test_snapshot_test.zz", true),
+    ("stdlib", "property_test.zz", true),
     ("stdlib", "test_black_box_test.zz", true),
     ("stdlib", "shadow_test.zz", true),
     ("stdlib", "range_display_test.zz", false),

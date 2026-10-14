@@ -696,6 +696,7 @@ e2e_success_test!(
     "stdlib",
     "test_snapshot_test.zz"
 );
+e2e_success_test!(e2e_stdlib_property_test, "stdlib", "property_test.zz");
 e2e_success_test!(
     e2e_stdlib_test_black_box_test,
     "stdlib",

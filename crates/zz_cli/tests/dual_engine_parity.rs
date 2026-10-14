@@ -1016,6 +1016,7 @@ parity_strict_error!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
 parity_strict_error!(parity_err_edge_min_rem_neg1, "edge_int_min_rem_neg1.zz");
 parity_strict_error!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
 parity_strict_error!(parity_err_edge_index_oob, "edge_index_oob.zz");
+parity_strict_error!(parity_err_property_falsified, "property_falsified.zz");
 // Modules fixtures: standalone-runnable files must match on both engines
 // (`import_alias.zz` excluded — broken on the VM itself, see
 // `module_skip_reason`).
@@ -1450,6 +1451,7 @@ parity_strict!(
     "stdlib",
     "test_snapshot_test.zz"
 );
+parity_strict!(parity_stdlib_property_test, "stdlib", "property_test.zz");
 parity_strict!(
     parity_stdlib_test_black_box_test,
     "stdlib",
