@@ -78,6 +78,7 @@ struct TestConfig {
     native_release: bool,
     allow_source_builds: bool,
     allow_hooks: bool,
+    update_snapshots: bool,
 }
 
 impl TestConfig {
@@ -108,6 +109,7 @@ impl TestConfig {
         let mut native_release = false;
         let mut allow_source_builds = false;
         let mut allow_hooks = false;
+        let mut update_snapshots = defaults.update_snapshots;
 
         let mut i = 0;
         while i < args.len() {
@@ -240,6 +242,7 @@ impl TestConfig {
                     }
                 }
                 "--changed" => changed = true,
+                "--update-snapshots" => update_snapshots = true,
                 "--nocapture-impl" => {}
                 "--help" | "-h" => {
                     return Err("usage: zz test [file.zz | directory]... [FLAGS]\n\n\
@@ -270,6 +273,7 @@ impl TestConfig {
                            --junit <path>   JUnit XML to file\n  \
                            --repeat N       Run tests N times\n  \
                            --changed        Only run tests for files changed vs git HEAD\n  \
+                           --update-snapshots  Write assert_snapshot goldens instead of comparing\n  \
                            -h, --help       Show this help\n\n\
                          ENGINES:\n  \
                            VM (default): in-process interpreter, fastest.\n  \
@@ -344,6 +348,7 @@ impl TestConfig {
             native_release,
             allow_source_builds,
             allow_hooks,
+            update_snapshots,
         })
     }
 
@@ -375,6 +380,7 @@ struct TestDefaults {
     seed: Option<u64>,
     repeat: usize,
     engine: TestEngine,
+    update_snapshots: bool,
 }
 
 impl Default for TestDefaults {
@@ -389,6 +395,7 @@ impl Default for TestDefaults {
             seed: None,
             repeat: 1,
             engine: TestEngine::Vm,
+            update_snapshots: false,
         }
     }
 }
@@ -441,6 +448,12 @@ fn load_zz_toml_defaults() -> TestDefaults {
             _ => TestEngine::Vm,
         };
     }
+    if let Some(v) = test_section
+        .get("update-snapshots")
+        .and_then(|v| v.as_bool())
+    {
+        d.update_snapshots = v;
+    }
 
     d
 }
@@ -453,6 +466,69 @@ fn default_test_path() -> String {
         return "tests".to_string();
     }
     ".".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot store env (`assert_snapshot`)
+// ---------------------------------------------------------------------------
+
+/// Env passthrough for snapshot tests. The runner points it at
+/// `<test file parent>/snapshots` per group; `zz run` (no runner) falls
+/// back to `./snapshots`. Update mode writes instead of comparing.
+const SNAPSHOT_ENV_DIR: &str = "ZZ_SNAPSHOTS_DIR";
+const SNAPSHOT_ENV_UPDATE: &str = "ZZ_UPDATE_SNAPSHOTS";
+
+/// Saves the ambient snapshot env on creation, restores it on drop so a
+/// `zz test` process never leaks the per-group settings.
+struct SnapshotEnv {
+    prev_dir: Option<String>,
+    prev_update: Option<String>,
+}
+
+impl SnapshotEnv {
+    fn capture() -> Self {
+        Self {
+            prev_dir: std::env::var(SNAPSHOT_ENV_DIR).ok(),
+            prev_update: std::env::var(SNAPSHOT_ENV_UPDATE).ok(),
+        }
+    }
+}
+
+impl Drop for SnapshotEnv {
+    fn drop(&mut self) {
+        restore_snapshot_env(SNAPSHOT_ENV_DIR, self.prev_dir.take());
+        restore_snapshot_env(SNAPSHOT_ENV_UPDATE, self.prev_update.take());
+    }
+}
+
+fn restore_snapshot_env(key: &str, prev: Option<String>) {
+    // SAFETY: groups run sequentially on this thread; no concurrent
+    // getenv races inside the runner. Same contract as `std.env.set`.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
+/// Point snapshot natives at this group's store for the duration of the
+/// group. AOT children inherit the process env; VM natives read it per
+/// call — both stay consistent because groups run sequentially.
+fn set_snapshot_env_for(file: &Path, config: &TestConfig) {
+    let dir = file
+        .parent()
+        .map(|p| p.join("snapshots"))
+        .unwrap_or_else(|| PathBuf::from("snapshots"));
+    // SAFETY: see `restore_snapshot_env`.
+    unsafe {
+        std::env::set_var(SNAPSHOT_ENV_DIR, dir);
+        if config.update_snapshots {
+            std::env::set_var(SNAPSHOT_ENV_UPDATE, "1");
+        } else {
+            std::env::remove_var(SNAPSHOT_ENV_UPDATE);
+        }
+    }
 }
 
 fn dir_has_zz(dir: &Path) -> bool {
@@ -693,6 +769,8 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
     let overall_start = Instant::now();
     let use_color = config.use_color();
     let total_files = groups.len();
+    // Snapshot store env (restored on scope exit, even on early returns).
+    let _snap_guard = SnapshotEnv::capture();
 
     for iteration in 0..repeat {
         if repeat > 1 && !config.json_output {
@@ -741,6 +819,9 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
                 eprintln!("Running {}", file.display());
                 eprintln!("running {} tests", tests.len());
             }
+            // Groups run sequentially, so one live snapshot setting is
+            // race-free; AOT children inherit it; VM reads it per call.
+            set_snapshot_env_for(file, &config);
             let file_start = Instant::now();
             let bin = aot_bins.get(file).map(|(_, b)| b.clone());
             // Streams each result test-by-test; the file footer follows.

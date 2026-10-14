@@ -900,6 +900,9 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         }
         "temp_dir" | "test.temp_dir" | "std.test.temp_dir" => Some("zz_test_temp_dir"),
         "free_port" | "test.free_port" | "std.test.free_port" => Some("zz_test_free_port"),
+        "assert_snapshot" | "test.assert_snapshot" | "std.test.assert_snapshot" => {
+            Some("zz_assert_snapshot")
+        }
         // Debug print preserving Option wrappers; returns its argument.
         "dbg" => Some("zz_dbg"),
         "len" => Some("zz_len"),

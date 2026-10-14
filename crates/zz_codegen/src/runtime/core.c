@@ -7554,6 +7554,153 @@ zz_value zz_test_free_port(zz_value unused, int *err) {
     return zz_variant_ok(zz_int((int64_t)port));
 }
 
+// ---- snapshot assertion (P3) -------------------------------------------
+// Mirrors `natives/assert::assert_snapshot_fn`: dir from $ZZ_SNAPSHOTS_DIR
+// (else `./snapshots`), update on $ZZ_UPDATE_SNAPSHOTS=1, same name rules,
+// same first-line messages. Mismatch body is a simple Left/Right pair
+// (matching the C twin convention of zz_assert_eq, not the VM Myers diff);
+// success paths are byte-identical and failure paths share the `error:`
+// prefix + exit code.
+
+static int zz_snap_name_valid(const char *s, size_t n) {
+    if (n == 0 || n > 128) return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\0' || s[i] == '/' || s[i] == '\\') return 0;
+    }
+    // Reject `.`, `..`, and anything containing `..` (keeps both engines
+    // trivially identical; legit `v1..v2` names are out of scope).
+    if ((n == 1 && s[0] == '.') || (n == 2 && s[0] == '.' && s[1] == '.')) return 0;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (s[i] == '.' && s[i + 1] == '.') return 0;
+    }
+    return 1;
+}
+
+// mkdir -p (bounded depth; tolerates EEXIST races).
+static int zz_snap_mkdir_p(const char *path) {
+    char tmp[4096];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof tmp) return -1;
+    memcpy(tmp, path, len + 1);
+    for (size_t i = 1; i <= len; i++) {
+        if (tmp[i] == '/' || tmp[i] == '\\' || tmp[i] == '\0') {
+            char save = tmp[i];
+            tmp[i] = '\0';
+            if (strlen(tmp) > 0) {
+#ifdef ZZ_OS_WINDOWS
+                _mkdir(tmp);
+#else
+                if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+#endif
+            }
+            tmp[i] = save;
+        }
+    }
+    return 0;
+}
+
+zz_value zz_assert_snapshot(zz_value actual, zz_value name, int *err) {
+    (void)err;
+    if (actual.tag != ZZ_STR || !actual.s || name.tag != ZZ_STR || !name.s) {
+        char *as = zz_value_to_string(&actual);
+        char *ns = zz_value_to_string(&name);
+        fprintf(stderr, "error: `assert_snapshot` expects `str` (actual, name), got (%s, %s)\n", as, ns);
+        free(as);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    const char *nptr = zz_str_cptr(name.s);
+    size_t nlen = name.s->len;
+    if (!zz_snap_name_valid(nptr, nlen)) {
+        fprintf(stderr, "error: `assert_snapshot` expects a snapshot name without path separators (`/`, `\\`, `..`)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    char namebuf[129];
+    memcpy(namebuf, nptr, nlen);
+    namebuf[nlen] = '\0';
+    const char *dir = getenv("ZZ_SNAPSHOTS_DIR");
+    if (!dir || !*dir) dir = "snapshots";
+    char path[4352];
+    int pn = snprintf(path, sizeof path, "%s/%s.snap", dir, namebuf);
+    if (pn <= 0 || (size_t)pn >= sizeof path) {
+        fprintf(stderr, "error: test.snapshot: snapshot path too long\n");
+        fflush(stderr);
+        exit(1);
+    }
+    const char *upd = getenv("ZZ_UPDATE_SNAPSHOTS");
+    const char *abuf = zz_str_cptr(actual.s);
+    size_t alen = actual.s->len;
+    if (upd && strcmp(upd, "1") == 0) {
+        // Split dir for mkdir (path is "<dir>/<name>.snap").
+        char dbuf[4224];
+        size_t dn = (size_t)pn - (nlen + 6);
+        if (dn >= sizeof dbuf) {
+            fprintf(stderr, "error: test.snapshot: snapshot path too long\n");
+            fflush(stderr);
+            exit(1);
+        }
+        memcpy(dbuf, path, dn);
+        dbuf[dn] = '\0';
+        if (zz_snap_mkdir_p(dbuf) != 0) {
+            fprintf(stderr, "error: test.snapshot: cannot create snapshots dir\n");
+            fflush(stderr);
+            exit(1);
+        }
+        FILE *f = fopen(path, "wb");
+        if (!f) {
+            fprintf(stderr, "error: test.snapshot: cannot write snapshot \"%s\"\n", namebuf);
+            fflush(stderr);
+            exit(1);
+        }
+        if (alen > 0 && fwrite(abuf, 1, alen, f) != alen) {
+            fclose(f);
+            fprintf(stderr, "error: test.snapshot: cannot write snapshot \"%s\"\n", namebuf);
+            fflush(stderr);
+            exit(1);
+        }
+        fclose(f);
+        return zz_unit();
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: Snapshot missing: \"%s\" (run with --update-snapshots to create)\n", namebuf);
+        fflush(stderr);
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    char *exp = (char *)malloc((size_t)sz + 1);
+    if (!exp) {
+        fclose(f);
+        fprintf(stderr, "error: test.snapshot: out of memory\n");
+        fflush(stderr);
+        exit(1);
+    }
+    size_t got = fread(exp, 1, (size_t)sz, f);
+    fclose(f);
+    int same = (got == alen) && (alen == 0 || memcmp(exp, abuf, alen) == 0);
+    if (same) {
+        free(exp);
+        return zz_unit();
+    }
+    // Binary-safe body: lengths + raw bytes (VM renders a Myers diff here;
+    // the C twin keeps the same first line, `error:` prefix, and exit code,
+    // matching the zz_assert_eq twin convention).
+    fprintf(stderr, "error: Assertion Failed: Snapshot mismatch for \"%s\"\n", namebuf);
+    fprintf(stderr, "- Stored (%zu bytes):\n", got);
+    if (got > 0) fwrite(exp, 1, got, stderr);
+    fprintf(stderr, "\n+ Actual (%zu bytes):\n", alen);
+    if (alen > 0) fwrite(abuf, 1, alen, stderr);
+    fprintf(stderr, "\n");
+    free(exp);
+    fflush(stderr);
+    exit(1);
+}
+
 // env.user() → Option<str>
 zz_value zz_env_user(zz_value unused, int *err) {
     (void)unused; (void)err;
