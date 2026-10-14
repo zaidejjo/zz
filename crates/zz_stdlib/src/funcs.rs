@@ -4890,7 +4890,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1061);
+        assert_eq!(funcs.len(), 1062);
     }
 
     #[test]
