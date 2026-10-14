@@ -897,6 +897,23 @@ impl Checker {
     /// so the HIR could bindings can be built deterministically afterward.
     /// The key pairs the span with the enclosing top-level item: bare spans
     /// repeat across modules (offsets restart at 0 per file).
+    /// Resolve a named-function value type (`p1.greet` from using a bare
+    /// function name as a value) to its `Func` type so it unifies with
+    /// func-typed positions like struct fields (#385). Generic functions
+    /// stay `Named` (using one as a value errors at lookup).
+    pub(crate) fn resolve_fn_value(&mut self, t: Type) -> Type {
+        match t {
+            Type::Named(ref n) => match self.funcs.get(n).cloned() {
+                Some(sig) if sig.generics.is_empty() => {
+                    let (ps, ret, _) = self.instantiate(&sig);
+                    Type::Func(ps, Box::new(ret))
+                }
+                _ => t,
+            },
+            other => other,
+        }
+    }
+
     pub(crate) fn check_expr(&mut self, e: &Expr) -> Type {
         let ty = self.check_expr_impl(e);
         // Unresolved types stay as `Var`s during the walk; the typed map is
@@ -1069,6 +1086,7 @@ impl Checker {
                 for (fname, fval) in fields {
                     if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == fname) {
                         let vt = self.check_expr(fval);
+                        let vt = self.resolve_fn_value(vt);
                         let exp = crate::checker::inference::subst(ft, &gen_map);
                         if let Err(e) = self.unifier.unify(&vt, &exp) {
                             self.report_mismatch(e, fval.span());
@@ -1082,6 +1100,7 @@ impl Checker {
                             continue;
                         }
                         let vt = self.check_expr(fval);
+                        let vt = self.resolve_fn_value(vt);
                         if let Err(e) = self.unifier.unify(&vt, &pft) {
                             self.report_mismatch(e, fval.span());
                         }

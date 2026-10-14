@@ -60,6 +60,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "return_in_loops.zz", false),
     ("syntax", "control_flow.zz", false),
     ("types", "structs.zz", false),
+    ("types", "func_field_value.zz", true),
     ("types", "aliases.zz", true),
     ("types", "enums.zz", true),
     ("types", "enum_generics.zz", true),

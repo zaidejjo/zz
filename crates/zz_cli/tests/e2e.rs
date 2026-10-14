@@ -572,6 +572,7 @@ e2e_success_test!(e2e_syntax_generic_structs, "syntax", "generic_structs.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
+e2e_success_test!(e2e_types_func_field_value, "types", "func_field_value.zz");
 e2e_success_test!(e2e_types_aliases, "types", "aliases.zz");
 e2e_success_test!(e2e_types_alias_import, "types", "alias_import.zz");
 e2e_success_test!(e2e_types_enums, "types", "enums.zz");
