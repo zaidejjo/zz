@@ -27,6 +27,13 @@ pub(crate) async fn handle_execute_command(
     backend: &Backend,
     params: ExecuteCommandParams,
 ) -> Result<Option<serde_json::Value>> {
+    if params.command == crate::project_check::CHECK_PROJECT_COMMAND {
+        let root = project_root_for(backend, &params.arguments)?;
+        return Ok(Some(
+            crate::project_check::run_project_check(backend.state.clone(), &backend.client, root)
+                .await,
+        ));
+    }
     if params.command != crate::test_lens::RUN_TEST_COMMAND {
         return Err(Error::method_not_found());
     }
@@ -34,4 +41,23 @@ pub(crate) async fn handle_execute_command(
         return Err(Error::invalid_params("expected [fileUri, testName]"));
     };
     Ok(crate::test_lens::run_single_test(&backend.client, &file, &test_name).await)
+}
+
+/// Project root for a project-check request: explicit file argument
+/// first, workspace root second.
+fn project_root_for(backend: &Backend, args: &[serde_json::Value]) -> Result<std::path::PathBuf> {
+    if let Some(first) = args.first() {
+        if let Some(text) = first.as_str() {
+            if let Ok(uri) = text.parse::<Url>() {
+                if let Ok(path) = uri.to_file_path() {
+                    if let Some(root) = crate::deps::find_project_root(&path) {
+                        return Ok(root);
+                    }
+                }
+            }
+        }
+    }
+    backend.state.root.read().unwrap().clone().ok_or_else(|| {
+        Error::invalid_params("zz.checkProject needs a file argument or workspace root")
+    })
 }

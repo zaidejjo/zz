@@ -36,6 +36,14 @@ pub(crate) async fn handle_prepare_rename(
     }
 }
 
+/// Open-document snapshot for resolver lookup (fresh check bindings).
+fn state_for_resolver(
+    state: &crate::state::GlobalState,
+    uri: &Url,
+) -> Option<crate::state::DocumentState> {
+    state.documents.get(uri).map(|doc| doc.value().clone())
+}
+
 /// Short name of a possibly qualified definition (`Point.x` → `x`).
 fn short_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
@@ -67,8 +75,14 @@ pub(crate) async fn handle_rename(
     };
     let _ = program;
 
-    // No-op renames stay silent.
-    if new_name == &scope.name {
+    // No-op renames stay silent (field def sites carry the full
+    // `Point.x` name: renaming to the same short name is also a no-op).
+    if new_name == &scope.name
+        || scope
+            .field_target
+            .as_ref()
+            .is_some_and(|(_, field)| new_name == field)
+    {
         return Ok(None);
     }
 
@@ -81,12 +95,30 @@ pub(crate) async fn handle_rename(
         &crate::symbol_refs::ScopedFile,
         Vec<crate::lookup::Reference>,
     )> = Vec::new();
+    // Open-document snapshots for receiver resolution (fresh check
+    // bindings); guards drop each iteration.
     for file in &scope.files {
-        let refs = crate::lookup::find_references_to_name_in_program(
-            &file.program,
-            &file.source,
-            &scope.name,
-        );
+        let refs = match scope.field_target.clone() {
+            Some((struct_name, field)) => {
+                let open = state_for_resolver(&backend.state, &file.uri);
+                let bindings = open
+                    .as_ref()
+                    .and_then(|doc| doc.check_result.as_ref().map(|cr| &cr.bindings));
+                let resolver = crate::symbol_refs::FieldResolver::new(bindings);
+                crate::lookup::find_field_references(
+                    &file.program,
+                    &file.source,
+                    &struct_name,
+                    &field,
+                    &|obj| resolver.resolve(obj),
+                )
+            }
+            None => crate::lookup::find_references_to_name_in_program(
+                &file.program,
+                &file.source,
+                &scope.name,
+            ),
+        };
         let counted: Vec<crate::lookup::Reference> = refs
             .into_iter()
             .filter(|r| crate::symbol_refs::hit_counts_in_file(&scope, &file.uri, r, &file.source))
@@ -102,11 +134,7 @@ pub(crate) async fn handle_rename(
     // collides with renaming `Point.x` to `y`). The rename aborts whole
     // (editors apply WorkspaceEdits atomically, so a partial rename
     // would be worse than none) with the colliding symbol named.
-    let renaming_field = touched.iter().any(|(file, _)| {
-        crate::lookup::collect_definitions(&file.program, &file.source)
-            .values()
-            .any(|d| d.kind == crate::lookup::DefKind::Field && short_name(&d.name) == scope.name)
-    });
+    let renaming_field = scope.field_target.is_some();
     for (file, _) in &touched {
         let defs = crate::lookup::collect_definitions(&file.program, &file.source);
         if let Some(hit) = defs

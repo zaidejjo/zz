@@ -43,6 +43,10 @@ pub struct ScopedFile {
 pub struct SymbolScope {
     pub name: String,
     pub defining_uri: Url,
+    /// Struct-field target when the symbol is a field: (struct, field).
+    /// Drives type-aware reference finding (definition site, literal
+    /// labels, receiver-resolved usages) instead of bare-name matching.
+    pub field_target: Option<(String, String)>,
     /// True when the cursor sits on a struct-field definition/usage:
     /// cross-file hits must be qualified (`p.x`), never bare (`x`).
     pub field_only_qualified: bool,
@@ -82,6 +86,7 @@ pub fn resolve_symbol_scope(state: &GlobalState, uri: &Url, offset: u32) -> Opti
     // file without imports. Look the definition up in the defining
     // file's own program (fresh buffer when open).
     let global_binding = is_top_level_binding(state, &defining_uri, &name);
+    let field_target = field_target_in(state, &defining_uri, &name);
 
     // Fresh buffers first: open documents shadow index snapshots.
     let mut files: Vec<ScopedFile> = Vec::new();
@@ -129,6 +134,7 @@ pub fn resolve_symbol_scope(state: &GlobalState, uri: &Url, offset: u32) -> Opti
         defining_uri,
         field_only_qualified,
         global_binding,
+        field_target,
         files,
     })
 }
@@ -137,27 +143,66 @@ pub fn resolve_symbol_scope(state: &GlobalState, uri: &Url, offset: u32) -> Opti
 /// defining file's program. Such bindings merge into the global seed
 /// and are referenceable without imports.
 fn is_top_level_binding(state: &GlobalState, defining_uri: &Url, name: &str) -> bool {
-    let from_docs = state
-        .documents
-        .get(defining_uri)
-        .and_then(|doc| doc.program.clone());
-    let from_index = || {
-        state
-            .module_index
-            .read()
-            .unwrap()
-            .entries
-            .get(defining_uri)
-            .and_then(|e| e.program.clone())
-    };
-    let program = from_docs.or_else(from_index);
-    let Some(program) = program else {
+    let Some(program) = defining_program(state, defining_uri) else {
         return false;
     };
     program.stmts.iter().any(|stmt| match stmt {
         Stmt::Decl { name: n, .. } => n.name == name,
         _ => false,
     })
+}
+
+/// Resolve a struct-field target in the defining file: full
+/// `Point.x` names match directly; bare `x` resolves when exactly one
+/// struct declares it (ambiguity falls back to bare-name matching).
+fn field_target_in(
+    state: &GlobalState,
+    defining_uri: &Url,
+    name: &str,
+) -> Option<(String, String)> {
+    let program = defining_program(state, defining_uri)?;
+    let mut structs: Vec<(String, Vec<String>)> = Vec::new();
+    for stmt in &program.stmts {
+        if let Stmt::Struct { name, fields, .. } = stmt {
+            structs.push((
+                name.join("."),
+                fields.iter().map(|(f, _)| f.name.clone()).collect(),
+            ));
+        }
+    }
+    if let Some((head, short)) = name.rsplit_once('.') {
+        if structs
+            .iter()
+            .any(|(s, fs)| s == head && fs.iter().any(|f| f == short))
+        {
+            return Some((head.to_string(), short.to_string()));
+        }
+        return None;
+    }
+    let mut hits = structs
+        .iter()
+        .filter(|(_, fs)| fs.iter().any(|f| f == name));
+    let (owner, _) = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    Some((owner.clone(), name.to_string()))
+}
+
+/// The defining file's program: open buffer first, index second.
+fn defining_program(state: &GlobalState, defining_uri: &Url) -> Option<Program> {
+    if let Some(doc) = state.documents.get(defining_uri) {
+        if let Some(program) = doc.program.clone() {
+            return Some(program);
+        }
+    }
+    state
+        .module_index
+        .read()
+        .unwrap()
+        .entries
+        .get(defining_uri)
+        .and_then(|e| e.program.clone())
 }
 
 /// Find the defining file of `name` through `program`'s imports:
@@ -248,6 +293,26 @@ fn imports_module(
         }
     }
     false
+}
+
+/// Receiver-to-struct resolver for field reference finding, backed by
+/// one file's check bindings (`p` → `Point`). Files without a check
+/// result resolve nothing (usages there are skipped, never guessed).
+pub struct FieldResolver<'a> {
+    bindings: Option<&'a HashMap<String, zz_checker::Type>>,
+}
+
+impl<'a> FieldResolver<'a> {
+    pub fn new(bindings: Option<&'a HashMap<String, zz_checker::Type>>) -> Self {
+        Self { bindings }
+    }
+
+    pub fn resolve(&self, obj: &str) -> Option<String> {
+        match self.bindings?.get(obj)? {
+            zz_checker::Type::Struct(name, _) => Some(name.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// Map a reference span to the exact range a rename must replace.
@@ -418,6 +483,7 @@ mod tests {
         let scope = SymbolScope {
             name: "circle".to_string(),
             defining_uri: lib.clone(),
+            field_target: None,
             field_only_qualified: false,
             global_binding: false,
             files: vec![],

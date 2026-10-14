@@ -299,11 +299,29 @@ pub(crate) async fn handle_references(
 
     let mut locations: Vec<Location> = Vec::new();
     for file in &scope.files {
-        let refs = crate::lookup::find_references_to_name_in_program(
-            &file.program,
-            &file.source,
-            &scope.name,
-        );
+        let refs = match scope.field_target.clone() {
+            Some((struct_name, field)) => {
+                let open = backend.state.documents.get(&file.uri);
+                let bindings = open
+                    .as_ref()
+                    .and_then(|doc| doc.check_result.as_ref().map(|cr| &cr.bindings));
+                let resolver = crate::symbol_refs::FieldResolver::new(bindings);
+                let refs = crate::lookup::find_field_references(
+                    &file.program,
+                    &file.source,
+                    &struct_name,
+                    &field,
+                    &|obj| resolver.resolve(obj),
+                );
+                drop(open);
+                refs
+            }
+            None => crate::lookup::find_references_to_name_in_program(
+                &file.program,
+                &file.source,
+                &scope.name,
+            ),
+        };
         let line_index = LineIndex::new(&file.source);
         for r in &refs {
             if !crate::symbol_refs::hit_counts_in_file(&scope, &file.uri, r, &file.source) {
