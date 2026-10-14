@@ -133,7 +133,7 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
 ///
 /// Stashes the full `RawDiag` as JSON in `Diagnostic.data` so that
 /// `textDocument/codeAction` can retrieve fixit info without re-checking.
-fn convert_diagnostic(source: &str, raw: &zz_frontend::diag::RawDiag) -> Diagnostic {
+pub(crate) fn convert_diagnostic(source: &str, raw: &zz_frontend::diag::RawDiag) -> Diagnostic {
     let span = raw
         .span
         .expect("caller must filter None spans before calling");

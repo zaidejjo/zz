@@ -54,7 +54,10 @@ pub(crate) async fn handle_initialize(
                 resolve_provider: Some(false),
             }),
             execute_command_provider: Some(ExecuteCommandOptions {
-                commands: vec![crate::test_lens::RUN_TEST_COMMAND.to_string()],
+                commands: vec![
+                    crate::test_lens::RUN_TEST_COMMAND.to_string(),
+                    crate::project_check::CHECK_PROJECT_COMMAND.to_string(),
+                ],
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             }),
             completion_provider: Some(CompletionOptions {
