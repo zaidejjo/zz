@@ -1,0 +1,52 @@
+// features: comparison, enums, func-call, locals, match, print, return, string-literal
+// E2E: enum-typed helper calls — a call to a plain function returning
+// an enum must stay a call even when the enum is declared first. The
+// VM compiler used to read any enum-typed multi-part callee as variant
+// construction (`unknown variant` error); the head must name the enum
+// and the trailing component must be a real variant.
+// Top-level names carry the `ordcall_` prefix (batch drivers share one
+// native binary; see #437).
+enum OrdR {
+    Null,
+    Int(int),
+    List([OrdR]),
+}
+
+func ordcall_make(n: int) -> OrdR {
+    return OrdR.Int(n)
+}
+
+func ordcall_depth(v: OrdR) -> int {
+    match v {
+        .Null => 0
+        .Int(_) => 0
+        .List(xs) => {
+            m := 0
+            for x in xs {
+                d := ordcall_depth(x)
+                if d > m {
+                    m = d
+                }
+            }
+            m + 1
+        }
+    }
+}
+
+func ordcall_chain(n: int) -> OrdR {
+    t := OrdR.Int(0)
+    for _i in 0..n {
+        t = OrdR.List([t])
+    }
+    return t
+}
+
+func main() {
+    t := ordcall_make(5)
+    println("ordcall_eq:{t == OrdR.Int(5)}")
+    nested := OrdR.List([OrdR.Int(1), t])
+    println("ordcall_depth={ordcall_depth(nested)}")
+    deep := ordcall_chain(50)
+    println("ordcall_deep={ordcall_depth(deep)}")
+    println("ordcall_ok")
+}
