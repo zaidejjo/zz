@@ -21,15 +21,16 @@ use crate::lookup::resolve_type_of_expr;
 // ── ZZ keywords ──────────────────────────────────────────────────────────
 
 const KEYWORDS: &[&str] = &[
-    "break", "continue", "defer", "else", "false", "for", "func", "if", "import", "match", "none",
-    "return", "struct", "true", "while",
+    "as", "break", "const", "continue", "defer", "else", "enum", "extern", "false", "for", "func",
+    "if", "impl", "import", "in", "match", "mut", "none", "pub", "return", "struct", "true",
+    "type", "while",
 ];
 
-// ── Stdlib module names ──────────────────────────────────────────────────
+/// Primitive type names (`x: int`), always in scope.
+const PRIMITIVE_TYPES: &[&str] = &["bool", "float", "int", "str"];
 
-const STDLIB_MODULES: &[&str] = &[
-    "io", "str", "vec", "json", "http", "fs", "cenv", "math", "time", "sqlz", "db",
-];
+/// Builtin trait bounds (`<T: Num>`), always in scope.
+const BUILTIN_BOUNDS: &[&str] = &["Display", "Eq", "Num", "Ord"];
 
 // ── Completion environment ─────────────────────────────────────────────────
 
@@ -73,7 +74,7 @@ pub fn completions_for_position(
             partial_prefix,
         } => dot_access_completions(program, check_result, &obj_name, &partial_prefix, cenv),
         CompletionContext::Scope { partial_prefix } => {
-            scope_completions(program, check_result, &partial_prefix, cenv)
+            scope_completions(program, check_result, &partial_prefix, offset, cenv)
         }
         CompletionContext::ImportPath {
             partial_prefix,
@@ -111,7 +112,7 @@ pub fn completions_for_position(
                     &key,
                     &partial_prefix,
                 ),
-                None => scope_completions(program, check_result, &partial_prefix, cenv),
+                None => scope_completions(program, check_result, &partial_prefix, offset, cenv),
             }
         }
     };
@@ -1199,7 +1200,7 @@ fn find_stdlib_module_for_alias(program: &Program, alias: &str) -> Option<String
                     return Some(path[1..].join("."));
                 }
                 // Direct import like `import math` — assume it's a stdlib module.
-                if path.len() == 1 && STDLIB_MODULES.contains(&path[0].as_str()) {
+                if path.len() == 1 && zz_stdlib::STDLIB_MODULES.contains(&path[0].as_str()) {
                     return Some(path[0].clone());
                 }
                 fallback = Some(ns);
@@ -1325,6 +1326,7 @@ fn scope_completions(
     program: &Program,
     check_result: Option<&CheckResult>,
     partial_prefix: &str,
+    offset: u32,
     cenv: Option<&CompletionEnv>,
 ) -> Vec<CompletionItem> {
     let mut items = Vec::new();
@@ -1336,6 +1338,52 @@ fn scope_completions(
                 label: kw.to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("keyword".to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Primitive types and builtin trait bounds: always in scope, so they
+    // complete in type positions (`x: in|`, `<T: N|`) as well as value
+    // positions (harmless there — the checker rejects misuse).
+    for ty in PRIMITIVE_TYPES {
+        if ty.starts_with(partial_prefix) {
+            items.push(CompletionItem {
+                label: ty.to_string(),
+                kind: Some(CompletionItemKind::CLASS),
+                detail: Some("builtin type".to_string()),
+                ..Default::default()
+            });
+        }
+    }
+    for bound in BUILTIN_BOUNDS {
+        if bound.starts_with(partial_prefix) {
+            items.push(CompletionItem {
+                label: bound.to_string(),
+                kind: Some(CompletionItemKind::INTERFACE),
+                detail: Some("builtin bound".to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Generic parameters of the enclosing function (`func min<T: Num>(`
+    // → `T` completes in the body and signature). Span containment on
+    // the cursor offset; innermost wins for nested closures.
+    let mut generic_names: Vec<String> = Vec::new();
+    for stmt in &program.stmts {
+        if let Stmt::Func { generics, span, .. } = stmt {
+            if offset >= span.start && offset <= span.end {
+                generic_names = generics.iter().map(|g| g.name.name.clone()).collect();
+            }
+        }
+    }
+    for name in &generic_names {
+        if name.starts_with(partial_prefix) && !items.iter().any(|i| i.label == *name) {
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::TYPE_PARAMETER),
+                detail: Some("generic parameter".to_string()),
                 ..Default::default()
             });
         }
@@ -1744,7 +1792,7 @@ mod tests {
     fn scope_keywords() {
         let src = "x := 1\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "ret", None);
+        let items = scope_completions(&program, cr.as_ref(), "ret", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "return"));
         assert!(!items.iter().any(|i| i.label == "func"));
     }
@@ -1753,7 +1801,7 @@ mod tests {
     fn scope_globals() {
         let src = "func add(a: int, b: int) -> int { return a + b }\nx := 1\nxy := 2\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "x", None);
+        let items = scope_completions(&program, cr.as_ref(), "x", src.len() as u32, None);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"x"));
         assert!(labels.contains(&"xy"));
@@ -1764,7 +1812,7 @@ mod tests {
     fn scope_local_params() {
         let src = "func f(param_a: int) -> int {\n  let local_b = param_a\n  return local_b\n}\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "par", None);
+        let items = scope_completions(&program, cr.as_ref(), "par", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "param_a"));
     }
 
@@ -1772,7 +1820,7 @@ mod tests {
     fn scope_local_let() {
         let src = "alpha := 1\nbeta := 2\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "al", None);
+        let items = scope_completions(&program, cr.as_ref(), "al", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "alpha"));
         assert!(!items.iter().any(|i| i.label == "beta"));
     }
@@ -2890,5 +2938,103 @@ mod struct_literal_dep_tests {
             .iter()
             .all(|i| i.kind == Some(CompletionItemKind::FIELD)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scope_serves_keywords_builtins_and_types() {
+        // Bare scope: missing lexer keywords (`pub`, `as`, `in`, …),
+        // prelude builtins (`println`, `input`), primitives and bounds.
+        let src = "func main() {\n    ";
+        let parsed = zz_frontend::parse(src);
+        let cenv = CompletionEnv::default();
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            tower_lsp::lsp_types::CompletionResponse::Array(v) => v,
+            tower_lsp::lsp_types::CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let has = |l: &str| items.iter().any(|i| i.label == l);
+        for kw in [
+            "pub", "as", "in", "impl", "const", "extern", "mut", "enum", "type", "struct", "func",
+            "return",
+        ] {
+            assert!(has(kw), "keyword serves: {kw}");
+        }
+        for ty in ["int", "float", "bool", "str"] {
+            assert!(has(ty), "primitive serves: {ty}");
+        }
+        for b in ["Num", "Ord", "Eq", "Display"] {
+            assert!(has(b), "bound serves: {b}");
+        }
+        let state = crate::state::GlobalState::new();
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
+        let cr = zz_checker::check_program(&parsed.program, ib, ifunc, is, ia, ie);
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            Some(&cr),
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            tower_lsp::lsp_types::CompletionResponse::Array(v) => v,
+            tower_lsp::lsp_types::CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let has = |l: &str| items.iter().any(|i| i.label == l);
+        for b in ["println", "print", "input", "len", "range"] {
+            assert!(has(b), "builtin serves: {b}");
+        }
+    }
+
+    #[test]
+    fn scope_serves_enclosing_generic_params() {
+        let src = "func min<T: Num>(a: T, b: T) -> T {\n    ";
+        let parsed = zz_frontend::parse(src);
+        let cenv = CompletionEnv::default();
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            tower_lsp::lsp_types::CompletionResponse::Array(v) => v,
+            tower_lsp::lsp_types::CompletionResponse::List(_) => panic!("expected array"),
+        };
+        assert!(
+            items.iter().any(|i| i.label == "T"
+                && i.kind == Some(tower_lsp::lsp_types::CompletionItemKind::TYPE_PARAMETER)),
+            "generic param serves"
+        );
+        // Outside any function: no generic params leak in.
+        let src2 = "x := ";
+        let parsed2 = zz_frontend::parse(src2);
+        let items2 = match completions_for_position(
+            &parsed2.program,
+            src2,
+            src2.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            tower_lsp::lsp_types::CompletionResponse::Array(v) => v,
+            tower_lsp::lsp_types::CompletionResponse::List(_) => panic!("expected array"),
+        };
+        assert!(
+            items2
+                .iter()
+                .all(|i| i.kind != Some(tower_lsp::lsp_types::CompletionItemKind::TYPE_PARAMETER)),
+            "no params at top level"
+        );
     }
 }
