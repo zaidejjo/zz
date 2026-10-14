@@ -59,7 +59,17 @@ pub(crate) async fn handle_initialize(
             }),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
-                trigger_characters: Some(vec![".".to_string()]),
+                // `.` covers members; `(` selective imports + calls;
+                // `{` struct literals; `:` annotations. Editors that
+                // auto-request on keystrokes get everything regardless;
+                // these exist for clients (Neovim autotrigger) that only
+                // fire on trigger characters.
+                trigger_characters: Some(vec![
+                    ".".to_string(),
+                    "(".to_string(),
+                    "{".to_string(),
+                    ":".to_string(),
+                ]),
                 ..Default::default()
             }),
             signature_help_provider: Some(SignatureHelpOptions {

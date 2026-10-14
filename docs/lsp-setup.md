@@ -53,6 +53,20 @@ end
 -- Start the server.
 lspconfig.zz_lsp.setup({})
 
+-- Completion while typing: Neovim's built-in completion only pops
+-- automatically on trigger characters unless autotrigger is on.
+-- Enable it so keywords, builtins, and scope items appear as you type
+-- (the server advertises `.`, `(`, `{`, `:` triggers for members,
+-- selective imports, struct literals, and annotations).
+vim.api.nvim_create_autocmd("LspAttach", {
+  callback = function(args)
+    local client = vim.lsp.get_client_by_id(args.data.client_id)
+    if client and client.name == "zz_lsp" then
+      vim.lsp.completion.enable(true, client.id, args.buf, { autotrigger = true })
+    end
+  end,
+})
+
 -- Optional: format on save.
 vim.api.nvim_create_autocmd("BufWritePre", {
   pattern = "*.zz",
