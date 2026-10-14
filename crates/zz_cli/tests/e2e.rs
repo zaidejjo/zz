@@ -1784,6 +1784,15 @@ fn e2e_cover_basic() {
         stdout.contains("uncovered: 15"),
         "missing uncovered line in:\n{stdout}"
     );
+    // Branch directions: the else path ran, the then path never did.
+    assert!(
+        stdout.contains("50.0% branches (1/2)"),
+        "missing branch total in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("uncovered branches: 14 (fallthrough)"),
+        "missing uncovered branch in:\n{stdout}"
+    );
 }
 
 #[test]
@@ -1817,7 +1826,56 @@ fn e2e_cover_fail_under_and_lcov() {
     assert!(content.contains("TN:"), "missing TN in:\n{content}");
     assert!(content.contains("LF:6"), "missing LF in:\n{content}");
     assert!(content.contains("LH:5"), "missing LH in:\n{content}");
+    assert!(content.contains("BRF:2"), "missing BRF in:\n{content}");
+    assert!(content.contains("BRH:1"), "missing BRH in:\n{content}");
     let _ = std::fs::remove_file(&lcov);
+}
+
+#[test]
+fn e2e_cover_tests_mode() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("basic_assertions.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("cover")
+        .arg("--tests")
+        .arg(&path)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .expect("failed to exec `zz cover --tests`");
+    let exit = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(
+        exit, 0,
+        "`zz cover --tests` should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Coverage: 100.0% lines (19/19)"),
+        "missing merged total in:\n{stdout}"
+    );
+}
+
+#[test]
+fn e2e_cover_html() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("cover").join("basic_cover.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let html = std::env::temp_dir().join("zz_e2e_cover.html");
+    let (exit, _stdout, _stderr) =
+        run_zz_cover(&path, &["--html", html.to_string_lossy().as_ref()]);
+    assert_eq!(exit, 0, "`zz cover --html` should exit 0");
+    let content = std::fs::read_to_string(&html).expect("html file should exist");
+    assert!(content.contains("<title>zz cover</title>"), "missing title");
+    assert!(
+        content.contains("class=\"unc\""),
+        "missing uncovered gutter"
+    );
+    assert!(content.contains("class=\"cov\""), "missing covered gutter");
+    let _ = std::fs::remove_file(&html);
 }
 
 // --- Doc-tests (`/// ```zz` fences) ---

@@ -582,7 +582,7 @@ struct TestResult {
 }
 
 #[derive(Debug, Clone)]
-struct TestInfo {
+pub(crate) struct TestInfo {
     name: String,
     file: PathBuf,
     meta: TestMeta,
@@ -2019,6 +2019,34 @@ fn map_worker_report(
 }
 
 fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
+    let (mut interp, func_val, args) = setup_test_interp(test, false)?;
+
+    // Call @setup if present.
+    if let Some(ref setup_name) = test.setup_fn {
+        call_named_fn(&mut interp, setup_name, test.meta.span)?;
+    }
+
+    // Call the test function (with case arguments if parameterized).
+    let test_result = match interp.call(func_val, args, test.meta.span) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{e:?}")),
+    };
+
+    // Call @teardown if present (always runs, even on test failure).
+    if let Some(ref teardown_name) = test.teardown_fn {
+        let _ = call_named_fn(&mut interp, teardown_name, test.meta.span);
+    }
+
+    test_result
+}
+
+/// Shared setup for isolated test execution: load, graft doctests,
+/// plugins, HIR build, interpreter seed, stdlib + module execution up to
+/// the test's own module. Returns the interpreter plus the resolved test
+/// function value and its case arguments; callers run setup/test/teardown
+/// calls themselves. With `cover`, the recorder is enabled and every user
+/// module is labeled from `loaded.files` (stdlib runs stay unlabeled).
+fn setup_test_interp(test: &TestInfo, cover: bool) -> Result<(Interp, Value, Vec<Value>), String> {
     let mut loaded = loader::load_program(&test.file)?;
 
     // Same doctest graft as discovery (deterministic): without it the
@@ -2072,6 +2100,10 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
 
     let mut interp = Interp::with_natives(natives);
 
+    if cover {
+        interp.enable_coverage();
+    }
+
     for (key, val) in zz_stdlib::stdlib_consts() {
         interp.env.define(&key, Value::Float(val));
         if let Some(rest) = key.strip_prefix("std.") {
@@ -2119,6 +2151,11 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     }
 
     for (i, program) in loaded.programs.iter().enumerate() {
+        if cover {
+            if let Some((name, source)) = loaded.files.get(i) {
+                interp.set_coverage_source(name, source);
+            }
+        }
         if let Err(e) = interp.run_typed(program, types.clone(), structs.clone(), enums.clone()) {
             return Err(format!("module error: {e:?}"));
         }
@@ -2133,24 +2170,8 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
         .get(&func_name)
         .ok_or_else(|| format!("test function `{func_name}` not found in environment"))?;
 
-    // Call @setup if present.
-    if let Some(ref setup_name) = test.setup_fn {
-        call_named_fn(&mut interp, setup_name, test.meta.span)?;
-    }
-
-    // Call the test function (with case arguments if parameterized).
     let args = test.case_values.clone().unwrap_or_default();
-    let test_result = match interp.call(func_val, args, test.meta.span) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("{e:?}")),
-    };
-
-    // Call @teardown if present (always runs, even on test failure).
-    if let Some(ref teardown_name) = test.teardown_fn {
-        let _ = call_named_fn(&mut interp, teardown_name, test.meta.span);
-    }
-
-    test_result
+    Ok((interp, func_val, args))
 }
 
 /// Call a named zero-arg function in the interpreter. Returns Err on failure.
@@ -2164,6 +2185,82 @@ fn call_named_fn(interp: &mut Interp, name: &str, span: Span) -> Result<(), Stri
         Ok(_) => Ok(()),
         Err(e) => Err(format!("{name}: {e:?}")),
     }
+}
+
+/// Run one test with the coverage recorder enabled, merging-friendly:
+/// returns the test's pass/fail plus its coverage state. Setup and
+/// teardown run exactly like [`run_test_isolated`] (inline — no timeout
+/// worker subprocesses; a hanging test hangs coverage, documented in
+/// `docs/coverage.md`).
+pub(crate) fn run_test_covered(
+    test: &TestInfo,
+) -> Result<(bool, zz_runtime::CoverageState), String> {
+    let (mut interp, func_val, args) = setup_test_interp(test, true)?;
+
+    if let Some(ref setup_name) = test.setup_fn {
+        call_named_fn(&mut interp, setup_name, test.meta.span)?;
+    }
+    let res = interp.call(func_val, args, test.meta.span);
+    if let Some(ref teardown_name) = test.teardown_fn {
+        let _ = call_named_fn(&mut interp, teardown_name, test.meta.span);
+    }
+    // `should_panic` inversion mirrors `run_test_attempt_inner`: an
+    // expected failure still counts the executed lines.
+    let passed = match res {
+        Ok(_) => !test.meta.should_panic,
+        Err(_) => test.meta.should_panic,
+    };
+    let cov = interp
+        .coverage
+        .clone()
+        .ok_or_else(|| "coverage recorder missing after covered run".to_string())?;
+    Ok((passed, cov))
+}
+
+/// Discover every test under `root` (file or directory; `None` selects
+/// the same default as `zz test`) and run each with coverage, merging
+/// all states. Ignored tests are skipped like the runner skips them.
+/// Returns the merged state plus the failing test names (empty = all
+/// passed); failures still contribute their partial coverage.
+pub(crate) fn cover_tests(
+    root: Option<&str>,
+) -> Result<(zz_runtime::CoverageState, Vec<String>), String> {
+    let roots = match root {
+        Some(r) => vec![r.to_string()],
+        None => vec![default_test_path()],
+    };
+    for r in &roots {
+        crate::enforce_project_zz(std::path::Path::new(r))?;
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    for r in &roots {
+        files.extend(collect_zz_files(r)?);
+    }
+    files.sort();
+    files.dedup();
+
+    let mut total = zz_runtime::CoverageState::default();
+    let mut failed = Vec::new();
+    for file in &files {
+        let tests = discover_tests(file)?;
+        for test in &tests {
+            if test.meta.ignore {
+                continue;
+            }
+            match run_test_covered(test) {
+                Ok((passed, cov)) => {
+                    if !passed {
+                        failed.push(test.name.clone());
+                    }
+                    total.merge(&cov);
+                }
+                Err(e) => {
+                    failed.push(format!("{} ({e})", test.name));
+                }
+            }
+        }
+    }
+    Ok((total, failed))
 }
 
 // ---------------------------------------------------------------------------

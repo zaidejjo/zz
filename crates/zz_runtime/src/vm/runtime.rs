@@ -287,6 +287,10 @@ impl Vm {
         // hook then costs one integer compare when disabled.
         let mut cached_cov_ids: *const Vec<u32>;
         let mut cached_cov_file: usize;
+        // Branch ids parallel to `code` (`COV_UNMAPPED` = not a branch).
+        // Recording goes through `record_branch!` inside the five
+        // conditional handlers below.
+        let mut cached_cov_branch: *const Vec<u32>;
 
         // Re-cache from the current top frame (after any frame push/pop).
         macro_rules! re_cache {
@@ -305,6 +309,31 @@ impl Vm {
                         .unwrap_or(usize::MAX),
                     None => usize::MAX,
                 };
+                cached_cov_branch = &c.cov_branch;
+            }};
+        }
+
+        // Record one branch direction for the just-executed conditional
+        // op at `ip - 1` (`ip` already advanced past it). No-op unless
+        // this frame's chunk is attributed. Call before retargeting `ip`.
+        macro_rules! record_branch {
+            ($taken:expr) => {{
+                if cached_cov_file != usize::MAX {
+                    let branches: &Vec<u32> = unsafe { &*cached_cov_branch };
+                    if let Some(&bid) = branches.get(ip - 1) {
+                        if bid != crate::coverage::COV_UNMAPPED {
+                            if let Some(cov) = interp.coverage.as_mut() {
+                                if let Some(h) = cov.branch_hits.get_mut(bid as usize) {
+                                    if $taken {
+                                        h.0 += 1;
+                                    } else {
+                                        h.1 += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }};
         }
 
@@ -1348,13 +1377,17 @@ impl Vm {
                 }
                 Op::JumpIfFalse(target) => {
                     let v = self.stack.pop().unwrap();
-                    if !v.is_truthy() {
+                    let jumped = !v.is_truthy();
+                    record_branch!(jumped);
+                    if jumped {
                         ip = *target;
                     }
                 }
                 Op::JumpIfTrue(target) => {
                     let v = self.stack.pop().unwrap();
-                    if v.is_truthy() {
+                    let jumped = v.is_truthy();
+                    record_branch!(jumped);
+                    if jumped {
                         ip = *target;
                     }
                 }
@@ -1363,7 +1396,9 @@ impl Vm {
                     if !matches!(v, Value::Bool(_)) {
                         return Err(self.error("`if` condition must be a bool", *span));
                     }
-                    if !v.is_truthy() {
+                    let jumped = !v.is_truthy();
+                    record_branch!(jumped);
+                    if jumped {
                         ip = *target;
                     }
                 }
@@ -1559,11 +1594,13 @@ impl Vm {
                     } // immutable borrow of self.stack dropped here
 
                     if iter_done {
+                        record_branch!(true);
                         let li = self.loops.pop().unwrap();
                         self.stack.truncate(li.stack_base + 1);
                         interp.env = li.env;
                         ip = *exit;
                     } else {
+                        record_branch!(false);
                         self.stack.push(next_idx);
                         self.stack.push(push_val.clone());
                         if let Some(ref v) = push_val2 {
@@ -1599,7 +1636,9 @@ impl Vm {
                     if !matches!(c, Value::Bool(_)) {
                         return Err(self.error("`while` condition must be a bool", *span));
                     }
-                    if !c.is_truthy() {
+                    let done = !c.is_truthy();
+                    record_branch!(done);
+                    if done {
                         let li = self.loops.pop().unwrap();
                         self.stack.truncate(li.stack_base + 1);
                         interp.env = li.env;

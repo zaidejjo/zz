@@ -20,6 +20,9 @@ pub struct Chunk {
     /// Dense coverage id per opcode, parallel to `code`/`spans`
     /// (`COV_UNMAPPED` = skip). Filled by `register_coverage_chunk`.
     pub cov_ids: Vec<u32>,
+    /// Branch id per opcode for conditional jumps, parallel to `code`
+    /// (`COV_UNMAPPED` = not a branch). Same fill path as `cov_ids`.
+    pub cov_branch: Vec<u32>,
     /// Parameter list when this chunk is a function body (empty otherwise).
     pub params: Vec<Param>,
     /// Source span for each opcode. Same length as `code`.
@@ -54,6 +57,7 @@ impl Chunk {
             constants: Vec::new(),
             source: None,
             cov_ids: Vec::new(),
+            cov_branch: Vec::new(),
             params: Vec::new(),
             spans: Vec::new(),
             toplevel_slots: Vec::new(),
