@@ -55,6 +55,37 @@ Metadata flags (`@test(...)` named args only):
 
 `cases` requires array literal with literal elements; non-literal errors at compile time. Expansion happens at HIR build — each entry reports individually.
 
+## Doc-tests
+
+`/// ```zz` fences in doc comments run as tests on both engines:
+
+```zz
+/// Double a number.
+///
+/// ```zz
+/// assert_eq(double(21), 42)
+/// ```
+///
+/// ```zz,ignore
+/// assert_eq(double(0), 999)
+/// ```
+func double(n: int) -> int { n * 2 }
+```
+
+- Only explicit `zz` fences are extracted; plain ``` fences stay prose.
+- The header accepts `,ignore` and `,should_panic` (same meaning as
+  `@test` metadata). Unknown options and unterminated fences are load
+  errors with file positions — never silently skipped.
+- Body lines starting with `#` compile but stay hidden from rendered
+  docs (Rust convention); they occupy their file lines so failure
+  locations stay exact.
+- Fences report as `doctest <file>#<n>` and get the file's
+  `@setup`/`@teardown` like any test. Sibling references resolve
+  identically to `@test` bodies (same namespace rewriting).
+- `--no-doctests` skips running/listing them (malformed fences still
+  fail the file at load). Fences inside function bodies are ignored.
+- `zz run`, `zz check`, and `zz fmt` never see synthetic tests.
+
 ## CLI
 
 ```
@@ -87,6 +118,7 @@ zz test --list
 | `--slow-threshold <ms>` | Mark passing tests slower than threshold as slow |
 | `--changed` | Only tests affected by files changed since last success (content hash, conservative) |
 | `--update-snapshots` | Write `assert_snapshot` goldens instead of comparing |
+| `--no-doctests` | Skip `/// ```zz` doc-tests |
 | `-h/--help` | Help |
 
 ### Engines
@@ -328,7 +360,6 @@ CLI flags always override file config. No config file is required.
 
 ## Deferred
 
-- **Doctests:** `/// ```zz ... ``` ` extraction → `doctests` category. Design stub: reuse doc-comment trivia, register as synthetic `@test` with `file:line` of fence.
 - **`--isolate` subprocess mode:** per-test child `zz test --run-one` for true segfault isolation *in the VM engine* (AOT already isolates per test).
 - **Precise `--changed`:** cross-file fine-grained dependency hashing.
 

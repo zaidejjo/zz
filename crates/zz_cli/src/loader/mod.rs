@@ -31,7 +31,7 @@ use zz_stdlib::{
 };
 
 pub(crate) mod cache;
-mod rewrite;
+pub(crate) mod rewrite;
 
 #[cfg(test)]
 mod tests;

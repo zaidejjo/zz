@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use zz_frontend::ast::Stmt;
 use zz_frontend::diag::{render_to_string, Files};
+use zz_frontend::doctest;
 use zz_frontend::span::Span;
 use zz_frontend::test_attr::{self, TestMeta};
 use zz_runtime::{Interp, Value};
@@ -79,6 +80,7 @@ struct TestConfig {
     allow_source_builds: bool,
     allow_hooks: bool,
     update_snapshots: bool,
+    no_doctests: bool,
 }
 
 impl TestConfig {
@@ -110,6 +112,7 @@ impl TestConfig {
         let mut allow_source_builds = false;
         let mut allow_hooks = false;
         let mut update_snapshots = defaults.update_snapshots;
+        let mut no_doctests = false;
 
         let mut i = 0;
         while i < args.len() {
@@ -171,6 +174,7 @@ impl TestConfig {
                 "--exact" => exact = true,
                 "--fail-fast" => fail_fast = true,
                 "--fail-on-empty" => fail_on_empty = true,
+                "--no-doctests" => no_doctests = true,
                 "--list" => list_only = true,
                 "--json" => json_output = true,
                 "--native" | "--aot" => {
@@ -274,6 +278,7 @@ impl TestConfig {
                            --repeat N       Run tests N times\n  \
                            --changed        Only run tests for files changed vs git HEAD\n  \
                            --update-snapshots  Write assert_snapshot goldens instead of comparing\n  \
+                           --no-doctests    Skip `/// ```zz` doc-tests\n  \
                            -h, --help       Show this help\n\n\
                          ENGINES:\n  \
                            VM (default): in-process interpreter, fastest.\n  \
@@ -349,6 +354,7 @@ impl TestConfig {
             allow_source_builds,
             allow_hooks,
             update_snapshots,
+            no_doctests,
         })
     }
 
@@ -1098,6 +1104,12 @@ fn run_group_parallel(
 // ---------------------------------------------------------------------------
 
 fn apply_filters(tests: &mut Vec<TestInfo>, config: &TestConfig) {
+    // `--no-doctests`: drop synthetic doctest entries (grafting still
+    // defines them, inert and never called — but malformed fences still
+    // fail the file at load; see `graft_doctests`).
+    if config.no_doctests {
+        tests.retain(|t| !(t.func_name.len() == 1 && t.func_name[0].starts_with("__zz_doctest_")));
+    }
     if let Some(ref pat) = config.filter {
         if config.exact {
             tests.retain(|t| t.name == *pat || display_name(&t.name, &t.file) == *pat);
@@ -1156,7 +1168,7 @@ fn parse_git_output(stdout: &[u8]) -> Result<Vec<PathBuf>, String> {
 // ---------------------------------------------------------------------------
 
 fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
-    let loaded = loader::load_program(path)?;
+    let mut loaded = loader::load_program(path)?;
 
     let mut errors = false;
     for e in &loaded.errors {
@@ -1173,6 +1185,12 @@ fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
     if errors {
         return Err(format!("failed to load `{}`", path.display()));
     }
+
+    // Doc-tests: graft `/// ```zz` fences as synthetic `@test` funcs.
+    // Deterministic (same source → same funcs), so discovery and the
+    // fresh loads at execution time always agree. Returns func-name →
+    // display-name for the grafted tests.
+    let doctest_names = graft_doctests(&mut loaded, path)?;
 
     // First pass: find @setup / @teardown functions (file-scoped, last wins).
     let mut setup_fn: Option<String> = None;
@@ -1255,7 +1273,194 @@ fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
         }
     }
 
+    // Synthetic doctest funcs get human display names (`doctest stem#n`);
+    // `func_name` stays the real (callable) identifier.
+    for test in tests.iter_mut() {
+        if test.func_name.len() == 1 {
+            if let Some(display) = doctest_names.get(&test.func_name[0]) {
+                test.name = display.clone();
+            }
+        }
+    }
+
     Ok(tests)
+}
+
+/// Derive the namespacing context for doctest grafting from a loaded
+/// (already rewritten) module: the consensus namespace of dotted top-level
+/// definitions, their bare names, and import alias heads. Returns
+/// `None` namespace for script-mode modules (all bare — no rewriting).
+/// Same-file multi-namespace edges (#380) keep the majority head; alias
+/// heads are left for the rewriter's import set instead.
+fn doctest_rewrite_context(
+    stmts: &[Stmt],
+) -> (
+    Option<String>,
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    let mut heads: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut defs: Vec<String> = Vec::new();
+    let mut imports = std::collections::HashSet::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Func { name, .. }
+            | Stmt::Struct { name, .. }
+            | Stmt::TypeAlias { name, .. }
+            | Stmt::Enum { name, .. } => {
+                let full = name.join(".");
+                defs.push(full.clone());
+                if let Some((head, _)) = full.split_once('.') {
+                    *heads.entry(head.to_string()).or_insert(0) += 1;
+                }
+            }
+            Stmt::Decl { name, .. } => {
+                defs.push(name.name.clone());
+                if let Some((head, _)) = name.name.split_once('.') {
+                    *heads.entry(head.to_string()).or_insert(0) += 1;
+                }
+            }
+            Stmt::Import { path, alias, .. } => {
+                if let Some(a) = alias {
+                    imports.insert(a.clone());
+                } else if let Some(last) = path.last() {
+                    imports.insert(last.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let ns_opt = heads.into_iter().max_by_key(|(_, n)| *n).map(|(h, _)| h);
+    let mut top = std::collections::HashSet::new();
+    if let Some(ns) = ns_opt.as_deref() {
+        let prefix = format!("{ns}.");
+        for full in &defs {
+            top.insert(full.strip_prefix(&prefix).unwrap_or(full).to_string());
+        }
+    } else {
+        top.extend(defs);
+    }
+    (ns_opt, top, imports)
+}
+
+/// Graft doc-test fences as synthetic `@test` functions into every loaded
+/// program. Pure + deterministic: extraction, padded parsing (line-exact
+/// spans), and decorator construction depend only on file text, so the
+/// discovery load and each execution load produce identical funcs.
+/// Returns func-name → display-name for grafted tests. Hard errors
+/// (bad fence, unparseable body) fail the file like load errors.
+fn graft_doctests(
+    loaded: &mut loader::LoadResult,
+    path: &Path,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    use zz_frontend::ast::{Block, Decorator, Expr, Ident};
+    use zz_frontend::parser::parse;
+
+    let mut names = std::collections::HashMap::new();
+    for i in 0..loaded.programs.len() {
+        let (name, source) = match loaded.files.get(i) {
+            Some(f) => f.clone(),
+            None => continue,
+        };
+        // Mirror the module's own namespacing for grafted bodies: derive
+        // the namespace + bare top-level names from the loaded (rewritten)
+        // siblings, then run the real rewriter over each synthetic func
+        // body. Without this, bare references to sibling items fail at
+        // runtime — the exact treatment user `@test` bodies received at
+        // load. Script-mode modules (all bare) need no rewriting.
+        let (ns_opt, top, imports) = doctest_rewrite_context(&loaded.programs[i].stmts);
+        let stem = std::path::Path::new(&name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let (docs, mut diags) = doctest::extract(&source, &name);
+        // Parse each fence body with newline padding so spans sit on the
+        // original file lines; render against the original source, whose
+        // lines then match exactly.
+        for doc in &docs {
+            let padded = doc.padded_source();
+            let parsed = parse(&padded);
+            diags.extend(parsed.errors);
+            if diags
+                .iter()
+                .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+            {
+                let mut files = Files::new();
+                let id = files.add(name.clone(), source.clone());
+                eprint!("{}", render_to_string(&files, id, &diags));
+                return Err(format!("failed doctests in `{}`", path.display()));
+            }
+            let mut named = Vec::new();
+            if doc.ignore {
+                named.push((
+                    Ident {
+                        name: "ignore".to_string(),
+                        span: doc.header_span,
+                    },
+                    Expr::Bool {
+                        value: true,
+                        span: doc.header_span,
+                    },
+                ));
+            }
+            if doc.should_panic {
+                named.push((
+                    Ident {
+                        name: "should_panic".to_string(),
+                        span: doc.header_span,
+                    },
+                    Expr::Bool {
+                        value: true,
+                        span: doc.header_span,
+                    },
+                ));
+            }
+            let block_span = parsed.program.span;
+            let mut func = Stmt::Func {
+                name: vec![doc.func_name()],
+                generics: Vec::new(),
+                params: Vec::new(),
+                ret: None,
+                body: Block {
+                    stmts: parsed.program.stmts,
+                    span: block_span,
+                },
+                span: doc.header_span,
+                pub_: false,
+                decorators: vec![Decorator {
+                    path: vec!["test".to_string()],
+                    args: Vec::new(),
+                    named,
+                    span: doc.header_span,
+                }],
+            };
+            // Same namespacing user bodies received: bare sibling references
+            // become qualified paths (locals shadow correctly — the real
+            // rewriter tracks scopes). Script-mode modules skip this.
+            if let Some(ns) = ns_opt.as_deref() {
+                let mut rw = crate::loader::rewrite::Rewriter::new(ns, &top);
+                rw.imports = imports.clone();
+                rw.push_scope();
+                if let Stmt::Func { body, .. } = &mut func {
+                    rw.rewrite_block(body);
+                }
+                rw.pop_scope();
+            }
+            loaded.programs[i].stmts.push(func);
+            names.insert(doc.func_name(), doc.display_name(&stem));
+        }
+        if !diags.is_empty() {
+            let mut files = Files::new();
+            let id = files.add(name.clone(), source.clone());
+            eprint!("{}", render_to_string(&files, id, &diags));
+            return Err(format!("failed doctests in `{}`", path.display()));
+        }
+    }
+    Ok(names)
 }
 
 /// Evaluate a literal `Expr` into a runtime `Value`. Returns `None` for
@@ -1814,7 +2019,14 @@ fn map_worker_report(
 }
 
 fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
-    let loaded = loader::load_program(&test.file)?;
+    let mut loaded = loader::load_program(&test.file)?;
+
+    // Same doctest graft as discovery (deterministic): without it the
+    // synthetic `__zz_doctest_*` functions would not exist at execution.
+    // Diagnostics were already shown at discovery; discard the names here.
+    // A file whose fences break between discovery and execution fails here
+    // instead of running a stale test list — correct behavior.
+    let _ = graft_doctests(&mut loaded, &test.file)?;
 
     // Native plugins: dlopen each dependency's build/*.so so `@test`
     // functions can call plugin natives — same as `zz run` (previously the
@@ -2133,11 +2345,31 @@ fn build_aot_harness(
     tests: &[TestInfo],
     config: &TestConfig,
 ) -> Result<(PathBuf, PathBuf), String> {
-    let source = std::fs::read_to_string(file)
+    let raw = std::fs::read_to_string(file)
         .map_err(|e| format!("cannot read test file `{}`: {e}", file.display()))?;
+    // Doc-test source twins, extracted BEFORE main-parking / alias
+    // transforms so the VM graft (parsed ASTs) and this harness text derive
+    // from identical input (same order → same `__zz_doctest_N` names).
+    // Skipped with --no-doctests. Discovery already failed the file on bad
+    // fences; the check here only guards TOCTOU drift.
+    let doctests = if config.no_doctests {
+        Vec::new()
+    } else {
+        let (docs, diags) = doctest::extract(&raw, &file.display().to_string());
+        if diags
+            .iter()
+            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+        {
+            let mut files = Files::new();
+            let id = files.add(file.display().to_string(), raw.clone());
+            eprint!("{}", render_to_string(&files, id, &diags));
+            return Err(format!("failed doctests in `{}`", file.display()));
+        }
+        docs
+    };
     // A test file with its own `func main` would collide with the harness
     // entrypoint; park it aside (it never runs under `zz test`).
-    let source = source
+    let source = raw
         .replace("func main(", "func __zz_user_main(")
         .replace("func main (", "func __zz_user_main (")
         .replace("pub func main(", "pub func __zz_user_main(")
@@ -2147,6 +2379,12 @@ fn build_aot_harness(
     // `main.answer()` fails to check (native only — the VM never injects
     // `func main`). Retarget such imports through a file-local alias (#401).
     let source = alias_main_imports(&source);
+    // Append the doctest twins after all transforms (generated code has no
+    // mains or imports to rewrite, and must not be rewritten itself).
+    let mut source = source;
+    for doc in &doctests {
+        source.push_str(&doc.harness_func());
+    }
     let orig_ns = file
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
