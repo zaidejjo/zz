@@ -92,15 +92,20 @@ fn zz_bin() -> PathBuf {
 }
 
 fn fixture_files() -> Vec<PathBuf> {
-    let errors = workspace_root()
-        .join("tests")
-        .join("fixtures")
-        .join("errors");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&errors)
-        .unwrap_or_else(|e| panic!("cannot list {}: {e}", errors.display()))
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("zz"))
-        .collect();
+    let fixtures = workspace_root().join("tests").join("fixtures");
+    // The error corpus plus the parity-only corpus: files that must
+    // agree across `zz check` and the server but are not error fixtures
+    // (the errors/ dir mandates runtime failure via e2e discovery, so
+    // warning-only and clean agreement files live in lsp_parity/).
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in [fixtures.join("errors"), fixtures.join("lsp_parity")] {
+        let mut dir_files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("zz"))
+            .collect();
+        files.append(&mut dir_files);
+    }
     for clean in CLEAN_FILES {
         files.push(workspace_root().join(clean));
     }
