@@ -678,6 +678,7 @@ e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
 e2e_success_test!(e2e_stdlib_cell_struct_test, "stdlib", "cell_struct_test.zz");
 e2e_success_test!(e2e_stdlib_cell_arena_test, "stdlib", "cell_arena_test.zz");
 e2e_success_test!(e2e_stdlib_vec_push_shapes, "stdlib", "vec_push_shapes.zz");
+e2e_success_test!(e2e_stdlib_clone_test, "stdlib", "clone_test.zz");
 e2e_success_test!(e2e_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
 e2e_success_test!(
     e2e_stdlib_range_display_test,

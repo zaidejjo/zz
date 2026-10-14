@@ -863,6 +863,7 @@ zz_value zz_time_sleep_ms(zz_value ms, int *err);
 
 // ---- type casts ---------------------------------------------------------
 zz_value zz_typeof(zz_value v, int *err);
+zz_value zz_clone_deep(zz_value v, int *err);
 zz_value zz_int_cast(zz_value v, int *err);
 zz_value zz_float_cast(zz_value v, int *err);
 zz_value zz_bool_cast(zz_value v, int *err);

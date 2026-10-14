@@ -82,6 +82,21 @@ pub(crate) fn dbg_fn(
     Ok(v)
 }
 
+/// Built-in `clone(v)` — deep copy returning a fully independent value
+/// (#267). Reads and binds share backing stores, so this pins a
+/// snapshot regardless of ownership analysis. Cycle-safe.
+pub(crate) fn clone_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for clone", span))?;
+    Ok(zz_runtime::deep_clone(v))
+}
+
 /// Built-in `append(arr, val)` — returns the array with val appended.
 /// The compiler write-back stores the result back to `arr`, making it
 /// appear to mutate in-place.

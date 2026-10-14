@@ -862,6 +862,12 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
     }
 }
 
+/// Deep-copy a value into a fully independent value (the `clone(x)`
+/// builtin, #267). Cycle-safe; shared backing stores are duplicated.
+pub fn deep_clone(v: Value) -> Value {
+    deep_clone_value(v, &mut HashMap::new())
+}
+
 /// A JSON value (see [`crate::json`]).
 pub use crate::json::JsonValue;
 

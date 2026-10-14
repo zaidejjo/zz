@@ -6466,6 +6466,15 @@ zz_value zz_typeof(zz_value v, int *err) {
     return zz_str_static(name);
 }
 
+// clone(v) — deep copy returning a fully independent value (#267).
+// Reads/binds share backing stores, so this is the explicit way to pin
+// a snapshot regardless of ownership analysis. Cycle-safe via the
+// dup memo (same helper as thread crossings).
+zz_value zz_clone_deep(zz_value v, int *err) {
+    (void)err;
+    return zz_value_dup(v);
+}
+
 // int(v) — parse to Option[int] (mirrors the VM `conv_int`).
 // INT/FLOAT wrap in `.some`; STR trims ASCII whitespace then requires an
 // optional sign + all-digits (Rust `parse::<i64>` semantics); everything
