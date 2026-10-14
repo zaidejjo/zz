@@ -14,7 +14,18 @@ pub(crate) async fn handle_did_open(backend: &Backend, params: DidOpenTextDocume
         backend.state.prune_defs(defs);
     }
 
-    recheck_and_publish(backend.state.clone(), &backend.client, uri).await;
+    recheck_and_publish(backend.state.clone(), &backend.client, uri.clone()).await;
+    // Surface a broken project manifest on open too (watchers may be
+    // unsupported by the client): silent zz.toml + failing imports is
+    // otherwise a mystery.
+    let root = uri
+        .to_file_path()
+        .ok()
+        .and_then(|p| crate::deps::find_project_root(&p))
+        .or_else(|| backend.state.root.read().unwrap().clone());
+    if let Some(root) = root {
+        crate::watch::publish_manifest_diagnostic(&backend.client, &root).await;
+    }
 }
 
 pub(crate) async fn handle_did_change(backend: &Backend, params: DidChangeTextDocumentParams) {

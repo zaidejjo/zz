@@ -240,7 +240,13 @@ fn find_import_candidates(
     }
 
     let mut candidates = Vec::new();
-    candidates.extend(workspace_candidates(state, file_uri, program, &head, member.as_deref()));
+    candidates.extend(workspace_candidates(
+        state,
+        file_uri,
+        program,
+        &head,
+        member.as_deref(),
+    ));
     if candidates.len() < MAX_IMPORT_CANDIDATES {
         candidates.extend(dep_candidates(state, file_uri, &head, member.as_deref()));
     }
@@ -294,7 +300,12 @@ fn workspace_candidates(
                 Some(p) => p.clone(),
                 None => zz_frontend::parse(&entry.source).program,
             };
-            files.push((entry_uri.clone(), entry_program, entry.source.clone(), module));
+            files.push((
+                entry_uri.clone(),
+                entry_program,
+                entry.source.clone(),
+                module,
+            ));
         }
     }
 
@@ -594,7 +605,11 @@ mod tests {
             .iter()
             .find(|d| d.fixits.iter().any(|f| f.message == "add import"))
             .expect("checker suggests the std import");
-        let fixit = raw.fixits.iter().find(|f| f.message == "add import").unwrap();
+        let fixit = raw
+            .fixits
+            .iter()
+            .find(|f| f.message == "add import")
+            .unwrap();
         assert_eq!(fixit.replacement, "import std.math\n");
 
         let diag = Diagnostic {
@@ -626,7 +641,13 @@ mod tests {
         let edits = action.edit.as_ref().unwrap().changes.as_ref().unwrap()[&uri].clone();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "import std.math\n");
-        assert_eq!(edits[0].range.start, Position { line: 0, character: 0 });
+        assert_eq!(
+            edits[0].range.start,
+            Position {
+                line: 0,
+                character: 0
+            }
+        );
     }
 
     fn auto_import_state(lib_src: &str, main_src: &str) -> (GlobalState, Url, Program) {
@@ -640,8 +661,12 @@ mod tests {
                 "lib".to_string(),
             );
             let mut index = state.module_index.write().unwrap();
-            index.module_to_uri.insert("lib".to_string(), lib_uri.clone());
-            index.uri_to_module.insert(lib_uri.clone(), "lib".to_string());
+            index
+                .module_to_uri
+                .insert("lib".to_string(), lib_uri.clone());
+            index
+                .uri_to_module
+                .insert(lib_uri.clone(), "lib".to_string());
             index.entries.insert(lib_uri.clone(), entry);
         }
         let main_uri: Url = "file:///main.zz".parse().unwrap();
@@ -662,7 +687,10 @@ mod tests {
     }
 
     fn action_titles(actions: &CodeActionResponse) -> Vec<String> {
-        actions.iter().map(|a| extract_action(a).title.clone()).collect()
+        actions
+            .iter()
+            .map(|a| extract_action(a).title.clone())
+            .collect()
     }
 
     #[test]
@@ -717,7 +745,9 @@ mod tests {
         let actions = auto_import_actions(&state, &main_uri, main_src, &program, &diags);
         let titles = action_titles(&actions);
         assert!(
-            titles.iter().any(|t| t.contains("import lib") && !t.contains('(')),
+            titles
+                .iter()
+                .any(|t| t.contains("import lib") && !t.contains('(')),
             "full import offered: {titles:?}"
         );
     }
@@ -725,8 +755,7 @@ mod tests {
     #[test]
     fn auto_import_silent_when_head_imported() {
         let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
-        let main_src =
-            "import lib\nfunc main() {\n    y := lib.square(1.0)\n    println(y)\n}\n";
+        let main_src = "import lib\nfunc main() {\n    y := lib.square(1.0)\n    println(y)\n}\n";
         let (state, main_uri, program) = auto_import_state(lib_src, main_src);
         let diags = vec![undefined_diag("lib.square")];
 
@@ -743,14 +772,18 @@ mod tests {
         let (state, main_uri, program) = auto_import_state(lib_src, main_src);
         // Point the workspace module at a different path so the existing
         // `import std.math` does not count as importing it.
-        state.module_index.write().unwrap().uri_to_module.insert(
-            "file:///lib.zz".parse().unwrap(),
-            "shapes".to_string(),
-        );
-        state.module_index.write().unwrap().module_to_uri.insert(
-            "shapes".to_string(),
-            "file:///lib.zz".parse().unwrap(),
-        );
+        state
+            .module_index
+            .write()
+            .unwrap()
+            .uri_to_module
+            .insert("file:///lib.zz".parse().unwrap(), "shapes".to_string());
+        state
+            .module_index
+            .write()
+            .unwrap()
+            .module_to_uri
+            .insert("shapes".to_string(), "file:///lib.zz".parse().unwrap());
         let diags = vec![undefined_diag("circle")];
 
         let actions = auto_import_actions(&state, &main_uri, main_src, &program, &diags);
@@ -769,7 +802,7 @@ mod tests {
         assert_eq!(edits[0].range.start.line, 1, "insert after import block");
     }
 
-        #[test]
+    #[test]
     fn no_actions_when_data_missing() {
         let diag = Diagnostic {
             range: Range {
@@ -796,6 +829,4 @@ mod tests {
         let actions = code_actions_for_range(&params, "", &uri);
         assert!(actions.is_empty());
     }
-
-
 }

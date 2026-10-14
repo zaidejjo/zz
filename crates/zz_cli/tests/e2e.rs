@@ -1135,7 +1135,10 @@ fn e2e_check_unimported_std_module_suggests_import() {
     )
     .unwrap();
     let (exit, _, stderr) = run_zz_check(&tmp);
-    assert_ne!(exit, 0, "check should fail without the import.\nstderr: {stderr}");
+    assert_ne!(
+        exit, 0,
+        "check should fail without the import.\nstderr: {stderr}"
+    );
     assert!(
         stderr.contains("import std.math"),
         "expected import hint.\nstderr: {stderr}"

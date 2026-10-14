@@ -3396,10 +3396,9 @@ fn unknown_root_gets_no_import_suggestion() {
     // `wat` is no std module: typo machinery only, never an import hint.
     let r = check_src("y := wat.sin(1.0)");
     assert!(
-        r.errors.iter().all(|e| e
-            .fixits
+        r.errors
             .iter()
-            .all(|f| f.message != "add import")),
+            .all(|e| e.fixits.iter().all(|f| f.message != "add import")),
         "no import fixit for unknown modules: {:?}",
         r.errors
     );

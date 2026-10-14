@@ -157,6 +157,7 @@ async fn manifest_changed(state: &Arc<GlobalState>, client: &Client, path: &std:
     };
     state.dep_cache.write().unwrap().remove(&root);
     log::info!("manifest changed, dep cache dropped for {}", root.display());
+    publish_manifest_diagnostic(client, &root).await;
     for entry in state.documents.iter() {
         let uri = entry.key();
         let under_root = uri
@@ -166,6 +167,49 @@ async fn manifest_changed(state: &Arc<GlobalState>, client: &Client, path: &std:
         if under_root {
             crate::diagnostics::recheck_and_publish(state.clone(), client, uri.clone()).await;
         }
+    }
+}
+
+/// Publish (or clear) the `zz.toml` diagnostic for `root`.
+///
+/// A malformed manifest is otherwise completely silent in the editor
+/// while every import quietly fails to resolve — one file-level error
+/// with the parse message fixes that.
+pub async fn publish_manifest_diagnostic(client: &Client, root: &std::path::Path) {
+    let manifest_uri = match Url::from_file_path(root.join("zz.toml")) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    client
+        .publish_diagnostics(manifest_uri, manifest_diagnostic_for(root), None)
+        .await;
+}
+
+/// The `zz.toml` diagnostic for `root`: one parse error, or nothing when
+/// the manifest loads.
+pub fn manifest_diagnostic_for(root: &std::path::Path) -> Vec<Diagnostic> {
+    match zz_pm::manifest::Manifest::load(&root.join("zz.toml")) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("zz".to_string()),
+            message: e,
+            related_information: None,
+            tags: None,
+            data: None,
+        }],
     }
 }
 
@@ -179,5 +223,43 @@ async fn recheck_open_dependents(state: &Arc<GlobalState>, client: &Client, uri:
         if state.documents.contains_key(&dependent) {
             crate::diagnostics::recheck_and_publish(state.clone(), client, dependent.clone()).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest_tmp(tag: &str, content: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zz-lsp-manifest-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("zz.toml"), content).unwrap();
+        dir
+    }
+
+    #[test]
+    fn broken_manifest_yields_error() {
+        let dir = manifest_tmp("broken", "[package\nname = ");
+        let diags = manifest_diagnostic_for(&dir);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].severity,
+            Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+        );
+        assert!(
+            diags[0].message.contains("zz.toml"),
+            "message names the file: {}",
+            diags[0].message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_manifest_yields_nothing() {
+        let dir = manifest_tmp("valid", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+        assert!(manifest_diagnostic_for(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

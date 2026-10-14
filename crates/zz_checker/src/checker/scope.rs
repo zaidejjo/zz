@@ -11,8 +11,8 @@ use zz_frontend::span::Span;
 /// depend on `zz_stdlib`: the dependency points the other way).
 const KNOWN_STD_MODULES: &[&str] = &[
     "args", "bytes", "cell", "chan", "colors", "csv", "crypto", "db", "dec", "encoding", "env",
-    "fs", "http", "json", "log", "map", "math", "net", "path", "process", "regexp", "set",
-    "sqlz", "str", "sys", "task", "term", "test", "time", "unix", "uuid", "vec",
+    "fs", "http", "json", "log", "map", "math", "net", "path", "process", "regexp", "set", "sqlz",
+    "str", "sys", "task", "term", "test", "time", "unix", "uuid", "vec",
 ];
 
 impl Checker {
