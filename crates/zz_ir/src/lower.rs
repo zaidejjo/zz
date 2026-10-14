@@ -660,6 +660,17 @@ impl<'a> Lowerer<'a> {
             VmOp::IntDiv(_) => Ok(vec![Op::IntDiv]),
             VmOp::IntRem(_) => Ok(vec![Op::IntRem]),
             VmOp::IntNeg(_) => Ok(vec![Op::IntNeg]),
+            // Typed int comparisons (#364) are VM-interpreter-only: the
+            // chunk→C backend already specializes int comparisons inside
+            // generic `BinOp`, so the IR keeps the generic form (zero
+            // codec/chunk/verify churn, no .zzc compat risk). `zz run`
+            // executes `VmOp` directly and takes the fast path.
+            VmOp::IntLt(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Lt))]),
+            VmOp::IntGt(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Gt))]),
+            VmOp::IntLe(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Le))]),
+            VmOp::IntGe(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Ge))]),
+            VmOp::IntEq(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Eq))]),
+            VmOp::IntNe(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Ne))]),
             VmOp::BinOp(op, _) => Ok(vec![Op::BinOp(Self::lower_binop(op))]),
             VmOp::UnOp(op, _) => Ok(vec![Op::UnOp(Self::lower_unop(op))]),
             VmOp::Jump(t) => Ok(vec![Op::Jump(*t as u32)]),

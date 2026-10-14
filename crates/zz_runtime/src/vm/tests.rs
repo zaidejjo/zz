@@ -865,6 +865,80 @@ fn vm_compound_assign_fuses_like_plain_assign() {
     );
 }
 
+/// Typed int comparisons (#364) compile to the unboxed fast-path ops
+/// instead of generic `BinOp` — mirroring the `IntAdd` precedent.
+/// Mixed-type operands keep generic dispatch.
+#[test]
+fn vm_typed_int_comparisons_emit_fast_ops() {
+    use std::collections::{HashMap, HashSet};
+
+    fn opcodes(src: &str) -> Vec<&'static str> {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let (_res, types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let chunk = super::Compiler::compile_program_typed(
+            &parsed.program,
+            Arc::new(types),
+            HashMap::new(),
+            HashMap::new(),
+            Arc::new(HashSet::new()),
+        );
+        chunk
+            .code
+            .iter()
+            .map(|op| match op {
+                Op::IntLt(_) => "IntLt",
+                Op::IntGt(_) => "IntGt",
+                Op::IntLe(_) => "IntLe",
+                Op::IntGe(_) => "IntGe",
+                Op::IntEq(_) => "IntEq",
+                Op::IntNe(_) => "IntNe",
+                Op::BinOp(..) => "BinOp",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    let ops = opcodes(
+        "a: int = 3\n\
+         b: int = 4\n\
+         c1 := a < b\n\
+         c2 := a > b\n\
+         c3 := a <= b\n\
+         c4 := a >= b\n\
+         c5 := a == b\n\
+         c6 := a != b",
+    );
+    for want in ["IntLt", "IntGt", "IntLe", "IntGe", "IntEq", "IntNe"] {
+        assert!(ops.contains(&want), "{want} missing: {ops:?}");
+    }
+    assert!(
+        !ops.contains(&"BinOp"),
+        "int comparisons must not use generic BinOp: {ops:?}"
+    );
+    // Mixed int/float operands keep generic dispatch.
+    let mixed = opcodes("a: int = 3\nb: float = 1.5\nc := a < b");
+    assert!(
+        mixed.contains(&"BinOp"),
+        "mixed-type comparison must stay generic: {mixed:?}"
+    );
+    assert!(
+        !mixed.iter().any(|o| *o != "BinOp" && *o != "other"),
+        "no int fast-path for mixed types: {mixed:?}"
+    );
+}
+
 /// Structural proof of zero-cost erasure: a generic struct program
 /// compiles to the same opcode *shape* as its hand-monomorphized twin
 /// (names differ, so only discriminants are compared).

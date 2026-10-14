@@ -423,6 +423,12 @@ impl Compiler {
             | Op::IntDiv(span)
             | Op::IntRem(span)
             | Op::IntNeg(span)
+            | Op::IntLt(span)
+            | Op::IntGt(span)
+            | Op::IntLe(span)
+            | Op::IntGe(span)
+            | Op::IntEq(span)
+            | Op::IntNe(span)
             | Op::BinOp(_, span)
             | Op::UnOp(_, span) => *span,
             Op::LoadVar(_, span) | Op::StoreVar(_, span) => *span,
@@ -489,9 +495,17 @@ impl Compiler {
             | Op::RegisterEnum { .. }
             | Op::MakeClosure { .. } => 1,
             Op::SpawnClosure { .. } => 1,
-            Op::IntAdd(..) | Op::IntSub(..) | Op::IntMul(..) | Op::IntDiv(..) | Op::IntRem(..) => {
-                -1
-            }
+            Op::IntAdd(..)
+            | Op::IntSub(..)
+            | Op::IntMul(..)
+            | Op::IntDiv(..)
+            | Op::IntRem(..)
+            | Op::IntLt(..)
+            | Op::IntGt(..)
+            | Op::IntLe(..)
+            | Op::IntGe(..)
+            | Op::IntEq(..)
+            | Op::IntNe(..) => -1,
             Op::IntNeg(..) => 0,
             Op::BinOp(..) => -1,
             Op::UnOp(..) => 0,
@@ -3196,8 +3210,14 @@ impl Compiler {
                             BinOp::Mul => self.emit(Op::IntMul(*span)),
                             BinOp::Div => self.emit(Op::IntDiv(*span)),
                             BinOp::Rem => self.emit(Op::IntRem(*span)),
+                            BinOp::Lt => self.emit(Op::IntLt(*span)),
+                            BinOp::Gt => self.emit(Op::IntGt(*span)),
+                            BinOp::Le => self.emit(Op::IntLe(*span)),
+                            BinOp::Ge => self.emit(Op::IntGe(*span)),
+                            BinOp::Eq => self.emit(Op::IntEq(*span)),
+                            BinOp::Ne => self.emit(Op::IntNe(*span)),
                             _ => {
-                                // Comparisons, Pow, etc. fall through to generic.
+                                // Pow, etc. fall through to generic.
                                 self.emit(Op::BinOp(*op, *span));
                             }
                         }
