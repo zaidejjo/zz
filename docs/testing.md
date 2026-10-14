@@ -223,3 +223,26 @@ zz test --json > results.json
 zz test --junit junit.xml
 zz test --changed
 ```
+
+## LSP-vs-check diagnostic parity gate (#264)
+
+Editor truth is a CI property: every `zz check` diagnostic set must
+equal the `zz-lsp` `publishDiagnostics` set for the same file. Run it
+with `cargo test -p zz_lsp --test check_parity`.
+
+How it works: for each corpus file, the harness runs
+`zz check --format json` (same code path as the CLI) and drives the
+server in-process exactly like `didOpen` (`update_document` →
+`checker_seed_for_path` → `check_program` → `absorb_result`,
+collecting what `recheck_and_publish` sends). Both sides normalize to
+`(severity, message, span)` triples — span-less diagnostics dropped
+(the publish path never sends those), loader file-stem qualification
+stripped on the check side — then compare per file.
+
+To add a case: drop a `.zz` file in `tests/fixtures/errors/` (or a
+known-clean file in the harness `CLEAN_FILES` list). It joins
+automatically; no registration. If the gate reports a divergence, fix
+the analysis gap; if the divergence is intentional (e.g. partial-program
+recovery), record it in `tests/fixtures/lsp_parity_allowlist.toml`
+with a reason. Allowlisted files that start passing fail loudly
+(`FIXED!`) so the list never goes stale.

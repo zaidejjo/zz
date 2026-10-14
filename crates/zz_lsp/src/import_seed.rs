@@ -17,9 +17,58 @@ use std::collections::HashMap;
 
 use zz_checker::{AliasSig, EnumSig, FuncSig, StructSig, Type};
 use zz_frontend::ast::{ImportItem, Program, Stmt};
+use zz_frontend::diag::{RawDiag, Severity};
+use zz_frontend::span::Span;
 use zz_stdlib::{
     register_module_namespace, register_selective_namespace, register_wildcard_namespace,
 };
+
+/// Unknown-module import errors for a program, byte-identical to the
+/// loader's (`zz_cli::loader`): bare `import std` names no module, and
+/// `import std.<unknown>` names nothing either. The checker never sees
+/// these (it checks seeded tables), so without this the server stays
+/// silent where `zz check` errors — exactly the #256 class the parity
+/// gate (#264) pins.
+pub fn unknown_import_diags(program: &Program) -> Vec<RawDiag> {
+    let mut out = Vec::new();
+    for stmt in &program.stmts {
+        let Stmt::Import { path, .. } = stmt else {
+            continue;
+        };
+        if path.first().map(String::as_str) != Some("std") {
+            continue;
+        }
+        if path.len() < 2 {
+            out.push(RawDiag {
+                severity: Severity::Error,
+                message: "`import std` names no module\n\
+                     hint: import a concrete module, e.g. `import std.str`"
+                    .to_string(),
+                span: Some(Span::new(0, 0)),
+                notes: Vec::new(),
+                fixits: Vec::new(),
+                secondary: None,
+            });
+            continue;
+        }
+        let module = path[1..].join(".");
+        if !zz_stdlib::STDLIB_MODULES.contains(&module.as_str()) {
+            out.push(RawDiag {
+                severity: Severity::Error,
+                message: format!(
+                    "unknown standard library module `std.{module}`\n\
+                     hint: available modules are: {}",
+                    zz_stdlib::STDLIB_MODULES.to_vec().join(", ")
+                ),
+                span: Some(Span::new(0, 0)),
+                notes: Vec::new(),
+                fixits: Vec::new(),
+                secondary: None,
+            });
+        }
+    }
+    out
+}
 
 /// Seeded tables after applying one program's imports.
 #[derive(Debug, Clone, Default)]
@@ -243,5 +292,40 @@ mod tests {
         let program = parse("import std.nope\n");
         let funcs = seeded_funcs_for_program(&program, &base());
         assert_eq!(funcs.len(), base().len(), "unknown modules change nothing");
+    }
+
+    #[test]
+    fn unknown_import_diags_mirror_loader() {
+        // Byte-identical messages to the loader (#264 parity): the gate
+        // compares message text, so any wording drift fails loudly there.
+        let bare = parse("import std\n");
+        let diags = unknown_import_diags(&bare);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "`import std` names no module\n\
+             hint: import a concrete module, e.g. `import std.str`"
+        );
+        assert!(matches!(
+            diags[0].severity,
+            zz_frontend::diag::Severity::Error
+        ));
+
+        let unknown = parse("import std.nope\n");
+        let diags = unknown_import_diags(&unknown);
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0]
+                .message
+                .starts_with("unknown standard library module `std.nope`"),
+            "unexpected message: {}",
+            diags[0].message
+        );
+
+        let known = parse("import std.math\nimport math2\n");
+        assert!(
+            unknown_import_diags(&known).is_empty(),
+            "known/local imports stay silent"
+        );
     }
 }

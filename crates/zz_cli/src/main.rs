@@ -363,7 +363,27 @@ fn main() -> ExitCode {
             }
         },
         Some("check") => {
-            let (path, flags) = parse_path_and_flags(rest);
+            // Strip the two-token `--format <value>` form before path
+            // parsing (the bare value would otherwise parse as the path);
+            // `--format=<value>` is already a single flag token.
+            let mut rest_filtered: Vec<String> = Vec::with_capacity(rest.len());
+            let mut rest_iter = rest.iter().peekable();
+            let mut format_value: Option<String> = None;
+            while let Some(a) = rest_iter.next() {
+                if a == "--format" {
+                    if let Some(v) = rest_iter.next() {
+                        format_value = Some(v.clone());
+                    }
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--format=") {
+                    format_value = Some(v.to_string());
+                    rest_filtered.push(a.clone());
+                    continue;
+                }
+                rest_filtered.push(a.clone());
+            }
+            let (path, flags) = parse_path_and_flags(&rest_filtered);
             if flags.iter().any(|f| f == "--check" || f == "-c") {
                 eprintln!(
                     "zz: `zz check --check` is not a flag\n\
@@ -376,9 +396,35 @@ fn main() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let has_stats = flags.contains(&"--stats".to_string());
+            // Machine-readable diagnostics for tooling (and the
+            // LSP-parity gate): `--format=json` or `--format json`
+            // (the value was stripped above).
+            let format_json = matches!(format_value.as_deref(), Some("json"));
+            if format_value.is_some() && !format_json {
+                eprintln!(
+                    "zz: unknown `--format` value `{}` (expected `json`)\n\
+                     hint: run `zz check --format json <path>`",
+                    format_value.as_deref().unwrap_or_default()
+                );
+                return ExitCode::FAILURE;
+            }
+            if has_fix && format_json {
+                eprintln!(
+                    "zz: `--format json` cannot be combined with `--fix`\n\
+                     hint: run plain `zz check --format json` for machine-readable diagnostics"
+                );
+                return ExitCode::FAILURE;
+            }
 
             let interactive = has_fix && has_interactive && !has_hard;
-            match check_or_fix_path(&path, has_fix, interactive, has_hard, has_stats) {
+            match check_or_fix_path(
+                &path,
+                has_fix,
+                interactive,
+                has_hard,
+                has_stats,
+                format_json,
+            ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -391,7 +437,7 @@ fn main() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let interactive = has_interactive && !has_hard;
-            match check_or_fix_path(&path, true, interactive, has_hard, false) {
+            match check_or_fix_path(&path, true, interactive, has_hard, false, false) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -2485,6 +2531,7 @@ fn check_or_fix_path(
     interactive: bool,
     force: bool,
     show_stats: bool,
+    format_json: bool,
 ) -> Result<(), String> {
     use zz_frontend::diag::{FixSafety, Severity};
 
@@ -2507,6 +2554,9 @@ fn check_or_fix_path(
     let mut stat_misses = 0usize;
     let mut stat_seed = 0usize;
     let stats_start = std::time::Instant::now();
+    // Machine-readable accumulation for `--format json` (#264): one
+    // entry per checked file (empty diagnostics = clean).
+    let mut json_files: Vec<(String, Vec<zz_frontend::diag::RawDiag>)> = Vec::new();
 
     for path in &files {
         let path_str = path.display().to_string();
@@ -2559,10 +2609,18 @@ fn check_or_fix_path(
 
         if !do_fix {
             // Check-only mode: print diagnostics, track what's fixable.
-            for e in &loaded.errors {
-                let mut files_ctx = Files::new();
-                let id = files_ctx.add(e.name.clone(), e.source.clone());
-                eprint!("{}", render_to_string(&files_ctx, id, &e.diags));
+            if format_json {
+                let mut diags = Vec::new();
+                for e in &loaded.errors {
+                    diags.extend(e.diags.iter().cloned());
+                }
+                json_files.push((path_str.clone(), diags));
+            } else {
+                for e in &loaded.errors {
+                    let mut files_ctx = Files::new();
+                    let id = files_ctx.add(e.name.clone(), e.source.clone());
+                    eprint!("{}", render_to_string(&files_ctx, id, &e.diags));
+                }
             }
             if !safe_fixits.is_empty() {
                 any_safe_fixits = true;
@@ -2696,9 +2754,38 @@ fn check_or_fix_path(
         }
     }
 
+    // Machine-readable report for `--format json` (#264): stdout
+    // carries the full diagnostic set even when the exit code signals
+    // failure (same contract as compiler JSON protocols).
+    if format_json && !do_fix {
+        #[derive(serde::Serialize)]
+        struct CheckJsonFile<'a> {
+            file: &'a str,
+            diagnostics: &'a [zz_frontend::diag::RawDiag],
+        }
+        #[derive(serde::Serialize)]
+        struct CheckJson<'a> {
+            files: Vec<CheckJsonFile<'a>>,
+        }
+        let report = CheckJson {
+            files: json_files
+                .iter()
+                .map(|(file, diagnostics)| CheckJsonFile {
+                    file: file.as_str(),
+                    diagnostics: diagnostics.as_slice(),
+                })
+                .collect(),
+        };
+        match serde_json::to_string(&report) {
+            Ok(json) => println!("{json}"),
+            Err(e) => return Err(format!("cannot encode diagnostics as JSON: {e}")),
+        }
+    }
+
     if !do_fix && total_errors > 0 {
         return Err(format!("{total_errors} file(s) failed type-check"));
     }
+
     if do_fix && total_fixes == 0 {
         eprintln!("zz: no fixable diagnostics in `{raw}`");
     }
@@ -2750,14 +2837,14 @@ mod tests {
     /// otherwise pollutes their entry counts mid-flight.
     fn check_isolated(path: &str) -> Result<(), String> {
         super::loader::cache::with_isolated_cache(|| {
-            check_or_fix_path(&Some(path.to_string()), false, false, false, false)
+            check_or_fix_path(&Some(path.to_string()), false, false, false, false, false)
         })
     }
 
     /// Run `zz check --fix` (fix mode) under the isolated cache env.
     fn fix_isolated(path: &str) -> Result<(), String> {
         super::loader::cache::with_isolated_cache(|| {
-            check_or_fix_path(&Some(path.to_string()), true, false, false, false)
+            check_or_fix_path(&Some(path.to_string()), true, false, false, false, false)
         })
     }
 

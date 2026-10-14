@@ -100,3 +100,17 @@ jobs:
         # arch-dependent breakage (e.g. c_char signedness) x86_64 can
         # never see. No linking, no tests: pure type gate, stays fast.
         run: cargo check --workspace --all-targets
+
+  lsp-parity:
+    name: lsp-parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build zz binary (check side of the gate)
+        # The gate shells out to a freshly built `zz check`; the LSP
+        # side runs in-process. Check-only: no clang, no native deps.
+        run: cargo build -p zz_cli
+      - name: lsp-vs-check diagnostic parity gate (#264)
+        run: cargo test -p zz_lsp --test check_parity
