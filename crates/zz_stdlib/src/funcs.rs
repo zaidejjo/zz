@@ -4615,6 +4615,33 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     for name in ["assert_is_err", "std.test.assert_is_err"] {
         m.insert(name.into(), is_ok_sig.clone());
     }
+    // ── std.test pro helpers (P2) ──────────────────────────────
+    // Bare builtins + `std.test.*` (lockstep with `natives/test_helpers`,
+    // `runtime/core.c` `zz_test_*`, `lower/native_impl`).
+    let temp_dir_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: vec![("prefix".to_string(), Type::Str)],
+        has_default: vec![false],
+        ret: Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["temp_dir", "std.test.temp_dir"] {
+        m.insert(name.into(), temp_dir_sig.clone());
+    }
+    let free_port_sig = FuncSig {
+        generics: Vec::new(),
+        bounds: Vec::new(),
+        params: Vec::new(),
+        has_default: Vec::new(),
+        ret: Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+        is_extern: false,
+        extern_c_symbol: None,
+    };
+    for name in ["free_port", "std.test.free_port"] {
+        m.insert(name.into(), free_port_sig.clone());
+    }
     let fail_sig = FuncSig {
         generics: Vec::new(),
         bounds: Vec::new(),
@@ -5029,10 +5056,14 @@ mod tests {
             "std.test.assert_is_ok",
             "assert_is_err",
             "std.test.assert_is_err",
+            "temp_dir",
+            "std.test.temp_dir",
+            "free_port",
+            "std.test.free_port",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1082);
+        assert_eq!(funcs.len(), 1086);
     }
 
     #[test]

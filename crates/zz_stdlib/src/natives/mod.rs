@@ -33,6 +33,7 @@ pub(crate) mod result_mod;
 pub(crate) mod str_mod;
 pub(crate) mod sys;
 pub(crate) mod term;
+pub(crate) mod test_helpers;
 pub(crate) mod time;
 pub(crate) mod uuid;
 pub(crate) mod vec_mod;
@@ -132,6 +133,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("assert_is_none", 1, assert::assert_is_none_fn),
         ("assert_is_ok", 1, assert::assert_is_ok_fn),
         ("assert_is_err", 1, assert::assert_is_err_fn),
+        ("temp_dir", 1, test_helpers::test_temp_dir),
+        ("free_port", 0, test_helpers::test_free_port),
     ] {
         m.insert(name.into(), NativeEntry { arity, f: func });
     }
@@ -175,6 +178,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.test.assert_is_none", 1, assert::assert_is_none_fn),
         ("std.test.assert_is_ok", 1, assert::assert_is_ok_fn),
         ("std.test.assert_is_err", 1, assert::assert_is_err_fn),
+        ("std.test.temp_dir", 1, test_helpers::test_temp_dir),
+        ("std.test.free_port", 0, test_helpers::test_free_port),
     ] {
         m.insert(short.into(), NativeEntry { arity, f: func });
     }
