@@ -28,6 +28,10 @@ const MAX_PROJECT_FILES: usize = 1000;
 
 /// Check every project file: `(uri, diagnostics)` in path order.
 /// Open documents are checked from their buffers, the rest from disk.
+///
+/// Disk files cache by (content hash, seed version): consecutive runs
+/// only pay for changed files or a moved seed. Open buffers always
+/// recheck (unsaved edits are the truth) and never populate the cache.
 pub fn check_project_files(
     state: &GlobalState,
     root: &std::path::Path,
@@ -38,6 +42,8 @@ pub fn check_project_files(
     if truncated {
         paths.truncate(MAX_PROJECT_FILES);
     }
+    let seed_version = state.seed_version();
+    let mut cache = state.project_cache.write().unwrap();
     let mut out = Vec::new();
     for path in &paths {
         let uri = match Url::from_file_path(path) {
@@ -45,35 +51,40 @@ pub fn check_project_files(
             Err(_) => continue,
         };
         // Open buffers win over disk (unsaved edits are the truth).
-        let (source, program, parse_errors) = match state.documents.get(&uri) {
-            Some(doc) => (
+        if let Some(doc) = state.documents.get(&uri) {
+            let (source, program, parse_errors) = (
                 doc.source.clone(),
                 doc.program.clone(),
                 doc.parse_errors.clone(),
-            ),
-            None => match std::fs::read_to_string(path) {
-                Ok(source) => {
-                    let parsed = zz_frontend::parse(&source);
-                    (source, Some(parsed.program), parsed.errors)
-                }
-                Err(_) => continue,
-            },
-        };
-        let Some(program) = program else {
+            );
+            drop(doc);
+            if let Some(diags) = check_one(state, path, &source, program, parse_errors) {
+                out.push((uri, diags));
+            }
             continue;
+        }
+        let source = match std::fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(_) => continue,
         };
-        let (ib, ifunc, is, ia, ie) = state.checker_seed_for_path(&program, Some(path));
-        let checked = check_program(&program, ib, ifunc, is, ia, ie);
-        let mut raw = parse_errors;
-        raw.extend(crate::import_seed::unknown_import_diags(&program));
-        raw.extend(checked.errors);
-        let diags: Vec<Diagnostic> = raw
-            .iter()
-            .filter(|e| e.span.is_some())
-            .map(|d| convert_diagnostic(&source, d))
-            .collect();
-        out.push((uri, diags));
+        let hash = crate::state::content_hash(&source);
+        if let Some((cached_hash, cached_seed, diags)) = cache.get(path) {
+            if *cached_hash == hash && *cached_seed == seed_version {
+                out.push((uri, diags.clone()));
+                continue;
+            }
+        }
+        let parsed = zz_frontend::parse(&source);
+        let program = Some(parsed.program);
+        let parse_errors = parsed.errors;
+        if let Some(diags) = check_one(state, path, &source, program, parse_errors) {
+            cache.insert(path.clone(), (hash, seed_version, diags.clone()));
+            out.push((uri, diags));
+        }
     }
+    // Drop entries for files that left the tree (renames/deletes).
+    let live: std::collections::HashSet<_> = paths.iter().collect();
+    cache.retain(|cached_path, _| live.contains(cached_path));
     if truncated {
         log::warn!(
             "project check truncated at {MAX_PROJECT_FILES} files under {}",
@@ -81,6 +92,29 @@ pub fn check_project_files(
         );
     }
     out
+}
+
+/// Check one file: seed → check → convert. Returns `None` for files
+/// with no program (unparseable shell).
+fn check_one(
+    state: &GlobalState,
+    path: &std::path::Path,
+    source: &str,
+    program: Option<zz_frontend::ast::Program>,
+    parse_errors: Vec<zz_frontend::diag::RawDiag>,
+) -> Option<Vec<Diagnostic>> {
+    let program = program?;
+    let (ib, ifunc, is, ia, ie) = state.checker_seed_for_path(&program, Some(path));
+    let checked = check_program(&program, ib, ifunc, is, ia, ie);
+    let mut raw = parse_errors;
+    raw.extend(crate::import_seed::unknown_import_diags(&program));
+    raw.extend(checked.errors);
+    let diags: Vec<Diagnostic> = raw
+        .iter()
+        .filter(|e| e.span.is_some())
+        .map(|d| convert_diagnostic(source, d))
+        .collect();
+    Some(diags)
 }
 
 /// Run the check off-thread, publish every file (empty vecs clear
@@ -190,6 +224,79 @@ mod tests {
             .find(|(u, _)| u.path().ends_with("dep.zz"))
             .expect("dep reported");
         assert!(dep.1.is_empty(), "buffer truth, not disk: {:?}", dep.1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_hit_reuses_diags_and_prunes_deleted() {
+        let state = GlobalState::new();
+        let dir = project_tmp("cachehit");
+        let dep_path = dir.join("dep.zz");
+        std::fs::write(&dep_path, "func broken() -> int {\n    return nope\n}\n").unwrap();
+
+        let first = check_project_files(&state, &dir);
+        let dep_first = first
+            .iter()
+            .find(|(u, _)| u.path().ends_with("dep.zz"))
+            .expect("dep reported");
+        assert!(!dep_first.1.is_empty(), "broken file has diags");
+        assert_eq!(state.project_cache.read().unwrap().len(), 1);
+
+        // Unchanged second run: same diagnostics, served from cache.
+        let second = check_project_files(&state, &dir);
+        let dep_second = second
+            .iter()
+            .find(|(u, _)| u.path().ends_with("dep.zz"))
+            .expect("dep reported");
+        assert_eq!(dep_first.1, dep_second.1);
+
+        // Fix the file: cache invalidates, diagnostics clear.
+        std::fs::write(&dep_path, "func broken() -> int {\n    return 1\n}\n").unwrap();
+        let third = check_project_files(&state, &dir);
+        let dep_third = third
+            .iter()
+            .find(|(u, _)| u.path().ends_with("dep.zz"))
+            .expect("dep reported");
+        assert!(dep_third.1.is_empty(), "fixed file is clean");
+
+        // Delete the file: entry pruned, file unreported.
+        std::fs::remove_file(&dep_path).unwrap();
+        let fourth = check_project_files(&state, &dir);
+        assert!(
+            fourth.iter().all(|(u, _)| !u.path().ends_with("dep.zz")),
+            "deleted file unreported"
+        );
+        assert!(
+            state.project_cache.read().unwrap().is_empty(),
+            "deleted entry pruned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_invalidates_when_seed_moves() {
+        let state = GlobalState::new();
+        let dir = project_tmp("cacheseed");
+        let dep_path = dir.join("dep.zz");
+        std::fs::write(&dep_path, "func main() {\n    println(1)\n}\n").unwrap();
+
+        let first = check_project_files(&state, &dir);
+        assert!(first.iter().all(|(_, d)| d.is_empty()));
+        // Simulate an unrelated absorb between runs: same disk content,
+        // moved seed → entry recomputed, not blindly reused.
+        state
+            .seed_version
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let second = check_project_files(&state, &dir);
+        assert!(second.iter().all(|(_, d)| d.is_empty()));
+        let (_, cached_seed, _) = state
+            .project_cache
+            .read()
+            .unwrap()
+            .get(&dep_path)
+            .cloned()
+            .expect("entry refreshed");
+        assert_eq!(cached_seed, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
