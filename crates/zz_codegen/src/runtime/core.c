@@ -3495,16 +3495,6 @@ zz_value zz_tcp_readline(zz_value stream, int *err) {
     return zz_variant_ok(zz_str_owned(sb_take(&sb)));
 }
 
-// net.tcp_close(stream) → Result<Ok(true), Err(msg)> (idempotent)
-zz_value zz_tcp_close(zz_value stream, int *err) {
-    (void)err;
-    if ((stream.tag == ZZ_TCP_STREAM || stream.tag == ZZ_TCP_LISTENER) && stream.net && !stream.net->closed) {
-        close(stream.net->fd);
-        stream.net->closed = 1;
-    }
-    return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
-}
-
 // net.tcp_read_bytes(stream, max_bytes) → Result<Ok(bytes), Err(msg)>
 // Binary-safe read: raw bytes with no UTF-8 decoding (unlike zz_tcp_read,
 // which decodes lossy by construction).

@@ -587,8 +587,6 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // around the closure body); no native C implementation needed.
     ("std.sqlz.transaction", "AOT-inlined; no native C impl"),
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
-    ("std.db.transaction", "AOT-inlined; no native C impl"),
-    ("db.transaction", "AOT-inlined; no native C impl"),
 ];
 
 #[test]

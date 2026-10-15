@@ -8,10 +8,10 @@ import std.env
 func main() -> Result<int, str> {
     root := "{env.temp_dir()}/zz_static_p2"
     fs.mkdir_all(root)?
-    fs.write_file("{root}/hello.txt", "hello static")?
-    fs.write_file("{root}/app.js", "console.log(1)")?
-    fs.write_file("{root}/index.html", "<h1>hi</h1>")?
-    fs.write_file("{root}/data.bin", "0123456789")?
+    fs.write("{root}/hello.txt", "hello static")?
+    fs.write("{root}/app.js", "console.log(1)")?
+    fs.write("{root}/index.html", "<h1>hi</h1>")?
+    fs.write("{root}/data.bin", "0123456789")?
 
     s := http.server()
     s = http.serve_dir(s, root)

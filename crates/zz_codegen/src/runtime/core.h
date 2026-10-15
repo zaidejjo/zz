@@ -1006,7 +1006,6 @@ zz_value zz_tcp_accept(zz_value listener, int *err);
 zz_value zz_tcp_write(zz_value stream, zz_value data, int *err);
 zz_value zz_tcp_read(zz_value stream, zz_value max_bytes, int *err);
 zz_value zz_tcp_readline(zz_value stream, int *err);
-zz_value zz_tcp_close(zz_value stream, int *err);
 zz_value zz_tcp_read_bytes(zz_value stream, zz_value max_bytes, int *err);
 zz_value zz_tcp_read_exact(zz_value stream, zz_value n, int *err);
 zz_value zz_tcp_write_bytes(zz_value stream, zz_value data, int *err);

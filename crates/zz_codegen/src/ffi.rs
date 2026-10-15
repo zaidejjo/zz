@@ -268,19 +268,12 @@ pub fn needs_native_rt(natives: &HashSet<String>) -> bool {
     })
 }
 
-/// `sqlz.*` / `db.*` / `pg.*` spellings (both bare and `std.`-qualified):
+/// `sqlz.*` / `pg.*` spellings (both bare and `std.`-qualified):
 /// all lower to the C handle natives whose PG backend lives in the
 /// staticlib. MySQL spellings are excluded (still VM-only, lowered to
 /// unit — no staticlib symbols involved).
 fn is_sql_native(name: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "sqlz.",
-        "std.sqlz.",
-        "db.",
-        "std.db.",
-        "pg.",
-        "std.sqlz.postgres.",
-    ];
+    const PREFIXES: &[&str] = &["sqlz.", "std.sqlz.", "pg.", "std.sqlz.postgres."];
     PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
@@ -1221,9 +1214,6 @@ mod tests {
         for n in [
             "sqlz.open",
             "std.sqlz.open",
-            "db.exec",
-            "std.db.query",
-            "db.transaction",
             "pg.query",
             "std.sqlz.postgres.connect",
         ] {

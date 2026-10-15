@@ -23,24 +23,31 @@ pub const TOP: &str = "<top>";
 /// namespace. When unknown (an unresolved inference variable), conservatively
 /// emits an edge to every known `*.{method}` function so DCE never drops a
 /// potential target.
+/// Canonicalize a constructed `ns.method` name to its `std.*` seed.
+/// Seeds hold canonical names only; orphans (`option.unwrap`) and user
+/// namespaces pass through unchanged.
+fn canon(name: String) -> String {
+    zz_checker::canonical_std_name(&name).unwrap_or(name)
+}
+
 fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -> Vec<String> {
     match tp.type_at(caller, recv.span()) {
-        Some(Type::Str) => vec![format!("str.{method}")],
-        Some(Type::Array(_)) => vec![format!("vec.{method}")],
-        Some(Type::Bytes) => vec![format!("bytes.{method}")],
-        Some(Type::Option(_)) => vec![format!("option.{method}")],
-        Some(Type::Result(_, _)) => vec![format!("result.{method}")],
-        Some(Type::Response) => vec![format!("http.{method}")],
-        Some(Type::HttpRequest) => vec![format!("http.{method}")],
-        Some(Type::TcpStream) | Some(Type::TcpListener) => vec![format!("net.{method}")],
-        Some(Type::HttpServer) => vec![format!("http.{method}")],
+        Some(Type::Str) => vec![canon(format!("str.{method}"))],
+        Some(Type::Array(_)) => vec![canon(format!("vec.{method}"))],
+        Some(Type::Bytes) => vec![canon(format!("bytes.{method}"))],
+        Some(Type::Option(_)) => vec![canon(format!("option.{method}"))],
+        Some(Type::Result(_, _)) => vec![canon(format!("result.{method}"))],
+        Some(Type::Response) => vec![canon(format!("http.{method}"))],
+        Some(Type::HttpRequest) => vec![canon(format!("http.{method}"))],
+        Some(Type::TcpStream) | Some(Type::TcpListener) => vec![canon(format!("net.{method}"))],
+        Some(Type::HttpServer) => vec![canon(format!("http.{method}"))],
         // Canonical `sqlz.*` only — the `db` module was removed. Method
         // calls on handles named `db` still dispatch here (module use of
         // `db` warns in the checker; this table never sees it).
-        Some(Type::Db) => vec![format!("sqlz.{method}")],
-        Some(Type::Json) => vec![format!("json.{method}")],
+        Some(Type::Db) => vec![canon(format!("sqlz.{method}"))],
+        Some(Type::Json) => vec![canon(format!("json.{method}"))],
         // Opaque handles dispatch on their module tag (`regex.*`, …).
-        Some(Type::Opaque(tag)) => vec![format!("{tag}.{method}")],
+        Some(Type::Opaque(tag)) => vec![canon(format!("{tag}.{method}"))],
         Some(Type::Struct(s, _)) => {
             let fq = format!("{s}.{method}");
             if tp.funcs.contains_key(&fq) {

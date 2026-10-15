@@ -15,18 +15,18 @@ func main() {
     scratch := "/tmp/zz_result_print_{pid()}_{tok}.txt"
     _u1 := fs.write(scratch, "hello clean")
     // Bare Ok straight to stdout unwraps.
-    println(fs.read_to_string(scratch))
-    print(fs.read_to_string(scratch))
+    println(fs.read(scratch))
+    print(fs.read(scratch))
     println("")
     // Bare Some unwraps; bare None prints `none`.
     println(.some("unwrapped"))
     println(.some(42))
     println(.none)
     // Errors are handled explicitly and stay catchable.
-    match fs.read_to_string("/tmp/zz_result_print_missing.txt") {
+    match fs.read("/tmp/zz_result_print_missing.txt") {
         .ok(c) => println("unexpected: {c}")
         .err(e) => println("caught: {e}")
     }
-    _u2 := fs.remove_file(scratch)
+    _u2 := fs.remove(scratch)
     println("result_print_ok")
 }

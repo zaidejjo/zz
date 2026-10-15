@@ -16,20 +16,11 @@ use crate::value::{FuncValue, ObjectValue, RangeValue, Value};
 use super::Interp;
 
 impl Interp {
-    /// Deprecated `db` module → `sqlz` canonical spelling (one release).
-    /// Alias, not copy: there is exactly one implementation — the `sqlz`
-    /// one. Maps `db.*` → `sqlz.*` and `std.db.*` → `std.sqlz.*`.
-    /// (Local inline copy of `zz_stdlib::canonical_std_func` — zz_runtime
-    /// cannot depend on zz_stdlib. Callers gate on module position so a
-    /// handle variable named `db` never rewrites.)
-    pub(crate) fn canonical_db_alias(name: &str) -> Option<String> {
-        if let Some(rest) = name.strip_prefix("std.db.") {
-            return Some(format!("std.sqlz.{rest}"));
-        }
-        if let Some(rest) = name.strip_prefix("db.") {
-            return Some(format!("sqlz.{rest}"));
-        }
-        None
+    /// Canonical `std.*` spelling for a bare `module.func` name.
+    /// Single source: `zz_checker::canonical_std_name`. Callers gate on
+    /// module position so a local with the same head never rewrites.
+    pub(crate) fn canonical_std_alias(name: &str) -> Option<String> {
+        zz_checker::canonical_std_name(name)
     }
 
     pub(crate) fn run_stmt(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
@@ -399,7 +390,7 @@ impl Interp {
                             // `fs.remove`, …) is a real call, not an
                             // array-method write-back on a variable.
                             let dotted = parts.join(".");
-                            if !self.natives.contains_key(&dotted)
+                            if zz_checker::lookup_std(&self.natives, &dotted).is_none()
                                 && MUTATING_METHODS.contains(&method_name.as_str())
                             {
                                 let obj_name = &parts[0];
@@ -429,7 +420,7 @@ impl Interp {
                             // back through the chain (any depth).
                             let method_name = parts.last().unwrap();
                             let dotted = parts.join(".");
-                            if !self.natives.contains_key(&dotted)
+                            if zz_checker::lookup_std(&self.natives, &dotted).is_none()
                                 && MUTATING_METHODS.contains(&method_name.as_str())
                             {
                                 let recv_parts = parts[..parts.len() - 1].to_vec();
@@ -801,22 +792,33 @@ impl Interp {
         parts: &[String],
         span: Span,
     ) -> Result<Value, EvalError> {
-        // Deprecated `db` module → `sqlz` (one release): rewrite the
-        // dotted name only when the head has NO local binding. A handle
-        // variable named `db` (`db := sqlz.open(..)`) falls through to the
-        // value path below untouched.
+        // Canonical `std.*` seeds only: try the name as-written first
+        // (covers orphans like `option.unwrap`, user definitions, and
+        // import-copied `ns.*` keys, which have no canonical form), then
+        // the canonical spelling when the head has NO local binding. A
+        // handle variable named `db` (`db := sqlz.open(..)`) falls
+        // through to the value path below untouched.
         let raw = parts.join(".");
-        let name = match Self::canonical_db_alias(&raw) {
-            Some(canon) if !parts.is_empty() && self.env.get(&parts[0]).is_none() => canon,
+        let name = match Self::canonical_std_alias(&raw) {
+            Some(canon)
+                if !parts.is_empty()
+                    && self.env.get(&parts[0]).is_none()
+                    && self.env.get(&raw).is_none()
+                    && self.funcs.get(&raw).is_none()
+                    && self.natives.get(&raw).is_none()
+                    && (self.funcs.get(&canon).is_some() || self.natives.get(&canon).is_some()) =>
+            {
+                canon
+            }
             _ => raw,
         };
         if let Some(v) = self.env.get(&name) {
             return Ok(v);
         }
-        if let Some(fv) = self.funcs.get(&name) {
+        if let Some(fv) = zz_checker::lookup_std(&self.funcs, &name) {
             return Ok(Value::Func(Box::new(fv.clone())));
         }
-        if let Some(entry) = self.natives.get(&name) {
+        if let Some(entry) = zz_checker::lookup_std(&self.natives, &name) {
             return Ok(Value::Native(Box::new(NativeFunc {
                 name,
                 arity: entry.arity,
@@ -836,12 +838,20 @@ impl Interp {
     }
 
     fn lookup_callable(&self, name: &str, span: Span) -> Result<Value, EvalError> {
-        // Deprecated `db` module → `sqlz` (one release). Same head rule as
-        // `resolve_path_value`: locals win, module position rewrites.
+        // Canonical `std.*` seeds only: as-written first (orphans, user
+        // definitions, import copies), then the canonical spelling.
+        // Same head rule as `resolve_path_value`: locals win, module
+        // position may rewrite.
         let raw_head = name.split('.').next().unwrap_or(name);
         let owned;
-        let name = match Self::canonical_db_alias(name) {
-            Some(canon) if self.env.get(raw_head).is_none() => {
+        let name = match Self::canonical_std_alias(name) {
+            Some(canon)
+                if self.env.get(raw_head).is_none()
+                    && self.env.get(name).is_none()
+                    && self.funcs.get(name).is_none()
+                    && self.natives.get(name).is_none()
+                    && (self.funcs.get(&canon).is_some() || self.natives.get(&canon).is_some()) =>
+            {
                 owned = canon;
                 &owned
             }
@@ -850,10 +860,10 @@ impl Interp {
         if let Some(v) = self.env.get(name) {
             return Ok(v);
         }
-        if let Some(fv) = self.funcs.get(name) {
+        if let Some(fv) = zz_checker::lookup_std(&self.funcs, name) {
             return Ok(Value::Func(Box::new(fv.clone())));
         }
-        if let Some(entry) = self.natives.get(name) {
+        if let Some(entry) = zz_checker::lookup_std(&self.natives, name) {
             return Ok(Value::Native(Box::new(NativeFunc {
                 name: name.to_string(),
                 arity: entry.arity,
@@ -1045,10 +1055,10 @@ impl Interp {
                 if let Some(v) = self.env.get(name) {
                     return Ok(Flow::Value(v));
                 }
-                if let Some(fv) = self.funcs.get(name) {
+                if let Some(fv) = zz_checker::lookup_std(&self.funcs, name) {
                     return Ok(Flow::Value(Value::Func(Box::new(fv.clone()))));
                 }
-                if let Some(entry) = self.natives.get(name) {
+                if let Some(entry) = zz_checker::lookup_std(&self.natives, name) {
                     return Ok(Flow::Value(Value::Native(Box::new(NativeFunc {
                         name: name.clone(),
                         arity: entry.arity,
@@ -1180,8 +1190,8 @@ impl Interp {
                     if parts.len() >= 2 {
                         let joined = parts.join(".");
                         let is_direct = self.env.get(&joined).is_some()
-                            || self.funcs.contains_key(&joined)
-                            || self.natives.contains_key(&joined);
+                            || zz_checker::lookup_std(&self.funcs, &joined).is_some()
+                            || zz_checker::lookup_std(&self.natives, &joined).is_some();
                         // Enum construction (`Token.IntLit(1)`) builds a
                         // qualified `Object` value — no function involved.
                         // Yields to real functions/values on collision
@@ -1751,10 +1761,6 @@ impl Interp {
                         | "std.sqlz.query"
                         | "sqlz.exec"
                         | "std.sqlz.exec"
-                        | "db.query"
-                        | "std.db.query"
-                        | "db.exec"
-                        | "std.db.exec"
                         | "pg.query"
                         | "pg.exec"
                         | "postgres.query"

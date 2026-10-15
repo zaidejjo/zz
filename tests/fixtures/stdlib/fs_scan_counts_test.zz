@@ -17,7 +17,7 @@ match fs.write(src_path, code_text) {
 
 // Fused scan must equal the read + classify composition.
 match fs.scan_counts(src_path, ["//"], "/*", "*/", false, false) {
-    .ok(r) => match fs.read_to_string(src_path) {
+    .ok(r) => match fs.read(src_path) {
         .ok(text) => {
             c := str.classify(text, ["//"], "/*", "*/", false, false)
             same := r[0] == c[0] && r[1] == c[1] && r[2] == c[2] && r[3] == c[3] && r[4] == 0
@@ -97,7 +97,7 @@ match fs.scan_counts("/tmp", [], "", "", false, false) {
     }
 }
 // Same guard in read_to_string (shared crash class, same fix).
-match fs.read_to_string("/tmp") {
+match fs.read("/tmp") {
     .ok(_) => println("readdir_bad")
     .err(e) => {
         rdir_io := str.contains(e, "io_error")
@@ -139,7 +139,7 @@ match process.spawn("sh", ["-c", "printf 'a\\nb\\n' > {fifo_path}"]) {
     }
     .err(_) => println("fifo_skip")
 }
-match fs.remove_file(fifo_path) {
+match fs.remove(fifo_path) {
     .ok(_) => println("fifo_clean")
     .err(e) => println("fifo_clean_err: {e}")
 }

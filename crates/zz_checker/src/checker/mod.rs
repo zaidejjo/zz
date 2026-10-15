@@ -1307,7 +1307,6 @@ impl Checker {
                     | "process"
                     | "uuid"
                     | "sqlz"
-                    | "db"
                     | "option"
                     | "result"
             )
@@ -1315,6 +1314,54 @@ impl Checker {
             false
         }
     }
+}
+
+/// Top-level std module heads for [`canonical_std_name`]: a bare dotted
+/// name whose first segment is one of these resolves to the single
+/// canonical `std.*` seed. Method-only namespaces (`option`, `result`,
+/// `file`, …) and type constructors (`ArgsParser`, `Regexp`) are absent
+/// on purpose — they were never duplicated and stay bare.
+const STD_MODULE_HEADS: &[&str] = &[
+    "str", "vec", "json", "http", "fs", "path", "env", "math", "time", "encoding", "net", "chan",
+    "task", "regexp", "crypto", "log", "sys", "args", "process", "uuid", "sqlz", "colors", "term",
+    "test", "map", "set", "dec", "bytes", "csv", "property", "cell", "unix",
+];
+
+/// Look up a stdlib registry entry by either spelling: the name as-written
+/// first (covers orphans like `option.unwrap` and import-copied `ns.*`
+/// keys, which have no canonical form), then the canonical `std.*`
+/// spelling. Single choke point for the canonical-seeds-only tables —
+/// callers must use this instead of raw `HashMap::get` for stdlib names.
+pub fn lookup_std<'a, V>(
+    map: &'a std::collections::HashMap<String, V>,
+    name: &str,
+) -> Option<&'a V> {
+    map.get(name)
+        .or_else(|| canonical_std_name(name).and_then(|c| map.get(&c)))
+}
+
+/// Membership twin of [`lookup_std`] for precomputed name sets
+/// (`native_names`, seed-key sets, completion snapshots).
+pub fn contains_std(set: &std::collections::HashSet<String>, name: &str) -> bool {
+    set.contains(name) || canonical_std_name(name).is_some_and(|c| set.contains(&c))
+}
+
+/// Resolve a bare `module.func` name to its canonical `std.module.func`
+/// spelling: the single source of truth for the std alias (replaces the
+/// old per-crate inline copies). Returns `None` for already-canonical
+/// `std.*` names, bare builtins, unknown heads, and non-module
+/// namespaces. Nested modules compose (`sqlz.postgres.query` →
+/// `std.sqlz.postgres.query`). Callers gate on module position (a local
+/// binding with the same head always wins) before applying this.
+pub fn canonical_std_name(name: &str) -> Option<String> {
+    if name.starts_with("std.") || !name.contains('.') {
+        return None;
+    }
+    let head = name.split('.').next().unwrap_or(name);
+    if STD_MODULE_HEADS.contains(&head) {
+        return Some(format!("std.{name}"));
+    }
+    None
 }
 
 #[cfg(test)]

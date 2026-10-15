@@ -2865,16 +2865,12 @@ impl Lowerer {
             cname.as_str(),
             "sqlz.query"
                 | "std.sqlz.query"
-                | "db.query"
-                | "std.db.query"
                 | "pg.query"
                 | "std.sqlz.postgres.query"
         ) || matches!(
             cname.as_str(),
             "sqlz.exec"
                 | "std.sqlz.exec"
-                | "db.exec"
-                | "std.db.exec"
                 | "pg.exec"
                 | "std.sqlz.postgres.exec"
         ) {
@@ -2887,7 +2883,7 @@ impl Lowerer {
         // the closure parameter (typically `tx`) to the same db handle.
         if matches!(
             cname.as_str(),
-            "sqlz.transaction" | "std.sqlz.transaction" | "db.transaction" | "std.db.transaction"
+            "sqlz.transaction" | "std.sqlz.transaction"
         ) {
             if let Some(Expr::Closure { params, body, .. }) = args.last() {
                 // Emit the db handle — for the method form
@@ -5181,8 +5177,6 @@ impl Lowerer {
             cname,
             "sqlz.query"
                 | "std.sqlz.query"
-                | "db.query"
-                | "std.db.query"
                 | "pg.query"
                 | "std.sqlz.postgres.query"
         );

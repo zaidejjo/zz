@@ -8,12 +8,12 @@ fn fs_write_and_read_file() {
     let path_str = path.to_string_lossy().to_string();
 
     let v = run(&format!(
-        "import std.fs\nfs.write_file(\"{path_str}\", \"hello fs\")"
+        "import std.fs\nfs.write(\"{path_str}\", \"hello fs\")"
     ))
     .unwrap();
     assert_eq!(v, Value::Result(Box::new(Ok(Value::Unit))));
 
-    let v = run(&format!("import std.fs\nfs.read_file(\"{path_str}\")")).unwrap();
+    let v = run(&format!("import std.fs\nfs.read(\"{path_str}\")")).unwrap();
     assert_eq!(
         v,
         Value::Result(Box::new(Ok(Value::Str("hello fs".to_string().into()))))
@@ -27,7 +27,7 @@ fn fs_write_and_read_file() {
 
 #[test]
 fn fs_read_missing_file_is_err() {
-    let v = run("import std.fs\nfs.read_file(\"/tmp/zz_no_such_file_zz\")").unwrap();
+    let v = run("import std.fs\nfs.read(\"/tmp/zz_no_such_file_zz\")").unwrap();
     match v {
         Value::Result(r) => match &*r {
             Err(e) => {
@@ -73,7 +73,7 @@ fn fs_append_copy_move_dirs_and_stat() {
     assert_eq!(v, Value::Result(Box::new(Ok(Value::Unit))));
 
     let v = run(&format!(
-        "import std.fs\nfs.read_to_string(\"{base}/a.txt\")"
+        "import std.fs\nfs.read(\"{base}/a.txt\")"
     ))
     .unwrap();
     assert_eq!(

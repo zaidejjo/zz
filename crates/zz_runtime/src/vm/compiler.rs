@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
 use zz_frontend::move_elide::{
-    classify_self_assign_vm, count_refs, has_closure_or_spawn, has_early_exit, unqualify_expr,
+    classify_self_assign, count_refs, has_closure_or_spawn, has_early_exit, unqualify_expr,
     MoveKind,
 };
 use zz_frontend::span::Span;
@@ -91,8 +91,7 @@ pub struct Compiler {
     /// call compiler verify the trailing path component is really a
     /// variant before treating an enum-typed call as construction.
     enums: Option<HashMap<String, zz_checker::EnumSig>>,
-    /// True while compiling the SQL argument of `sqlz.query`/`sqlz.exec`
-    /// (`db.*` alias included):
+    /// True while compiling the SQL argument of `sqlz.query`/`sqlz.exec`:
     /// the Fmt lowers to template + bound params (DbQuery) instead of
     /// string concatenation.
     in_db_query: bool,
@@ -731,7 +730,7 @@ impl Compiler {
     // reusing the owned `Vec`, store back): zero clones on the steady path.
     // `x = f(x, ...)` sets `move_take` so the single `x` load takes instead
     // of cloning. Static eligibility comes from
-    // `zz_frontend::move_elide::classify_self_assign_vm`; the gates here
+    // `zz_frontend::move_elide::classify_self_assign`; the gates here
     // are VM-specific (see each helper).
 
     /// A move-take home: frame slot or env binding name.
@@ -758,6 +757,18 @@ impl Compiler {
             && (self.locals.iter().any(|l| l.name == key) || self.top_globals.contains(key))
     }
 
+    /// `func_info` membership with canonical fallback: seeds hold
+    /// `std.*` only, so a bare `module.func` spelling checks its
+    /// canonical form too (orphans like `option.unwrap` hit directly).
+    fn func_info_contains(&self, name: &str) -> bool {
+        zz_checker::lookup_std(&self.func_info, name).is_some()
+    }
+
+    /// `func_info` lookup with canonical fallback (see above).
+    fn func_info_get(&self, name: &str) -> Option<FuncInfo> {
+        zz_checker::lookup_std(&self.func_info, name).cloned()
+    }
+
     /// Canonical free push callee resolving to the real native (not
     /// shadowed by a user func, registered). Returns the spelling.
     /// (`vec.push` plus the method form `xs.push(x)` is the only spelling —
@@ -771,13 +782,15 @@ impl Compiler {
         if !matches!(spelling.as_str(), "vec.push" | "std.vec.push") {
             return None;
         }
+        // Exact match only: user shadowing is by source spelling;
+        // canonical seeds must not count as shadowing.
         if self.func_info.contains_key(&spelling) {
             return None;
         }
         if !self
             .native_names
             .as_ref()
-            .is_some_and(|n| n.contains(&spelling))
+            .is_some_and(|n| zz_checker::contains_std(n, &spelling))
         {
             return None;
         }
@@ -829,7 +842,7 @@ impl Compiler {
             span,
         };
         if !matches!(
-            classify_self_assign_vm(&target, v2),
+            classify_self_assign(&target, v2),
             Some(MoveKind::VecPush(_))
         ) {
             return false;
@@ -868,7 +881,7 @@ impl Compiler {
             span: Span::default(),
         };
         if !matches!(
-            classify_self_assign_vm(&target, v2),
+            classify_self_assign(&target, v2),
             Some(MoveKind::ThreadCall(_))
         ) {
             return None;
@@ -927,7 +940,7 @@ impl Compiler {
             name: parts[1].clone(),
             span,
         };
-        match classify_self_assign_vm(&target, v2) {
+        match classify_self_assign(&target, v2) {
             Some(MoveKind::ThreadCall(var)) if var == parts[1] => {
                 // The single occurrence must spell the target exactly
                 // (bare or identically qualified): a differently-spelled
@@ -1043,7 +1056,11 @@ impl Compiler {
             },
             _ => None,
         };
-        if joined.is_some_and(|j| self.native_names.as_ref().is_some_and(|n| n.contains(&j))) {
+        if joined.is_some_and(|j| {
+            self.native_names
+                .as_ref()
+                .is_some_and(|n| zz_checker::contains_std(n, &j))
+        }) {
             return false;
         }
         self.compile_expr(&args[0]);
@@ -1232,13 +1249,15 @@ impl Compiler {
         ) {
             return None;
         }
+        // Exact match only: user shadowing is by source spelling;
+        // canonical seeds must not count as shadowing.
         if self.func_info.contains_key(&spelling) {
             return None;
         }
         if !self
             .native_names
             .as_ref()
-            .is_some_and(|n| n.contains(&spelling))
+            .is_some_and(|n| zz_checker::contains_std(n, &spelling))
         {
             return None;
         }
@@ -1354,7 +1373,7 @@ impl Compiler {
                 && self
                     .native_names
                     .as_ref()
-                    .is_some_and(|n| n.contains(&parts.join(".")))
+                    .is_some_and(|n| zz_checker::contains_std(n, &parts.join(".")))
             {
                 return false;
             }
@@ -1365,7 +1384,7 @@ impl Compiler {
                 if self
                     .native_names
                     .as_ref()
-                    .is_some_and(|n| n.contains(&joined))
+                    .is_some_and(|n| zz_checker::contains_std(n, &joined))
                 {
                     return false;
                 }
@@ -1398,7 +1417,7 @@ impl Compiler {
                 name: parts[1].clone(),
                 span,
             };
-            let Some(MoveKind::VecPush(var)) = classify_self_assign_vm(&bare, v2) else {
+            let Some(MoveKind::VecPush(var)) = classify_self_assign(&bare, v2) else {
                 return false;
             };
             if var != parts[1] {
@@ -1447,7 +1466,7 @@ impl Compiler {
         let v2 = nv.as_ref().unwrap_or(value);
         // ThreadCall never applies to path targets (globals are readable
         // by same-module callees).
-        match classify_self_assign_vm(&target, v2) {
+        match classify_self_assign(&target, v2) {
             Some(MoveKind::FieldPush { obj, field }) => {
                 // Receiver spelling must equal the target spelling.
                 let receiver_ok = match value {
@@ -2297,7 +2316,7 @@ impl Compiler {
                         let nv = self.normalize_move_value(value);
                         let v2 = nv.as_ref().unwrap_or(value);
                         if let Some(MoveKind::FieldPush { obj: o, field: f }) =
-                            classify_self_assign_vm(&target, v2)
+                            classify_self_assign(&target, v2)
                         {
                             // Receiver must spell the target exactly (a
                             // differently-spelled occurrence names another
@@ -2467,7 +2486,7 @@ impl Compiler {
                             let is_native = self
                                 .native_names
                                 .as_ref()
-                                .is_some_and(|n| n.contains(&dotted));
+                                .is_some_and(|n| zz_checker::contains_std(n, &dotted));
                             if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
                                 let obj_name = &parts[0];
                                 // Compile: LoadVar(obj) + args + CallMethod(method)
@@ -2511,7 +2530,7 @@ impl Compiler {
                             let is_native = self
                                 .native_names
                                 .as_ref()
-                                .is_some_and(|n| n.contains(&dotted));
+                                .is_some_and(|n| zz_checker::contains_std(n, &dotted));
                             if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
                                 let recv_parts = parts[..parts.len() - 1].to_vec();
                                 self.compile_path_load(&recv_parts, e.span());
@@ -2796,7 +2815,7 @@ impl Compiler {
         args: &[Expr],
         named: &[(zz_frontend::ast::Ident, Expr)],
     ) {
-        let info = match self.func_info.get(func_name) {
+        let info = match self.func_info_get(func_name) {
             Some(fi) => fi.clone(),
             None => {
                 for a in args {
@@ -2846,8 +2865,7 @@ impl Compiler {
         }
     }
 
-    /// Total native argc for a `sqlz.query`/`sqlz.exec` call site
-    /// (`db.*` alias included):
+    /// Total native argc for a `sqlz.query`/`sqlz.exec` call site:
     /// receiver + template + bound params (+1 struct marker for query
     /// when the checker resolved an `[Struct]` element type).
     fn db_call_argc(&self, args: &[Expr], span: Span) -> usize {
@@ -2864,7 +2882,6 @@ impl Compiler {
     }
 
     /// Resolve the `[Struct]` element type for a `sqlz.query` call site
-    /// (`db.*` alias included)
     /// from the checker's span map (the call's own span carries the
     /// unified return type, which includes the `let x: [User]` annotation).
     fn db_query_struct(&self, span: Span) -> Option<String> {
@@ -2953,9 +2970,9 @@ impl Compiler {
     }
 
     /// True when a Path-form call `recv.method` targets a db handle:
-    /// either the module-qualified `sqlz.query`/`std.sqlz.query` (or the
-    /// `db.*`/`std.db.*` alias, receiver is the module namespace) or a
-    /// method on a local whose checker type is `Db`. Falls back to
+    /// either the module-qualified `sqlz.query`/`std.sqlz.query`
+    /// (receiver is the module namespace) or a method on a local whose
+    /// checker type is `Db`. There is no `db` module anymore. Falls back to
     /// name-only match when type info is absent (untyped
     /// `compile_program` path, e.g. tests/REPL snippets).
     fn is_db_path(&self, parts: &[String]) -> bool {
@@ -2965,7 +2982,7 @@ impl Compiler {
         if !matches!(parts[1].as_str(), "query" | "exec" | "close" | "open") {
             return false;
         }
-        if parts[0] == "sqlz" || parts[0] == "db" || parts[0] == "std" {
+        if parts[0] == "sqlz" || parts[0] == "std" {
             return true;
         }
         // Type-driven: receiver local resolved to Db by the checker.
@@ -2977,8 +2994,7 @@ impl Compiler {
             return true;
         }
         // Untyped path: accept query/exec/close on any receiver; the
-        // runtime `lookup_method` will resolve `sqlz.*` (or the `db.*`
-        // alias) or error clearly.
+        // runtime `lookup_method` will resolve `sqlz.*` or error clearly.
         true
     }
 
@@ -3187,30 +3203,38 @@ impl Compiler {
             } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
                     let raw_name = parts.join(".");
-                    // Deprecated `db` module → `sqlz` (one release): normalize
-                    // the emitted name when the head is the module namespace.
-                    // A local handle named `db` (`db := sqlz.open(..)`) keeps
-                    // method dispatch below — `resolve` only returns `Env`
-                    // for names with no local binding.
-                    // (Local inline copy of `zz_stdlib::canonical_std_func` —
-                    // zz_runtime cannot depend on zz_stdlib.)
-                    let func_name: String =
-                        if raw_name.starts_with("db.") || raw_name.starts_with("std.db.") {
-                            let head_is_module = matches!(self.resolve(&parts[0]), Resolved::Env);
-                            if head_is_module {
-                                if let Some(rest) = raw_name.strip_prefix("std.db.") {
-                                    format!("std.sqlz.{rest}")
-                                } else if let Some(rest) = raw_name.strip_prefix("db.") {
-                                    format!("sqlz.{rest}")
-                                } else {
-                                    raw_name
-                                }
-                            } else {
-                                raw_name
+                    // Canonical `std.*` seeds only (single source:
+                    // `zz_checker::canonical_std_name`): prefer the
+                    // as-written spelling when it is registered (orphans
+                    // like `vec.reverse`, user definitions, import
+                    // copies), else the canonical spelling when the head
+                    // is the module namespace. A local with the same head
+                    // keeps its spelling (`resolve` returns `Env` only
+                    // with no local binding).
+                    let raw_known = self.func_info.contains_key(&raw_name)
+                        || self
+                            .native_names
+                            .as_ref()
+                            .is_some_and(|n| n.contains(&raw_name));
+                    let func_name: String = if !raw_known
+                        && !raw_name.starts_with("std.")
+                        && matches!(self.resolve(&parts[0]), Resolved::Env)
+                    {
+                        match zz_checker::canonical_std_name(&raw_name) {
+                            Some(canon)
+                                if self.func_info.contains_key(&canon)
+                                    || self
+                                        .native_names
+                                        .as_ref()
+                                        .is_some_and(|n| n.contains(&canon)) =>
+                            {
+                                canon
                             }
-                        } else {
-                            raw_name
-                        };
+                            _ => raw_name,
+                        }
+                    } else {
+                        raw_name
+                    };
                     // Enum construction (`Token.IntLit(1)`) builds a
                     // qualified `Object`, not a call. Type-driven: the
                     // checker resolved this call to `Type::Enum`, so no
@@ -3233,7 +3257,7 @@ impl Compiler {
                             // the checker's and tree-walker's miss-only
                             // rules.
                             let variant = parts.last().cloned().unwrap_or_default();
-                            let known_func = self.func_info.contains_key(&func_name)
+                            let known_func = self.func_info_contains(&func_name)
                                 || {
                                     let suffix = format!(".{func_name}");
                                     let mut hits: Vec<&String> = self
@@ -3248,7 +3272,7 @@ impl Compiler {
                                 || self
                                     .native_names
                                     .as_ref()
-                                    .is_some_and(|n| n.contains(&func_name));
+                                    .is_some_and(|n| zz_checker::contains_std(n, &func_name));
                             let is_variant = self
                                 .enums
                                 .as_ref()
@@ -3303,13 +3327,13 @@ impl Compiler {
                     // in DbQuery mode (template + bound params).
                     //
                     // A leading component that resolves to a slot/env LOCAL
-                    // is a receiver; a module namespace (`sqlz`, `db`,
-                    // `pg`, `postgres`, `my`, `mysql`, `std`) takes the
+                    // is a receiver; a module namespace (`sqlz`, `pg`,
+                    // `postgres`, `my`, `mysql`, `std`) takes the
                     // free-function branch below (`is_module_db_call`).
                     let leading_is_module_ns =
                         matches!(
                             parts[0].as_str(),
-                            "sqlz" | "db" | "pg" | "postgres" | "my" | "mysql" | "std"
+                            "sqlz" | "pg" | "postgres" | "my" | "mysql" | "std"
                         ) && matches!(self.resolve(&parts[0]), Resolved::Env);
                     let is_db_call = parts.len() == 2
                         && matches!(parts[1].as_str(), "query" | "exec")
@@ -3318,7 +3342,7 @@ impl Compiler {
                         && !self
                             .native_names
                             .as_ref()
-                            .is_some_and(|n| n.contains(&parts.join(".")));
+                            .is_some_and(|n| zz_checker::contains_std(n, &parts.join(".")));
                     // Free-function form with explicit receiver:
                     // `pg.query(db, sql)`, `my.exec(db, sql)`,
                     // `sqlz.query(db, sql)`,
@@ -3337,8 +3361,6 @@ impl Compiler {
                         db_module_prefix.as_str(),
                         "sqlz"
                             | "std.sqlz"
-                            | "db"
-                            | "std.db"
                             | "pg"
                             | "postgres"
                             | "std.sqlz.postgres"
@@ -3481,7 +3503,7 @@ impl Compiler {
                             if self
                                 .native_names
                                 .as_ref()
-                                .is_some_and(|n| n.contains(&func_name))
+                                .is_some_and(|n| zz_checker::contains_std(n, &func_name))
                             {
                                 self.emit(Op::CallNative {
                                     name: func_name.clone(),
@@ -3533,7 +3555,7 @@ impl Compiler {
                             && self
                                 .native_names
                                 .as_ref()
-                                .is_some_and(|n| n.contains(&func_name))
+                                .is_some_and(|n| zz_checker::contains_std(n, &func_name))
                         {
                             self.emit(Op::CallNative {
                                 name: func_name,
@@ -3614,7 +3636,7 @@ impl Compiler {
                     // `main.g`). Exact match first, then a unique
                     // `*.name` suffix (mirrors the AOT owned-fallback).
                     let info_key: Option<String> = callee_name.and_then(|cn| {
-                        if self.func_info.contains_key(cn) {
+                        if self.func_info_contains(cn) {
                             Some(cn.to_string())
                         } else {
                             let suffix = format!(".{cn}");
@@ -3647,7 +3669,7 @@ impl Compiler {
                     } else if has_named_or_defaults {
                         info_key
                             .as_ref()
-                            .and_then(|k| self.func_info.get(k))
+                            .and_then(|k| self.func_info_get(k))
                             .map_or(args.len() + named.len(), |fi| fi.param_names.len())
                     } else {
                         args.len() + named.len()
@@ -3706,7 +3728,7 @@ impl Compiler {
             Expr::Block(b) => self.compile_block(b),
             Expr::Fmt { parts, .. } => {
                 // sqlz context: when this Fmt is the SQL arg of
-                // `sqlz.query`/`sqlz.exec` (+ `db.*` alias), emit DbQuery
+                // `sqlz.query`/`sqlz.exec`, emit DbQuery
                 // so the template and
                 // bound values stay separate (prepared-statement binding,
                 // never string concatenation). Otherwise normal Concat.

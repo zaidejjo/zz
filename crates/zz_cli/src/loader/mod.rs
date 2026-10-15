@@ -21,7 +21,7 @@ use zz_checker::{
     check_program_with_module_ns, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type,
 };
 use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
-use zz_frontend::diag::{error_at, warning_at, RawDiag};
+use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
 use zz_runtime::NativeEntry;
@@ -985,19 +985,20 @@ impl Loader {
                     continue;
                 }
                 let module = imp[1..].join(".");
-                // Deprecated `db` module (one release): warn, then resolve
-                // against canonical `sqlz` below. Handle variables named
-                // `db` are unaffected — this fires only on the import.
+                // Removed `db` module: hard error with a rename hint.
+                // Handle variables named `db` are unaffected — this fires
+                // only on the import.
                 if module == "db" {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),
                         source: source.clone(),
-                        diags: vec![warning_at(
-                            "std module `db` is deprecated — rename to `sqlz` (there is no `std.db`)",
+                        diags: vec![error_at(
+                            "no std module `db` — rename to `sqlz`",
                             Span::new(0, 0),
                         )
                         .with_note("hint: `import std.db` → `import std.sqlz`")],
                     });
+                    continue;
                 }
                 if !STDLIB_MODULES.contains(&module.as_str()) {
                     self.errors.push(LoadError {

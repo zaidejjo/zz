@@ -449,7 +449,6 @@ import std.net
 | `net.tcp_read_bytes` | `net.tcp_read_bytes(stream, max_bytes) -> Result<bytes, str>` | Binary-safe read (method: `stream.read_bytes()`) |
 | `net.tcp_write_bytes` | `net.tcp_write_bytes(stream, data: bytes) -> Result<int, str>` | Binary-safe write (method: `stream.write_bytes()`) |
 | `net.tcp_shutdown` | `net.tcp_shutdown(stream) -> Result<unit, str>` | Real shutdown, both directions (methods: `stream.close()`, `stream.shutdown()`) |
-| `net.tcp_close` | `net.tcp_close(stream) -> Result<bool, str>` | Legacy no-op (returns true; prefer `close`) |
 | `net.peer_addr` | `net.peer_addr(stream) -> Result<str, str>` | Remote `"ip:port"` |
 | `net.local_addr` | `net.local_addr(stream) -> Result<str, str>` | Local `"ip:port"` |
 | `net.set_read_timeout` | `net.set_read_timeout(stream, ms) -> Result<bool, str>` | Read deadline |
@@ -489,15 +488,15 @@ import std.fs
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `fs.read_file` | `fs.read_file(path: str)` | Read file contents |
-| `fs.write_file` | `fs.write_file(path: str, contents: str)` | Write file |
+| `fs.read` | `fs.read(path: str)` | Read file contents |
+| `fs.write` | `fs.write(path: str, contents: str)` | Write file |
 | `fs.exists` | `fs.exists(path: str) -> bool` | Check existence |
 | `fs.read_bytes` | `fs.read_bytes(path: str)` | Raw bytes as `bytes` (contiguous, ~1x RSS) |
 | `fs.append` / `fs.copy` / `fs.move` / `fs.rename` | `(…)` | Append, copy, move |
 | `fs.is_file` / `fs.is_dir` | `(path) -> bool` | Type predicates |
-| `fs.remove_file` / `fs.remove` | `(path)` | Delete a file |
+| `fs.remove` | `(path)` | Delete a file |
 | `fs.mkdir` / `fs.mkdir_all` | `(path)` | Create directories |
-| `fs.read_dir` / `fs.readdir` | `(path)` | Child basenames (sorted) |
+| `fs.read_dir` | `(path)` | Child basenames (sorted) |
 | `fs.remove_dir_all` / `fs.walk_dir` | `(path)` | Recursive remove / list |
 | `fs.stat` | `(path)` | Metadata dict |
 | `fs.scan_counts` | `(path, markers, bstart, bend, nested, whole) -> Result<[int]>` | Fused read + NUL-sniff + `str.classify` in one call: `[lines, code, comments, blanks, binary]` (`binary` 1 = NUL present, counts zeroed) |
@@ -585,13 +584,13 @@ Paths inside a provider live in one `/`-rooted virtual namespace
 import std.fs
 
 // Read
-match fs.read_file("data.txt") {
+match fs.read("data.txt") {
     .ok(content)   => println(content),
     .err(e)        => println("Error: {e}"),
 }
 
 // Write
-match fs.write_file("out.txt", "Hello World") {
+match fs.write("out.txt", "Hello World") {
     .ok(_)         => println("Written"),
     .err(e)        => println("Error: {e}"),
 }
@@ -616,7 +615,7 @@ import std.env
 | `env.get_var` | `env.get_var(name: str)` | Get env var (legacy alias shape) |
 | `env.var` | `env.var(name: str)` | Value or `.err` |
 | `env.set` | `env.set(key: str, val: str)` | Set (`.err` on bad key) |
-| `env.remove` / `env.unset` | `env.remove(key: str)` | Unset (total no-op) |
+| `env.remove` | `env.remove(key: str)` | Remove (total no-op when absent) |
 | `env.vars` | `env.vars() -> map[str]str` | All variables, sorted by key |
 | `env.cwd` | `env.cwd()` | Working directory (`.err` on failure) |
 | `env.set_cwd` | `env.set_cwd(path: str)` | Change directory (`.err` on failure) |

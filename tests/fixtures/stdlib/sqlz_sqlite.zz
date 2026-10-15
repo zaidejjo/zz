@@ -1,7 +1,4 @@
-// features: arrays, imports, indexing, locals, methods, print, std-db, std-sqlz, string-blocks, string-literal, structs
-// Deprecated `std.db` module (one release): still runs via the `sqlz`
-// implementation with a checker warning — rename to `import std.sqlz`.
-import std.db
+// features: arrays, imports, indexing, locals, methods, print, std-sqlz, string-blocks, string-literal, structs
 import std.sqlz
 
 struct User {
@@ -32,7 +29,7 @@ print(users[0].id)
 q := "bob"
 via_macro:[User] = sqlz!{mydb, """SELECT id, name FROM users WHERE name = {q}"""}
 print(via_macro[0].name)
-alidb := db.open(":memory:")
+alidb := sqlz.open(":memory:")
 alidb.exec("""CREATE TABLE t (v INTEGER)""")
 alidb.exec("""INSERT INTO t VALUES (41)""")
 print("alias_ok")
