@@ -255,3 +255,92 @@ fn step_in_and_out_of_call() {
     s.request("disconnect", serde_json::json!({ "restart": false }));
     s.finish();
 }
+
+#[test]
+fn expand_struct_and_paged_array() {
+    let mut src = String::from(
+        "struct Point {\n    x: int,\n    y: int,\n}\nstruct Rect {\n    origin: Point,\n    w: int,\n}\nr := Rect{ origin: Point{ x: 1, y: 2 }, w: 3 }\n",
+    );
+    let elems: Vec<String> = (0..150).map(|i| i.to_string()).collect();
+    src.push_str(&format!("big := [{}]\n", elems.join(", ")));
+    // Executable last line (bare `r` emits no breakpoint site): both `r`
+    // and `big` are bound when we stop here.
+    src.push_str("done := r.w + big[100]\n");
+    let prog = fixture("expand.zz", &src);
+    let mut s = Session::spawn(&prog);
+
+    s.request(
+        "setBreakpoints",
+        serde_json::json!({
+            "source": { "path": prog.to_str().unwrap() },
+            // Last line (`done := ...`): everything is bound by now.
+            "breakpoints": [{ "line": 11 }],
+        }),
+    );
+    s.request("configurationDone", serde_json::json!({}));
+    let stopped = s.expect_event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint");
+
+    let resp = s.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    let frames = resp["body"]["stackFrames"].as_array().unwrap();
+    let resp = s.request("scopes", serde_json::json!({ "frameId": frames[0]["id"] }));
+    let var_ref = resp["body"]["scopes"][0]["variablesReference"]
+        .as_u64()
+        .unwrap();
+    let resp = s.request(
+        "variables",
+        serde_json::json!({ "variablesReference": var_ref }),
+    );
+    let vars = resp["body"]["variables"].as_array().unwrap();
+    let r = vars.iter().find(|v| v["name"] == "r").expect("var r");
+    assert_ne!(r["variablesReference"], 0, "struct expands");
+    assert_eq!(r["type"], "Rect");
+    let big = vars.iter().find(|v| v["name"] == "big").expect("var big");
+    assert_ne!(big["variablesReference"], 0, "array expands");
+
+    // Nested struct expansion.
+    let resp = s.request(
+        "variables",
+        serde_json::json!({ "variablesReference": r["variablesReference"] }),
+    );
+    let children = resp["body"]["variables"].as_array().unwrap();
+    let origin = children
+        .iter()
+        .find(|v| v["name"] == "origin")
+        .expect("origin");
+    assert_ne!(origin["variablesReference"], 0);
+    let w = children.iter().find(|v| v["name"] == "w").expect("w");
+    assert_eq!(w["value"], "3");
+    let resp = s.request(
+        "variables",
+        serde_json::json!({ "variablesReference": origin["variablesReference"] }),
+    );
+    let grandchildren = resp["body"]["variables"].as_array().unwrap();
+    let x = grandchildren.iter().find(|v| v["name"] == "x").expect("x");
+    assert_eq!(x["value"], "1");
+
+    // Paged array: two windows, second one expands positionally.
+    let resp = s.request(
+        "variables",
+        serde_json::json!({ "variablesReference": big["variablesReference"] }),
+    );
+    let windows = resp["body"]["variables"].as_array().unwrap();
+    assert_eq!(windows.len(), 2, "150 items page into 2 windows");
+    assert_eq!(windows[0]["name"], "[0..99]");
+    assert_eq!(windows[1]["name"], "[100..149]");
+    let resp = s.request(
+        "variables",
+        serde_json::json!({ "variablesReference": windows[1]["variablesReference"] }),
+    );
+    let page = resp["body"]["variables"].as_array().unwrap();
+    assert_eq!(page.len(), 50);
+    assert_eq!(page[0]["name"], "[100]");
+    assert_eq!(page[0]["value"], "100");
+
+    let resp = s.request("continue", serde_json::json!({ "threadId": 1 }));
+    assert!(resp["success"].as_bool().unwrap());
+    s.expect_event("terminated");
+
+    s.request("disconnect", serde_json::json!({ "restart": false }));
+    s.finish();
+}

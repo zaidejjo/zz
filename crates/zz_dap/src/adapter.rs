@@ -41,7 +41,10 @@ struct FrameView {
 struct VarView {
     name: String,
     value: String,
-    typ: &'static str,
+    typ: String,
+    reference: u64,
+    named: usize,
+    indexed: usize,
 }
 
 pub enum WorkerEvent {
@@ -60,7 +63,13 @@ enum WorkerCmd {
 
 enum InspectReq {
     Frames,
-    Vars { frame_idx: usize },
+    Vars { key: VarKey },
+}
+
+#[derive(Debug, Clone)]
+enum VarKey {
+    Frame(usize),
+    Node(u64),
 }
 
 enum InspectResp {
@@ -356,17 +365,28 @@ impl Adapter {
             Some(a) => a,
             None => return Response::err(seq, req.seq, "variables", "bad arguments".into()),
         };
-        let frame_idx = args.variables_reference.saturating_sub(1000) as usize;
-        match self.inspect(InspectReq::Vars { frame_idx }) {
+        let key = if args.variables_reference >= 10000 {
+            VarKey::Node(args.variables_reference)
+        } else {
+            VarKey::Frame(args.variables_reference.saturating_sub(1000) as usize)
+        };
+        let start = args.start.unwrap_or(0) as usize;
+        let count = args.count.map(|c| c as usize).unwrap_or(usize::MAX);
+        match self.inspect(InspectReq::Vars { key }) {
             Some(InspectResp::Vars(vars)) => {
-                let wire: Vec<serde_json::Value> = vars
+                let total = vars.len();
+                let end = start.saturating_add(count).min(total);
+                let start = start.min(total);
+                let wire: Vec<serde_json::Value> = vars[start..end]
                     .iter()
                     .map(|v| {
-                        json!({
+                        serde_json::json!({
                             "name": v.name,
                             "value": v.value,
                             "type": v.typ,
-                            "variablesReference": 0,
+                            "variablesReference": v.reference,
+                            "namedVariables": v.named,
+                            "indexedVariables": v.indexed,
                         })
                     })
                     .collect();
@@ -374,7 +394,7 @@ impl Adapter {
                     seq,
                     req.seq,
                     "variables",
-                    Some(json!({ "variables": wire })),
+                    Some(serde_json::json!({ "variables": wire })),
                 )
             }
             _ => Response::err(seq, req.seq, "variables", "not stopped".into()),
@@ -420,14 +440,31 @@ fn check_parses(program: &str, source: &str) -> Result<(), String> {
     }
 }
 
-fn value_type_name(value: &Value) -> &'static str {
+fn value_type_name(value: &Value) -> String {
     match value {
-        Value::Int(_) => "int",
-        Value::Float(_) => "float",
-        Value::Bool(_) => "bool",
-        Value::Str(_) => "str",
-        Value::Unit => "unit",
-        _ => "value",
+        Value::Int(_) => "int".to_string(),
+        Value::Float(_) => "float".to_string(),
+        Value::Bool(_) => "bool".to_string(),
+        Value::Str(_) => "str".to_string(),
+        Value::Unit => "unit".to_string(),
+        Value::Array(_) => "array".to_string(),
+        Value::Tuple(_) => "tuple".to_string(),
+        Value::Dict(_) => "dict".to_string(),
+        Value::Object(o) => o.display_name().to_string(),
+        Value::Option(_) => "option".to_string(),
+        Value::Result(_) => "result".to_string(),
+        Value::Func(_) => "func".to_string(),
+        _ => "value".to_string(),
+    }
+}
+
+/// Display text that never renders blank (`Unit` displays as empty).
+fn display_value(value: &Value) -> String {
+    let text = format!("{value}");
+    if text.is_empty() {
+        "()".to_string()
+    } else {
+        text
     }
 }
 
@@ -464,6 +501,8 @@ fn exec_main(
         program_path,
         started: false,
         status: ExecStatus::Idle,
+        var_nodes: std::collections::HashMap::new(),
+        next_var_ref: 10000,
     };
 
     loop {
@@ -486,6 +525,29 @@ struct ExecProg {
     program_path: String,
     started: bool,
     status: ExecStatus,
+    /// Expandable-node registry, cleared on every resume/step: reference
+    /// → what it expands. Frame scopes keep their 1000-based ids.
+    var_nodes: std::collections::HashMap<u64, VarNode>,
+    next_var_ref: u64,
+}
+
+/// One expandable variables node.
+#[derive(Debug, Clone)]
+enum VarNode {
+    /// Children of a composite value at a path from a frame root.
+    Value {
+        frame_idx: usize,
+        root: String,
+        path: Vec<zz_runtime::debug::DebugSeg>,
+    },
+    /// One paging window over a sequence value.
+    Range {
+        frame_idx: usize,
+        root: String,
+        path: Vec<zz_runtime::debug::DebugSeg>,
+        start: usize,
+        len: usize,
+    },
 }
 
 /// Handle one command. Returns true when the thread should exit.
@@ -507,6 +569,9 @@ fn exec_command(prog: &mut ExecProg, cmd: WorkerCmd, event_tx: &mpsc::Sender<Wor
         }
         WorkerCmd::Resume | WorkerCmd::Step(_) => {
             if prog.status == ExecStatus::Parked {
+                // Stale references would resolve against the new
+                // frames: drop them on every resume.
+                prog.var_nodes.clear();
                 if let WorkerCmd::Step(mode) = cmd {
                     arm_step(prog, mode);
                 }
@@ -561,6 +626,157 @@ fn run_until_park(prog: &mut ExecProg, event_tx: &mpsc::Sender<WorkerEvent>) {
     }
 }
 
+/// Allocate a fresh expandable-node reference.
+fn alloc_ref(prog: &mut ExecProg) -> u64 {
+    prog.next_var_ref += 1;
+    prog.next_var_ref
+}
+
+/// One child row; registers an expandable node when the value is
+/// composite and returns its reference (0 for leaves).
+fn child_row(
+    prog: &mut ExecProg,
+    frame_idx: usize,
+    root: &str,
+    path: Vec<zz_runtime::debug::DebugSeg>,
+    name: String,
+    value: Value,
+) -> VarView {
+    let has = zz_runtime::debug::debug_has_children(&value);
+    let reference = if has {
+        let reference = alloc_ref(prog);
+        prog.var_nodes.insert(
+            reference,
+            VarNode::Value {
+                frame_idx,
+                root: root.to_string(),
+                path,
+            },
+        );
+        reference
+    } else {
+        0
+    };
+    VarView {
+        name,
+        value: display_value(&value),
+        typ: value_type_name(&value),
+        reference,
+        named: named_count(&value),
+        indexed: indexed_count(&value),
+    }
+}
+
+/// One paging-window row over a sequence value.
+fn range_row(
+    prog: &mut ExecProg,
+    frame_idx: usize,
+    root: &str,
+    path: Vec<zz_runtime::debug::DebugSeg>,
+    name: String,
+    start: usize,
+    len: usize,
+) -> VarView {
+    let reference = alloc_ref(prog);
+    prog.var_nodes.insert(
+        reference,
+        VarNode::Range {
+            frame_idx,
+            root: root.to_string(),
+            path,
+            start,
+            len,
+        },
+    );
+    VarView {
+        name,
+        value: String::new(),
+        typ: "range".to_string(),
+        reference,
+        named: 0,
+        indexed: len,
+    }
+}
+
+fn named_count(value: &Value) -> usize {
+    zz_runtime::debug::debug_child_count(value).0
+}
+
+fn indexed_count(value: &Value) -> usize {
+    zz_runtime::debug::debug_child_count(value).1
+}
+
+/// Top-level frame rows (roots register themselves when composite).
+fn frame_vars(prog: &mut ExecProg, frame_idx: usize) -> Vec<VarView> {
+    prog.vm
+        .debug_frame_vars(&prog.interp, frame_idx)
+        .into_iter()
+        .map(|(name, value)| child_row(prog, frame_idx, &name.clone(), Vec::new(), name, value))
+        .collect()
+}
+
+/// Children of an allocated node reference.
+fn node_vars(prog: &mut ExecProg, node: VarNode) -> Vec<VarView> {
+    use zz_runtime::debug::{DebugChild, DebugSeg};
+    match node {
+        VarNode::Value {
+            frame_idx,
+            root,
+            path,
+        } => {
+            let value = match prog.vm.debug_resolve(&prog.interp, frame_idx, &root, &path) {
+                Some(v) => v,
+                None => return Vec::new(),
+            };
+            let mut out = Vec::new();
+            for child in zz_runtime::debug::debug_children(&value) {
+                match child {
+                    DebugChild::Value { name, value } => {
+                        // Struct/dict/option members extend by field; a
+                        // sequence child would have been a Range node.
+                        let mut child_path = path.clone();
+                        child_path.push(DebugSeg::Field(name.clone()));
+                        out.push(child_row(prog, frame_idx, &root, child_path, name, value));
+                    }
+                    DebugChild::Range { name, start, len } => {
+                        out.push(range_row(
+                            prog,
+                            frame_idx,
+                            &root,
+                            path.clone(),
+                            name,
+                            start,
+                            len,
+                        ));
+                    }
+                }
+            }
+            out
+        }
+        VarNode::Range {
+            frame_idx,
+            root,
+            path,
+            start,
+            len,
+        } => {
+            let mut out = Vec::new();
+            for i in start..start + len {
+                let mut element_path = path.clone();
+                element_path.push(DebugSeg::Index(i));
+                let name = format!("[{i}]");
+                if let Some(value) =
+                    prog.vm
+                        .debug_resolve(&prog.interp, frame_idx, &root, &element_path)
+                {
+                    out.push(child_row(prog, frame_idx, &root, element_path, name, value));
+                }
+            }
+            out
+        }
+    }
+}
+
 fn inspect(prog: &mut ExecProg, req: InspectReq) -> InspectResp {
     match req {
         InspectReq::Frames => {
@@ -590,27 +806,14 @@ fn inspect(prog: &mut ExecProg, req: InspectReq) -> InspectResp {
                 .collect();
             InspectResp::Frames(frames)
         }
-        InspectReq::Vars { frame_idx } => {
-            let vars = prog
-                .vm
-                .debug_frame_vars(&prog.interp, frame_idx)
-                .into_iter()
-                .map(|(name, value)| {
-                    // `Unit` displays as empty: show `()` so variables never
-                    // render blank in the editor.
-                    let text = format!("{value}");
-                    let text = if text.is_empty() {
-                        "()".to_string()
-                    } else {
-                        text
-                    };
-                    VarView {
-                        name,
-                        value: text,
-                        typ: value_type_name(&value),
-                    }
-                })
-                .collect();
+        InspectReq::Vars { key } => {
+            let vars = match key {
+                VarKey::Frame(frame_idx) => frame_vars(prog, frame_idx),
+                VarKey::Node(reference) => match prog.var_nodes.get(&reference) {
+                    Some(node) => node_vars(prog, node.clone()),
+                    None => Vec::new(),
+                },
+            };
             InspectResp::Vars(vars)
         }
     }

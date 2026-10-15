@@ -44,8 +44,9 @@ dap.configurations.zz = {
 
 Implemented: `initialize`, `launch {program}`, `setBreakpoints`,
 `configurationDone`, `threads`, `stackTrace`, `scopes`, `variables`
-(leaf values only — structs render as text), `continue`, `next`
-(step-over), `disconnect`. Anything else answers `success: false`
+(structs/dicts/options expand by field, arrays/tuples page in
+`[0..99]` windows), `continue`, `next` (step-over), `stepIn`,
+`stepOut`, `disconnect`. Anything else answers `success: false`
 instead of hanging.
 
 ## Limitations (current)
@@ -54,5 +55,6 @@ instead of hanging.
   execute but carry no source labels yet.
 - **`input()` corrupts the session**: the debuggee shares stdio with
   the protocol — reading stdin steals framing bytes. Don't.
-- **Leaf-only variables**: no expandable children for structs/arrays.
+- **Long sequences page**: arrays/tuples over 100 items expand as
+  `[0..99]`, `[100..199]`, … windows.
 - **Function params** may not appear in Locals (slots + env only).
