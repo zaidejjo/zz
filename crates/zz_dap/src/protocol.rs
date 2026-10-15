@@ -105,4 +105,8 @@ pub struct ScopesArgs {
 pub struct VariablesArgs {
     #[serde(rename = "variablesReference")]
     pub variables_reference: u64,
+    #[serde(default)]
+    pub start: Option<u64>,
+    #[serde(default)]
+    pub count: Option<u64>,
 }

@@ -237,6 +237,39 @@ impl Vm {
         out
     }
 
+    /// Resolve a variable path for the variables view: the named root
+    /// in frame `idx`, then [`DebugSeg`](crate::debug::DebugSeg) steps.
+    /// Returns `None` for unknown roots, out-of-range indexes, and
+    /// missing fields — the adapter reports an empty scope instead of
+    /// guessing.
+    pub fn debug_resolve(
+        &self,
+        interp: &crate::eval::Interp,
+        idx: usize,
+        root: &str,
+        path: &[crate::debug::DebugSeg],
+    ) -> Option<crate::value::Value> {
+        let mut value = self
+            .debug_frame_vars(interp, idx)
+            .into_iter()
+            .find(|(name, _)| name == root)
+            .map(|(_, value)| value)?;
+        for seg in path {
+            value = match seg {
+                crate::debug::DebugSeg::Field(name) => {
+                    crate::debug::debug_child_named(&value, name)?
+                }
+                crate::debug::DebugSeg::Index(i) => match &value {
+                    crate::value::Value::Array(a) | crate::value::Value::Tuple(a) => {
+                        a.get(*i)?.clone()
+                    }
+                    _ => return None,
+                },
+            };
+        }
+        Some(value)
+    }
+
     /// Look up a variable where execution currently stands: the top
     /// frame's slots first (top-level lets live there until frame exit
     /// syncs them into the environment), then the interpreter env.

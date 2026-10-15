@@ -170,6 +170,158 @@ impl DebugSession {
     }
 }
 
+/// One step down a variable tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebugSeg {
+    /// Struct field / dict key / option payload (`value`) / result arm.
+    Field(String),
+    /// Absolute array/tuple index.
+    Index(usize),
+}
+
+/// One child of a composite value for the variables view.
+#[derive(Debug, Clone)]
+pub enum DebugChild {
+    /// A real child value.
+    Value {
+        name: String,
+        value: crate::value::Value,
+    },
+    /// A paging window over a long sequence (`[0..99]`).
+    Range {
+        name: String,
+        start: usize,
+        len: usize,
+    },
+}
+
+/// Maximum direct children before paging windows kick in (DAP convention).
+pub const DEBUG_PAGE_LEN: usize = 100;
+
+/// Whether a value expands in the variables view.
+pub fn debug_has_children(value: &crate::value::Value) -> bool {
+    use crate::value::Value;
+    matches!(
+        value,
+        Value::Object(_)
+            | Value::Array(_)
+            | Value::Tuple(_)
+            | Value::Dict(_)
+            | Value::Option(_)
+            | Value::Result(_)
+            | Value::Bytes(_)
+    )
+}
+
+/// Child count for counts (`namedVariables` / `indexedVariables`).
+/// Sequences report the raw length (clients page via ranges).
+pub fn debug_child_count(value: &crate::value::Value) -> (usize, usize) {
+    use crate::value::Value;
+    match value {
+        Value::Object(o) => (o.fields.len(), 0),
+        Value::Array(a) | Value::Tuple(a) => (0, a.len()),
+        Value::Dict(d) => (d.len(), 0),
+        Value::Option(o) => (usize::from(o.is_some()), 0),
+        Value::Result(_) => (1, 0),
+        Value::Bytes(b) => (0, b.len()),
+        _ => (0, 0),
+    }
+}
+
+/// Direct children of `value` (one level; sequences page past
+/// [`DEBUG_PAGE_LEN`]).
+pub fn debug_children(value: &crate::value::Value) -> Vec<DebugChild> {
+    use crate::value::Value;
+    match value {
+        Value::Object(o) => o
+            .fields
+            .iter()
+            .map(|(name, value)| DebugChild::Value {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        Value::Array(a) | Value::Tuple(a) => page_sequence(a, "Array"),
+        Value::Dict(d) => d
+            .iter()
+            .enumerate()
+            .map(|(i, (k, v))| {
+                let name = match k {
+                    Value::Str(s) => s.to_string(),
+                    Value::Int(n) => n.to_string(),
+                    _ => format!("[{i}]"),
+                };
+                DebugChild::Value {
+                    name,
+                    value: v.clone(),
+                }
+            })
+            .collect(),
+        Value::Option(o) => match o.as_ref() {
+            Some(v) => vec![DebugChild::Value {
+                name: "value".to_string(),
+                value: v.as_ref().clone(),
+            }],
+            None => Vec::new(),
+        },
+        Value::Result(r) => match r.as_ref() {
+            Ok(v) => vec![DebugChild::Value {
+                name: "ok".to_string(),
+                value: v.clone(),
+            }],
+            Err(e) => vec![DebugChild::Value {
+                name: "err".to_string(),
+                value: e.clone(),
+            }],
+        },
+        Value::Bytes(b) => {
+            let bytes: Vec<crate::value::Value> = b
+                .as_slice()
+                .iter()
+                .map(|byte| crate::value::Value::Int(*byte as i64))
+                .collect();
+            page_sequence(&bytes, "Bytes")
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn page_sequence(values: &[crate::value::Value], _kind: &str) -> Vec<DebugChild> {
+    if values.len() <= DEBUG_PAGE_LEN {
+        return values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| DebugChild::Value {
+                name: format!("[{i}]"),
+                value: value.clone(),
+            })
+            .collect();
+    }
+    values
+        .chunks(DEBUG_PAGE_LEN)
+        .enumerate()
+        .map(|(page, chunk)| {
+            let start = page * DEBUG_PAGE_LEN;
+            DebugChild::Range {
+                name: format!("[{start}..{}]", start + chunk.len() - 1),
+                start,
+                len: chunk.len(),
+            }
+        })
+        .collect()
+}
+
+/// The named direct child value of a composite (ranges excluded —
+/// absolute indexes address sequences directly).
+pub fn debug_child_named(value: &crate::value::Value, name: &str) -> Option<crate::value::Value> {
+    debug_children(value)
+        .into_iter()
+        .find_map(|child| match child {
+            DebugChild::Value { name: n, value } if n == name => Some(value),
+            _ => None,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
