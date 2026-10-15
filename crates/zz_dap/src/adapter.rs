@@ -53,7 +53,7 @@ enum WorkerCmd {
     SetBreakpoints { path: String, lines: Vec<u32> },
     Start,
     Resume,
-    Step,
+    Step(zz_runtime::debug::StepMode),
     Inspect(InspectReq, mpsc::Sender<InspectResp>),
     Disconnect,
 }
@@ -123,7 +123,24 @@ impl Adapter {
             "scopes" => self.on_scopes(seq, req),
             "variables" => self.on_variables(seq, req),
             "continue" => self.on_run_control(seq, req, "continue", WorkerCmd::Resume),
-            "next" => self.on_run_control(seq, req, "next", WorkerCmd::Step),
+            "next" => self.on_run_control(
+                seq,
+                req,
+                "next",
+                WorkerCmd::Step(zz_runtime::debug::StepMode::Over),
+            ),
+            "stepIn" => self.on_run_control(
+                seq,
+                req,
+                "stepIn",
+                WorkerCmd::Step(zz_runtime::debug::StepMode::Into),
+            ),
+            "stepOut" => self.on_run_control(
+                seq,
+                req,
+                "stepOut",
+                WorkerCmd::Step(zz_runtime::debug::StepMode::Out),
+            ),
             "disconnect" => self.on_disconnect(seq, req),
             other => Response::err(
                 seq,
@@ -425,7 +442,10 @@ fn exec_main(
 ) {
     let parsed = zz_frontend::parse(&source);
     let mut chunk = Compiler::compile_program(&parsed.program);
-    chunk.source = Some(std::sync::Arc::from(program_path.as_str()));
+    zz_runtime::coverage::stamp_chunk_tree(
+        &mut chunk,
+        &std::sync::Arc::from(program_path.as_str()),
+    );
     let chunk = std::sync::Arc::new(chunk);
 
     let mut session = DebugSession::new();
@@ -485,10 +505,10 @@ fn exec_command(prog: &mut ExecProg, cmd: WorkerCmd, event_tx: &mpsc::Sender<Wor
                 run_until_park(prog, event_tx);
             }
         }
-        WorkerCmd::Resume | WorkerCmd::Step => {
+        WorkerCmd::Resume | WorkerCmd::Step(_) => {
             if prog.status == ExecStatus::Parked {
-                if matches!(cmd, WorkerCmd::Step) {
-                    arm_step(prog);
+                if let WorkerCmd::Step(mode) = cmd {
+                    arm_step(prog, mode);
                 }
                 prog.status = ExecStatus::Running;
                 run_until_park(prog, event_tx);
@@ -501,15 +521,15 @@ fn exec_command(prog: &mut ExecProg, cmd: WorkerCmd, event_tx: &mpsc::Sender<Wor
     false
 }
 
-/// Arm a step-over from the current parked position.
-fn arm_step(prog: &mut ExecProg) {
+/// Arm a step from the current parked position.
+fn arm_step(prog: &mut ExecProg, mode: zz_runtime::debug::StepMode) {
     let depth = prog.vm.debug_frames().len();
     if let Some((func, label, span)) = prog.vm.debug_frames().first() {
         let _ = func;
         if let Some(label) = label {
             let mut session = prog.session.lock().unwrap();
             let line = session.line_for(label, span.start).unwrap_or(1);
-            session.start_step(label.clone(), line, depth);
+            session.start_step(mode, label.clone(), line, depth);
         }
     }
 }
