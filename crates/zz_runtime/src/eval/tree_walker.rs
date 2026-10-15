@@ -16,6 +16,22 @@ use crate::value::{FuncValue, ObjectValue, RangeValue, Value};
 use super::Interp;
 
 impl Interp {
+    /// Deprecated `db` module → `sqlz` canonical spelling (one release).
+    /// Alias, not copy: there is exactly one implementation — the `sqlz`
+    /// one. Maps `db.*` → `sqlz.*` and `std.db.*` → `std.sqlz.*`.
+    /// (Local inline copy of `zz_stdlib::canonical_std_func` — zz_runtime
+    /// cannot depend on zz_stdlib. Callers gate on module position so a
+    /// handle variable named `db` never rewrites.)
+    pub(crate) fn canonical_db_alias(name: &str) -> Option<String> {
+        if let Some(rest) = name.strip_prefix("std.db.") {
+            return Some(format!("std.sqlz.{rest}"));
+        }
+        if let Some(rest) = name.strip_prefix("db.") {
+            return Some(format!("sqlz.{rest}"));
+        }
+        None
+    }
+
     pub(crate) fn run_stmt(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
         match stmt {
             Stmt::Decl { name, value, .. } => match self.eval(value)? {
@@ -372,9 +388,8 @@ impl Interp {
                     ..
                 } = e
                 {
-                    const MUTATING_METHODS: &[&str] = &[
-                        "push", "pop", "insert", "remove", "reverse", "sort", "append",
-                    ];
+                    const MUTATING_METHODS: &[&str] =
+                        &["push", "pop", "insert", "remove", "reverse", "sort"];
 
                     // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
                     if let Expr::Path { parts, span: pspan } = callee.as_ref() {
@@ -496,25 +511,8 @@ impl Interp {
                             }
                         }
                     }
-                    // Built-in `append(arr, val)` write-back.
-                    if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-                        if fname == "append" && args.len() == 2 && named.is_empty() {
-                            if let Expr::Ident {
-                                name: arr_name,
-                                span,
-                            } = &args[0]
-                            {
-                                let result = self.eval(e)?;
-                                if !self.env.assign(arr_name, result.into_value()?) {
-                                    return Err(EvalError::new(
-                                        format!("undefined variable `{arr_name}`"),
-                                        *span,
-                                    ));
-                                }
-                                return Ok(Flow::Value(Value::Unit));
-                            }
-                        }
-                    }
+                    // NOTE: the bare `append(arr, val)` builtin was removed —
+                    // push is `vec.push(x, e)` or the method `x.push(e)`.
                 }
                 self.eval(e)
             }
@@ -803,7 +801,15 @@ impl Interp {
         parts: &[String],
         span: Span,
     ) -> Result<Value, EvalError> {
-        let name = parts.join(".");
+        // Deprecated `db` module → `sqlz` (one release): rewrite the
+        // dotted name only when the head has NO local binding. A handle
+        // variable named `db` (`db := sqlz.open(..)`) falls through to the
+        // value path below untouched.
+        let raw = parts.join(".");
+        let name = match Self::canonical_db_alias(&raw) {
+            Some(canon) if !parts.is_empty() && self.env.get(&parts[0]).is_none() => canon,
+            _ => raw,
+        };
         if let Some(v) = self.env.get(&name) {
             return Ok(v);
         }
@@ -830,6 +836,17 @@ impl Interp {
     }
 
     fn lookup_callable(&self, name: &str, span: Span) -> Result<Value, EvalError> {
+        // Deprecated `db` module → `sqlz` (one release). Same head rule as
+        // `resolve_path_value`: locals win, module position rewrites.
+        let raw_head = name.split('.').next().unwrap_or(name);
+        let owned;
+        let name = match Self::canonical_db_alias(name) {
+            Some(canon) if self.env.get(raw_head).is_none() => {
+                owned = canon;
+                &owned
+            }
+            _ => name,
+        };
         if let Some(v) = self.env.get(name) {
             return Ok(v);
         }
@@ -874,14 +891,8 @@ impl Interp {
             if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
                 return Ok((f, recv.clone()));
             }
-            // `db.*` is a zero-overhead alias for canonical `sqlz.*`:
-            // fall back so handles work regardless of which module was
-            // imported.
-            if ns == "sqlz" {
-                if let Ok(f) = self.lookup_callable(&format!("db.{method}"), span) {
-                    return Ok((f, recv.clone()));
-                }
-            }
+            // NOTE: the old `db.*` fallback for `sqlz` handles was removed
+            // with the `db` module — `sqlz` is canonical.
         }
         if let Value::Object(o) = recv {
             // Try TypeName.method (impl block methods)

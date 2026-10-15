@@ -34,9 +34,10 @@ fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -
         Some(Type::HttpRequest) => vec![format!("http.{method}")],
         Some(Type::TcpStream) | Some(Type::TcpListener) => vec![format!("net.{method}")],
         Some(Type::HttpServer) => vec![format!("http.{method}")],
-        // Canonical `sqlz.*` plus `db.*` alias so DCE keeps the target
-        // regardless of which namespace the call site used.
-        Some(Type::Db) => vec![format!("sqlz.{method}"), format!("db.{method}")],
+        // Canonical `sqlz.*` only — the `db` module was removed. Method
+        // calls on handles named `db` still dispatch here (module use of
+        // `db` warns in the checker; this table never sees it).
+        Some(Type::Db) => vec![format!("sqlz.{method}")],
         Some(Type::Json) => vec![format!("json.{method}")],
         // Opaque handles dispatch on their module tag (`regex.*`, …).
         Some(Type::Opaque(tag)) => vec![format!("{tag}.{method}")],

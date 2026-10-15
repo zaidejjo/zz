@@ -120,36 +120,3 @@ fn push_struct_array_for_loop() {
     .unwrap();
     assert_eq!(result, Value::Str("Alice Bob".to_string().into()));
 }
-
-#[test]
-fn append_mutates_array() {
-    let result = run(r#"
-        arr := [1, 2, 3]
-        append(arr, 4)
-        arr.len()
-    "#)
-    .unwrap();
-    assert_eq!(result, Value::Int(4));
-}
-
-#[test]
-fn append_preserves_elements() {
-    let result = run(r#"
-        arr := [1, 2, 3]
-        append(arr, 4)
-        arr[0] + arr[1] + arr[2] + arr[3]
-    "#)
-    .unwrap();
-    assert_eq!(result, Value::Int(10));
-}
-
-#[test]
-fn append_method_syntax() {
-    let result = run(r#"
-        arr := [1, 2, 3]
-        arr.append(4)
-        arr.len()
-    "#)
-    .unwrap();
-    assert_eq!(result, Value::Int(4));
-}

@@ -67,32 +67,13 @@ impl MoveKind {
 }
 
 /// Push-family callee spellings that never invoke user code.
-/// Bare `append` is intentionally absent: on native it lowers to the
-/// in-place mutator (unit return), so `x = vec.append(x, e)` is not the
-/// same value shape there.
+/// Only `vec.push` / `std.vec.push`: the `append` spellings were removed —
+/// push is `vec.push` plus the method form `xs.push(x)`.
 fn is_push_callee(callee: &Expr) -> bool {
     match callee {
         Expr::Ident { name, .. } => name == "vec.push" || name == "std.vec.push",
         Expr::Path { parts, .. } => {
             parts.as_slice() == ["vec", "push"] || parts.as_slice() == ["std", "vec", "push"]
-        }
-        _ => false,
-    }
-}
-
-/// `is_push_callee` plus the append spellings. Only for engines where
-/// append is value-identical to push (the VM: both return the new array).
-/// The native backend must keep using `is_push_callee`.
-fn is_push_or_append_callee(callee: &Expr) -> bool {
-    if is_push_callee(callee) {
-        return true;
-    }
-    match callee {
-        Expr::Ident { name, .. } => {
-            name == "append" || name == "vec.append" || name == "std.vec.append"
-        }
-        Expr::Path { parts, .. } => {
-            parts.as_slice() == ["vec", "append"] || parts.as_slice() == ["std", "vec", "append"]
         }
         _ => false,
     }
@@ -1004,10 +985,10 @@ pub fn classify_self_assign(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
     classify_with(target, rhs, &is_push_callee)
 }
 
-/// VM-engine classification: push plus append spellings (see
-/// `is_push_or_append_callee`; append is value-identical to push there).
+/// VM-engine classification: push spellings (see `is_push_callee` — the
+/// `append` spellings were removed, so both engines classify identically).
 pub fn classify_self_assign_vm(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
-    classify_with(target, rhs, &is_push_or_append_callee)
+    classify_with(target, rhs, &is_push_callee)
 }
 
 fn classify_with(target: &Expr, rhs: &Expr, is_push: &dyn Fn(&Expr) -> bool) -> Option<MoveKind> {

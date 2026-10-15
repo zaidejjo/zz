@@ -839,14 +839,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: vec_mod::vec_remove,
         },
     );
-    // vec.append — alias for vec.push, same semantics
-    m.insert(
-        "vec.append".into(),
-        NativeEntry {
-            arity: 2,
-            f: vec_mod::vec_push,
-        },
-    );
+    // NOTE: `vec.append` was removed — canonical spelling is `vec.push`
+    // plus the method form `xs.push(x)`. No bare `push`/`append` builtin.
     // vec.enumerate / std.vec.enumerate — method spellings of `enumerate`.
     m.insert(
         "vec.enumerate".into(),
@@ -3449,7 +3443,10 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // `query`/`exec` take (db, template, ...bound_params); the VM's DbQuery
     // op splits the interpolated SQL into template + params so values are
     // bound via prepared statements, never concatenated.
-    // `std.db` / `db.*` below are zero-overhead aliases (same fn pointers).
+    // `std.db` / `db.*` seeds removed: `sqlz` is the only SQLite module.
+    // Alias resolution (with deprecation warning) lives in the
+    // checker/loader; runtime keeps the `db.*` name mapping for one release.
+    // (db seed block deleted — canonical `std.sqlz.*` + `sqlz.*` above.)
     m.insert(
         "std.sqlz.open".into(),
         NativeEntry {
@@ -3507,64 +3504,9 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: db::db_close,
         },
     );
-    // Alias: `std.db` / `db.*` point directly at the `std.sqlz` impls.
-    m.insert(
-        "std.db.open".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_open,
-        },
-    );
-    m.insert(
-        "std.db.exec".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_exec,
-        },
-    );
-    m.insert(
-        "std.db.query".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_query,
-        },
-    );
-    m.insert(
-        "std.db.close".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_close,
-        },
-    );
-    // Method-dispatch aliases (`db.open(...)` after `import std.db`).
-    m.insert(
-        "db.open".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_open,
-        },
-    );
-    m.insert(
-        "db.exec".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_exec,
-        },
-    );
-    m.insert(
-        "db.query".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_query,
-        },
-    );
-    m.insert(
-        "db.close".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_close,
-        },
-    );
+    // NOTE: `std.db.*` / `db.*` seeds removed — `sqlz` is canonical.
+    // (One-release runtime fallback maps `db.*` names to these fn pointers;
+    // see `lookup_db_alias` in the VM/tree-walker.)
 
     // std.sqlz.postgres — wire-protocol driver. Import as
     // `import std.sqlz.postgres as pg`; the namespace copies below happen
@@ -3647,20 +3589,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: db::db_transaction,
         },
     );
-    m.insert(
-        "std.db.transaction".into(),
-        NativeEntry {
-            arity: 2,
-            f: db::db_transaction,
-        },
-    );
-    m.insert(
-        "db.transaction".into(),
-        NativeEntry {
-            arity: 2,
-            f: db::db_transaction,
-        },
-    );
 
     // Built-in: `typeof(v)` — the runtime type name of any value.
     m.insert(
@@ -3703,14 +3631,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
-    // Built-in: `append(arr, val)` — mutates array in-place, returns unit.
-    m.insert(
-        "append".into(),
-        NativeEntry {
-            arity: 2,
-            f: builtins::append_fn,
-        },
-    );
+    // NOTE: the bare `append(arr, val)` builtin was removed. Push is
+    // `vec.push(v, x)` plus the method form `xs.push(x)`.
 
     // Built-in: `dbg(v)` — debug print preserving Option wrappers,
     // returns `v` unchanged. The only display path that keeps

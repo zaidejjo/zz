@@ -9,10 +9,11 @@ use zz_frontend::span::Span;
 /// Top-level std module names the checker suggests imports for.
 /// Keep in sync with `zz_stdlib::STDLIB_MODULES` (this crate cannot
 /// depend on `zz_stdlib`: the dependency points the other way).
+/// (`db` deliberately absent: the module was removed, `sqlz` is canonical.)
 const KNOWN_STD_MODULES: &[&str] = &[
-    "args", "bytes", "cell", "chan", "colors", "csv", "crypto", "db", "dec", "encoding", "env",
-    "fs", "http", "json", "log", "map", "math", "net", "path", "process", "regexp", "set", "sqlz",
-    "str", "sys", "task", "term", "test", "time", "unix", "uuid", "vec",
+    "args", "bytes", "cell", "chan", "colors", "csv", "crypto", "dec", "encoding", "env", "fs",
+    "http", "json", "log", "map", "math", "net", "path", "process", "regexp", "set", "sqlz", "str",
+    "sys", "task", "term", "test", "time", "unix", "uuid", "vec",
 ];
 
 impl Checker {

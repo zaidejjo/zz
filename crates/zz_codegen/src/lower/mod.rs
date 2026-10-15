@@ -913,7 +913,6 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "filter" | "vec.filter" | "std.vec.filter" => Some("zz_iter_filter"),
         "enumerate" | "vec.enumerate" | "std.vec.enumerate" => Some("zz_iter_enumerate"),
         "zip" | "vec.zip" | "std.vec.zip" => Some("zz_iter_zip"),
-        "append" => Some("zz_vec_push"),
         "clone" => Some("zz_clone_deep"),
         "range" => Some("zz_range3"),
         "typeof" => Some("zz_typeof"),
@@ -924,12 +923,8 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         // vec methods — bare names for method dispatch
         "vec.len" | "std.vec.len" | "vec_len" => Some("zz_vec_len"),
         "bytes.len" | "std.bytes.len" => Some("zz_len"),
-        // `vec.append` is documented (stdlib.md, checker sigs) as an alias
-        // for `vec.push`: it returns the new array. Map to the value form
-        // `zz_vec_push`; statement position still mutates in place via the
-        // existing void-context `zz_vec_push` → `zz_vec_append` swap in
-        // expr.rs (same as `vec.push` and bare `append`).
-        "vec.append" | "std.vec.append" => Some("zz_vec_push"),
+        // `vec.append` was removed — canonical spelling is `vec.push`.
+        // (Mapping deleted; the checker errors with a rename hint.)
         "vec.push" | "std.vec.push" => Some("zz_vec_push"),
         "vec.pop" | "std.vec.pop" => Some("zz_vec_pop"),
         "vec.remove" | "std.vec.remove" => Some("zz_vec_remove"),
@@ -1157,9 +1152,10 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.set_write_timeout" | "std.net.set_write_timeout" => Some("zz_tcp_set_write_timeout"),
         // sqlz (AOT: sqlite3 prepared-statement C impl + postgres via
         // the staticlib; the C handle records the backend).
-        // Canonical `sqlz.*` / `std.sqlz.*`; `db.*` / `std.db.*` are
-        // zero-overhead aliases; `pg.*` / `std.sqlz.postgres.*` are the
-        // explicit PG spellings (same handle, same dispatch).
+        // Canonical `sqlz.*` / `std.sqlz.*`; `db.*` / `std.db.*` are a
+        // deprecated one-release mapping (checker warns, rewrite to sqlz);
+        // `pg.*` / `std.sqlz.postgres.*` are the explicit PG spellings
+        // (`pg` only exists as an import alias of the nested module).
         "sqlz.open" | "std.sqlz.open" | "db.open" | "std.db.open" => Some("zz_db_open"),
         "pg.connect" | "std.sqlz.postgres.connect" => Some("zz_pg_connect"),
         "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec" => Some("zz_db_exec"),

@@ -2026,11 +2026,10 @@ impl Checker {
                         }
                         Type::Json => sig = self.funcs.get(&format!("json.{method}")).cloned(),
                         Type::Db => {
-                            // Canonical `sqlz.*` first, `db.*` alias fallback.
+                            // Canonical `sqlz.*` only — the `db` module was
+                            // removed. Handle variables named `db` dispatch
+                            // here silently (method call, not module use).
                             sig = self.funcs.get(&format!("sqlz.{method}")).cloned();
-                            if sig.is_none() {
-                                sig = self.funcs.get(&format!("db.{method}")).cloned();
-                            }
                         }
                         Type::Chan => sig = self.funcs.get(&format!("chan.{method}")).cloned(),
                         Type::TaskJoin => sig = self.funcs.get(&format!("task.{method}")).cloned(),
@@ -2096,6 +2095,99 @@ impl Checker {
             _ => None,
         };
         if let Some(name) = &direct_name {
+            // Deprecated `db`/`std.db` module namespace → `sqlz` (one release).
+            // Alias, not copy: `db` has no seeds — resolve to the single
+            // `sqlz` implementation. Fires ONLY when the head is the module
+            // namespace, never for a handle variable (`db := sqlz.open(..);
+            // db.exec(..)` is a method call and stays silent).
+            // (Local inline copy of `zz_stdlib::canonical_std_func` — the
+            // checker cannot depend on zz_stdlib.)
+            let eff_name: String = match name
+                .strip_prefix("std.db.")
+                .map(|r| format!("std.sqlz.{r}"))
+                .or_else(|| name.strip_prefix("db.").map(|r| format!("sqlz.{r}")))
+            {
+                Some(canon) => {
+                    let head_is_module = match callee {
+                        Expr::Path { parts, .. } => {
+                            parts.len() >= 2 && self.lookup_opt(&parts[0]).is_none()
+                        }
+                        _ => false,
+                    };
+                    if head_is_module {
+                        // Mark the original spelling used so `import std.db`
+                        // does not also warn as unused (the use flowed to
+                        // the canonical `sqlz` entry below).
+                        self.used_names.insert(name.clone());
+                        self.errors.push(
+                            warning_at(
+                                "std module `db` is deprecated — rename to `sqlz` (there is no `std.db`)",
+                                span,
+                            )
+                            .with_note(format!("hint: use `{canon}` instead")),
+                        );
+                        canon
+                    } else {
+                        name.clone()
+                    }
+                }
+                None => name.clone(),
+            };
+            let name = &eff_name;
+            // Removed push spellings: `vec.append` / `std.vec.append` and the
+            // bare `append` builtin are gone — `vec.push` plus the method form
+            // `xs.push(x)` is the only spelling. Hard error with a hint
+            // (no silent redirect: the old bare form fused to an in-place
+            // statement op, so a quiet rewrite could change behavior).
+            if name.as_str() == "vec.append"
+                || name.as_str() == "std.vec.append"
+                || name.as_str() == "append"
+            {
+                // Still check the args so nested errors inside them surface,
+                // then stop: the name no longer resolves, and letting lookup
+                // run on would add a confusing second error (e.g. suggesting
+                // `import std.fs` for the unrelated file `fs.append` API).
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    "removed: `append` is gone — use `vec.push(v, x)` or the method form `xs.push(x)`",
+                    span,
+                ));
+                return Type::Array(Box::new(self.unifier.fresh_var()));
+            }
+            // Bare `pg.*` / `my.*` / `postgres.*` / `mysql.*` never resolve:
+            // postgres/mysql live nested inside sqlz. Guide to the import.
+            if name.as_str() == "pg.query"
+                || name.as_str() == "pg.exec"
+                || name.as_str() == "postgres.query"
+                || name.as_str() == "postgres.exec"
+                || name.as_str() == "my.query"
+                || name.as_str() == "my.exec"
+                || name.as_str() == "mysql.query"
+                || name.as_str() == "mysql.exec"
+            {
+                // Still check the args so nested errors surface, then stop:
+                // these names never resolve (nested modules need an import),
+                // and falling through would add a bare "undefined variable".
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    "unknown module: postgres/mysql live inside `sqlz` — `import std.sqlz.postgres` (optionally `as pg`) or `import std.sqlz.mysql` (`as my`), then call `pg.query(..)` / `my.query(..)`",
+                    span,
+                ));
+                if name.as_str().ends_with(".exec") {
+                    return Type::Int;
+                }
+                return Type::Array(Box::new(self.unifier.fresh_var()));
+            }
             // Math constants are values, not functions: `math.PI()` is
             // always an error — use bare `math.PI`.
             if self.is_math_const(name) && self.funcs.contains_key(name) {
@@ -2116,7 +2208,8 @@ impl Checker {
                 return Type::Float;
             }
             // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` (canonical;
-            // `db.*` / `std.db.*` are zero-overhead aliases) take an
+            // the `db` module was removed — module-position `db.*` calls are
+            // rewritten to `sqlz.*` with a deprecation warning above) take an
             // interpolated SQL string. `{expr}` segments are extracted as
             // bound parameters (never inlined), so verification here is:
             // receiver is `db`, SQL arg is `str`, each bound expr is a
@@ -2554,11 +2647,10 @@ impl Checker {
                             sig = self.funcs.get(&format!("json.{method}")).cloned();
                         }
                         Type::Db => {
-                            // Canonical `sqlz.*` first, `db.*` alias fallback.
+                            // Canonical `sqlz.*` only — the `db` module was
+                            // removed. Handle variables named `db` dispatch
+                            // here silently (method call, not module use).
                             sig = self.funcs.get(&format!("sqlz.{method}")).cloned();
-                            if sig.is_none() {
-                                sig = self.funcs.get(&format!("db.{method}")).cloned();
-                            }
                         }
                         Type::Chan => {
                             sig = self.funcs.get(&format!("chan.{method}")).cloned();
