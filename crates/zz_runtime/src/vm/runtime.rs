@@ -2177,7 +2177,9 @@ impl Vm {
                                         Unwind::Error(err) => return Err(err),
                                     },
                                     Some(fname) => {
-                                        let Some(fv) = zz_checker::lookup_std(&interp.funcs, &fname).cloned() else {
+                                        let Some(fv) =
+                                            zz_checker::lookup_std(&interp.funcs, &fname).cloned()
+                                        else {
                                             match self.unwind_frame(
                                                 Flow::Return(Value::Result(Box::new(Err(
                                                     e.clone()

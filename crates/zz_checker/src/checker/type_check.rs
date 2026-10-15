@@ -1012,7 +1012,9 @@ impl Checker {
                             _ => None,
                         };
                         if let Some(ns) = ns {
-                            if let Some(sig) = crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned() {
+                            if let Some(sig) =
+                                crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned()
+                            {
                                 let (ps, ret, subs) = self.instantiate(&sig);
                                 if !ps.is_empty() {
                                     if let Err(e) = self.unifier.unify(&other, &ps[0]) {
@@ -1999,63 +2001,95 @@ impl Checker {
                 let mut sig = crate::lookup_std(&self.funcs, &method).cloned();
                 if sig.is_none() {
                     match &self.unifier.resolve(&recv_t) {
-                        Type::Str => sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned(),
-                        Type::Array(_) => sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned(),
-                        Type::Bytes => sig = crate::lookup_std(&self.funcs, &format!("bytes.{method}")).cloned(),
+                        Type::Str => {
+                            sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned()
+                        }
+                        Type::Array(_) => {
+                            sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned()
+                        }
+                        Type::Bytes => {
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("bytes.{method}")).cloned()
+                        }
                         Type::Option(_) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("option.{method}")).cloned()
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("option.{method}")).cloned()
                         }
                         Type::Result(_, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("result.{method}")).cloned()
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("result.{method}")).cloned()
                         }
                         // Scalar extensions (`impl int/float/bool`) live in
                         // the same merged table; no stdlib namespace here.
-                        Type::Int => sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned(),
-                        Type::Float => sig = crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned(),
-                        Type::Bool => sig = crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned(),
-                        Type::Response => sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned(),
+                        Type::Int => {
+                            sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned()
+                        }
+                        Type::Float => {
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned()
+                        }
+                        Type::Bool => {
+                            sig = crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned()
+                        }
+                        Type::Response => {
+                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                        }
                         Type::HttpRequest => {
                             sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
                         }
-                        Type::TcpStream => sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned(),
+                        Type::TcpStream => {
+                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+                        }
                         Type::TcpListener => {
                             sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
                         }
                         Type::HttpServer => {
                             sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
                         }
-                        Type::Json => sig = crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned(),
+                        Type::Json => {
+                            sig = crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned()
+                        }
                         Type::Db => {
                             // Canonical `sqlz.*` only — the `db` module was
                             // removed. Handle variables named `db` dispatch
                             // here silently (method call, not module use).
-                            sig = crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
                         }
-                        Type::Chan => sig = crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned(),
-                        Type::TaskJoin => sig = crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned(),
+                        Type::Chan => {
+                            sig = crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned()
+                        }
+                        Type::TaskJoin => {
+                            sig = crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned()
+                        }
                         // Opaque handles dispatch on their module tag, e.g.
                         // an `Opaque("regex")` receiver resolves
                         // `regex.is_match`.
                         Type::Opaque(tag) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned()
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned()
                         }
                         Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
-                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}"))
+                                .cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned();
+                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                        .cloned();
                                 }
                             }
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
                         Type::Enum(ename, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}"))
+                                .cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned();
+                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                        .cloned();
                                 }
                             }
                         }
@@ -2572,7 +2606,11 @@ impl Checker {
                                     .cloned();
                                 if sig.is_none() {
                                     if let Some((ns, _)) = canonical_head2.rsplit_once('.') {
-                                        sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method2}")).cloned();
+                                        sig = crate::lookup_std(
+                                            &self.funcs,
+                                            &format!("{ns}.{method2}"),
+                                        )
+                                        .cloned();
                                     }
                                 }
                                 if let Some(sig) = sig {
@@ -2646,7 +2684,9 @@ impl Checker {
                                         return *ret;
                                     }
                                     Type::Named(ref nname) => {
-                                        if let Some(sig) = crate::lookup_std(&self.funcs, nname).cloned() {
+                                        if let Some(sig) =
+                                            crate::lookup_std(&self.funcs, nname).cloned()
+                                        {
                                             let (ps, ret, subs) = self.instantiate(&sig);
                                             let pnames: Vec<String> =
                                                 sig.params.iter().map(|(n, _)| n.clone()).collect();
@@ -2695,25 +2735,31 @@ impl Checker {
                             sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned();
                         }
                         Type::Option(_) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("option.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("option.{method}"))
+                                .cloned();
                         }
                         Type::Result(_, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("result.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("result.{method}"))
+                                .cloned();
                         }
                         Type::Int => {
                             sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned();
                         }
                         Type::Float => {
-                            sig = crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned();
                         }
                         Type::Bool => {
-                            sig = crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned();
                         }
                         Type::Response => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
                         }
                         Type::HttpRequest => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
                         }
                         Type::TcpStream => {
                             sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned();
@@ -2722,43 +2768,53 @@ impl Checker {
                             sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned();
                         }
                         Type::HttpServer => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
                         }
                         Type::Json => {
-                            sig = crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned();
                         }
                         Type::Db => {
                             // Canonical `sqlz.*` only — the `db` module was
                             // removed. Handle variables named `db` dispatch
                             // here silently (method call, not module use).
-                            sig = crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
                         }
                         Type::Chan => {
-                            sig = crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned();
                         }
                         Type::TaskJoin => {
-                            sig = crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned();
                         }
                         Type::Opaque(tag) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned();
                         }
                         Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
-                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}"))
+                                .cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned();
+                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                        .cloned();
                                 }
                             }
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
                         Type::Enum(ename, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}"))
+                                .cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned();
+                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                        .cloned();
                                 }
                             }
                         }
@@ -3175,13 +3231,15 @@ impl Checker {
                     // structural unification applies instead of failing on
                     // `Named` vs `Func`.
                     let at = match (&at, &expected) {
-                        (Type::Named(n), Type::Func(_, _)) => match crate::lookup_std(&self.funcs, n).cloned() {
-                            Some(sig) => {
-                                let (sps, sret, _) = self.instantiate(&sig);
-                                Type::Func(sps, Box::new(sret))
+                        (Type::Named(n), Type::Func(_, _)) => {
+                            match crate::lookup_std(&self.funcs, n).cloned() {
+                                Some(sig) => {
+                                    let (sps, sret, _) = self.instantiate(&sig);
+                                    Type::Func(sps, Box::new(sret))
+                                }
+                                None => at,
                             }
-                            None => at,
-                        },
+                        }
                         _ => at,
                     };
                     if let Err(e) = self.unifier.unify(&at, &expected) {

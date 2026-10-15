@@ -2863,16 +2863,10 @@ impl Lowerer {
         // Both are passed explicitly.
         if matches!(
             cname.as_str(),
-            "sqlz.query"
-                | "std.sqlz.query"
-                | "pg.query"
-                | "std.sqlz.postgres.query"
+            "sqlz.query" | "std.sqlz.query" | "pg.query" | "std.sqlz.postgres.query"
         ) || matches!(
             cname.as_str(),
-            "sqlz.exec"
-                | "std.sqlz.exec"
-                | "pg.exec"
-                | "std.sqlz.postgres.exec"
+            "sqlz.exec" | "std.sqlz.exec" | "pg.exec" | "std.sqlz.postgres.exec"
         ) {
             return self.emit_db_call(&cname, method_receiver.as_ref(), ordered_args, names, out);
         }
@@ -2881,10 +2875,7 @@ impl Lowerer {
         // path (closures have no C function pointer).  Instead we inline the
         // closure body between BEGIN / COMMIT / ROLLBACK directly, binding
         // the closure parameter (typically `tx`) to the same db handle.
-        if matches!(
-            cname.as_str(),
-            "sqlz.transaction" | "std.sqlz.transaction"
-        ) {
+        if matches!(cname.as_str(), "sqlz.transaction" | "std.sqlz.transaction") {
             if let Some(Expr::Closure { params, body, .. }) = args.last() {
                 // Emit the db handle — for the method form
                 // `db.transaction(|tx| {...})` the receiver IS the db;
@@ -5175,10 +5166,7 @@ impl Lowerer {
         }
         let is_query = matches!(
             cname,
-            "sqlz.query"
-                | "std.sqlz.query"
-                | "pg.query"
-                | "std.sqlz.postgres.query"
+            "sqlz.query" | "std.sqlz.query" | "pg.query" | "std.sqlz.postgres.query"
         );
         let rt = if is_query {
             "zz_db_query"

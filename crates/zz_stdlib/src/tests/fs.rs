@@ -72,10 +72,7 @@ fn fs_append_copy_move_dirs_and_stat() {
     .unwrap();
     assert_eq!(v, Value::Result(Box::new(Ok(Value::Unit))));
 
-    let v = run(&format!(
-        "import std.fs\nfs.read(\"{base}/a.txt\")"
-    ))
-    .unwrap();
+    let v = run(&format!("import std.fs\nfs.read(\"{base}/a.txt\")")).unwrap();
     assert_eq!(
         v,
         Value::Result(Box::new(Ok(Value::Str("hello!".to_string().into()))))
