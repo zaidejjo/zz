@@ -804,7 +804,13 @@ fn check_program_impl(
                     } else {
                         // Builtin-wins: an extension colliding with an existing
                         // inherent/stdlib method is an error naming the origin.
-                        if checker.funcs.contains_key(&full_name) {
+                        // Seeds are canonical (`std.*` only), so check the
+                        // canonical spelling too (`str.length` collides with
+                        // `std.str.length`).
+                        if checker.funcs.contains_key(&full_name)
+                            || canonical_std_name(&full_name)
+                                .is_some_and(|c| checker.funcs.contains_key(&c))
+                        {
                             let origin = if Checker::is_stdlib_method(&full_name) {
                                 "defined in the standard library"
                             } else {

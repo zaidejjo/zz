@@ -529,6 +529,13 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.span.end".into(),
         sig(vec![("sp", span_t.clone())], Type::Int),
     );
+    // NOTE: bare `span.end` keeps its seed: `span` is not an importable
+    // module (like `tls.*`), so the canonical fallback can never produce
+    // it — method calls on span handles (`sp.end()`) need the bare key.
+    m.insert(
+        "span.end".into(),
+        sig(vec![("sp", span_t.clone())], Type::Int),
+    );
 
     // std.sys — system information. All queries infallible (empty
     // string / fallback values, never errors). Both spellings.
@@ -2169,6 +2176,20 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     }
     m.insert(
         "std.tls.connect_with_ca".into(),
+        sig(
+            vec![
+                ("addr", Type::Str),
+                ("server_name", Type::Str),
+                ("ca_file", Type::Str),
+                ("timeout_ms", Type::Int),
+            ],
+            result_tls(),
+        ),
+    );
+    // NOTE: bare `tls.connect_with_ca` keeps its seed: `tls` is not an
+    // importable module, so no canonical fallback can produce it.
+    m.insert(
+        "tls.connect_with_ca".into(),
         sig(
             vec![
                 ("addr", Type::Str),
@@ -4106,28 +4127,28 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 697);
+        assert_eq!(funcs.len(), 699);
     }
 
     #[test]
     fn no_bare_twin_seeds() {
         // B invariant: seeds hold canonical `std.*` names only. A bare
         // `module.func` key may exist only when no `std.module.func` seed
-        // exists (orphans: `option.*`, `file.*`, …) — never as a twin.
-        // Bare callers resolve via `canonical_std_name` fallback.
-        // Exception: `tls.*`, `tls_listener.*`, `unix_listener.*` keep
-        // both spellings — they are not importable modules (no
-        // `import std.tls`), so the bare form has no canonical home.
-        // Folding them into `net`/`unix` needs a UX decision (tracked).
+        // exists - never as a twin. The only exceptions are namespaces the
+        // canonical fallback cannot serve (no importable module behind
+        // them: `tls.*`, `span.end`, ...): for those the bare seed is
+        // load-bearing, so the test derives the rule from
+        // `canonical_std_name` itself instead of a hardcoded list.
+        // Bare callers resolve via that same fallback.
         let funcs = stdlib_funcs();
         let mut twins = Vec::new();
         for k in funcs.keys() {
-            if k.contains('.') && !k.starts_with("std.") && funcs.contains_key(&format!("std.{k}"))
+            if k.contains('.')
+                && !k.starts_with("std.")
+                && funcs.contains_key(&format!("std.{k}"))
+                && zz_checker::canonical_std_name(k).is_some()
             {
-                let head = k.split('.').next().unwrap_or("");
-                if !matches!(head, "tls" | "tls_listener" | "unix_listener") {
-                    twins.push(k.clone());
-                }
+                twins.push(k.clone());
             }
         }
         assert!(

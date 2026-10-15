@@ -1002,6 +1002,15 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: log::span_end,
         },
     );
+    // NOTE: bare `span.end` keeps its seed (see funcs.rs): `span` is not
+    // an importable module, so no canonical fallback can produce it.
+    m.insert(
+        "span.end".into(),
+        NativeEntry {
+            arity: 1,
+            f: log::span_end,
+        },
+    );
 
     // std.encoding
     m.insert(
@@ -2384,6 +2393,14 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     }
     m.insert(
         "std.tls.connect_with_ca".into(),
+        NativeEntry {
+            arity: 4,
+            f: net::tls::tls_connect_with_ca,
+        },
+    );
+    // NOTE: bare `tls.connect_with_ca` keeps its seed (see funcs.rs).
+    m.insert(
+        "tls.connect_with_ca".into(),
         NativeEntry {
             arity: 4,
             f: net::tls::tls_connect_with_ca,
