@@ -79,10 +79,13 @@ pub(crate) async fn handle_did_change(backend: &Backend, params: DidChangeTextDo
 pub(crate) async fn handle_did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     let uri = params.text_document.uri;
     recheck_and_publish(backend.state.clone(), &backend.client, uri.clone()).await;
-    // Dependents observe this file: refresh open ones so a fixed
-    // dependency clears their diagnostics on save (one level, bounded
-    // by the open set — the same rule as watched-file changes).
-    for dependent in backend.state.get_dependents(&uri) {
+    // Dependents observe this file transitively (BFS: each file rechecks
+    // after the dependency it observes absorbed fresh results), bounded
+    // by the open set. Sequential: the global debounce counter and seed
+    // freshness both assume one recheck at a time — unchanged files with
+    // an unchanged seed skip the checker via the fast path, so fan-out
+    // stays cheap.
+    for dependent in backend.state.transitive_dependents(&uri) {
         if backend.state.documents.contains_key(&dependent) {
             recheck_and_publish(backend.state.clone(), &backend.client, dependent.clone()).await;
         }

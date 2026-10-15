@@ -19,14 +19,36 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
     let seq = state.bump_sequence();
 
     // Snapshot what we need for the blocking closure.
-    let (source, parse_errors, program) = match state.documents.get(&uri) {
-        Some(doc) => (
-            doc.source.clone(),
-            doc.parse_errors.clone(),
-            doc.program.clone(),
-        ),
+    let (source, parse_errors, program, hash, cached) = match state.documents.get(&uri) {
+        Some(doc) => {
+            let source = doc.source.clone();
+            let hash = crate::state::content_hash(&source);
+            let seed = state.seed_version();
+            let fresh = !crate::state::needs_recheck(
+                doc.last_checked_hash,
+                doc.last_seed_version,
+                hash,
+                seed,
+                doc.check_result.is_some(),
+            );
+            (
+                source,
+                doc.parse_errors.clone(),
+                doc.program.clone(),
+                hash,
+                fresh.then(|| doc.last_diagnostics.clone()),
+            )
+        }
         None => return,
     };
+    // Incremental fast path: identical text over an identical seed —
+    // republish the last result instead of re-running the checker
+    // (save-without-changes, duplicate notifications, untouched
+    // dependents in a fan-out).
+    if let Some(diagnostics) = cached {
+        client.publish_diagnostics(uri, diagnostics, None).await;
+        return;
+    }
     // Filesystem path for project-dependency harvest (`zz add` packages):
     // non-file URIs (untitled buffers) skip dep seeding, everything else
     // still applies.
@@ -123,6 +145,16 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         .filter(|e| e.span.is_some())
         .map(|raw| convert_diagnostic(&source, raw))
         .collect();
+
+    // Remember this result for skip decisions: identical text over an
+    // identical seed republishes verbatim. Seed read post-absorb so any
+    // later absorb (including our own dependents' follow-ups) correctly
+    // invalidates.
+    if let Some(mut doc) = state.documents.get_mut(&uri_clone) {
+        doc.last_checked_hash = Some(hash);
+        doc.last_seed_version = Some(state.seed_version());
+        doc.last_diagnostics = diagnostics.clone();
+    }
 
     client_clone
         .publish_diagnostics(uri_clone, diagnostics, None)

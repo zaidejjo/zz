@@ -219,7 +219,8 @@ pub fn manifest_diagnostic_for(root: &std::path::Path) -> Vec<Diagnostic> {
 /// dependencies change or on save. Bounded by the open set — never a
 /// full-project sweep per keystroke.
 async fn recheck_open_dependents(state: &Arc<GlobalState>, client: &Client, uri: &Url) {
-    for dependent in state.get_dependents(uri) {
+    // Transitive, BFS-ordered, open buffers only (same rule as saves).
+    for dependent in state.transitive_dependents(uri) {
         if state.documents.contains_key(&dependent) {
             crate::diagnostics::recheck_and_publish(state.clone(), client, dependent.clone()).await;
         }
