@@ -1724,8 +1724,14 @@ mod move_inline_tests {
 
     // ── move ──
 
+    // Unique per test task: libtest runs tests in parallel in one
+    // process, so a pid-only dir is shared — concurrent move tests using
+    // the same filenames (`main.zz`, `circle.zz`) clobber each other.
     fn move_tmp() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zz-lsp-move-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("zz-lsp-move-{}-{uniq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

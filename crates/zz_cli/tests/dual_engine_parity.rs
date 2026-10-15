@@ -81,8 +81,8 @@ fn run_zz_with_input_env(
         .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
     // Standalone native outputs publish to the invocation dir, so the
-    // `--native` legs name a unique `-o` destination per fixture inside
-    // an isolated temp dir: parallel fixtures never share (and race on)
+    // `--native` legs name a unique `-o` destination per task inside
+    // an isolated temp dir: parallel tasks never share (and race on)
     // one destination, and the repo stays litter-free. CWD stays at the
     // workspace root — fixtures read repo-root-relative paths
     // (`tests/fixtures/.../data/*`), so moving CWD would break them.
@@ -198,19 +198,29 @@ fn run_zz_native_token(file: &Path, token: &str) -> (i32, String, String) {
     run_zz_with_input_env(&["run", "--native"], file, &input, Some(token))
 }
 
-/// `-o` parent dir for `--native` legs: a unique temp dir per fixture
-/// (path hash + stem), created on demand. CWD itself stays at the
-/// workspace root (fixtures read repo-root-relative paths); only the
-/// published binary moves aside. See the call-site comment.
+/// `-o` parent dir for `--native` legs: a unique temp dir per test task
+/// (process + per-task counter + stem), created on demand. CWD itself
+/// stays at the workspace root (fixtures read repo-root-relative paths);
+/// only the published binary moves aside. See the call-site comment.
+///
+/// Uniqueness is per task, not per fixture: libtest runs tests in
+/// parallel in one process, and the strict test and the sweep task for
+/// the SAME fixture overlap — a deterministic per-fixture dir lets one
+/// task's end-of-leg `remove_dir_all` reap the other's in-progress
+/// clang build (native exit != 0 flakes). The counter + pid
+/// disambiguate; the dir is reaped after the leg either way.
 fn native_cwd(file: &Path) -> PathBuf {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    file.to_string_lossy().hash(&mut h);
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NATIVE_CWD_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = NATIVE_CWD_COUNTER.fetch_add(1, Ordering::SeqCst);
     let stem = file
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "zz".to_string());
-    let dir = std::env::temp_dir().join(format!("zz-parity-native-{:016x}-{stem}", h.finish()));
+        .unwrap_or_else(|| "zz_out".to_string());
+    let dir = std::env::temp_dir().join(format!(
+        "zz-parity-native-{}-{uniq}-{stem}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("native CWD tmpdir");
     dir
 }
@@ -1685,7 +1695,7 @@ fn run_quad_leg(
         .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
     // Same standalone-destination rule as above: `--native` legs run
-    // from a unique temp dir per fixture (the VM writes nothing),
+    // from a unique temp dir per task (the VM writes nothing),
     // reaped after the leg (see above for orphan safety).
     let native_tmp: Option<PathBuf> = if native {
         let dir = native_cwd(file);
