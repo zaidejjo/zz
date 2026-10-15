@@ -758,18 +758,17 @@ impl Compiler {
             && (self.locals.iter().any(|l| l.name == key) || self.top_globals.contains(key))
     }
 
-    /// Canonical free push/append callee resolving to the real native (not
+    /// Canonical free push callee resolving to the real native (not
     /// shadowed by a user func, registered). Returns the spelling.
+    /// (`vec.push` plus the method form `xs.push(x)` is the only spelling —
+    /// `vec.append` and the bare `append` builtin were removed.)
     fn move_push_native(&self, callee: &Expr) -> Option<String> {
         let spelling = match callee {
             Expr::Ident { name, .. } => name.clone(),
             Expr::Path { parts, .. } => parts.join("."),
             _ => return None,
         };
-        if !matches!(
-            spelling.as_str(),
-            "vec.push" | "std.vec.push" | "vec.append" | "std.vec.append" | "append"
-        ) {
+        if !matches!(spelling.as_str(), "vec.push" | "std.vec.push") {
             return None;
         }
         if self.func_info.contains_key(&spelling) {
@@ -819,7 +818,7 @@ impl Compiler {
         unqualify_expr(value, &is_global)
     }
 
-    /// Fused `x = vec.push(x, e)` / `x = vec.append(x, e)` for an Ident
+    /// Fused `x = vec.push(x, e)` for an Ident
     /// target. Returns true when emitted (caller pushes the statement
     /// value and returns).
     fn try_emit_move_push_ident(&mut self, name: &str, span: Span, value: &Expr) -> bool {
@@ -982,24 +981,23 @@ impl Compiler {
         }
     }
 
-    /// Method name for method takes (`push`/`append` on the VM, where both
-    /// return the new array).
+    /// Method name for method takes (`push` on the VM, which returns the
+    /// new array).
     fn method_push_name(callee: &Expr) -> Option<String> {
         match callee {
             Expr::Path { parts, .. } if parts.len() == 2 => {
-                if parts[1] == "push" || parts[1] == "append" {
+                if parts[1] == "push" {
                     Some(parts[1].clone())
                 } else {
                     None
                 }
             }
-            Expr::Field { name, .. } if name == "push" || name == "append" => Some(name.clone()),
+            Expr::Field { name, .. } if name == "push" => Some(name.clone()),
             _ => None,
         }
     }
 
-    /// Fused method push/append-assign (`x = x.push(e)`, `ns.b =
-    /// ns.b.append(e)`): runtime-checked receiver (arrays go in place,
+    /// Fused method push-assign (`x = x.push(e)`): runtime-checked receiver (arrays go in place,
     /// anything else takes the generic call with write-back). Needs no
     /// capture guards — the home is restored before any user code runs.
     /// Returns true when emitted.
@@ -1319,11 +1317,10 @@ impl Compiler {
         true
     }
 
-    /// Fused push/append statement (`x.push(e)`, `x.append(e)`,
-    /// `append(x, e)`): take the home, push reusing the owned `Vec`, store
-    /// back. Method homes go through the runtime-checked op (arrays in
-    /// place, anything else the generic call); the free `append` spelling
-    /// is name-gated like the assign path. Returns true when emitted.
+    /// Fused push statement (`x.push(e)`): take the home, push reusing the
+    /// owned `Vec`, store back. Method homes go through the runtime-checked
+    /// op (arrays in place, anything else the generic call).
+    /// Returns true when emitted.
     fn try_emit_move_push_stmt(&mut self, e: &Expr) -> bool {
         let Expr::Call {
             callee,
@@ -1338,28 +1335,9 @@ impl Compiler {
             return false;
         }
         let span = e.span();
-        // Bare `append(x, e)` (statement write-back shape).
-        if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-            if fname == "append" && args.len() == 2 {
-                let home_key = match &args[0] {
-                    Expr::Ident { name, .. } => name.clone(),
-                    Expr::Path { parts, .. } if parts.len() == 2 => parts.join("."),
-                    _ => return false,
-                };
-                if self.move_push_native(callee).is_none() {
-                    return false;
-                }
-                let home = match self.move_home_of(&home_key) {
-                    Some(h) => h,
-                    None => return false,
-                };
-                self.compile_expr(&args[1]);
-                self.emit(Op::VecPush { home, span });
-                return true;
-            }
-            return false;
-        }
-        // Method shape (`rx.push(e)` / `rx.append(e)`, Path or Field callee).
+        // NOTE: the bare `append(x, e)` statement spelling was removed with
+        // the builtin — push is `vec.push(x, e)` or the method `x.push(e)`.
+        // Method shape (`rx.push(e)`, Path or Field callee).
         if args.len() != 1 {
             return false;
         }
@@ -2472,9 +2450,8 @@ impl Compiler {
                 } = e
                 {
                     // Known mutating array methods that return the modified array.
-                    const MUTATING_METHODS: &[&str] = &[
-                        "push", "pop", "insert", "remove", "reverse", "sort", "append",
-                    ];
+                    const MUTATING_METHODS: &[&str] =
+                        &["push", "pop", "insert", "remove", "reverse", "sort"];
 
                     // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
                     if let Expr::Path { parts, .. } = callee.as_ref() {
@@ -2584,34 +2561,8 @@ impl Compiler {
                         }
                     }
                 }
-                // Built-in `append(arr, val)` write-back: same as method call.
-                // append returns the mutated array; store it back to arr.
-                if let Expr::Call {
-                    callee,
-                    args,
-                    named,
-                    ..
-                } = e
-                {
-                    if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-                        if fname == "append" && args.len() == 2 && named.is_empty() {
-                            if let Expr::Ident {
-                                name: arr_name,
-                                span,
-                            } = &args[0]
-                            {
-                                self.compile_expr(e);
-                                match self.resolve(arr_name) {
-                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
-                                    Resolved::Env => {
-                                        self.emit(Op::StoreVar(arr_name.clone(), *span))
-                                    }
-                                }
-                                return StmtValue::None;
-                            }
-                        }
-                    }
-                }
+                // NOTE: the bare `append(arr, val)` builtin was removed — push
+                // is `vec.push(x, e)` or the method `x.push(e)`.
                 self.compile_expr(e);
                 StmtValue::Discard
             }
@@ -3235,7 +3186,31 @@ impl Compiler {
                 span,
             } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
-                    let func_name = parts.join(".");
+                    let raw_name = parts.join(".");
+                    // Deprecated `db` module → `sqlz` (one release): normalize
+                    // the emitted name when the head is the module namespace.
+                    // A local handle named `db` (`db := sqlz.open(..)`) keeps
+                    // method dispatch below — `resolve` only returns `Env`
+                    // for names with no local binding.
+                    // (Local inline copy of `zz_stdlib::canonical_std_func` —
+                    // zz_runtime cannot depend on zz_stdlib.)
+                    let func_name: String =
+                        if raw_name.starts_with("db.") || raw_name.starts_with("std.db.") {
+                            let head_is_module = matches!(self.resolve(&parts[0]), Resolved::Env);
+                            if head_is_module {
+                                if let Some(rest) = raw_name.strip_prefix("std.db.") {
+                                    format!("std.sqlz.{rest}")
+                                } else if let Some(rest) = raw_name.strip_prefix("db.") {
+                                    format!("sqlz.{rest}")
+                                } else {
+                                    raw_name
+                                }
+                            } else {
+                                raw_name
+                            }
+                        } else {
+                            raw_name
+                        };
                     // Enum construction (`Token.IntLit(1)`) builds a
                     // qualified `Object`, not a call. Type-driven: the
                     // checker resolved this call to `Type::Enum`, so no

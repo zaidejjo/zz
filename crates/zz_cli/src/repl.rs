@@ -50,7 +50,6 @@ const ZZ_BUILTINS: &[&str] = &[
     "str",
     "int",
     "float",
-    "append",
 ];
 
 const META_COMMANDS: &[&str] = &[

@@ -1,5 +1,6 @@
-//! `std.sqlz` — SQLite via rusqlite (bundled). CANONICAL module name;
-//! `std.db` is a zero-overhead alias exposing identical functionality.
+//! `std.sqlz` — SQLite via rusqlite (bundled). CANONICAL and only module
+//! name; the `std.db` / `db` module was removed (one-release checker
+//! warning rewrites module-position uses to `sqlz`).
 //!
 //! Compile-time parameterization contract:
 //! - `sqlz.query(sql)` / `sqlz.exec(sql)` receive an *already-evaluated* SQL

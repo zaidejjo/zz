@@ -520,6 +520,11 @@ fn import_path_completions(
     if partial_prefix == "std" || partial_prefix.starts_with("std.") {
         let mut seen = std::collections::HashSet::new();
         for module in zz_stdlib::STDLIB_MODULES {
+            // Deprecated `db` module: hidden from completion — `sqlz` is
+            // the only SQLite module (checker warns on `db` use).
+            if *module == "db" {
+                continue;
+            }
             let full = format!("std.{module}");
             if full.starts_with(partial_prefix) && seen.insert(full.clone()) {
                 items.push(CompletionItem {
@@ -899,6 +904,12 @@ fn std_root_completions(partial_prefix: &str) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
     for module in zz_stdlib::STDLIB_MODULES {
+        // Deprecated `db` module: hidden — `sqlz` is canonical. Nested
+        // `sqlz.postgres` / `sqlz.mysql` stay hidden at root by design:
+        // they complete only under `std.sqlz.*`.
+        if *module == "db" {
+            continue;
+        }
         let top = module.split('.').next().unwrap_or(module);
         if top.starts_with(partial_prefix) && seen.insert(top.to_string()) {
             items.push(CompletionItem {
@@ -980,7 +991,7 @@ fn dot_access_completions(
                 Type::Response | Type::HttpServer | Type::HttpRequest => vec!["http"],
                 Type::TcpStream | Type::TcpListener => vec!["net"],
                 Type::Json => vec!["json"],
-                Type::Db => vec!["sqlz", "db"],
+                Type::Db => vec!["sqlz"],
                 Type::Chan => vec!["chan"],
                 _ => vec![],
             };

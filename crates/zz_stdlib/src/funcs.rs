@@ -1115,14 +1115,8 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Array(Box::new(t.clone())),
         ),
     );
-    // vec.append — alias for vec.push
-    m.insert(
-        "vec.append".into(),
-        sig_t(
-            vec![("v", Type::Array(Box::new(t.clone()))), ("x", t.clone())],
-            Type::Array(Box::new(t.clone())),
-        ),
-    );
+    // NOTE: `vec.append` was removed — canonical spelling is `vec.push`
+    // plus the method form `xs.push(x)`. No bare `push`/`append` builtin.
     m.insert(
         "vec.pop".into(),
         sig_t(
@@ -3367,13 +3361,9 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     let t = Type::Named("T".to_string());
     m.insert("typeof".into(), sig_t(vec![("v", t.clone())], Type::Str));
 
-    // Built-in: `append(arr, val)` — returns array with val appended.
-    // Used as a statement: compiler write-back stores result to arr.
-    let t_arr = Type::Array(Box::new(Type::Named("T".to_string())));
-    m.insert(
-        "append".into(),
-        sig_t(vec![("arr", t_arr.clone()), ("val", t.clone())], t_arr),
-    );
+    // NOTE: the bare `append(arr, val)` builtin was removed. Push is
+    // `vec.push(v, x)` plus the method form `xs.push(x)` (statement
+    // write-back stores the result). This keeps a single push spelling.
 
     // Built-in: `clone(v)` — deep copy, fully independent value (#267).
     m.insert("clone".into(), sig_t(vec![("v", t.clone())], t.clone()));
@@ -4355,7 +4345,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // annotation (`let users: [User] = sqlz.query(...)`) so the runtime can
     // map columns positionally into that struct.
     //
-    // `std.db` / `db.*` are zero-overhead aliases (identical sigs below).
+    // `std.db` / `db.*` were removed: `sqlz` is the only SQLite module.
+    // The checker emits a deprecation warning pointing at `sqlz` when the
+    // `db`/`std.db` module namespace is used; handle variables named `db`
+    // (e.g. `db := sqlz.open(..); db.exec(..)`) are method calls and warn
+    // free. Runtime/codegen keep the `db.*` name mapping for one release.
     let db_row_t = Type::Named("T".to_string());
     m.insert(
         "std.sqlz.open".into(),
@@ -4390,39 +4384,8 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert("sqlz.close".into(), sig(vec![("db", Type::Db)], Type::Unit));
-    // Alias: `std.db` / `db.*` point directly at the `std.sqlz` sigs.
-    m.insert(
-        "std.db.open".into(),
-        sig(vec![("path", Type::Str)], Type::Db),
-    );
-    m.insert(
-        "std.db.exec".into(),
-        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
-    );
-    m.insert(
-        "std.db.query".into(),
-        sig_t(
-            vec![("db", Type::Db), ("sql", Type::Str)],
-            Type::Array(Box::new(db_row_t.clone())),
-        ),
-    );
-    m.insert(
-        "std.db.close".into(),
-        sig(vec![("db", Type::Db)], Type::Unit),
-    );
-    m.insert("db.open".into(), sig(vec![("path", Type::Str)], Type::Db));
-    m.insert(
-        "db.exec".into(),
-        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
-    );
-    m.insert(
-        "db.query".into(),
-        sig_t(
-            vec![("db", Type::Db), ("sql", Type::Str)],
-            Type::Array(Box::new(db_row_t.clone())),
-        ),
-    );
-    m.insert("db.close".into(), sig(vec![("db", Type::Db)], Type::Unit));
+    // NOTE: `std.db.*` / `db.*` seeds removed (see above). Alias resolution
+    // lives in the checker/loader with a deprecation warning, not here.
 
     // std.sqlz.postgres — async-minded PostgreSQL wire-protocol driver.
     //
@@ -4481,8 +4444,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // `transaction(db, fn(tx) { ... }) -> Result[T, str]`: BEGIN, run the
     // closure with the transaction handle, COMMIT on clean return
     // (`.ok(value)`), ROLLBACK on closure error (`.err(message)`).
-    // `db.transaction` is the same zero-overhead alias pattern as the
-    // other sqlz methods.
+    // `db.transaction` alias removed with the other `db.*` seeds.
     let tx_t = Type::Named("T".to_string());
     let tx_sig = sig_t(
         vec![
@@ -4493,8 +4455,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert("std.sqlz.transaction".into(), tx_sig.clone());
     m.insert("sqlz.transaction".into(), tx_sig.clone());
-    m.insert("std.db.transaction".into(), tx_sig.clone());
-    m.insert("db.transaction".into(), tx_sig);
 
     // std.chan — concurrency primitives
     let t = Type::Named("T".to_string());
@@ -4896,7 +4856,6 @@ mod tests {
         assert!(funcs.contains_key("str"));
         assert!(funcs.contains_key("int"));
         assert!(funcs.contains_key("float"));
-        assert!(funcs.contains_key("append"));
         assert!(funcs.contains_key("clone"));
         assert!(funcs.contains_key("std.task.spawn"));
         assert!(funcs.contains_key("std.task.join"));
@@ -4909,14 +4868,11 @@ mod tests {
         assert!(funcs.contains_key("sqlz.exec"));
         assert!(funcs.contains_key("sqlz.query"));
         assert!(funcs.contains_key("sqlz.close"));
-        assert!(funcs.contains_key("std.db.open"));
-        assert!(funcs.contains_key("std.db.exec"));
-        assert!(funcs.contains_key("std.db.query"));
-        assert!(funcs.contains_key("std.db.close"));
-        assert!(funcs.contains_key("db.open"));
-        assert!(funcs.contains_key("db.exec"));
-        assert!(funcs.contains_key("db.query"));
-        assert!(funcs.contains_key("db.close"));
+        // `std.db.*` / `db.*` seeds removed — `sqlz` is the only SQLite
+        // module (alias resolution + warning live in checker/loader).
+        assert!(!funcs.contains_key("std.db.open"));
+        assert!(!funcs.contains_key("db.open"));
+        assert!(!funcs.contains_key("db.query"));
         assert!(funcs.contains_key("std.sqlz.postgres.connect"));
         assert!(funcs.contains_key("std.sqlz.postgres.exec"));
         assert!(funcs.contains_key("std.sqlz.postgres.query"));
@@ -4927,8 +4883,7 @@ mod tests {
         assert!(funcs.contains_key("std.sqlz.mysql.close"));
         assert!(funcs.contains_key("std.sqlz.transaction"));
         assert!(funcs.contains_key("sqlz.transaction"));
-        assert!(funcs.contains_key("std.db.transaction"));
-        assert!(funcs.contains_key("db.transaction"));
+        // `std.db.transaction` / `db.transaction` removed with `db`.
         // Math constants are static values, not zero-arg functions.
         let consts = stdlib_consts();
         assert!(consts.contains_key("std.math.PI"));
@@ -5210,7 +5165,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1118);
+        assert_eq!(funcs.len(), 1106);
     }
 
     #[test]

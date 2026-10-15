@@ -2433,7 +2433,9 @@ impl Vm {
                                 interp.resolve_path_value(&parts[..parts.len() - 1], pspan)?;
                             // sqlz fast path (CallPath form): Db handle +
                             // query/exec/close dispatches straight to the
-                            // canonical sqlz.* native (db.* alias fallback).
+                            // canonical sqlz.* native only (`db` module removed;
+                            // module-position `db.*` calls are rewritten to
+                            // `sqlz.*` by the checker with a warning).
                             // lookup_method would also work via the Db
                             // method_namespace, but this avoids the
                             // object_field detour entirely.
@@ -2446,12 +2448,6 @@ impl Vm {
                                     .copied()
                                     .or_else(|| {
                                         interp.natives.get(&format!("std.sqlz.{method}")).copied()
-                                    })
-                                    .or_else(|| {
-                                        interp.natives.get(&format!("db.{method}")).copied()
-                                    })
-                                    .or_else(|| {
-                                        interp.natives.get(&format!("std.db.{method}")).copied()
                                     });
                                 match entry {
                                     Some(e) => {
@@ -2499,18 +2495,15 @@ impl Vm {
                     // sqlz fast path: `mydb.query/exec` on a Db handle
                     // bypasses object_field (Db has no struct fields) and
                     // dispatches straight to the canonical sqlz.* native
-                    // (db.* alias fallback).
+                    // (`db` module removed; see above).
                     if matches!(recv, Value::Db(_))
                         && matches!(name.as_str(), "query" | "exec" | "close")
                     {
                         let native_name = format!("sqlz.{name}");
-                        let entry = interp
-                            .natives
-                            .get(&native_name)
-                            .copied()
-                            .or_else(|| interp.natives.get(&format!("std.sqlz.{name}")).copied())
-                            .or_else(|| interp.natives.get(&format!("db.{name}")).copied())
-                            .or_else(|| interp.natives.get(&format!("std.db.{name}")).copied());
+                        let entry =
+                            interp.natives.get(&native_name).copied().or_else(|| {
+                                interp.natives.get(&format!("std.sqlz.{name}")).copied()
+                            });
                         match entry {
                             Some(e) => {
                                 let mut arg_vals = vec![recv];
@@ -2658,9 +2651,12 @@ impl Vm {
                             | "std.sqlz.mysql.query"
                             | "std.sqlz.mysql.exec"
                     );
-                    // sqlz.query/sqlz.exec (+ db.* alias) carry a variable
+                    // sqlz.query/sqlz.exec carry a variable
                     // number of bound params; resolve the entry without an
                     // arity gate (Interp::call skips it for sqlz.* too).
+                    // (`db.*` kept one release: checker rewrites to `sqlz.*`
+                    // with a warning. `pg.*`/`my.*` only exist as import
+                    // aliases of the nested `std.sqlz.postgres/mysql`.)
                     let entry = interp.natives.get(name).copied();
                     let arity = match &entry {
                         Some(e) => e.arity,

@@ -97,36 +97,5 @@ pub(crate) fn clone_fn(
     Ok(zz_runtime::deep_clone(v))
 }
 
-/// Built-in `append(arr, val)` — returns the array with val appended.
-/// The compiler write-back stores the result back to `arr`, making it
-/// appear to mutate in-place.
-pub(crate) fn append_fn(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return Err(EvalError::new(
-            "append() expects 2 arguments: append(array, value)",
-            span,
-        ));
-    }
-    let val = args.remove(1);
-    match &args[0] {
-        Value::Array(arr) => {
-            let mut new_arr = arr.clone();
-            // Copy-on-write: uniquely-owned buffers grow in place,
-            // shared ones copy once here — the caller's array is
-            // never mutated either way.
-            std::sync::Arc::make_mut(&mut new_arr).push(val);
-            Ok(Value::Array(new_arr))
-        }
-        other => Err(EvalError::new(
-            format!(
-                "append() first argument must be an array, got `{}`",
-                other.type_name()
-            ),
-            span,
-        )),
-    }
-}
+// Push is `vec.push(v, x)` plus the method form `xs.push(x)`: the old
+// bare `append(arr, val)` builtin was removed (single push spelling).

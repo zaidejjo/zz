@@ -59,7 +59,8 @@ mod types;
 
 /// The per-module member cache (#233) must copy exactly what the old
 /// full-table scan copied: same keys, same values, for every module —
-/// including the `db`→`sqlz` alias and the `sqlz`/`sqlz.postgres` split.
+/// including the deprecated `db`→`sqlz` resolution and the
+/// `sqlz`/`sqlz.postgres` split.
 #[test]
 fn module_namespace_matches_full_scan_oracle() {
     use super::{stdlib_consts_cached, stdlib_funcs_cached, stdlib_natives_cached};
