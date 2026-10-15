@@ -55,10 +55,23 @@ pub enum StopReason {
     Step,
 }
 
-/// Step-over rule: suspend at the first attributable op that is back at
-/// our frame depth (or shallower, after returns) on a *different* line.
+/// How a step suspends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepMode {
+    /// First new line at our depth or shallower (calls run through).
+    Over,
+    /// First new line anywhere, descending into calls.
+    Into,
+    /// First opportunity shallower than our depth (i.e. after return).
+    /// At top level this never fires: stepping out of `main` is just
+    /// continuing.
+    Out,
+}
+
+/// One-shot step rule, cleared when it fires.
 #[derive(Debug, Clone)]
 pub struct StepRule {
+    pub mode: StepMode,
     pub depth: usize,
     pub label: String,
     pub line: u32,
@@ -107,9 +120,14 @@ impl DebugSession {
         self.files.get(label).map(|f| f.line_of(offset))
     }
 
-    /// Start a step-over from `(label, line)` at `depth` frames.
-    pub fn start_step(&mut self, label: String, line: u32, depth: usize) {
-        self.step = Some(StepRule { depth, label, line });
+    /// Start a step from `(label, line)` at `depth` frames.
+    pub fn start_step(&mut self, mode: StepMode, label: String, line: u32, depth: usize) {
+        self.step = Some(StepRule {
+            mode,
+            depth,
+            label,
+            line,
+        });
     }
 
     /// Line breakpoint check for one op span at `depth` frames: the
@@ -130,9 +148,15 @@ impl DebugSession {
         let line = file.line_of(span.start);
         let current = (label.to_string(), line);
         let changed = self.last.replace(current.clone()) != Some(current.clone());
-        // Step-over wins: back at our depth (or shallower) on a new line.
+        // Steps win over breakpoints: one-shot, cleared on fire.
         if let Some(rule) = self.step.clone() {
-            if depth <= rule.depth && (label != rule.label || line != rule.line) {
+            let moved = label != rule.label || line != rule.line;
+            let fire = match rule.mode {
+                StepMode::Over => depth <= rule.depth && moved,
+                StepMode::Into => moved,
+                StepMode::Out => depth < rule.depth,
+            };
+            if fire {
                 self.step = None;
                 self.stop_reason = StopReason::Step;
                 return Some(line);
@@ -158,7 +182,10 @@ mod tests {
         let parsed = zz_frontend::parse(src);
         assert!(parsed.errors.is_empty());
         let mut chunk = Compiler::compile_program(&parsed.program);
-        chunk.source = Some(Arc::from(label));
+        // Label the whole tree (function bodies are sub-chunks in
+        // MakeFunc ops): unlabeled chunks never resolve lines, so
+        // breakpoints and steps inside functions would silently miss.
+        crate::coverage::stamp_chunk_tree(&mut chunk, &Arc::from(label));
         let chunk = Arc::new(chunk);
 
         let mut session = DebugSession::new();
@@ -206,7 +233,7 @@ mod tests {
         let src = "a := 10\nb := a + 5\nc := b * 2\nc\n";
         let parsed = zz_frontend::parse(src);
         let mut chunk = Compiler::compile_program(&parsed.program);
-        chunk.source = Some(Arc::from("spike"));
+        crate::coverage::stamp_chunk_tree(&mut chunk, &Arc::from("spike"));
         let chunk = Arc::new(chunk);
 
         let mut session = DebugSession::new();
@@ -258,5 +285,82 @@ mod tests {
         assert_eq!(file.line_of(2), 1);
         assert_eq!(file.line_of(3), 2);
         assert_eq!(file.line_of(8), 4);
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+    use crate::eval::Interp;
+    use crate::value::{Value, YieldReason};
+    use crate::vm::{Compiler, Vm};
+    use std::sync::Arc;
+
+    fn parked_program() -> (Vm, Interp, Arc<crate::vm::Chunk>) {
+        // Attributable work follows the call so step-out has
+        // somewhere to land (slot shuffles carry no spans).
+        let src = "func add(a: int, b: int) -> int {\n    return a + b\n}\nx := add(1, 2)\ny := x + 1\ny\n";
+        let parsed = zz_frontend::parse(src);
+        assert!(parsed.errors.is_empty());
+        let mut chunk = Compiler::compile_program(&parsed.program);
+        crate::coverage::stamp_chunk_tree(&mut chunk, &Arc::from("spike"));
+        let chunk = Arc::new(chunk);
+
+        let mut session = DebugSession::new();
+        session.add_source("spike", src);
+        session.add_breakpoint("spike", 4);
+
+        let mut interp = Interp::new();
+        let mut vm = Vm::new();
+        vm.attach_debug(session);
+        match vm.run_chunk(&chunk, &mut interp) {
+            Ok(crate::runtime::Flow::Yield(YieldReason::DebugBreak { line })) => {
+                assert_eq!(line, 4);
+            }
+            other => panic!("expected break at line 4, got: {other:?}"),
+        }
+        (vm, interp, chunk)
+    }
+
+    #[test]
+    fn step_into_descends_and_out_returns() {
+        use crate::debug::StepMode;
+
+        let (mut vm, mut interp, chunk) = parked_program();
+        assert_eq!(vm.debug_frames().len(), 1);
+
+        // Into the call: next suspension is inside `add`.
+        {
+            let session = vm.debug_session().expect("session");
+            let mut session = session.lock().unwrap();
+            session.start_step(StepMode::Into, "spike".to_string(), 4, 1);
+        }
+        match vm.resume_chunk(&mut interp) {
+            Ok(crate::runtime::Flow::Yield(YieldReason::DebugBreak { line })) => {
+                assert_ne!(line, 4, "stepped into the callee");
+                assert_eq!(vm.debug_frames().len(), 2);
+            }
+            other => panic!("expected step-into suspend, got: {other:?}"),
+        }
+
+        // Out: back to the caller frame.
+        {
+            let session = vm.debug_session().expect("session");
+            let mut session = session.lock().unwrap();
+            session.start_step(StepMode::Out, "spike".to_string(), 1, 2);
+        }
+        match vm.resume_chunk(&mut interp) {
+            Ok(crate::runtime::Flow::Yield(YieldReason::DebugBreak { .. })) => {
+                assert_eq!(vm.debug_frames().len(), 1, "back in the caller");
+            }
+            other => panic!("expected step-out suspend, got: {other:?}"),
+        }
+
+        // To completion with the right value.
+        match vm.resume_chunk(&mut interp) {
+            Ok(crate::runtime::Flow::Value(Value::Int(4))) => {}
+            other => panic!("expected Int(4), got: {other:?}"),
+        }
+        let _ = chunk;
     }
 }

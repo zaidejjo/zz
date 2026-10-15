@@ -209,3 +209,49 @@ fn step_over_advances_line() {
     s.request("disconnect", serde_json::json!({ "restart": false }));
     s.finish();
 }
+
+#[test]
+fn step_in_and_out_of_call() {
+    let prog = fixture(
+        "stepin.zz",
+        "func add(a: int, b: int) -> int {\n    return a + b\n}\nx := add(1, 2)\ny := x + 1\ny\n",
+    );
+    let mut s = Session::spawn(&prog);
+
+    s.request(
+        "setBreakpoints",
+        serde_json::json!({
+            "source": { "path": prog.to_str().unwrap() },
+            "breakpoints": [{ "line": 4 }],
+        }),
+    );
+    s.request("configurationDone", serde_json::json!({}));
+    let stopped = s.expect_event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint");
+
+    // Into the call: land inside `add` on a deeper frame.
+    let resp = s.request("stepIn", serde_json::json!({ "threadId": 1 }));
+    assert!(resp["success"].as_bool().unwrap());
+    let stopped = s.expect_event("stopped");
+    assert_eq!(stopped["body"]["reason"], "step");
+    let resp = s.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    let frames = resp["body"]["stackFrames"].as_array().unwrap();
+    assert!(frames.len() >= 2, "inside the callee: {frames:?}");
+    assert_ne!(frames[0]["line"], 4);
+
+    // Out: back to one frame in the caller.
+    let resp = s.request("stepOut", serde_json::json!({ "threadId": 1 }));
+    assert!(resp["success"].as_bool().unwrap());
+    let stopped = s.expect_event("stopped");
+    assert_eq!(stopped["body"]["reason"], "step");
+    let resp = s.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    let frames = resp["body"]["stackFrames"].as_array().unwrap();
+    assert_eq!(frames.len(), 1, "back in the caller: {frames:?}");
+
+    let resp = s.request("continue", serde_json::json!({ "threadId": 1 }));
+    assert!(resp["success"].as_bool().unwrap());
+    s.expect_event("terminated");
+
+    s.request("disconnect", serde_json::json!({ "restart": false }));
+    s.finish();
+}

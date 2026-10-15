@@ -27,7 +27,8 @@ cargo build -p zz-dap
 ```
 
 Breakpoints, step-over, call stack, and Locals work. Run control:
-continue, step-over (`next`), disconnect.
+continue, step-over (`next`), step-into (`stepIn`), step-out
+(`stepOut`), disconnect.
 
 ## Neovim (nvim-dap)
 
@@ -54,5 +55,4 @@ instead of hanging.
 - **`input()` corrupts the session**: the debuggee shares stdio with
   the protocol — reading stdin steals framing bytes. Don't.
 - **Leaf-only variables**: no expandable children for structs/arrays.
-- **No step-into / step-out yet**: `next` steps over calls.
 - **Function params** may not appear in Locals (slots + env only).
