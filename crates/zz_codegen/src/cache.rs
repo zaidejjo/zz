@@ -128,7 +128,92 @@ pub fn ensure_rt_a(
         let _ = std::fs::remove_file(&path);
     }
 
+    // Cross-process build lock: cold parallel `zz run --native` runs
+    // (e.g. the parity suite: N tests × clang -O3 full-runtime builds on
+    // a small box) would otherwise each compile the runtime at once —
+    // minutes wasted and OOM-killed clang processes under load. One
+    // builder wins; the rest wait, re-check, and reuse its archive.
+    // Lock file (not the archive itself) so a killed builder can never
+    // leave a half-written artifact behind: publishing still goes
+    // through the atomic rename in `compile_rt_a`.
+    let _lock = acquire_rt_lock(&dir);
+    // Double-checked: someone may have published while we waited.
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() >= MIN_ARCHIVE_BYTES {
+            return Ok(path);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
     compile_rt_a(opts, clang, target, Some(&path))
+}
+
+/// Guard for the runtime-archive build lock; removes the lock file on
+/// drop, but only when this guard created it — a guard that gave up
+/// waiting must never unlink another builder's live lock. A panic or
+/// kill between acquire and drop leaves the file — `acquire_rt_lock`
+/// expires those by mtime.
+struct RtBuildLock {
+    path: std::path::PathBuf,
+    owned: bool,
+}
+
+impl Drop for RtBuildLock {
+    fn drop(&mut self) {
+        if self.owned {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Spin-acquire `<dir>/.lock` via atomic `create_new`. Cross-process
+/// (each `zz run --native` is its own process, so in-process statics
+/// cannot serialize this). Gives up spinning after a generous timeout
+/// and proceeds to build anyway — a contended build beats a wedged one.
+/// Stale locks (mtime older than the timeout window) are unlinked so a
+/// killed builder cannot wedge later runs.
+fn acquire_rt_lock(dir: &Path) -> RtBuildLock {
+    use std::time::{Duration, Instant};
+    // Cold -O3 runtime builds take ~1-3 min; budget generously, then
+    // build through rather than fail the whole native leg.
+    const LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+    const LOCK_STALE_AFTER: Duration = Duration::from_secs(20 * 60);
+    const POLL: Duration = Duration::from_millis(100);
+    let path = dir.join(".lock");
+    let start = Instant::now();
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return RtBuildLock { path, owned: true },
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Reap locks from builders that died mid-build.
+                let stale = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > LOCK_STALE_AFTER);
+                if stale {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                if start.elapsed() >= LOCK_TIMEOUT {
+                    // Wedged lock (clock trouble, pathological CI):
+                    // build through instead of failing. Not owned, so
+                    // drop never unlinks the live lock file.
+                    return RtBuildLock { path, owned: false };
+                }
+                std::thread::sleep(POLL);
+            }
+            Err(_) => {
+                // Lock dir missing/unwritable: build unlocked rather
+                // than fail the native leg on a locking nicety.
+                return RtBuildLock { path, owned: false };
+            }
+        }
+    }
 }
 
 /// Compile the C runtime into a static library and optionally save to `dest`.
@@ -281,4 +366,57 @@ fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String>
     // flags as the program, or ASan/UBSan miss every runtime bug.
     flags.extend(crate::compile::sanitize_flags());
     flags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lock_tmp(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("zz-rt-lock-{tag}-{}-{uniq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rt_lock_releases_on_drop() {
+        let dir = lock_tmp("drop");
+        {
+            let _guard = acquire_rt_lock(&dir);
+            assert!(dir.join(".lock").exists(), "lock file present while held");
+        }
+        assert!(!dir.join(".lock").exists(), "lock file removed on drop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rt_lock_serializes_second_acquirer() {
+        let dir = lock_tmp("serial");
+        let guard = acquire_rt_lock(&dir);
+        assert!(guard.owned, "first acquire owns the lock");
+        let dir2 = dir.clone();
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let guard2 = acquire_rt_lock(&dir2);
+            assert!(guard2.owned, "second acquire owns after release");
+            start.elapsed()
+        });
+        // Hold long enough to prove the spawned acquire blocks.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            !handle.is_finished(),
+            "second acquire must wait for release"
+        );
+        drop(guard);
+        let waited = handle.join().expect("acquirer thread");
+        assert!(
+            waited >= std::time::Duration::from_millis(400),
+            "acquirer waited for release, only waited {waited:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
