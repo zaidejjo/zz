@@ -591,11 +591,13 @@ mod tests {
 
     #[test]
     fn std_add_import_fixit_flows_to_quickfix() {
-        // End-to-end: checker emits `add import` for `math.sin` without
-        // imports; the existing fixit path must surface an insert action.
+        // End-to-end: checker emits `add import` for bare `sin` without
+        // imports (qualified `math.sin` resolves import-free through the
+        // canonical fallback); the existing fixit path must surface an
+        // insert action.
         use crate::state::GlobalState;
 
-        let src = "func main() {\n    y := math.sin(1.0)\n    println(y)\n}\n";
+        let src = "func main() {\n    y := sin(1.0)\n    println(y)\n}\n";
         let state = GlobalState::new();
         let program = zz_frontend::parse(src).program;
         let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&program);
