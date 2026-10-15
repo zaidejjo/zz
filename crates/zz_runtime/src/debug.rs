@@ -46,6 +46,24 @@ impl SourceFile {
 }
 
 /// Attached debugger state: sources plus (label, line) breakpoints.
+/// Why the last suspension happened (read by the adapter for the
+/// `stopped` event reason).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StopReason {
+    #[default]
+    Breakpoint,
+    Step,
+}
+
+/// Step-over rule: suspend at the first attributable op that is back at
+/// our frame depth (or shallower, after returns) on a *different* line.
+#[derive(Debug, Clone)]
+pub struct StepRule {
+    pub depth: usize,
+    pub label: String,
+    pub line: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DebugSession {
     files: HashMap<String, SourceFile>,
@@ -55,6 +73,10 @@ pub struct DebugSession {
     /// re-suspend on the next op of the same line forever, while loops
     /// still re-break on genuine revisits.
     last: Option<(String, u32)>,
+    /// Active step-over rule (one-shot: cleared when it fires).
+    step: Option<StepRule>,
+    /// Reason for the most recent suspension.
+    pub stop_reason: StopReason,
 }
 
 impl DebugSession {
@@ -67,6 +89,12 @@ impl DebugSession {
         self.files.insert(label.into(), SourceFile::new(source));
     }
 
+    /// Drop every breakpoint registered for `label` (DAP replaces the
+    /// whole file set on every `setBreakpoints` request).
+    pub fn retain_file(&mut self, label: &str) {
+        self.breakpoints.retain(|(l, _)| l != label);
+    }
+
     /// Break before the first attributable op on `line` (1-based) of `label`.
     pub fn add_breakpoint(&mut self, label: impl Into<String>, line: u32) {
         self.breakpoints.insert((label.into(), line));
@@ -74,14 +102,25 @@ impl DebugSession {
 
     /// Line breakpoint check for one op span: the 1-based line when this
     /// op should suspend, `None` otherwise.
-    /// Line breakpoint check for one op span: the 1-based line when this
-    /// op should suspend, `None` otherwise. Every attributable op
-    /// refreshes the last-position tracker (breakpoints and plain lines
-    /// alike) so loop revisits still fire.
+    /// 1-based line of `offset` in `label`, if registered.
+    pub fn line_for(&self, label: &str, offset: u32) -> Option<u32> {
+        self.files.get(label).map(|f| f.line_of(offset))
+    }
+
+    /// Start a step-over from `(label, line)` at `depth` frames.
+    pub fn start_step(&mut self, label: String, line: u32, depth: usize) {
+        self.step = Some(StepRule { depth, label, line });
+    }
+
+    /// Line breakpoint check for one op span at `depth` frames: the
+    /// 1-based line when this op should suspend, `None` otherwise. Every
+    /// attributable op refreshes the last-position tracker (breakpoints
+    /// and plain lines alike) so loop revisits still fire.
     pub fn check_span(
         &mut self,
         label: Option<&str>,
         span: zz_frontend::span::Span,
+        depth: usize,
     ) -> Option<u32> {
         if span.start == 0 && span.end == 0 {
             return None;
@@ -91,7 +130,19 @@ impl DebugSession {
         let line = file.line_of(span.start);
         let current = (label.to_string(), line);
         let changed = self.last.replace(current.clone()) != Some(current.clone());
-        (changed && self.breakpoints.contains(&current)).then_some(line)
+        // Step-over wins: back at our depth (or shallower) on a new line.
+        if let Some(rule) = self.step.clone() {
+            if depth <= rule.depth && (label != rule.label || line != rule.line) {
+                self.step = None;
+                self.stop_reason = StopReason::Step;
+                return Some(line);
+            }
+        }
+        if changed && self.breakpoints.contains(&current) {
+            self.stop_reason = StopReason::Breakpoint;
+            return Some(line);
+        }
+        None
     }
 }
 
