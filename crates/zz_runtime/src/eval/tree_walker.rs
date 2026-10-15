@@ -804,9 +804,9 @@ impl Interp {
                 if !parts.is_empty()
                     && self.env.get(&parts[0]).is_none()
                     && self.env.get(&raw).is_none()
-                    && self.funcs.get(&raw).is_none()
-                    && self.natives.get(&raw).is_none()
-                    && (self.funcs.get(&canon).is_some() || self.natives.get(&canon).is_some()) =>
+                    && !self.funcs.contains_key(&raw)
+                    && !self.natives.contains_key(&raw)
+                    && (self.funcs.contains_key(&canon) || self.natives.contains_key(&canon)) =>
             {
                 canon
             }
@@ -848,9 +848,9 @@ impl Interp {
             Some(canon)
                 if self.env.get(raw_head).is_none()
                     && self.env.get(name).is_none()
-                    && self.funcs.get(name).is_none()
-                    && self.natives.get(name).is_none()
-                    && (self.funcs.get(&canon).is_some() || self.natives.get(&canon).is_some()) =>
+                    && !self.funcs.contains_key(name)
+                    && !self.natives.contains_key(name)
+                    && (self.funcs.contains_key(&canon) || self.natives.contains_key(&canon)) =>
             {
                 owned = canon;
                 &owned
