@@ -287,8 +287,8 @@ pub(crate) fn tcp_write_bytes(
 
 /// `net.tcp_shutdown(stream: tcp.stream) -> Result<unit, str>`
 ///
-/// Real socket shutdown (`Shutdown::Both`): both directions stop, unlike
-/// `tcp_close`, which is a no-op kept for API completeness.
+/// Real socket shutdown (`Shutdown::Both`): both directions stop. Use
+/// `close`/`shutdown`; the legacy `tcp_close` no-op was removed.
 pub(crate) fn tcp_shutdown(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -312,19 +312,6 @@ pub(crate) fn tcp_shutdown(
             format!("tcp_shutdown failed: {e}").into(),
         ))))),
     }
-}
-
-/// `net.tcp_close(stream: tcp.stream) -> Result<bool, str>`
-///
-/// Legacy no-op (returns true): TCP streams close when dropped.
-/// Prefer `tcp_shutdown`/`close` for a real shutdown.
-pub(crate) fn tcp_close(
-    _interp: &mut Interp,
-    _args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    // The stream will be closed when the last Arc reference is dropped.
-    Ok(Value::Result(Box::new(Ok(Value::Bool(true)))))
 }
 
 /// `net.peer_addr(stream: tcp.stream) -> Result<str, str>`

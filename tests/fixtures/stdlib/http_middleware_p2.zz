@@ -9,8 +9,8 @@ import std.env
 func main() -> Result<int, str> {
     root := "{env.temp_dir()}/zz_mw_p2"
     fs.mkdir_all("{root}/assets")?
-    fs.write_file("{root}/assets/logo.txt", "logo-bytes")?
-    fs.write_file("{root}/top.txt", "top-level")?
+    fs.write("{root}/assets/logo.txt", "logo-bytes")?
+    fs.write("{root}/top.txt", "top-level")?
 
     s := http.server()
     s = s.route("GET", "/api/hi", |_req| "hi")
@@ -46,7 +46,7 @@ func main() -> Result<int, str> {
     // longest prefix wins regardless of registration order
     pub2 := "{env.temp_dir()}/zz_mw_p2b"
     fs.mkdir_all("{pub2}/assets")?
-    fs.write_file("{pub2}/assets/logo.txt", "wrong-root")?
+    fs.write("{pub2}/assets/logo.txt", "wrong-root")?
     s = http.serve_dir(s, pub2)
     r7 := http.test(s, "GET", "/assets/logo.txt", "")
     println("longest: {r7.text()}")

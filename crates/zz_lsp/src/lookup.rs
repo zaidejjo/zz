@@ -700,8 +700,8 @@ pub fn resolve_type_at(
     let node = find_node_at(program, source, offset);
     let name = node.name?;
 
-    // Check function signatures.
-    if let Some(sig) = check_result.funcs.get(&name) {
+    // Check function signatures (canonical fallback).
+    if let Some(sig) = zz_checker::lookup_std(&check_result.funcs, &name) {
         return Some(func_sig_to_type(&name, sig));
     }
 
@@ -767,7 +767,8 @@ pub fn resolve_type_of_expr(
     match expr {
         Expr::Ident { name, .. } => {
             // Same lookup as resolve_type_at but without cursor context.
-            if let Some(sig) = check_result.funcs.get(name) {
+            // Canonical fallback: seeds are `std.*` only.
+            if let Some(sig) = zz_checker::lookup_std(&check_result.funcs, name) {
                 return Some(func_sig_to_type(name, sig));
             }
             if let Some(sig) = check_result.structs.get(name) {
@@ -782,7 +783,7 @@ pub fn resolve_type_of_expr(
         }
         Expr::Path { parts, .. } => {
             let joined = parts.join(".");
-            if let Some(sig) = check_result.funcs.get(&joined) {
+            if let Some(sig) = zz_checker::lookup_std(&check_result.funcs, &joined) {
                 return Some(func_sig_to_type(&joined, sig));
             }
             if let Some(sig) = check_result.structs.get(&joined) {

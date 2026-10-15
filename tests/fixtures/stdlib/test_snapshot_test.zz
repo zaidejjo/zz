@@ -15,7 +15,7 @@ func main() {
         .err(_) => fail("env setup failed")
     }
     // pre-seeded golden, bare + namespaced match
-    assert_is_ok(fs.write_file("{d}/greeting.snap", "hello world"))
+    assert_is_ok(fs.write("{d}/greeting.snap", "hello world"))
     assert_snapshot("hello world", "greeting")
     test.assert_snapshot("hello world", "greeting")
     // update mode writes, verify mode reads back
@@ -27,7 +27,7 @@ func main() {
     env.remove("ZZ_UPDATE_SNAPSHOTS")
     assert_snapshot("v2 content", "auto")
     // multiline golden
-    assert_is_ok(fs.write_file("{d}/multi.snap", "line1\nline2\n"))
+    assert_is_ok(fs.write("{d}/multi.snap", "line1\nline2\n"))
     assert_snapshot("line1\nline2\n", "multi")
     // cleanup leaves no trace
     env.remove("ZZ_SNAPSHOTS_DIR")

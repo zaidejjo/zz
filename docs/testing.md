@@ -198,7 +198,7 @@ func test_export() {
         .err(_) => fail("temp_dir failed")
     }
     f := "{d}/out.txt"
-    assert_is_ok(fs.write_file(f, "hi"))
+    assert_is_ok(fs.write(f, "hi"))
     assert(fs.exists(f))
     assert_is_ok(fs.remove_dir_all(d))      // or in @teardown
 }

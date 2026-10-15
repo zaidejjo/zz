@@ -294,9 +294,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Int,
         ),
     );
-    // Canonical `std.str.*` twins of the method-dispatch entries below, so
-    // selective imports (`import std.str(trim)`) and qualified calls
-    // (`std.str.trim(s)`) resolve. Signatures mirror `str.*` exactly.
+    // Canonical `std.str.*` entries: the single seeds behind the qualified
+    // calls (`std.str.trim(s)`) and — via fallback — the bare
+    // (`str.trim(s)`) and method (`s.trim()`) spellings. Selective imports
+    // (`import std.str(trim)`) resolve against these. See
+    // `canonical_std_name`.
     m.insert(
         "std.str.trim".into(),
         sig(vec![("s", Type::Str)], Type::Str),
@@ -344,155 +346,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
 
     // str.* methods (for method dispatch: "hello".trim())
-    m.insert("str.length".into(), sig(vec![("s", Type::Str)], Type::Int));
-    m.insert("str.trim".into(), sig(vec![("s", Type::Str)], Type::Str));
-    m.insert(
-        "str.to_upper".into(),
-        sig(vec![("s", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "str.to_lower".into(),
-        sig(vec![("s", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "str.split".into(),
-        sig(
-            vec![("s", Type::Str), ("sep", Type::Str)],
-            Type::Array(Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "str.contains".into(),
-        sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "str.find".into(),
-        sig(
-            vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
-            Type::Int,
-        ),
-    );
-    m.insert(
-        "str.rfind".into(),
-        sig(
-            vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
-            Type::Int,
-        ),
-    );
-    m.insert(
-        "str.bytes".into(),
-        sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
-    );
-    m.insert(
-        "str.byte_len".into(),
-        sig(vec![("s", Type::Str)], Type::Int),
-    );
-    m.insert("str.ord".into(), sig(vec![("ch", Type::Str)], Type::Int));
-    m.insert("str.chr".into(), sig(vec![("cp", Type::Int)], Type::Str));
-    m.insert(
-        "str.classify".into(),
-        sig(
-            vec![
-                ("text", Type::Str),
-                ("markers", Type::Array(Box::new(Type::Str))),
-                ("bstart", Type::Str),
-                ("bend", Type::Str),
-                ("nested", Type::Bool),
-                ("whole", Type::Bool),
-            ],
-            Type::Array(Box::new(Type::Int)),
-        ),
-    );
-    m.insert(
-        "str.starts_with_at".into(),
-        sig(
-            vec![("s", Type::Str), ("sub", Type::Str), ("pos", Type::Int)],
-            Type::Bool,
-        ),
-    );
-    m.insert(
-        "str.ends_with_at".into(),
-        sig(
-            vec![("s", Type::Str), ("sub", Type::Str), ("pos", Type::Int)],
-            Type::Bool,
-        ),
-    );
-    m.insert(
-        "str.trim_span".into(),
-        sig(
-            vec![("s", Type::Str), ("start", Type::Int), ("end", Type::Int)],
-            Type::Array(Box::new(Type::Int)),
-        ),
-    );
-    m.insert(
-        "str.find_in".into(),
-        sig(
-            vec![
-                ("s", Type::Str),
-                ("sub", Type::Str),
-                ("start", Type::Int),
-                ("end", Type::Int),
-            ],
-            Type::Int,
-        ),
-    );
-    m.insert(
-        "str.rfind_in".into(),
-        sig(
-            vec![
-                ("s", Type::Str),
-                ("sub", Type::Str),
-                ("start", Type::Int),
-                ("end", Type::Int),
-            ],
-            Type::Int,
-        ),
-    );
-    m.insert(
-        "str.count_in".into(),
-        sig(
-            vec![
-                ("s", Type::Str),
-                ("sub", Type::Str),
-                ("start", Type::Int),
-                ("end", Type::Int),
-            ],
-            Type::Int,
-        ),
-    );
-    m.insert(
-        "str.replace".into(),
-        sig(
-            vec![("s", Type::Str), ("old", Type::Str), ("new", Type::Str)],
-            Type::Str,
-        ),
-    );
-    m.insert(
-        "str.starts_with".into(),
-        sig(vec![("s", Type::Str), ("prefix", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "str.ends_with".into(),
-        sig(vec![("s", Type::Str), ("suffix", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "str.join".into(),
-        sig(
-            vec![
-                ("items", Type::Array(Box::new(Type::Str))),
-                ("sep", Type::Str),
-            ],
-            Type::Str,
-        ),
-    );
-    m.insert(
-        "str.trim_start".into(),
-        sig(vec![("s", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "str.trim_end".into(),
-        sig(vec![("s", Type::Str)], Type::Str),
-    );
 
     // Pure-ZZ stdlib: string helpers (compiled from zz/str/mod.zz)
     m.insert(
@@ -577,54 +430,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.crypto.jwt_decode_ed".into(),
         sig(vec![("token", Type::Str), ("pk", Type::Str)], result_str2()),
     );
-    m.insert("crypto.ed25519_keypair".into(), sig(vec![], str_arr()));
-    m.insert(
-        "crypto.ed25519_sign".into(),
-        sig(vec![("sk", Type::Str), ("msg", Type::Str)], result_str2()),
-    );
-    m.insert(
-        "crypto.ed25519_verify".into(),
-        sig(
-            vec![("pk", Type::Str), ("msg", Type::Str), ("sig", Type::Str)],
-            Type::Bool,
-        ),
-    );
-    m.insert(
-        "crypto.rsa_keypair".into(),
-        sig(
-            vec![],
-            Type::Result(Box::new(str_arr()), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "crypto.rsa_sign".into(),
-        sig(vec![("sk", Type::Str), ("msg", Type::Str)], result_str2()),
-    );
-    m.insert(
-        "crypto.rsa_verify".into(),
-        sig(
-            vec![("pk", Type::Str), ("msg", Type::Str), ("sig", Type::Str)],
-            Type::Bool,
-        ),
-    );
-    m.insert(
-        "crypto.jwt_encode".into(),
-        sig(
-            vec![("payload", Type::Str), ("secret", Type::Str)],
-            Type::Str,
-        ),
-    );
-    m.insert(
-        "crypto.jwt_decode".into(),
-        sig(
-            vec![("token", Type::Str), ("secret", Type::Str)],
-            result_str2(),
-        ),
-    );
-    m.insert(
-        "crypto.jwt_decode_ed".into(),
-        sig(vec![("token", Type::Str), ("pk", Type::Str)], result_str2()),
-    );
     // Process result triples `[status, stdout, stderr]` (heterogeneous).
     let process_t = Type::Opaque("process".to_string());
     let str_arr2 = || Type::Array(Box::new(Type::Str));
@@ -664,40 +469,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("code", Type::Int)], Type::Unit),
     );
     m.insert("std.process.pid".into(), sig(vec![], Type::Int));
-    m.insert(
-        "process.run".into(),
-        sig(
-            vec![("cmd", Type::Str), ("argv", str_arr2())],
-            result_triple(),
-        ),
-    );
-    m.insert(
-        "process.run_with_env".into(),
-        sig(
-            vec![
-                ("cmd", Type::Str),
-                ("argv", str_arr2()),
-                ("env", str_arr2()),
-            ],
-            result_triple(),
-        ),
-    );
-    m.insert(
-        "process.spawn".into(),
-        sig(
-            vec![("cmd", Type::Str), ("argv", str_arr2())],
-            Type::Result(Box::new(process_t.clone()), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "process.wait".into(),
-        sig(vec![("child", process_t.clone())], result_triple()),
-    );
-    m.insert(
-        "process.exit".into(),
-        sig(vec![("code", Type::Int)], Type::Unit),
-    );
-    m.insert("process.pid".into(), sig(vec![], Type::Int));
 
     // std.uuid — v4/v7 generation, parse (normalizing), validation.
     // Both spellings (like json).
@@ -710,16 +481,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.uuid.is_valid".into(),
-        sig(vec![("s", Type::Str)], Type::Bool),
-    );
-    m.insert("uuid.v4".into(), sig(vec![], Type::Str));
-    m.insert("uuid.v7".into(), sig(vec![], Type::Str));
-    m.insert(
-        "uuid.parse".into(),
-        sig(vec![("s", Type::Str)], result_str3()),
-    );
-    m.insert(
-        "uuid.is_valid".into(),
         sig(vec![("s", Type::Str)], Type::Bool),
     );
 
@@ -768,38 +529,9 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.span.end".into(),
         sig(vec![("sp", span_t.clone())], Type::Int),
     );
-    m.insert(
-        "log.set_level".into(),
-        sig(vec![("name", Type::Str)], Type::Bool),
-    );
-    m.insert("log.get_level".into(), sig(vec![], Type::Str));
-    m.insert(
-        "log.set_format".into(),
-        sig(vec![("name", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "log.to_file".into(),
-        sig(vec![("path", Type::Str)], Type::Bool),
-    );
-    m.insert("log.to_stderr".into(), sig(vec![], Type::Unit));
-    m.insert(
-        "log.trace".into(),
-        sig(vec![("msg", Type::Str)], Type::Unit),
-    );
-    m.insert(
-        "log.debug".into(),
-        sig(vec![("msg", Type::Str)], Type::Unit),
-    );
-    m.insert("log.info".into(), sig(vec![("msg", Type::Str)], Type::Unit));
-    m.insert("log.warn".into(), sig(vec![("msg", Type::Str)], Type::Unit));
-    m.insert(
-        "log.error".into(),
-        sig(vec![("msg", Type::Str)], Type::Unit),
-    );
-    m.insert(
-        "log.span_begin".into(),
-        sig(vec![("name", Type::Str)], span_t.clone()),
-    );
+    // NOTE: bare `span.end` keeps its seed: `span` is not an importable
+    // module (like `tls.*`), so the canonical fallback can never produce
+    // it — method calls on span handles (`sp.end()`) need the bare key.
     m.insert(
         "span.end".into(),
         sig(vec![("sp", span_t.clone())], Type::Int),
@@ -813,12 +545,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("std.sys.hostname".into(), sig(vec![], Type::Str));
     m.insert("std.sys.total_mem".into(), sig(vec![], Type::Int));
     m.insert("std.sys.avail_mem".into(), sig(vec![], Type::Int));
-    m.insert("sys.os".into(), sig(vec![], Type::Str));
-    m.insert("sys.arch".into(), sig(vec![], Type::Str));
-    m.insert("sys.cpu_count".into(), sig(vec![], Type::Int));
-    m.insert("sys.hostname".into(), sig(vec![], Type::Str));
-    m.insert("sys.total_mem".into(), sig(vec![], Type::Int));
-    m.insert("sys.avail_mem".into(), sig(vec![], Type::Int));
 
     // std.term — terminal control (raw mode, single-key reads, size).
     // Fallible ops return Result so non-TTY stdin degrades gracefully;
@@ -842,13 +568,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("std.term.get_size".into(), sig(vec![], res_size()));
     m.insert("std.term.is_tty".into(), sig(vec![], Type::Bool));
     m.insert("std.term.flush".into(), sig(vec![], Type::Unit));
-    m.insert("term.enable_raw".into(), sig(vec![], res_unit2()));
-    m.insert("term.disable_raw".into(), sig(vec![], res_unit2()));
-    m.insert("term.read_key".into(), sig(vec![], res_int()));
-    m.insert("term.poll".into(), sig(vec![("ms", Type::Int)], res_bool()));
-    m.insert("term.get_size".into(), sig(vec![], res_size()));
-    m.insert("term.is_tty".into(), sig(vec![], Type::Bool));
-    m.insert("term.flush".into(), sig(vec![], Type::Unit));
 
     // std.args — raw argv + flag parser. Parser handles are Opaque("args"),
     // dispatching `args.*` methods by tag. Both spellings (like json).
@@ -929,95 +648,8 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.args.was_help".into(),
         sig(vec![("p", args_t.clone())], Type::Bool),
     );
-    m.insert(
-        "args.get_raw".into(),
-        sig(vec![], Type::Array(Box::new(Type::Str))),
-    );
-    m.insert("args.parser".into(), sig(vec![], args_t.clone()));
-    m.insert(
-        "args.str_flag".into(),
-        sig(
-            vec![
-                ("p", args_t.clone()),
-                ("name", Type::Str),
-                ("default", Type::Str),
-            ],
-            Type::Unit,
-        ),
-    );
-    m.insert(
-        "args.int_flag".into(),
-        sig(
-            vec![
-                ("p", args_t.clone()),
-                ("name", Type::Str),
-                ("default", Type::Int),
-            ],
-            Type::Unit,
-        ),
-    );
-    m.insert(
-        "args.bool_flag".into(),
-        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Unit),
-    );
-    m.insert(
-        "args.parse".into(),
-        sig(
-            vec![
-                ("p", args_t.clone()),
-                ("argv", Type::Array(Box::new(Type::Str))),
-            ],
-            Type::Bool,
-        ),
-    );
-    m.insert(
-        "args.get_str".into(),
-        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "args.get_int".into(),
-        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Int),
-    );
-    m.insert(
-        "args.get_bool".into(),
-        sig(vec![("p", args_t.clone()), ("name", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "args.positional".into(),
-        sig(
-            vec![("p", args_t.clone()), ("i", Type::Int)],
-            Type::Option(Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "args.subcommand".into(),
-        sig(vec![("p", args_t.clone())], Type::Str),
-    );
-    m.insert(
-        "args.help".into(),
-        sig(vec![("p", args_t.clone()), ("prog", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "args.error".into(),
-        sig(vec![("p", args_t.clone())], Type::Str),
-    );
-    m.insert(
-        "args.was_help".into(),
-        sig(vec![("p", args_t.clone())], Type::Bool),
-    );
     // Pure-ZZ wrapper (zz/args/mod.zz): ArgsParser constructor namespace.
     m.insert("ArgsParser.new".into(), sig(vec![], args_t.clone()));
-    m.insert(
-        "crypto.jwt_encode_ed".into(),
-        sig(
-            vec![("payload", Type::Str), ("sk", Type::Str)],
-            result_str2(),
-        ),
-    );
-    m.insert(
-        "crypto.jwt_decode_ed".into(),
-        sig(vec![("token", Type::Str), ("pk", Type::Str)], result_str2()),
-    );
     m.insert(
         "std.str.pad_right".into(),
         sig(
@@ -1026,33 +658,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     // Method-dispatch aliases for pure-ZZ string helpers
-    m.insert(
-        "str.repeat".into(),
-        sig(vec![("s", Type::Str), ("n", Type::Int)], Type::Str),
-    );
-    m.insert(
-        "str.count".into(),
-        sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Int),
-    );
-    m.insert(
-        "str.is_empty".into(),
-        sig(vec![("s", Type::Str)], Type::Bool),
-    );
-    m.insert("str.reverse".into(), sig(vec![("s", Type::Str)], Type::Str));
-    m.insert(
-        "str.pad_left".into(),
-        sig(
-            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
-            Type::Str,
-        ),
-    );
-    m.insert(
-        "str.pad_right".into(),
-        sig(
-            vec![("s", Type::Str), ("len", Type::Int), ("pad", Type::Str)],
-            Type::Str,
-        ),
-    );
 
     // std.vec — generic over element type T.
     let t = Type::Named("T".to_string());
@@ -1076,22 +681,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
 
     // vec.* methods (for method dispatch: [1,2].push(3))
-    m.insert(
-        "vec.len".into(),
-        sig_t(vec![("v", Type::Array(Box::new(t.clone())))], Type::Int),
-    );
     // bytes.* methods (for method dispatch: `b.len()` on byte buffers).
-    m.insert("bytes.len".into(), sig(vec![("v", Type::Bytes)], Type::Int));
     m.insert(
         "std.bytes.len".into(),
         sig(vec![("v", Type::Bytes)], Type::Int),
-    );
-    m.insert(
-        "bytes.to_str".into(),
-        sig(
-            vec![("vs", Type::Array(Box::new(Type::Int)))],
-            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
-        ),
     );
     m.insert(
         "std.bytes.to_str".into(),
@@ -1101,29 +694,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert(
-        "bytes.to_ints".into(),
-        sig(vec![("b", Type::Bytes)], Type::Array(Box::new(Type::Int))),
-    );
-    m.insert(
         "std.bytes.to_ints".into(),
         sig(vec![("b", Type::Bytes)], Type::Array(Box::new(Type::Int))),
     );
-    m.insert(
-        "vec.push".into(),
-        sig_t(
-            vec![("v", Type::Array(Box::new(t.clone()))), ("x", t.clone())],
-            Type::Array(Box::new(t.clone())),
-        ),
-    );
     // NOTE: `vec.append` was removed — canonical spelling is `vec.push`
     // plus the method form `xs.push(x)`. No bare `push`/`append` builtin.
-    m.insert(
-        "vec.pop".into(),
-        sig_t(
-            vec![("v", Type::Array(Box::new(t.clone())))],
-            Type::Array(Box::new(t.clone())),
-        ),
-    );
     m.insert(
         "vec.reverse".into(),
         sig_t(
@@ -1173,15 +748,14 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // vec.enumerate — method form of bare `enumerate`, so both
     // `xs.enumerate()` and `enumerate(xs)` type-check to `[(int, T)]`.
     // Pairs unpack directly in 2-variable `for` loops.
-    for name in ["vec.enumerate", "std.vec.enumerate"] {
-        m.insert(
-            name.into(),
-            sig_t(
-                vec![("v", Type::Array(Box::new(t.clone())))],
-                Type::Array(Box::new(Type::Tuple(vec![Type::Int, t.clone()]))),
-            ),
-        );
-    }
+    // (Single canonical seed; the bare spelling resolves via fallback.)
+    m.insert(
+        "std.vec.enumerate".into(),
+        sig_t(
+            vec![("v", Type::Array(Box::new(t.clone())))],
+            Type::Array(Box::new(Type::Tuple(vec![Type::Int, t.clone()]))),
+        ),
+    );
 
     // Pure-ZZ stdlib: vec helpers (compiled from zz/collections/vec.zz)
     // min_val/max_val are generic <T> returning Option<T>;
@@ -1270,86 +844,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     // Method-dispatch aliases for pure-ZZ vec helpers
-    m.insert(
-        "vec.fold".into(),
-        sig(
-            vec![
-                ("arr", Type::Array(Box::new(Type::Int))),
-                ("init", Type::Int),
-            ],
-            Type::Int,
-        ),
-    );
-    m.insert(
-        "vec.sum".into(),
-        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
-    );
-    m.insert(
-        "vec.product".into(),
-        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
-    );
-    m.insert(
-        "vec.min_val".into(),
-        sig_t(
-            vec![("arr", Type::Array(Box::new(t.clone())))],
-            Type::Option(Box::new(t.clone())),
-        ),
-    );
-    m.insert(
-        "vec.max_val".into(),
-        sig_t(
-            vec![("arr", Type::Array(Box::new(t.clone())))],
-            Type::Option(Box::new(t.clone())),
-        ),
-    );
-    m.insert(
-        "vec.sum_f".into(),
-        sig(vec![("arr", float_arr())], Type::Float),
-    );
-    m.insert(
-        "vec.product_f".into(),
-        sig(vec![("arr", float_arr())], Type::Float),
-    );
-    m.insert(
-        "vec.concat".into(),
-        sig(
-            vec![
-                ("a", Type::Array(Box::new(Type::Int))),
-                ("b", Type::Array(Box::new(Type::Int))),
-            ],
-            Type::Array(Box::new(Type::Int)),
-        ),
-    );
-    m.insert(
-        "vec.flatten".into(),
-        sig(
-            vec![(
-                "arr",
-                Type::Array(Box::new(Type::Array(Box::new(Type::Int)))),
-            )],
-            Type::Array(Box::new(Type::Int)),
-        ),
-    );
-    m.insert(
-        "vec.index_of".into(),
-        sig(
-            vec![
-                ("arr", Type::Array(Box::new(Type::Int))),
-                ("target", Type::Int),
-            ],
-            Type::Int,
-        ),
-    );
-    m.insert(
-        "vec.last_index_of".into(),
-        sig(
-            vec![
-                ("arr", Type::Array(Box::new(Type::Int))),
-                ("target", Type::Int),
-            ],
-            Type::Int,
-        ),
-    );
 
     // option.* methods (for method dispatch: .some(1).unwrap_or(0))
     let t = Type::Named("T".to_string());
@@ -1468,88 +962,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("std.json.null".into(), sig(vec![], json_t.clone()));
 
     // json.* short-form (for pure-ZZ and import-free use)
-    m.insert(
-        "json.parse".into(),
-        sig(
-            vec![("s", Type::Str)],
-            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "json.stringify".into(),
-        sig_t(
-            vec![("v", t.clone())],
-            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "json.get".into(),
-        sig(
-            vec![("j", json_t.clone()), ("key", Type::Str)],
-            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "json.as_str".into(),
-        sig(vec![("j", json_t.clone())], Type::Str),
-    );
-    m.insert(
-        "json.as_int".into(),
-        sig(vec![("j", json_t.clone())], Type::Int),
-    );
-    m.insert(
-        "json.as_float".into(),
-        sig(vec![("j", json_t.clone())], Type::Float),
-    );
-    m.insert(
-        "json.as_bool".into(),
-        sig(vec![("j", json_t.clone())], Type::Bool),
-    );
-    m.insert("json.null".into(), sig(vec![], json_t.clone()));
-    m.insert(
-        "json.pretty".into(),
-        sig(vec![("j", json_t.clone())], Type::Str),
-    );
-    m.insert(
-        "json.type".into(),
-        sig(vec![("j", json_t.clone())], Type::Str),
-    );
-    m.insert(
-        "json.len".into(),
-        sig(vec![("j", json_t.clone())], Type::Int),
-    );
-    m.insert(
-        "json.keys".into(),
-        sig(
-            vec![("j", json_t.clone())],
-            Type::Array(Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "json.has".into(),
-        sig(vec![("j", json_t.clone()), ("key", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "json.merge".into(),
-        sig(
-            vec![("a", json_t.clone()), ("b", json_t.clone())],
-            json_t.clone(),
-        ),
-    );
-    m.insert(
-        "json.deep_get".into(),
-        sig(
-            vec![("j", json_t.clone()), ("path", Type::Str)],
-            Type::Result(Box::new(json_t.clone()), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "json.array_push".into(),
-        sig_t(
-            vec![("j", json_t.clone()), ("val", t.clone())],
-            json_t.clone(),
-        ),
-    );
 
     // std.json — Phase 2.6 extensions
     m.insert(
@@ -1658,64 +1070,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
 
     // json.* short-form for pure-ZZ helpers
-    m.insert(
-        "json.validate".into(),
-        sig(vec![("s", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "json.parse_or".into(),
-        sig(
-            vec![("s", Type::Str), ("default", json_t.clone())],
-            json_t.clone(),
-        ),
-    );
-    m.insert(
-        "json.parse_or_null".into(),
-        sig(vec![("s", Type::Str)], json_t.clone()),
-    );
-    m.insert(
-        "json.path_exists".into(),
-        sig(vec![("j", json_t.clone()), ("path", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "json.path_get_or".into(),
-        sig(
-            vec![
-                ("j", json_t.clone()),
-                ("path", Type::Str),
-                ("default", json_t.clone()),
-            ],
-            json_t.clone(),
-        ),
-    );
-    m.insert(
-        "json.is_null".into(),
-        sig(vec![("j", json_t.clone())], Type::Bool),
-    );
-    m.insert(
-        "json.is_bool".into(),
-        sig(vec![("j", json_t.clone())], Type::Bool),
-    );
-    m.insert(
-        "json.is_number".into(),
-        sig(vec![("j", json_t.clone())], Type::Bool),
-    );
-    m.insert(
-        "json.is_string".into(),
-        sig(vec![("j", json_t.clone())], Type::Bool),
-    );
-    m.insert(
-        "json.is_array".into(),
-        sig(vec![("j", json_t.clone())], Type::Bool),
-    );
-    m.insert(
-        "json.is_object".into(),
-        sig(vec![("j", json_t.clone())], Type::Bool),
-    );
-    m.insert(
-        "json.is_empty".into(),
-        sig(vec![("j", json_t.clone())], Type::Bool),
-    );
 
     // std.crypto — digests (hex strings), HMAC, CSPRNG, constant-time eq.
     // Both spellings registered (like json).
@@ -1743,30 +1097,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.crypto.ct_eq".into(),
         sig(vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
     );
-    m.insert(
-        "crypto.sha256".into(),
-        sig(vec![("s", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "crypto.sha256_bytes".into(),
-        sig(vec![("b", Type::Bytes)], Type::Str),
-    );
-    m.insert(
-        "crypto.sha512".into(),
-        sig(vec![("s", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "crypto.hmac_sha256".into(),
-        sig(vec![("key", Type::Str), ("msg", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "crypto.random_bytes".into(),
-        sig(vec![("n", Type::Int)], Type::Str),
-    );
-    m.insert(
-        "crypto.ct_eq".into(),
-        sig(vec![("a", Type::Str), ("b", Type::Str)], Type::Bool),
-    );
     // Password hashing (Argon2id + bcrypt). Hashes are PHC strings;
     // verification is total (malformed input verifies as false).
     m.insert(
@@ -1783,22 +1113,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.crypto.bcrypt_verify".into(),
-        sig(vec![("hash", Type::Str), ("pw", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "crypto.argon2_hash".into(),
-        sig(vec![("pw", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "crypto.argon2_verify".into(),
-        sig(vec![("hash", Type::Str), ("pw", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "crypto.bcrypt_hash".into(),
-        sig(vec![("pw", Type::Str)], Type::Str),
-    );
-    m.insert(
-        "crypto.bcrypt_verify".into(),
         sig(vec![("hash", Type::Str), ("pw", Type::Str)], Type::Bool),
     );
 
@@ -1872,39 +1186,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Array(Box::new(Type::Str)),
         ),
     );
-    m.insert(
-        "regexp.compile".into(),
-        sig(vec![("pat", Type::Str)], regexp_result()),
-    );
-    m.insert(
-        "regexp.is_match".into(),
-        sig(vec![("re", regexp_t.clone()), ("s", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "regexp.find".into(),
-        sig(
-            vec![("re", regexp_t.clone()), ("s", Type::Str)],
-            Type::Option(Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "regexp.replace_all".into(),
-        sig(
-            vec![
-                ("re", regexp_t.clone()),
-                ("s", Type::Str),
-                ("rep", Type::Str),
-            ],
-            Type::Str,
-        ),
-    );
-    m.insert(
-        "regexp.captures".into(),
-        sig(
-            vec![("re", regexp_t.clone()), ("s", Type::Str)],
-            Type::Array(Box::new(Type::Str)),
-        ),
-    );
     // Pure-ZZ wrapper (zz/regexp/mod.zz): `Regexp` struct constructor and
     // the email-validation helper.
     m.insert(
@@ -1913,10 +1194,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.regexp.is_email".into(),
-        sig(vec![("s", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "regexp.is_email".into(),
         sig(vec![("s", Type::Str)], Type::Bool),
     );
 
@@ -1982,8 +1259,9 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_response(),
         ),
     );
+    // Test-only insecure fetch (self-signed fixtures). Same shape as fetch.
     m.insert(
-        "http.fetch".into(),
+        "std.http.fetch_insecure".into(),
         sig_defaults(
             vec![
                 ("url", Type::Str),
@@ -1996,45 +1274,27 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_response(),
         ),
     );
-    // Test-only insecure fetch (self-signed fixtures). Same shape as fetch.
-    for name in ["std.http.fetch_insecure", "http.fetch_insecure"] {
-        m.insert(
-            name.into(),
-            sig_defaults(
-                vec![
-                    ("url", Type::Str),
-                    ("method", Type::Str),
-                    ("headers", dict_str()),
-                    ("body", body_t()),
-                    ("timeout_ms", Type::Int),
-                ],
-                4,
-                result_response(),
-            ),
-        );
-    }
+
     // Generic over the body like `json.stringify` so dicts/arrays of any
     // element type check.
     // JSON client: `post_json(url, body: T, headers?)` — serializes any
     // value via the JSON serializer + sets `Content-Type: application/json`.
-    for name in ["std.http.post_json", "http.post_json"] {
-        m.insert(
-            name.into(),
-            FuncSig {
-                generics: vec!["T".to_string()],
-                bounds: Vec::new(),
-                params: vec![
-                    ("url".to_string(), Type::Str),
-                    ("body".to_string(), Type::Named("T".to_string())),
-                    ("headers".to_string(), dict_str()),
-                ],
-                has_default: vec![false, false, true],
-                ret: result_response(),
-                is_extern: false,
-                extern_c_symbol: None,
-            },
-        );
-    }
+    m.insert(
+        "std.http.post_json".into(),
+        FuncSig {
+            generics: vec!["T".to_string()],
+            bounds: Vec::new(),
+            params: vec![
+                ("url".to_string(), Type::Str),
+                ("body".to_string(), Type::Named("T".to_string())),
+                ("headers".to_string(), dict_str()),
+            ],
+            has_default: vec![false, false, true],
+            ret: result_response(),
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
@@ -2061,40 +1321,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
 
     // std.http — Server methods (dispatched via method_namespace "http")
-    m.insert(
-        "http.log".into(),
-        sig(
-            vec![("server", Type::HttpServer), ("enabled", Type::Bool)],
-            Type::HttpServer,
-        ),
-    );
-    m.insert(
-        "http.pipe".into(),
-        sig(
-            vec![
-                ("server", Type::HttpServer),
-                (
-                    "middleware",
-                    Type::Func(
-                        vec![Type::HttpRequest],
-                        Box::new(Type::Result(
-                            Box::new(Type::HttpRequest),
-                            // Short-circuit: `.err(response)` answers directly.
-                            Box::new(Type::Response),
-                        )),
-                    ),
-                ),
-            ],
-            Type::HttpServer,
-        ),
-    );
-    m.insert(
-        "http.serve_dir".into(),
-        sig(
-            vec![("server", Type::HttpServer), ("dir", Type::Str)],
-            Type::HttpServer,
-        ),
-    );
 
     // std.http — Server (per-route model)
     let server_t = Type::HttpServer;
@@ -2112,19 +1338,18 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         vec![Type::HttpRequest, Type::TcpStream],
         Box::new(Type::Union(vec![Type::Str, Type::Unit])),
     );
-    for name in ["std.http.hijack", "http.hijack"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![
-                    ("server", server_t.clone()),
-                    ("path", Type::Str),
-                    ("handler", hijack_t.clone()),
-                ],
-                server_t.clone(),
-            ),
-        );
-    }
+    m.insert(
+        "std.http.hijack".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("path", Type::Str),
+                ("handler", hijack_t.clone()),
+            ],
+            server_t.clone(),
+        ),
+    );
+
     m.insert("std.http.server".into(), sig(vec![], server_t.clone()));
     m.insert(
         "std.http.route_get".into(),
@@ -2193,48 +1418,44 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // All keys optional ints: read_ms, max_reqs_conn, max_body_bytes,
     // shutdown_ms. Both spellings like every other `std.http.*` name.
     let dict_str_int = Type::Dict(Box::new(Type::Str), Box::new(Type::Int));
-    for name in ["std.http.listen_cfg", "http.listen_cfg"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![
-                    ("server", server_t.clone()),
-                    ("port", Type::Int),
-                    ("opts", dict_str_int.clone()),
-                ],
-                Type::Unit,
-            ),
-        );
-    }
-    for name in ["std.http.listen_tls", "http.listen_tls"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![
-                    ("server", server_t.clone()),
-                    ("port", Type::Int),
-                    ("cert_path", Type::Str),
-                    ("key_path", Type::Str),
-                ],
-                Type::Unit,
-            ),
-        );
-    }
-    for name in ["std.http.listen_tls_cfg", "http.listen_tls_cfg"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![
-                    ("server", server_t.clone()),
-                    ("port", Type::Int),
-                    ("cert_path", Type::Str),
-                    ("key_path", Type::Str),
-                    ("opts", dict_str_int.clone()),
-                ],
-                Type::Unit,
-            ),
-        );
-    }
+    m.insert(
+        "std.http.listen_cfg".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("port", Type::Int),
+                ("opts", dict_str_int.clone()),
+            ],
+            Type::Unit,
+        ),
+    );
+
+    m.insert(
+        "std.http.listen_tls".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("port", Type::Int),
+                ("cert_path", Type::Str),
+                ("key_path", Type::Str),
+            ],
+            Type::Unit,
+        ),
+    );
+
+    m.insert(
+        "std.http.listen_tls_cfg".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("port", Type::Int),
+                ("cert_path", Type::Str),
+                ("key_path", Type::Str),
+                ("opts", dict_str_int.clone()),
+            ],
+            Type::Unit,
+        ),
+    );
 
     // std.http — Phase 5B features
     let dict_str_str = Type::Dict(Box::new(Type::Str), Box::new(Type::Str));
@@ -2274,57 +1495,53 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::HttpServer,
         ),
     );
-    for name in ["std.http.serve_dir_at", "http.serve_dir_at"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![
-                    ("server", Type::HttpServer),
-                    ("prefix", Type::Str),
-                    ("dir", Type::Str),
-                ],
-                Type::HttpServer,
-            ),
-        );
-    }
+    m.insert(
+        "std.http.serve_dir_at".into(),
+        sig(
+            vec![
+                ("server", Type::HttpServer),
+                ("prefix", Type::Str),
+                ("dir", Type::Str),
+            ],
+            Type::HttpServer,
+        ),
+    );
+
     // Post-middleware: `fn(req, res) -> res`, applied to handler output.
     let post_t = Type::Func(
         vec![Type::HttpRequest, Type::Response],
         Box::new(Type::Response),
     );
-    for name in ["std.http.pipe_post", "http.pipe_post"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![("server", Type::HttpServer), ("post", post_t.clone())],
-                Type::HttpServer,
-            ),
-        );
-    }
+    m.insert(
+        "std.http.pipe_post".into(),
+        sig(
+            vec![("server", Type::HttpServer), ("post", post_t.clone())],
+            Type::HttpServer,
+        ),
+    );
+
     // `with_headers(res, extra)` merges headers (`extra` wins).
-    for name in ["std.http.with_headers", "http.with_headers"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![("res", Type::Response), ("extra", dict_str())],
-                Type::Response,
-            ),
-        );
-    }
+    m.insert(
+        "std.http.with_headers".into(),
+        sig(
+            vec![("res", Type::Response), ("extra", dict_str())],
+            Type::Response,
+        ),
+    );
+
     // Token bucket per client IP: `max_requests` per rolling `window_ms`.
-    for name in ["std.http.rate_limit", "http.rate_limit"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![
-                    ("server", Type::HttpServer),
-                    ("max_requests", Type::Int),
-                    ("window_ms", Type::Int),
-                ],
-                Type::HttpServer,
-            ),
-        );
-    }
+    m.insert(
+        "std.http.rate_limit".into(),
+        sig(
+            vec![
+                ("server", Type::HttpServer),
+                ("max_requests", Type::Int),
+                ("window_ms", Type::Int),
+            ],
+            Type::HttpServer,
+        ),
+    );
+
     m.insert(
         "std.http.test".into(),
         sig(
@@ -2391,54 +1608,50 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.http.body_form".into(),
         sig(vec![("req", Type::HttpRequest)], dict_str_str.clone()),
     );
-    for name in ["std.http.body_bytes", "http.body_bytes"] {
-        m.insert(
-            name.into(),
-            sig(vec![("req", Type::HttpRequest)], Type::Bytes),
-        );
-    }
+    m.insert(
+        "std.http.body_bytes".into(),
+        sig(vec![("req", Type::HttpRequest)], Type::Bytes),
+    );
 
     // std.http — middleware alias + single-entry routing + response helpers.
     // `use` is the `pipe` spelling without the `|>` concept collision;
     // `route` collapses the four verb entries behind one method dispatch.
     // Helpers are pure-ZZ (`zz/http/mod.zz`), signatures live here so both
     // spellings type-check import-free like every other `std.*` name.
-    for name in ["std.http.use", "http.use"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![
-                    ("server", Type::HttpServer),
-                    (
-                        "middleware",
-                        Type::Func(
-                            vec![Type::HttpRequest],
-                            Box::new(Type::Result(
-                                Box::new(Type::HttpRequest),
-                                // Short-circuit: `.err(response)` answers directly.
-                                Box::new(Type::Response),
-                            )),
-                        ),
+    m.insert(
+        "std.http.use".into(),
+        sig(
+            vec![
+                ("server", Type::HttpServer),
+                (
+                    "middleware",
+                    Type::Func(
+                        vec![Type::HttpRequest],
+                        Box::new(Type::Result(
+                            Box::new(Type::HttpRequest),
+                            // Short-circuit: `.err(response)` answers directly.
+                            Box::new(Type::Response),
+                        )),
                     ),
-                ],
-                Type::HttpServer,
-            ),
-        );
-    }
-    for name in ["std.http.route", "http.route"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![
-                    ("server", server_t.clone()),
-                    ("method", Type::Str),
-                    ("path", Type::Str),
-                    ("handler", handler_t.clone()),
-                ],
-                server_t.clone(),
-            ),
-        );
-    }
+                ),
+            ],
+            Type::HttpServer,
+        ),
+    );
+
+    m.insert(
+        "std.http.route".into(),
+        sig(
+            vec![
+                ("server", server_t.clone()),
+                ("method", Type::Str),
+                ("path", Type::Str),
+                ("handler", handler_t.clone()),
+            ],
+            server_t.clone(),
+        ),
+    );
+
     // Response constructors: `ok(body)` → 200, `created(body)` → 201,
     // `not_found()` → 404, `redirect(url)` → 302 + `Location` header.
     for (name, params, ret) in [
@@ -2449,31 +1662,30 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     ] {
         let s = sig(params, ret);
         m.insert(format!("std.http.{name}"), s.clone());
-        m.insert(format!("http.{name}"), s);
     }
     // Pure-ZZ middleware kits (`zz/http/mod.zz`): `cors(server, origins)`
     // gates origins + answers preflights + echoes `Allow-Origin`;
     // `secure_headers(server)` injects CSP/nosniff/referrer/frame headers;
     // `secure_header_dict()` exposes the raw map for manual merges.
     let str_arr = || Type::Array(Box::new(Type::Str));
-    for name in ["std.http.cors", "http.cors"] {
-        m.insert(
-            name.into(),
-            sig(
-                vec![("server", Type::HttpServer), ("origins", str_arr())],
-                Type::HttpServer,
-            ),
-        );
-    }
-    for name in ["std.http.secure_headers", "http.secure_headers"] {
-        m.insert(
-            name.into(),
-            sig(vec![("server", Type::HttpServer)], Type::HttpServer),
-        );
-    }
-    for name in ["std.http.secure_header_dict", "http.secure_header_dict"] {
-        m.insert(name.into(), sig(vec![], dict_str()));
-    }
+    m.insert(
+        "std.http.cors".into(),
+        sig(
+            vec![("server", Type::HttpServer), ("origins", str_arr())],
+            Type::HttpServer,
+        ),
+    );
+
+    m.insert(
+        "std.http.secure_headers".into(),
+        sig(vec![("server", Type::HttpServer)], Type::HttpServer),
+    );
+
+    m.insert(
+        "std.http.secure_header_dict".into(),
+        sig(vec![], dict_str()),
+    );
+
     // Pure-ZZ kits: CSRF token helpers (CSPRNG hex + constant-time compare)
     // and per-response `X-Request-Id` (uuid v7) post-middleware.
     for (name, params, ret) in [
@@ -2486,14 +1698,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     ] {
         let s = sig(params, ret);
         m.insert(format!("std.http.{name}"), s.clone());
-        m.insert(format!("http.{name}"), s);
     }
-    for name in ["std.http.request_id", "http.request_id"] {
-        m.insert(
-            name.into(),
-            sig(vec![("server", Type::HttpServer)], Type::HttpServer),
-        );
-    }
+    m.insert(
+        "std.http.request_id".into(),
+        sig(vec![("server", Type::HttpServer)], Type::HttpServer),
+    );
 
     // std.net — TCP networking
     let result_tcp_stream = || Type::Result(Box::new(Type::TcpStream), Box::new(Type::Str));
@@ -2534,10 +1743,8 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.net.tcp_readline".into(),
         sig(vec![("stream", Type::TcpStream)], result_str()),
     );
-    m.insert(
-        "std.net.tcp_close".into(),
-        sig(vec![("stream", Type::TcpStream)], result_bool()),
-    );
+    // NOTE: `std.net.tcp_close` (legacy no-op) was removed — `close` /
+    // `shutdown` perform a real shutdown.
     m.insert(
         "std.net.peer_addr".into(),
         sig(vec![("stream", Type::TcpStream)], result_str()),
@@ -2577,12 +1784,17 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_int(),
         ),
     );
-    for name in ["std.net.tcp_shutdown", "std.net.shutdown", "net.shutdown"] {
-        m.insert(
-            name.into(),
-            sig(vec![("stream", Type::TcpStream)], result_unit()),
-        );
-    }
+    // `std.net.shutdown` is the ergonomic name for `std.net.tcp_shutdown`
+    // (single canonical seeds; the bare `net.*` spellings resolve via
+    // fallback). `stream.close()` / `stream.shutdown()` type-check.
+    m.insert(
+        "std.net.tcp_shutdown".into(),
+        sig(vec![("stream", Type::TcpStream)], result_unit()),
+    );
+    m.insert(
+        "std.net.shutdown".into(),
+        sig(vec![("stream", Type::TcpStream)], result_unit()),
+    );
     // std.net — ergonomic method aliases (same arities/shapes as the
     // `tcp_*` canonicals, so `listener.accept()?`, `stream.read_line()?`,
     // `stream.close()?` type-check; both spellings registered like
@@ -2638,16 +1850,13 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     ] {
         let s = sig(params, ret);
         m.insert(format!("std.net.{short}"), s.clone());
-        m.insert(format!("net.{short}"), s);
     }
-    // `close` is the real shutdown under its ergonomic name
-    // (`tcp_close` stays a legacy no-op alias).
-    for name in ["std.net.close", "net.close"] {
-        m.insert(
-            name.into(),
-            sig(vec![("stream", Type::TcpStream)], result_unit()),
-        );
-    }
+    // `close` is the real shutdown under its ergonomic name.
+    m.insert(
+        "std.net.close".into(),
+        sig(vec![("stream", Type::TcpStream)], result_unit()),
+    );
+
     // std.cell — shared-mutable slots (pool-backed handles; each op
     // takes the pool lock once). Generic over the stored value type.
     let cell_t = Type::Opaque("cell".to_string());
@@ -2659,15 +1868,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             sig_t(vec![("v", t.clone())], cell_t.clone()),
         );
         m.insert(
-            "cell.new".into(),
-            sig_t(vec![("v", t.clone())], cell_t.clone()),
-        );
-        m.insert(
             "std.cell.get".into(),
-            sig_t(vec![("c", cell_t.clone())], cell_result(t.clone())),
-        );
-        m.insert(
-            "cell.get".into(),
             sig_t(vec![("c", cell_t.clone())], cell_result(t.clone())),
         );
         m.insert(
@@ -2678,18 +1879,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             ),
         );
         m.insert(
-            "cell.set".into(),
-            sig_t(
-                vec![("c", cell_t.clone()), ("v", t.clone())],
-                cell_result(Type::Bool),
-            ),
-        );
-        m.insert(
             "std.cell.drop".into(),
-            sig(vec![("c", cell_t.clone())], Type::Bool),
-        );
-        m.insert(
-            "cell.drop".into(),
             sig(vec![("c", cell_t.clone())], Type::Bool),
         );
     }
@@ -2782,8 +1972,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         let s = sig(params, ret);
         m.insert(format!("std.net.{canon}"), s.clone());
         m.insert(format!("std.unix.{method}"), s.clone());
-        m.insert(format!("unix.{method}"), s.clone());
-        m.insert(format!("net.{canon}"), s);
     }
     for (method, params, ret) in [
         (
@@ -2959,8 +2147,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         m.insert(format!("std.net.{canon}"), s.clone());
         m.insert(format!("std.tls.{method}"), s.clone());
         m.insert(format!("tls.{method}"), s.clone());
-        m.insert(format!("net.{canon}"), s);
     }
+    // NOTE: no bare `net.{canon}` line — those sigs never had natives
+    // behind them (checked, then failed at runtime). `tls.*` keeps both
+    // spellings: `tls` is not an importable module (see below).
     // `tls.connect*` constructor aliases so `tls.connect(..)` reads naturally.
     for (alias, params) in [
         (
@@ -2985,7 +2175,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         m.insert(format!("std.tls.{alias}"), s);
     }
     m.insert(
-        "tls.connect_with_ca".into(),
+        "std.tls.connect_with_ca".into(),
         sig(
             vec![
                 ("addr", Type::Str),
@@ -2996,8 +2186,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             result_tls(),
         ),
     );
+    // NOTE: bare `tls.connect_with_ca` keeps its seed: `tls` is not an
+    // importable module, so no canonical fallback can produce it.
     m.insert(
-        "std.tls.connect_with_ca".into(),
+        "tls.connect_with_ca".into(),
         sig(
             vec![
                 ("addr", Type::Str),
@@ -3041,22 +2233,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         )
     };
     for (name, params, ret) in [
-        ("std.fs.read_file", vec![("path", Type::Str)], result_str()),
         ("std.fs.read", vec![("path", Type::Str)], result_str()),
-        (
-            "std.fs.read_to_string",
-            vec![("path", Type::Str)],
-            result_str(),
-        ),
         (
             "std.fs.read_bytes",
             vec![("path", Type::Str)],
             result_bytes(),
-        ),
-        (
-            "std.fs.write_file",
-            vec![("path", Type::Str), ("contents", Type::Str)],
-            result_unit(),
         ),
         (
             "std.fs.write",
@@ -3086,21 +2267,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ("std.fs.exists", vec![("path", Type::Str)], Type::Bool),
         ("std.fs.is_file", vec![("path", Type::Str)], Type::Bool),
         ("std.fs.is_dir", vec![("path", Type::Str)], Type::Bool),
-        (
-            "std.fs.remove_file",
-            vec![("path", Type::Str)],
-            result_unit(),
-        ),
         ("std.fs.remove", vec![("path", Type::Str)], result_unit()),
         ("std.fs.mkdir", vec![("path", Type::Str)], result_unit()),
         ("std.fs.mkdir_all", vec![("path", Type::Str)], result_unit()),
         (
             "std.fs.read_dir",
-            vec![("path", Type::Str)],
-            result_str_arr(),
-        ),
-        (
-            "std.fs.readdir",
             vec![("path", Type::Str)],
             result_str_arr(),
         ),
@@ -3302,7 +2473,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     ] {
         let s = sig(params, ret);
         m.insert(format!("std.path.{name}"), s.clone());
-        m.insert(format!("path.{name}"), s);
     }
 
     // std.env
@@ -3337,10 +2507,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.env.remove".into(),
         sig(vec![("key", Type::Str)], Type::Unit),
     );
-    m.insert(
-        "std.env.unset".into(),
-        sig(vec![("key", Type::Str)], Type::Unit),
-    );
+    // NOTE: `std.env.unset` was removed — one spelling: `std.env.remove`.
     m.insert(
         "std.env.vars".into(),
         sig(vec![], Type::Dict(Box::new(Type::Str), Box::new(Type::Str))),
@@ -3660,76 +2827,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     // Method-dispatch aliases for pure-ZZ math helpers
-    m.insert(
-        "math.sum".into(),
-        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
-    );
-    m.insert(
-        "math.product".into(),
-        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
-    );
-    m.insert(
-        "math.count".into(),
-        sig(
-            vec![
-                ("arr", Type::Array(Box::new(Type::Int))),
-                ("target", Type::Int),
-            ],
-            Type::Int,
-        ),
-    );
-    m.insert(
-        "math.min".into(),
-        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
-    );
-    m.insert(
-        "math.max".into(),
-        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
-    );
-    m.insert(
-        "math.is_even".into(),
-        sig(vec![("n", Type::Int)], Type::Bool),
-    );
-    m.insert(
-        "math.is_odd".into(),
-        sig(vec![("n", Type::Int)], Type::Bool),
-    );
-    m.insert(
-        "math.min_arr".into(),
-        sig_t(
-            vec![("arr", Type::Array(Box::new(t.clone())))],
-            Type::Option(Box::new(t.clone())),
-        ),
-    );
-    m.insert(
-        "math.max_arr".into(),
-        sig_t(
-            vec![("arr", Type::Array(Box::new(t.clone())))],
-            Type::Option(Box::new(t.clone())),
-        ),
-    );
-    m.insert(
-        "math.sum_f".into(),
-        sig(vec![("arr", float_arr())], Type::Float),
-    );
-    m.insert(
-        "math.product_f".into(),
-        sig(vec![("arr", float_arr())], Type::Float),
-    );
-    m.insert(
-        "math.mean_f".into(),
-        sig(
-            vec![("arr", float_arr())],
-            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "math.median_f".into(),
-        sig(
-            vec![("arr", float_arr())],
-            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
-        ),
-    );
 
     // std.time
     m.insert("std.time.now_ms".into(), sig(vec![], Type::Int));
@@ -3746,18 +2843,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     // Bare `time.*` aliases (like `vec.*`): back direct calls, method
     // dispatch, and references from pure-ZZ helpers (`Duration.sleep`).
-    m.insert("time.now_ms".into(), sig(vec![], Type::Int));
-    m.insert(
-        "time.sleep_ms".into(),
-        sig(vec![("ms", Type::Int)], Type::Unit),
-    );
-    m.insert("time.now_nanos".into(), sig(vec![], Type::Int));
-    m.insert("time.now_micros".into(), sig(vec![], Type::Int));
-    m.insert("time.monotonic_nanos".into(), sig(vec![], Type::Int));
-    m.insert(
-        "time.sleep_micros".into(),
-        sig(vec![("micros", Type::Int)], Type::Unit),
-    );
     // Pure-ZZ durations (zz/time/mod.zz): spans as integer microseconds.
     m.insert(
         "time.micros".into(),
@@ -3838,7 +2923,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ] {
             let s = sig(params, ret);
             m.insert(format!("std.time.{name}"), s.clone());
-            m.insert(format!("time.{name}"), s);
         }
     }
 
@@ -3896,7 +2980,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ] {
             let s = sig(params, ret);
             m.insert(format!("std.map.{name}"), s.clone());
-            m.insert(format!("map.{name}"), s);
         }
     }
 
@@ -3965,7 +3048,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ] {
             let s = sig(params, ret);
             m.insert(format!("std.set.{name}"), s.clone());
-            m.insert(format!("set.{name}"), s);
         }
     }
 
@@ -4001,7 +3083,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ] {
             let s = sig(params, ret);
             m.insert(format!("std.dec.{name}"), s.clone());
-            m.insert(format!("dec.{name}"), s);
         }
     }
 
@@ -4028,7 +3109,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             ),
         ] {
             let s = sig(params, ret);
-            m.insert(format!("str.{name}"), s.clone());
             m.insert(format!("std.str.{name}"), s);
         }
         for (name, params, ret) in [
@@ -4047,19 +3127,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             ("from_ints", vec![("vs", arr_int.clone())], arr_int.clone()),
         ] {
             let s = sig(params, ret);
-            m.insert(format!("bytes.{name}"), s.clone());
             m.insert(format!("std.bytes.{name}"), s);
         }
         // bytes.finish: the missing [int] -> bytes bridge (mod.zz builds
         // int-lists; only natives mint `bytes`). Fallible (range-checked),
         // unlike str.finish — binary assembly must never silently clamp.
-        m.insert(
-            "bytes.finish".into(),
-            sig(
-                vec![("vs", arr_int.clone())],
-                Type::Result(Box::new(Type::Bytes), Box::new(Type::Str)),
-            ),
-        );
         m.insert(
             "std.bytes.finish".into(),
             sig(
@@ -4113,7 +3185,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ] {
             let s = sig(params, ret);
             m.insert(format!("std.csv.{name}"), s.clone());
-            m.insert(format!("csv.{name}"), s);
         }
     }
 
@@ -4216,7 +3287,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             ),
         ] {
             m.insert(format!("std.property.{name}"), s.clone());
-            m.insert(format!("property.{name}"), s);
         }
     }
 
@@ -4269,7 +3339,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     for name in color_wraps {
         let s = sig(vec![("s", Type::Str)], Type::Str);
         m.insert(format!("std.colors.{name}"), s.clone());
-        m.insert(format!("colors.{name}"), s);
     }
     for (name, params, ret) in [
         ("clamp255", vec![("v", Type::Int)], Type::Int),
@@ -4333,7 +3402,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     ] {
         let s = sig(params, ret);
         m.insert(format!("std.colors.{name}"), s.clone());
-        m.insert(format!("colors.{name}"), s);
     }
 
     // std.sqlz — SQLite foundation (CANONICAL module name).
@@ -4345,11 +3413,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // annotation (`let users: [User] = sqlz.query(...)`) so the runtime can
     // map columns positionally into that struct.
     //
-    // `std.db` / `db.*` were removed: `sqlz` is the only SQLite module.
-    // The checker emits a deprecation warning pointing at `sqlz` when the
-    // `db`/`std.db` module namespace is used; handle variables named `db`
-    // (e.g. `db := sqlz.open(..); db.exec(..)`) are method calls and warn
-    // free. Runtime/codegen keep the `db.*` name mapping for one release.
+    // There is no `db` module: `sqlz` is the only SQLite module.
+    // Module-position `db.*` calls hard-error in the checker with a rename
+    // hint; handle variables named `db` (`db := sqlz.open(..); db.exec(..)`)
+    // are method calls and keep working.
     let db_row_t = Type::Named("T".to_string());
     m.insert(
         "std.sqlz.open".into(),
@@ -4371,21 +3438,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("db", Type::Db)], Type::Unit),
     );
     // Method-dispatch aliases (`sqlz.open(...)` after `import std.sqlz`).
-    m.insert("sqlz.open".into(), sig(vec![("path", Type::Str)], Type::Db));
-    m.insert(
-        "sqlz.exec".into(),
-        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
-    );
-    m.insert(
-        "sqlz.query".into(),
-        sig_t(
-            vec![("db", Type::Db), ("sql", Type::Str)],
-            Type::Array(Box::new(db_row_t.clone())),
-        ),
-    );
-    m.insert("sqlz.close".into(), sig(vec![("db", Type::Db)], Type::Unit));
-    // NOTE: `std.db.*` / `db.*` seeds removed (see above). Alias resolution
-    // lives in the checker/loader with a deprecation warning, not here.
+    // NOTE: no `std.db.*` / `db.*` seeds exist (see above).
 
     // std.sqlz.postgres — async-minded PostgreSQL wire-protocol driver.
     //
@@ -4444,7 +3497,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // `transaction(db, fn(tx) { ... }) -> Result[T, str]`: BEGIN, run the
     // closure with the transaction handle, COMMIT on clean return
     // (`.ok(value)`), ROLLBACK on closure error (`.err(message)`).
-    // `db.transaction` alias removed with the other `db.*` seeds.
+    // NOTE: no `db.transaction` — `sqlz.transaction` only.
     let tx_t = Type::Named("T".to_string());
     let tx_sig = sig_t(
         vec![
@@ -4454,7 +3507,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         Type::Result(Box::new(tx_t.clone()), Box::new(Type::Str)),
     );
     m.insert("std.sqlz.transaction".into(), tx_sig.clone());
-    m.insert("sqlz.transaction".into(), tx_sig.clone());
 
     // std.chan — concurrency primitives
     let t = Type::Named("T".to_string());
@@ -4754,6 +3806,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::stdlib_consts;
@@ -4791,7 +3844,6 @@ mod tests {
         assert!(funcs.contains_key("std.http.cors"));
         assert!(funcs.contains_key("std.http.secure_headers"));
         assert!(funcs.contains_key("std.encoding.base64_decode_bytes"));
-        assert!(funcs.contains_key("std.fs.read_to_string"));
         assert!(funcs.contains_key("std.fs.read_bytes"));
         assert!(funcs.contains_key("std.fs.write"));
         assert!(funcs.contains_key("std.fs.append"));
@@ -4800,7 +3852,6 @@ mod tests {
         assert!(funcs.contains_key("std.fs.rename"));
         assert!(funcs.contains_key("std.fs.is_file"));
         assert!(funcs.contains_key("std.fs.is_dir"));
-        assert!(funcs.contains_key("std.fs.remove_file"));
         assert!(funcs.contains_key("std.fs.mkdir"));
         assert!(funcs.contains_key("std.fs.mkdir_all"));
         assert!(funcs.contains_key("std.fs.read_dir"));
@@ -4864,15 +3915,7 @@ mod tests {
         assert!(funcs.contains_key("std.sqlz.exec"));
         assert!(funcs.contains_key("std.sqlz.query"));
         assert!(funcs.contains_key("std.sqlz.close"));
-        assert!(funcs.contains_key("sqlz.open"));
-        assert!(funcs.contains_key("sqlz.exec"));
-        assert!(funcs.contains_key("sqlz.query"));
-        assert!(funcs.contains_key("sqlz.close"));
-        // `std.db.*` / `db.*` seeds removed — `sqlz` is the only SQLite
-        // module (alias resolution + warning live in checker/loader).
-        assert!(!funcs.contains_key("std.db.open"));
-        assert!(!funcs.contains_key("db.open"));
-        assert!(!funcs.contains_key("db.query"));
+        // No `std.db.*` / `db.*` seeds exist — `sqlz` only.
         assert!(funcs.contains_key("std.sqlz.postgres.connect"));
         assert!(funcs.contains_key("std.sqlz.postgres.exec"));
         assert!(funcs.contains_key("std.sqlz.postgres.query"));
@@ -4882,8 +3925,6 @@ mod tests {
         assert!(funcs.contains_key("std.sqlz.mysql.query"));
         assert!(funcs.contains_key("std.sqlz.mysql.close"));
         assert!(funcs.contains_key("std.sqlz.transaction"));
-        assert!(funcs.contains_key("sqlz.transaction"));
-        // `std.db.transaction` / `db.transaction` removed with `db`.
         // Math constants are static values, not zero-arg functions.
         let consts = stdlib_consts();
         assert!(consts.contains_key("std.math.PI"));
@@ -4896,7 +3937,6 @@ mod tests {
         assert!(funcs.contains_key("std.math.INF"));
         assert!(funcs.contains_key("std.math.NAN"));
         // vec.enumerate: method spelling of bare `enumerate`.
-        assert!(funcs.contains_key("vec.enumerate"));
         assert!(funcs.contains_key("std.vec.enumerate"));
         // path helpers (pure-ZZ).
         assert!(funcs.contains_key("std.path.join"));
@@ -4906,22 +3946,18 @@ mod tests {
         assert!(funcs.contains_key("std.path.dirname"));
         assert!(funcs.contains_key("std.path.is_absolute"));
         assert!(funcs.contains_key("std.path.extension"));
-        assert!(funcs.contains_key("path.join"));
-        assert!(funcs.contains_key("path.join_all"));
         assert!(funcs.contains_key("std.colors.red"));
         assert!(funcs.contains_key("std.colors.rgb"));
         assert!(funcs.contains_key("std.colors.hex"));
-        assert!(funcs.contains_key("colors.red"));
-        assert!(funcs.contains_key("colors.bold"));
-        assert!(funcs.contains_key("colors.strip"));
+        assert!(funcs.contains_key("std.colors.bold"));
+        assert!(funcs.contains_key("std.colors.strip"));
         assert!(funcs.contains_key("std.colors.reverse"));
-        assert!(funcs.contains_key("colors.reverse"));
         assert!(funcs.contains_key("std.colors.strikethrough"));
-        assert!(funcs.contains_key("colors.blink"));
+        assert!(funcs.contains_key("std.colors.blink"));
         assert!(funcs.contains_key("std.colors.bg_bright_red"));
-        assert!(funcs.contains_key("colors.bg_bright_white"));
+        assert!(funcs.contains_key("std.colors.bg_bright_white"));
         assert!(funcs.contains_key("std.colors.color256"));
-        assert!(funcs.contains_key("colors.bg_256"));
+        assert!(funcs.contains_key("std.colors.bg_256"));
         assert!(funcs.contains_key("dbg"));
         // net method aliases + binary transfers + shutdown.
         for name in [
@@ -4929,29 +3965,17 @@ mod tests {
             "std.net.tcp_write_bytes",
             "std.net.tcp_shutdown",
             "std.net.shutdown",
-            "net.shutdown",
             "std.net.accept",
-            "net.accept",
             "std.net.read",
-            "net.read",
             "std.net.read_line",
-            "net.read_line",
             "std.net.read_bytes",
-            "net.read_bytes",
             "std.net.write",
-            "net.write",
             "std.net.write_bytes",
-            "net.write_bytes",
             "std.net.close",
-            "net.close",
             "std.net.peer_addr",
-            "net.peer_addr",
             "std.net.local_addr",
-            "net.local_addr",
             "std.net.set_read_timeout",
-            "net.set_read_timeout",
             "std.net.set_write_timeout",
-            "net.set_write_timeout",
             "std.net.tcp_read_exact",
             "std.net.tls_connect",
             "std.net.tls_connect_with_ca",
@@ -4964,27 +3988,16 @@ mod tests {
         // http helpers (pure-ZZ, compiled from zz/http/mod.zz).
         for name in [
             "std.http.use",
-            "http.use",
             "std.http.route",
-            "http.route",
             "std.http.ok",
             "std.http.created",
             "std.http.not_found",
             "std.http.redirect",
-            "http.ok",
-            "http.created",
-            "http.not_found",
-            "http.redirect",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
         // Unified client + JSON client.
-        for name in [
-            "std.http.fetch",
-            "http.fetch",
-            "std.http.post_json",
-            "http.post_json",
-        ] {
+        for name in ["std.http.fetch", "std.http.post_json"] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
         // 9 canonical `std.str.*` twins of the `str.*` method entries
@@ -5012,53 +4025,29 @@ mod tests {
             "std.term.get_size",
             "std.term.is_tty",
             "std.term.flush",
-            "term.enable_raw",
-            "term.disable_raw",
-            "term.read_key",
-            "term.poll",
-            "term.get_size",
-            "term.is_tty",
-            "term.flush",
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
         // New pure-ZZ modules (map, set, dec, bytes, csv, time dates).
         for name in [
             "std.map.has",
-            "map.has",
             "std.map.get_or",
-            "map.get_or",
             "std.map.merge",
-            "map.merge",
             "std.map.keys",
-            "map.keys",
             "std.set.has",
-            "set.has",
             "std.set.union",
-            "set.union",
             "std.set.intersect",
-            "set.intersect",
             "std.dec.add",
-            "dec.add",
             "std.dec.cmp",
-            "dec.cmp",
             "std.dec.format",
-            "dec.format",
-            "str.builder",
             "std.str.builder",
-            "str.finish",
-            "bytes.builder",
+            "std.str.finish",
             "std.bytes.builder",
-            "bytes.finish",
             "std.bytes.finish",
             "std.cell.new",
-            "cell.new",
             "std.cell.get",
-            "cell.get",
             "std.cell.set",
-            "cell.set",
             "std.cell.drop",
-            "cell.drop",
             "std.net.unix_connect",
             "std.net.unix_listen",
             "std.net.unix_accept",
@@ -5073,66 +4062,39 @@ mod tests {
             "std.net.unix_set_write_timeout",
             "std.net.unix_close",
             "std.net.unix_shutdown",
-            "net.unix_shutdown",
             "unix_listener.accept",
             "std.unix_listener.close",
             "std.net.tls_readline",
             "std.net.tls_shutdown",
-            "net.tls_shutdown",
-            "bytes.push_byte",
+            "std.bytes.push_byte",
             "std.csv.parse",
-            "csv.parse",
             "std.csv.stringify",
-            "csv.stringify",
             "std.csv.to_json",
-            "csv.to_json",
             "std.property.seed",
-            "property.seed",
             "std.property.int_in",
-            "property.int_in",
             "std.property.check",
-            "property.check",
             "std.property.for_all_int",
-            "property.for_all_int",
             "std.time.parse_rfc3339",
-            "time.parse_rfc3339",
             "std.time.format_rfc3339",
-            "time.format_rfc3339",
             "std.time.add_days",
-            "time.add_days",
             "std.str.starts_with_at",
-            "str.starts_with_at",
             "std.str.ends_with_at",
-            "str.ends_with_at",
             "std.str.trim_span",
-            "str.trim_span",
             "std.str.find_in",
-            "str.find_in",
             "std.str.rfind_in",
-            "str.rfind_in",
             "std.str.count_in",
-            "str.count_in",
             "std.str.bytes",
-            "str.bytes",
             "std.str.byte_len",
-            "str.byte_len",
             "std.bytes.to_str",
-            "bytes.to_str",
             "std.bytes.to_ints",
             "std.str.classify",
-            "str.classify",
             "std.fs.scan_counts",
             "std.fs.is_generated",
-            "bytes.to_ints",
             "std.str.find",
-            "str.find",
             "std.str.rfind",
-            "str.rfind",
             "ord",
-            "str.ord",
             "std.str.ord",
             "chr",
-            "str.chr",
             "std.str.chr",
             "assert_contains",
             "std.test.assert_contains",
@@ -5165,7 +4127,34 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 1106);
+        assert_eq!(funcs.len(), 699);
+    }
+
+    #[test]
+    fn no_bare_twin_seeds() {
+        // B invariant: seeds hold canonical `std.*` names only. A bare
+        // `module.func` key may exist only when no `std.module.func` seed
+        // exists - never as a twin. The only exceptions are namespaces the
+        // canonical fallback cannot serve (no importable module behind
+        // them: `tls.*`, `span.end`, ...): for those the bare seed is
+        // load-bearing, so the test derives the rule from
+        // `canonical_std_name` itself instead of a hardcoded list.
+        // Bare callers resolve via that same fallback.
+        let funcs = stdlib_funcs();
+        let mut twins = Vec::new();
+        for k in funcs.keys() {
+            if k.contains('.')
+                && !k.starts_with("std.")
+                && funcs.contains_key(&format!("std.{k}"))
+                && zz_checker::canonical_std_name(k).is_some()
+            {
+                twins.push(k.clone());
+            }
+        }
+        assert!(
+            twins.is_empty(),
+            "bare twin seeds (use std.* only): {twins:?}"
+        );
     }
 
     #[test]

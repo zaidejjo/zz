@@ -11,7 +11,7 @@ func main() {
     }
     assert(fs.exists(d))
     f := "{d}/hello.txt"
-    assert_is_ok(fs.write_file(f, "hi"))
+    assert_is_ok(fs.write(f, "hi"))
     assert(fs.exists(f))
     assert_is_ok(fs.remove_dir_all(d))
     assert(!fs.exists(d))

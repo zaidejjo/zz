@@ -1,6 +1,5 @@
 //! `std.sqlz` — SQLite via rusqlite (bundled). CANONICAL and only module
-//! name; the `std.db` / `db` module was removed (one-release checker
-//! warning rewrites module-position uses to `sqlz`).
+//! name; there is no `db` module (removed outright).
 //!
 //! Compile-time parameterization contract:
 //! - `sqlz.query(sql)` / `sqlz.exec(sql)` receive an *already-evaluated* SQL

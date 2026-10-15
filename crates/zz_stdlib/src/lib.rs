@@ -57,13 +57,11 @@ fn build_stdlib_consts() -> std::collections::HashMap<String, f64> {
 }
 
 /// The set of known `std.*` module names (second path component).
-/// `sqlz` is the canonical SQLite module. `db` is kept for one release as a
-/// deprecated alias that resolves to `sqlz` with a checker warning
-/// (see [`deprecated_module_canonical`]); it has no seeds of its own.
+/// `sqlz` is the only SQLite module (the old `db` alias was removed).
 /// `sqlz.postgres` is the nested PostgreSQL wire-protocol submodule and
 /// `sqlz.mysql` the nested MySQL wire-protocol submodule. They are only
 /// reachable via `import std.sqlz.postgres` / `import std.sqlz.mysql`
-/// (optionally `as pg` / `as my`); bare `pg.*` / `my.*` no longer resolve.
+/// (optionally `as pg` / `as my`); bare `pg.*` / `my.*` do not resolve.
 pub const STDLIB_MODULES: &[&str] = &[
     "str",
     "vec",
@@ -86,7 +84,6 @@ pub const STDLIB_MODULES: &[&str] = &[
     "process",
     "uuid",
     "sqlz",
-    "db",
     "sqlz.postgres",
     "sqlz.mysql",
     "colors",
@@ -102,36 +99,11 @@ pub const STDLIB_MODULES: &[&str] = &[
     "unix",
 ];
 
-/// Resolve a module name to its canonical backing module.
-/// Every module is its own canonical name, except deprecated aliases
-/// (see [`deprecated_module_canonical`]): `db` resolves to `sqlz`.
+/// Resolve a module name to its canonical backing module: identity —
+/// every module is its own canonical name (the old `db`→`sqlz` alias was
+/// removed; `db` is a hard error everywhere now).
 pub fn canonical_module(module: &str) -> &str {
-    deprecated_module_canonical(module).unwrap_or(module)
-}
-
-/// Deprecated module aliases, kept for one release with a checker warning.
-/// `db` has no seeds of its own — it resolves to the `sqlz` members.
-/// Next release: delete this table, `canonical_module` becomes identity,
-/// and `db` leaves [`STDLIB_MODULES`].
-pub fn deprecated_module_canonical(module: &str) -> Option<&'static str> {
-    match module {
-        "db" => Some("sqlz"),
-        _ => None,
-    }
-}
-
-/// Resolve a deprecated fully-qualified function name to its canonical
-/// spelling. Maps `db.*` → `sqlz.*` and `std.db.*` → `std.sqlz.*`
-/// (including `transaction`). Returns `None` for canonical names.
-/// Alias, not copy: there is exactly one implementation — the `sqlz` one.
-pub fn canonical_std_func(name: &str) -> Option<String> {
-    if let Some(rest) = name.strip_prefix("std.db.") {
-        return Some(format!("std.sqlz.{rest}"));
-    }
-    if let Some(rest) = name.strip_prefix("db.") {
-        return Some(format!("sqlz.{rest}"));
-    }
-    None
+    module
 }
 
 /// Per-module direct members, precomputed once per process (#233).
@@ -262,9 +234,6 @@ pub fn register_module_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    // Deprecated `std.db`: importing it copies the canonical `std.sqlz.*`
-    // entries (identical sigs + fn pointers, single implementation) and the
-    // checker/loader warn to rename to `sqlz`. Removed next release.
     // Members are precomputed once per process (#233): per import we walk
     // only this module's members instead of scanning the whole tables.
     let source = canonical_module(module);
@@ -308,8 +277,6 @@ pub fn register_selective_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    // Deprecated: selective `import std.db(open)` resolves against
-    // `std.sqlz.*` with a warning. Borrow cached tables; lookups only.
     // Borrow cached tables (no per-import rebuild); lookups only.
     let prefix = format!("std.{}.", canonical_module(module));
     let std_funcs = crate::funcs::stdlib_funcs_cached();
@@ -356,8 +323,6 @@ pub fn register_wildcard_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    // Deprecated: wildcard `import std.db(*)` resolves against `std.sqlz.*`
-    // with a warning. Members precomputed once per process (#233), same set
     // Members precomputed once per process (#233), same set as the old
     // full-table scan (direct members only — see `register_module_namespace`).
     let Some(members) = module_members_table().get(canonical_module(module)) else {

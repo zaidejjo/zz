@@ -28,7 +28,7 @@ func main() {
         }
     }
     println(found)
-    env.unset("ZZ_E2E_ENV_MARKER")
+    env.remove("ZZ_E2E_ENV_MARKER")
     match env.get("ZZ_E2E_ENV_MARKER") {
         .some(v) => println("unexpected_post: {v}")
         .none => println("remove_ok")

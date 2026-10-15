@@ -520,11 +520,6 @@ fn import_path_completions(
     if partial_prefix == "std" || partial_prefix.starts_with("std.") {
         let mut seen = std::collections::HashSet::new();
         for module in zz_stdlib::STDLIB_MODULES {
-            // Deprecated `db` module: hidden from completion — `sqlz` is
-            // the only SQLite module (checker warns on `db` use).
-            if *module == "db" {
-                continue;
-            }
             let full = format!("std.{module}");
             if full.starts_with(partial_prefix) && seen.insert(full.clone()) {
                 items.push(CompletionItem {
@@ -742,7 +737,7 @@ fn selective_member_completions(
             std::collections::HashMap::new();
         if let Some(cr) = check_result {
             for key in cr.funcs.keys() {
-                if let Some(name) = key.strip_prefix(&prefix) {
+                if let Some(name) = strip_member(key, ns) {
                     if !name.contains('.') && name.starts_with(partial_prefix) {
                         members
                             .entry(name.to_string())
@@ -751,7 +746,7 @@ fn selective_member_completions(
                 }
             }
             for key in cr.structs.keys() {
-                if let Some(name) = key.strip_prefix(&prefix) {
+                if let Some(name) = strip_member(key, ns) {
                     if !name.contains('.') && name.starts_with(partial_prefix) {
                         members
                             .entry(name.to_string())
@@ -904,12 +899,8 @@ fn std_root_completions(partial_prefix: &str) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
     for module in zz_stdlib::STDLIB_MODULES {
-        // Deprecated `db` module: hidden — `sqlz` is canonical. Nested
-        // `sqlz.postgres` / `sqlz.mysql` stay hidden at root by design:
-        // they complete only under `std.sqlz.*`.
-        if *module == "db" {
-            continue;
-        }
+        // Nested `sqlz.postgres` / `sqlz.mysql` stay hidden at root by
+        // design: they complete only under `std.sqlz.*`.
         let top = module.split('.').next().unwrap_or(module);
         if top.starts_with(partial_prefix) && seen.insert(top.to_string()) {
             items.push(CompletionItem {
@@ -923,6 +914,22 @@ fn std_root_completions(partial_prefix: &str) -> Vec<CompletionItem> {
     }
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+/// Strip a member key for namespace `ns`, accepting the canonical
+/// `std.*` seed spelling as well as the short (import-copied) one.
+/// Seeds hold canonical names only (`std.vec.push`), so an unimported
+/// `vec.` scan must also match `std.vec.`.
+fn strip_member<'a>(key: &'a str, ns: &str) -> Option<&'a str> {
+    if let Some(rest) = key.strip_prefix(&format!("{ns}.")) {
+        return Some(rest);
+    }
+    if !ns.starts_with("std.") {
+        if let Some(rest) = key.strip_prefix(&format!("std.{ns}.")) {
+            return Some(rest);
+        }
+    }
+    None
 }
 
 /// Seeded globals snapshot (`lib.pi` from deps/workspace).
@@ -997,9 +1004,8 @@ fn dot_access_completions(
             };
             let mut items: Vec<CompletionItem> = Vec::new();
             for ns in nss {
-                let prefix = format!("{ns}.");
                 for k in cr.funcs.keys() {
-                    if let Some(m) = k.strip_prefix(&prefix) {
+                    if let Some(m) = strip_member(k, ns) {
                         if m.starts_with(partial_prefix) && !m.contains('.') {
                             items.push(CompletionItem {
                                 label: m.to_string(),
@@ -1052,9 +1058,8 @@ fn struct_items(cr: &CheckResult, struct_name: &str, partial_prefix: &str) -> Ve
         })
         .collect();
     // Struct methods (inherent + extensions, merged in `funcs`).
-    let prefix = format!("{struct_name}.");
     for k in cr.funcs.keys() {
-        if let Some(m) = k.strip_prefix(&prefix) {
+        if let Some(m) = strip_member(k, struct_name) {
             if m.starts_with(partial_prefix) && !m.contains('.') {
                 items.push(CompletionItem {
                     label: m.to_string(),
@@ -1228,8 +1233,8 @@ fn resolve_obj_type(program: &Program, cr: &CheckResult, name: &str) -> Option<T
     if let Some(ty) = cr.bindings.get(name) {
         return Some(ty.clone());
     }
-    // 2. Check function name.
-    if let Some(sig) = cr.funcs.get(name) {
+    // 2. Check function name (canonical fallback: seeds are `std.*` only).
+    if let Some(sig) = zz_checker::lookup_std(&cr.funcs, name) {
         return Some(func_sig_to_type(sig));
     }
     // 3. Check struct name.
@@ -1562,7 +1567,7 @@ fn scope_completions(
                     continue;
                 }
                 let qualified = format!("{ns}.{name}");
-                if cr.funcs.contains_key(&qualified) {
+                if zz_checker::lookup_std(&cr.funcs, &qualified).is_some() {
                     ranked.push((
                         TIER_IMPORTED,
                         CompletionItem {

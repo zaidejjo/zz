@@ -980,14 +980,9 @@ fn count_stmt_field_refs(s: &Stmt, obj: &str, field: &str) -> usize {
 /// Classify `target = rhs` per the module rule. Returns the move shape when
 /// every static clause holds; per-engine guards (capture sets, callee
 /// scope-share, slot kinds) apply on top.
-/// Native-engine classification: push spellings only (see `is_push_callee`).
+/// Single spelling: push is `vec.push` plus the method form `xs.push(x)`,
+/// so all engines classify identically.
 pub fn classify_self_assign(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
-    classify_with(target, rhs, &is_push_callee)
-}
-
-/// VM-engine classification: push spellings (see `is_push_callee` — the
-/// `append` spellings were removed, so both engines classify identically).
-pub fn classify_self_assign_vm(target: &Expr, rhs: &Expr) -> Option<MoveKind> {
     classify_with(target, rhs, &is_push_callee)
 }
 

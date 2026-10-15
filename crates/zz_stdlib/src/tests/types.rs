@@ -75,7 +75,7 @@ fn option_unwrap_or_via_int_parse() {
 
 #[test]
 fn result_unwrap_via_fs() {
-    let v = run("import std.fs\nfs.read_file(\"/tmp/zz_no_such_file_zz\").unwrap_or(\"default\")")
-        .unwrap();
+    let v =
+        run("import std.fs\nfs.read(\"/tmp/zz_no_such_file_zz\").unwrap_or(\"default\")").unwrap();
     assert_eq!(v, Value::Str("default".to_string().into()));
 }

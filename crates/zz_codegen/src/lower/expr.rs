@@ -2863,20 +2863,10 @@ impl Lowerer {
         // Both are passed explicitly.
         if matches!(
             cname.as_str(),
-            "sqlz.query"
-                | "std.sqlz.query"
-                | "db.query"
-                | "std.db.query"
-                | "pg.query"
-                | "std.sqlz.postgres.query"
+            "sqlz.query" | "std.sqlz.query" | "pg.query" | "std.sqlz.postgres.query"
         ) || matches!(
             cname.as_str(),
-            "sqlz.exec"
-                | "std.sqlz.exec"
-                | "db.exec"
-                | "std.db.exec"
-                | "pg.exec"
-                | "std.sqlz.postgres.exec"
+            "sqlz.exec" | "std.sqlz.exec" | "pg.exec" | "std.sqlz.postgres.exec"
         ) {
             return self.emit_db_call(&cname, method_receiver.as_ref(), ordered_args, names, out);
         }
@@ -2885,10 +2875,7 @@ impl Lowerer {
         // path (closures have no C function pointer).  Instead we inline the
         // closure body between BEGIN / COMMIT / ROLLBACK directly, binding
         // the closure parameter (typically `tx`) to the same db handle.
-        if matches!(
-            cname.as_str(),
-            "sqlz.transaction" | "std.sqlz.transaction" | "db.transaction" | "std.db.transaction"
-        ) {
+        if matches!(cname.as_str(), "sqlz.transaction" | "std.sqlz.transaction") {
             if let Some(Expr::Closure { params, body, .. }) = args.last() {
                 // Emit the db handle — for the method form
                 // `db.transaction(|tx| {...})` the receiver IS the db;
@@ -3577,9 +3564,27 @@ impl Lowerer {
         let cname_for_native: String = cname_ref.to_string();
         let _ = &owned_fallback;
 
+        // Canonical-to-short definition bridge: pure-ZZ bodies are
+        // declared under short names (`path.join`) while selective-import
+        // and canonical call spellings arrive as `std.path.join`. The
+        // definition loop emits the short spelling, so reference it —
+        // otherwise the call dangles (decl without def). Only remaps when
+        // the canonical name has no definition of its own (user `std.*`
+        // definitions, such as they are, keep exact match) — natives
+        // never reach here without an impl (handled above).
+        let cname_for_native: String = if self.find_func_def(&cname_for_native).is_none() {
+            match cname_for_native.strip_prefix("std.") {
+                Some(stripped) if self.find_func_def(stripped).is_some() => stripped.to_string(),
+                _ => cname_for_native,
+            }
+        } else {
+            cname_for_native
+        };
+
         if !shadowed
             && self.reachable_funcs.contains(&cname_for_native)
             && (self.tp.funcs.contains_key(&cname_for_native)
+                || self.find_func_def(&cname_for_native).is_some()
                 || self.is_impl_method(&cname_for_native))
         {
             let cf = format!("zz_fn_{}", mangle(&cname_for_native));
@@ -5179,12 +5184,7 @@ impl Lowerer {
         }
         let is_query = matches!(
             cname,
-            "sqlz.query"
-                | "std.sqlz.query"
-                | "db.query"
-                | "std.db.query"
-                | "pg.query"
-                | "std.sqlz.postgres.query"
+            "sqlz.query" | "std.sqlz.query" | "pg.query" | "std.sqlz.postgres.query"
         );
         let rt = if is_query {
             "zz_db_query"

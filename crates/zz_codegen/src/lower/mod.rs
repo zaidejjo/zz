@@ -1131,7 +1131,6 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.tcp_write" | "std.net.tcp_write" => Some("zz_tcp_write"),
         "net.tcp_read" | "std.net.tcp_read" => Some("zz_tcp_read"),
         "net.tcp_readline" | "std.net.tcp_readline" => Some("zz_tcp_readline"),
-        "net.tcp_close" | "std.net.tcp_close" => Some("zz_tcp_close"),
         "net.tcp_read_bytes" | "std.net.tcp_read_bytes" => Some("zz_tcp_read_bytes"),
         "net.tcp_read_exact" | "std.net.tcp_read_exact" => Some("zz_tcp_read_exact"),
         "net.tcp_write_bytes" | "std.net.tcp_write_bytes" => Some("zz_tcp_write_bytes"),
@@ -1152,17 +1151,16 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.set_write_timeout" | "std.net.set_write_timeout" => Some("zz_tcp_set_write_timeout"),
         // sqlz (AOT: sqlite3 prepared-statement C impl + postgres via
         // the staticlib; the C handle records the backend).
-        // Canonical `sqlz.*` / `std.sqlz.*`; `db.*` / `std.db.*` are a
-        // deprecated one-release mapping (checker warns, rewrite to sqlz);
+        // Canonical `sqlz.*` / `std.sqlz.*` (`db` was removed);
         // `pg.*` / `std.sqlz.postgres.*` are the explicit PG spellings
         // (`pg` only exists as an import alias of the nested module).
-        "sqlz.open" | "std.sqlz.open" | "db.open" | "std.db.open" => Some("zz_db_open"),
+        "sqlz.open" | "std.sqlz.open" => Some("zz_db_open"),
         "pg.connect" | "std.sqlz.postgres.connect" => Some("zz_pg_connect"),
-        "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec" => Some("zz_db_exec"),
+        "sqlz.exec" | "std.sqlz.exec" => Some("zz_db_exec"),
         "pg.exec" | "std.sqlz.postgres.exec" => Some("zz_db_exec"),
-        "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query" => Some("zz_db_query"),
+        "sqlz.query" | "std.sqlz.query" => Some("zz_db_query"),
         "pg.query" | "std.sqlz.postgres.query" => Some("zz_db_query"),
-        "sqlz.close" | "std.sqlz.close" | "db.close" | "std.db.close" => Some("zz_db_close"),
+        "sqlz.close" | "std.sqlz.close" => Some("zz_db_close"),
         "pg.close" | "std.sqlz.postgres.close" => Some("zz_db_close"),
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),

@@ -10,12 +10,12 @@ scratch_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
 scratch := "/tmp/zz_e2e_test_{pid()}_{scratch_tok}.txt"
 
 // write + read
-match fs.write_file(scratch, "hello from zz") {
+match fs.write(scratch, "hello from zz") {
     .ok(_) => println("write_ok")
     .err(e) => println("write_err: {e}")
 }
 
-match fs.read_file(scratch) {
+match fs.read(scratch) {
     .ok(content) => println(content)
     .err(e) => println("read_err: {e}")
 }
@@ -25,6 +25,6 @@ println(fs.exists(scratch))
 println(fs.exists("/tmp/zz_no_such_file.txt"))
 
 // cleanup
-_u1 := fs.write_file(scratch, "")
+_u1 := fs.write(scratch, "")
 
 println("fs_ok")

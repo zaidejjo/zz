@@ -1152,7 +1152,7 @@ fn e2e_check_unimported_std_module_suggests_import() {
     std::fs::write(
         &tmp,
         r#"func main() {
-    y := math.sin(1.0)
+    y := sin(1.0)
     println(y)
 }"#,
     )

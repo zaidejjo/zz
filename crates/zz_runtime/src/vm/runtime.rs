@@ -2210,7 +2210,9 @@ impl Vm {
                                         Unwind::Error(err) => return Err(err),
                                     },
                                     Some(fname) => {
-                                        let Some(fv) = interp.funcs.get(&fname).cloned() else {
+                                        let Some(fv) =
+                                            zz_checker::lookup_std(&interp.funcs, &fname).cloned()
+                                        else {
                                             match self.unwind_frame(
                                                 Flow::Return(Value::Result(Box::new(Err(
                                                     e.clone()
@@ -2332,8 +2334,8 @@ impl Vm {
                         // Precomputed at compile time (see `Op::CallPath`):
                         // no lookup-string allocation per call.
                         let is_direct = interp.env.get(joined).is_some()
-                            || interp.funcs.contains_key(joined)
-                            || interp.natives.contains_key(joined);
+                            || zz_checker::lookup_std(&interp.funcs, joined).is_some()
+                            || zz_checker::lookup_std(&interp.natives, joined).is_some();
                         // Fast path (#364): a direct hit skips every
                         // fallback probe below (head-shadow joins, enum
                         // tables, and a second full path resolution) —
@@ -2466,9 +2468,9 @@ impl Vm {
                                 interp.resolve_path_value(&parts[..parts.len() - 1], pspan)?;
                             // sqlz fast path (CallPath form): Db handle +
                             // query/exec/close dispatches straight to the
-                            // canonical sqlz.* native only (`db` module removed;
-                            // module-position `db.*` calls are rewritten to
-                            // `sqlz.*` by the checker with a warning).
+                            // canonical sqlz.* native only (there is no
+                            // `db` module; module-position `db.*` is a
+                            // checker hard error).
                             // lookup_method would also work via the Db
                             // method_namespace, but this avoids the
                             // object_field detour entirely.
@@ -2667,10 +2669,6 @@ impl Vm {
                             | "std.sqlz.query"
                             | "sqlz.exec"
                             | "std.sqlz.exec"
-                            | "db.query"
-                            | "std.db.query"
-                            | "db.exec"
-                            | "std.db.exec"
                             | "pg.query"
                             | "pg.exec"
                             | "postgres.query"
@@ -2687,10 +2685,9 @@ impl Vm {
                     // sqlz.query/sqlz.exec carry a variable
                     // number of bound params; resolve the entry without an
                     // arity gate (Interp::call skips it for sqlz.* too).
-                    // (`db.*` kept one release: checker rewrites to `sqlz.*`
-                    // with a warning. `pg.*`/`my.*` only exist as import
-                    // aliases of the nested `std.sqlz.postgres/mysql`.)
-                    let entry = interp.natives.get(name).copied();
+                    // (`pg.*`/`my.*` only exist as import aliases of the
+                    // nested `std.sqlz.postgres/mysql`.)
+                    let entry = zz_checker::lookup_std(&interp.natives, name).copied();
                     let arity = match &entry {
                         Some(e) => e.arity,
                         // C-only plugins resolve by name from the registry.
@@ -2929,13 +2926,11 @@ impl Vm {
             .env
             .get(name)
             .or_else(|| {
-                interp
-                    .funcs
-                    .get(name)
+                zz_checker::lookup_std(&interp.funcs, name)
                     .map(|fv| Value::Func(Box::new(fv.clone())))
             })
             .or_else(|| {
-                interp.natives.get(name).map(|entry| {
+                zz_checker::lookup_std(&interp.natives, name).map(|entry| {
                     Value::Native(Box::new(NativeFunc {
                         name: name.to_string(),
                         arity: entry.arity,

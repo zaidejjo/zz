@@ -348,8 +348,8 @@ mod tests {
             "str.repeat should be defined"
         );
         assert!(
-            str_prog.funcs.contains_key("str.count"),
-            "str.count should be defined"
+            str_prog.funcs.contains_key("std.str.count"),
+            "std.str.count should be defined (canonical seed)"
         );
         assert!(
             str_prog.funcs.contains_key("str.is_empty"),
