@@ -3564,9 +3564,27 @@ impl Lowerer {
         let cname_for_native: String = cname_ref.to_string();
         let _ = &owned_fallback;
 
+        // Canonical-to-short definition bridge: pure-ZZ bodies are
+        // declared under short names (`path.join`) while selective-import
+        // and canonical call spellings arrive as `std.path.join`. The
+        // definition loop emits the short spelling, so reference it —
+        // otherwise the call dangles (decl without def). Only remaps when
+        // the canonical name has no definition of its own (user `std.*`
+        // definitions, such as they are, keep exact match) — natives
+        // never reach here without an impl (handled above).
+        let cname_for_native: String = if self.find_func_def(&cname_for_native).is_none() {
+            match cname_for_native.strip_prefix("std.") {
+                Some(stripped) if self.find_func_def(stripped).is_some() => stripped.to_string(),
+                _ => cname_for_native,
+            }
+        } else {
+            cname_for_native
+        };
+
         if !shadowed
             && self.reachable_funcs.contains(&cname_for_native)
             && (self.tp.funcs.contains_key(&cname_for_native)
+                || self.find_func_def(&cname_for_native).is_some()
                 || self.is_impl_method(&cname_for_native))
         {
             let cf = format!("zz_fn_{}", mangle(&cname_for_native));

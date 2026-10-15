@@ -569,12 +569,31 @@ pub fn reachable_from(tp: &TypedProgram, cg: &CallGraph, roots: &[&str]) -> Reac
                         }
                     }
                 }
+                // Canonical → queue short program-defined targets.
+                // Pure-ZZ bodies are declared short (`path.join`) while
+                // callers may edge the canonical spelling (`std.path.join`
+                // via selective imports or qualified calls). Without the
+                // short edge, pruning drops the body while the call
+                // still references it (dangling `zz_fn_*` in AOT).
+                if let Some(stripped) = c.strip_prefix("std.") {
+                    if cg.program_defined.contains(stripped) && !reach.funcs.contains(stripped) {
+                        alias_extra.push(stripped.to_string());
+                    }
+                }
             }
         }
         if let Some(vals) = cg.value_uses.get(&caller) {
             for v in vals {
                 if reach.funcs.insert(v.clone()) {
                     queue.push_back(v.clone());
+                }
+                // Same canonical→short mirror as calls above: a
+                // first-class reference to the canonical spelling must
+                // also retain the short program definition.
+                if let Some(stripped) = v.strip_prefix("std.") {
+                    if cg.program_defined.contains(stripped) && !reach.funcs.contains(stripped) {
+                        alias_extra.push(stripped.to_string());
+                    }
                 }
             }
         }
