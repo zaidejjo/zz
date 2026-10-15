@@ -106,7 +106,8 @@ REGISTRY (see `zz pm --help` for full flags):
     zz deps tree [--depth N]      print the dependency tree
     zz deps why <pkg>             show why a package is depended on
     zz outdated                   locked vs wanted vs latest per dep
-    zz audit                      verify pins (published? hash? licensed?)
+    zz audit                      verify pins + native closure (hash? licensed? drift? hooks?)
+    zz generate-wrapper [--check] generate src/<pkg>.zz wrappers from plugin.zzi
     zz search <query>             search the package registry
     zz info <pkg>                 show package metadata and versions
     zz login [--browser]          authenticate for publishing
@@ -547,6 +548,13 @@ fn main() -> ExitCode {
             }
         },
         Some("audit") => match pm::audit(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("generate-wrapper") => match pm::generate_wrapper(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");

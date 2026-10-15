@@ -536,8 +536,29 @@ Package "foo.bar":  foo_bar_init, foo_bar_process, ...
 
 The `zz_plugin_register` entrypoint and `ZZ_PLUGIN_ABI_VERSION` symbol are NOT prefixed — they are well-known names shared by all plugins.
 
+### Calling your own natives: C-symbol aliases
+
+Inside the defining package, a dotted self-path (`bytehash.sum(...)`)
+reads as a method call and never resolves to the extern. Every extern
+is therefore also visible under its C symbol spelling (`bytehash_sum`)
+within the defining package (and to importers): a bare name that calls
+exactly like the dotted form on both engines. Aliases never override
+real names. Generated wrappers (§10b) use them for call-through.
+
 ---
 
+## 10b. Generated Wrappers (`zz generate-wrapper`)
+
+`zz generate-wrapper [pkg-dir]` reads `plugin.zzi` and writes
+`src/<pkg>.zz`: one `pub` wrapper per manifest function, calling
+through the C-symbol alias (§10). The file carries a `GENERATED`
+marker; hand-written files are never overwritten. Output is
+deterministic, so `zz generate-wrapper --check` fails loudly on drift —
+re-run the command after manifest changes, never hand-edit. The
+ergonomic layer (slot getters, `Result` mapping) builds on these
+wrappers; today they are faithful pass-throughs.
+
+---
 ## 11. Version Stamping
 
 The loader validates two things before loading a plugin:

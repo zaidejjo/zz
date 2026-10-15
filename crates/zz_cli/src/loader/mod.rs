@@ -739,6 +739,18 @@ fn resolve_module_key(
     Some(key)
 }
 
+/// True when `name` is usable as a ZZ identifier (and hence a C
+/// symbol): leading letter/underscore, then alphanumerics/underscores.
+/// Mirrors the codegen-side `c_ident_valid` for the alias gate.
+pub(crate) fn is_zz_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl Loader {
     /// Project name + root owning `canon` (nearest `zz.toml`), cached per
     /// root. `None` outside any project or when the manifest cannot load
@@ -1436,7 +1448,13 @@ impl Loader {
                 .collect();
             namespace_program(&mut program, &ns, &aliases);
             self.programs.insert(canon.clone(), program);
-            self.order.push(canon);
+            self.order.push(canon.clone());
+            // Plugin package entry (`<pkg>.zz` / `src/<pkg>.zz` next to
+            // `plugin.zzi`): the package's own module sees its manifest
+            // signatures, so a generated wrapper (`src/<pkg>.zz`, #235)
+            // can call through by declared name. Same seed treatment as
+            // importer-side merging (seed-owned, every module agrees).
+            self.merge_own_plugin_sigs(&canon);
         }
         Ok(())
     }
@@ -1472,6 +1490,12 @@ impl Loader {
             // Seed-owned: plugin deps shared by several modules must
             // resolve identically in each (same consumption bug as #214).
             self.seed_func_keys.insert(name.clone());
+        }
+        // C-symbol aliases (#235) resolve identically too.
+        for (alias, sig) in Self::plugin_aliases(&manifest.funcs) {
+            self.funcs.entry(alias.clone()).or_insert(sig.clone());
+            self.all_funcs.entry(alias.clone()).or_insert(sig);
+            self.seed_func_keys.insert(alias);
         }
         let ns = alias.unwrap_or(dep);
         if ns != dep {
@@ -1578,6 +1602,57 @@ impl Loader {
         self.namespaces.insert(ns.to_string(), canon.to_path_buf());
         self.ns_of.insert(canon.to_path_buf(), ns.to_string());
         true
+    }
+
+    /// Merge a plugin package's own manifest signatures into its entry
+    /// module (`<pkg>.zz` / `src/<pkg>.zz` next to `plugin.zzi`), so a
+    /// generated wrapper (#235) can call its natives without dotted
+    /// self-paths (which read as method calls). Registers the C-symbol
+    /// alias spellings (`bytehash.sum` → `bytehash_sum`): bare names the
+    /// defining module calls directly. Aliases never override real names
+    /// (or_insert); an author-defined collision surfaces as a loud arity
+    /// error at the call, never a silent reroute. No-op for non-plugin
+    /// files.
+    fn merge_own_plugin_sigs(&mut self, canon: &Path) {
+        let Some((pkg_name, root)) = self.package_of(canon) else {
+            return;
+        };
+        if canon != root.join(format!("{pkg_name}.zz"))
+            && canon != root.join("src").join(format!("{pkg_name}.zz"))
+        {
+            return;
+        }
+        let zzi = root.join("plugin.zzi");
+        if !zzi.exists() {
+            return;
+        }
+        let manifest = match zz_plugin::load_manifest(&zzi) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        for (alias, sig) in Self::plugin_aliases(&manifest.funcs) {
+            self.funcs.entry(alias.clone()).or_insert(sig.clone());
+            self.all_funcs.entry(alias.clone()).or_insert(sig);
+            self.seed_func_keys.insert(alias);
+        }
+    }
+
+    /// C-symbol alias spellings for plugin externs (`bytehash.sum` →
+    /// `bytehash_sum`, #235). Only spellings that are valid ZZ
+    /// identifiers, differ from the declared name, and collide with no
+    /// other manifest entry qualify. Sorted for determinism.
+    fn plugin_aliases(
+        funcs: &HashMap<String, zz_checker::FuncSig>,
+    ) -> Vec<(String, zz_checker::FuncSig)> {
+        let mut out = Vec::new();
+        for (name, sig) in funcs {
+            let alias = sig.c_symbol(name);
+            if alias != *name && !funcs.contains_key(&alias) && is_zz_ident(&alias) {
+                out.push((alias, sig.clone()));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Rewrite a diagnostic that references an item which exists but was not
