@@ -127,9 +127,10 @@ pub struct Vm {
     /// safepoint expiry (lazy: programs without loops never pay for a
     /// clock read, not even in `Vm::new`).
     slice_start: Option<std::time::Instant>,
-    /// Attached debugger session. `None` (the default) disables the
-    /// per-op breakpoint check to a single `Option` discriminant test.
-    pub debug: Option<crate::debug::DebugSession>,
+    /// Attached debugger session, shared so breakpoints (and step
+    /// rules) update live while parked. `None` (the default) disables
+    /// the per-op check to a single `Option` discriminant test.
+    pub debug: Option<std::sync::Arc<std::sync::Mutex<crate::debug::DebugSession>>>,
 }
 
 /// State saved during defer-before-return execution.
@@ -171,7 +172,69 @@ impl Vm {
     /// via [`YieldReason::DebugBreak`](crate::value::YieldReason).
     /// Detaching (`None`) restores full speed.
     pub fn attach_debug(&mut self, session: crate::debug::DebugSession) {
-        self.debug = Some(session);
+        self.debug = Some(std::sync::Arc::new(std::sync::Mutex::new(session)));
+    }
+
+    /// Shared handle to the attached session (for live breakpoint
+    /// updates while parked or running).
+    pub fn debug_session(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<crate::debug::DebugSession>>> {
+        self.debug.clone()
+    }
+
+    /// Stack snapshot for the debugger: innermost-first
+    /// (function name, source label, op span).
+    pub fn debug_frames(&self) -> Vec<(String, Option<String>, zz_frontend::span::Span)> {
+        self.frames
+            .iter()
+            .rev()
+            .map(|f| {
+                let span = f.chunk.spans.get(f.ip).copied().unwrap_or_default();
+                (
+                    f.func_name.clone(),
+                    f.chunk.source.as_deref().map(|s| s.to_string()),
+                    span,
+                )
+            })
+            .collect()
+    }
+
+    /// Variables visible in frame `idx` (innermost-first index into
+    /// [`debug_frames`](Self::debug_frames)): slot names plus
+    /// environment names, sorted, shadowing resolved slot-first.
+    pub fn debug_frame_vars(
+        &self,
+        interp: &crate::eval::Interp,
+        idx: usize,
+    ) -> Vec<(String, crate::value::Value)> {
+        let frames: Vec<&Frame> = self.frames.iter().rev().collect();
+        let Some(frame) = frames.get(idx) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, crate::value::Value)> = Vec::new();
+        for (name, slot) in &frame.chunk.toplevel_slots {
+            if let Some(v) = self.stack.get(frame.stack_base + *slot as usize) {
+                out.push((name.clone(), v.clone()));
+            }
+        }
+        // The visible environment: the caller's saved env for inner
+        // frames, the live env for the top frame.
+        let env = if idx + 1 < frames.len() {
+            &frames[idx + 1].prev_env
+        } else {
+            &interp.env
+        };
+        for name in env.local_names() {
+            if out.iter().any(|(n, _)| n == &name) {
+                continue;
+            }
+            if let Some(v) = env.get(&name) {
+                out.push((name, v));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Look up a variable where execution currently stands: the top
@@ -534,10 +597,13 @@ impl Vm {
             // intact for inspection.
             if self.debug.is_some() {
                 let spans: &Vec<Span> = unsafe { &*cached_spans };
+                let depth = self.frames.len();
                 let hit = spans.get(ip - 1).and_then(|span| {
-                    self.debug
-                        .as_mut()
-                        .and_then(|dbg| dbg.check_span(cached_dbg_label.as_deref(), *span))
+                    self.debug.as_ref().and_then(|dbg| {
+                        dbg.lock().ok().and_then(|mut session| {
+                            session.check_span(cached_dbg_label.as_deref(), *span, depth)
+                        })
+                    })
                 });
                 if let Some(line) = hit {
                     self.frames.last_mut().unwrap().ip = ip - 1;
