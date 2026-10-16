@@ -8,10 +8,13 @@ func main() -> Result<int, str> {
     s := http.server()
     s = s.route("GET", "/users/new", |_req| "new-user")
     s = s.route("GET", "/users/:id", |req| "user-{http.param(req, "id").expect("id")}")
+    // Swapped order (#490): param before exact — both stay live, no
+    // dead-route warning in either direction.
+    s = s.route("GET", "/orders/:id", |req| "order-{http.param(req, "id").expect("id")}")
+    s = s.route("GET", "/orders/recent", |_req| "recent-orders")
     s = s.route("GET", "/files/:path...", |req| "file-{http.param(req, "path").expect("path")}")
     s = s.route("PATCH", "/items/:id", |req| "patched-{http.param(req, "id").expect("id")}")
     s = s.route("GET", "*", |_req| "fallback")
-
     r1 := http.test(s, "GET", "/users/new", "")
     println("precedence: {r1.text()}")
     r2 := http.test(s, "GET", "/users/42", "")
@@ -27,7 +30,10 @@ func main() -> Result<int, str> {
     println("tail_empty: {r6.text()}")
     r7 := http.test(s, "GET", "/nope", "")
     println("wild: {r7.text()}")
-
+    r8 := http.test(s, "GET", "/orders/recent", "")
+    println("swapped_exact: {r8.text()}")
+    r9 := http.test(s, "GET", "/orders/42", "")
+    println("swapped_param: {r9.text()}")
     println("http_router_p1_ok")
     .ok(0)
 }
