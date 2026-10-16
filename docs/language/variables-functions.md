@@ -1,0 +1,94 @@
+# Variables and functions
+
+## Variables
+
+```zz
+x := 42            // inferred: int
+pi: float = 3.14   // checked against annotation
+scores: [int] = [1, 2, 3]
+```
+
+- `:=` infers from the right side. `: T =` verifies and names the fix direction on mismatch.
+- Statements end at newline (depth 0) or `;`. Newlines inside `()`, `[]`, `{}` do not end statements.
+- Assignment `=` overwrites. Compound forms evaluate the receiver once:
+  `arr[i()] += f()` calls `i()` once, not twice.
+
+```zz
+x := 10
+x += 1
+x *= 3
+flags := 0
+flags |= 4
+```
+
+## Functions
+
+```zz
+func add(a: int, b: int) -> int {
+    a + b   // last expression is the return
+}
+
+func greet(name: str) {
+    println("Hello, {name}")  // no return = unit
+}
+
+func hello(name: str, greeting: str = "Hello") {
+    println("{greeting}, {name}")
+}
+
+hello("Ada")
+hello("Ada", greeting: "Hi")
+```
+
+Named args: `create_user("Ada", age: 30, active: true)`.
+Cannot chain compound assignment (`x += y += z` is an error).
+
+## Generics
+
+```zz
+func identity<T>(x: T) -> T {
+    x
+}
+
+result := identity(42)  // T = int
+```
+
+Type args erase at runtime: generic code runs like hand-written copies.
+
+## Closures
+
+```zz
+double := |x: int| x * 2
+square := |x: int| {
+    x * x
+}
+
+nums := [1, 2, 3]
+doubled := map(nums, |x| x * 2)
+```
+
+Closures capture by copy (snapshot). They are values and can be passed to
+`map` / `filter` / `task.spawn`.
+
+## Method syntax
+
+`p.dist()` is `dist(p)` — receiver becomes first arg:
+
+```zz
+struct Point { x: int, y: int }
+func dist(p: Point) -> int { p.x + p.y }
+
+p := Point{ x: 3, y: 4 }
+dist(p)  // 7
+p.dist() // 7
+```
+
+Works for stdlib too: `"hi".to_upper()`, `[3, 1, 2].sort()`, `server.route(...)`.
+
+## Pitfalls
+
+- Arrays/structs are values: mutating a parameter never mutates the caller.
+- `+` on `str` / `[T]` concatenates; `+` on mixed `int`+`float` yields `float`.
+- Integer overflow wraps (`9223372036854775807 + 1` is min-int). Division by zero errors.
+
+Deep reference: [syntax.md](../syntax.md) sections Declarations, Functions, Expressions.
