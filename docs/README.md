@@ -57,6 +57,7 @@ This is the developer-friendly entry point. Pick a path below.
 - [Packages](tooling/packages.md) — `zz.toml`, registry/git/path deps, `vendor/`, publish.
 - [Plugins](tooling/plugins.md) — C ABI, `plugin.zzi`, native build hooks.
 - [Editors and debugging](tooling/editors-debug.md) — LSP, DAP, VS Code, Neovim.
+- [Offline doc lookup](tooling/doc-spec.md) — `zz doc` spec over local files.
 - [Performance](tooling/perf.md) — budgets, PGO, profiling, `black_box`.
 - [Performance deep dive](tooling/perf-deep.md) — profiling recipes, memory table.
 - Command details: [CLI](cli.md), [Testing](testing.md), [Bench](bench.md).
