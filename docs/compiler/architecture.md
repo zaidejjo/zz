@@ -41,7 +41,7 @@ flowchart LR
 | `zz_hir` / `zz_ir` | typed HIR, portable IR (codec + disassembler), callgraph + DCE |
 | `zz_runtime` | tree-walker interpreter + bytecode VM + C-ABI bridge (`c_abi.rs`) |
 | `zz_codegen` | AOT: HIR→C (`lower/`) + chunk→C (`chunk.rs`), Clang driver, PGO, cross targets |
-| `zz_stdlib` | 465 natives across 34 modules: VM registry + C twins + Rust staticlib (`ffi.rs`), see [reference](../stdlib/reference.md) |
+| `zz_stdlib` | 691 entries (465 `std.*` fns + builtins/aliases/consts) across 42 groups: VM registry + C twins + Rust staticlib (`ffi.rs`), see [reference](../stdlib/reference.md) |
 | `zz_cli` (`zz`) | run/build/test/check/fix/fmt, REPL, loader + module cache, doctor, upgrade |
 | `zz_lsp` / `zz-dap` | editor server, debug adapter |
 | `zz_pm` | registry/git/path deps, publish |

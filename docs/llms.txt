@@ -36,7 +36,7 @@
 - [Concurrency](stdlib/concurrency.md): chan/task/cell, snapshot isolation
 - [System slots](stdlib/cell-path-sys.md): cell/path/sys/args/log, TLS/Unix, TOML note
 - [Test helpers](stdlib/testing-lib.md): asserts, std.test, snapshots, doctests
-- [Stdlib reference](stdlib/reference.md): generated 465 fns across 34 modules
+- [Stdlib reference](stdlib/reference.md): generated 691 entries with signatures across 42 groups
 - [CLI](tooling/cli.md): run/build/watch, clean/cache/toolchain
 - [CLI reference](tooling/cli-reference.md): every command and flag
 - [Check fix format](tooling/check-fmt.md): diagnostics, auto-fix, file loading

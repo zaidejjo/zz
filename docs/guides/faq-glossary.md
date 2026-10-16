@@ -59,7 +59,7 @@ No hosted playground yet. Local equivalent: `zz` REPL (`:type`, `:clear`) and
 
 **How do I get help for one symbol offline?**
 `rg "std.http.route" crates/zz_stdlib/src/funcs.rs` for signatures,
-`docs/stdlib/reference.md` (generated 465 fns) for the index,
+`docs/stdlib/reference.md` (generated 691 entries) for the index,
 `docs/_meta/search-index.json` for keyword lookup. A `zz doc <symbol>` wrapper
 over those two files is specced but not yet shipped.
 

@@ -45,7 +45,7 @@ This is the developer-friendly entry point. Pick a path below.
 - [Concurrency](stdlib/concurrency.md) — `std.chan`, `std.task`, snapshot isolation.
 - [System slots](stdlib/cell-path-sys.md) — `cell`, `path`, `sys`, `args`, `log`, TLS/Unix.
 - [Test helpers](stdlib/testing-lib.md) — asserts, `std.test`, snapshots.
-- [Stdlib reference](stdlib/reference.md) — generated 465 fns across 34 modules.
+- [Stdlib reference](stdlib/reference.md) — generated 691 entries with signatures across 42 groups.
 - Exhaustive API tables: [stdlib.md](stdlib.md).
 
 ## Tooling
