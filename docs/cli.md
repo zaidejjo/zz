@@ -1,6 +1,7 @@
 # CLI Reference
 
-Complete guide to the `zz` command-line tool.
+> Reference (complete). Learning path: [CLI](tooling/cli.md) →
+> [CLI reference](tooling/cli-reference.md) for every-command tables.
 
 ## Installation
 

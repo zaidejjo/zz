@@ -218,6 +218,7 @@ func is_even_twice(x: int) -> bool {
 }
 
 property.for_all_int(-1000, 1000, is_even_twice, 200, 7)
+```
 
 ## Rate-limited API with request IDs
 

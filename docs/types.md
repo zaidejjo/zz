@@ -1,6 +1,7 @@
 # Type System
 
-ZZ uses a unification-based type checker with full type inference.
+> Reference (complete). Learning path: [docs/README.md](README.md) →
+> [Value semantics](language/value-semantics.md). This file stays the type-rules source of truth.
 
 ## Primitive Types
 

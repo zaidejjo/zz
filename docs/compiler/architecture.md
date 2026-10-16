@@ -2,10 +2,36 @@
 
 Linear pipeline:
 
+```mermaid
+flowchart LR
+    FE[zz_frontend<br/>lexer parser AST fmt] --> CH[zz_checker<br/>unify infer]
+    CH --> HIR[zz_hir typed HIR]
+    HIR --> IR[zz_ir portable IR<br/>codec disasm callgraph DCE]
+    IR --> RT[zz_runtime<br/>tree-walker + VM]
+    IR --> CG[zz_codegen<br/>HIR-C chunk-C clang]
+    SL[zz_stdlib<br/>VM + C twins] --> RT
+    SL --> CG
+    RT --> CLI[zz_cli]
+    CG --> CLI
 ```
-zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen } → zz_cli
-                               zz_stdlib ─┘                ↓
-              zz_arena, zz_fmt, zz_native_rt, zz_plugin, zz_pm, zz_lsp
+
+```mermaid
+flowchart TB
+    Clone[clone: bump refcount O1] --> Write{shared?}
+    Write -->|unique| InPlace[mutate in place]
+    Write -->|shared| CopyOnce[copy once then mutate]
+    CopyOnce --> Obs[unobservable: deep eq, no leak]
+    InPlace --> Obs
+```
+
+```mermaid
+flowchart LR
+    subgraph exe[executor: 1 thread per CPU]
+        DQ[local Chase-Lev deque<br/>LIFO pop] <--> INJ[global injector]
+        IDLE[idle worker] -->|steal random victim| DQ
+    end
+    SP[spawn: deep-copy captures] --> DQ
+    CHAN[chan.send: ring + spill<br/>mutex-paired wake] --> DQ
 ```
 
 | Crate | Role |
@@ -15,7 +41,7 @@ zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen 
 | `zz_hir` / `zz_ir` | typed HIR, portable IR (codec + disassembler), callgraph + DCE |
 | `zz_runtime` | tree-walker interpreter + bytecode VM + C-ABI bridge (`c_abi.rs`) |
 | `zz_codegen` | AOT: HIR→C (`lower/`) + chunk→C (`chunk.rs`), Clang driver, PGO, cross targets |
-| `zz_stdlib` | 900+ natives: VM registry + C twins + Rust staticlib (`ffi.rs`) |
+| `zz_stdlib` | 465 natives across 34 modules: VM registry + C twins + Rust staticlib (`ffi.rs`), see [reference](../stdlib/reference.md) |
 | `zz_cli` (`zz`) | run/build/test/check/fix/fmt, REPL, loader + module cache, doctor, upgrade |
 | `zz_lsp` / `zz-dap` | editor server, debug adapter |
 | `zz_pm` | registry/git/path deps, publish |
