@@ -2364,16 +2364,18 @@ impl Vm {
                         // directly instead of failing the path lookup.
                         // Miss-only: a shadowing value keeps its
                         // meaning (mirrors the checker and tree-walker).
-                        let head_shadowed = parts.len() >= 2
-                            && (interp
-                                .env
-                                .get(&parts[..parts.len() - 1].join("."))
-                                .is_some()
-                                || interp
-                                    .funcs
-                                    .contains_key(&parts[..parts.len() - 1].join(".")));
+                        // `head` is built once and reused below (it was
+                        // joined three times per call before).
+                        let head: Option<String> = if parts.len() >= 2 {
+                            Some(parts[..parts.len() - 1].join("."))
+                        } else {
+                            None
+                        };
+                        let head_shadowed = head.as_ref().is_some_and(|h| {
+                            interp.env.get(h).is_some() || interp.funcs.contains_key(h)
+                        });
                         if !head_shadowed {
-                            let head = parts[..parts.len() - 1].join(".");
+                            let head = head.unwrap_or_default();
                             let canonical = if interp.enums.contains_key(&head) {
                                 Some(head.clone())
                             } else {
@@ -2422,16 +2424,18 @@ impl Vm {
                         // same resolution as above, then method dispatch
                         // on the constructed receiver. Payload variants
                         // can't chain (checker rejects with bind-first).
-                        let head2_shadowed = parts.len() >= 3
-                            && (interp
-                                .env
-                                .get(&parts[..parts.len() - 2].join("."))
-                                .is_some()
-                                || interp
-                                    .funcs
-                                    .contains_key(&parts[..parts.len() - 2].join(".")));
+                        // `head2` is built once and reused below (it was
+                        // joined three times per call before).
+                        let head2: Option<String> = if parts.len() >= 3 {
+                            Some(parts[..parts.len() - 2].join("."))
+                        } else {
+                            None
+                        };
+                        let head2_shadowed = head2.as_ref().is_some_and(|h| {
+                            interp.env.get(h).is_some() || interp.funcs.contains_key(h)
+                        });
                         if !head2_shadowed {
-                            let head2 = parts[..parts.len() - 2].join(".");
+                            let head2 = head2.unwrap_or_default();
                             let canonical2 = if interp.enums.contains_key(&head2) {
                                 Some(head2.clone())
                             } else {
@@ -2461,8 +2465,12 @@ impl Vm {
                                     if let Ok((f, recv)) =
                                         interp.lookup_method_recv(&recv, &method, span)
                                     {
-                                        let mut arg_vals = vec![recv];
-                                        arg_vals.extend(args);
+                                        // Reuse the scratch buffer: prepend
+                                        // the receiver instead of allocating
+                                        // a second Vec (shift is O(argc),
+                                        // argc is tiny on this path).
+                                        let mut arg_vals = args;
+                                        arg_vals.insert(0, recv);
                                         self.frames.last_mut().unwrap().ip = ip;
                                         self.call_value(f, arg_vals, span, interp)?;
                                         re_cache!();
@@ -2496,11 +2504,12 @@ impl Vm {
                                     });
                                 match entry {
                                     Some(e) => {
-                                        let mut arg_vals = vec![recv];
-                                        arg_vals.extend(args);
+                                        let mut arg_vals = args;
+                                        arg_vals.insert(0, recv);
                                         self.frames.last_mut().unwrap().ip = ip;
                                         let result = (e.f)(interp, &mut arg_vals, span)?;
                                         self.stack.push(result);
+                                        return_scratch_args(arg_vals);
                                         re_cache!();
                                         yield_check!();
                                         continue;
@@ -2512,8 +2521,8 @@ impl Vm {
                                 }
                             }
                             let (f, recv) = interp.lookup_method_recv(&recv, method, pspan)?;
-                            let mut arg_vals = vec![recv];
-                            arg_vals.extend(args);
+                            let mut arg_vals = args;
+                            arg_vals.insert(0, recv);
                             self.frames.last_mut().unwrap().ip = ip;
                             self.call_value(f, arg_vals, span, interp)?;
                             re_cache!();
@@ -2531,7 +2540,10 @@ impl Vm {
                     let argc = *argc;
                     let span = *span;
                     let mut args = take_scratch_args();
-                    args.reserve(argc as usize);
+                    // +1: method fallbacks prepend the receiver into this
+                    // same buffer (`insert(0, recv)`) instead of allocating
+                    // a second Vec.
+                    args.reserve(argc as usize + 1);
                     for _ in 0..argc {
                         args.push(self.stack.pop().unwrap());
                     }
@@ -2554,10 +2566,11 @@ impl Vm {
                             });
                         match entry {
                             Some(e) => {
-                                let mut arg_vals = vec![recv];
-                                arg_vals.extend(args);
+                                let mut arg_vals = args;
+                                arg_vals.insert(0, recv);
                                 let result = (e.f)(interp, &mut arg_vals, span)?;
                                 self.stack.push(result);
+                                return_scratch_args(arg_vals);
                                 re_cache!();
                                 yield_check!();
                                 continue;
@@ -2571,8 +2584,8 @@ impl Vm {
                         Ok(f) => self.call_value(f, args, span, interp)?,
                         Err(_) => {
                             let (f, recv) = interp.lookup_method_recv(&recv, name, span)?;
-                            let mut arg_vals = vec![recv];
-                            arg_vals.extend(args);
+                            let mut arg_vals = args;
+                            arg_vals.insert(0, recv);
                             self.call_value(f, arg_vals, span, interp)?;
                         }
                     }
