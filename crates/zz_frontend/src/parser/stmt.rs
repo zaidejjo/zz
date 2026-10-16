@@ -664,15 +664,34 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// One dotted import path segment, allowing `-` joins (`my-app`).
+    /// Hyphens are only special here: everywhere else `-` stays Minus
+    /// and idents stay bare, so `a - b` in expression position still
+    /// parses as subtraction. Aliases and bindings never take hyphens.
+    pub(crate) fn parse_import_segment(&mut self) -> Option<(String, Span)> {
+        let first = self.expect_ident()?;
+        let mut name = first.name;
+        let mut span = first.span;
+        while self.eat(TokenKind::Minus) {
+            let Some(cont) = self.expect_ident() else {
+                break;
+            };
+            name.push('-');
+            name.push_str(&cont.name);
+            span = span.join(cont.span);
+        }
+        Some((name, span))
+    }
+
     pub(crate) fn parse_import(&mut self, pub_: bool) -> Stmt {
         let import_tok = self.advance();
         let mut path = Vec::new();
-        if let Some(id) = self.expect_ident() {
-            path.push(id.name);
+        if let Some((seg, _)) = self.parse_import_segment() {
+            path.push(seg);
         }
         while self.eat(TokenKind::Dot) {
-            if let Some(id) = self.expect_ident() {
-                path.push(id.name);
+            if let Some((seg, _)) = self.parse_import_segment() {
+                path.push(seg);
             }
         }
         let alias = if self.eat(TokenKind::As) {
@@ -687,16 +706,16 @@ impl<'a> Parser<'a> {
                 if self.peek_kind() == TokenKind::Star {
                     let tok = self.advance();
                     items.push(ImportItem::Wildcard { span: tok.span });
-                } else if let Some(id) = self.expect_ident() {
+                } else if let Some((name, seg_span)) = self.parse_import_segment() {
                     let item_alias = if self.eat(TokenKind::As) {
                         self.expect_ident().map(|id| id.name)
                     } else {
                         None
                     };
                     items.push(ImportItem::Named {
-                        name: id.name,
+                        name,
                         alias: item_alias,
-                        span: id.span,
+                        span: seg_span,
                     });
                 }
                 if !self.eat(TokenKind::Comma) {
@@ -1600,5 +1619,62 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             }
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod import_segment_tests {
+    use super::*;
+    use crate::parser::parse;
+
+    fn import_of(src: &str) -> (Vec<String>, Option<String>) {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors for {src:?}: {:?}",
+            parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let [stmt] = &parsed.program.stmts[..] else {
+            panic!("expected one stmt for {src:?}");
+        };
+        let Stmt::Import { path, alias, .. } = stmt else {
+            panic!("expected import for {src:?}");
+        };
+        (path.clone(), alias.clone())
+    }
+
+    #[test]
+    fn hyphen_segments_parse() {
+        // #486: `-` joins import path segments.
+        assert_eq!(
+            import_of("import faker-locales.ar as ar"),
+            (
+                vec!["faker-locales".to_string(), "ar".to_string()],
+                Some("ar".to_string())
+            )
+        );
+        assert_eq!(
+            import_of("import my-app"),
+            (vec!["my-app".to_string()], None)
+        );
+    }
+
+    #[test]
+    fn plain_idents_unchanged() {
+        assert_eq!(
+            import_of("import std.http"),
+            (vec!["std".to_string(), "http".to_string()], None)
+        );
+    }
+
+    #[test]
+    fn minus_outside_imports_stays_subtraction() {
+        // `a - b` must not lex/parse as a hyphenated name.
+        let parsed = parse("x := a - b");
+        assert!(
+            parsed.errors.is_empty(),
+            "subtraction must still parse: {:?}",
+            parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 }

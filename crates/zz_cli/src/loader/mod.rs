@@ -340,6 +340,40 @@ fn normalize_pkg(name: &str) -> String {
     name.replace('-', "_")
 }
 
+/// Find a lock entry by package name under `-`/`_` agreement: exact
+/// match first (no behavior change when spellings already agree), then
+/// the normalized form (`#486`: `import my_app.x` with `my-app` locked).
+fn find_locked<'a>(
+    lock: &'a zz_pm::lock::Lockfile,
+    name: &str,
+) -> Option<&'a zz_pm::lock::LockedDep> {
+    lock.deps.iter().find(|d| d.name == name).or_else(|| {
+        let want = normalize_pkg(name);
+        lock.deps.iter().find(|d| normalize_pkg(&d.name) == want)
+    })
+}
+
+/// Find a manifest dependency under `-`/`_` agreement (same rule as
+/// [`find_locked`]).
+fn manifest_dep<'a>(
+    manifest: &'a zz_pm::manifest::Manifest,
+    name: &str,
+) -> Option<&'a zz_pm::manifest::DepSpec> {
+    manifest.dependencies.get(name).or_else(|| {
+        let want = normalize_pkg(name);
+        manifest
+            .dependencies
+            .iter()
+            .find(|(n, _)| normalize_pkg(n) == want)
+            .map(|(_, s)| s)
+    })
+}
+
+/// True when `name` is a declared dependency under `-`/`_` agreement.
+fn manifest_declares(manifest: &zz_pm::manifest::Manifest, name: &str) -> bool {
+    manifest_dep(manifest, name).is_some()
+}
+
 /// Resolve `<pkg>.<rest...>` against a project root: `<rest...>` maps to
 /// `<root>/src/<rest...>.zz` (dot-separated → path). A bare `<pkg>`
 /// (empty `rest`) maps to `<root>/src/main.zz`.
@@ -364,12 +398,12 @@ fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf
     // Manifest+lock parse once per root process-wide (#233); mtimes
     // revalidate so concurrent edits reload instead of serving stale deps.
     let (manifest, lock) = cache::manifest_lock(project_root)?;
-    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    let locked = find_locked(&lock, dep_name)?;
     // Path deps resolve against the manifest path (same as plugins).
     // Transitive path pins (#420) have no manifest entry: resolve them
     // through the dependency-closure BFS instead.
     if locked.source == "path" {
-        match manifest.dependencies.get(dep_name) {
+        match manifest_dep(&manifest, dep_name) {
             Some(zz_pm::manifest::DepSpec::Path(p)) => {
                 return entry_in(&project_root.join(&p.path), dep_name);
             }
@@ -380,13 +414,26 @@ fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf
         }
     }
     // Registry/git deps: the vendor link first, CAS entry as fallback.
-    let linked = project_root.join("vendor").join(dep_name);
-    if linked.exists() {
-        if let Some(entry) = entry_in(&linked, dep_name) {
-            return Some(entry);
+    // The link lives under the locked (real-spelling) name, which may
+    // differ from the import spelling under `-`/`_` agreement (#486);
+    // entry files may also use either spelling (`src/my-app.zz` vs
+    // `src/my_app.zz`), so both are tried with `src/main.zz` first.
+    let entry_in_either = |dir: &Path| {
+        entry_in(dir, dep_name).or_else(|| {
+            (locked.name.as_str() != dep_name)
+                .then(|| entry_in(dir, &locked.name))
+                .flatten()
+        })
+    };
+    for candidate in [dep_name, locked.name.as_str()] {
+        let linked = project_root.join("vendor").join(candidate);
+        if linked.exists() {
+            if let Some(entry) = entry_in_either(&linked) {
+                return Some(entry);
+            }
         }
     }
-    entry_in(&zz_pm::paths::cas_entry(&locked.hash), dep_name)
+    entry_in_either(&zz_pm::paths::cas_entry(&locked.hash))
 }
 
 /// Entry-file convention inside a dependency package directory.
@@ -439,18 +486,21 @@ fn resolve_dep_dir(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
     // Manifest+lock parse once per root process-wide (#233), same as the
     // sibling resolvers.
     let (manifest, lock) = cache::manifest_lock(project_root)?;
-    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    let locked = find_locked(&lock, dep_name)?;
     if locked.source == "path" {
         // Direct path deps resolve against the manifest path; transitive
         // path pins (#420) resolve through the dep-closure BFS below.
-        if let Some(zz_pm::manifest::DepSpec::Path(p)) = manifest.dependencies.get(dep_name) {
+        if let Some(zz_pm::manifest::DepSpec::Path(p)) = manifest_dep(&manifest, dep_name) {
             return Some(project_root.join(&p.path));
         }
         return resolve_transitive_path_dir(project_root, dep_name);
     }
-    let linked = project_root.join("vendor").join(dep_name);
-    if linked.exists() {
-        return Some(linked);
+    // The vendor link lives under the locked (real-spelling) name (#486).
+    for candidate in [dep_name, locked.name.as_str()] {
+        let linked = project_root.join("vendor").join(candidate);
+        if linked.exists() {
+            return Some(linked);
+        }
     }
     Some(zz_pm::paths::cas_entry(&locked.hash))
 }
@@ -625,19 +675,22 @@ fn ancestor_roots(start: &Path) -> Vec<PathBuf> {
 /// ships a `plugin.zzi` manifest.
 fn resolve_plugin_pkg(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
     let (manifest, lock) = cache::manifest_lock(project_root)?;
-    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    let locked = find_locked(&lock, dep_name)?;
     let pkg_dir = if locked.source == "path" {
-        match manifest.dependencies.get(dep_name) {
+        match manifest_dep(&manifest, dep_name) {
             Some(zz_pm::manifest::DepSpec::Path(p)) => project_root.join(&p.path),
             // Transitive path pins (#420) live under vendor/ like every
-            // other locked dep.
+            // other locked dep (real-spelling link, #486).
             _ => {
-                let linked = project_root.join("vendor").join(dep_name);
-                if linked.exists() {
-                    linked
-                } else {
-                    return None;
+                let mut found = None;
+                for candidate in [dep_name, locked.name.as_str()] {
+                    let linked = project_root.join("vendor").join(candidate);
+                    if linked.exists() {
+                        found = Some(linked);
+                        break;
+                    }
                 }
+                found?
             }
         }
     } else {
@@ -844,7 +897,7 @@ impl Loader {
                 continue;
             }
             if let Some(dep_man) = cache::manifest_of(&dir) {
-                if dep_man.dependencies.contains_key(name) {
+                if manifest_declares(&dep_man, name) {
                     out.push(dep_name.clone());
                 }
             }
@@ -859,7 +912,7 @@ impl Loader {
     fn missing_dep_hint(root: &Path, name: &str) -> Option<String> {
         let manifest = cache::manifest_of(root)?;
         // Declared but not installed (no vendor link / no lock entry).
-        if manifest.dependencies.contains_key(name) {
+        if manifest_declares(&manifest, name) {
             return Some(format!(
                 "cannot resolve import `{name}`: declared in zz.toml but not installed\n\
                  hint: run `zz install`, then build again"
