@@ -52,10 +52,13 @@ dec.cmp("1.5", "2")       // -1
 ```zz
 import std.json
 
-data := json.parse(`{"name": "Ada", "age": 36}`)
-name := json.as_str(json.get(data, "name"))
-age := json.as_int(json.get(data, "age"))
-json.stringify({"name": "Bo", "age": 12})
+func main() -> Result<int, str> {
+    data := json.parse(`{"name": "Ada", "age": 36}`)?
+    println(json.as_str(json.get(data, "name")?))
+    println(json.as_int(json.get(data, "age")?))
+    println(json.stringify({"name": "Bo", "age": 12})?)
+    .ok(0)
+}
 ```
 
 `json.get`, `as_str/as_int/as_float/as_bool`. Buffers (`bytes`) serialize as int arrays.

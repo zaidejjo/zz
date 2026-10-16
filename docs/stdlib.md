@@ -224,13 +224,14 @@ import std.json
 ```zz
 import std.json
 
-data := json.parse({"name": "Alice", "age": 30})
-name := json.as_str(json.get(data, "name"))   // "Alice"
-age := json.as_int(json.get(data, "age"))     // 30
-
-// Serialize
-person := {"name": "Bob", "age": 25}
-json.stringify(person)  // {"age":25,"name":"Bob"}
+func main() -> Result<int, str> {
+    data := json.parse(`{"name": "Alice", "age": 30}`)?
+    println(json.as_str(json.get(data, "name")?))  // Alice
+    println(json.as_int(json.get(data, "age")?))   // 30
+    person := {"name": "Bob", "age": 25}
+    println(json.stringify(person)?)
+    .ok(0)
+}
 ```
 
 ---

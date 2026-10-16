@@ -85,10 +85,11 @@ This is the developer-friendly entry point. Pick a path below.
 - Tables list canonical paths (`std.vec.push`). Bare aliases (`push`) work only where noted.
 - VM (`zz run`) and AOT (`zz build` / `zz run --native`) agree unless a page says otherwise.
 
-## Legacy flat references
+## Deep references (complete, historical)
 
-The complete references still live at the top level and are linked everywhere above.
-New pages are the learning path; old pages are the source of truth:
+New pages above are canonical. Flat files below are deep references kept for
+history and code links — each carries a banner to its canonical replacement.
+On conflict, the new page + `funcs.rs` win:
 
 - [syntax.md](syntax.md), [types.md](types.md), [stdlib.md](stdlib.md),
   [cli.md](cli.md), [testing.md](testing.md), [threading.md](threading.md),

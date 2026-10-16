@@ -52,14 +52,16 @@ http.listen_cfg(s, 8080, {"max_body_bytes": 10000000})
 ```zz
 import std.args
 
-p := args.parser()
-p = args.str_flag(p, "out", "o", "output file", "out.txt")
-p = args.bool_flag(p, "verbose", "v", "verbose")
-p = args.parse(p)
-
-out := args.get_str(p, "out") ?? "out.txt"
-if args.get_bool(p, "verbose") ?? false {
-    println("writing {out}")
+p := ArgsParser.new()
+p.str_flag("out", "out.txt")
+p.bool_flag("verbose")
+if p.parse(["--out", "a.txt"]) {
+    println(p.get_str("out"))
+    if p.get_bool("verbose") {
+        println("verbose on")
+    }
+} else {
+    println(p.error())
 }
 ```
 
@@ -88,7 +90,7 @@ jobs := chan()
 out := chan()
 for i in 0..4 {
     task.spawn(|_| {
-        loop {
+        while true {
             match chan.try_recv(jobs) {
                 .some(j) => chan.send(out, j * 2),
                 .none    => break,
@@ -157,16 +159,17 @@ func main() {
 import std.sqlz
 
 func main() -> Result<int, str> {
-    db := sqlz.open("users.db")?
-    sqlz.exec(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER, name TEXT)")?
-    sqlz.transaction(db, |tx| {
-        sqlz.exec(tx, "INSERT INTO users VALUES (1, 'Ada')")?
-        sqlz.exec(tx, "INSERT INTO users VALUES (2, 'Bo')")?
-        .ok(0)
+    db := sqlz.open("users.db")
+    sqlz.exec(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER, name TEXT)")
+    n := sqlz.transaction(db, |tx| {
+        sqlz.exec(tx, "INSERT INTO users VALUES (1, 'Ada')")
+        sqlz.exec(tx, "INSERT INTO users VALUES (2, 'Bo')")
+        2
     })?
-    rows := sqlz.query(db, "SELECT * FROM users")?
+    println("inserted {n}")
+    rows := sqlz.query(db, "SELECT * FROM users")
     println(rows)
-    sqlz.close(db)?
+    sqlz.close(db)
     .ok(0)
 }
 ```
@@ -242,9 +245,10 @@ import std.fs
 
 func main() -> Result<int, str> {
     src := fs.read("in.csv")?
-    match csv.validate(src) {
-        .ok(_) => println("rows {csv.len(csv.parse(src))}"),
-        .err(e) => println("bad csv: {e}"),
+    if csv.validate(src) {
+        println("rows {csv.len(csv.parse(src))}")
+    } else {
+        println("bad csv")
     }
     println(csv.get_cell(csv.parse(src), 0, 0, "?"))
     .ok(0)

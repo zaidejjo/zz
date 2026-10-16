@@ -10,8 +10,9 @@ Pool-backed handles for counters and caches. Each op is explicit — no hidden a
 import std.cell
 
 c := cell.new(0)
-cell.set(c, cell.get(c) + 1)
-println(cell.get(c))  // 1
+cur := cell.get(c).unwrap_or(0)
+_ := cell.set(c, cur + 1)
+println(cell.get(c).unwrap_or(-1))  // 1
 cell.drop(c)          // release back to pool
 ```
 
@@ -60,24 +61,22 @@ Opaque parser handles (`Opaque("args")`):
 ```zz
 import std.args
 
-p := args.parser()
-p = args.str_flag(p, "out", "o", "output file", "out.txt")
-p = args.int_flag(p, "jobs", "j", "workers", 4)
-p = args.bool_flag(p, "verbose", "v", "verbose logs")
-p = args.parse(p)
-
-out := args.get_str(p, "out") ?? "out.txt"
-jobs := args.get_int(p, "jobs") ?? 4
-verbose := args.get_bool(p, "verbose") ?? false
-
-pos := args.positional(p)    // [str] leftovers
-sub := args.subcommand(p)    // .some(name) / .none
-println(args.help(p))        // --help text
-match args.error(p) {
-    .some(e) => println("args error: {e}"),
-    .none    => println("ok"),
+p := ArgsParser.new()
+p.str_flag("out", "out.txt")
+p.int_flag("jobs", 4)
+p.bool_flag("verbose")
+if p.parse(["--jobs", "8"]) {
+    println(p.get_str("out"))
+    println(p.get_int("jobs"))
+    println(p.get_bool("verbose"))
+} else {
+    println(p.error())
 }
-if args.was_help(p) { println("help shown") }
+
+println(p.positional(0) ?? "-")  // first leftover or "-"
+println(p.subcommand() ?? "none")
+println(p.help("myapp"))         // --help text
+if p.was_help() { println("help shown") }
 ```
 
 `get_raw()` is raw argv without parsing. Declare before `parse`; read after.
