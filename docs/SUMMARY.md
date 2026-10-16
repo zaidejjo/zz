@@ -45,6 +45,7 @@
   - [Packages](tooling/packages.md)
   - [Plugins](tooling/plugins.md)
   - [Editors and debugging](tooling/editors-debug.md)
+  - [Offline doc lookup](tooling/doc-spec.md)
   - [Performance](tooling/perf.md)
   - [Performance deep dive](tooling/perf-deep.md)
 - Compiler

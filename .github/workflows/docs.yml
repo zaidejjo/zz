@@ -8,6 +8,7 @@ on:
       - "docs/**"
       - "scripts/check-docs.py"
       - "scripts/gen-stdlib-ref.py"
+      - "scripts/test-doc-fences.py"
       - "crates/zz_stdlib/src/funcs.rs"
 
 jobs:
@@ -22,6 +23,8 @@ jobs:
         run: python3 scripts/check-docs.py
       - name: Generated stdlib reference is fresh
         run: python3 scripts/gen-stdlib-ref.py --check
+      - name: Doc fences check clean with real checker
+        run: python3 scripts/test-doc-fences.py --strict
       - name: No task markers
         run: "! rg -n 'TODO:|FIXME:|XXX:|TBD:' docs scripts"
       - uses: dtolnay/rust-toolchain@stable
