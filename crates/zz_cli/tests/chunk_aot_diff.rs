@@ -419,7 +419,31 @@ const CASES: &[(&str, &str)] = &[
     ("range_start", RANGE_START),
     ("stdlib_str", STDLIB_STR),
     ("range_display", RANGE_DISPLAY),
+    ("cond_cmp", COND_CMP),
 ];
+
+// Condition fusion pin: slot-vs-slot and slot-vs-const int compares
+// feeding WhileCond stay identical across backends (chunk fuses them
+// to raw compare+branch; see `condfuse_scan`).
+const COND_CMP: &str = r#"
+func main() {
+    s := 0
+    i := 0
+    n := 1000
+    while i < n {
+        s = s + i
+        i = i + 1
+    }
+    println(s)
+    t := 0
+    j := 1000
+    while j > 10 {
+        j = j - 1
+        t = t + 1
+    }
+    println(t)
+}
+"#;
 
 #[test]
 fn chunk_matches_hir_stdout_and_exit() {
