@@ -55,5 +55,6 @@
   - [Cookbook](guides/cookbook.md)
   - [Error catalog](guides/errors.md)
   - [Error index](guides/error-index.md)
+  - [Examples index](guides/examples-index.md)
   - [VM vs native parity](guides/parity.md)
   - [FAQ and glossary](guides/faq-glossary.md)

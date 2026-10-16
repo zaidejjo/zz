@@ -73,6 +73,7 @@ This is the developer-friendly entry point. Pick a path below.
 - [Cookbook](guides/cookbook.md) — file server, JSON API, CLI, CSV→JSON, worker pool.
 - [Error catalog](guides/errors.md) — most common errors and exact fixes.
 - [Error index](guides/error-index.md) — verbatim messages with fixes.
+- [Examples index](guides/examples-index.md) — curated map (examples/ is scratch).
 - [VM vs native parity](guides/parity.md) — what is guaranteed identical.
 - [FAQ and glossary](guides/faq-glossary.md) — quick answers + terms.
 
