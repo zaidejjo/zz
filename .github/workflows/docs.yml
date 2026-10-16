@@ -19,6 +19,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build zz binary for fence tests
+        run: cargo install --path crates/zz_cli --root ~/.cargo --force --quiet
       - name: Links, fences, stdlib coverage
         run: python3 scripts/check-docs.py
       - name: Generated stdlib reference is fresh
@@ -27,6 +31,5 @@ jobs:
         run: python3 scripts/test-doc-fences.py --strict
       - name: No task markers
         run: "! rg -n 'TODO:|FIXME:|XXX:|TBD:' docs scripts"
-      - uses: dtolnay/rust-toolchain@stable
       - name: fmt clean
         run: cargo fmt --check
