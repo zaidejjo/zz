@@ -68,7 +68,9 @@ impl<'a> Raiser<'a> {
                 for (k, v) in pairs {
                     out.push((self.raise_const(*k, seen)?, self.raise_const(*v, seen)?));
                 }
-                Ok(VmValue::Dict(std::sync::Arc::new(out)))
+                Ok(VmValue::Dict(std::sync::Arc::new(
+                    zz_runtime::DictData::from_entries(out),
+                )))
             }
             Const::Option(inner) => Ok(VmValue::Option(match inner {
                 Some(x) => Some(Box::new(self.raise_const(*x, seen)?)),

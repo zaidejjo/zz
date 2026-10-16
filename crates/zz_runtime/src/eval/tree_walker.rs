@@ -262,8 +262,9 @@ impl Interp {
                     }
                     Value::Dict(pairs) => {
                         let mut result = Value::Unit;
-                        let owned =
-                            std::sync::Arc::try_unwrap(pairs).unwrap_or_else(|a| (*a).clone());
+                        let owned = std::sync::Arc::try_unwrap(pairs)
+                            .map(crate::value::DictData::into_entries)
+                            .unwrap_or_else(|a| a.entries().to_vec());
                         for (k, v) in owned {
                             let mut scope = Env::with_parent(&self.env);
                             if vars.len() == 2 {
@@ -1553,7 +1554,9 @@ impl Interp {
                     let vv = self.eval(v)?.into_value()?;
                     pairs.push((kv, vv));
                 }
-                Ok(Flow::Value(Value::Dict(std::sync::Arc::new(pairs))))
+                Ok(Flow::Value(Value::Dict(std::sync::Arc::new(
+                    crate::value::DictData::from_entries(pairs),
+                ))))
             }
             Expr::Variant { name, arg, span } => {
                 let av = match arg {

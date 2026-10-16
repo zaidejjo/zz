@@ -797,7 +797,9 @@ pub(crate) fn fs_stat(
                     Value::Str(std::sync::Arc::new(m.permissions().readonly().to_string())),
                 ),
             ];
-            ok_value(Value::Dict(std::sync::Arc::new(pairs)))
+            ok_value(Value::Dict(std::sync::Arc::new(
+                zz_runtime::DictData::from_entries(pairs),
+            )))
         }
         Err(e) => fs_err("stat", &path, &e),
     })

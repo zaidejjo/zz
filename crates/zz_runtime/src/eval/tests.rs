@@ -346,10 +346,9 @@ fn array_explicit_decl() {
 fn dict_literal() {
     assert_eq!(
         eval_src("ages := {\"Zaid\": 20}\nages").unwrap(),
-        Value::Dict(std::sync::Arc::new(vec![(
-            Value::Str("Zaid".to_string().into()),
-            Value::Int(20)
-        )]))
+        Value::Dict(std::sync::Arc::new(crate::value::DictData::from_entries(
+            vec![(Value::Str("Zaid".to_string().into()), Value::Int(20))],
+        )))
     );
 }
 
@@ -357,10 +356,9 @@ fn dict_literal() {
 fn dict_explicit_decl() {
     assert_eq!(
         eval_src("ages: {str: int} = {\"a\": 1}\nages").unwrap(),
-        Value::Dict(std::sync::Arc::new(vec![(
-            Value::Str("a".to_string().into()),
-            Value::Int(1)
-        )]))
+        Value::Dict(std::sync::Arc::new(crate::value::DictData::from_entries(
+            vec![(Value::Str("a".to_string().into()), Value::Int(1))],
+        )))
     );
 }
 
@@ -368,13 +366,15 @@ fn dict_explicit_decl() {
 fn dict_union_value_type() {
     assert_eq!(
         eval_src("user: {str: str | int} = {\"name\": \"Zaid\", \"age\": 20}\nuser").unwrap(),
-        Value::Dict(std::sync::Arc::new(vec![
-            (
-                Value::Str("name".to_string().into()),
-                Value::Str("Zaid".to_string().into())
-            ),
-            (Value::Str("age".to_string().into()), Value::Int(20)),
-        ]))
+        Value::Dict(std::sync::Arc::new(crate::value::DictData::from_entries(
+            vec![
+                (
+                    Value::Str("name".to_string().into()),
+                    Value::Str("Zaid".to_string().into())
+                ),
+                (Value::Str("age".to_string().into()), Value::Int(20)),
+            ],
+        )))
     );
 }
 

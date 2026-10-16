@@ -48,7 +48,7 @@ fn diff_values(left: &Value, right: &Value) -> String {
         (Value::Array(a), Value::Array(b)) => diff_arrays(a, b, 0),
         (Value::Bytes(_), Value::Bytes(_)) => diff_scalar(left, right),
         (Value::Object(a), Value::Object(b)) => diff_objects(a, b, 0),
-        (Value::Dict(a), Value::Dict(b)) => diff_dicts(a, b, 0),
+        (Value::Dict(a), Value::Dict(b)) => diff_dicts(a.entries(), b.entries(), 0),
         _ => diff_scalar(left, right),
     }
 }

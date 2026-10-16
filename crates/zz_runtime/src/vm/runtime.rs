@@ -1026,10 +1026,7 @@ impl Vm {
                                 }
                             }
                         }
-                        (Some(Value::Dict(entries)), key) => entries
-                            .iter()
-                            .find(|(k, _)| k == key)
-                            .map(|(_, v)| v.clone()),
+                        (Some(Value::Dict(dict)), key) => dict.get(key).cloned(),
                         _ => None,
                     };
                     match elem {
@@ -1744,9 +1741,9 @@ impl Vm {
                                 } else {
                                     iter_done = false;
                                     next_idx = Value::Int((i as i64).wrapping_add(1));
-                                    push_val = pairs[i].0.clone();
+                                    push_val = pairs.entries()[i].0.clone();
                                     if num_vars == 2 {
-                                        push_val2 = Some(pairs[i].1.clone());
+                                        push_val2 = Some(pairs.entries()[i].1.clone());
                                     } else {
                                         push_val2 = None;
                                     }
@@ -1898,7 +1895,9 @@ impl Vm {
                         pairs.push((k, v));
                     }
                     pairs.reverse();
-                    self.stack.push(Value::Dict(std::sync::Arc::new(pairs)));
+                    self.stack.push(Value::Dict(std::sync::Arc::new(
+                        crate::value::DictData::from_entries(pairs),
+                    )));
                 }
                 Op::IndexOp(span) => {
                     let iv = self.stack.pop().unwrap();
