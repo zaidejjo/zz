@@ -1,0 +1,29 @@
+name: docs
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    paths:
+      - "docs/**"
+      - "scripts/check-docs.py"
+      - "scripts/gen-stdlib-ref.py"
+      - "crates/zz_stdlib/src/funcs.rs"
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Links, fences, stdlib coverage
+        run: python3 scripts/check-docs.py
+      - name: Generated stdlib reference is fresh
+        run: python3 scripts/gen-stdlib-ref.py --check
+      - name: No task markers
+        run: "! rg -n 'TODO:|FIXME:|XXX:|TBD:' docs scripts"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: fmt clean
+        run: cargo fmt --check

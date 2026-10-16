@@ -1,0 +1,57 @@
+# ZZ docs — llms.txt
+
+> Fast systems language: native AOT, green threads, zero GC pauses.
+> Start at docs/README.md. Every `zz` fence is a runnable program.
+
+- [Docs home](README.md): paths for new users vs developers
+- [Install](getting-started/install.md): release script, source, managed Zig, doctor
+- [Quick start](getting-started/quick-start.md): hello, 60s tour, check/fmt/eval
+- [Project layout](getting-started/project-layout.md): zz.toml, entry, imports, tests/bench/assets
+- [REPL tour](getting-started/repl-tour.md): :help :quit :type :clear, persistence
+- [Cheatsheet](getting-started/cheatsheet.md): one-page quick ref
+- [Language overview](language/overview.md): values, inference, pipelines, parity
+- [Variables and functions](language/variables-functions.md): :=, defaults, generics, closures, methods
+- [Control flow](language/control-flow.md): if/if-let, for/while, defer, ?/??
+- [Strings](language/strings.md): interpolation, {{ }}, raw backticks, format specs
+- [Collections](language/collections.md): arrays, dicts, tuples, slicing, comprehensions
+- [Structs and enums](language/structs-enums.md): embedding, impl, generics, recursion
+- [Pattern matching](language/pattern-matching.md): match, guards, exhaustiveness
+- [Modules](language/modules.md): imports, package vs relative, cycles
+- [Operators](language/operators.md): precedence tightest-first, type rules
+- [Lexicon](language/lexicon.md): keywords, literals, comments, terminators, fmt
+- [Value semantics](language/value-semantics.md): copies, CoW, clone, snapshot isolation
+- [Stdlib overview](stdlib/overview.md): module index, namespace rule, Result pattern
+- [Built-ins](stdlib/builtins.md): println/len/range/map/int, Option/Result methods
+- [Strings and arrays](stdlib/str-vec.md): std.str, std.vec, builders
+- [Data helpers](stdlib/data.md): map/set/dec/json/csv/property
+- [Filesystem and bytes](stdlib/fs-bytes.md): fs, providers, bytes buffers
+- [HTTP](stdlib/http.md): server/routing/middleware/static/TLS/client/test
+- [Networking](stdlib/net.md): TCP, timeouts, binary-safe reads
+- [Env and processes](stdlib/env-process.md): env/args/process/sys/log
+- [Math and time](stdlib/math-time.md): math, now_ms/sleep, RFC3339 dates
+- [Terminal](stdlib/terminal.md): term raw mode, colors ANSI
+- [Encoding and crypto](stdlib/encoding-crypto.md): base64/hex/URL, sha/hmac, argon2/JWT/uuid
+- [Regexp](stdlib/regexp.md): compile/is_match/find/replace/captures
+- [Databases](stdlib/sql-db.md): sqlz sqlite/postgres/mysql, transaction
+- [Concurrency](stdlib/concurrency.md): chan/task/cell, snapshot isolation
+- [System slots](stdlib/cell-path-sys.md): cell/path/sys/args/log, TLS/Unix, TOML note
+- [Test helpers](stdlib/testing-lib.md): asserts, std.test, snapshots, doctests
+- [Stdlib reference](stdlib/reference.md): generated 465 fns across 34 modules
+- [CLI](tooling/cli.md): run/build/watch, clean/cache/toolchain
+- [CLI reference](tooling/cli-reference.md): every command and flag
+- [Check fix format](tooling/check-fmt.md): diagnostics, auto-fix, file loading
+- [Test and bench](tooling/test-bench.md): test/bench/cover flags, engines
+- [Packages](tooling/packages.md): zz.toml, registry/git/path, vendor, publish
+- [Plugins](tooling/plugins.md): C ABI, plugin.zzi, build hooks
+- [Editors and debugging](tooling/editors-debug.md): LSP parity gate, DAP
+- [Performance](tooling/perf.md): budgets, PGO, black_box, fast paths
+- [Performance deep dive](tooling/perf-deep.md): profiling recipes, memory table
+- [Compiler architecture](compiler/architecture.md): pipeline, five locksteps
+- [Checker](compiler/checker.md): unification, inference, proves
+- [Runtime and codegen](compiler/runtime-codegen.md): tree-walker/VM/AOT, CoW
+- [Cookbook](guides/cookbook.md): JSON API, static, CLI, CSV, pool, JWT, property
+- [Error catalog](guides/errors.md): common errors with fixes
+- [Error index](guides/error-index.md): verbatim messages with fixes
+- [Parity](guides/parity.md): VM vs native guarantees, sweep enforcement
+- [FAQ and glossary](guides/faq-glossary.md): answers + terms
+- [Conventions](CONVENTIONS.md): how to write and verify docs
