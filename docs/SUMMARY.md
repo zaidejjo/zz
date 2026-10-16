@@ -14,6 +14,7 @@
   - [Collections](language/collections.md)
   - [Structs and enums](language/structs-enums.md)
   - [Pattern matching](language/pattern-matching.md)
+  - [Operators](language/operators.md)
   - [Modules](language/modules.md)
   - [Value semantics](language/value-semantics.md)
 - Standard library
@@ -31,9 +32,11 @@
   - [Regexp](stdlib/regexp.md)
   - [Databases](stdlib/sql-db.md)
   - [Concurrency](stdlib/concurrency.md)
+  - [System slots](stdlib/cell-path-sys.md)
   - [Test helpers](stdlib/testing-lib.md)
 - Tooling
   - [CLI](tooling/cli.md)
+  - [CLI reference](tooling/cli-reference.md)
   - [Check, fix, format](tooling/check-fmt.md)
   - [Test and bench](tooling/test-bench.md)
   - [Packages](tooling/packages.md)

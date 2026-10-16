@@ -19,6 +19,7 @@ This is the developer-friendly entry point. Pick a path below.
 - [Collections](language/collections.md) — arrays, dicts, tuples, slicing, comprehensions, pipelines.
 - [Structs and enums](language/structs-enums.md) — embedding, `impl`, generics, recursion.
 - [Pattern matching](language/pattern-matching.md) — `match`, guards, exhaustiveness.
+- [Operators](language/operators.md) — precedence, associativity, type rules.
 - [Modules](language/modules.md) — imports, package vs relative, cycles.
 - [Value semantics](language/value-semantics.md) — copies, no aliasing, what the optimizer may elide.
 - Deep references (complete, exhaustive):
@@ -40,12 +41,14 @@ This is the developer-friendly entry point. Pick a path below.
 - [Regexp](stdlib/regexp.md) — `std.regexp` handles, match/find/replace/captures.
 - [Databases](stdlib/sql-db.md) — `std.sqlz` (sqlite), postgres and mysql drivers.
 - [Concurrency](stdlib/concurrency.md) — `std.chan`, `std.task`, snapshot isolation.
+- [System slots](stdlib/cell-path-sys.md) — `cell`, `path`, `sys`, `args`, `log`, TLS/Unix.
 - [Test helpers](stdlib/testing-lib.md) — asserts, `std.test`, snapshots.
 - Exhaustive API tables: [stdlib.md](stdlib.md).
 
 ## Tooling
 
 - [CLI](tooling/cli.md) — `run`, `build`, `eval`, `watch`, `clean`, `cache`, `toolchain`.
+- [CLI reference](tooling/cli-reference.md) — every command and flag in one table.
 - [Check, fix, format](tooling/check-fmt.md) — diagnostics, auto-fix, formatting.
 - [Test and bench](tooling/test-bench.md) — `zz test`, doctests, snapshots, `zz bench`, coverage.
 - [Packages](tooling/packages.md) — `zz.toml`, registry/git/path deps, `vendor/`, publish.

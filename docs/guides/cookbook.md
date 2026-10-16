@@ -129,3 +129,93 @@ match regexp.compile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) {
 ```
 
 Demo: `examples/regexp_email_demo/extract_emails.zz`.
+
+## Env-gated server with graceful config
+
+```zz
+import std.env
+import std.http
+
+func port() -> int {
+    match env.get("PORT") {
+        .some(p) => int(p) ?? 8080,
+        .none    => 8080,
+    }
+}
+
+func main() {
+    s := http.server()
+    s = http.route(s, "GET", "/health", |_req| "ok")
+    s = http.log(s, true)
+    http.listen(s, port())
+}
+```
+
+## SQLite users table with transaction
+
+```zz
+import std.sqlz
+
+func main() -> Result<int, str> {
+    db := sqlz.open("users.db")?
+    sqlz.exec(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER, name TEXT)")?
+    sqlz.transaction(db, |tx| {
+        sqlz.exec(tx, "INSERT INTO users VALUES (1, 'Ada')")?
+        sqlz.exec(tx, "INSERT INTO users VALUES (2, 'Bo')")?
+        .ok(0)
+    })?
+    rows := sqlz.query(db, "SELECT * FROM users")?
+    println(rows)
+    sqlz.close(db)?
+    .ok(0)
+}
+```
+
+## Terminal picker with raw mode + colors
+
+```zz
+import std.term
+import std.colors
+
+func main() {
+    if !term.is_tty() {
+        println("needs a tty")
+        return
+    }
+    match term.enable_raw() {
+        .ok(_)  => println("raw on"),
+        .err(e) => println("no tty: {e}"),
+    }
+    defer term.disable_raw()
+    match term.read_key() {
+        .ok(k) => println("picked {k}" |> colors.green() |> colors.bold()),
+        .err(e) => println(e),
+    }
+}
+```
+
+## JWT issue + verify round-trip
+
+```zz
+import std.crypto
+
+tok := crypto.jwt_encode("secret", `{"sub":"1"}`)
+match crypto.jwt_decode("secret", tok) {
+    .ok(payload) => println("ok"),
+    .err(e)      => println("bad: {e}"),
+}
+```
+
+## Property test for a pure function
+
+```zz
+import std.property
+
+func double(n: int) -> int { n * 2 }
+
+func is_even_twice(x: int) -> bool {
+    double(x) % 2 == 0
+}
+
+property.for_all_int(-1000, 1000, is_even_twice, 200, 7)
+```
