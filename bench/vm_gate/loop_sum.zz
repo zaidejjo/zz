@@ -1,0 +1,9 @@
+import std.time
+
+t0 := time.now_ms()
+sum := 0
+for i in 0..1000000 {
+    sum = sum + i
+}
+t1 := time.now_ms()
+println("loop_sum: {t1 - t0}ms result={sum}")

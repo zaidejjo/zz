@@ -1,0 +1,13 @@
+import std.time
+
+func main() {
+    arr:[int] = []
+    t0 := time.now_ms()
+    total := 0
+    for i in 0..100000 {
+        arr.push(i)
+        total = total + i
+    }
+    t1 := time.now_ms()
+    println("method_push: {t1 - t0}ms result={total + len(arr)}")
+}
