@@ -317,7 +317,7 @@ pub(crate) fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
         )),
         Value::Dict(entries) => {
             let mut out = Vec::with_capacity(entries.len());
-            for (k, val) in &**entries {
+            for (k, val) in entries.iter() {
                 let key = match k {
                     Value::Str(s) => s.clone(),
                     other => return Err(err(&format!("a non-string key (`{other}`)"))),

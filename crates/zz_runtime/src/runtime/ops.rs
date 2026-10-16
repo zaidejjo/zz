@@ -10,7 +10,7 @@ use zz_frontend::span::Span;
 use std::collections::HashMap;
 
 use super::EvalError;
-use crate::value::{ObjectValue, Value};
+use crate::value::{DictData, ObjectValue, Value};
 
 // ---------------------------------------------------------------------------
 // Object / field helpers
@@ -254,7 +254,7 @@ pub(crate) fn fill_default_headers(name: &str, args: &mut Vec<Value>, arity: usi
         "http.post_json",
     ];
     if OPTIONAL_HEADERS.contains(&name) && args.len() + 1 == arity {
-        args.push(Value::Dict(std::sync::Arc::new(Vec::new())));
+        args.push(Value::Dict(std::sync::Arc::new(DictData::new())));
         return true;
     }
     // Unified client defaults, in signature order:
@@ -276,7 +276,7 @@ pub(crate) fn fill_default_headers(name: &str, args: &mut Vec<Value>, arity: usi
             tail.push(Value::Str(String::new().into()));
         }
         if missing >= 3 {
-            tail.push(Value::Dict(std::sync::Arc::new(Vec::new())));
+            tail.push(Value::Dict(std::sync::Arc::new(DictData::new())));
         }
         if missing >= 4 {
             tail.push(Value::Str("GET".to_string().into()));
@@ -323,10 +323,8 @@ pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value,
             let idx = normalize_index(*i, b.len(), span)?;
             Ok(Value::Int(b.as_slice()[idx] as i64))
         }
-        (Value::Dict(entries), key) => entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
+        (Value::Dict(dict), key) => dict
+            .get_cloned(key)
             .ok_or_else(|| EvalError::new(format!("key `{key}` not found in dict"), span)),
         (Value::Str(s), Value::Int(i)) => {
             // ASCII fast path: byte index == char index, no `Vec<char>`
@@ -370,13 +368,12 @@ pub(crate) fn set_index(
             std::sync::Arc::make_mut(items)[idx] = value;
             Ok(())
         }
-        (Value::Dict(entries), key) => {
-            let entries = std::sync::Arc::make_mut(entries);
-            if let Some((_, slot)) = entries.iter_mut().find(|(k, _)| k == key) {
-                *slot = value;
-            } else {
-                entries.push((key.clone(), value));
-            }
+        (Value::Dict(dict), key) => {
+            // Copy-on-write: uniquely-owned dicts mutate in place, shared
+            // ones copy once here (same value semantics as before); the
+            // index is maintained by `insert`.
+            let dict = std::sync::Arc::make_mut(dict);
+            dict.insert(key.clone(), value);
             Ok(())
         }
         (Value::Str(_), _) => Err(EvalError::new(

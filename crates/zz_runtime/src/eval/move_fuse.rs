@@ -552,10 +552,7 @@ impl Interp {
                     }
                 }
             }
-            (Some(Value::Dict(entries)), key) => entries
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone()),
+            (Some(Value::Dict(dict)), key) => dict.get(key).cloned(),
             _ => None,
         };
         match elem {

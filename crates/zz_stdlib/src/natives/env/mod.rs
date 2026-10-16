@@ -121,7 +121,9 @@ pub(crate) fn env_vars(
         };
         ka.cmp(&kb)
     });
-    Ok(Value::Dict(std::sync::Arc::new(pairs)))
+    Ok(Value::Dict(std::sync::Arc::new(
+        zz_runtime::DictData::from_entries(pairs),
+    )))
 }
 
 /// `env.cwd() -> Result<str, str>`.

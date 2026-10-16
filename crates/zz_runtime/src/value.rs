@@ -315,7 +315,10 @@ pub enum Value {
     /// `{k1: v1, k2: v2, ...}` — insertion-ordered key/value pairs.
     ///
     /// `Arc`-backed like arrays: clones bump, mutations copy once.
-    Dict(std::sync::Arc<Vec<(Value, Value)>>),
+    /// Large dicts additionally carry a lazy key→first-position index
+    /// (see [`DictData`}); small dicts stay a plain linear Vec exactly
+    /// as before.
+    Dict(std::sync::Arc<DictData>),
     /// A native (Rust-backed) function from the standard library.
     Native(Box<NativeFunc>),
     /// A parsed JSON value (opaque to the type system).
@@ -831,8 +834,8 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 .map(|v| deep_clone_value(v.clone(), seen))
                 .collect(),
         )),
-        Value::Dict(pairs) => Value::Dict(std::sync::Arc::new(
-            pairs
+        Value::Dict(dict) => Value::Dict(std::sync::Arc::new(DictData::from_entries(
+            dict.entries()
                 .iter()
                 .map(|(k, v)| {
                     (
@@ -841,7 +844,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                     )
                 })
                 .collect(),
-        )),
+        ))),
         Value::Option(opt) => Value::Option(opt.map(|v| Box::new(deep_clone_value(*v, seen)))),
         Value::Result(res) => Value::Result(Box::new(match *res {
             Ok(v) => Ok(deep_clone_value(v, seen)),
@@ -863,6 +866,196 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
         })),
         // Primitives and opaque Arc-wrapped types: cheap clone is fine.
         other => other,
+    }
+}
+
+/// Index threshold: dicts at or below this size stay linear (a hash probe
+/// costs more than a few comparisons); larger dicts carry a key index.
+/// Small dicts — headers, query pairs, literals — behave exactly as before.
+const DICT_INDEX_THRESHOLD: usize = 8;
+
+/// Hashable dict-key fast lane: ints, bools, and strings cover every key
+/// the stdlib and fixtures use. Anything else (floats — NaN never equals
+/// itself — arrays, objects, funcs, ...) falls back to the linear scan
+/// with byte-identical `Value ==` semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DictKey {
+    Int(i64),
+    Bool(bool),
+    Str(std::sync::Arc<String>),
+}
+
+impl DictKey {
+    fn of(key: &Value) -> Option<DictKey> {
+        match key {
+            Value::Int(i) => Some(DictKey::Int(*i)),
+            Value::Bool(b) => Some(DictKey::Bool(*b)),
+            // `Arc` bump only: the index shares the key's backing store.
+            Value::Str(s) => Some(DictKey::Str(std::sync::Arc::clone(s))),
+            _ => None,
+        }
+    }
+}
+
+/// Insertion-ordered dict backing store with a lazy key index.
+///
+/// `entries` is the source of truth (order, duplicates, iteration);
+/// `index` is a pure cache: key → FIRST occurrence (matching the linear
+/// `find`), built once the dict outgrows [`DICT_INDEX_THRESHOLD`] and
+/// maintained by every mutator. All fields are private so the invariant
+/// (index consistent or absent) holds by construction.
+#[derive(Debug, Clone, Default)]
+pub struct DictData {
+    entries: Vec<(Value, Value)>,
+    index: Option<HashMap<DictKey, usize>>,
+}
+
+impl DictData {
+    /// Empty dict.
+    pub fn new() -> Self {
+        DictData {
+            entries: Vec::new(),
+            index: None,
+        }
+    }
+
+    /// Build from ordered pairs, indexing only when large enough to win.
+    /// Duplicate keys keep every occurrence; the index (like the old
+    /// linear scan) resolves to the first.
+    pub fn from_entries(entries: Vec<(Value, Value)>) -> Self {
+        let mut dict = DictData {
+            entries,
+            index: None,
+        };
+        if dict.entries.len() > DICT_INDEX_THRESHOLD {
+            dict.rebuild_index();
+        }
+        dict
+    }
+
+    /// Rebuild the index from scratch (first occurrence wins).
+    fn rebuild_index(&mut self) {
+        let mut index = HashMap::with_capacity(self.entries.len());
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            if let Some(dk) = DictKey::of(k) {
+                index.entry(dk).or_insert(i);
+            }
+        }
+        self.index = Some(index);
+    }
+
+    /// Build the index once the dict outgrows the linear lane.
+    fn ensure_index(&mut self) {
+        if self.index.is_none() && self.entries.len() > DICT_INDEX_THRESHOLD {
+            self.rebuild_index();
+        }
+    }
+
+    /// Number of pairs (including duplicate keys, as before).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the dict holds no pairs.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Ordered pair iterator (insertion order, duplicates included).
+    pub fn iter(&self) -> std::slice::Iter<'_, (Value, Value)> {
+        self.entries.iter()
+    }
+
+    /// Ordered pairs as a slice (positional iteration, direct indexing).
+    pub fn entries(&self) -> &[(Value, Value)] {
+        &self.entries
+    }
+
+    /// Consume into the ordered pairs, dropping the index (used by
+    /// by-value iteration fast paths that only need the entries).
+    pub fn into_entries(self) -> Vec<(Value, Value)> {
+        self.entries
+    }
+
+    /// Read a key: O(1) on the indexed lane, linear scan otherwise —
+    /// same miss errors, same first-match rule.
+    pub fn get(&self, key: &Value) -> Option<&Value> {
+        match (&self.index, DictKey::of(key)) {
+            (Some(index), Some(dk)) => index.get(&dk).map(|&i| &self.entries[i].1),
+            _ => self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+        }
+    }
+
+    /// Owned read (the common `d[k]` path).
+    pub fn get_cloned(&self, key: &Value) -> Option<Value> {
+        self.get(key).cloned()
+    }
+
+    /// Write `dict[key] = value`: first-match update, else append —
+    /// exactly the old linear semantics, with the index maintained.
+    pub fn insert(&mut self, key: Value, value: Value) {
+        if let Some(dk) = DictKey::of(&key) {
+            if let Some(index) = self.index.as_mut() {
+                if let Some(&i) = index.get(&dk) {
+                    debug_assert!(self.entries[i].0 == key);
+                    self.entries[i].1 = value;
+                    return;
+                }
+                let i = self.entries.len();
+                self.entries.push((key, value));
+                index.insert(dk, i);
+                return;
+            }
+        }
+        if let Some(slot) = self
+            .entries
+            .iter_mut()
+            .find(|pair| pair.0 == key)
+            .map(|pair| &mut pair.1)
+        {
+            *slot = value;
+        } else {
+            self.entries.push((key, value));
+            self.ensure_index();
+        }
+    }
+
+    /// Retain only matching pairs, rebuilding the index when present
+    /// (positions may have shifted). Rare path (one legacy caller).
+    pub fn retain(&mut self, mut pred: impl FnMut(&(Value, Value)) -> bool) {
+        self.entries.retain(|e| pred(e));
+        if self.index.is_some() {
+            if self.entries.len() > DICT_INDEX_THRESHOLD {
+                self.rebuild_index();
+            } else {
+                self.index = None;
+            }
+        }
+    }
+}
+
+impl FromIterator<(Value, Value)> for DictData {
+    // Lets pair iterators `.collect()` straight into an indexed dict
+    // (headers, query pairs, JSON objects built from Rust tuples).
+    fn from_iter<I: IntoIterator<Item = (Value, Value)>>(iter: I) -> Self {
+        DictData::from_entries(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a DictData {
+    type Item = &'a (Value, Value);
+    type IntoIter = std::slice::Iter<'a, (Value, Value)>;
+    // Borrowed iteration in insertion order (JSON encoding, header scans).
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl PartialEq for DictData {
+    // The index is a pure cache: equality compares entries only, so two
+    // dicts with identical pairs are equal however each was built.
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
     }
 }
 
@@ -1422,10 +1615,10 @@ mod tests {
     #[test]
     fn dict_displays() {
         assert_eq!(
-            Value::Dict(std::sync::Arc::new(vec![
+            Value::Dict(std::sync::Arc::new(DictData::from_entries(vec![
                 (Value::Str("a".to_string().into()), Value::Int(1)),
                 (Value::Str("b".to_string().into()), Value::Int(2)),
-            ]))
+            ])))
             .to_string(),
             "{a: 1, b: 2}"
         );
@@ -1515,6 +1708,79 @@ mod snapshot_tests {
             chunk: None,
             chunk_defaults: Vec::new(),
         }))
+    }
+
+    #[test]
+    fn dict_index_first_wins_and_updates_in_place() {
+        // Duplicate keys keep every occurrence; reads and writes resolve
+        // to the first (the old linear-scan rule).
+        let mut d = DictData::from_entries(vec![
+            (Value::Int(1), Value::Int(10)),
+            (Value::Int(1), Value::Int(20)),
+        ]);
+        assert_eq!(d.get(&Value::Int(1)), Some(&Value::Int(10)));
+        d.insert(Value::Int(1), Value::Int(30));
+        assert_eq!(d.len(), 2);
+        assert_eq!(d.entries()[0].1, Value::Int(30));
+        assert_eq!(d.entries()[1].1, Value::Int(20));
+    }
+
+    #[test]
+    fn dict_index_grows_and_reads_large_dicts() {
+        // 500 string keys: indexed lane, order preserved.
+        let mut d = DictData::new();
+        for i in 0..500 {
+            d.insert(Value::Str(format!("k{i}").into()), Value::Int(i as i64));
+        }
+        assert_eq!(d.len(), 500);
+        let probe = Value::Str("k499".to_string().into());
+        assert_eq!(d.get(&probe), Some(&Value::Int(499)));
+        assert!(d.get(&Value::Str("missing".to_string().into())).is_none());
+        // Insertion order survives indexing.
+        assert_eq!(d.entries()[0].0, Value::Str("k0".to_string().into()));
+        // Small dicts stay linear (no index allocated).
+        let small = DictData::from_entries(vec![(Value::Int(1), Value::Int(2))]);
+        assert_eq!(small.get(&Value::Int(1)), Some(&Value::Int(2)));
+    }
+
+    #[test]
+    fn dict_exotic_keys_keep_linear_semantics() {
+        // Floats (and other exotic keys) never enter the index: NaN still
+        // never matches, 0.0 still finds its entry.
+        let d = DictData::from_entries(vec![
+            (Value::Float(0.0), Value::Int(1)),
+            (Value::Float(f64::NAN), Value::Int(2)),
+        ]);
+        assert_eq!(d.get(&Value::Float(0.0)), Some(&Value::Int(1)));
+        assert_eq!(d.get(&Value::Float(f64::NAN)), None);
+    }
+
+    #[test]
+    fn dict_equality_ignores_index_state() {
+        // Same pairs built different ways (indexed vs linear) compare equal.
+        let mut indexed = DictData::new();
+        for i in 0..20 {
+            indexed.insert(Value::Int(i), Value::Int(i));
+        }
+        let linear =
+            DictData::from_entries((0..9).map(|i| (Value::Int(i), Value::Int(i))).collect());
+        let linear_full =
+            DictData::from_entries((0..20).map(|i| (Value::Int(i), Value::Int(i))).collect());
+        assert_eq!(indexed, linear_full);
+        assert_ne!(indexed, linear);
+    }
+
+    #[test]
+    fn dict_retain_and_into_entries() {
+        let mut d =
+            DictData::from_entries((0..20).map(|i| (Value::Int(i), Value::Int(i))).collect());
+        d.retain(|(k, _)| matches!(k, Value::Int(i) if i % 2 == 0));
+        assert_eq!(d.len(), 10);
+        assert_eq!(d.get(&Value::Int(3)), None);
+        assert_eq!(d.get(&Value::Int(4)), Some(&Value::Int(4)));
+        let v = d.into_entries();
+        assert_eq!(v.len(), 10);
+        assert_eq!(v[0], (Value::Int(0), Value::Int(0)));
     }
 
     #[test]
