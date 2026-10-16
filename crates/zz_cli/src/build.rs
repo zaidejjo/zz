@@ -1574,10 +1574,6 @@ pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Stri
     // --native` invocations in one process (e.g. the e2e/parity suites)
     // used to share a single `zz_out` path, so tests executed each
     // other's binaries — rotating VM-vs-native mismatches.
-    // Unique per call (pid + process-wide counter): parallel `zz run
-    // --native` invocations in one process (e.g. the e2e/parity suites)
-    // used to share a single `zz_out` path, so tests executed each
-    // other's binaries — rotating VM-vs-native mismatches.
     static TRANSIENT_COUNTER: AtomicU64 = AtomicU64::new(0);
     let uniq = TRANSIENT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-native-{}-{uniq}", std::process::id()));

@@ -72,11 +72,6 @@ fn vm_run(src: &str) -> (i32, String) {
     }
 }
 
-#[allow(dead_code)]
-fn out_path() -> PathBuf {
-    std::env::temp_dir().join(format!("zz-e2e-{}", std::process::id()))
-}
-
 /// Intentional, tracked gaps: stdlib funcs the AOT runtime does not implement
 /// natively. Each entry names the Phase 2 work item / tracked parity fixture
 /// that will remove it. A gap that is no longer missing (the C impl landed)

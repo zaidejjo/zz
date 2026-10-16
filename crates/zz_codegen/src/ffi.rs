@@ -1256,7 +1256,10 @@ mod tests {
         // Same runtime deps as compile::build.
         args.push("-lcurl".to_string());
         args.push("-lsqlite3".to_string());
-        let tmp = std::env::temp_dir().join(format!("zz-ffi-test-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!("zz-ffi-test-{}-{uniq}", std::process::id()));
         std::fs::create_dir_all(&tmp).expect("tmpdir");
         let c_path = tmp.join("t.c");
         let bin_path = tmp.join("t");
