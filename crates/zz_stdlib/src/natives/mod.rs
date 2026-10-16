@@ -520,42 +520,42 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     // vec.* methods (for method dispatch: [1,2].push(3))
     m.insert(
-        "vec.reverse".into(),
+        "std.vec.reverse".into(),
         NativeEntry {
             arity: 1,
             f: vec_mod::vec_reverse,
         },
     );
     m.insert(
-        "vec.join".into(),
+        "std.vec.join".into(),
         NativeEntry {
             arity: 2,
             f: vec_mod::vec_join,
         },
     );
     m.insert(
-        "vec.contains".into(),
+        "std.vec.contains".into(),
         NativeEntry {
             arity: 2,
             f: vec_mod::vec_contains,
         },
     );
     m.insert(
-        "vec.sort".into(),
+        "std.vec.sort".into(),
         NativeEntry {
             arity: 1,
             f: vec_mod::vec_sort,
         },
     );
     m.insert(
-        "vec.insert".into(),
+        "std.vec.insert".into(),
         NativeEntry {
             arity: 3,
             f: vec_mod::vec_insert,
         },
     );
     m.insert(
-        "vec.remove".into(),
+        "std.vec.remove".into(),
         NativeEntry {
             arity: 2,
             f: vec_mod::vec_remove,
@@ -1116,28 +1116,28 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
-        "http.status".into(),
+        "std.http.status".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_status,
         },
     );
     m.insert(
-        "http.text".into(),
+        "std.http.text".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_text,
         },
     );
     m.insert(
-        "http.json".into(),
+        "std.http.json".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_json,
         },
     );
     m.insert(
-        "http.headers".into(),
+        "std.http.headers".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_headers,
@@ -1359,7 +1359,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.fs.append", 2, fs::fs_append),
         ("std.fs.copy", 2, fs::fs_copy),
         ("std.fs.move", 2, fs::fs_move),
-        ("std.fs.rename", 2, fs::fs_move),
+        // NOTE: `std.fs.rename` was removed (identical to `move`).
         ("std.fs.exists", 1, fs::fs_exists),
         ("std.fs.is_file", 1, fs::fs_is_file),
         ("std.fs.is_dir", 1, fs::fs_is_dir),

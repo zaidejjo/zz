@@ -492,7 +492,7 @@ import std.fs
 | `fs.write` | `fs.write(path: str, contents: str)` | Write file |
 | `fs.exists` | `fs.exists(path: str) -> bool` | Check existence |
 | `fs.read_bytes` | `fs.read_bytes(path: str)` | Raw bytes as `bytes` (contiguous, ~1x RSS) |
-| `fs.append` / `fs.copy` / `fs.move` / `fs.rename` | `(…)` | Append, copy, move |
+| `fs.append` / `fs.copy` / `fs.move` | `(…)` | Append, copy, move |
 | `fs.is_file` / `fs.is_dir` | `(path) -> bool` | Type predicates |
 | `fs.remove` | `(path)` | Delete a file |
 | `fs.mkdir` / `fs.mkdir_all` | `(path)` | Create directories |

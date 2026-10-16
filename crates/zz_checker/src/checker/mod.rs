@@ -1322,12 +1322,13 @@ impl Checker {
     }
 }
 
-/// Top-level std module heads for [`canonical_std_name`]: a bare dotted
-/// name whose first segment is one of these resolves to the single
-/// canonical `std.*` seed. Method-only namespaces (`option`, `result`,
+/// Canonical std module list (dotted; nested modules included).
+/// SINGLE SOURCE for all module-name tables: `zz_stdlib::STDLIB_MODULES`
+/// re-exports this, and the helpers below derive from it — there is no
+/// second list to drift. Method-only namespaces (`option`, `result`,
 /// `file`, …) and type constructors (`ArgsParser`, `Regexp`) are absent
 /// on purpose — they were never duplicated and stay bare.
-const STD_MODULE_HEADS: &[&str] = &[
+pub const STD_MODULES: &[&str] = &[
     "str",
     "vec",
     "json",
@@ -1349,6 +1350,8 @@ const STD_MODULE_HEADS: &[&str] = &[
     "process",
     "uuid",
     "sqlz",
+    "sqlz.postgres",
+    "sqlz.mysql",
     "colors",
     "term",
     "test",
@@ -1364,6 +1367,15 @@ const STD_MODULE_HEADS: &[&str] = &[
     "tls_listener",
     "unix_listener",
 ];
+
+/// True when `head` is a top-level std module (`sqlz` in
+/// `sqlz.postgres.query`). Derives from [`STD_MODULES`] — no parallel
+/// list. Used by import suggestions and canonical resolution alike.
+pub fn is_std_module_head(head: &str) -> bool {
+    STD_MODULES
+        .iter()
+        .any(|m| m.split('.').next() == Some(head))
+}
 
 /// Look up a stdlib registry entry by either spelling: the name as-written
 /// first (covers orphans like `option.unwrap` and import-copied `ns.*`
@@ -1396,7 +1408,7 @@ pub fn canonical_std_name(name: &str) -> Option<String> {
         return None;
     }
     let head = name.split('.').next().unwrap_or(name);
-    if STD_MODULE_HEADS.contains(&head) {
+    if is_std_module_head(head) {
         return Some(format!("std.{name}"));
     }
     None
