@@ -1986,7 +1986,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     ] {
         let s = sig(params, ret);
-        m.insert(format!("unix_listener.{method}"), s.clone());
         m.insert(format!("std.unix_listener.{method}"), s);
     }
     m.insert(
@@ -2037,7 +2036,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     ] {
         let s = sig(params, ret);
-        m.insert(format!("tls_listener.{method}"), s.clone());
         m.insert(format!("std.tls_listener.{method}"), s);
     }
     for (name, params) in [
@@ -2146,11 +2144,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         let s = sig(params, ret);
         m.insert(format!("std.net.{canon}"), s.clone());
         m.insert(format!("std.tls.{method}"), s.clone());
-        m.insert(format!("tls.{method}"), s.clone());
     }
     // NOTE: no bare `net.{canon}` line — those sigs never had natives
-    // behind them (checked, then failed at runtime). `tls.*` keeps both
-    // spellings: `tls` is not an importable module (see below).
+    // behind them (checked, then failed at runtime). Bare `tls.*`
+    // spellings resolve via the canonical fallback (`tls` is an
+    // importable module now).
     // `tls.connect*` constructor aliases so `tls.connect(..)` reads naturally.
     for (alias, params) in [
         (
@@ -2171,25 +2169,10 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     ] {
         let s = sig(params, result_tls());
-        m.insert(format!("tls.{alias}"), s.clone());
         m.insert(format!("std.tls.{alias}"), s);
     }
     m.insert(
         "std.tls.connect_with_ca".into(),
-        sig(
-            vec![
-                ("addr", Type::Str),
-                ("server_name", Type::Str),
-                ("ca_file", Type::Str),
-                ("timeout_ms", Type::Int),
-            ],
-            result_tls(),
-        ),
-    );
-    // NOTE: bare `tls.connect_with_ca` keeps its seed: `tls` is not an
-    // importable module, so no canonical fallback can produce it.
-    m.insert(
-        "tls.connect_with_ca".into(),
         sig(
             vec![
                 ("addr", Type::Str),
@@ -4062,7 +4045,7 @@ mod tests {
             "std.net.unix_set_write_timeout",
             "std.net.unix_close",
             "std.net.unix_shutdown",
-            "unix_listener.accept",
+            "std.unix_listener.accept",
             "std.unix_listener.close",
             "std.net.tls_readline",
             "std.net.tls_shutdown",
@@ -4127,19 +4110,18 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 699);
+        assert_eq!(funcs.len(), 681);
     }
 
     #[test]
     fn no_bare_twin_seeds() {
         // B invariant: seeds hold canonical `std.*` names only. A bare
         // `module.func` key may exist only when no `std.module.func` seed
-        // exists - never as a twin. The only exceptions are namespaces the
-        // canonical fallback cannot serve (no importable module behind
-        // them: `tls.*`, `span.end`, ...): for those the bare seed is
-        // load-bearing, so the test derives the rule from
-        // `canonical_std_name` itself instead of a hardcoded list.
-        // Bare callers resolve via that same fallback.
+        // exists - never as a twin. Namespaces without an importable
+        // module behind them (`span.end`, ...) keep their bare seeds:
+        // the test derives the rule from `canonical_std_name` itself
+        // instead of a hardcoded list. Bare callers resolve via that
+        // same fallback.
         let funcs = stdlib_funcs();
         let mut twins = Vec::new();
         for k in funcs.keys() {
