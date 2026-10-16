@@ -77,11 +77,6 @@ fn vm_run(src: &str) -> (i32, String) {
 /// that will remove it. A gap that is no longer missing (the C impl landed)
 /// fails the test so the list cannot rot.
 const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
-    // Phase 2.7 variants — option/result unwrap
-    ("option.unwrap", "option unwrap"),
-    ("option.unwrap_or", "option unwrap_or"),
-    ("result.unwrap", "result unwrap"),
-    ("result.unwrap_or", "result unwrap_or"),
     // Non-reachable from parity fixtures (no fixture uses them):
     ("std.math.matrix_mul", "no fixture; niche math"),
     // Pure-ZZ stdlib functions — run in VM only, no C codegen

@@ -91,6 +91,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "fs_path.zz", true),
     ("stdlib", "bytes.zz", true),
     ("stdlib", "cell_test.zz", true),
+    ("stdlib", "option_result_unwrap_test.zz", false),
     ("stdlib", "cell_struct_test.zz", true),
     ("stdlib", "cell_arena_test.zz", true),
     ("stdlib", "vec_push_shapes.zz", true),

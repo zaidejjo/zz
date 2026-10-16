@@ -1054,6 +1054,10 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         // option / result
         "option.expect" | "std.option.expect" => Some("zz_option_expect"),
         "result.expect" | "std.result.expect" => Some("zz_result_expect"),
+        "option.unwrap" | "std.option.unwrap" => Some("zz_option_unwrap"),
+        "option.unwrap_or" | "std.option.unwrap_or" => Some("zz_option_unwrap_or"),
+        "result.unwrap" | "std.result.unwrap" => Some("zz_result_unwrap"),
+        "result.unwrap_or" | "std.result.unwrap_or" => Some("zz_result_unwrap_or"),
         // fs — comprehensive non-blocking filesystem (C runtime in
         // core.c; unified `fs:<op>:<code>` diagnostics match the VM).
         "fs.read" | "std.fs.read" => Some("zz_fs_read"),
