@@ -6,46 +6,9 @@ use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::{suggest_all, suggest_dotted};
 use zz_frontend::span::Span;
 
-/// Top-level std module names the checker suggests imports for.
-/// Keep in sync with `zz_stdlib::STDLIB_MODULES` (this crate cannot
-/// depend on `zz_stdlib`: the dependency points the other way).
-/// (`db` deliberately absent: the module was removed, `sqlz` is canonical.)
-const KNOWN_STD_MODULES: &[&str] = &[
-    "args",
-    "bytes",
-    "cell",
-    "chan",
-    "colors",
-    "csv",
-    "crypto",
-    "dec",
-    "encoding",
-    "env",
-    "fs",
-    "http",
-    "json",
-    "log",
-    "map",
-    "math",
-    "net",
-    "path",
-    "process",
-    "regexp",
-    "set",
-    "sqlz",
-    "str",
-    "sys",
-    "task",
-    "term",
-    "test",
-    "time",
-    "tls",
-    "tls_listener",
-    "unix",
-    "unix_listener",
-    "uuid",
-    "vec",
-];
+// Import suggestions and canonical resolution derive from the single
+// `super::STD_MODULES` source (see `is_std_module_head`) — no parallel
+// list to drift.
 
 impl Checker {
     // --- environments -----------------------------------------------------
@@ -338,7 +301,7 @@ impl Checker {
                 // If the name looks like `module.func` and matches a known
                 // stdlib pattern, suggest adding the import.
                 if let Some((module, _func)) = name.split_once('.') {
-                    let std_module = if KNOWN_STD_MODULES.contains(&module) {
+                    let std_module = if super::is_std_module_head(module) {
                         Some(module.to_string())
                     } else {
                         // Generalized: any other std module present in the
@@ -470,7 +433,7 @@ impl Checker {
             // so a known module name is necessarily unimported. Attached
             // before the typo branches because the dotted branch returns
             // early.
-            if parts.len() >= 2 && KNOWN_STD_MODULES.contains(&parts[0].as_str()) {
+            if parts.len() >= 2 && super::is_std_module_head(&parts[0]) {
                 let import_stmt = format!("import std.{}", parts[0]);
                 diag = diag.with_note(format!(
                     "add `{import_stmt}` at the top of the file to use `{joined}`"

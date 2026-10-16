@@ -2293,6 +2293,22 @@ impl Checker {
                 ));
                 return replacement.1;
             }
+            // `std.fs.rename` (identical to `move`) → `std.fs.move`.
+            if !self.funcs.contains_key(name)
+                && (name.as_str() == "std.fs.rename" || name.as_str() == "fs.rename")
+            {
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    "removed: `fs.rename` is gone — use `fs.move(src, dst)`",
+                    span,
+                ));
+                return Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
+            }
             // `std.net.tcp_close` (legacy no-op) → `close` / `shutdown`.
             if !self.funcs.contains_key(name)
                 && (name.as_str() == "std.net.tcp_close"

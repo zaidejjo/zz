@@ -700,35 +700,35 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // NOTE: `vec.append` was removed — canonical spelling is `vec.push`
     // plus the method form `xs.push(x)`. No bare `push`/`append` builtin.
     m.insert(
-        "vec.reverse".into(),
+        "std.vec.reverse".into(),
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone())))],
             Type::Array(Box::new(t.clone())),
         ),
     );
     m.insert(
-        "vec.join".into(),
+        "std.vec.join".into(),
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone()))), ("sep", Type::Str)],
             Type::Str,
         ),
     );
     m.insert(
-        "vec.contains".into(),
+        "std.vec.contains".into(),
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone()))), ("x", t.clone())],
             Type::Bool,
         ),
     );
     m.insert(
-        "vec.sort".into(),
+        "std.vec.sort".into(),
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone())))],
             Type::Array(Box::new(t.clone())),
         ),
     );
     m.insert(
-        "vec.insert".into(),
+        "std.vec.insert".into(),
         sig_t(
             vec![
                 ("v", Type::Array(Box::new(t.clone()))),
@@ -739,7 +739,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert(
-        "vec.remove".into(),
+        "std.vec.remove".into(),
         sig_t(
             vec![("v", Type::Array(Box::new(t.clone()))), ("idx", Type::Int)],
             Type::Array(Box::new(t.clone())),
@@ -1298,22 +1298,22 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
-        "http.status".into(),
+        "std.http.status".into(),
         sig(vec![("res", Type::Response)], Type::Int),
     );
     m.insert(
-        "http.text".into(),
+        "std.http.text".into(),
         sig(vec![("res", Type::Response)], Type::Str),
     );
     m.insert(
-        "http.json".into(),
+        "std.http.json".into(),
         sig(
             vec![("res", Type::Response)],
             Type::Result(Box::new(Type::Json), Box::new(Type::Str)),
         ),
     );
     m.insert(
-        "http.headers".into(),
+        "std.http.headers".into(),
         sig(
             vec![("res", Type::Response)],
             Type::Dict(Box::new(Type::Str), Box::new(Type::Str)),
@@ -2242,11 +2242,8 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             vec![("src", Type::Str), ("dst", Type::Str)],
             result_unit(),
         ),
-        (
-            "std.fs.rename",
-            vec![("src", Type::Str), ("dst", Type::Str)],
-            result_unit(),
-        ),
+        // NOTE: `std.fs.rename` was removed (identical to `move`) — one
+        // spelling: `std.fs.move`.
         ("std.fs.exists", vec![("path", Type::Str)], Type::Bool),
         ("std.fs.is_file", vec![("path", Type::Str)], Type::Bool),
         ("std.fs.is_dir", vec![("path", Type::Str)], Type::Bool),
@@ -3832,7 +3829,7 @@ mod tests {
         assert!(funcs.contains_key("std.fs.append"));
         assert!(funcs.contains_key("std.fs.copy"));
         assert!(funcs.contains_key("std.fs.move"));
-        assert!(funcs.contains_key("std.fs.rename"));
+        assert!(!funcs.contains_key("std.fs.rename"));
         assert!(funcs.contains_key("std.fs.is_file"));
         assert!(funcs.contains_key("std.fs.is_dir"));
         assert!(funcs.contains_key("std.fs.mkdir"));
@@ -4110,7 +4107,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 681);
+        assert_eq!(funcs.len(), 680);
     }
 
     #[test]

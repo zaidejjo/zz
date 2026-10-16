@@ -57,57 +57,12 @@ fn build_stdlib_consts() -> std::collections::HashMap<String, f64> {
 }
 
 /// The set of known `std.*` module names (second path component).
-/// `sqlz` is the only SQLite module (the old `db` alias was removed).
-/// `sqlz.postgres` is the nested PostgreSQL wire-protocol submodule and
-/// `sqlz.mysql` the nested MySQL wire-protocol submodule. They are only
-/// reachable via `import std.sqlz.postgres` / `import std.sqlz.mysql`
-/// (optionally `as pg` / `as my`); bare `pg.*` / `my.*` do not resolve.
-pub const STDLIB_MODULES: &[&str] = &[
-    "str",
-    "vec",
-    "json",
-    "http",
-    "fs",
-    "path",
-    "env",
-    "math",
-    "time",
-    "encoding",
-    "net",
-    "chan",
-    "task",
-    "regexp",
-    "crypto",
-    "log",
-    "sys",
-    "args",
-    "process",
-    "uuid",
-    "sqlz",
-    "sqlz.postgres",
-    "sqlz.mysql",
-    "colors",
-    "term",
-    "test",
-    "map",
-    "set",
-    "dec",
-    "bytes",
-    "csv",
-    "property",
-    "cell",
-    "unix",
-    "tls",
-    "tls_listener",
-    "unix_listener",
-];
-
-/// Resolve a module name to its canonical backing module: identity —
-/// every module is its own canonical name (the old `db`→`sqlz` alias was
-/// removed; `db` is a hard error everywhere now).
-pub fn canonical_module(module: &str) -> &str {
-    module
-}
+/// Single-sourced from `zz_checker::STD_MODULES` — see there for the
+/// contract. Nested modules (`sqlz.postgres`) included; `sqlz` is the
+/// only SQLite module. Nested `postgres`/`mysql` are reachable only via
+/// `import std.sqlz.postgres` / `import std.sqlz.mysql` (optionally
+/// `as pg` / `as my`); bare `pg.*` / `my.*` do not resolve.
+pub use zz_checker::STD_MODULES as STDLIB_MODULES;
 
 /// Per-module direct members, precomputed once per process (#233).
 /// [`register_module_namespace`] used to scan the ENTIRE std func/native
@@ -191,7 +146,7 @@ fn split_std_key(key: &str) -> Option<(&str, &str)> {
     // `sqlz.postgres`, not `sqlz`.
     let mut best: Option<(&str, &str)> = None;
     for module in STDLIB_MODULES {
-        let canonical = canonical_module(module);
+        let canonical = module;
         if let Some(rest) = without_std.strip_prefix(canonical) {
             if let Some(rest) = rest.strip_prefix('.') {
                 if rest.is_empty() {
@@ -239,7 +194,7 @@ pub fn register_module_namespace(
     }
     // Members are precomputed once per process (#233): per import we walk
     // only this module's members instead of scanning the whole tables.
-    let source = canonical_module(module);
+    let source = module;
     let Some(members) = module_members_table().get(source) else {
         return Ok(Vec::new());
     };
@@ -281,7 +236,7 @@ pub fn register_selective_namespace(
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
     // Borrow cached tables (no per-import rebuild); lookups only.
-    let prefix = format!("std.{}.", canonical_module(module));
+    let prefix = format!("std.{module}.");
     let std_funcs = crate::funcs::stdlib_funcs_cached();
     let std_natives = crate::natives::stdlib_natives_cached();
     let std_consts = stdlib_consts_cached();
@@ -328,7 +283,7 @@ pub fn register_wildcard_namespace(
     }
     // Members precomputed once per process (#233), same set as the old
     // full-table scan (direct members only — see `register_module_namespace`).
-    let Some(members) = module_members_table().get(canonical_module(module)) else {
+    let Some(members) = module_members_table().get(module) else {
         return Ok(Vec::new());
     };
     let mut inserted = Vec::with_capacity(members.funcs.len() + members.consts.len());
