@@ -43,7 +43,11 @@ pub(crate) fn len(
         // arrays, where `zz_len` already counts them).
         Some(Value::Tuple(vs)) => Ok(Value::Int(vs.len() as i64)),
         Some(Value::Bytes(b)) => Ok(Value::Int(b.len() as i64)),
-        Some(Value::Str(s)) => Ok(Value::Int(s.chars().count() as i64)),
+        Some(Value::Str(s)) => Ok(Value::Int(if s.is_ascii() {
+            s.len()
+        } else {
+            s.chars().count()
+        } as i64)),
         Some(Value::Dict(entries)) => Ok(Value::Int(entries.len() as i64)),
         Some(Value::Range(r)) => {
             let (start, stop, step) = (r.start, r.end, r.step);

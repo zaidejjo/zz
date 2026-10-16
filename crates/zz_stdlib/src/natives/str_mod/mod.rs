@@ -7,7 +7,13 @@ pub(crate) fn str_length(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let s = expect_str(args, 0, "std.str.length")?;
-    Ok(Value::Int(s.chars().count() as i64))
+    // ASCII fast path: byte length == char count (O(1), no scan of
+    // graphemes needed — `is_ascii` itself is the only pass).
+    Ok(Value::Int(if s.is_ascii() {
+        s.len()
+    } else {
+        s.chars().count()
+    } as i64))
 }
 
 pub(crate) fn str_split(
@@ -114,7 +120,14 @@ pub(crate) fn str_count(
     let s = expect_str(args, 0, "std.str.count")?;
     let sub = expect_str(args, 1, "std.str.count")?;
     if sub.is_empty() {
-        return Ok(Value::Int(s.chars().count() as i64 + 1));
+        return Ok(Value::Int(
+            if s.is_ascii() {
+                s.len()
+            } else {
+                s.chars().count()
+            } as i64
+                + 1,
+        ));
     }
     Ok(Value::Int(
         memchr::memmem::find_iter(s.as_bytes(), sub.as_bytes()).count() as i64,

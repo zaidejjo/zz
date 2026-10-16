@@ -2994,7 +2994,11 @@ impl Vm {
             Value::Array(vs) => Some(vs.len() as i64),
             Value::Tuple(vs) => Some(vs.len() as i64),
             Value::Bytes(b) => Some(b.len() as i64),
-            Value::Str(st) => Some(st.chars().count() as i64),
+            Value::Str(st) => Some(if st.is_ascii() {
+                st.len()
+            } else {
+                st.chars().count()
+            } as i64),
             Value::Dict(entries) => Some(entries.len() as i64),
             Value::Range(r) => {
                 let (start, stop, step) = (r.start, r.end, r.step);

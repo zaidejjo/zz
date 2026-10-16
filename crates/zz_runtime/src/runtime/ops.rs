@@ -329,9 +329,16 @@ pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value,
             .map(|(_, v)| v.clone())
             .ok_or_else(|| EvalError::new(format!("key `{key}` not found in dict"), span)),
         (Value::Str(s), Value::Int(i)) => {
-            let chars: Vec<char> = s.chars().collect();
-            let idx = normalize_index(*i, chars.len(), span)?;
-            Ok(Value::Str(chars[idx].to_string().into()))
+            // ASCII fast path: byte index == char index, no `Vec<char>`
+            // allocation. Non-ASCII keeps the exact char semantics below.
+            if s.is_ascii() {
+                let idx = normalize_index(*i, s.len(), span)?;
+                Ok(Value::Str((s.as_bytes()[idx] as char).to_string().into()))
+            } else {
+                let chars: Vec<char> = s.chars().collect();
+                let idx = normalize_index(*i, chars.len(), span)?;
+                Ok(Value::Str(chars[idx].to_string().into()))
+            }
         }
         (other, _) => Err(EvalError::new(
             format!("cannot index a value of type `{}`", other.type_name()),
@@ -425,9 +432,16 @@ pub(crate) fn slice_value(
             Ok(Value::Bytes(Box::new(b.slice(a, c))))
         }
         Value::Str(s) => {
-            let chars: Vec<char> = s.chars().collect();
-            let (a, b) = slice_bounds(start, end, chars.len());
-            Ok(Value::Str(chars[a..b].iter().collect::<String>().into()))
+            // ASCII fast path: byte bounds == char bounds (every byte is a
+            // char boundary), so slice without the `Vec<char>` round-trip.
+            if s.is_ascii() {
+                let (a, b) = slice_bounds(start, end, s.len());
+                Ok(Value::Str(s.get(a..b).unwrap_or("").to_string().into()))
+            } else {
+                let chars: Vec<char> = s.chars().collect();
+                let (a, b) = slice_bounds(start, end, chars.len());
+                Ok(Value::Str(chars[a..b].iter().collect::<String>().into()))
+            }
         }
         other => Err(EvalError::new(
             format!("cannot slice a value of type `{}`", other.type_name()),
