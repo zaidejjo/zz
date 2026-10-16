@@ -218,4 +218,58 @@ func is_even_twice(x: int) -> bool {
 }
 
 property.for_all_int(-1000, 1000, is_even_twice, 200, 7)
+
+## Rate-limited API with request IDs
+
+```zz
+import std.http
+import std.uuid
+
+s := http.server()
+s = http.route(s, "GET", "/", |_req| "ok-{uuid.v7()}")
+s = http.rate_limit(s, 100, 60000)
+s = http.request_id(s)
+s = http.secure_headers(s)
+http.listen(s, 8080)
+```
+
+## Validated CSV ingest
+
+```zz
+import std.csv
+import std.fs
+
+func main() -> Result<int, str> {
+    src := fs.read("in.csv")?
+    match csv.validate(src) {
+        .ok(_) => println("rows {csv.len(csv.parse(src))}"),
+        .err(e) => println("bad csv: {e}"),
+    }
+    println(csv.get_cell(csv.parse(src), 0, 0, "?"))
+    .ok(0)
+}
+```
+
+## Process wrapper with env overlay
+
+```zz
+import std.process
+
+match process.run_with_env("make", ["test"], ["RUST_BACKTRACE=1"]) {
+    .ok(out)  => println("status {out[0]} out {out[1]}"),
+    .err(e)   => println("spawn failed: {e}"),
+}
+```
+
+## UUID-keyed ingest dedupe
+
+```zz
+import std.uuid
+import std.set
+
+ids := [uuid.v7(), uuid.v7()]
+ids = set.insert(ids, ids[0])  // duplicate ignored
+println(set.len(ids))          // 2
+println(uuid.is_valid(ids[0]))
+```
 ```

@@ -6,6 +6,7 @@
   - [Quick start](getting-started/quick-start.md)
   - [Project layout](getting-started/project-layout.md)
   - [REPL tour](getting-started/repl-tour.md)
+  - [Cheatsheet](getting-started/cheatsheet.md)
 - Language
   - [Overview](language/overview.md)
   - [Variables and functions](language/variables-functions.md)
@@ -15,6 +16,7 @@
   - [Structs and enums](language/structs-enums.md)
   - [Pattern matching](language/pattern-matching.md)
   - [Operators](language/operators.md)
+  - [Lexicon](language/lexicon.md)
   - [Modules](language/modules.md)
   - [Value semantics](language/value-semantics.md)
 - Standard library
@@ -34,6 +36,7 @@
   - [Concurrency](stdlib/concurrency.md)
   - [System slots](stdlib/cell-path-sys.md)
   - [Test helpers](stdlib/testing-lib.md)
+  - [Reference](stdlib/reference.md)
 - Tooling
   - [CLI](tooling/cli.md)
   - [CLI reference](tooling/cli-reference.md)
@@ -43,6 +46,7 @@
   - [Plugins](tooling/plugins.md)
   - [Editors and debugging](tooling/editors-debug.md)
   - [Performance](tooling/perf.md)
+  - [Performance deep dive](tooling/perf-deep.md)
 - Compiler
   - [Architecture](compiler/architecture.md)
   - [Checker](compiler/checker.md)
@@ -50,5 +54,6 @@
 - Guides
   - [Cookbook](guides/cookbook.md)
   - [Error catalog](guides/errors.md)
+  - [Error index](guides/error-index.md)
   - [VM vs native parity](guides/parity.md)
   - [FAQ and glossary](guides/faq-glossary.md)

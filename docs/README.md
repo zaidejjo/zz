@@ -8,6 +8,7 @@ This is the developer-friendly entry point. Pick a path below.
 - New to ZZ? Start with [Quick start](getting-started/quick-start.md), then
   [Project layout](getting-started/project-layout.md) and [REPL tour](getting-started/repl-tour.md).
 - Installing or updating? See [Install](getting-started/install.md).
+- One page? See [Cheatsheet](getting-started/cheatsheet.md).
 - Building something now? Jump to [Cookbook](guides/cookbook.md).
 
 ## Learn the language
@@ -20,6 +21,7 @@ This is the developer-friendly entry point. Pick a path below.
 - [Structs and enums](language/structs-enums.md) — embedding, `impl`, generics, recursion.
 - [Pattern matching](language/pattern-matching.md) — `match`, guards, exhaustiveness.
 - [Operators](language/operators.md) — precedence, associativity, type rules.
+- [Lexicon](language/lexicon.md) — keywords, literals, comments, terminators.
 - [Modules](language/modules.md) — imports, package vs relative, cycles.
 - [Value semantics](language/value-semantics.md) — copies, no aliasing, what the optimizer may elide.
 - Deep references (complete, exhaustive):
@@ -43,6 +45,7 @@ This is the developer-friendly entry point. Pick a path below.
 - [Concurrency](stdlib/concurrency.md) — `std.chan`, `std.task`, snapshot isolation.
 - [System slots](stdlib/cell-path-sys.md) — `cell`, `path`, `sys`, `args`, `log`, TLS/Unix.
 - [Test helpers](stdlib/testing-lib.md) — asserts, `std.test`, snapshots.
+- [Stdlib reference](stdlib/reference.md) — generated 465 fns across 34 modules.
 - Exhaustive API tables: [stdlib.md](stdlib.md).
 
 ## Tooling
@@ -55,6 +58,7 @@ This is the developer-friendly entry point. Pick a path below.
 - [Plugins](tooling/plugins.md) — C ABI, `plugin.zzi`, native build hooks.
 - [Editors and debugging](tooling/editors-debug.md) — LSP, DAP, VS Code, Neovim.
 - [Performance](tooling/perf.md) — budgets, PGO, profiling, `black_box`.
+- [Performance deep dive](tooling/perf-deep.md) — profiling recipes, memory table.
 - Command details: [CLI](cli.md), [Testing](testing.md), [Bench](bench.md).
 
 ## Compiler internals
@@ -68,6 +72,7 @@ This is the developer-friendly entry point. Pick a path below.
 
 - [Cookbook](guides/cookbook.md) — file server, JSON API, CLI, CSV→JSON, worker pool.
 - [Error catalog](guides/errors.md) — most common errors and exact fixes.
+- [Error index](guides/error-index.md) — verbatim messages with fixes.
 - [VM vs native parity](guides/parity.md) — what is guaranteed identical.
 - [FAQ and glossary](guides/faq-glossary.md) — quick answers + terms.
 
