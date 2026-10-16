@@ -1146,9 +1146,24 @@ fn e2e_eval_multi_interpolation() {
     assert_eq!(stdout.trim(), "Hello World!");
 }
 
+/// Unique temp file stem per test process *and* invocation: fixed
+/// names in the shared temp dir collide across parallel `cargo test`
+/// processes (and stale files from killed runs), same class as the
+/// pkgmap-dir race below.
+fn unique_tmp_stem(base: &str) -> String {
+    format!(
+        "{base}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    )
+}
+
 #[test]
 fn e2e_check_unimported_std_module_suggests_import() {
-    let tmp = std::env::temp_dir().join("zz_unimported_std_test.zz");
+    let tmp = std::env::temp_dir().join(unique_tmp_stem("zz_unimported_std_test") + ".zz");
     std::fs::write(
         &tmp,
         r#"func main() {
@@ -1171,7 +1186,7 @@ fn e2e_check_unimported_std_module_suggests_import() {
 
 #[test]
 fn e2e_check_string_before_while_block() {
-    let tmp = std::env::temp_dir().join("zz_str_while_test.zz");
+    let tmp = std::env::temp_dir().join(unique_tmp_stem("zz_str_while_test") + ".zz");
     std::fs::write(
         &tmp,
         r#"s := "test"
@@ -1502,7 +1517,10 @@ const INPUT_PROG: &str =
     "func main() {\n    line := input(\"\")\n    println(\"got:\" + line)\n}\n";
 
 fn write_input_prog(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zz-e2e-input-{}", std::process::id()));
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zz-e2e-input-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(name);
     std::fs::write(&file, INPUT_PROG).unwrap();
@@ -1811,7 +1829,7 @@ fn e2e_cover_fail_under_and_lcov() {
         "missing gate msg in:\n{stderr}"
     );
 
-    let lcov = std::env::temp_dir().join("zz_e2e_cover.info");
+    let lcov = std::env::temp_dir().join(unique_tmp_stem("zz_e2e_cover") + ".info");
     let (exit, _stdout, _stderr) = run_zz_cover(
         &path,
         &[
@@ -1864,7 +1882,7 @@ fn e2e_cover_html() {
     let path = fixtures.join("cover").join("basic_cover.zz");
     assert!(path.exists(), "fixture not found: {}", path.display());
 
-    let html = std::env::temp_dir().join("zz_e2e_cover.html");
+    let html = std::env::temp_dir().join(unique_tmp_stem("zz_e2e_cover") + ".html");
     let (exit, _stdout, _stderr) =
         run_zz_cover(&path, &["--html", html.to_string_lossy().as_ref()]);
     assert_eq!(exit, 0, "`zz cover --html` should exit 0");
