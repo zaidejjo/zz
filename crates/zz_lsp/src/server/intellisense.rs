@@ -154,7 +154,7 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
 
     let mut contents = String::new();
 
-    if let Some(sig) = check_result.funcs.get(&name) {
+    if let Some(sig) = zz_checker::lookup_std(&check_result.funcs, &name) {
         contents.push_str(&format!("**func** `{name}`\n\n"));
         contents.push_str("```zz\n");
         contents.push_str(&format!("func {name}("));

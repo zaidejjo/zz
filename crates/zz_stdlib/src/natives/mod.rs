@@ -2271,10 +2271,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("close", 1, net::unix::unix_listener_close),
     ] {
         m.insert(
-            format!("unix_listener.{name}"),
-            NativeEntry { arity, f: func },
-        );
-        m.insert(
             format!("std.unix_listener.{name}"),
             NativeEntry { arity, f: func },
         );
@@ -2308,10 +2304,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ),
         ("close", 1, net::tls::tls_listener_close),
     ] {
-        m.insert(
-            format!("tls_listener.{name}"),
-            NativeEntry { arity, f: func },
-        );
         m.insert(
             format!("std.tls_listener.{name}"),
             NativeEntry { arity, f: func },
@@ -2377,7 +2369,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("shutdown", 1, net::tls::tls_close),
         ("peer_addr", 1, net::tls::tls_peer_addr),
     ] {
-        m.insert(format!("tls.{name}"), NativeEntry { arity, f: func });
         m.insert(format!("std.tls.{name}"), NativeEntry { arity, f: func });
     }
     for (name, arity, func) in [
@@ -2388,19 +2379,10 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ),
         ("connect_insecure", 3, net::tls::tls_connect_insecure),
     ] {
-        m.insert(format!("tls.{name}"), NativeEntry { arity, f: func });
         m.insert(format!("std.tls.{name}"), NativeEntry { arity, f: func });
     }
     m.insert(
         "std.tls.connect_with_ca".into(),
-        NativeEntry {
-            arity: 4,
-            f: net::tls::tls_connect_with_ca,
-        },
-    );
-    // NOTE: bare `tls.connect_with_ca` keeps its seed (see funcs.rs).
-    m.insert(
-        "tls.connect_with_ca".into(),
         NativeEntry {
             arity: 4,
             f: net::tls::tls_connect_with_ca,

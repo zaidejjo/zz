@@ -97,6 +97,9 @@ pub const STDLIB_MODULES: &[&str] = &[
     "property",
     "cell",
     "unix",
+    "tls",
+    "tls_listener",
+    "unix_listener",
 ];
 
 /// Resolve a module name to its canonical backing module: identity —

@@ -164,7 +164,7 @@ fn collect_expr_hints(
                     _ => None,
                 };
                 if let Some(name) = func_name {
-                    if let Some(sig) = cr.funcs.get(name) {
+                    if let Some(sig) = zz_checker::lookup_std(&cr.funcs, name) {
                         for (i, arg) in args.iter().enumerate() {
                             if i < sig.params.len() {
                                 let (pname, _) = &sig.params[i];

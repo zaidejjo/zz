@@ -127,7 +127,7 @@ pub fn resolve_completion_detail(item: &mut CompletionItem, check_result: Option
         Some(cr) => cr,
         None => return,
     };
-    if let Some(sig) = cr.funcs.get(&item.label) {
+    if let Some(sig) = zz_checker::lookup_std(&cr.funcs, &item.label) {
         item.detail = Some(format_func_sig(&item.label, sig));
         if let Some(docs) = format_func_docs(sig) {
             item.documentation = Some(tower_lsp::lsp_types::Documentation::String(docs));

@@ -11,9 +11,40 @@ use zz_frontend::span::Span;
 /// depend on `zz_stdlib`: the dependency points the other way).
 /// (`db` deliberately absent: the module was removed, `sqlz` is canonical.)
 const KNOWN_STD_MODULES: &[&str] = &[
-    "args", "bytes", "cell", "chan", "colors", "csv", "crypto", "dec", "encoding", "env", "fs",
-    "http", "json", "log", "map", "math", "net", "path", "process", "regexp", "set", "sqlz", "str",
-    "sys", "task", "term", "test", "time", "unix", "uuid", "vec",
+    "args",
+    "bytes",
+    "cell",
+    "chan",
+    "colors",
+    "csv",
+    "crypto",
+    "dec",
+    "encoding",
+    "env",
+    "fs",
+    "http",
+    "json",
+    "log",
+    "map",
+    "math",
+    "net",
+    "path",
+    "process",
+    "regexp",
+    "set",
+    "sqlz",
+    "str",
+    "sys",
+    "task",
+    "term",
+    "test",
+    "time",
+    "tls",
+    "tls_listener",
+    "unix",
+    "unix_listener",
+    "uuid",
+    "vec",
 ];
 
 impl Checker {
@@ -253,7 +284,7 @@ impl Checker {
                 t
             }
             None => {
-                if let Some(sig) = self.funcs.get(name) {
+                if let Some(sig) = crate::lookup_std(&self.funcs, name) {
                     if !sig.generics.is_empty() {
                         self.errors.push(error_at(
                             format!(
@@ -383,7 +414,7 @@ impl Checker {
                 return Some(t.clone());
             }
         }
-        if let Some(sig) = self.funcs.get(name) {
+        if let Some(sig) = crate::lookup_std(&self.funcs, name) {
             self.used_names.insert(name.to_string());
             if !sig.generics.is_empty() {
                 return None;
