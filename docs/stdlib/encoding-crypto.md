@@ -21,13 +21,18 @@ encoding.url_decode("a%20b")          // .ok("a b")
 
 ```zz
 import std.crypto
+import std.encoding
 
 crypto.sha256("hi")
-crypto.sha256_bytes(b)          // bytes input, same hex out
 crypto.sha512("hi")
 crypto.hmac_sha256("key", "msg")
 crypto.random_bytes(16)         // hex of n CSPRNG bytes
-crypto.ct_eq(a, b)              // constant-time compare
+a := "s1"
+println(crypto.ct_eq(a, "s1"))  // true, constant-time compare
+match encoding.base64_decode_bytes("aGk=") {
+    .ok(b)  => println(crypto.sha256_bytes(b)),  // bytes input, same hex out
+    .err(e) => println(e),
+}
 ```
 
 Passwords (argon2/bcrypt) and signatures (ed25519/RSA, JWT):
@@ -56,10 +61,11 @@ Random uses OS CSPRNG; `random_bytes` hex length is `2*n`. Compare secrets with
 ```zz
 import std.uuid
 
-uuid.v4()              // random
-uuid.v7()              // time-ordered (good for request IDs, DB keys)
-uuid.parse(s)          // normalized or .err
-uuid.is_valid(s)       // bool
+println(uuid.v4())     // random
+println(uuid.v7())     // time-ordered (good for request IDs, DB keys)
+s := uuid.v4()
+println(uuid.parse(s))   // normalized or .err
+println(uuid.is_valid(s))  // bool
 ```
 
 `v7` sorts roughly by creation time — prefer it for IDs that appear in logs

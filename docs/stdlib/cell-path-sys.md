@@ -87,6 +87,8 @@ if p.was_help() { println("help shown") }
 ```zz
 import std.log
 
+k := "k1"
+n := 1
 log.set_level("debug")  // trace < debug < info < warn < error
 println(log.get_level())
 log.set_format("json")  // or text
