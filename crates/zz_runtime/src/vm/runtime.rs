@@ -2303,11 +2303,18 @@ impl Vm {
                 Op::Call { argc, span } => {
                     let argc = *argc;
                     let span = *span;
-                    let mut args = Vec::with_capacity(argc as usize);
+                    // Scratch args buffer (same discipline as `CallNative`):
+                    // reuses one allocation per thread instead of one per
+                    // call. `call_value` returns the buffer for chunked
+                    // callees; slow paths consume it (correct, just slower).
+                    let mut args = take_scratch_args();
+                    args.reserve(argc as usize);
                     for _ in 0..argc {
                         args.push(self.stack.pop().unwrap());
                     }
-                    args.reverse();
+                    if args.len() > 1 {
+                        args.reverse();
+                    }
                     let callee = self.stack.pop().unwrap();
                     // Sync ip back so the parent frame resumes at the right spot.
                     self.frames.last_mut().unwrap().ip = ip;
@@ -2325,11 +2332,14 @@ impl Vm {
                     let argc = *argc;
                     let span = *span;
                     let pspan = *pspan;
-                    let mut args = Vec::with_capacity(argc as usize);
+                    let mut args = take_scratch_args();
+                    args.reserve(argc as usize);
                     for _ in 0..argc {
                         args.push(self.stack.pop().unwrap());
                     }
-                    args.reverse();
+                    if args.len() > 1 {
+                        args.reverse();
+                    }
                     if parts.len() >= 2 {
                         // Precomputed at compile time (see `Op::CallPath`):
                         // no lookup-string allocation per call.
@@ -2520,11 +2530,14 @@ impl Vm {
                 Op::CallMethod { name, argc, span } => {
                     let argc = *argc;
                     let span = *span;
-                    let mut args = Vec::with_capacity(argc as usize);
+                    let mut args = take_scratch_args();
+                    args.reserve(argc as usize);
                     for _ in 0..argc {
                         args.push(self.stack.pop().unwrap());
                     }
-                    args.reverse();
+                    if args.len() > 1 {
+                        args.reverse();
+                    }
                     let recv = self.stack.pop().unwrap();
                     self.frames.last_mut().unwrap().ip = ip;
                     // sqlz fast path: `mydb.query/exec` on a Db handle
@@ -2738,12 +2751,11 @@ impl Vm {
             Value::Func(fv) if fv.chunk.is_some() => {
                 let mut args = args;
                 if args.len() > fv.params.len() {
+                    let expected = fv.params.len();
+                    let found = args.len();
+                    return_scratch_args(args);
                     return Err(self.error(
-                        format!(
-                            "expected {} arguments, found {}",
-                            fv.params.len(),
-                            args.len()
-                        ),
+                        format!("expected {expected} arguments, found {found}"),
                         span,
                     ));
                 }
@@ -2783,12 +2795,10 @@ impl Vm {
                                         }
                                     }
                                 } else {
+                                    let expected = fv.params.len();
+                                    return_scratch_args(args);
                                     return Err(self.error(
-                                        format!(
-                                            "expected {} arguments, found {}",
-                                            fv.params.len(),
-                                            start
-                                        ),
+                                        format!("expected {expected} arguments, found {start}"),
                                         span,
                                     ));
                                 }
@@ -2797,7 +2807,11 @@ impl Vm {
                     }
                 }
                 let stack_base = self.stack.len();
-                self.stack.extend(args);
+                // Append (not extend+drain): elements move onto the stack while
+                // the buffer keeps its allocation and goes back to the
+                // scratch slot below — steady-state calls never allocate.
+                self.stack.append(&mut args);
+                return_scratch_args(args);
                 let prev_env = std::mem::replace(&mut interp.env, fv.env.clone());
                 let saved_defers = std::mem::take(&mut self.defer_stack);
                 self.frames.push(Frame {
