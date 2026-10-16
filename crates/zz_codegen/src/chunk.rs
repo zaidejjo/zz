@@ -1368,6 +1368,118 @@ fn idxread_scan(
     }
     (fused, skip)
 }
+/// Condition fusion: `[int-operand, int-operand, BinOp(cmp),
+/// WhileCond|JumpIfFalse|JumpIfTrue]` compiles to guarded raw compare +
+/// branch — no clones, no `zz_binop` dispatch, no bool box/unwrap (the
+/// dominant cost in `while`-driven loops: sieve's inner loop measured
+/// 4x behind HIR here on `while j < n` alone).
+///
+/// Window shape (all adjacent):
+/// - two int operands: `LoadSlot(s)` with `s` int-typed per `ints`, or
+///   `PushConst` of an int. Arithmetic-nested conditions stay boxed;
+///   loop conditions are overwhelmingly slot-vs-slot and slot-vs-const.
+/// - `BinOp` limited to trapping-free total-order integer comparisons
+///   (`== != < > <= >=`); short-circuiting, float, and div/rem never
+///   match.
+/// - terminator `WhileCond(exit)`, `JumpIfFalse(t)`, or `JumpIfTrue(t)`.
+/// - No jump target in the window interior (the start may be targeted —
+///   the label still emits, then our statement), no overlap with
+///   already-claimed pcs (every existing fusion wins ties).
+///
+/// Guards mirror [`int_fuse`]: each slot load is int-guarded (fail-closed
+/// cold trap); consts render direct. Emission never touches `sp` — no
+/// values are pushed, so the `WhileCond` pop is already accounted for
+/// and the exit protocol is verbatim. Fall-through pushes nothing.
+///
+/// Returns `(fused, skip)`: `fused[start]` describes the window; `skip`
+/// holds the other three pcs.
+#[derive(Debug, Clone, Copy)]
+enum CondTerm {
+    While(u32),
+    JumpFalse(u32),
+    JumpTrue(u32),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CondOperand {
+    Slot(u16),
+    Const(i64),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CondFuse {
+    a: CondOperand,
+    b: CondOperand,
+    cmp: zz_ir::op::BinOp,
+    term: CondTerm,
+}
+
+fn condfuse_scan(
+    code: &[Op],
+    consts: &[Const],
+    ints: &HashSet<u16>,
+    targets: &HashSet<u32>,
+    taken: &HashSet<usize>,
+) -> (HashMap<usize, CondFuse>, HashSet<usize>) {
+    use zz_ir::op::BinOp as B;
+    fn operand(ints: &HashSet<u16>, consts: &[Const], op: &Op) -> Option<CondOperand> {
+        match op {
+            Op::LoadSlot(s) if ints.contains(s) => Some(CondOperand::Slot(*s)),
+            Op::PushConst(c) => match consts.get(c.0 as usize) {
+                Some(Const::Int(k)) => Some(CondOperand::Const(*k)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    let mut fused = HashMap::new();
+    let mut skip = HashSet::new();
+    if code.len() < 4 {
+        return (fused, skip);
+    }
+    let mut pc = 0usize;
+    while pc + 3 < code.len() {
+        if taken.contains(&pc) || skip.contains(&pc) {
+            pc += 1;
+            continue;
+        }
+        // Interior label-free and unclaimed (the start itself may be
+        // targeted — the label emits at `pc`, then our statement).
+        if (pc + 1..=pc + 3).any(|x| targets.contains(&(x as u32)) || taken.contains(&x)) {
+            pc += 1;
+            continue;
+        }
+        let (Some(a), Some(b)) = (
+            operand(ints, consts, &code[pc]),
+            operand(ints, consts, &code[pc + 1]),
+        ) else {
+            pc += 1;
+            continue;
+        };
+        let cmp = match &code[pc + 2] {
+            Op::BinOp(c @ (B::Eq | B::Ne | B::Lt | B::Gt | B::Le | B::Ge)) => *c,
+            _ => {
+                pc += 1;
+                continue;
+            }
+        };
+        let term = match &code[pc + 3] {
+            Op::WhileCond { exit } => CondTerm::While(*exit),
+            Op::JumpIfFalse(t) => CondTerm::JumpFalse(*t),
+            Op::JumpIfTrue(t) => CondTerm::JumpTrue(*t),
+            _ => {
+                pc += 1;
+                continue;
+            }
+        };
+        fused.insert(pc, CondFuse { a, b, cmp, term });
+        for x in pc + 1..=pc + 3 {
+            skip.insert(x);
+        }
+        pc += 4;
+    }
+    (fused, skip)
+}
 /// Coverage verdict for one module: every op supported, no default args
 /// (arity fill needs caller-env evaluation), and every `Call`/`CallPath`
 /// statically resolvable. Fails with the first gap found.
@@ -2065,6 +2177,15 @@ impl<'a> Emitter<'a> {
             idxreads.keys().all(|k| !skip.contains(k)),
             "idxread start in skip set"
         );
+        // Condition fusion (see `condfuse_scan`): same tie discipline —
+        // every earlier fusion wins, so overlapping windows stay boxed.
+        let (condfused, cskip) =
+            condfuse_scan(&f.code, &self.module.consts, &uint, &targets, &skip);
+        skip.extend(cskip);
+        debug_assert!(
+            condfused.keys().all(|k| !skip.contains(k)),
+            "condfuse start in skip set"
+        );
         for (pc, op) in f.code.iter().enumerate() {
             if skip.contains(&pc) {
                 continue;
@@ -2088,6 +2209,7 @@ impl<'a> Emitter<'a> {
                 peel: peels.get(&pc).cloned(),
                 strapp: strapped.get(&pc).copied(),
                 idxread: idxreads.get(&pc).copied(),
+                condfuse: condfused.get(&pc).copied(),
             };
             self.emit_op(id, pc, op, &cx, out)?;
         }
@@ -2261,6 +2383,56 @@ impl<'a> Emitter<'a> {
             }
         }
         out.push_str("    }\n");
+        Ok(())
+    }
+
+    /// Emit one fused int-compare branch (see [`CondFuse`]): guarded raw
+    /// `int64_t` loads plus the comparison and the terminator's exact
+    /// protocol. No values are pushed, so `sp` is untouched: the
+    /// `WhileCond` pop is already accounted for and the exit edge
+    /// (`_ldepth--; sp = _lbase[...] + 1; goto`) is verbatim. Guards are
+    /// fail-closed cold traps, like [`int_fuse`].
+    fn emit_condfuse(cf: &CondFuse, out: &mut String) -> Result<(), ChunkError> {
+        use zz_ir::op::BinOp as B;
+        fn operand(o: &CondOperand, name: &str, out: &mut String) {
+            match o {
+                CondOperand::Slot(s) => {
+                    out.push_str(&format!(
+                        "      int64_t {name} = 0; {{ zz_value _b{name} = st[{s}]; if (_b{name}.tag != ZZ_INT) {}; {name} = _b{name}.i; }}\n",
+                        ftrap("int slot loaded non-int value")
+                    ));
+                }
+                CondOperand::Const(k) => {
+                    out.push_str(&format!("      int64_t {name} = {};\n", c_int(*k)));
+                }
+            }
+        }
+        let cmp = match cf.cmp {
+            B::Eq => "==",
+            B::Ne => "!=",
+            B::Lt => "<",
+            B::Gt => ">",
+            B::Le => "<=",
+            B::Ge => ">=",
+            _ => return Err(ChunkError::op("condfuse compare")),
+        };
+        out.push_str("    {\n");
+        operand(&cf.a, "_cca", out);
+        operand(&cf.b, "_ccb", out);
+        out.push_str(&format!("      int _cct = (_cca {cmp} _ccb);\n"));
+        match cf.term {
+            CondTerm::While(exit) => {
+                out.push_str(&format!(
+                    "      if (!_cct) {{ _ldepth--; sp = _lbase[_ldepth] + 1; goto L{exit}; }} }}\n"
+                ));
+            }
+            CondTerm::JumpFalse(t) => {
+                out.push_str(&format!("      if (!_cct) goto L{t}; }}\n"));
+            }
+            CondTerm::JumpTrue(t) => {
+                out.push_str(&format!("      if (_cct) goto L{t}; }}\n"));
+            }
+        }
         Ok(())
     }
     /// Emit one peeled counted loop (see [`Peel`]): pop the `ForSetup`
@@ -2692,6 +2864,9 @@ struct OpCx<'x> {
     strapp: Option<(u16, ConstId)>,
     /// Index-read window starting at this pc, if any. See [`idxread_scan`].
     idxread: Option<IdxRead>,
+    /// Fused int-compare branch starting at this pc, if any. See
+    /// [`condfuse_scan`].
+    condfuse: Option<CondFuse>,
 }
 
 /// One fused unboxed-int window: a straight-line int expression over
@@ -2776,6 +2951,12 @@ impl<'a> Emitter<'a> {
                 .get(id.0 as usize)
                 .ok_or_else(|| ChunkError::op("func id"))?;
             Self::emit_idxread(self.module, &f.code, pc, &rd, out)?;
+            return Ok(());
+        }
+        // Fused int-compare branch (see `condfuse_scan`): guarded raw
+        // compare + terminator protocol, no stack traffic at all.
+        if let Some(cf) = cx.condfuse {
+            Self::emit_condfuse(&cf, out)?;
             return Ok(());
         }
         match op {
@@ -3643,4 +3824,125 @@ pub fn build_module(
         needs_curl: crate::ffi::needs_curl_link(&native_names),
         needs_sqlite: crate::ffi::needs_sqlite_link(&native_names),
     })
+}
+
+#[cfg(test)]
+mod condfuse_tests {
+    use super::*;
+    use zz_ir::op::BinOp as B;
+
+    fn ints(slots: &[u16]) -> HashSet<u16> {
+        slots.iter().copied().collect()
+    }
+
+    fn consts() -> Vec<Const> {
+        vec![Const::Int(10)]
+    }
+
+    #[test]
+    fn while_slot_slot_fuses() {
+        // `loadslot 7, loadslot 0, binop Lt, whilecond` (sieve shape).
+        let code = vec![
+            Op::LoadSlot(7),
+            Op::LoadSlot(0),
+            Op::BinOp(B::Lt),
+            Op::WhileCond { exit: 76 },
+        ];
+        let (fused, skip) = condfuse_scan(
+            &code,
+            &consts(),
+            &ints(&[0, 7]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(fused.len(), 1);
+        let cf = &fused[&0];
+        assert!(matches!(cf.term, CondTerm::While(76)));
+        assert!(matches!(cf.cmp, B::Lt));
+        assert_eq!(skip, HashSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn while_slot_const_fuses() {
+        let code = vec![
+            Op::LoadSlot(3),
+            Op::PushConst(ConstId(0)),
+            Op::BinOp(B::Gt),
+            Op::WhileCond { exit: 9 },
+        ];
+        let (fused, _) = condfuse_scan(
+            &code,
+            &consts(),
+            &ints(&[3]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(fused.len(), 1);
+    }
+
+    #[test]
+    fn jump_terminators_fuse() {
+        for (term, ok) in [
+            (Op::JumpIfFalse(5), true),
+            (Op::JumpIfTrue(5), true),
+            (Op::Jump(5), false),
+        ] {
+            let code = vec![Op::LoadSlot(1), Op::LoadSlot(2), Op::BinOp(B::Eq), term];
+            let (fused, _) = condfuse_scan(
+                &code,
+                &consts(),
+                &ints(&[1, 2]),
+                &HashSet::new(),
+                &HashSet::new(),
+            );
+            assert_eq!(!fused.is_empty(), ok);
+        }
+    }
+
+    #[test]
+    fn non_int_operands_and_ops_do_not_fuse() {
+        // Unknown slot stays boxed.
+        let code = vec![
+            Op::LoadSlot(7),
+            Op::LoadSlot(9),
+            Op::BinOp(B::Lt),
+            Op::WhileCond { exit: 1 },
+        ];
+        let (fused, _) = condfuse_scan(
+            &code,
+            &consts(),
+            &ints(&[7]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(fused.is_empty());
+        // Non-comparison BinOp stays boxed.
+        let code = vec![
+            Op::LoadSlot(7),
+            Op::LoadSlot(0),
+            Op::BinOp(B::Add),
+            Op::WhileCond { exit: 1 },
+        ];
+        let (fused, _) = condfuse_scan(
+            &code,
+            &consts(),
+            &ints(&[0, 7]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn interior_jump_target_blocks() {
+        let code = vec![
+            Op::LoadSlot(7),
+            Op::LoadSlot(0),
+            Op::BinOp(B::Lt),
+            Op::WhileCond { exit: 1 },
+        ];
+        let targets = HashSet::from([2u32]);
+        let (fused, _) = condfuse_scan(&code, &consts(), &ints(&[0, 7]), &targets, &HashSet::new());
+        assert!(fused.is_empty());
+    }
 }
