@@ -1,6 +1,8 @@
 # Syntax Reference
 
-Complete grammar and syntax guide for the ZZ language.
+> Reference (complete). Learning path: [docs/README.md](README.md) →
+> [Language overview](language/overview.md). New pages distill this file and link back;
+> this file stays the grammar source of truth.
 
 ## Lexical Structure
 

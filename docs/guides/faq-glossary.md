@@ -35,6 +35,34 @@ assert `passed == 0` via `--json`.
 **TOML?**
 Not in stdlib — external `toml` package (pure ZZ, versioned separately).
 
+**I upgraded and imports broke — migration?**
+Three renames cover most: `import std.io` → bare builtins (`println`, no import);
+`http.pipe` → `http.use`; `[native] build = "hook"` → `[native.build-cc]`
+(see [Plugins](../tooling/plugins.md)). Stale lock pins after a manifest
+registry↔path flip are ignored with a note — run `zz install` to rewrite
+lock + `vendor/`. See [Packages](../tooling/packages.md).
+
+**`zz doctor` says clang missing — what now?**
+VM-only work needs no C toolchain. For AOT: `zz toolchain install` then
+`zz build -p --cc zig`, or install clang 18+. Verify with `zz doctor --fix`
+and `zz build -p --verbose` to see the exact clang line. See
+[Install](../getting-started/install.md).
+
+**Where is the changelog / which version am I on?**
+`zz --version` + workspace `Cargo.toml` version. Releases cut from `main`
+via `release.yml` (per-arch zips with `lib/` native runtime). Downstream pins
+(`zcc`, AUR) follow the tag — never moving branches.
+
+**Is there a playground?**
+No hosted playground yet. Local equivalent: `zz` REPL (`:type`, `:clear`) and
+`zz eval "1 + 2"`. Browser execution needs a WASM VM build (tracked separately).
+
+**How do I get help for one symbol offline?**
+`rg "std.http.route" crates/zz_stdlib/src/funcs.rs` for signatures,
+`docs/stdlib/reference.md` (generated 465 fns) for the index,
+`docs/_meta/search-index.json` for keyword lookup. A `zz doc <symbol>` wrapper
+over those two files is specced but not yet shipped.
+
 ## Glossary
 
 - **AOT**: ahead-of-time native binary via HIR→C/chunk→C + clang.

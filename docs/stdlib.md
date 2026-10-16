@@ -1,6 +1,7 @@
 # Standard Library
 
-Exhaustive reference of all built-in functions and modules.
+> Reference (complete). Learning path: [Stdlib overview](stdlib/overview.md).
+> Per-module guides distill this file; generated name index: [reference.md](stdlib/reference.md).
 
 ## Built-in Functions
 
