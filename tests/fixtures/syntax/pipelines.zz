@@ -33,4 +33,14 @@ result := 10
     |> double
 println(result)
 
+// pipeline with comments between links (#489): comment-only lines are
+// trivia and must not terminate the chain
+commented := 5
+    // double it
+    |> double
+    /* then bump it */
+    |> add_one // trailing comment stays on its link
+    |> double
+println(commented)
+
 println("pipe_ok")
