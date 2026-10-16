@@ -117,6 +117,8 @@ the clamped position for `find`/`rfind` and never matches for `_at`.
 
 ```zz
 import std.str
+import std.bytes
+import std.encoding
 
 s := "  Hello World  "
 s.trim()                // "Hello World"
@@ -137,7 +139,10 @@ ord("A")                           // 65
 chr(233)                           // "é"
 chr(ord("Z"))                      // "Z"
 bytes.to_str([104, 105])           // .ok("hi")
-bytes.to_ints(b)[0]                // first byte as int
+match encoding.base64_decode_bytes("aGk=") {
+    .ok(raw)  => println(bytes.to_ints(raw)[0]),  // first byte as int
+    .err(e)   => println(e),
+}
 ```
 
 ### Method Call Syntax
@@ -224,13 +229,14 @@ import std.json
 ```zz
 import std.json
 
-data := json.parse({"name": "Alice", "age": 30})
-name := json.as_str(json.get(data, "name"))   // "Alice"
-age := json.as_int(json.get(data, "age"))     // 30
-
-// Serialize
-person := {"name": "Bob", "age": 25}
-json.stringify(person)  // {"age":25,"name":"Bob"}
+func main() -> Result<int, str> {
+    data := json.parse(`{"name": "Alice", "age": 30}`)?
+    println(json.as_str(json.get(data, "name")?))  // Alice
+    println(json.as_int(json.get(data, "age")?))   // 30
+    person := {"name": "Bob", "age": 25}
+    println(json.stringify(person)?)
+    .ok(0)
+}
 ```
 
 ---
@@ -821,11 +827,12 @@ collect parts and join once. Handles are plain arrays (no definitions
 needed).
 
 ```zz
+import std.str
 import std.bytes
 
 b := str.builder()
 b = str.push_part(b, "hello ")
-b = str.push_part(b, name)
+b = str.push_part(b, "Ada")
 println(str.finish(b))
 
 nums := bytes.builder()

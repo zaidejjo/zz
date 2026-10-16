@@ -8,12 +8,12 @@ Canonical module is `std.sqlz`. There is no `std.db`/`db.*` — `sqlz` only.
 import std.sqlz
 
 func main() -> Result<int, str> {
-    db := sqlz.open("app.db")?
-    sqlz.exec(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER, name TEXT)")?
-    sqlz.exec(db, "INSERT INTO users VALUES (1, 'Ada')")?
-    rows := sqlz.query(db, "SELECT id, name FROM users")?
+    db := sqlz.open("app.db")
+    sqlz.exec(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER, name TEXT)")
+    sqlz.exec(db, "INSERT INTO users VALUES (1, 'Ada')")
+    rows := sqlz.query(db, "SELECT id, name FROM users")
     println(rows)
-    sqlz.close(db)?
+    sqlz.close(db)
     .ok(0)
 }
 ```
@@ -35,11 +35,11 @@ See `examples/sqlz_test.zz` and `examples/sqlz_universal.zz`.
 import std.sqlz.postgres as pg
 
 func main() -> Result<int, str> {
-    db := pg.connect("host=127.0.0.1 user=app dbname=app")?
-    pg.exec(db, "CREATE TABLE IF NOT EXISTS t (id INTEGER)")?
-    rows := pg.query(db, "SELECT * FROM t")?
+    db := pg.connect("host=127.0.0.1 user=app dbname=app")
+    pg.exec(db, "CREATE TABLE IF NOT EXISTS t (id INTEGER)")
+    rows := pg.query(db, "SELECT * FROM t")
     println(rows)
-    pg.close(db)?
+    pg.close(db)
     .ok(0)
 }
 ```
@@ -52,11 +52,11 @@ func main() -> Result<int, str> {
 import std.sqlz.mysql as my
 
 func main() -> Result<int, str> {
-    db := my.connect("127.0.0.1:3306", "app", "secret", "appdb")?
-    my.exec(db, "CREATE TABLE IF NOT EXISTS t (id INTEGER)")?
-    rows := my.query(db, "SELECT * FROM t")?
+    db := my.connect("host=127.0.0.1 port=3306 user=app password=secret dbname=appdb")
+    my.exec(db, "CREATE TABLE IF NOT EXISTS t (id INTEGER)")
+    rows := my.query(db, "SELECT * FROM t")
     println(rows)
-    my.close(db)?
+    my.close(db)
     .ok(0)
 }
 ```

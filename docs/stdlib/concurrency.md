@@ -22,8 +22,8 @@ import std.chan
 
 c := chan()
 chan.send(c, 42)
-v := chan.recv(c)        // blocks
-opt := chan.try_recv(c)  // .some(v) or .none, never blocks
+v: int = chan.recv(c)              // blocks
+opt: Option<int> = chan.try_recv(c)  // .some(v) or .none, never blocks
 ```
 
 `chan()` creates, `send` pushes, `recv` blocks, `try_recv` polls.
@@ -61,7 +61,7 @@ out := chan()
 
 for i in 0..4 {
     task.spawn(|_| {
-        loop {
+        while true {
             match chan.try_recv(jobs) {
                 .some(j) => chan.send(out, j * 2),
                 .none    => break,
@@ -83,8 +83,9 @@ Pool-backed mutable handles for counters and caches:
 import std.cell
 
 c := cell.new(0)
-cell.set(c, cell.get(c) + 1)
-println(cell.get(c))
+cur := cell.get(c).unwrap_or(0)
+_ := cell.set(c, cur + 1)
+println(cell.get(c).unwrap_or(-1))
 cell.drop(c)
 ```
 

@@ -60,8 +60,10 @@ vec.sort(nums)       // [1, 2, 3]
 Strings are immutable; `s = s + part` in a loop is O(n²). Collect and join once:
 
 ```zz
+import std.str
 import std.bytes
 
+name := "Ada"
 b := str.builder()          // [str] handle
 b = str.push_part(b, "hi ")
 b = str.push_part(b, name)
@@ -74,7 +76,6 @@ nums = bytes.extend(nums, [1, 2])
 println(bytes.len_of(nums))
 bytes.from_ints(nums)       // normalize array
 bytes.to_str([104, 105])    // .ok("hi"), strict UTF-8
-bytes.to_ints(b)            // opaque bytes -> [int]
 ```
 
 Full tables: [stdlib.md](../stdlib.md).

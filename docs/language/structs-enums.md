@@ -53,8 +53,13 @@ methods. Args erase at runtime.
 ## Type aliases
 
 ```zz
+enum Token { Eof, IntLit(int), Name(str) }
+
 type Tokens = [Token]
 type Pair<T> = (T, T)
+
+toks: Tokens = [Token.Eof]
+p: Pair<int> = (1, 2)
 ```
 
 Erase at check time, zero runtime cost. `pub type` exports across modules.

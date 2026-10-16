@@ -19,7 +19,7 @@
 3. `docs/llms.txt` snapshots alongside — AI consumers pin `llms.txt` at a tag
    for stable answers.
 4. `docs/stdlib/reference.md` header records the generator run
-   (`465 fns` now); drift between tags is reviewable in git.
+   (`691 entries` now); drift between tags is reviewable in git.
 
 ## Changelog link
 

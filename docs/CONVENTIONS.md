@@ -33,9 +33,12 @@ Read this before adding or editing any page under `docs/`.
 
 ## What goes where
 
-- Learning path: `getting-started/`, `language/`, `stdlib/`, `tooling/`, `guides/`.
-- Source of truth: `syntax.md`, `types.md`, `stdlib.md`, `cli.md`, `testing.md`,
-  `bench.md`, `threading.md` stay exhaustive; new pages distill and link back.
+- New pages are canonical: `getting-started/`, `language/`, `stdlib/`, `tooling/`,
+  `compiler/`, `guides/` (+ generated `stdlib/reference.md` for signatures).
+- Legacy flat files (`syntax.md`, `types.md`, `stdlib.md`, `cli.md`, `testing.md`,
+  `bench.md`, `threading.md`) are deep references kept for history and code links;
+  each carries a banner pointing at its canonical replacement. On conflict, the
+  new page + `funcs.rs` win — file a fix, don't fork the docs.
 - Internals: `compiler/`, `design/`, `perf/`. Never document an optimization as a
   semantic promise — see [Value semantics](language/value-semantics.md).
 

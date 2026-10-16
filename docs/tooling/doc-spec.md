@@ -8,7 +8,7 @@ Planned thin wrapper over two files that already exist. No new backend needed.
 zz doc <symbol>   # e.g. zz doc std.http.route | zz doc "??" | zz doc chan.send
 ```
 
-1. Exact match in `docs/stdlib/reference.md` (generated 465 fns) → print the
+1. Exact match in `docs/stdlib/reference.md` (generated 691 entries) → print the
    module guide section (`docs/stdlib/<guide>#<fn>`).
 2. Keyword match in `docs/_meta/search-index.json` (`keywords` + `excerpt`) →
    rank pages, print top 3 paths.

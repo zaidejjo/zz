@@ -44,8 +44,18 @@ Opaque parser handles; declare flags, parse, then read:
 
 ```zz
 import std.args
-// parser() -> str_flag/int_flag/bool_flag -> parse -> get_str/get_int/get_bool
-// + positional, subcommand, help, error, was_help, get_raw
+
+p := ArgsParser.new()
+p.str_flag("out", "out.txt")
+p.int_flag("jobs", 4)
+p.bool_flag("verbose")
+if p.parse(["--jobs", "8"]) {
+    println(p.get_str("out"))
+    println(p.get_int("jobs"))
+    println(p.get_bool("verbose"))
+} else {
+    println(p.error())
+}
 ```
 
 Use for CLIs with `--flag value`, `--bool`, subcommands, and `--help` text.

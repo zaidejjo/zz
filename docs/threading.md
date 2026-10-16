@@ -36,6 +36,8 @@ refcounts and the intern table are thread-safe.
 import std.task
 import std.chan
 
+func risky() -> int { 1 }
+
 // Fan-out / fan-in.
 c := std.chan()
 for i in 0..8 {
@@ -45,12 +47,10 @@ for i in 0..8 {
     v: int = std.chan.recv(c)
 }
 
-// Join a single task (panics inside surface as `.err`).
+// Join a single task.
 h := task.spawn(|_| { risky() })
-r: Result<int, str> = task.join(h)
-
-// Non-blocking poll: `.some` when done (repeatable), `.none` while running.
-q := task.try_join(h)
+println(task.join(h))      // 1 (panics inside surface as .err)
+println(task.try_join(h))  // .some(...) when done, .none while running
 ```
 
 ## Cooperative safepoints
