@@ -546,23 +546,56 @@ impl<'a> Lexer<'a> {
         )
     }
 
-    /// Returns true if the next non-whitespace/non-newline in the source is
-    /// `|>`. Used to allow multi-line pipe chains:
+    /// Returns true if the next non-trivia in the source is `|>`. Used to
+    /// allow multi-line pipe chains:
     /// ```zz
     /// val
     ///   |> f
     ///   |> g
     /// ```
+    /// Comments are trivia too: a comment-only line between chain links
+    /// must not terminate the pipeline (#489).
     fn next_is_pipe_arrow(&self) -> bool {
-        let mut offset = 1; // skip the newline we just saw
+        // Scan the raw source ahead of the newline just seen (`self.pos`
+        // is at the `\n`, so `+ 1` skips it). Byte-slice based, so
+        // multibyte chars in skipped trivia can't split a boundary.
+        let mut rest = self.src.get(self.pos + 1..).unwrap_or("");
         loop {
-            match self.peek_char_at(offset) {
-                Some(' ' | '\t' | '\r') => offset += 1,
-                Some('\n') => offset += 1,
-                Some('|') => {
-                    return self.peek_char_at(offset + 1) == Some('>');
+            rest = rest.trim_start_matches([' ', '\t', '\r', '\n']);
+            if let Some(after) = rest.strip_prefix("//") {
+                // Line comment: skip to its newline and re-trim. A
+                // comment running to EOF means no pipe can follow.
+                match after.find('\n') {
+                    Some(i) => rest = &after[i..],
+                    None => return false,
                 }
-                _ => return false,
+            } else if rest.starts_with("/*") {
+                // Block comments nest: track depth until the matching
+                // closer. Unterminated means a real lex error surfaces
+                // later; stay conservative here and end the statement.
+                let mut depth = 1usize;
+                let mut scan = &rest[2..];
+                loop {
+                    let closer = scan.find("*/");
+                    let opener = scan.find("/*");
+                    match (closer, opener) {
+                        (Some(c), Some(o)) if o < c => {
+                            depth += 1;
+                            scan = &scan[o + 2..];
+                        }
+                        (Some(c), _) => {
+                            depth -= 1;
+                            scan = &scan[c + 2..];
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => return false,
+                    }
+                }
+                rest = scan;
+            } else {
+                return rest.starts_with("|>");
             }
         }
     }
@@ -1743,6 +1776,70 @@ mod tests {
             .filter(|t| t.kind == TokenKind::PipeGt)
             .count();
         assert_eq!(pipe_count, 2, "should have two PipeGt tokens");
+    }
+
+    #[test]
+    fn pipe_chain_with_line_comment_no_stmt_end() {
+        // #489: a `//` comment line between chain links must not end
+        // the statement.
+        let tokens = lex("5\n  // double it\n  |> f").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        let mut found_int = false;
+        for k in &kinds {
+            if *k == TokenKind::Int {
+                found_int = true;
+            }
+            if *k == TokenKind::StmtEnd && found_int {
+                panic!(
+                    "StmtEnd found before PipeGt with comment in chain: {:?}",
+                    kinds
+                );
+            }
+            if *k == TokenKind::PipeGt {
+                assert!(found_int, "PipeGt should appear after Int");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn pipe_chain_with_block_comment_no_stmt_end() {
+        // #489: block comments (incl. nested) are trivia in the lookahead.
+        let tokens = lex("5\n  /* why /* nested */ still why */  |> f").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        let int_idx = kinds.iter().position(|k| *k == TokenKind::Int).unwrap();
+        let pipe_idx = kinds.iter().position(|k| *k == TokenKind::PipeGt).unwrap();
+        assert!(
+            !kinds[int_idx..pipe_idx].contains(&TokenKind::StmtEnd),
+            "no StmtEnd between Int and PipeGt: {:?}",
+            kinds
+        );
+    }
+
+    #[test]
+    fn pipe_chain_trailing_comment_then_link_no_stmt_end() {
+        // #489: trailing comment after a link, next link on its own line.
+        let tokens = lex("5 |> f // first step\n  |> g").tokens;
+        let pipe_count = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::PipeGt)
+            .count();
+        assert_eq!(pipe_count, 2, "should have two PipeGt tokens");
+    }
+
+    #[test]
+    fn comment_then_non_pipe_still_emits_stmt_end() {
+        // A comment followed by a non-pipe line must still end the
+        // statement — the lookahead only skips trivia, it never joins.
+        let tokens = lex("5\n  // just a comment\n  x").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        let int_idx = kinds.iter().position(|k| *k == TokenKind::Int).unwrap();
+        let ident_idx = kinds.iter().position(|k| *k == TokenKind::Ident).unwrap();
+        assert!(
+            kinds[int_idx..ident_idx].contains(&TokenKind::StmtEnd),
+            "StmtEnd expected before non-pipe line: {:?}",
+            kinds
+        );
     }
 
     // --- triple-quoted (multiline) strings ---------------------------------
