@@ -1487,6 +1487,59 @@ zz_value zz_result_expect(zz_value res, zz_value msg, int *err) {
     exit(1);
 }
 
+// option.unwrap(opt) — unwrap .some(v) or abort like the VM's
+// `called unwrap on .none` EvalError (native: `error:` + exit 1,
+// matching `zz_option_expect`).
+zz_value zz_option_unwrap(zz_value opt, int *err) {
+    (void)err;
+    if (opt.tag == ZZ_OPTION_SOME && opt.payload)
+        return zz_clone(*opt.payload);
+    if (opt.tag == ZZ_OPTION_NONE) {
+        fprintf(stderr, "error: called unwrap on .none\n");
+        exit(1);
+    }
+    fprintf(stderr, "error: option.unwrap: expected an option\n");
+    exit(1);
+}
+
+// option.unwrap_or(opt, def) — `.some(v)` yields v, `.none` yields def.
+zz_value zz_option_unwrap_or(zz_value opt, zz_value def, int *err) {
+    (void)err;
+    if (opt.tag == ZZ_OPTION_SOME && opt.payload)
+        return zz_clone(*opt.payload);
+    if (opt.tag == ZZ_OPTION_NONE)
+        return zz_clone(def);
+    fprintf(stderr, "error: option.unwrap_or: expected an option\n");
+    exit(1);
+}
+
+// result.unwrap(res) — unwrap .ok(v) or abort like the VM's
+// `result.unwrap: called unwrap on .err(e)` EvalError.
+zz_value zz_result_unwrap(zz_value res, int *err) {
+    (void)err;
+    if (res.tag == ZZ_RESULT_OK && res.payload)
+        return zz_clone(*res.payload);
+    if (res.tag == ZZ_RESULT_ERR && res.payload) {
+        char *estr = zz_value_to_string(res.payload);
+        fprintf(stderr, "error: result.unwrap: called unwrap on .err(%s)\n", estr);
+        free(estr);
+    } else {
+        fprintf(stderr, "error: result.unwrap: expected a result\n");
+    }
+    exit(1);
+}
+
+// result.unwrap_or(res, def) — `.ok(v)` yields v, `.err(_)` yields def.
+zz_value zz_result_unwrap_or(zz_value res, zz_value def, int *err) {
+    (void)err;
+    if (res.tag == ZZ_RESULT_OK && res.payload)
+        return zz_clone(*res.payload);
+    if (res.tag == ZZ_RESULT_ERR)
+        return zz_clone(def);
+    fprintf(stderr, "error: result.unwrap_or: expected a result\n");
+    exit(1);
+}
+
 // Index-trap with operands and function name (#251): called from lowered
 // bounds-check failures instead of a bare "index out of bounds". Mirrors
 // the VM wording (`index {i} out of bounds for length {len}`) plus the

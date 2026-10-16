@@ -1086,6 +1086,10 @@ int  zz_tx_has_error(void);
 // ---- option / result ----------------------------------------------------
 zz_value zz_option_expect(zz_value opt, zz_value msg, int *err);
 zz_value zz_result_expect(zz_value res, zz_value msg, int *err);
+zz_value zz_option_unwrap(zz_value opt, int *err);
+zz_value zz_option_unwrap_or(zz_value opt, zz_value def, int *err);
+zz_value zz_result_unwrap(zz_value res, int *err);
+zz_value zz_result_unwrap_or(zz_value res, zz_value def, int *err);
 
 // ---- runtime glue ------------------------------------------------------
 // Generated code calls zz_main (top-level statements) then zz_call_main.
