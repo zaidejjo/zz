@@ -479,10 +479,16 @@ impl Vm {
         // frame ip was synced pre-call, so resumption continues right after
         // this op without any re-cache. Only the executor interprets
         // `Flow::Yield`.
+        //
+        // The executor guard first: `request_yield` fires only on executor
+        // threads, so off-executor (plain `zz run`) this is one thread-local
+        // cell read instead of a RefCell borrow plus take on every call.
         macro_rules! yield_check {
             () => {{
-                if let Some(reason) = crate::value::take_yield() {
-                    return Ok(Flow::Yield(reason));
+                if crate::value::on_executor() {
+                    if let Some(reason) = crate::value::take_yield() {
+                        return Ok(Flow::Yield(reason));
+                    }
                 }
             }};
         }
