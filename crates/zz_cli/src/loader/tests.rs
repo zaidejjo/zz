@@ -2117,6 +2117,42 @@ fn transitive_path_import_resolves_when_locked() {
 }
 
 #[test]
+fn hyphen_package_import_resolves_both_spellings() {
+    // #486: the package dir and lock name use `-`, but `-` never parsed
+    // in import paths and `_` never resolved. Both spellings must load
+    // with no `zz add` rename workaround.
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n[dependencies]\nmy-lib = { path = \"./mylib\" }\n",
+        ),
+        (
+            "mylib/zz.toml",
+            "[package]\nname = \"my-lib\"\nversion = \"0.1.0\"\n",
+        ),
+        ("mylib/src/main.zz", "pub func pkgval() -> int { 41 }"),
+        ("mylib/src/util.zz", "pub func uval() -> int { 1 }"),
+        (
+            "src/main.zz",
+            "import my-lib as lib\nimport my_lib.util as u\nx := lib.pkgval() + u.uval()",
+        ),
+    ]);
+    let mut lock = zz_pm::lock::Lockfile::new();
+    lock.deps.push(zz_pm::lock::LockedDep {
+        name: "my-lib".to_string(),
+        version: "*".to_string(),
+        source: "path".to_string(),
+        hash: String::new(),
+        commit: None,
+        native: None,
+    });
+    lock.save(&dir.join("zz.lock")).expect("write lock");
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Int);
+}
+
+#[test]
 fn missing_bare_import_hints_uninstalled_declaration() {
     // #420: declared in zz.toml but never installed — point at install.
     let dir = temp_project(&[
