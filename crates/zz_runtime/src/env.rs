@@ -12,6 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::value::Value;
+use crate::vm::Chunk;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Env {
@@ -45,6 +46,43 @@ impl FrozenScope {
             Some(v.clone())
         } else {
             self.parent.as_ref().and_then(|p| p.get(name))
+        }
+    }
+
+    /// Project a binding for the call fast paths ([`Env::bound`]).
+    fn bound(&self, name: &str) -> Option<Bound> {
+        if let Some(v) = self.vars.get(name) {
+            return Some(Bound::of(v));
+        }
+        self.parent.as_ref().and_then(|p| p.bound(name))
+    }
+}
+
+/// A binding projected without cloning its value, for callers that only
+/// need to dispatch on what a name is bound to.
+///
+/// [`EnvLink::get`] clones on every hit, which the VM call path pays for
+/// with a `FuncValue` (parameters and defaults) per call; [`Env::bound`]
+/// reads the same binding in place and hands out only the cheap pieces
+/// frame entry actually needs.
+#[derive(Debug, Clone)]
+pub enum Bound {
+    /// A compiled function: its bytecode, its definition environment,
+    /// and its declared arity.
+    Compiled {
+        chunk: Arc<Chunk>,
+        env: EnvLink,
+        params: usize,
+    },
+    /// Any other binding (a native, a chunk-less closure, a plain value).
+    Other,
+}
+
+impl Bound {
+    fn of(value: &Value) -> Bound {
+        match value.callable_parts() {
+            Some((chunk, env, params)) => Bound::Compiled { chunk, env, params },
+            None => Bound::Other,
         }
     }
 }
@@ -97,6 +135,17 @@ impl Env {
         } else {
             self.parent.as_ref().and_then(|p| p.get(name))
         }
+    }
+
+    /// Look a name up without cloning what it is bound to: [`Bound::Other`]
+    /// for a present non-function binding, `None` for an unbound name.
+    /// Used by the VM call fast path, where `get`'s clone would copy a
+    /// whole `FuncValue` (its parameters and defaults) per call.
+    pub fn bound(&self, name: &str) -> Option<Bound> {
+        if let Some(v) = self.vars.get(name) {
+            return Some(Bound::of(v));
+        }
+        self.parent.as_ref().and_then(|p| p.bound(name))
     }
 
     /// Mutable access to a binding in this scope (no parent fallthrough).
@@ -279,6 +328,14 @@ impl EnvLink {
         match self {
             EnvLink::Owned(rc) => rc.borrow().get(name),
             EnvLink::Frozen(f) => f.get(name),
+        }
+    }
+
+    /// Project a binding without cloning it (see [`Env::bound`]).
+    pub fn bound(&self, name: &str) -> Option<Bound> {
+        match self {
+            EnvLink::Owned(rc) => rc.borrow().bound(name),
+            EnvLink::Frozen(f) => f.bound(name),
         }
     }
 

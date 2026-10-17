@@ -5,6 +5,7 @@ use zz_frontend::parse;
 use zz_frontend::span::Span;
 
 use super::{Compiler, Op, Vm};
+use crate::env::{Env, EnvLink};
 use crate::eval::Interp;
 use crate::value::{FuncValue, Value};
 use crate::EvalError;
@@ -1323,4 +1324,139 @@ fn vm_short_circuit_field_binop_stays_generic() {
     assert_same(
         "struct W { f: bool, n: int }\nfunc bump(w: W) -> bool {\n    w.n = w.n + 1\n    true\n}\ns := W{f: false, n: 0}\ns.f = s.f && bump(s)\ns.n",
     );
+}
+
+/// `assert_same` for a recursive fixture: the tree-walker recurses on the
+/// Rust stack, so the comparison runs on a worker with room for it (same
+/// reason `bench_fib_vm_vs_tree` spawns a large-stack thread).
+fn assert_same_deep(src: &'static str) {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || assert_same(src))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Every call shape the direct-call fast path touches — the ones it takes
+/// and the ones it declines — must resolve exactly as the tree-walker
+/// does: same values, same error text.
+#[test]
+fn call_resolution_matches_tree_walker() {
+    assert_same_deep(
+        "func fib(n: int) -> int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(10)",
+    );
+    for src in [
+        // Nested forward calls, result consumed by arithmetic.
+        "func dbl(n: int) -> int { n * 2 }\nfunc quad(n: int) -> int { dbl(dbl(n)) }\nquad(4)",
+        // Fewer arguments than parameters: the default must still be filled.
+        "func greet(name: str, prefix: str = \"Hi\") -> str { \"{prefix}, {name}\" }\ngreet(\"World\")",
+        // More arguments than parameters: the same arity error, same text.
+        "func one(a: int) -> int { a }\none(1, 2)",
+        // A closure with no bytecode still runs through the walker.
+        "f := |x: int| x + 1\nf(1)",
+        // Same, reached by name from a function body.
+        "g := |x: int| x * 2\nfunc use() -> int { g(3) }\nuse()",
+        // Undefined callee: the error must still name it.
+        "func caller() -> int { missing() }\ncaller()",
+    ] {
+        assert_same(src);
+    }
+}
+
+/// Helper: a bytecode function of the given arity, defined in `env`.
+fn mk_chunked_func(env: &EnvLink, params: usize) -> FuncValue {
+    let chunk = Arc::new(Compiler::compile_program_with_natives(
+        &parse("1").program,
+        Arc::new(std::collections::HashSet::new()),
+    ));
+    FuncValue {
+        params: (0..params)
+            .map(|i| Param {
+                name: Ident {
+                    name: format!("p{i}"),
+                    span: Span::new(0, 0),
+                },
+                ty: None,
+                default: None,
+                span: Span::new(0, 0),
+            })
+            .collect(),
+        body: Expr::Block(Block {
+            stmts: Vec::new(),
+            span: Span::new(0, 0),
+        }),
+        env: env.clone(),
+        chunk: Some(chunk),
+        chunk_defaults: Vec::new(),
+    }
+}
+
+/// The fast path enters the frame — switching to the callee's definition
+/// environment — for an unshadowed compiled function of matching arity,
+/// without building the `Value::Func` the general path would clone.
+#[test]
+fn direct_call_enters_frame_for_compiled_function() {
+    let mut interp = Interp::new();
+    let caller_env = interp.env.clone();
+    let def_env = Env::with_parent(&caller_env);
+    interp
+        .funcs
+        .insert("top.fib".to_string(), mk_chunked_func(&def_env, 1));
+    let mut vm = Vm::new();
+    let entered =
+        vm.try_enter_direct_call("top.fib", vec![Value::Int(1)], Span::new(0, 0), &mut interp);
+    assert!(entered.is_none(), "matching arity must enter the frame");
+    assert!(
+        EnvLink::ptr_eq(&interp.env, &def_env),
+        "entering must switch to the callee's definition environment"
+    );
+    assert!(!EnvLink::ptr_eq(&interp.env, &caller_env));
+}
+
+/// Whatever the fast path cannot prove equivalent comes back as the
+/// original arguments with the environment untouched, so the general
+/// path still fills defaults, reports arity errors, and honours
+/// shadowing.
+#[test]
+fn direct_call_declines_and_hands_the_arguments_back() {
+    let mut interp = Interp::new();
+    let caller_env = interp.env.clone();
+    let def_env = Env::with_parent(&caller_env);
+    interp
+        .funcs
+        .insert("top.fib".to_string(), mk_chunked_func(&def_env, 1));
+    let mut closureless = mk_chunked_func(&def_env, 0);
+    closureless.chunk = None;
+    interp.funcs.insert("top.closure".to_string(), closureless);
+    let span = Span::new(0, 0);
+    let mut vm = Vm::new();
+
+    // Arity mismatch: defaults and arity errors belong to the general path.
+    let back = vm
+        .try_enter_direct_call("top.fib", Vec::new(), span, &mut interp)
+        .expect("declined calls return their arguments");
+    assert!(back.is_empty());
+
+    // Unknown name.
+    let back = vm
+        .try_enter_direct_call("top.missing", vec![Value::Int(1)], span, &mut interp)
+        .expect("declined calls return their arguments");
+    assert_eq!(back, vec![Value::Int(1)]);
+
+    // Registered but without bytecode (an AST-only closure).
+    let back = vm
+        .try_enter_direct_call("top.closure", Vec::new(), span, &mut interp)
+        .expect("declined calls return their arguments");
+    assert!(back.is_empty());
+
+    // A shadowing non-function binding wins over the function table.
+    interp.env.define("top.fib", Value::Int(9));
+    let back = vm
+        .try_enter_direct_call("top.fib", vec![Value::Int(1)], span, &mut interp)
+        .expect("declined calls return their arguments");
+    assert_eq!(back, vec![Value::Int(1)]);
+
+    // ...and no decline switched the environment.
+    assert!(EnvLink::ptr_eq(&interp.env, &caller_env));
 }
