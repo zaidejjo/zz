@@ -5,7 +5,7 @@ use zz_frontend::span::Span;
 
 use super::chunk::Chunk;
 use super::op::{Op, TakeHome};
-use crate::env::{Env, EnvLink};
+use crate::env::{Bound, Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
     eval_binary, eval_int_binary, eval_unary, fill_default_headers, get_index, normalize_index,
@@ -2345,6 +2345,23 @@ impl Vm {
                     if args.len() > 1 {
                         args.reverse();
                     }
+                    // Direct script-function call: `fib(n)` and module paths
+                    // like `lib.fib(n)` resolve to a compiled function bound
+                    // under the precomputed `joined` key. Entering its frame
+                    // here skips the per-call `Value::Func` clones (the
+                    // `is_direct` probe's discarded one included) and every
+                    // fallback probe below. Anything this can't prove
+                    // equivalent — a shadowing binding, a native, defaults to
+                    // fill, a wrong arity — falls through unchanged.
+                    self.frames.last_mut().unwrap().ip = ip;
+                    match self.try_enter_direct_call(joined, args, span, interp) {
+                        None => {
+                            re_cache!();
+                            yield_check!();
+                            continue;
+                        }
+                        Some(back) => args = back,
+                    }
                     if parts.len() >= 2 {
                         // Precomputed at compile time (see `Op::CallPath`):
                         // no lookup-string allocation per call.
@@ -2758,6 +2775,91 @@ impl Vm {
         }
     }
 
+    /// Enter a bytecode function's frame: move the arguments onto the
+    /// stack, switch the active environment, and push the frame.
+    ///
+    /// Shared by [`Vm::call_value`] and the direct-call fast path so frame
+    /// setup is identical wherever a chunk is entered.
+    fn enter_call_frame(
+        &mut self,
+        chunk: Arc<Chunk>,
+        env: EnvLink,
+        args: Vec<Value>,
+        span: Span,
+        interp: &mut Interp,
+    ) {
+        let stack_base = self.stack.len();
+        let mut args = args;
+        // Append (not extend+drain): elements move onto the stack while
+        // the buffer keeps its allocation and goes back to the scratch
+        // slot below — steady-state calls never allocate.
+        self.stack.append(&mut args);
+        return_scratch_args(args);
+        let prev_env = std::mem::replace(&mut interp.env, env);
+        let saved_defers = std::mem::take(&mut self.defer_stack);
+        self.frames.push(Frame {
+            chunk,
+            ip: 0,
+            prev_env,
+            stack_base,
+            defer_stack: saved_defers,
+            func_name: String::new(),
+            func_span: span,
+        });
+    }
+
+    /// Call the compiled function bound under `name` without materialising
+    /// a `Value`.
+    ///
+    /// `resolve_path_value` answers a callable name with a cloned
+    /// `Value::Func`, which copies the function's parameters and defaults
+    /// on **every** call. Whole-program functions are registered in the
+    /// environment *and* the function table, so recursive code (`fib`)
+    /// pays that twice per call — once for the `is_direct` probe's
+    /// discarded value and once for the callee.
+    ///
+    /// Returns the arguments back when the call needs the general path:
+    /// a shadowing non-function binding, a native, a canonical `std.*`
+    /// alias, an arity that needs defaults filled, or a closure with no
+    /// bytecode. Everything this handles is exactly what the general path
+    /// would have done, without the copies.
+    pub(super) fn try_enter_direct_call(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+        interp: &mut Interp,
+    ) -> Option<Vec<Value>> {
+        // Bindings win over the function table (mirrors
+        // `resolve_path_value`'s environment-first order).
+        match interp.env.bound(name) {
+            Some(Bound::Compiled { chunk, env, params }) if args.len() == params => {
+                self.enter_call_frame(chunk, env, args, span, interp);
+                return None;
+            }
+            Some(_) => return Some(args),
+            None => {}
+        }
+        // Unbound: a direct hit in the function table is the same value
+        // the general path resolves next. Canonical `std.*` aliases are
+        // left to it (rare, and they carry no local binding to shadow).
+        let Some(fv) = interp.funcs.get(name) else {
+            return Some(args);
+        };
+        // Trailing defaults (and arity errors) need `params` themselves,
+        // so they take the general path even though it costs the clone.
+        if args.len() != fv.params.len() {
+            return Some(args);
+        }
+        let Some(chunk) = fv.chunk.as_ref() else {
+            return Some(args);
+        };
+        let chunk = Arc::clone(chunk);
+        let env = fv.env.clone();
+        self.enter_call_frame(chunk, env, args, span, interp);
+        None
+    }
+
     fn call_value(
         &mut self,
         callee: Value,
@@ -2824,23 +2926,7 @@ impl Vm {
                         }
                     }
                 }
-                let stack_base = self.stack.len();
-                // Append (not extend+drain): elements move onto the stack while
-                // the buffer keeps its allocation and goes back to the
-                // scratch slot below — steady-state calls never allocate.
-                self.stack.append(&mut args);
-                return_scratch_args(args);
-                let prev_env = std::mem::replace(&mut interp.env, fv.env.clone());
-                let saved_defers = std::mem::take(&mut self.defer_stack);
-                self.frames.push(Frame {
-                    chunk: fv.chunk.unwrap(),
-                    ip: 0,
-                    prev_env,
-                    stack_base,
-                    defer_stack: saved_defers,
-                    func_name: String::new(),
-                    func_span: span,
-                });
+                self.enter_call_frame(fv.chunk.unwrap(), fv.env.clone(), args, span, interp);
                 Ok(())
             }
             other => {

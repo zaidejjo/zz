@@ -2173,3 +2173,45 @@ fn missing_bare_import_hints_uninstalled_declaration() {
         "expected install hint, got: {joined}"
     );
 }
+
+/// Whether `chunk`, or any function/closure chunk nested inside it, holds
+/// an `Op::CallPath`.
+fn has_callpath(chunk: &zz_runtime::vm::Chunk) -> bool {
+    chunk.code.iter().any(|op| match op {
+        zz_runtime::vm::Op::CallPath { .. } => true,
+        zz_runtime::vm::Op::MakeFunc { chunk, .. }
+        | zz_runtime::vm::Op::MakeClosure { chunk, .. }
+        | zz_runtime::vm::Op::SpawnClosure { chunk, .. } => has_callpath(chunk),
+        _ => false,
+    })
+}
+
+#[test]
+fn module_aware_compile_emits_callpath_for_function_calls() {
+    // The VM's direct-call fast path looks up `Op::CallPath`'s precomputed
+    // `joined` key instead of building a `Value::Func` (which clones the
+    // function per call). That only holds while the module-aware compiler —
+    // the one `zz run` uses, which namespaces top-level functions into
+    // `module.fn` paths — emits a path op for a whole-program call. If it
+    // ever emits `Op::Call`, the optimization silently stops applying.
+    let dir = temp_project(&[(
+        "main.zz",
+        "func fib(n: int) -> int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(3)",
+    )]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    let native_names: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(result.natives.keys().cloned().collect());
+    let chunk = zz_runtime::vm::Compiler::compile_program_typed(
+        &result.programs[0],
+        std::sync::Arc::new(std::collections::HashMap::new()),
+        result.structs.clone(),
+        result.enums.clone(),
+        native_names,
+    );
+    assert!(
+        has_callpath(&chunk),
+        "expected a CallPath for a module-qualified function call, got {:?}",
+        chunk.code
+    );
+}

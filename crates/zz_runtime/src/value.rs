@@ -1243,6 +1243,23 @@ impl Value {
         }
     }
 
+    /// Compiled-function projection for the VM's direct-call fast path:
+    /// the bytecode chunk, the definition environment, and the declared
+    /// arity — everything entering a frame needs, without the
+    /// `FuncValue` clone (`params`, `defaults`) that `Value::clone` costs.
+    ///
+    /// `None` for everything else, including closures that exist only as
+    /// AST and must run through the tree-walker.
+    pub fn callable_parts(&self) -> Option<(Arc<Chunk>, EnvLink, usize)> {
+        match self {
+            Value::Func(fv) => fv
+                .chunk
+                .as_ref()
+                .map(|chunk| (Arc::clone(chunk), fv.env.clone(), fv.params.len())),
+            _ => None,
+        }
+    }
+
     /// Display string for user-facing output (interpolation, `str()`,
     /// `println` nesting): auto-unwraps `Option` layers so `.some(v)`
     /// renders as `v` and `.none` renders as `none` (no dot), without
