@@ -7,6 +7,13 @@
 #   new_bin  candidate binary (default ZZ_NEW_BIN or ~/.bench/zz_new)
 #   base_bin baseline binary (default ZZ_BASE_BIN or ~/.bench/zz_base)
 #
+# Every repetition runs the base binary and the new binary back to back,
+# alternating which goes first, so both sample the same span of host load.
+# Running all base reps then all new reps credits whichever binary happens
+# to run while the machine is quieter — on a shared box that alone swings
+# deltas by tens of percent. The minimums stay comparable because neither
+# binary is favoured by a drifting or spiky load.
+#
 # Each fixture prints "<name>: <ms>ms result=<value>". The result= payload
 # must match between binaries or the fixture is reported FAIL (behavior
 # gate: speedups must never change semantics).
@@ -36,41 +43,59 @@ run_one() {
 	$1 run "$GATE/$2.zz" 2>/dev/null | tail -n 1 | sed -e 's/^.*: //' -e 's/ms result=/ /'
 }
 
-# best_of <bin> <fixture> -> prints "<best_ms> <result>".
-best_of() {
-	best_ms=""
-	best_result=""
+# best_of_pair <fixture> -> prints "<base_ms> <base_res> <new_ms> <new_res>".
+# Interleaves the two binaries one repetition at a time, alternating the
+# order, so host load drift lands on both sides instead of the last runner.
+best_of_pair() {
+	base_best_ms=""
+	base_best_res=""
+	new_best_ms=""
+	new_best_res=""
 	n=0
 	while [ "$n" -lt "$RUNS" ]; do
-		out="$(run_one "$1" "$2")"
-		ms="$(echo "$out" | awk '{print $1}')"
-		res="$(echo "$out" | awk '{print $2}')"
-		case "$ms" in
-		'' | *[^0-9]*)
-			echo "fixture $2 failed under $1 (output: $out)"
-			exit 1
-			;;
-		esac
-		if [ -z "$best_ms" ] || [ "$ms" -lt "$best_ms" ]; then
-			best_ms="$ms"
-			best_result="$res"
+		if [ $((n % 2)) -eq 0 ]; then
+			order="$BASE_BIN $NEW_BIN"
+		else
+			order="$NEW_BIN $BASE_BIN"
 		fi
+		for bin in $order; do
+			out="$(run_one "$bin" "$1")"
+			ms="$(echo "$out" | awk '{print $1}')"
+			res="$(echo "$out" | awk '{print $2}')"
+			case "$ms" in
+			'' | *[^0-9]*)
+				echo "fixture $1 failed under $bin (output: $out)"
+				exit 1
+				;;
+			esac
+			if [ "$bin" = "$BASE_BIN" ]; then
+				if [ -z "$base_best_ms" ] || [ "$ms" -lt "$base_best_ms" ]; then
+					base_best_ms="$ms"
+					base_best_res="$res"
+				fi
+			elif [ -z "$new_best_ms" ] || [ "$ms" -lt "$new_best_ms" ]; then
+				new_best_ms="$ms"
+				new_best_res="$res"
+			fi
+		done
 		n=$((n + 1))
 	done
-	echo "$best_ms $best_result"
+	echo "$base_best_ms $base_best_res $new_best_ms $new_best_res"
 }
 
+# Host load in the report: a busy shared machine widens every delta, and
+# silent load is how a phantom regression gets chased.
+echo "<!-- load $(cut -d' ' -f1-3 /proc/loadavg) on $(nproc) cores -->"
 echo "| fixture | base best | new best | delta | result |"
 echo "|---|---|---|---|---|"
 
 fail=0
 for f in $FIXTURES; do
-	base="$(best_of "$BASE_BIN" "$f")"
-	new="$(best_of "$NEW_BIN" "$f")"
-	base_ms="$(echo "$base" | awk '{print $1}')"
-	base_res="$(echo "$base" | awk '{print $2}')"
-	new_ms="$(echo "$new" | awk '{print $1}')"
-	new_res="$(echo "$new" | awk '{print $2}')"
+	pair="$(best_of_pair "$f")"
+	base_ms="$(echo "$pair" | awk '{print $1}')"
+	base_res="$(echo "$pair" | awk '{print $2}')"
+	new_ms="$(echo "$pair" | awk '{print $3}')"
+	new_res="$(echo "$pair" | awk '{print $4}')"
 	if [ "$base_res" = "$new_res" ]; then
 		status="same"
 	else
