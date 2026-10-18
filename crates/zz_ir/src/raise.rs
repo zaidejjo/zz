@@ -368,6 +368,34 @@ impl<'a> Raiser<'a> {
                 field: self.str(*field)?,
                 span: VmSpan::default(),
             }),
+            // Fused slot fast paths raise one to one: the interpreter
+            // takes the native fast path (with the generic fallback the
+            // op already carries), which is what the format carries them
+            // for. Backends that want the desugared stream call
+            // `lower::expand_fused` first.
+            Op::SlotAddInt { dst, src } => Ok(VmOp::SlotAddInt {
+                dst: *dst,
+                src: *src,
+            }),
+            Op::SlotInc { slot } => Ok(VmOp::SlotInc { slot: *slot }),
+            Op::SlotAddIntImm { dst, imm } => Ok(VmOp::SlotAddIntImm {
+                dst: *dst,
+                imm: *imm,
+            }),
+            Op::SlotLessIntSlot { a, b } => Ok(VmOp::SlotLessIntSlot { a: *a, b: *b }),
+            Op::SlotLessIntImm { a, imm } => Ok(VmOp::SlotLessIntImm { a: *a, imm: *imm }),
+            Op::SlotBinaryInt { dst, lhs, rhs, op } => Ok(VmOp::SlotBinaryInt {
+                dst: *dst,
+                lhs: *lhs,
+                rhs: *rhs,
+                op: Self::raise_binop(*op),
+            }),
+            Op::SlotBinaryIntImm { dst, lhs, imm, op } => Ok(VmOp::SlotBinaryIntImm {
+                dst: *dst,
+                lhs: *lhs,
+                imm: *imm,
+                op: Self::raise_binop(*op),
+            }),
             Op::IntAdd => Ok(VmOp::IntAdd(VmSpan::default())),
             Op::IntSub => Ok(VmOp::IntSub(VmSpan::default())),
             Op::IntMul => Ok(VmOp::IntMul(VmSpan::default())),

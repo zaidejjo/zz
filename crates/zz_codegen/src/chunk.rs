@@ -3688,6 +3688,13 @@ pub fn build_module(
     module: &Module,
     entry_main: &str,
 ) -> Result<super::lower::LoweredC, ChunkError> {
+    // The format carries the VM's fused slot fast paths (the interpreter
+    // runs them natively). Every pass below analyses and emits the core
+    // stream — int-twin selection, peels, cond-fusion — so expand first:
+    // the passes, and therefore the C output, are exactly the pre-v3 ones.
+    let expanded = zz_ir::lower::expand_fused(module)
+        .map_err(|e| ChunkError::op(&format!("expand fused slot ops: {e}")))?;
+    let module: &Module = expanded.as_ref();
     coverage(module)?;
     let mut em = Emitter {
         module,
