@@ -818,3 +818,81 @@ fn verify_short_locals_fails_closed() {
         err.message
     );
 }
+
+#[test]
+fn round_trip_unread_parameters() {
+    // Regression (#512): a parameter the body never reads emits no
+    // `LoadSlot`/`StoreSlot`, so sizing the locals table from referenced
+    // slots alone left it shorter than the signature arity and lowering
+    // died in verification with "locals: fewer slots than signature
+    // params". `b` is never read; `a` is.
+    assert_eq!(
+        round_trip_value("func f(a: int, b: int) -> int {\n a\n}\nf(7, 9)"),
+        Value::Int(7)
+    );
+    // No parameter read at all.
+    assert_eq!(
+        round_trip_value("func g(n: int) -> int {\n 5\n}\ng(1)"),
+        Value::Int(5)
+    );
+    // Same shape for a closure: its lifted chunk carries the lambda's
+    // arity, and an unused tail parameter must not shrink the table.
+    assert_eq!(
+        round_trip_value("f := |a: int, b: int| a\nf(3, 4)"),
+        Value::Int(3)
+    );
+}
+
+/// Minimal one-function module for verifier-shape tests: `arity` params,
+/// `locals_len` frame slots, and the given code.
+fn shape_module(arity: usize, locals_len: usize, code: Vec<zz_ir::Op>) -> zz_ir::Module {
+    use zz_ir::{FuncDef, FuncId, FuncSig, IrType, Module, Param, StrId, TypeId};
+    let params: Vec<Param> = (0..arity)
+        .map(|_| Param {
+            name: StrId(0),
+            default: None,
+        })
+        .collect();
+    Module {
+        types: vec![IrType::Unknown],
+        strings: vec!["f".to_string()],
+        consts: vec![],
+        funcs: vec![FuncDef {
+            name: StrId(0),
+            arity: arity as u32,
+            params,
+            sig: FuncSig {
+                params: vec![TypeId(0); arity],
+                ret: TypeId(0),
+            },
+            locals: vec![TypeId(0); locals_len],
+            vartab: vec![],
+            toplevel_slots: vec![],
+            code,
+            spans: vec![],
+            max_stack: 0,
+        }],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn verify_accepts_locals_floored_at_arity() {
+    // #512: an unread parameter still owns a frame slot, so a table sized to
+    // the parameter list with no slot references at all is canonical.
+    let module = shape_module(2, 2, vec![]);
+    verify::verify(&module).expect("param-floored locals must verify");
+}
+
+#[test]
+fn verify_rejects_locals_longer_than_needed() {
+    // The canonical size is `max(referenced slots, arity)`: slack beyond
+    // that is still corruption, not a roomier table.
+    let module = shape_module(2, 3, vec![]);
+    let err = verify::verify(&module).expect_err("over-long locals must fail closed");
+    assert!(
+        err.message.contains("locals length mismatch"),
+        "unexpected error: {}",
+        err.message
+    );
+}
