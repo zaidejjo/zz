@@ -1016,6 +1016,12 @@ parity_strict!(
     "regression",
     "edge_float_nan_display.zz"
 );
+// A type alias statement owns no value in either engine.
+parity_strict!(
+    parity_regression_edge_type_alias_stmt,
+    "regression",
+    "edge_type_alias_stmt.zz"
+);
 // Canonical float formatting conformance (spec §4.1): exact pins + legs.
 parity_strict!(
     parity_regression_edge_float_format,

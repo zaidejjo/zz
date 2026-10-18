@@ -450,6 +450,13 @@ e2e_success_test!(
     "regression",
     "edge_float_nan_display.zz"
 );
+// A type alias statement owns no value: the container must not pop one for it
+// (that shift made the next declaration panic).
+e2e_success_test!(
+    e2e_regression_edge_type_alias_stmt,
+    "regression",
+    "edge_type_alias_stmt.zz"
+);
 // Canonical float formatting (spec §4): exact-string pins on both legs.
 e2e_success_test!(
     e2e_regression_edge_float_format,
