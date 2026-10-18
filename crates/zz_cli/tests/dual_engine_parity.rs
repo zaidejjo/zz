@@ -818,6 +818,13 @@ parity_strict!(
     "syntax",
     "method_chain_recv.zz"
 );
+// #500: an `impl` method outranks a same-named free function in dot calls
+// (`w.get()` → `W.get`), while `get(w)` still calls the free function.
+parity_strict!(
+    parity_syntax_method_shadow_free,
+    "syntax",
+    "method_shadow_free.zz"
+);
 parity_strict!(
     parity_syntax_for_annotated_decl,
     "syntax",

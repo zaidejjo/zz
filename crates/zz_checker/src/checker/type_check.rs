@@ -1941,6 +1941,26 @@ impl Checker {
         recv_t.is_some_and(|r| r == first_t)
     }
 
+    /// True when a named receiver type carries its own `impl` method
+    /// called `method`. `impl W { func get(self) }` registers `W.get`, so
+    /// this is the dot-call form's own definition: it outranks a
+    /// same-named receiver-implicit free function (`get(w)`), which keeps
+    /// dot syntax from silently binding the free function and leaving the
+    /// method unreachable (#500). The free function stays callable by
+    /// name, so neither form is lost.
+    fn receiver_impl_method(&self, recv: &Type, method: &str) -> bool {
+        // Resolve first: a top-level binding's recorded type can still be a
+        // unification variable at its use site, and reading the raw type
+        // would silently skip the receiver's own method.
+        let recv = self.unifier.resolve_deep(recv);
+        match &recv {
+            Type::Struct(name, _) | Type::Enum(name, _) => {
+                crate::lookup_std(&self.funcs, &format!("{name}.{method}")).is_some()
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn check_call(
         &mut self,
         callee: &Expr,
@@ -1998,7 +2018,14 @@ impl Checker {
                     // Field-call args exclude the receiver: `req.param(name)`.
                     self.lint_http_param(args.first());
                 }
-                let mut sig = crate::lookup_std(&self.funcs, &method).cloned();
+                // Dot-call order for a `Field` callee (`makePoint().get()`):
+                // the receiver's own `impl` method (`{Type}.{method}`) wins
+                // over a same-named receiver-implicit free function (#500).
+                // The free signature is restored below when nothing matches,
+                // so its mismatch diagnostics are unchanged.
+                let impl_owned = self.receiver_impl_method(&recv_t, &method);
+                let free_sig = crate::lookup_std(&self.funcs, &method).cloned();
+                let mut sig = if impl_owned { None } else { free_sig.clone() };
                 if sig.is_none() {
                     match &self.unifier.resolve(&recv_t) {
                         Type::Str => {
@@ -2112,6 +2139,12 @@ impl Checker {
                             sig = Some(psig);
                         }
                     }
+                }
+                // No method matched: restore the free signature so the
+                // call reports a mismatch against it rather than falling
+                // through as an unknown callee.
+                if sig.is_none() {
+                    sig = free_sig;
                 }
                 if let Some(sig) = sig {
                     return self.check_method_call(&MethodCall {
@@ -2740,9 +2773,21 @@ impl Checker {
                 }
                 let method = parts.last().unwrap();
                 let recv_t = self.lookup_path(&parts[..parts.len() - 1], *pspan);
-                let mut sig = crate::lookup_std(&self.funcs, method).cloned();
+                let recv_t_resolved = self.unifier.resolve(&recv_t);
+                // Dot-call order for `recv.method(...)`:
+                //   1. the receiver's own `impl` method (`{Type}.{method}`);
+                //   2. the receiver-implicit free function `method`
+                //      (`p.dist()` ≡ `dist(p)`);
+                //   3. the receiver-typed stdlib namespace (`str.`/`vec.`/…)
+                //      and the cross-module `{ns}.{method}` fallback below.
+                // (1) keeps a same-named free function from silently making
+                // the method unreachable (#500); the free signature is
+                // restored at the end when nothing matches, so its mismatch
+                // diagnostics are unchanged.
+                let impl_owned = self.receiver_impl_method(&recv_t_resolved, method);
+                let free_sig = crate::lookup_std(&self.funcs, method).cloned();
+                let mut sig = if impl_owned { None } else { free_sig.clone() };
                 if sig.is_none() {
-                    let recv_t_resolved = self.unifier.resolve(&recv_t);
                     match &recv_t_resolved {
                         Type::Str => {
                             sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned();
@@ -2850,6 +2895,9 @@ impl Checker {
                             sig = Some(psig);
                         }
                     }
+                }
+                if sig.is_none() {
+                    sig = free_sig;
                 }
                 if let Some(sig) = sig {
                     // sqlz method form: `db.exec(sql)`, `db.query(sql)`,

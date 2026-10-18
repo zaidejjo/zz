@@ -4700,10 +4700,13 @@ impl Lowerer {
         // Strategy 1: longest-prefix local match.
         // parts = ["mod", "rect", "area"] → try "mod.rect" (no), then
         // "rect" (yes, since locals are registered under the bare name
-        // and not the module-prefixed form). The matched lookup key is
-        // either the joined prefix or the last segment of the prefix
-        // — whichever hits a registered local.
-        for split in (1..parts.len() - 1).rev() {
+        // and not the module-prefixed form). A plain `local.method()`
+        // has the whole path as its receiver, so the prefix range must
+        // reach `parts.len() - 1` — otherwise the two-part form (the most
+        // common dot call) never reaches this strategy at all. The matched
+        // lookup key is either the joined prefix or the last segment of
+        // the prefix — whichever hits a registered local.
+        for split in (1..parts.len()).rev() {
             let recv_parts = &parts[..split];
             let recv_joined = recv_parts.join(".");
             let recv_tail = recv_parts.last().unwrap().clone();
@@ -4714,7 +4717,11 @@ impl Lowerer {
             } else {
                 continue;
             };
-            let recv_type = names.lookup_type(&matched_key)?;
+            // A receiver with no registered C type (abstract/erased) is
+            // not a dead end: shorter prefixes may still match.
+            let Some(recv_type) = names.lookup_type(&matched_key) else {
+                continue;
+            };
             let unmangled = self
                 .struct_name_from_c_type(recv_type)
                 .and_then(|mangled| {
@@ -4728,23 +4735,25 @@ impl Lowerer {
                     // Boxed receiver: resolve through the checker type.
                     let span = zz_frontend::span::Span::new(0, 0);
                     self.checker_struct_of(names, &matched_tail, Some(span))
-                })?;
-            if let Some((impl_name, path)) = self.struct_method_target(&unmangled, &method) {
-                let span = zz_frontend::span::Span::new(0, 0);
-                let recv_expr = if path.is_empty() {
-                    Expr::Ident {
-                        name: matched_tail,
-                        span,
-                    }
-                } else {
-                    let mut rparts = vec![matched_tail];
-                    rparts.extend(path);
-                    Expr::Path {
-                        parts: rparts,
-                        span,
-                    }
-                };
-                return Some((impl_name, recv_expr));
+                });
+            if let Some(unmangled) = unmangled {
+                if let Some((impl_name, path)) = self.struct_method_target(&unmangled, &method) {
+                    let span = zz_frontend::span::Span::new(0, 0);
+                    let recv_expr = if path.is_empty() {
+                        Expr::Ident {
+                            name: matched_tail,
+                            span,
+                        }
+                    } else {
+                        let mut rparts = vec![matched_tail];
+                        rparts.extend(path);
+                        Expr::Path {
+                            parts: rparts,
+                            span,
+                        }
+                    };
+                    return Some((impl_name, recv_expr));
+                }
             }
             // Enum-typed local (`zz_value` erasure): resolve `Enum.method`
             // the same way. No promotion: variants carry no embedded values.

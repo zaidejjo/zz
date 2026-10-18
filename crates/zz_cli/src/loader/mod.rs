@@ -2905,6 +2905,7 @@ fn collect_import_aliases(
 ///   through the canonical namespace from `ns_aliases`.
 fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<String, String>) {
     let mut top = HashSet::new();
+    let mut top_bindings = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
             Stmt::Func { name, .. }
@@ -2915,11 +2916,12 @@ fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<Strin
             }
             Stmt::Decl { name, .. } => {
                 top.insert(name.name.clone());
+                top_bindings.insert(name.name.clone());
             }
             _ => {}
         }
     }
-    let mut rw = rewrite::Rewriter::new(ns, &top);
+    let mut rw = rewrite::Rewriter::new(ns, &top, &top_bindings);
     rw.ns_aliases = ns_aliases.clone();
     // Imported namespace heads resolve on their own; the Call rewriter
     // must leave `alias.func(...)` paths untouched.

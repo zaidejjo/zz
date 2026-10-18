@@ -1,0 +1,60 @@
+// features: comparison, enums, func-call, int-arith, locals, match, methods, print, string-literal, string-ops, structs
+// #500: an `impl` method outranks a same-named receiver-implicit free
+// function in dot calls — `w.get()` must reach `W.get`, while `get(w)`
+// still reaches the free function. The old order let the free function win
+// silently, leaving the method unreachable; the AOT Field-callee arm
+// already preferred the method, so the engines disagreed on one source.
+struct W {
+    v: int,
+}
+
+func get(w: W) -> str {
+    "free-" + str(w.v)
+}
+
+func mk() -> W {
+    W{v: 9}
+}
+
+impl W {
+    func get(self) -> str {
+        "method-" + str(self.v)
+    }
+}
+
+enum Tone {
+    Low,
+    High(int),
+}
+
+func describe(t: Tone) -> str {
+    match t {
+        .Low => "free-low"
+        .High(n) => "free-" + str(n)
+    }
+}
+
+impl Tone {
+    func describe(self) -> str {
+        match self {
+            .Low => "method-low"
+            .High(n) => "method-" + str(n)
+        }
+    }
+}
+
+func main() {
+    w := W{v: 7}
+    // Impl method wins in dot form, in every engine.
+    println(w.get())
+    // The free function stays reachable by name.
+    println(get(w))
+    // Non-trivial base (parsed as a Field callee, not a Path).
+    println(mk().get())
+    // Enum receivers follow the same rule: methods register under the
+    // enum's name while the value is named `Tone.High`.
+    t := Tone.High(3)
+    println(t.describe())
+    println(describe(t))
+    println("method_shadow_free_ok")
+}

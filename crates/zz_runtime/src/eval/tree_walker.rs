@@ -895,6 +895,30 @@ impl Interp {
         method: &str,
         span: Span,
     ) -> Result<(Value, Value), EvalError> {
+        // Dot-call order mirrors the checker's: a named receiver's own
+        // `impl` method (`{Type}.{method}`) wins over a same-named
+        // receiver-implicit free function (#500). `w.get()` therefore
+        // reaches `W.get`, while the free `get(w)` stays reachable by
+        // name. Non-named receivers keep the free-function-first order.
+        if let Value::Object(o) = recv {
+            if let Ok(f) = self.lookup_callable(&format!("{}.{}", o.name, method), span) {
+                return Ok((f, recv.clone()));
+            }
+            // Enum values are named `{Enum}.{Variant}` (see
+            // `eval_enum_construction`), so an `impl` method on the enum is
+            // registered under the *enum's* name, not the variant's.
+            if let Some((nombre, variant)) = o.name.rsplit_once('.') {
+                let names_variant = self
+                    .enums
+                    .get(nombre)
+                    .is_some_and(|vs| vs.iter().any(|(v, _)| v == variant));
+                if names_variant {
+                    if let Ok(f) = self.lookup_callable(&format!("{nombre}.{method}"), span) {
+                        return Ok((f, recv.clone()));
+                    }
+                }
+            }
+        }
         if let Ok(f) = self.lookup_callable(method, span) {
             return Ok((f, recv.clone()));
         }
@@ -906,10 +930,6 @@ impl Interp {
             // with the `db` module — `sqlz` is canonical.
         }
         if let Value::Object(o) = recv {
-            // Try TypeName.method (impl block methods)
-            if let Ok(f) = self.lookup_callable(&format!("{}.{}", o.name, method), span) {
-                return Ok((f, recv.clone()));
-            }
             // Try namespace.method (cross-module)
             if let Some((ns, _)) = o.name.rsplit_once('.') {
                 if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
