@@ -123,6 +123,16 @@ enum StmtValue {
     None,
 }
 
+/// What a compiled block body left on the stack, reported to its caller.
+struct BodyTail {
+    /// The body's final statement left slot storage that `PopN` consumed:
+    /// a loop caller's `SetLoopResult` pops one more value, so it must then
+    /// emit a `Unit` top-up to stay balanced.
+    needs_result_unit: bool,
+    /// What the body's last statement left behind.
+    value: StmtValue,
+}
+
 impl Default for Compiler {
     fn default() -> Self {
         Self::new()
@@ -1819,6 +1829,31 @@ impl Compiler {
         self.emit(Op::PushConst(idx));
     }
 
+    /// The `Unit` a value-producing statement leaves as its *statement* value.
+    ///
+    /// Assignments and compound assignments push a placeholder `Unit` nobody
+    /// ever reads. Whatever owns the statement consumes it: a container pops
+    /// it (`Op::Pop` for `StmtValue::Discard`), a loop drops it as its result.
+    /// When the owner has already said the value is dead (`value_discarded`),
+    /// pushing it is pure work — skip the push and report `None`, which tells
+    /// the container no `Op::Pop` is owed. Both ops vanish together, so
+    /// `stack_height` and the runtime stack stay balanced.
+    ///
+    /// Deciding here, *before* the statement's ops exist, is what makes this
+    /// safe. An op-stream peephole that deletes an already-emitted `PushConst`
+    /// can be aimed at by a forward branch (`jmp`/`jfb` patched to that
+    /// position) and silently unbalance the other arm; a decision here changes
+    /// the emission itself, so every later jump target is patched knowing the
+    /// final layout.
+    fn stmt_unit(&mut self, value_discarded: bool) -> StmtValue {
+        if value_discarded {
+            StmtValue::None
+        } else {
+            self.emit_const(Value::Unit);
+            StmtValue::Discard
+        }
+    }
+
     fn emit_jump(&mut self, kind: JumpKind) -> usize {
         let pos = self.chunk.code.len();
         // Conditional jumps pop their condition at runtime, so they carry
@@ -2048,8 +2083,12 @@ impl Compiler {
                 });
                 StmtValue::Discard
             }
-            // Aliases erase at check time: no ops to emit.
-            Stmt::TypeAlias { .. } => StmtValue::Discard,
+            // Aliases erase at check time: no ops to emit, so the statement
+            // owns no value. `Discard` here would make the owning container
+            // emit a `Pop` for a value that was never pushed, shifting every
+            // later slot by one — `type A = int` followed by `x := 1` used to
+            // panic in `StoreSlot`.
+            Stmt::TypeAlias { .. } => StmtValue::None,
             // Enums register their variant names so qualified
             // construction (`Token.IntLit(1)`) resolves at runtime.
             // Values are plain `Object`s — no other state needed.
@@ -2152,44 +2191,38 @@ impl Compiler {
                         .collect(),
                 );
                 let body_needs_env = self.scope_declares_captured(body);
+                // The loop's result slot is written before `ForSetup` and only
+                // read by a caller that keeps the loop's value. When the caller
+                // drops it, nothing reads it — and then nothing reads the
+                // body's own trailing value either, so the body is told that
+                // up front (see `compile_block_body`'s `trailing_value_dead`).
+                let dead_result = value_discarded && !body_needs_env;
                 if body_needs_env {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                let body_needs_result = self.compile_block_body(body, true);
+                let body_tail = self.compile_block_body(body, true, dead_result);
                 self.scope_depth -= 1;
                 if body_needs_env {
                     self.emit(Op::ExitScope);
                 }
-                // A non-final statement's value is dropped by the caller's
-                // `Op::Pop` (see the `StmtValue::Discard` arms in
-                // `compile_program` / `compile_block_body`), so nothing ever
-                // reads the loop's result slot and the store into it is dead.
-                // A body that consumed its own value into slot storage needs
-                // neither the `Unit` top-up nor the store; one that left a
-                // value needs that value dropped rather than stored. Either
-                // way the slot keeps the `Unit` placeholder written before
-                // `ForSetup`, which the caller's `Op::Pop` removes.
-                //
-                // A body that opens a scope is left alone: its `ExitScope`
-                // sits between the body's value and the store, so the tail is
-                // not ours to rewrite here.
-                let dead_result = value_discarded && !body_needs_env;
                 if !dead_result {
-                    if body_needs_result {
+                    if body_tail.needs_result_unit {
                         // Trailing slot declaration (see `compile_block_body`):
                         // supply the loop-result value `SetLoopResult` pops.
                         self.emit_const(Value::Unit);
                     }
                     self.emit(Op::SetLoopResult);
-                } else if body_needs_result {
-                    // Nothing on the stack to clean up: skipping the `Unit`
-                    // top-up leaves the loop as balanced as before.
-                } else {
-                    // The body left a value of its own: drop it rather than
-                    // storing it (`Op::Pop` is cheaper than a frame store).
+                } else if matches!(body_tail.value, StmtValue::Discard) {
+                    // The body left a value of its own (a call result, an `if`
+                    // expression, ...) that nothing reads: drop it rather than
+                    // storing it. A body whose trailing statement could skip
+                    // its value reports `None` and owes nothing at all.
                     self.emit(Op::Pop);
                 }
+                // Either way the loop's own slot keeps the `Unit` placeholder
+                // written before `ForSetup`, which the caller's `Op::Pop`
+                // removes.
                 self.emit(Op::Jump(header));
                 self.patch_jump(j);
                 let exit = self.chunk.code.len();
@@ -2240,11 +2273,9 @@ impl Compiler {
                     // operands resolving to local slots -> single fused op.
                     if let Some(op) = self.try_slot_binop(name, value) {
                         self.emit(op);
-                        self.emit_const(Value::Unit);
-                        StmtValue::Discard
+                        self.stmt_unit(value_discarded)
                     } else if self.try_emit_move_push_ident(name, *span, value) {
-                        self.emit_const(Value::Unit);
-                        StmtValue::Discard
+                        self.stmt_unit(value_discarded)
                     } else {
                         // Move-take for `x = f(x, ...)`: the flag makes the
                         // single `x` load take; cleared after the RHS either
@@ -2259,16 +2290,14 @@ impl Compiler {
                             Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                             Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
                         }
-                        self.emit_const(Value::Unit);
-                        StmtValue::Discard
+                        self.stmt_unit(value_discarded)
                     }
                 }
                 Expr::Path { parts, span } => {
                     // Move-take: fused push/field takes (locals and
                     // module-global homes).
                     if parts.len() == 2 && self.try_emit_move_path(parts, *span, value) {
-                        self.emit_const(Value::Unit);
-                        return StmtValue::Discard;
+                        return self.stmt_unit(value_discarded);
                     }
                     // Move-take for `ns.x = f(ns.x, ...)`: thread the
                     // global through the call instead of cloning it
@@ -2281,8 +2310,7 @@ impl Compiler {
                             self.compile_expr(value);
                             self.move_take = None;
                             self.compile_path_store(parts, *span);
-                            self.emit_const(Value::Unit);
-                            return StmtValue::Discard;
+                            return self.stmt_unit(value_discarded);
                         }
                     }
                     let full = parts.join(".");
@@ -2294,22 +2322,19 @@ impl Compiler {
                         && (self.try_emit_field_binop_take(&parts[0], &parts[1], value, *span)
                             || self.try_emit_set_field_take(&parts[0], &parts[1], value, *span))
                     {
-                        self.emit_const(Value::Unit);
-                        return StmtValue::Discard;
+                        return self.stmt_unit(value_discarded);
                     }
                     // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
                     // resolves to a direct slot when the full name is a local.
                     if let Resolved::Slot(_) = self.resolve(&full) {
                         if let Some(op) = self.try_slot_binop_path(parts, value) {
                             self.emit(op);
-                            self.emit_const(Value::Unit);
-                            return StmtValue::Discard;
+                            return self.stmt_unit(value_discarded);
                         }
                     }
                     self.compile_expr(value);
                     self.compile_path_store(parts, *span);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 Expr::Index { obj, index, span } => {
                     // Take-restore indexed field stores (#242): `s.f[i]`
@@ -2327,8 +2352,7 @@ impl Compiler {
                     };
                     if let Some((home, field)) = home_field {
                         if self.try_emit_set_field_index_take(home, field, index, value, *span) {
-                            self.emit_const(Value::Unit);
-                            return StmtValue::Discard;
+                            return self.stmt_unit(value_discarded);
                         }
                     }
                     // Source order: base, index, value (spec §7). The
@@ -2339,8 +2363,7 @@ impl Compiler {
                     self.compile_expr(value);
                     self.emit(Op::StoreIndexOp(*span));
                     self.compile_write_back(obj);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 Expr::Field { obj, name, span } => {
                     // Move-take for simple field homes (`s.f = ...`).
@@ -2371,8 +2394,7 @@ impl Compiler {
                                 && receiver_ok
                                 && self.try_emit_move_field(&o, &f, value, *span)
                             {
-                                self.emit_const(Value::Unit);
-                                return StmtValue::Discard;
+                                return self.stmt_unit(value_discarded);
                             }
                         }
                     }
@@ -2382,8 +2404,7 @@ impl Compiler {
                         if self.try_emit_field_binop_take(obj_name, name, value, *span)
                             || self.try_emit_set_field_take(obj_name, name, value, *span)
                         {
-                            self.emit_const(Value::Unit);
-                            return StmtValue::Discard;
+                            return self.stmt_unit(value_discarded);
                         }
                     }
                     // Source order: base, then value (spec §7). `Swap`
@@ -2398,15 +2419,13 @@ impl Compiler {
                             if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
                                 self.emit(Op::SetFieldIdx(idx as u16, *span));
                                 self.compile_write_back(obj);
-                                self.emit_const(Value::Unit);
-                                return StmtValue::Discard;
+                                return self.stmt_unit(value_discarded);
                             }
                         }
                     }
                     self.emit(Op::SetField(name.clone(), *span));
                     self.compile_write_back(obj);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 _ => unreachable!("unhandled assignment target"),
             },
@@ -2454,7 +2473,7 @@ impl Compiler {
                         },
                         span: *span,
                     };
-                    self.compile_stmt(&synthetic, false)
+                    self.compile_stmt(&synthetic, value_discarded)
                 }
                 Expr::Index { obj, index, .. } => {
                     // Receiver first (same order as the tree-walker),
@@ -2467,8 +2486,7 @@ impl Compiler {
                         span: *span,
                     });
                     self.compile_write_back(obj);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 Expr::Field { obj, name, .. } => {
                     self.compile_expr(obj);
@@ -2479,8 +2497,7 @@ impl Compiler {
                         span: *span,
                     });
                     self.compile_write_back(obj);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 _ => unreachable!("unhandled compound assignment target"),
             },
@@ -2630,35 +2647,49 @@ impl Compiler {
             self.emit(Op::EnterScope);
         }
         self.scope_depth += 1;
-        self.compile_block_body(block, false);
+        self.compile_block_body(block, false, false);
         self.scope_depth -= 1;
         if needs_env {
             self.emit(Op::ExitScope);
         }
     }
 
-    /// Compile a block body, cleaning up its locals. Returns `true` when the
-    /// body's final statement left slot storage that `PopN` consumed: loop
-    /// callers (`for`/`while`, which pop one more value via `SetLoopResult`
-    /// for the loop result) must then emit a `Unit` to stay balanced.
-    /// Other callers (plain blocks, function bodies) ignore the return.
+    /// Compile a block body, cleaning up its locals.
     ///
     /// `is_loop_body`: loop bodies sit above live loop-var slots, so their
     /// cleanup keeps the full `PopN(n)` count (the result lands in the top
     /// var slot — the `SetLoopResult` dance below). Plain blocks with a
     /// trailing slot declaration instead hold only n values (the result IS
     /// the last local) and need `PopN(n - 1)`.
-    fn compile_block_body(&mut self, block: &Block, is_loop_body: bool) -> bool {
+    ///
+    /// `trailing_value_dead`: nothing reads this body's value — not even the
+    /// caller (a `for` whose own value is discarded). The trailing statement
+    /// is then compiled knowing its value is dead, so a value-producing
+    /// statement skips the push instead of leaving the caller to drop it one
+    /// op later. The body reports what it left on the stack either way, so the
+    /// caller can settle the tail without guessing.
+    fn compile_block_body(
+        &mut self,
+        block: &Block,
+        is_loop_body: bool,
+        trailing_value_dead: bool,
+    ) -> BodyTail {
         let scope_base = self.locals.len();
+        let stmt_count = block.stmts.len();
         let mut last = StmtValue::None;
         for (i, stmt) in block.stmts.iter().enumerate() {
-            last = self.compile_stmt(stmt, i < block.stmts.len() - 1);
-            if i < block.stmts.len() - 1 && matches!(last, StmtValue::Discard) {
+            let is_last = i == stmt_count - 1;
+            // A non-final statement's value is always dropped, here or by the
+            // caller; a final one too when the caller said so.
+            last = self.compile_stmt(stmt, !is_last || trailing_value_dead);
+            if !is_last && matches!(last, StmtValue::Discard) {
                 self.emit(Op::Pop);
             }
         }
-        if block.stmts.is_empty() || matches!(last, StmtValue::None) {
+        if !trailing_value_dead && (block.stmts.is_empty() || matches!(last, StmtValue::None)) {
+            // The body must still produce a value for whoever reads it.
             self.emit_const(Value::Unit);
+            last = StmtValue::Discard;
         }
         let n = self.locals[scope_base..]
             .iter()
@@ -2688,9 +2719,11 @@ impl Compiler {
                 });
             }
         }
-        let need_result_unit = trailing_slot_decl;
         self.locals.truncate(scope_base);
-        need_result_unit
+        BodyTail {
+            needs_result_unit: trailing_slot_decl,
+            value: last,
+        }
     }
 
     fn compile_func_body(&mut self, scope: &str, block: &Block, params: &[Param]) -> Arc<Chunk> {
@@ -2838,7 +2871,7 @@ impl Compiler {
                 }
             }
         }
-        sub.compile_block_body(block, false);
+        sub.compile_block_body(block, false, false);
         if needs_env {
             sub.emit(Op::ExitScope);
         }
@@ -3835,7 +3868,7 @@ impl Compiler {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                if self.compile_block_body(body, true) {
+                if self.compile_block_body(body, true, false).needs_result_unit {
                     // Trailing slot declaration (see `compile_block_body`):
                     // supply the loop-result value `SetLoopResult` pops.
                     self.emit_const(Value::Unit);

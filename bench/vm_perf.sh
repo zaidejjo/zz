@@ -46,11 +46,20 @@ run_one() {
 # best_of_pair <fixture> -> prints "<base_ms> <base_res> <new_ms> <new_res>".
 # Interleaves the two binaries one repetition at a time, alternating the
 # order, so host load drift lands on both sides instead of the last runner.
+#
+# Both caches are warmed first. `zz run` stores lowered IR on a cold miss and
+# executes it on every later run; the AST-compiled chunk (miss) and the
+# IR-raised chunk (hit) are different code shapes — the IR lowering expands
+# the fused slot ops. Timing a cold first run against a warm one (or two
+# binaries with differently-aged caches) would compare code shapes rather
+# than the change under test.
 best_of_pair() {
 	base_best_ms=""
 	base_best_res=""
 	new_best_ms=""
 	new_best_res=""
+	run_one "$BASE_BIN" "$1" >/dev/null
+	run_one "$NEW_BIN" "$1" >/dev/null
 	n=0
 	while [ "$n" -lt "$RUNS" ]; do
 		if [ $((n % 2)) -eq 0 ]; then

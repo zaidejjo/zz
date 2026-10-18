@@ -127,6 +127,9 @@ fn vm_slot_locals_match_tree_walker() {
         "x := 0\nfor x in 0..3 { x }\nx",
         "x := 5\nfor i in 0..3 { x := i\nx }\nx",
         "sum := 0\nfor i in 0..3 { j := i * 2\nsum = sum + j }\nsum",
+        // A type alias statement owns no value in either engine.
+        "type A = int\nx := 41\nx",
+        "type A = int\nx := 41\n{ type B = str\ny := 1\nx + y }",
     ] {
         assert_same(src);
     }
@@ -1513,6 +1516,58 @@ fn live_for_loop_result_keeps_bookkeeping() {
     );
 }
 
+/// A discarded assignment statement leaves no value behind at all: the `Unit`
+/// it used to push, and the caller's matching `Op::Pop`, both disappear —
+/// nothing ever read that value.
+#[test]
+fn discarded_assignment_statement_pushes_no_unit() {
+    let chunk = compile_with_push_native("total := 0\ntotal = 1\ntotal");
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::Pop)),
+        "a discarded assignment owes no Pop: {:#?}",
+        chunk.code
+    );
+}
+
+/// The same elision at a loop tail. A `for` whose own value is discarded can
+/// tell its body the trailing value is dead too, so the per-iteration `Unit`
+/// push and the `Op::Pop` that dropped it are both gone: the simplest
+/// accumulate loop drops from 8 ops per iteration to 6.
+#[test]
+fn dead_loop_body_assignment_pushes_no_value() {
+    let chunk =
+        compile_with_push_native("total := 0\nfor i in 0..10 {\n    total = total + i\n}\ntotal");
+    let (header, exit) = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::ForSetup { header, exit, .. } => Some((*header, *exit)),
+            _ => None,
+        })
+        .expect("expected a ForSetup op");
+    for op in &chunk.code[header..exit] {
+        assert!(
+            !matches!(op, Op::Pop | Op::PushConst(_) | Op::SetLoopResult),
+            "a dead loop body must neither push nor drop a value, got {op:?} in {:#?}",
+            chunk.code
+        );
+    }
+}
+
+/// A type alias erases at check time, so its statement emits nothing and owns
+/// no value. Reporting `Discard` made the owning container pop a value that
+/// was never pushed, shifting every later slot by one — the next declaration
+/// then panicked in `StoreSlot`.
+#[test]
+fn type_alias_statement_owns_no_value() {
+    let chunk = compile_with_push_native("type A = int\nx := 41\nx");
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::Pop)),
+        "a type alias statement owes no Pop: {:#?}",
+        chunk.code
+    );
+}
+
 /// `while` is compiled as an expression, where its value cannot be proven
 /// dead, so its standalone header `Safepoint` stays.
 #[test]
@@ -1549,6 +1604,15 @@ fn for_loop_codegen_matches_tree_walker() {
         // 200k iterations: a per-iteration stack imbalance in the elided
         // path would exhaust memory instead of passing.
         "n := 0\nfor i in 0..200000 {\n    n = n + 1\n}\nn",
+        // `if`-terminated body: the arms merge onto a single continuation, so
+        // an elided value must not leave a branch jumping at a deleted op.
+        "total := 0\nfor i in 0..8 {\n    if i % 2 == 0 {\n        total = total + i\n    } else {\n        total = total - i\n    }\n}\ntotal",
+        // Compound assignment (rewritten to an assignment) in dead position.
+        "total := 0\nfor i in 0..8 {\n    total += i\n}\ntotal",
+        // Several dead assignment statements before the body's last one.
+        "a := 0\nb := 0\nfor i in 0..8 {\n    a = a + i\n    b = b + 1\n    a = a + b\n}\na",
+        // Dead assignment statements in a plain (non-loop) block.
+        "a := 0\nif true {\n    a = a + 1\n    a = a + 2\n}\na",
     ] {
         assert_same(src);
     }
