@@ -27,8 +27,10 @@ Consequences:
   code references.
 
 The AOT backend mirrors the model in C: channel sends and spawn captures
-are deep copies (`zz_value_dup`), arenas are thread-local, string
-refcounts and the intern table are thread-safe.
+are deep copies (`zz_value_dup`), arenas are thread-local, and heap
+ownership — strings, arrays/dicts, and Option/Result payload boxes
+(`zz_vbox`) — is reference counted with atomic counters, so values shared
+across threads stay safe.
 
 ## Recipes
 

@@ -2002,10 +2002,7 @@ impl<'a> Emitter<'a> {
                 Some(x) => {
                     let e = self.emit_const_new(x, out)?;
                     let tmp = format!("_kc{}", out.len());
-                    out.push_str(&format!(
-                        "    zz_value *_kp{tmp} = malloc(sizeof(zz_value));\n"
-                    ));
-                    out.push_str(&format!("    *_kp{tmp} = {e};\n"));
+                    out.push_str(&format!("    zz_value *_kp{tmp} = zz_vbox_new({e});\n"));
                     Ok(format!(
                         "(zz_value){{ZZ_OPTION_SOME, {{.payload = _kp{tmp}}}}}",
                         tmp = tmp
@@ -2016,10 +2013,7 @@ impl<'a> Emitter<'a> {
                 let e = self.emit_const_new(val, out)?;
                 let tmp = format!("_kc{}", out.len());
                 let tag = if ok { "ZZ_RESULT_OK" } else { "ZZ_RESULT_ERR" };
-                out.push_str(&format!(
-                    "    zz_value *_kp{tmp} = malloc(sizeof(zz_value));\n"
-                ));
-                out.push_str(&format!("    *_kp{tmp} = {e};\n"));
+                out.push_str(&format!("    zz_value *_kp{tmp} = zz_vbox_new({e});\n"));
                 Ok(format!(
                     "(zz_value){{{tag}, {{.payload = _kp{tmp}}}}}",
                     tmp = tmp

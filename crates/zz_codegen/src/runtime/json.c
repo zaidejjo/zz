@@ -5,12 +5,10 @@
 #include "runtime.h"
 
 // Wrap a raw value as a JSON value (mirrors the VM's `Value::Json`).
-// The payload is heap-allocated and refcounted via the same path as
-// Option/Result variants.
+// The payload is a reference-counted box on the same path as
+// Option/Result variants (see `zz_vbox`).
 zz_value zz_json_wrap(zz_value inner) {
-    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-    *p = inner;
-    return (zz_value){ZZ_JSON, {.payload = p}};
+    return (zz_value){ZZ_JSON, {.payload = zz_vbox_new(inner)}};
 }
 
 // Unwrap a ZZ_JSON payload (or pass through plain values).

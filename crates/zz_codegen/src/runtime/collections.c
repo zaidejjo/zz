@@ -109,18 +109,29 @@ static zz_value heal_deep_copy(zz_value v, int depth) {
         }
         return out;
     }
-    case ZZ_TUPLE:
+    case ZZ_TUPLE: {
+        if (!v.payload) return v;
+        // Tuple boxes predate the payload refcount: `ZZ_TUPLE` has no
+        // clone/release arms (they leak rather than double-free), so they
+        // keep the plain allocation here.
+        if (!value_needs_heal(*v.payload, depth + 1)) return zz_clone(v);
+        zz_value *slot = (zz_value *)malloc(sizeof(zz_value));
+        if (!slot) return zz_clone(v);
+        *slot = heal_deep_copy(*v.payload, depth + 1);
+        zz_value out = v;
+        out.payload = slot;
+        return out;
+    }
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON: {
         if (!v.payload) return v;
         // Clean payloads stay shared (no rebuild churn); only
-        // arena-containing payloads get a fresh wrapper + healed inner.
+        // arena-containing payloads get a fresh box + healed inner.
         if (!value_needs_heal(*v.payload, depth + 1)) return zz_clone(v);
-        zz_value *slot = (zz_value *)malloc(sizeof(zz_value));
+        zz_value *slot = zz_vbox_new(heal_deep_copy(*v.payload, depth + 1));
         if (!slot) return zz_clone(v);
-        *slot = heal_deep_copy(*v.payload, depth + 1);
         zz_value out = v;
         out.payload = slot;
         return out;
@@ -806,33 +817,40 @@ zz_value zz_range3(zz_value a, zz_value b, zz_value c, int *err) {
 }
 
 // ---- variant constructors (Option / Result) ---------------------------
-// Store the inner value on the heap so match can extract it via payload pointer.
+// Store the inner value in a reference-counted box (see `zz_vbox`) so
+// every owner of the wrapper shares one box safely; `match` and friends
+// extract the inner through the payload pointer.
 
 zz_value zz_variant_some(zz_value inner) {
-    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-    *p = inner;
-    return (zz_value){ZZ_OPTION_SOME, {.payload = p}};
+    return (zz_value){ZZ_OPTION_SOME, {.payload = zz_vbox_new(inner)}};
 }
 
 zz_value zz_variant_ok(zz_value inner) {
-    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-    *p = inner;
-    return (zz_value){ZZ_RESULT_OK, {.payload = p}};
+    return (zz_value){ZZ_RESULT_OK, {.payload = zz_vbox_new(inner)}};
 }
 
 zz_value zz_variant_err(zz_value inner) {
-    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-    *p = inner;
-    return (zz_value){ZZ_RESULT_ERR, {.payload = p}};
+    return (zz_value){ZZ_RESULT_ERR, {.payload = zz_vbox_new(inner)}};
 }
 
-// Release helper for variant payloads.
-void zz_release_variant(zz_value *v) {
-    if (v->payload) {
-        zz_release(v->payload);
-        free(v->payload);
-        v->payload = NULL;
+// Drop one owner of a variant payload: the box releases the inner it owns
+// and is freed once the last owner goes away. `zz_vbox_release` lives out
+// of line (next to this function) because it needs `zz_release`.
+void zz_vbox_release(zz_value *payload) {
+    if (!payload) {
+        return;
     }
+    zz_vbox *b = zz_vbox_of(payload);
+    if (__atomic_sub_fetch(&b->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        zz_release(&b->inner);
+        free(b);
+    }
+}
+
+// Release helper for variant payloads (drop our owner reference).
+void zz_release_variant(zz_value *v) {
+    zz_vbox_release(v->payload);
+    v->payload = NULL;
 }
 
 // ---- boxed struct (object) constructors and accessors --------------------
@@ -1055,39 +1073,13 @@ zz_value zz_range_build_step(zz_value start, zz_value end, zz_value step) {
     return v;
 }
 
-// Release an owned temporary WITHOUT freeing variant/JSON payload boxes.
+// Release an owned temporary variant/JSON wrapper.
 //
-// Background: `zz_clone` on Option/Result/JSON wrappers is a shallow share
-// — it bumps the refcounted leaves but shares the payload BOX (boxes carry
-// no refcount; they are immortal while any owner lives). `zz_release` /
-// `zz_release_variant` frees the box, so clone-then-release use-after-frees
-// anyone else sharing it (e.g. `zz_elvis` cloning the winner out of `left`
-// and then releasing `left` freed the box the winner still points to).
-//
-// This helper balances the leaf refcounts (so 1MB `read_to_string`
-// payloads don't accumulate per `??`) while leaking the 16-byte boxes
-// exactly as the old never-release behavior did — strictly less leaking,
-// no new frees, no UAF.
-static void zz_release_shared(zz_value *v) {
-    switch (v->tag) {
-    case ZZ_OPTION_SOME:
-    case ZZ_RESULT_OK:
-    case ZZ_RESULT_ERR:
-    case ZZ_JSON:
-        if (v->payload) zz_release_shared(v->payload);
-        break;
-    default:
-        zz_release(v);
-        break;
-    }
-}
-
-// zz_elvis(left, right) — unwrap Option/Result on the left, else return right.
-// Mirrors the VM's `??` operator which unwraps .some(v) and .ok(v).
-// Consume semantics (mirrors zz_binop_cat): both inputs are owned
-// temporaries. Inputs are released via zz_release_shared (leaf-balanced,
-// box-preserving — see above), so `fs.read_to_string(p) ?? ""` no longer
-// retains the whole Result payload per evaluation (~1.5MB/pass growth).
+// Boxes are reference counted now (`zz_vbox`), so the plain release is
+// correct: it drops this owner's box reference, and the box releases the
+// inner it owns once the last owner goes away. This used to need a
+// box-leaking special case (`zz_release_shared`), because
+// `zz_release_variant` freed a box other owners still pointed at (#507).
 zz_value zz_elvis(zz_value left, zz_value right) {
     zz_value out;
     if (left.tag == ZZ_OPTION_SOME && left.payload)
@@ -1103,8 +1095,8 @@ zz_value zz_elvis(zz_value left, zz_value right) {
         out = zz_clone(left);
     else
         out = zz_clone(right);
-    zz_release_shared(&left);
-    zz_release_shared(&right);
+    zz_release(&left);
+    zz_release(&right);
     return out;
 }
 // =====================================================================

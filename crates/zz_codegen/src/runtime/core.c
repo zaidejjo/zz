@@ -1537,14 +1537,22 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         }
         return out;
     }
-    case ZZ_TUPLE:
+    case ZZ_TUPLE: {
+        if (!v.payload) return v;
+        // Tuple boxes keep their plain allocation: `ZZ_TUPLE` has no
+        // clone/release arms, so there is no shared-ownership to track.
+        zz_value *p = (zz_value *)malloc(sizeof(zz_value));
+        *p = zz_value_dup_inner(*v.payload, m);
+        zz_value out = v;
+        out.payload = p;
+        return out;
+    }
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON: {
         if (!v.payload) return v;
-        zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-        *p = zz_value_dup_inner(*v.payload, m);
+        zz_value *p = zz_vbox_new(zz_value_dup_inner(*v.payload, m));
         zz_value out = v;
         out.payload = p;
         return out;
@@ -5309,14 +5317,11 @@ static zz_value http_errf(const char *fmt, const char *arg) {
     return zz_variant_err(zz_str_new(buf, n));
 }
 
-// Move the inner value out of a Result/Option variant: frees the variant
-// box only; ownership of the inner's refs transfers to the caller.
-// (zz_clone + zz_release is WRONG here — the clone shares the variant
-// box and the release frees it, leaving a dangling payload pointer.)
+// Move the inner value out of a Result/Option variant: drops the box and
+// transfers ownership of the inner's references to the caller (a shared
+// box yields a clone instead — see `zz_vbox_take`).
 static zz_value http_variant_take(zz_value r) {
-    zz_value out = *r.payload;
-    free(r.payload);
-    return out;
+    return zz_vbox_take(r.payload);
 }
 
 // Parse a body string the way the VM's response/body json accessors do:
