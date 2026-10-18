@@ -30,7 +30,12 @@ fn zz_bin() -> PathBuf {
 
 fn run_zz(args: &[&str], cwd: &std::path::Path) -> (i32, String, String) {
     let mut cmd = Command::new(zz_bin());
-    cmd.args(args)
+    // Parity compares two pipelines, so neither leg may be served from the
+    // VM run cache: a hit skips the check pass (no warnings on stderr) and
+    // executes cached IR, which turns `run` into a second bytecode leg and
+    // fails the stderr comparison below (#511).
+    cmd.env("ZZ_RUN_CACHE", "0")
+        .args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
