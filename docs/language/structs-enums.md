@@ -87,6 +87,33 @@ match t {
 - Generic (`enum Box<T> { V(T), E }`), methods (`impl Token`), `if let`, nesting,
   and structural equality all work. `pub enum` exports.
 
+## Method dispatch
+
+`value.name(...)` resolves in this order:
+
+1. **the receiver's own `impl` method** — `impl W { func get(self) }` registers
+   `W.get`, and `w.get()` reaches it even when a free `get(w)` exists;
+2. **a free function `name`** with the receiver as its first argument
+   (`p.dist()` is `dist(p)`), when the receiver's type has no such method;
+3. **the receiver-typed stdlib namespace** (`str.`, `vec.`, `dict.`, `option.`).
+
+Both forms stay reachable, so a same-named pair can coexist:
+
+```zz
+struct W { v: int }
+func get(w: W) -> str { "free" }
+impl W {
+    func get(self) -> str { "method" }
+}
+
+w := W{ v: 1 }
+w.get() // "method"
+get(w)  // "free"
+```
+
+Keep the names distinct when the semantics differ — a method call always
+prefers the method, never the free function.
+
 ## Recursive types
 
 Behind an indirection (array, Option, dict) plus mutual pairs:

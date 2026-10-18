@@ -5,6 +5,11 @@ use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
 pub(crate) struct Rewriter<'a> {
     pub(crate) ns: &'a str,
     pub(crate) top: &'a HashSet<String>,
+    /// Top-level value bindings (`x := ...` at module scope). They are
+    /// receivers like any local: `w.get()` on one must resolve through the
+    /// receiver's own `impl`/type namespace, not through a same-named
+    /// module-level free function (#500).
+    pub(crate) top_bindings: &'a HashSet<String>,
     /// Imported namespace heads (`ops` from `import ops`, `io` from
     /// `import std.str`, explicit aliases). Calls through them
     /// (`ops.resize(...)`) already resolve and must not be rewritten.
@@ -18,16 +23,27 @@ pub(crate) struct Rewriter<'a> {
     pub(crate) ns_aliases: HashMap<String, String>,
     /// Stack of shadowing scopes; each holds names declared so far.
     pub(crate) scopes: Vec<HashSet<String>>,
+    /// Set while rewriting the `Stmt::Func` directly under a `Stmt::Impl`:
+    /// the method name is relative to its type (`Type.method`), never a
+    /// module-level symbol, so the top-level rename below must not touch
+    /// it even when a top-level function shares the name.
+    impl_method: bool,
 }
 
 impl<'a> Rewriter<'a> {
-    pub(crate) fn new(ns: &'a str, top: &'a HashSet<String>) -> Self {
+    pub(crate) fn new(
+        ns: &'a str,
+        top: &'a HashSet<String>,
+        top_bindings: &'a HashSet<String>,
+    ) -> Self {
         Rewriter {
             ns,
             top,
+            top_bindings,
             imports: HashSet::new(),
             ns_aliases: HashMap::new(),
             scopes: vec![HashSet::new()],
+            impl_method: false,
         }
     }
 
@@ -95,12 +111,16 @@ impl<'a> Rewriter<'a> {
                 ..
             } => {
                 let is_top = self.top.contains(&name.join("."));
+                // Consume the impl-method marker unconditionally: it only
+                // ever applies to the statement the `Stmt::Impl` arm just
+                // handed us, never to nested items in its body.
+                let from_impl = std::mem::take(&mut self.impl_method);
                 // Prefix unless already a qualified `ns.*` path. A bare
                 // name equal to the namespace itself (e.g. `func main`
                 // in `main.zz`) must still become `main.main`, which the
                 // auto-call lookup expects.
                 let already_qualified = name.len() > 1 && name[0] == self.ns;
-                if is_top && !already_qualified {
+                if is_top && !already_qualified && !from_impl {
                     name[0] = format!("{}.{}", self.ns, name[0]);
                 }
                 self.push_scope();
@@ -175,6 +195,13 @@ impl<'a> Rewriter<'a> {
                     name[0] = format!("{}.{}", self.ns, name[0]);
                 }
                 for method in methods {
+                    // Method names are relative to the impl type: registered
+                    // as `Type.method`, never as module-level symbols. Mark
+                    // the statement so a method sharing a top-level
+                    // function's name keeps its own key (#500: the collision
+                    // used to register `Type.ns.method`, leaving `Type.method`
+                    // unreachable in every engine).
+                    self.impl_method = matches!(method, Stmt::Func { .. });
                     self.rewrite_stmt(method);
                 }
             }
@@ -309,6 +336,12 @@ impl<'a> Rewriter<'a> {
                 if let Expr::Path { parts, .. } = callee.as_mut() {
                     if parts.len() >= 2
                         && !self.is_shadowed(&parts[0])
+                        // A module-scope value binding (`w := W{...}`) is a
+                        // receiver like any local: qualify the method name
+                        // only for heads that are *not* values, otherwise a
+                        // module-level free function sharing the method's
+                        // name hijacks the call (#500).
+                        && !self.top_bindings.contains(&parts[0])
                         && !self.imports.contains(&parts[0])
                     {
                         if let Some(last) = parts.last_mut() {

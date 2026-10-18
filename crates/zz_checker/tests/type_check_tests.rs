@@ -1978,6 +1978,113 @@ fn impl_method_without_pub_checkable() {
     assert_eq!(r.bindings["z"], Type::Int);
 }
 
+// --- #500: `impl` method vs same-named free function in dot calls --------
+
+/// `w.get()` binds the receiver's own `impl` method. The two readings are
+/// type-distinguishable (free returns `str`, the method returns `int`), so
+/// the `int` binding only checks when the method won.
+#[test]
+fn impl_method_outranks_same_named_free_function() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         func get(w: W) -> str { \"free\" }\n\
+         impl W { func get(self) -> int { self.v } }\n\
+         w := W{ v: 1 }\n\
+         n: int = w.get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+/// Same precedence for a non-trivial base (`makeW().get()` reaches the
+/// parser as a `Field` callee, not a `Path`).
+#[test]
+fn impl_method_outranks_free_function_on_field_callee() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         func get(w: W) -> str { \"free\" }\n\
+         impl W { func get(self) -> int { self.v } }\n\
+         func mk() -> W { W{ v: 1 } }\n\
+         n: int = mk().get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+/// Neither form is lost: the free function stays callable by name.
+#[test]
+fn free_function_still_reachable_by_name() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         func get(w: W) -> str { \"free\" }\n\
+         impl W { func get(self) -> int { self.v } }\n\
+         w := W{ v: 1 }\n\
+         s: str = get(w)",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["s"], Type::Str);
+}
+
+/// Receiver-implicit reading for receivers without an `impl` method of
+/// that name is untouched (`p.dist()` ≡ `dist(p)`).
+#[test]
+fn free_function_dot_form_still_resolves() {
+    let r = check_src(
+        "struct Point { x: int, y: int }\n\
+         func dist(p: Point) -> int { p.x + p.y }\n\
+         p := Point{ x: 1, y: 2 }\n\
+         z := p.dist()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+/// The rule is keyed on the receiver's named type, not on whether the free
+/// signature happens to fit: a different receiver type still reaches its
+/// own method.
+#[test]
+fn impl_method_wins_for_a_different_receiver_type() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         struct X { v: int }\n\
+         func get(w: W) -> str { \"free\" }\n\
+         impl X { func get(self) -> int { self.v } }\n\
+         x := X{ v: 2 }\n\
+         n: int = x.get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+/// A free signature needing more arguments than the call supplies does not
+/// block the receiver's own method either.
+#[test]
+fn impl_method_wins_over_a_wider_free_signature() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         func paint(w: W, shade: int) -> str { \"free\" }\n\
+         impl W { func paint(self) -> int { self.v } }\n\
+         w := W{ v: 1 }\n\
+         n: int = w.paint()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+/// With no method to fall back to, the free signature is still reported
+/// (`x: X` against `get(w: W)`) — the mismatch is never swallowed.
+#[test]
+fn receiver_mismatch_without_method_still_errors() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         struct X { v: int }\n\
+         func get(w: W) -> str { \"free\" }\n\
+         x := X{ v: 2 }\n\
+         s: str = x.get()",
+    );
+    assert!(has_errors(&r), "expected a mismatch, got: {:?}", r.errors);
+}
+
 #[test]
 fn impl_method_export_requires_pub() {
     // Only `pub` methods are exported to the cross-module seed. Non-pub

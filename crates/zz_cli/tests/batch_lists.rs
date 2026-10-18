@@ -29,6 +29,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "struct_scalar_fields.zz", true),
     ("syntax", "method_free_fn.zz", true),
     ("syntax", "method_chain_recv.zz", true),
+    ("syntax", "method_shadow_free.zz", true),
     ("syntax", "for_annotated_decl.zz", false),
     ("modules", "diamond_import.zz", true),
     ("modules", "multi_level_pub.zz", true),

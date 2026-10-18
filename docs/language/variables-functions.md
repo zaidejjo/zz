@@ -83,6 +83,21 @@ dist(p)  // 7
 p.dist() // 7
 ```
 
+An `impl` method on the receiver's own type wins over a same-named free
+function, so `w.get()` reaches `W.get` even when a free `get(w)` exists:
+
+```zz
+struct W { v: int }
+func get(w: W) -> str { "free" }
+impl W {
+    func get(self) -> str { "method" }
+}
+
+w := W{ v: 1 }
+w.get() // "method" — the impl method
+get(w)  // "free"   — the free function, still reachable by name
+```
+
 Works for stdlib too: `"hi".to_upper()`, `[3, 1, 2].sort()`, `server.route(...)`.
 
 ## Pitfalls

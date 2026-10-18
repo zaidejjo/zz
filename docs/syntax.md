@@ -750,6 +750,17 @@ dist(p)       // function call
 p.dist()      // method call equivalent
 ```
 
+Resolution order for `value.name(...)`:
+
+1. the receiver's own `impl` method — `impl W { func get(self) }` registers
+   `W.get`, and `w.get()` reaches it even when a free `get(w)` exists;
+2. a free function `name`, with the receiver as the first argument
+   (`p.dist()` ≡ `dist(p)`), when the receiver's type has no such method;
+3. the receiver-typed stdlib namespace (`str.`, `vec.`, `dict.`, `option.`, …).
+
+Both forms stay reachable, so a same-named `impl` method and free function can
+coexist: `w.get()` calls `W.get`, `get(w)` calls the free function.
+
 ### Try Operator (`?`)
 
 Unwraps a variant, propagating `.none`/`.err` upward on failure:

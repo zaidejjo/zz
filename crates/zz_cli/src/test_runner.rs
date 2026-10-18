@@ -1303,9 +1303,11 @@ fn doctest_rewrite_context(
     Option<String>,
     std::collections::HashSet<String>,
     std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
 ) {
     let mut heads: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut defs: Vec<String> = Vec::new();
+    let mut decls: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut imports = std::collections::HashSet::new();
     for stmt in stmts {
         match stmt {
@@ -1321,6 +1323,7 @@ fn doctest_rewrite_context(
             }
             Stmt::Decl { name, .. } => {
                 defs.push(name.name.clone());
+                decls.insert(name.name.clone());
                 if let Some((head, _)) = name.name.split_once('.') {
                     *heads.entry(head.to_string()).or_insert(0) += 1;
                 }
@@ -1337,15 +1340,23 @@ fn doctest_rewrite_context(
     }
     let ns_opt = heads.into_iter().max_by_key(|(_, n)| *n).map(|(h, _)| h);
     let mut top = std::collections::HashSet::new();
+    let mut top_bindings = std::collections::HashSet::new();
     if let Some(ns) = ns_opt.as_deref() {
         let prefix = format!("{ns}.");
         for full in &defs {
             top.insert(full.strip_prefix(&prefix).unwrap_or(full).to_string());
         }
+        // Module-scope value bindings are receivers like any local: the
+        // dot-call arm must not qualify their method names (#500). The
+        // loader's `namespace_program` passes the same set.
+        for decl in &decls {
+            top_bindings.insert(decl.strip_prefix(&prefix).unwrap_or(decl).to_string());
+        }
     } else {
         top.extend(defs);
+        top_bindings.extend(decls);
     }
-    (ns_opt, top, imports)
+    (ns_opt, top, top_bindings, imports)
 }
 
 /// Graft doc-test fences as synthetic `@test` functions into every loaded
@@ -1373,7 +1384,8 @@ fn graft_doctests(
         // body. Without this, bare references to sibling items fail at
         // runtime — the exact treatment user `@test` bodies received at
         // load. Script-mode modules (all bare) need no rewriting.
-        let (ns_opt, top, imports) = doctest_rewrite_context(&loaded.programs[i].stmts);
+        let (ns_opt, top, top_bindings, imports) =
+            doctest_rewrite_context(&loaded.programs[i].stmts);
         let stem = std::path::Path::new(&name)
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1511,7 +1523,7 @@ fn graft_doctests(
             // become qualified paths (locals shadow correctly — the real
             // rewriter tracks scopes). Script-mode modules skip this.
             if let Some(ns) = ns_opt.as_deref() {
-                let mut rw = crate::loader::rewrite::Rewriter::new(ns, &top);
+                let mut rw = crate::loader::rewrite::Rewriter::new(ns, &top, &top_bindings);
                 rw.imports = imports.clone();
                 rw.push_scope();
                 if let Stmt::Func { body, .. } = &mut func {

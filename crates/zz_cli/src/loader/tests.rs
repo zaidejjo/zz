@@ -55,6 +55,50 @@ fn loads_relative_import() {
 }
 
 #[test]
+fn impl_method_keeps_its_key_when_a_free_function_shares_its_name() {
+    // #500: the top-level rename pass used to prefix the *method* name when
+    // a top-level function shared it, so `impl W { func get }` next to
+    // `func get` registered `main.W.main.get` instead of `main.W.get`. The
+    // method was then unreachable in every engine and the same-named free
+    // function silently won the dot call.
+    let dir = temp_project(&[(
+        "main.zz",
+        "struct W { v: int }\n\
+         func get(w: W) -> int { w.v }\n\
+         impl W {\n\
+             func get(self) -> str { \"method\" }\n\
+         }\n\
+         w := W{ v: 1 }\n\
+         r := w.get()\n\
+         s := get(w)\n",
+    )]);
+    let result = load_program(&dir.join("main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(
+        result.funcs.contains_key("main.W.get"),
+        "impl method not registered under `main.W.get`: {:?}",
+        result.funcs.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        result.funcs.contains_key("main.get"),
+        "free function not registered under `main.get`: {:?}",
+        result.funcs.keys().collect::<Vec<_>>()
+    );
+    // The dot call binds the receiver's own `impl` method; the free
+    // function stays reachable by name.
+    assert_eq!(
+        result.bindings["main.r"],
+        Type::Str,
+        "dot call must reach the method"
+    );
+    assert_eq!(
+        result.bindings["main.s"],
+        Type::Int,
+        "by-name call must reach the free function"
+    );
+}
+
+#[test]
 fn imported_bindings_visible() {
     let dir = temp_project(&[
         ("main.zz", "import config\nx := config.base + 1"),

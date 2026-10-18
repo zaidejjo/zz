@@ -544,6 +544,11 @@ e2e_success_test!(
     "syntax",
     "method_chain_recv.zz"
 );
+e2e_success_test!(
+    e2e_syntax_method_shadow_free,
+    "syntax",
+    "method_shadow_free.zz"
+);
 e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
 e2e_success_test!(
     e2e_syntax_closure_fn_params,
