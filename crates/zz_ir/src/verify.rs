@@ -297,9 +297,12 @@ fn verify_func(
             func.max_stack
         )));
     }
-    // Locals-table integrity: one entry per referenced slot, params
-    // coherent with the signature. Checked here (after ids, before the
-    // inference walk that reads the table).
+    // Locals-table integrity: one entry per frame slot the code touches, and
+    // never fewer than the parameter list. A parameter the body never reads
+    // emits no `LoadSlot`/`StoreSlot` but still owns a frame slot, so the
+    // canonical size is `max(referenced slots, arity)` — exactly what
+    // lowering produces (`lift_chunk` floors at the arity too). Checked here
+    // (after ids, before the inference walk that reads the table).
     let mut maxref: Option<usize> = None;
     for op in &func.code {
         match op {
@@ -312,11 +315,16 @@ fn verify_func(
     for (_, s) in &func.toplevel_slots {
         maxref = Some(maxref.map_or(*s as usize, |m: usize| m.max(*s as usize)));
     }
-    if func.locals.len() != maxref.map_or(0, |m| m + 1) {
+    let referenced = maxref.map_or(0, |m| m + 1);
+    let slot_arity = func.arity as usize;
+    if func.locals.len() < slot_arity {
+        return Err(IrError::new("locals: fewer slots than signature params"));
+    }
+    let expected = referenced.max(slot_arity);
+    if func.locals.len() != expected {
         return Err(IrError::new(format!(
-            "locals length mismatch: table has {}, code references {}",
-            func.locals.len(),
-            maxref.map_or(0, |m| m + 1)
+            "locals length mismatch: table has {}, expected {expected}",
+            func.locals.len()
         )));
     }
     if func.sig.params.len() != func.arity as usize || func.params.len() != func.arity as usize {

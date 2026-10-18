@@ -221,6 +221,9 @@ its own number rendering on both engines; float→int saturation is §5.
   (params seeded from the signature; conflicts widen to the "unknown"
   top). Types are mandatory semantics, NOT annotations — the verifier
   checks every store/call/return against them, and `dis` shows them.
+  The table always covers the parameter list, even when the body never
+  reads a parameter (an unread param emits no slot op but still owns a
+  frame slot).
   The v2 decoder rejects v1 files (re-emit with `zz build --emit-ir`).
 - Constants pool holds all literals (including string-literal
   markers for `print` — the M2 subset needs no string machinery

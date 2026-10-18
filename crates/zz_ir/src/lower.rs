@@ -395,7 +395,12 @@ impl<'a> Lowerer<'a> {
             .collect();
         // Locals table: intern the compiler-recorded slot types, sized
         // to one past the highest referenced slot id (params are seeded
-        // from the signature later, in `seal_sig`).
+        // from the signature later, in `seal_sig`), and floored at the
+        // signature arity. Arity is a property of the signature: a
+        // parameter the body never reads emits no `LoadSlot`/`StoreSlot`,
+        // so sizing from referenced slots alone can leave the table
+        // shorter than the parameter list, which `verify` then rejects
+        // ("locals: fewer slots than signature params").
         let mut max_slot: Option<usize> = None;
         for op in &code {
             match op {
@@ -409,7 +414,8 @@ impl<'a> Lowerer<'a> {
             max_slot = Some(max_slot.map_or(*s as usize, |m: usize| m.max(*s as usize)));
         }
         let unknown = self.unknown();
-        let mut locals = vec![unknown; max_slot.map_or(0, |m| m + 1)];
+        let local_count = max_slot.map_or(0, |m| m + 1).max(arity as usize);
+        let mut locals = vec![unknown; local_count];
         for (i, recorded) in chunk.slot_types.iter().enumerate() {
             if let (Some(dst), Some(ty)) = (locals.get_mut(i), recorded) {
                 *dst = self.intern_type(ty);
