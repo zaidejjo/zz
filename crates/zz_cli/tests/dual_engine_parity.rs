@@ -74,7 +74,12 @@ fn run_zz_with_input_env(
     use std::process::Stdio;
     let zz_bin = env!("CARGO_BIN_EXE_zz");
     let mut cmd = Command::new(zz_bin);
-    cmd.args(args)
+    // Both legs must run the same, uncached pipeline: a VM run-cache hit
+    // skips the check pass (so its warnings never reach stderr) and
+    // executes cached IR instead of going through the source pipeline,
+    // which would silently weaken the VM-vs-native comparison (#511).
+    cmd.env("ZZ_RUN_CACHE", "0")
+        .args(args)
         .arg(file)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

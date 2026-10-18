@@ -209,6 +209,10 @@ fn demux(out: &str) -> std::collections::HashMap<String, Vec<String>> {
 
 fn run_driver(driver: &Path, native: bool) -> (i32, String, String) {
     let mut cmd = Command::new(zz_bin());
+    // The VM leg must not be served from the run cache: a hit skips the
+    // check pass (no warnings on stderr) and runs cached IR, so the leg
+    // stops matching the native leg's pipeline and stderr (#511).
+    cmd.env("ZZ_RUN_CACHE", "0");
     if native {
         cmd.arg("run").arg("--native");
     } else {
