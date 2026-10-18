@@ -1460,3 +1460,96 @@ fn direct_call_declines_and_hands_the_arguments_back() {
     // ...and no decline switched the environment.
     assert!(EnvLink::ptr_eq(&interp.env, &caller_env));
 }
+
+// ---------------------------------------------------------------------
+// `for` loop codegen: folded safepoint + dead loop-result bookkeeping.
+// ---------------------------------------------------------------------
+
+/// A `for` loop's cooperative yield check is charged to `ForNext` — the
+/// header target for both the back-edge and `continue` — instead of a
+/// standalone `Safepoint` op: one dispatch less per iteration. The loop
+/// header recorded in `ForSetup` must therefore name the `ForNext` itself.
+#[test]
+fn for_loop_header_is_fornext_carrying_the_safepoint() {
+    let chunk =
+        compile_with_push_native("total := 0\nfor i in 0..10 {\n    total = total + i\n}\ntotal");
+    let header = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::ForSetup { header, .. } => Some(*header),
+            _ => None,
+        })
+        .expect("expected a ForSetup op");
+    assert!(
+        matches!(chunk.code[header], Op::ForNext { .. }),
+        "loop header must be the ForNext that runs the check, got {:?}",
+        chunk.code[header]
+    );
+}
+
+/// A `for` loop in non-final statement position has its value discarded by
+/// the caller's `Op::Pop`, so the per-iteration `Unit` + `SetLoopResult`
+/// pair is dead work and must not be emitted. The `Unit` placeholder pushed
+/// before `ForSetup` is what that `Pop` removes, keeping the stack balanced.
+#[test]
+fn dead_for_loop_result_omits_bookkeeping() {
+    let chunk =
+        compile_with_push_native("total := 0\nfor i in 0..10 {\n    total = total + i\n}\ntotal");
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::SetLoopResult)),
+        "a discarded loop result must not emit SetLoopResult"
+    );
+}
+
+/// The value of a `for` loop that *is* used (final statement of its block,
+/// where no `Pop` follows) must still land in the loop's result slot.
+#[test]
+fn live_for_loop_result_keeps_bookkeeping() {
+    let chunk = compile_with_push_native("for i in 0..10 {\n    i\n}");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::SetLoopResult)),
+        "a used loop result must still emit SetLoopResult"
+    );
+}
+
+/// `while` is compiled as an expression, where its value cannot be proven
+/// dead, so its standalone header `Safepoint` stays.
+#[test]
+fn while_loop_keeps_header_safepoint() {
+    let chunk = compile_with_push_native("i := 0\nwhile i < 10 {\n    i = i + 1\n}\ni");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::Safepoint)),
+        "while loops keep their standalone header safepoint"
+    );
+}
+
+/// Loop codegen must not change observable behavior: discarded vs used loop
+/// values, nesting, `break`/`continue`, and enough iterations that any
+/// per-iteration stack imbalance would blow up instead of passing quietly.
+#[test]
+fn for_loop_codegen_matches_tree_walker() {
+    for src in [
+        // Discarded result, accumulating body.
+        "total := 0\nfor i in 0..10 {\n    total = total + i\n}\ntotal",
+        // Used result: the loop's value is its last body value.
+        "for i in 0..3 {\n    i\n}",
+        // Nested loops, both discarded.
+        "out := 0\nfor i in 0..3 {\n    for j in 0..3 {\n        out = out + i * j\n    }\n}\nout",
+        // Discarded loop nested inside a block.
+        "s := 0\nif true {\n    for i in 0..4 {\n        s = s + i\n    }\n}\ns",
+        // `break` / `continue` out of a discarded loop.
+        "n := 0\nfor i in 0..10 {\n    if i == 5 {\n        break\n    }\n    n = n + i\n}\nn",
+        "n := 0\nfor i in 0..10 {\n    if i % 2 == 0 {\n        continue\n    }\n    n = n + i\n}\nn",
+        // Array iteration; body declaring its own slot.
+        "x := 0\nfor v in [1, 2, 3] {\n    x = x + v\n}\nx",
+        "n := 0\nfor i in 0..3 {\n    v := i * 2\n    n = n + v\n}\nn",
+        // Empty body: the block supplies the loop's result value.
+        "n := 0\nfor i in 0..3 {\n}\nn",
+        // 200k iterations: a per-iteration stack imbalance in the elided
+        // path would exhaust memory instead of passing.
+        "n := 0\nfor i in 0..200000 {\n    n = n + 1\n}\nn",
+    ] {
+        assert_same(src);
+    }
+}

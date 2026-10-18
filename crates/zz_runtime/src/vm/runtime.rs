@@ -399,6 +399,32 @@ impl Vm {
         self.run_loop(interp)
     }
 
+    /// One cooperative-safepoint tick: decrement the call-frame slice budget
+    /// and, once per budget, read the clock to see whether the current
+    /// timeslice expired.
+    ///
+    /// Returns `true` only on executor threads, where a yield is actionable
+    /// (`zz run` has no executor and burns no clock here): the caller must
+    /// then rewind `ip` to the op it is executing and return
+    /// [`Flow::Yield`] so that resuming re-executes that op from the top.
+    fn safepoint_expired(&mut self) -> bool {
+        if self.slice_budget == 0 {
+            self.slice_budget = SAFEPOINT_BUDGET;
+            let now = std::time::Instant::now();
+            let expired = self
+                .slice_start
+                .is_none_or(|t| now.duration_since(t).as_millis() >= SAFEPOINT_QUANTUM_MS);
+            if expired {
+                self.slice_start = Some(now);
+                return crate::value::on_executor();
+            }
+            false
+        } else {
+            self.slice_budget -= 1;
+            false
+        }
+    }
+
     /// The interpreter loop shared by fresh and resumed execution.
     fn run_loop(&mut self, interp: &mut Interp) -> Result<Flow, EvalError> {
         // Cache chunk pointers locally to avoid re-fetching from frames on
@@ -1518,21 +1544,9 @@ impl Vm {
                     // yield here resumes after it — but the frame's saved
                     // ip must be synced first (the register is only
                     // written back at frame-change points otherwise).
-                    if self.slice_budget == 0 {
-                        self.slice_budget = SAFEPOINT_BUDGET;
-                        let now = std::time::Instant::now();
-                        let expired = self.slice_start.is_none_or(|t| {
-                            now.duration_since(t).as_millis() >= SAFEPOINT_QUANTUM_MS
-                        });
-                        if expired {
-                            self.slice_start = Some(now);
-                            if crate::value::on_executor() {
-                                self.frames.last_mut().unwrap().ip = ip;
-                                return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
-                            }
-                        }
-                    } else {
-                        self.slice_budget -= 1;
+                    if self.safepoint_expired() {
+                        self.frames.last_mut().unwrap().ip = ip;
+                        return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
                     }
                 }
                 Op::JumpIfFalse(target) => {
@@ -1645,6 +1659,17 @@ impl Vm {
                     in_env,
                     span,
                 } => {
+                    // Cooperative safepoint for `for` loops, folded in from
+                    // the header (see the `Stmt::For` arm in `compiler.rs`):
+                    // this op is the loop header target for both the
+                    // back-edge and `continue`, so the check covers every
+                    // iteration without a dispatch of its own. Taken before
+                    // any iteration state is mutated so a yield can rewind
+                    // to this op and re-execute it whole.
+                    if self.safepoint_expired() {
+                        self.frames.last_mut().unwrap().ip = ip - 1;
+                        return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
+                    }
                     let num_vars = vars.len();
                     // Pop num_vars loop variables from previous iteration
                     self.stack.truncate(self.stack.len() - num_vars);

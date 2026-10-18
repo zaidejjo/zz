@@ -1267,6 +1267,11 @@ parity_strict!(
     "concurrency_stress_test.zz"
 );
 parity_strict!(
+    parity_stdlib_concurrency_timeslice_loop_test,
+    "stdlib",
+    "concurrency_timeslice_loop_test.zz"
+);
+parity_strict!(
     parity_stdlib_concurrency_try_join_test,
     "stdlib",
     "concurrency_try_join_test.zz"
