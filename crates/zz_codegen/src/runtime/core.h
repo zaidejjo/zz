@@ -519,12 +519,60 @@ void zz_release_func(zz_func *f);
 void zz_release_variant(zz_value *v);
 void zz_release_object(zz_value *v);
 void zz_str_header_free(zz_str *s);
+void zz_vbox_release(zz_value *payload);
 
 // Retain one reference on a boxed struct object (mirrors the release in
 // `zz_release_object`: clones share ownership, so every clone must bump).
 static inline void zz_retain_object(zz_object *o) {
     if (o) {
         __atomic_add_fetch(&o->refs, 1, __ATOMIC_RELAXED);
+    }
+}
+
+// ---- variant / JSON payload boxes (ARC) --------------------------------
+// An Option/Result/JSON wrapper is a 16-byte value; its inner value lives
+// in a heap box. Cloning a wrapper is a shallow share, so the box must
+// outlive *every* owner and therefore carries its own refcount (the same
+// model as strings/arrays/dicts).
+//
+// This box used to be a bare `malloc(sizeof(zz_value))` with no refcount,
+// which made `zz_release_variant` free a box that another owner still
+// pointed at: `o := .some("x"); a := [o, o]` double-freed on the second
+// element's release (#507). The old workaround was to leak the box
+// (`zz_release_shared`).
+//
+// `payload` deliberately keeps pointing at the box's `inner` field, so
+// every payload reader (`*v.payload`) stays valid; the header is recovered
+// with `zz_vbox_of`. Boxes are only ever created by `zz_vbox_new`, and are
+// only freed by `zz_vbox_release` / `zz_vbox_take`.
+//
+// `refs` is a plain `int64_t` touched only through `__atomic_*` builtins
+// (the convention shared with `zz_str`/`zz_object`/`zz_range`), so the box
+// header is safe to hand across threads (spawn captures, channel sends).
+typedef struct {
+    int64_t refs;
+    zz_value inner;
+} zz_vbox;
+
+static inline zz_vbox *zz_vbox_of(zz_value *payload) {
+    return (zz_vbox *)((char *)payload - offsetof(zz_vbox, inner));
+}
+
+// Allocate a box owning one reference to `inner`; returns the payload
+// pointer to store in the wrapper (NULL if the allocation failed).
+static inline zz_value *zz_vbox_new(zz_value inner) {
+    zz_vbox *b = (zz_vbox *)malloc(sizeof(zz_vbox));
+    if (!b) {
+        return NULL;
+    }
+    b->refs = 1;
+    b->inner = inner;
+    return &b->inner;
+}
+
+static inline void zz_vbox_retain(zz_value *payload) {
+    if (payload) {
+        __atomic_add_fetch(&zz_vbox_of(payload)->refs, 1, __ATOMIC_RELAXED);
     }
 }
 
@@ -559,7 +607,7 @@ static inline void zz_retain(zz_value *v) {
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
-        if (v->payload) zz_retain(v->payload);
+        zz_vbox_retain(v->payload);
         break;
     default:
         break;
@@ -699,12 +747,30 @@ static inline zz_value zz_clone(zz_value v) {
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
-        if (v.payload) zz_retain(v.payload);
+        zz_vbox_retain(v.payload);
         break;
     default:
         break;
     }
     return v;
+}
+
+// Move the inner value out of a box this owner holds exclusively: the
+// caller takes over the inner's references and the box is freed without
+// releasing them. A shared box cannot be moved out of, so its owner gets
+// a clone of the inner instead (the box keeps its other owners' copy).
+// Defined here because it needs `zz_clone`; the `zz_vbox` type and the
+// other helpers are above `zz_retain`.
+static inline zz_value zz_vbox_take(zz_value *payload) {
+    zz_vbox *b = zz_vbox_of(payload);
+    if (__atomic_load_n(&b->refs, __ATOMIC_ACQUIRE) == 1) {
+        zz_value inner = b->inner;
+        free(b);
+        return inner;
+    }
+    zz_value inner = zz_clone(b->inner);
+    zz_vbox_release(payload);
+    return inner;
 }
 
 // ---- binaries ----------------------------------------------------------

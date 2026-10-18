@@ -268,7 +268,7 @@ void zz_retain_arc(zz_value *v) {
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
-        if (v->payload) zz_retain(v->payload);
+        zz_vbox_retain(v->payload);
         break;
     default:
         break;
@@ -347,7 +347,7 @@ zz_value zz_clone_arc(zz_value v) {
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
-        if (v.payload) zz_retain(v.payload);
+        zz_vbox_retain(v.payload);
         break;
     default:
         break;
