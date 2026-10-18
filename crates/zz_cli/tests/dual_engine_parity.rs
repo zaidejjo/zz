@@ -1732,6 +1732,12 @@ fn run_quad_leg(
     };
     cmd.env("ZZ_SWEEP_TOKEN", token);
     cmd.env("ZZ_CRYPTO_FAST", "1");
+    // Same uncached-pipeline rule as `run_zz_with_input_env` (#511): the
+    // quad legs run the same fixture under two drivers that share one run
+    // cache, so a hit on the second leg skips the check pass (its warnings
+    // never reach stderr) and executes cached IR instead of the source
+    // pipeline — `vm_dbg` and `vm_rel` then disagree on stderr.
+    cmd.env("ZZ_RUN_CACHE", "0");
     if dev {
         cmd.env("ZZ_NATIVE_DEV", "1");
     }
