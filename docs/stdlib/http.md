@@ -28,6 +28,46 @@ returns 405 + `Allow`. Use `http.route` single entry (`GET`/`POST`/`PUT`/`DELETE
 are shorthands. Checker validates literal paths, methods, handler arity,
 duplicate routes, and `param("typo")` names at compile time.
 
+### Many routes: a table, one loop
+
+A `|>` chain reads well for a short, literal route set; for more than a
+handful of routes build a table of `method`/`path`/handler rows and register
+them in one loop. The routes then live as data — easy to diff, reorder, and
+grep:
+
+```zz
+import std.http
+
+struct RouteDef {
+    method: str,
+    path: str,
+    handle: func(http.request) -> http.response,
+}
+
+func main() {
+    defs := [
+        RouteDef{method: "GET", path: "/", handle: |_req: http.request| http.ok("root")},
+        RouteDef{method: "GET", path: "/api/pkg/search", handle: |_req: http.request| http.ok("search")},
+        // ... one row per route ...
+        RouteDef{method: "GET", path: "*", handle: |_req: http.request| http.not_found()},
+    ]
+    s := http.server()
+    s = http.cors(s, ["https://app.example.com"])
+    for d in defs {
+        s = http.route(s, d.method, d.path, d.handle)
+    }
+    s = http.rate_limit(s, 300, 60000)
+    http.listen_cfg(s, 8080, {"max_body_bytes": 50000000})
+}
+```
+
+Every piece is checked like any other handler: closures in arrays, struct-held
+closures (`handle: func(http.request) -> http.response`), calling through the
+field, rebinding the server inside `for`, and the generic
+`http.route(server, method, path, handler)` entry point. Middleware that wraps
+the whole server stays outside the table — wrap before the loop for request
+handling, harden after it for the finished server.
+
 ## Requests
 
 Fields: `method`, `path` (no query), `body` (lossy text — use `body_bytes` for binary),
