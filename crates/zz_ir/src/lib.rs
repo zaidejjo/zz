@@ -36,6 +36,42 @@ pub const MAGIC: [u8; 4] = *b"ZZC1";
 /// files are rejected (re-emit with `zz build --emit-ir`).
 pub const VERSION: u32 = 2;
 
+/// Identity of the running binary: executable length + mtime + inode.
+///
+/// Dev-loop cache keys must cover the *build*, not the checkout. A local
+/// edit that changes codegen — a fused VM op, a C template, a checker
+/// rule — leaves `git HEAD` untouched, so artifacts written by the
+/// previous build were served to the new one (stale bytecode, AOT
+/// objects, check outcomes; issues #221 and #371 are two sightings).
+/// Every component here moves when cargo relinks, so any rebuild
+/// invalidates; copying an unchanged binary only costs a cold cache,
+/// never a stale one. Hashing the ~300 MB executable's contents would
+/// cost more than the compile it guards.
+pub fn build_stamp() -> u64 {
+    static STAMP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *STAMP.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        if let Ok(md) = std::env::current_exe().and_then(|p| p.metadata()) {
+            md.len().hash(&mut h);
+            if let Ok(t) = md.modified() {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+                    .hash(&mut h);
+            }
+            // Cargo relinks by rename: a same-second rebuild of identical
+            // size still lands on a fresh inode.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                md.ino().hash(&mut h);
+            }
+        }
+        h.finish()
+    })
+}
+
 /// Interned-string reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StrId(pub u32);
@@ -173,3 +209,16 @@ impl fmt::Display for IrError {
 }
 
 impl std::error::Error for IrError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stamp is read once per process (the running binary cannot change
+    /// under a live process), so every caller in one run shares it: a cache
+    /// write and its later read in the same run must agree.
+    #[test]
+    fn build_stamp_is_process_stable() {
+        assert_eq!(build_stamp(), build_stamp());
+    }
+}

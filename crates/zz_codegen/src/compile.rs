@@ -770,7 +770,8 @@ impl BuildOptions {
         self.fingerprint_with(None)
     }
 
-    /// Fingerprint including the `--target` triple.
+    /// Fingerprint including the `--target` triple, plus the identity of
+    /// this build (a rebuilt compiler invalidates its own artifacts).
     pub fn fingerprint_with(&self, target: Option<&str>) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -787,6 +788,11 @@ impl BuildOptions {
         self.sqlite_link.hash(&mut h);
         self.allow_static_downgrade.hash(&mut h);
         self.full_lto.hash(&mut h);
+        // The build identity, not just the flags: AOT objects are this
+        // compiler's output, so a rebuilt `zz` (dirty codegen, new C
+        // template) must never reuse them. Same class as the sanitizer
+        // list below, which was already patched for one such leak.
+        zz_ir::build_stamp().hash(&mut h);
         // Hash plugin artifact paths so cache invalidates when plugins change.
         for p in &self.plugin_artifacts {
             p.hash(&mut h);

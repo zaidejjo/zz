@@ -66,24 +66,21 @@ pub struct CachedModule<'a> {
 /// Bumped automatically with the CLI version; extend if the checker gains
 /// flags or the stdlib versions independently.
 ///
-/// The git commit disambiguates same-version binaries (dev-loop rebuilds
-/// share a version string but not semantics — issue #221). Resolved once
-/// per process from the build tree; absent outside git checkouts
-/// (tarballs fall back to version-only, as before).
+/// The build identity disambiguates same-version binaries, dirty working
+/// trees included (issue #221): a rebuild that changed the checker but not
+/// `HEAD` used to share a namespace with the previous binary's outcomes.
 ///
-/// The stdlib seed fingerprint disambiguates same-version binaries with
-/// different baked stdlibs (release vs dev, or uncommitted stdlib work —
-/// issue #371): the cache key covers source + deps + genesis, but the
-/// live git HEAD resolves the *checkout*, not the binary, so two
-/// toolchains with different seeds shared a namespace whenever the HEAD
-/// matched. Any seed change now invalidates via the genesis.
+/// The stdlib seed fingerprint stays as an independent signal that same
+/// binary re-emits carry different seeds (issue #371: release vs dev
+/// stdlibs, or generated seeds) — a seed change invalidates via the
+/// genesis even when the binary is byte-identical.
 fn genesis(plugin_names: &[String]) -> String {
     let mut names = plugin_names.to_vec();
     names.sort();
     format!(
-        "zz-check-cache-v6|cli={}|git={}|plugins={}|seed={}",
+        "zz-check-cache-v7|cli={}|build={}|plugins={}|seed={}",
         env!("CARGO_PKG_VERSION"),
-        git_hash().as_deref().unwrap_or("nogit"),
+        zz_ir::build_stamp(),
         names.join(","),
         seed_fingerprint(),
     )
@@ -109,38 +106,6 @@ fn seed_fingerprint() -> String {
             hex_of(h)
         })
         .clone()
-}
-
-/// Commit hash of the tree this binary was built from (dev-loop cache
-/// correctness). `None` outside a git checkout.
-fn git_hash() -> Option<String> {
-    static HASH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        let mut dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        loop {
-            if dir.join(".git").exists() {
-                let out = std::process::Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(dir)
-                    .output();
-                match out {
-                    Ok(o) if o.status.success() => {
-                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if s.is_empty() {
-                            return None;
-                        }
-                        return Some(s);
-                    }
-                    _ => return None,
-                }
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => return None,
-            }
-        }
-    })
-    .clone()
 }
 
 /// Dependency-aware key for one module:

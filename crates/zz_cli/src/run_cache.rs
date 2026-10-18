@@ -9,8 +9,8 @@
 //! Key discipline mirrors the native build cache: [`zz_pm::cache_key`]
 //! covers entry bytes + canonical path (namespace), every `.zz` source
 //! under the project dir, live path-dep content, and the target string.
-//! The VM fingerprint covers the toolchain (CLI version, IR version, git
-//! HEAD for dev-loop rebuilds) plus sorted plugin manifest names; `--embed`
+//! The VM fingerprint covers the toolchain (CLI version, IR version, the
+//! identity of this build) plus sorted plugin manifest names; `--embed`
 //! bytes join via the artifact segment. Script args are runtime-only and
 //! correctly excluded. A miss (or any corruption) falls back to today's
 //! pipeline exactly — callers must treat `lookup` returning `None` as a
@@ -82,52 +82,26 @@ pub fn run_cache_dir() -> PathBuf {
     crate::build::cache_dir().join(format!("run-{CACHE_VERSION}"))
 }
 
-/// Commit hash of the tree this binary was built from (dev-loop cache
-/// correctness: same-version rebuilds must not share entries). `None`
-/// outside a git checkout (tarballs fall back to version-only).
-fn git_hash() -> Option<String> {
-    static HASH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        let mut dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        loop {
-            if dir.join(".git").exists() {
-                let out = std::process::Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(dir)
-                    .output();
-                match out {
-                    Ok(o) if o.status.success() => {
-                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if s.is_empty() {
-                            return None;
-                        }
-                        return Some(s);
-                    }
-                    _ => return None,
-                }
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => return None,
-            }
-        }
-    })
-    .clone()
+/// Toolchain fingerprint for the VM run key: CLI version + IR format
+/// version + the identity of this build + sorted plugin manifest names.
+/// Any toolchain or plugin-shape change busts every entry (sound over
+/// stale code).
+pub fn vm_fingerprint(plugin_funcs: &[(String, zz_checker::FuncSig)]) -> u64 {
+    vm_fingerprint_with(zz_ir::build_stamp(), plugin_funcs)
 }
 
-/// Toolchain fingerprint for the VM run key: CLI version + IR format
-/// version + git HEAD + sorted plugin manifest names. Any toolchain or
-/// plugin-shape change busts every entry (sound over stale code).
-pub fn vm_fingerprint(plugin_funcs: &[(String, zz_checker::FuncSig)]) -> u64 {
+/// [`vm_fingerprint`] with the build identity injected: same CLI version,
+/// same IR format, same plugins — only the binary differs (a dev-loop
+/// rebuild that never touched `HEAD`). Such entries must never be reused:
+/// the artifact is that binary's output.
+fn vm_fingerprint_with(build_stamp: u64, plugin_funcs: &[(String, zz_checker::FuncSig)]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut names: Vec<&str> = plugin_funcs.iter().map(|(n, _)| n.as_str()).collect();
     names.sort();
     let mut h = std::collections::hash_map::DefaultHasher::new();
     env!("CARGO_PKG_VERSION").hash(&mut h);
     zz_ir::VERSION.hash(&mut h);
-    git_hash()
-        .unwrap_or_else(|| "nogit".to_string())
-        .hash(&mut h);
+    build_stamp.hash(&mut h);
     names.hash(&mut h);
     h.finish()
 }
@@ -659,6 +633,21 @@ mod tests {
             );
             assert!(base.contains("vm-run"), "target must be vm-run, got {base}");
         });
+    }
+
+    #[test]
+    fn fingerprint_busts_on_rebuild() {
+        // A dev-loop rebuild moves neither the version, the IR format nor
+        // the plugin set — only the binary. Its output must never be read
+        // by the next build (the pre-stamp key was git HEAD, which a dirty
+        // working tree never moves: stale bytecode, issues #221/#371).
+        assert_ne!(
+            vm_fingerprint_with(1, &[]),
+            vm_fingerprint_with(2, &[]),
+            "a different build must produce a different fingerprint"
+        );
+        let f = vm_fingerprint(&[]);
+        assert_eq!(f, vm_fingerprint(&[]), "one build, one fingerprint");
     }
 
     #[test]
