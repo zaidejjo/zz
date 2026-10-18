@@ -135,6 +135,10 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "spawn/timing-sensitive",
     ),
     (
+        "stdlib/concurrency_timeslice_loop_test.zz",
+        "spawn/timing-sensitive",
+    ),
+    (
         "stdlib/concurrency_try_join_test.zz",
         "spawn/timing-sensitive",
     ),

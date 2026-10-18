@@ -770,6 +770,11 @@ e2e_success_test!(
     "concurrency_stress_test.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_concurrency_timeslice_loop_test,
+    "stdlib",
+    "concurrency_timeslice_loop_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_concurrency_panic_test,
     "stdlib",
     "concurrency_panic_test.zz"

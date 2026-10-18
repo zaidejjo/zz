@@ -272,7 +272,9 @@ impl Compiler {
             })
             .collect();
         for (i, stmt) in program.stmts.iter().enumerate() {
-            let v = c.compile_stmt(stmt);
+            // Every statement but the last is discarded by the `Op::Pop`
+            // below, so tell the compiler its value is already dead.
+            let v = c.compile_stmt(stmt, i < program.stmts.len() - 1);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
                 c.emit(Op::Pop);
             }
@@ -396,7 +398,9 @@ impl Compiler {
             })
             .collect();
         for (i, stmt) in program.stmts.iter().enumerate() {
-            let v = c.compile_stmt(stmt);
+            // Every statement but the last is discarded by the `Op::Pop`
+            // below, so tell the compiler its value is already dead.
+            let v = c.compile_stmt(stmt, i < program.stmts.len() - 1);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
                 c.emit(Op::Pop);
             }
@@ -1964,7 +1968,13 @@ impl Compiler {
         }
     }
 
-    fn compile_stmt(&mut self, stmt: &Stmt) -> StmtValue {
+    /// Compile one statement.
+    ///
+    /// `value_discarded` is `true` when the caller drops this statement's
+    /// value (it emits `Op::Pop` for `StmtValue::Discard`): a value-producing
+    /// statement can then skip bookkeeping nothing reads. See the
+    /// `Stmt::For` arm.
+    fn compile_stmt(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 self.compile_expr(value);
@@ -2095,9 +2105,11 @@ impl Compiler {
                     num_vars: num_vars_u8,
                 });
                 let header = self.chunk.code.len();
-                // Safepoint at the header (not the back-edge) so `continue`
-                // cannot skip the cooperative yield check.
-                self.emit(Op::Safepoint);
+                // No standalone `Safepoint` here: the cooperative yield check
+                // is charged to `ForNext` instead. `ForNext` runs once per
+                // iteration and is the header target for both the back-edge
+                // and `continue`, so the check still cannot be skipped — at
+                // one dispatch less per iteration.
                 // Determine if any var is captured by an inner closure
                 let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
                 let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
@@ -2144,16 +2156,40 @@ impl Compiler {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                if self.compile_block_body(body, true) {
-                    // Trailing slot declaration (see `compile_block_body`):
-                    // supply the loop-result value `SetLoopResult` pops.
-                    self.emit_const(Value::Unit);
-                }
+                let body_needs_result = self.compile_block_body(body, true);
                 self.scope_depth -= 1;
                 if body_needs_env {
                     self.emit(Op::ExitScope);
                 }
-                self.emit(Op::SetLoopResult);
+                // A non-final statement's value is dropped by the caller's
+                // `Op::Pop` (see the `StmtValue::Discard` arms in
+                // `compile_program` / `compile_block_body`), so nothing ever
+                // reads the loop's result slot and the store into it is dead.
+                // A body that consumed its own value into slot storage needs
+                // neither the `Unit` top-up nor the store; one that left a
+                // value needs that value dropped rather than stored. Either
+                // way the slot keeps the `Unit` placeholder written before
+                // `ForSetup`, which the caller's `Op::Pop` removes.
+                //
+                // A body that opens a scope is left alone: its `ExitScope`
+                // sits between the body's value and the store, so the tail is
+                // not ours to rewrite here.
+                let dead_result = value_discarded && !body_needs_env;
+                if !dead_result {
+                    if body_needs_result {
+                        // Trailing slot declaration (see `compile_block_body`):
+                        // supply the loop-result value `SetLoopResult` pops.
+                        self.emit_const(Value::Unit);
+                    }
+                    self.emit(Op::SetLoopResult);
+                } else if body_needs_result {
+                    // Nothing on the stack to clean up: skipping the `Unit`
+                    // top-up leaves the loop as balanced as before.
+                } else {
+                    // The body left a value of its own: drop it rather than
+                    // storing it (`Op::Pop` is cheaper than a frame store).
+                    self.emit(Op::Pop);
+                }
                 self.emit(Op::Jump(header));
                 self.patch_jump(j);
                 let exit = self.chunk.code.len();
@@ -2418,7 +2454,7 @@ impl Compiler {
                         },
                         span: *span,
                     };
-                    self.compile_stmt(&synthetic)
+                    self.compile_stmt(&synthetic, false)
                 }
                 Expr::Index { obj, index, .. } => {
                     // Receiver first (same order as the tree-walker),
@@ -2616,7 +2652,7 @@ impl Compiler {
         let scope_base = self.locals.len();
         let mut last = StmtValue::None;
         for (i, stmt) in block.stmts.iter().enumerate() {
-            last = self.compile_stmt(stmt);
+            last = self.compile_stmt(stmt, i < block.stmts.len() - 1);
             if i < block.stmts.len() - 1 && matches!(last, StmtValue::Discard) {
                 self.emit(Op::Pop);
             }
@@ -2755,7 +2791,7 @@ impl Compiler {
                     let scope_base = sub.locals.len();
                     let n = block.stmts.len();
                     for stmt in &block.stmts[..n - 1] {
-                        let v = sub.compile_stmt(stmt);
+                        let v = sub.compile_stmt(stmt, true);
                         if matches!(v, StmtValue::Discard) {
                             sub.emit(Op::Pop);
                         }

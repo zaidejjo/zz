@@ -1,0 +1,19 @@
+// features: closures, for-loop, func-call, imports, int-arith, locals, print, ranges, std-task, string-literal
+// E2E: a long `for` loop inside a spawned task must hit its cooperative
+// timeslice, yield, and resume without skipping or repeating an iteration —
+// the loop's safepoint is charged to `ForNext` rather than a standalone
+// `Safepoint` op. Deterministic: the accumulator is exact.
+import std.task
+
+func main() {
+    h := task.spawn(|_| {
+        total := 0
+        for i in 0..1000000 {
+            total = total + i
+        }
+        total
+    })
+    t:int = task.join(h)
+    assert(t == 499999500000)
+    println("timeslice_ok")
+}
