@@ -1,0 +1,20 @@
+// features: func-call, locals, print, std-math, std-str, string-literal
+// Bare `ns.func` spellings of *pure-ZZ* stdlib helpers — no native twin,
+// so the body only exists when the module joins the compiled closure.
+// Imports used to be the only thing that put it there: `zz check` passed
+// via the canonical fallback, then the VM failed at run time with
+// `undefined method `repeat``, while the HIR backend merged every
+// reachable stdlib program and silently succeeded (#503).
+//
+// The reference scan in the loader now records those namespaces, so all
+// engines agree. Bare *natives* (`str.length`) stay legal everywhere and
+// must not drag a module in.
+func main() {
+    println(str.repeat("ab", 2))
+    println(str.reverse("abc"))
+    println(str.is_empty(""))
+    println(math.min(1, 2))
+    println(math.sum([1, 2, 3]))
+    println(str.length("abc"))
+    println("bare_purezz_call_ok")
+}

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use zz_checker::{
     check_program_with_module_ns, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type,
 };
-use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
+use zz_frontend::ast::{Block, Expr, ImportItem, Program, Stmt};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
@@ -2779,6 +2779,11 @@ impl Loader {
 
         let import_aliases =
             collect_import_aliases(&programs, &self.order, &self.ns_aliases, &self.funcs);
+        // #503: bare references to pure-ZZ stdlib helpers need their module
+        // in the compiled closure (see `collect_bare_purezz_modules`).
+        for module in collect_bare_purezz_modules(&programs, &self.funcs, &self.natives) {
+            self.stdlib_modules.insert(module);
+        }
         LoadResult {
             programs,
             files,
@@ -2896,6 +2901,220 @@ fn collect_import_aliases(
     aliases
 }
 
+// Collect Ident/Path references inside a function (params included —
+// conservative: a param shadowing a Decl name just blocks hoisting).
+fn collect_refs_expr(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Ident { name, .. } => {
+            out.insert(name.clone());
+        }
+        Expr::Path { parts, .. } => {
+            out.insert(parts.join("."));
+            for p in parts {
+                out.insert(p.clone());
+            }
+        }
+        _ => {}
+    }
+    // Recurse through children generically via debug walk: enumerate
+    // every nested Ident/Path by re-walking known containers.
+    match e {
+        Expr::Paren { expr: x, .. }
+        | Expr::Unary { expr: x, .. }
+        | Expr::Try { expr: x, .. }
+        | Expr::Closure { body: x, .. } => collect_refs_expr(x, out),
+        Expr::Binary { left, right, .. }
+        | Expr::Range {
+            start: left,
+            end: right,
+            ..
+        } => {
+            collect_refs_expr(left, out);
+            collect_refs_expr(right, out);
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_refs_expr(callee, out);
+            for a in args {
+                collect_refs_expr(a, out);
+            }
+            for (_, v) in named {
+                collect_refs_expr(v, out);
+            }
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_refs_expr(cond, out);
+            collect_refs_block(then, out);
+            if let Some(x) = els {
+                collect_refs_expr(x, out);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            collect_refs_expr(cond, out);
+            collect_refs_block(body, out);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_refs_expr(scrutinee, out);
+            for a in arms {
+                collect_refs_expr(&a.body, out);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            collect_refs_expr(value, out);
+            collect_refs_block(then, out);
+            if let Some(x) = els {
+                collect_refs_expr(x, out);
+            }
+        }
+        Expr::Block(b) => collect_refs_block(b, out),
+        Expr::Array { elems, .. } | Expr::Tuple { items: elems, .. } => {
+            for x in elems {
+                collect_refs_expr(x, out);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_refs_expr(k, out);
+                collect_refs_expr(v, out);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for p in parts {
+                if let zz_frontend::ast::FmtPart::Expr(x, _) = p {
+                    collect_refs_expr(x, out);
+                }
+            }
+        }
+        Expr::Field { obj, .. } => collect_refs_expr(obj, out),
+        Expr::Index { obj, index, .. } => {
+            collect_refs_expr(obj, out);
+            collect_refs_expr(index, out);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            collect_refs_expr(obj, out);
+            if let Some(x) = start {
+                collect_refs_expr(x, out);
+            }
+            if let Some(x) = end {
+                collect_refs_expr(x, out);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_refs_expr(v, out);
+            }
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            collect_refs_expr(body, out);
+            collect_refs_expr(iter, out);
+            if let Some(f) = filter {
+                collect_refs_expr(f, out);
+            }
+        }
+        Expr::Variant { arg: Some(x), .. } => {
+            collect_refs_expr(x, out);
+        }
+        _ => {}
+    }
+}
+fn collect_refs_block(b: &Block, out: &mut HashSet<String>) {
+    for s in &b.stmts {
+        collect_refs_stmt(s, out);
+    }
+}
+fn collect_refs_stmt(s: &Stmt, out: &mut HashSet<String>) {
+    match s {
+        Stmt::Decl { value, .. } => collect_refs_expr(value, out),
+        Stmt::Func { body, .. } => collect_refs_block(body, out),
+        Stmt::Return { value: Some(x), .. } => {
+            collect_refs_expr(x, out);
+        }
+        Stmt::Expr(x) => collect_refs_expr(x, out),
+        Stmt::Defer { expr: x, .. } => collect_refs_expr(x, out),
+        Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+            collect_refs_expr(target, out);
+            collect_refs_expr(value, out);
+        }
+        Stmt::Destructure { value, .. } => collect_refs_expr(value, out),
+        Stmt::For { iter, body, .. } => {
+            collect_refs_expr(iter, out);
+            collect_refs_block(body, out);
+        }
+        Stmt::Impl { methods, .. } => {
+            for m in methods {
+                collect_refs_stmt(m, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// #503: std namespaces a program references *bare* through a pure-ZZ stdlib
+/// helper — `str.repeat("ab", 2)` with no `import std.str` — and which must
+/// therefore join the compiled closure.
+///
+/// The seed exposes every canonical `std.*` signature under its bare spelling
+/// too, so the checker resolves such a call and `zz check` says nothing. The
+/// helper's *body*, however, only exists in the closure that the VM and both
+/// codegen backends compile (`zz_stdlib::stdlib_program_closure`), which is
+/// otherwise driven by imports alone. That left the engines disagreeing: the
+/// VM failed at run time with `undefined method`, the HIR backend merged every
+/// reachable stdlib program and silently succeeded, and the chunk backend could
+/// not resolve the call at all.
+///
+/// Natives are always registered, so a bare native (`vec.push`) is left alone.
+/// Imprecision is harmless here — naming a namespace costs a little startup
+/// compile, never correctness — which is why a plain reference scan suffices
+/// and no type information is needed.
+fn collect_bare_purezz_modules(
+    programs: &[Program],
+    funcs: &HashMap<String, FuncSig>,
+    natives: &HashMap<String, NativeEntry>,
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for program in programs {
+        let mut refs = HashSet::new();
+        for stmt in &program.stmts {
+            collect_refs_stmt(stmt, &mut refs);
+        }
+        for name in refs {
+            // `ns.func`: a real std namespace head and a non-dotted tail.
+            let Some((head, tail)) = name.split_once('.') else {
+                continue;
+            };
+            if tail.is_empty() || tail.contains('.') || !STDLIB_MODULES.contains(&head) {
+                continue;
+            }
+            // The canonical signature must exist: a user function, or a
+            // module named like a std namespace, is never seeded under `std.`.
+            if !funcs.contains_key(&format!("std.{name}")) {
+                continue;
+            }
+            // Natives (bare or canonical spelling) are registered
+            // unconditionally; only a missing ZZ body needs the closure.
+            if natives.contains_key(&name) || natives.contains_key(&format!("std.{name}")) {
+                continue;
+            }
+            out.insert(head.to_string());
+        }
+    }
+    out
+}
+
 /// Rewrite a module's AST so its top-level definitions are namespaced:
 /// - top-level `func foo` becomes `func ns.foo`,
 /// - top-level `x := ...` becomes `x := ...` with binding name `ns.x`,
@@ -2958,7 +3177,7 @@ fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<Strin
 /// mutual recursion between hoisted functions move stably, while programs
 /// hoisting cannot help keep exactly today's behavior.
 fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
-    use zz_frontend::ast::{Block, Expr, Pattern};
+    use zz_frontend::ast::Pattern;
     // Top-level binding names: `Decl`s post-rewrite ("ns.x") plus their
     // bare forms, and `Destructure` bindings (never namespaced — the
     // rewriter leaves patterns alone, and refs to them stay bare).
@@ -3002,167 +3221,6 @@ fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
     }
     if funcs.is_empty() {
         return;
-    }
-    // Collect Ident/Path references inside a function (params included —
-    // conservative: a param shadowing a Decl name just blocks hoisting).
-    fn collect_refs_expr(e: &Expr, out: &mut HashSet<String>) {
-        match e {
-            Expr::Ident { name, .. } => {
-                out.insert(name.clone());
-            }
-            Expr::Path { parts, .. } => {
-                out.insert(parts.join("."));
-                for p in parts {
-                    out.insert(p.clone());
-                }
-            }
-            _ => {}
-        }
-        // Recurse through children generically via debug walk: enumerate
-        // every nested Ident/Path by re-walking known containers.
-        match e {
-            Expr::Paren { expr: x, .. }
-            | Expr::Unary { expr: x, .. }
-            | Expr::Try { expr: x, .. }
-            | Expr::Closure { body: x, .. } => collect_refs_expr(x, out),
-            Expr::Binary { left, right, .. }
-            | Expr::Range {
-                start: left,
-                end: right,
-                ..
-            } => {
-                collect_refs_expr(left, out);
-                collect_refs_expr(right, out);
-            }
-            Expr::Call {
-                callee,
-                args,
-                named,
-                ..
-            } => {
-                collect_refs_expr(callee, out);
-                for a in args {
-                    collect_refs_expr(a, out);
-                }
-                for (_, v) in named {
-                    collect_refs_expr(v, out);
-                }
-            }
-            Expr::If {
-                cond, then, els, ..
-            } => {
-                collect_refs_expr(cond, out);
-                collect_refs_block(then, out);
-                if let Some(x) = els {
-                    collect_refs_expr(x, out);
-                }
-            }
-            Expr::While { cond, body, .. } => {
-                collect_refs_expr(cond, out);
-                collect_refs_block(body, out);
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                collect_refs_expr(scrutinee, out);
-                for a in arms {
-                    collect_refs_expr(&a.body, out);
-                }
-            }
-            Expr::IfLet {
-                value, then, els, ..
-            } => {
-                collect_refs_expr(value, out);
-                collect_refs_block(then, out);
-                if let Some(x) = els {
-                    collect_refs_expr(x, out);
-                }
-            }
-            Expr::Block(b) => collect_refs_block(b, out),
-            Expr::Array { elems, .. } | Expr::Tuple { items: elems, .. } => {
-                for x in elems {
-                    collect_refs_expr(x, out);
-                }
-            }
-            Expr::Dict { entries, .. } => {
-                for (k, v) in entries {
-                    collect_refs_expr(k, out);
-                    collect_refs_expr(v, out);
-                }
-            }
-            Expr::Fmt { parts, .. } => {
-                for p in parts {
-                    if let zz_frontend::ast::FmtPart::Expr(x, _) = p {
-                        collect_refs_expr(x, out);
-                    }
-                }
-            }
-            Expr::Field { obj, .. } => collect_refs_expr(obj, out),
-            Expr::Index { obj, index, .. } => {
-                collect_refs_expr(obj, out);
-                collect_refs_expr(index, out);
-            }
-            Expr::Slice {
-                obj, start, end, ..
-            } => {
-                collect_refs_expr(obj, out);
-                if let Some(x) = start {
-                    collect_refs_expr(x, out);
-                }
-                if let Some(x) = end {
-                    collect_refs_expr(x, out);
-                }
-            }
-            Expr::StructInit { fields, .. } => {
-                for (_, v) in fields {
-                    collect_refs_expr(v, out);
-                }
-            }
-            Expr::ListComp {
-                body, iter, filter, ..
-            } => {
-                collect_refs_expr(body, out);
-                collect_refs_expr(iter, out);
-                if let Some(f) = filter {
-                    collect_refs_expr(f, out);
-                }
-            }
-            Expr::Variant { arg: Some(x), .. } => {
-                collect_refs_expr(x, out);
-            }
-            _ => {}
-        }
-    }
-    fn collect_refs_block(b: &Block, out: &mut HashSet<String>) {
-        for s in &b.stmts {
-            collect_refs_stmt(s, out);
-        }
-    }
-    fn collect_refs_stmt(s: &Stmt, out: &mut HashSet<String>) {
-        match s {
-            Stmt::Decl { value, .. } => collect_refs_expr(value, out),
-            Stmt::Func { body, .. } => collect_refs_block(body, out),
-            Stmt::Return { value: Some(x), .. } => {
-                collect_refs_expr(x, out);
-            }
-            Stmt::Expr(x) => collect_refs_expr(x, out),
-            Stmt::Defer { expr: x, .. } => collect_refs_expr(x, out),
-            Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
-                collect_refs_expr(target, out);
-                collect_refs_expr(value, out);
-            }
-            Stmt::Destructure { value, .. } => collect_refs_expr(value, out),
-            Stmt::For { iter, body, .. } => {
-                collect_refs_expr(iter, out);
-                collect_refs_block(body, out);
-            }
-            Stmt::Impl { methods, .. } => {
-                for m in methods {
-                    collect_refs_stmt(m, out);
-                }
-            }
-            _ => {}
-        }
     }
     // Per-func refs (body + defaults).
     let mut refs: Vec<HashSet<String>> = Vec::with_capacity(funcs.len());

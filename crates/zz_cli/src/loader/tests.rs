@@ -1965,6 +1965,54 @@ fn stdlib_import_kinds_recorded_for_scoped_runs() {
         "aliases: {:?}",
         result.stdlib_aliases
     );
+
+    // #503: a bare `ns.func` spelling of a *pure-ZZ* helper pulls the module
+    // into the closure the VM and both codegen backends compile. Without it
+    // the call checked clean and then failed at run time with `undefined
+    // method` (the HIR backend merged everything and silently succeeded).
+    // Bare *natives* are always registered and must not drag anything in —
+    // `vec.push` here must add neither `vec` nor `str`.
+    let dir = temp_project(&[(
+        "bare.zz",
+        "func main() {\n    println(str.repeat(\"ab\", 2))\n    println(math.min(1, 2))\n    println(vec.push([1], 2))\n    println(str.length(\"abc\"))\n    println(\"bare_ok\")\n}\n",
+    )]);
+    let result = load_program(&dir.join("bare.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.stdlib_modules, vec!["math", "str"]);
+
+    // …and a program that only uses bare *natives* stays closure-free, so
+    // the scan cannot turn an import-free program into a stdlib compile.
+    let dir = temp_project(&[(
+        "native.zz",
+        "func main() {\n    println(str.length(\"abc\"))\n    println(vec.push([1], 2))\n}\n",
+    )]);
+    let result = load_program(&dir.join("native.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(
+        result.stdlib_modules.is_empty(),
+        "bare natives must not pull stdlib modules: {:?}",
+        result.stdlib_modules
+    );
+
+    // Qualified paths (`helper.str.repeat`) never match: the scan only
+    // accepts the two-segment `ns.func` spelling with a std namespace head,
+    // so a dotted path whose *middle* segment is a std namespace is safe.
+    // (The program below need not type-check — the closure decision is
+    // deliberately syntactic, which is why an over-match would only cost a
+    // little startup work rather than miscompile.)
+    let dir = temp_project(&[
+        (
+            "dotted.zz",
+            "import helper\nfunc main() {\n    println(helper.str.repeat(\"ab\", 2))\n}\n",
+        ),
+        ("helper.zz", "pub x := 1"),
+    ]);
+    let dotted = load_program(&dir.join("dotted.zz")).unwrap();
+    assert!(
+        dotted.stdlib_modules.is_empty(),
+        "dotted spellings must not pull stdlib modules: {:?}",
+        dotted.stdlib_modules
+    );
 }
 
 #[test]
