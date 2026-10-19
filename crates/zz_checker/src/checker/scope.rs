@@ -368,13 +368,48 @@ impl Checker {
         }
     }
 
+    /// Start observing `name` while its `:=` initializer is checked (#518).
+    /// Returns the marker for [`Checker::finish_shadow_probes`].
+    pub(crate) fn begin_shadow_probe(&mut self, name: String, span: Span) -> usize {
+        let mark = self.shadow_probes.len();
+        self.shadow_probes.push(crate::checker::ShadowProbe {
+            name,
+            span,
+            depth: self.env.len().saturating_sub(1),
+            referenced: false,
+        });
+        mark
+    }
+
+    /// Stop observing and return every probe whose initializer read the
+    /// binding it shadows, outermost first.
+    pub(crate) fn finish_shadow_probes(&mut self, mark: usize) -> Vec<crate::checker::ShadowProbe> {
+        let mut out = Vec::new();
+        while self.shadow_probes.len() > mark {
+            let probe = self.shadow_probes.pop().expect("probe above the mark");
+            if probe.referenced {
+                out.push(probe);
+            }
+        }
+        out
+    }
+
     /// Like [`Checker::lookup`] but without the error: returns `None` when
     /// the name is not bound anywhere.
     pub(crate) fn lookup_opt(&mut self, name: &str) -> Option<Type> {
-        for scope in self.env.iter().rev() {
+        for (depth, scope) in self.env.iter().enumerate().rev() {
             if let Some(t) = scope.get(name) {
+                let t = t.clone();
                 self.used_names.insert(name.to_string());
-                return Some(t.clone());
+                // #518: a read resolving to a *shallower* scope hit the
+                // binding the declaration under check would shadow. Fields
+                // are borrowed disjointly — `self.env` above is still live.
+                for probe in self.shadow_probes.iter_mut() {
+                    if probe.name == name && depth < probe.depth {
+                        probe.referenced = true;
+                    }
+                }
+                return Some(t);
             }
         }
         if let Some(sig) = crate::lookup_std(&self.funcs, name) {

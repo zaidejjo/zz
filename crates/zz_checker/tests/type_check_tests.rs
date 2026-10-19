@@ -1078,6 +1078,105 @@ fn shadowing_allowed() {
     assert_eq!(r.bindings["x"], Type::Int);
 }
 
+/// #518: a loop-body `x := x + 1` declares a body-scoped `x` from the
+/// untouched outer value, so the loop never advances the outer binding.
+/// Warn (not error) and offer the `:=` → `=` fix.
+#[test]
+fn shadowed_decl_reading_outer_binding_warns() {
+    let src = "func main() {\n    x := 0\n    i := 0\n    while i < 3 {\n        x := x + 1\n        i = i + 1\n    }\n    x\n}";
+    let r = check_src(src);
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    let w = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("shadows the outer `x`"))
+        .expect("expected shadow warning");
+    assert!(
+        w.fixits.iter().any(|f| f.replacement == " = "),
+        "expected `:=` -> `=` fixit, got: {:?}",
+        w.fixits
+    );
+}
+
+/// The same shape through the loader path (module owner named) must not turn
+/// into an error, and plain same-scope redeclaration stays silent: `x := 1;
+/// x := x + 1` reads the binding it is about to replace, not an outer one.
+#[test]
+fn shadowed_decl_plain_rebinding_does_not_warn() {
+    for src in [
+        "func main() {\n    x := 0\n    x := x + 1\n    x\n}",
+        "func main() {\n    x := 0\n    while false {\n        x := 5\n    }\n    x\n}",
+    ] {
+        let r = check_src(src);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.message.contains("shadows the outer `x`")),
+            "unexpected shadow warning for {src:?}: {:?}",
+            r.errors
+        );
+    }
+}
+
+/// A binder *inside* the initializer (here a closure parameter) is not the
+/// shadowed binding, so the probe must stay quiet.
+#[test]
+fn shadowed_decl_closure_parameter_does_not_warn() {
+    let src = "func main() {\n    x := 0\n    while false {\n        x := (|x: int| x + 1)(2)\n    }\n    x\n}";
+    let r = check_src(src);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("shadows the outer `x`")),
+        "unexpected shadow warning: {:?}",
+        r.errors
+    );
+}
+
+/// An annotated declaration has no assignment form, so it warns with the note
+/// but without a one-token fix.
+#[test]
+fn shadowed_annotated_decl_warns_without_fix() {
+    let src =
+        "func main() {\n    x := 0\n    while false {\n        x: int = x + 1\n    }\n    x\n}";
+    let r = check_src(src);
+    let w = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("shadows the outer `x`"))
+        .expect("expected shadow warning");
+    assert!(
+        w.fixits.is_empty(),
+        "annotated form has no assignment: {:?}",
+        w.fixits
+    );
+}
+
+/// #518 real-world shape: `one, b := faker.first_name(b)` in a loop re-declares
+/// the body-scoped `b`. Destructuring cannot become an assignment, so the
+/// warning carries the split hint and no fix-it.
+#[test]
+fn shadowed_destructure_reading_outer_binding_warns() {
+    let src = "func pair(b: int) -> (str, int) {\n    return (\"x\", b + 1)\n}\n\nfunc main() {\n    b := 1\n    i := 0\n    while i < 3 {\n        one, b := pair(b)\n        i = i + 1\n    }\n    b\n}";
+    let r = check_src(src);
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    let w = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("shadows the outer `b`"))
+        .expect("expected destructuring shadow warning");
+    assert!(
+        w.fixits.is_empty(),
+        "no one-token fix exists: {:?}",
+        w.fixits
+    );
+    assert!(
+        w.notes.iter().any(|n| n.contains("p := ")),
+        "expected the split hint, got: {:?}",
+        w.notes
+    );
+}
+
 #[test]
 fn duplicate_func_errors() {
     errors_contain("func f() { 1 }\nfunc f() { 2 }", "duplicate definition");

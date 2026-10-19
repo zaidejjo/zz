@@ -64,8 +64,84 @@ pub(crate) struct MethodCall<'a> {
     pub span: Span,
 }
 
+/// Every name a pattern binds, in source order (#518).
+fn pattern_bindings(pat: &Pattern) -> Vec<(String, Span)> {
+    fn walk(pat: &Pattern, out: &mut Vec<(String, Span)>) {
+        match pat {
+            Pattern::Binding { name } => out.push((name.name.clone(), name.span)),
+            Pattern::Tuple { pats, .. } => pats.iter().for_each(|p| walk(p, out)),
+            Pattern::Variant { arg, .. } => {
+                if let Some(a) = arg {
+                    walk(a, out);
+                }
+            }
+            Pattern::Or { pats, .. } => pats.iter().for_each(|p| walk(p, out)),
+            Pattern::Wildcard { .. } | Pattern::Literal { .. } => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(pat, &mut out);
+    out
+}
+
 impl Checker {
     // --- statements -------------------------------------------------------
+
+    /// Warn when a `:=` initializer read the binding the declaration shadows
+    /// (#518): `x := x + 1` in a loop body re-declares a body-scoped `x` from
+    /// the untouched outer value every pass, so the outer binding never
+    /// advances while `x = x + 1` does. Only the self-referential shape warns:
+    /// shadowing with a fresh value is deliberate and common.
+    fn warn_if_shadowed_decl(
+        &mut self,
+        mark: usize,
+        value: &Expr,
+        annotated: bool,
+        is_const: bool,
+    ) {
+        let Some(probe) = self.finish_shadow_probes(mark).pop() else {
+            return;
+        };
+        let name = probe.name;
+        let mut diag = warning_at(
+            format!("`{name} := …` shadows the outer `{name}` — the outer binding keeps its value"),
+            probe.span,
+        )
+        .with_note(format!(
+            "the declaration is scoped to the surrounding block; each pass re-reads the outer value — `{name} = …` updates it instead"
+        ));
+        // `x := x + 1` → `x = x + 1` is a one-token fix. A `const` binding and
+        // an annotated declaration have no assignment form, so they keep only
+        // the note.
+        if !is_const && !annotated {
+            diag = diag.with_fixit(FixIt::safe(
+                Span::new(probe.span.end, value.span().start),
+                " = ",
+                "assign the outer binding",
+            ));
+        }
+        self.errors.push(diag);
+    }
+
+    /// Warn for destructuring declarations whose initializer read a binding
+    /// they shadow (#518). There is no one-token fix — a pattern cannot become
+    /// an assignment — so the note points at the two-step split instead.
+    fn warn_if_shadowed_destructure(&mut self, mark: usize) {
+        for probe in self.finish_shadow_probes(mark) {
+            let name = probe.name;
+            self.errors.push(
+                warning_at(
+                    format!(
+                        "`{name} := …` shadows the outer `{name}` — the outer binding keeps its value"
+                    ),
+                    probe.span,
+                )
+                .with_note(format!(
+                    "destructuring binds fresh names in this block: keep the result (`p := …`) and assign the outer binding separately (`{name} = p[1]`)"
+                )),
+            );
+        }
+    }
 
     pub(crate) fn check_stmt(&mut self, stmt: &Stmt) -> Type {
         self.had_undefined_var = false;
@@ -78,12 +154,18 @@ impl Checker {
                 pub_: _,
                 is_const,
             } => {
+                // #518: `x := x + 1` inside a nested block declares a *new*
+                // `x` scoped to that block — the outer binding never advances.
+                // The initializer is checked before the new binding exists, so
+                // a read of `name` below resolves to the shadowed binding.
+                let probe = self.begin_shadow_probe(name.name.clone(), name.span);
                 // Pre-bind closures so recursive references resolve.
                 if matches!(value, Expr::Closure { .. }) {
                     let fv = self.unifier.fresh_var();
                     self.define_var_at(&name.name, fv, name.span, *is_const);
                 }
                 let vt = self.check_expr(value);
+                self.warn_if_shadowed_decl(probe, value, ty.is_some(), *is_const);
                 // Phase 2.2: inherit `std.http` route tables across server
                 // builder chains (`s2 := s.route_get(...)`, `s2 := s`).
                 self.propagate_http_routes(&name.name, value);
@@ -511,7 +593,15 @@ impl Checker {
                         pat.span(),
                     ));
                 }
+                // #518: `a, b := f(b)` re-declares the body-scoped `b` from
+                // the untouched outer value every iteration, exactly like the
+                // single-binding form above.
+                let mark = self.shadow_probes.len();
+                for (bound, bound_span) in pattern_bindings(pat) {
+                    self.begin_shadow_probe(bound, bound_span);
+                }
                 let vt = self.check_expr(value);
+                self.warn_if_shadowed_destructure(mark);
                 let vt = self.unifier.resolve(&vt);
                 self.bind_pattern(pat, &vt);
                 Type::Unit
