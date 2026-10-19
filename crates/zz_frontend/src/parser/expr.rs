@@ -625,7 +625,8 @@ impl<'a> Parser<'a> {
     /// interpolate elsewhere (template mode), a bare `{` that cannot expand
     /// is almost certainly a mistake: warn once with the exact rule.
     /// Mirrors the triple-quoted rule: `{{`, `{}`, and JSON-like `{"key"`
-    /// stay silent.
+    /// stay silent. Spaces and tabs after `{` are insignificant (#516), so
+    /// they are skipped before every one of these tests.
     pub(crate) fn check_literal_braces(
         &mut self,
         chunks: &[(String, Span)],
@@ -642,7 +643,16 @@ impl<'a> Parser<'a> {
                 if c != '{' {
                     continue;
                 }
-                match chars.peek() {
+                // #516: `{ n}` expands like `{n}`, so the deciding char is
+                // the first one that is not a space or tab.
+                let mut rest = chars.clone();
+                let after = loop {
+                    match rest.next() {
+                        Some((_, c)) if c == ' ' || c == '\t' => continue,
+                        other => break other,
+                    }
+                };
+                match after {
                     // `{{` escape, or `{` at chunk end (escape boundary).
                     Some((_, '{')) | None => {
                         chars.next();
@@ -650,7 +660,7 @@ impl<'a> Parser<'a> {
                     }
                     // Expands, or is a deliberate literal (`{}`, `{"key"`).
                     Some((_, next))
-                        if is_interp_start(Some(*next)) || *next == '"' || *next == '}' =>
+                        if is_interp_start(Some(next)) || next == '"' || next == '}' =>
                     {
                         continue;
                     }
@@ -664,7 +674,7 @@ impl<'a> Parser<'a> {
                                 string_span,
                             )
                             .with_note(
-                                "single-line strings expand `{name}`, `{1 + 2}`, `{(x)}` — `{{`, `{}`, and `{\"key\"` stay literal; use `{{` for a literal `{`",
+                                "single-line strings expand `{name}`, `{1 + 2}`, `{(x)}` (spaces after `{` are fine) — `{{`, `{}`, and `{\"key\"` stay literal; use `{{` for a literal `{`",
                             ),
                         );
                         return; // One warning per string.

@@ -372,6 +372,16 @@ println("bin = {n:b}")      // 11111111
 println("dec = {n:d}")      // 255
 ```
 
+Spaces and tabs right after `{` are insignificant, so `{ n}` is the same
+interpolation as `{n}` (a trailing space was always fine):
+
+```zz
+n := 5
+pi := 3.14159
+println("n is { n}")        // n is 5
+println("pi = { pi:.2f}")   // pi = 3.14
+```
+
 Literal braces use doubled escapes — `{{` renders `{`, and a `}}`
 that closes a `{{` pair renders `}` — in both `"..."` and `"""..."""`
 strings. This is the preferred way to emit CSS or template syntax:

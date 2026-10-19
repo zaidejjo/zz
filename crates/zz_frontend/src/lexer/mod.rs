@@ -1025,13 +1025,15 @@ impl<'a> Lexer<'a> {
             }
             // String interpolation: `{ident...`, `{1...`, `{(...` start an
             // embedded expression — the same trigger set as triple-quoted
-            // strings, so `{1 + 2}` prints `3`. `{{`, `{}`, and JSON-like
-            // `{"key"...` stay literal text (checked above/below).
+            // strings, so `{1 + 2}` prints `3`. Spaces and tabs straight
+            // after `{` are skipped before that test (#516), so `{ n}` is
+            // `{n}`. `{{`, `{}`, and JSON-like `{"key"...` stay literal
+            // text (checked above/below).
             // Emit the accumulated text as StrFmt and enter interpolation
             // mode (leaving the string context underneath); the main loop
             // lexes `{` as LBrace, the expression, and `}` as RBrace, popping
             // back into string mode for the continuation.
-            Some('{') if is_interp_start(self.peek_char_at(1)) => {
+            Some('{') if self.interp_starts_after_brace() => {
                 let span = Span::new(start as u32, self.pos as u32);
                 // Clean prefix (unbroken from the opening quote, no escapes)
                 // borrows `src[start+1..pos]`; anything else keeps the
@@ -1288,8 +1290,9 @@ impl<'a> Lexer<'a> {
                 });
             }
             // Interpolation: `{ident...`, `{1...`, `{(...` start an embedded
-            // expression. `{{`, `{}` and `{"...` (JSON-like) stay literal.
-            Some('{') if is_interp_start(self.peek_char_at(1)) => {
+            // expression, also when spaces/tabs follow the brace (#516).
+            // `{{`, `{}` and `{"...` (JSON-like) stay literal.
+            Some('{') if self.interp_starts_after_brace() => {
                 let span = Span::new(start as u32, self.pos as u32);
                 let idx = self.tokens.len();
                 self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
@@ -1534,6 +1537,23 @@ impl<'a> Lexer<'a> {
         self.src[idx..].chars().next()
     }
 
+    /// Whether the `{` at the cursor opens an interpolation (#516).
+    ///
+    /// Spaces and tabs immediately after the brace are skipped before the
+    /// trigger test, so `{ n }` behaves exactly like `{n}`. The body is
+    /// lexed by the main loop, where whitespace between tokens is skipped
+    /// like anywhere else, so only the trigger had to become
+    /// whitespace-aware. `{{` stays the documented literal escape.
+    fn interp_starts_after_brace(&self) -> bool {
+        let mut offset = 1;
+        loop {
+            match self.peek_char_at(offset) {
+                Some(' ') | Some('\t') => offset += 1,
+                c => return is_interp_start(c),
+            }
+        }
+    }
+
     fn bump_char(&mut self) -> char {
         let c = self.peek_char().expect("bump past end of input");
         self.pos += c.len_utf8();
@@ -1595,6 +1615,8 @@ pub(crate) fn is_ident_start(c: char) -> bool {
 /// Interpolation trigger for both single-line and triple-quoted strings:
 /// `{` opens an embedded expression when followed by an identifier start,
 /// a digit, or `(`. `{{`, `{}` and JSON-like `{"key"...` stay literal text.
+/// Callers test this on the first char after `{`, spaces and tabs skipped
+/// (#516 — see [`Lexer::interp_starts_after_brace`]).
 pub(crate) fn is_interp_start(c: Option<char>) -> bool {
     match c {
         Some(ch) if is_ident_start(ch) => true,
@@ -2105,6 +2127,48 @@ mod tests {
                 (TokenKind::Str, String::new()),
             ]
         );
+    }
+
+    #[test]
+    fn single_line_interpolation_leading_space() {
+        // #516: `{ n}` is the same interpolation as `{n}` — a leading space
+        // used to be silently literal.
+        let toks = sig("\"a { n} b\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "a ".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "n".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, " b".to_string()),
+            ]
+        );
+        // Tabs, digits and parens skip the same way.
+        let toks = sig("\"{\t1 + 2}\"");
+        assert_eq!(toks[0], (TokenKind::StrFmt, String::new()));
+        assert_eq!(toks[1], (TokenKind::LBrace, "{".to_string()));
+        assert_eq!(toks[2], (TokenKind::Int, "1".to_string()));
+        let toks = sig("\"{ (a)}\"");
+        assert_eq!(toks[2], (TokenKind::LParen, "(".to_string()));
+    }
+
+    #[test]
+    fn single_line_space_before_literal_braces() {
+        // A space does not turn a deliberate literal into an interpolation:
+        // JSON-like `{ "k": 1}` and `{ }` stay text (#516).
+        let toks = sig("\"{ \\\"k\\\": 1}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{ \"k\": 1}".to_string())]);
+        let toks = sig("\"{ }\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{ }".to_string())]);
+    }
+
+    #[test]
+    fn triple_interpolation_leading_space() {
+        let toks = sig("\"\"\"a { n} b\"\"\"");
+        assert_eq!(toks[0], (TokenKind::StrFmt, "a ".to_string()));
+        assert_eq!(toks[1], (TokenKind::LBrace, "{".to_string()));
+        assert_eq!(toks[2], (TokenKind::Ident, "n".to_string()));
     }
 
     #[test]

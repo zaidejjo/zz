@@ -670,6 +670,29 @@ fn dead_brace_in_template_warns() {
 }
 
 #[test]
+fn space_after_brace_interpolates_without_warning() {
+    // #516: `{ n}` expands like `{n}`, so no dead-brace warning either.
+    let parsed = parse("func main() {\n    n := 5\n    println(\"[{ n}]\")\n}");
+    assert!(
+        parsed.errors.is_empty(),
+        "expected clean parse, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn space_before_json_braces_stays_silent() {
+    // `{ "k": 1}` is still a deliberate JSON-like literal — a space after
+    // `{` must not make it look like a failed interpolation (#516).
+    let parsed = parse("func main() {\n    x := 1\n    println(\"{x} { \\\"k\\\": 1}\")\n}");
+    assert!(
+        parsed.errors.is_empty(),
+        "expected clean parse, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn digit_braces_interpolate_without_warning() {
     // `{1 + 2}` expands now: no dead-brace warning.
     let parsed = parse("func main() {\n    println(\"{1 + 2}\")\n}");
