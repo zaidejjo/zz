@@ -3,7 +3,7 @@
 func sum(items: [int]) -> int {
     total := 0
     for item in items {
-        total := total + item
+        total = total + item
     }
     total
 }
@@ -11,7 +11,7 @@ func sum(items: [int]) -> int {
 func count_size(counts: {str: int}) -> int {
     n := 0
     for _k in counts {
-        n := n + 1
+        n = n + 1
     }
     n
 }

@@ -119,6 +119,23 @@ pub struct ConvertImpl {
     pub span: Span,
 }
 
+/// A `:=` declaration whose initializer is being checked, while probing
+/// whether it reads the binding the declaration shadows (#518).
+#[derive(Debug, Clone)]
+pub struct ShadowProbe {
+    /// Declared name.
+    pub name: String,
+    /// Where the declaration binds (`x` in `x := …`) — the warning points here.
+    pub span: Span,
+    /// Index of the scope the declaration binds into. A read resolving to a
+    /// *shallower* scope hit the shadowed outer binding; one at the same or
+    /// deeper index is a binder inside the initializer (closure parameter,
+    /// nested block), which is not shadowing.
+    pub depth: usize,
+    /// Set once such an outer read is seen.
+    pub referenced: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckResult {
     pub errors: Vec<RawDiag>,
@@ -1113,6 +1130,10 @@ pub(crate) struct Checker {
     pub(crate) loop_depth: usize,
     /// Names that were used (looked up) — for unused-variable warnings.
     pub(crate) used_names: std::collections::HashSet<String>,
+    /// Declarations whose initializer is being checked right now, probing
+    /// whether it reads the very binding the declaration shadows from an
+    /// enclosing scope (#518). Innermost last — see `begin_shadow_probe`.
+    pub(crate) shadow_probes: Vec<ShadowProbe>,
     /// Top-level names marked `pub` — should not emit unused warnings.
     pub(crate) pub_names: std::collections::HashSet<String>,
     /// Names defined in the current scope with their spans — for unused
@@ -1211,6 +1232,7 @@ impl Checker {
             current_bounds: HashMap::new(),
             loop_depth: 0,
             used_names: std::collections::HashSet::new(),
+            shadow_probes: Vec::new(),
             pub_names: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,

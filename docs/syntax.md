@@ -84,6 +84,35 @@ pi: float = 3.14
 scores: [int] = [1, 2, 3]
 ```
 
+### Shadowing and Assignment
+
+Both declaration forms bind a **new** name scoped to the block they appear in.
+Inside a loop body or an inner block that means a declaration does not update
+an outer binding — it shadows it:
+
+```zz
+x := 0
+i := 0
+while i < 3 {
+    x := x + 1     // warning: shadows the outer `x`
+    println(x)     // 1, 1, 1 — every pass reads the untouched outer 0
+    i = i + 1
+}
+println(x)         // 0
+
+while i < 6 {
+    x = x + 1      // `=` updates the outer binding
+    i = i + 1
+}
+println(x)         // 3
+```
+
+`zz check` warns when a declaration's initializer reads the very binding it
+shadows (`x := x + 1`, `one, b := f(b)`), because that shape is almost always a
+mistyped assignment; it offers `=` as a fix when the declaration is neither
+typed nor `const`. Shadowing with a fresh value (`x := 5`) is deliberate and
+stays silent. Assignment to an inner declaration never reaches the outer one.
+
 ### Type Aliases
 
 ```zz
