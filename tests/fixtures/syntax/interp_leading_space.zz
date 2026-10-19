@@ -1,0 +1,21 @@
+// features: float-arith, fstrings, locals, print, string-literal, string-ops
+// E2E: `{ expr }` interpolation — spaces and tabs right after `{` are
+// insignificant (#516). Only the leading whitespace used to be literal, so
+// `{ n}` printed the braces while `{n }` printed the value; both expand now.
+// Deliberate literals are untouched: `{{`, `{ }`, and JSON-like `{ "k": 1}`.
+n := 5
+pi := 3.14159
+
+println("lead:[{ n}]")
+println("both:[{ n }]")
+println("trail:[{n }]")
+println("spec:[{ pi:.2f}]")
+println("expr:[{ n + 1}]")
+println("tab:[{	n	}]")
+println("paren:[{ (n)}]")
+
+// Escapes and JSON-like braces keep their meanings with a space after `{`.
+println("esc:[{{ n}}]")
+println("empty:[{ }]")
+println("json:[{ \"a\": {}}]")
+println("interp_leading_space_ok")
