@@ -7,12 +7,14 @@
 //! [`verify`]ied before execution; `zz run --bytecode` executes only
 //! bytes-derived data — no AST is available on the load path.
 //!
-//! Fused/optimizer ops from the VM compiler ([`TakeSlot`][vm], slot-int
-//! fast paths, …) are desugared to core-op sequences by [`lower`] before
-//! serialization, so the format only ever contains core ops. Ops with
-//! dispatch/fallback semantics (`TakeVar`, `VecPushField`,
-//! `VecPushMethod`, `SpawnClosure`) stay core: their behavior is not
-//! expressible as a fixed core sequence.
+//! Fused/optimizer ops from the VM compiler (slot-int fast paths) travel
+//! as ops: the interpreter runs them natively, and [`lower`] /
+//! [`raise`] map them one to one (v3). [`lower::expand_fused`] restores
+//! the desugared core stream for backends that re-specialize the code
+//! themselves (the chunk→C emitter), so those passes see exactly the
+//! pre-v3 stream. `TakeVar` (env chain), `VecPushField` / `VecPushMethod`
+//! (field/method dispatch), and `SpawnClosure` (task-hook dispatch) stay
+//! core: their behavior is not expressible as a fixed core sequence.
 //!
 //! [vm]: zz_runtime::vm
 
@@ -31,10 +33,13 @@ use std::fmt;
 
 /// Magic bytes opening every `.zzc` file (spec §8).
 pub const MAGIC: [u8; 4] = *b"ZZC1";
-/// Format version this crate reads and writes (spec §8: this spec = 2).
-/// v2 adds the per-function locals type table (`FUNCS` records); v1
-/// files are rejected (re-emit with `zz build --emit-ir`).
-pub const VERSION: u32 = 2;
+/// Format version this crate reads and writes (spec §8: this spec = 3).
+/// v2 adds the per-function locals type table (`FUNCS` records); v3
+/// carries the VM's fused slot fast paths (`SlotInc`, `SlotBinaryInt`, …)
+/// as ops instead of desugaring them (the interpreter ran the desugared
+/// form on cached runs and paid 3 extra stack ops per loop iteration).
+/// Older files are rejected (re-emit with `zz build --emit-ir`).
+pub const VERSION: u32 = 3;
 
 /// Identity of the running binary: executable length + mtime + inode.
 ///

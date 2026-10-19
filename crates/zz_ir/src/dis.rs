@@ -151,6 +151,15 @@ fn op_text(module: &Module, op: &Op) -> String {
                 str_text(module, *field)
             )
         }
+        Op::SlotAddInt { dst, src } => format!("slotaddint {dst} {src}"),
+        Op::SlotInc { slot } => format!("slotinc {slot}"),
+        Op::SlotAddIntImm { dst, imm } => format!("slotaddintimm {dst} {imm}"),
+        Op::SlotLessIntSlot { a, b } => format!("slotlessintslot {a} {b}"),
+        Op::SlotLessIntImm { a, imm } => format!("slotlessintimm {a} {imm}"),
+        Op::SlotBinaryInt { dst, lhs, rhs, op } => format!("slotbinint {dst} {lhs} {rhs} {op:?}"),
+        Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
+            format!("slotbinintimm {dst} {lhs} {imm} {op:?}")
+        }
         Op::IntAdd => "iadd".to_string(),
         Op::IntSub => "isub".to_string(),
         Op::IntMul => "imul".to_string(),

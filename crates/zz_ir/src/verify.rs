@@ -31,6 +31,14 @@ fn effect(op: &Op) -> i64 {
         Op::SetFieldIndexTake { .. } => -2,
         Op::GetFieldIndex { .. } => 0,
         Op::LenField { .. } => 1,
+        // Fused slot fast paths: pure slot traffic — the arithmetic ones
+        // touch slots only (net 0), the comparisons push their Bool.
+        Op::SlotAddInt { .. }
+        | Op::SlotInc { .. }
+        | Op::SlotAddIntImm { .. }
+        | Op::SlotBinaryInt { .. }
+        | Op::SlotBinaryIntImm { .. } => 0,
+        Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
         Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => -1,
         Op::IntNeg => 0,
         Op::BinOp(_) => -1,
@@ -305,11 +313,8 @@ fn verify_func(
     // (after ids, before the inference walk that reads the table).
     let mut maxref: Option<usize> = None;
     for op in &func.code {
-        match op {
-            Op::LoadSlot(s) | Op::StoreSlot(s) => {
-                maxref = Some(maxref.map_or(*s as usize, |m: usize| m.max(*s as usize)));
-            }
-            _ => {}
+        if let Some(s) = op.slot_extent() {
+            maxref = Some(maxref.map_or(s as usize, |m: usize| m.max(s as usize)));
         }
     }
     for (_, s) in &func.toplevel_slots {
@@ -1184,6 +1189,40 @@ fn infer_func(
             }
             Op::LenField { .. } => {
                 st.push(TV::U);
+            }
+            // Fused slot fast paths. Guards, not types: a non-`Int` slot
+            // runs the generic op on the same operands, so what lands in
+            // `dst` is only known to be whatever that returns — Unknown.
+            // The named slots still must exist (they are frame extents the
+            // locals table has to cover). Comparisons are `Bool`-or-trap
+            // for every operand pair (`eval_binary` has no other `Lt`).
+            Op::SlotAddInt { dst, src } => {
+                declared(*dst)?;
+                declared(*src)?;
+            }
+            Op::SlotInc { slot } => {
+                declared(*slot)?;
+            }
+            Op::SlotAddIntImm { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::SlotLessIntSlot { a, b } => {
+                declared(*a)?;
+                declared(*b)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotLessIntImm { a, .. } => {
+                declared(*a)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotBinaryInt { dst, lhs, rhs, .. } => {
+                declared(*dst)?;
+                declared(*lhs)?;
+                declared(*rhs)?;
+            }
+            Op::SlotBinaryIntImm { dst, lhs, .. } => {
+                declared(*dst)?;
+                declared(*lhs)?;
             }
             Op::IntAdd => {
                 let r = pop(&mut st, pc)?;

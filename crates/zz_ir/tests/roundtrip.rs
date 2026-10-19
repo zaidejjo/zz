@@ -272,6 +272,97 @@ fn dis_is_stable() {
     assert!(a.contains("binop Add"), "missing add op:\n{a}");
 }
 
+/// v3 carries the compiler's fused slot fast paths through the format.
+/// The interpreter must get the op back on the load path (the desugared
+/// form paid three extra stack ops per loop iteration; that is the whole
+/// reason the format changed), while the chunk→C backend must still see
+/// the desugared stream it is tuned for.
+#[test]
+fn fused_slot_ops_survive_the_round_trip() {
+    fn is_fused(op: &zz_ir::Op) -> bool {
+        use zz_ir::Op::*;
+        matches!(
+            op,
+            SlotAddInt { .. }
+                | SlotInc { .. }
+                | SlotAddIntImm { .. }
+                | SlotLessIntSlot { .. }
+                | SlotLessIntImm { .. }
+                | SlotBinaryInt { .. }
+                | SlotBinaryIntImm { .. }
+        )
+    }
+    // Typed compile: the fusion sits behind the compiler's `Int` type
+    // guard, which is exactly what a real `zz run` supplies.
+    let module = lower_typed_spanmap(
+        "s := 0\nfor _i in 0..10 {\n s = s + 1\n}\ns",
+        &std::collections::HashMap::new(),
+    );
+    let dis = zz_ir::dis::disassemble(&module);
+    let count = |m: &zz_ir::Module| -> usize {
+        m.funcs
+            .iter()
+            .flat_map(|f| f.code.iter())
+            .filter(|o| is_fused(o))
+            .count()
+    };
+    assert!(count(&module) > 0, "fusion lost in lowering:\n{dis}");
+    assert!(dis.contains("slotinc"), "dis must show SlotInc:\n{dis}");
+    // The bytes keep them, and the decoder hands the same module back.
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    verify::verify(&loaded).expect("verify failed");
+    assert_eq!(codec::encode(&loaded), bytes, "re-encode differs");
+    assert_eq!(count(&loaded), count(&module), "fused ops lost in codec");
+    // Raising restores the VM op itself, not its expansion — and the
+    // loaded run still produces the program's value.
+    fn has_slot_inc(chunk: &zz_runtime::vm::Chunk) -> bool {
+        chunk.code.iter().any(|op| match op {
+            zz_runtime::vm::Op::SlotInc { .. } => true,
+            zz_runtime::vm::Op::MakeFunc { chunk, .. } => has_slot_inc(chunk),
+            _ => false,
+        })
+    }
+    let raised = raise::raise(&loaded).expect("raise failed");
+    assert!(
+        has_slot_inc(&raised),
+        "raise must restore the fused op, got {:?}",
+        raised.code
+    );
+    // Both forms must run the loop: the typed entry compiles top-level
+    // statements as statements, so the effect is read back from the
+    // promoted top-level slot (`s`) rather than the program value.
+    let mut interp = Interp::new();
+    let got = interp.run_loaded_chunk(&raised).expect("loaded run failed");
+    assert_eq!(
+        interp.env.get("s"),
+        Some(Value::Int(10)),
+        "fused-op loop did not run (program value {got:?})"
+    );
+    // The chunk→C entry stream: expanded back to the pre-v3 core ops, one
+    // extra value-producing op per fused op, same behavior.
+    let expanded = lower::expand_fused(&loaded).expect("expand failed");
+    verify::verify(&expanded).expect("expanded must verify");
+    assert_eq!(count(&expanded), 0, "expansion left fused ops behind");
+    let n_fused_ops: usize = loaded.funcs.iter().map(|f| f.code.len()).sum();
+    let n_expanded_ops: usize = expanded.funcs.iter().map(|f| f.code.len()).sum();
+    assert!(
+        n_expanded_ops > n_fused_ops,
+        "expansion must re-add the stack traffic ({n_expanded_ops} vs {n_fused_ops})"
+    );
+    let reexpanded = raise::raise(&expanded).expect("raise failed");
+    let mut interp2 = Interp::new();
+    let got2 = interp2
+        .run_loaded_chunk(&reexpanded)
+        .expect("expanded run failed");
+    assert_eq!(
+        interp2.env.get("s"),
+        Some(Value::Int(10)),
+        "expanded loop did not run"
+    );
+    assert_eq!(got2, got, "expanded run differs from fused run");
+}
+
 #[test]
 fn typed_signatures_populate() {
     use std::collections::HashMap;
@@ -639,7 +730,7 @@ fn annot_section_is_removable() {
 }
 
 #[test]
-fn dis_shows_locals_and_v2() {
+fn dis_shows_locals_and_format_version() {
     use std::collections::HashMap;
     let mut sigs = HashMap::new();
     sigs.insert("f".to_string(), int_sig(1));
@@ -648,14 +739,13 @@ fn dis_shows_locals_and_v2() {
         &sigs,
     );
     let text = zz_ir::dis::disassemble(&module);
-    assert!(text.contains("; zzcz v2"), "missing v2 header:\n{text}");
+    assert!(text.contains("; zzcz v3"), "missing v3 header:\n{text}");
     assert!(text.contains("locals=[int"), "missing locals:\n{text}");
 }
 
 #[test]
 fn vartab_records_loop_var_slots() {
     use std::collections::HashMap;
-    use zz_ir::Op;
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     let module = lower_typed_spanmap(
@@ -672,18 +762,19 @@ fn vartab_records_loop_var_slots() {
         .map(|(_, f)| f)
         .expect("m lifted");
     // Exactly one for-loop with one var; the recorded slot must agree
-    // with the slot the loop body loads (the disassembly shows the
-    // body's `loadslot`).
+    // with the slot the loop body reads (the body's `s = s + v` fuses
+    // into a slot-referencing op, so ask the op rather than the
+    // disassembly, which shows the fused form).
     assert_eq!(f.vartab.len(), 1, "one loop expected: {:?}", f.vartab);
     assert_eq!(f.vartab[0].len(), 1, "one var expected");
     let vslot = f.vartab[0][0];
     assert_ne!(vslot, u16::MAX, "loop var must be slot-bound");
-    assert!(
-        f.code
-            .iter()
-            .any(|op| matches!(op, Op::LoadSlot(s) if *s == vslot)),
-        "body never loads vartab slot {vslot}"
-    );
+    let referenced = f.code.iter().any(|op| {
+        let mut hit = false;
+        op.for_each_slot(|s| hit |= s == vslot);
+        hit
+    });
+    assert!(referenced, "body never reads vartab slot {vslot}");
     // A vartab/ForNext count mismatch must fail closed.
     let mut bad = module.clone();
     let mf = bad

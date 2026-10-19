@@ -145,6 +145,66 @@ pub enum Op {
         field: StrId,
     },
 
+    // ---- fused slot fast paths (carried from the VM compiler) ----
+    //
+    // The VM compiler emits these for hot locals (`x = x + 1` shapes).
+    // v3 carries them through the format instead of desugaring: the
+    // interpreter runs them natively, and desugaring cost the cached-run
+    // steady state ~2x on loop-shaped code (every iteration re-expanded
+    // to three extra stack ops). Each op is *exactly* the core sequence
+    // named in its doc comment — the sequence `lower` emitted before v3 —
+    // so `lower::expand_fused` restores that stream byte for byte for
+    // backends that re-specialize (the chunk→C emitter).
+    //
+    // The fast paths are guards, not types: a non-`Int` slot falls back to
+    // the generic op with `Span::default()` (see `vm::runtime`), so keeping
+    // them needs no type information and adds no semantics.
+    /// `slot[dst] = Int(slot[dst] + slot[src])`; desugars to
+    /// `LoadSlot dst; LoadSlot src; BinOp Add; StoreSlot dst`.
+    SlotAddInt {
+        dst: u16,
+        src: u16,
+    },
+    /// `slot[slot] = Int(slot[slot] + 1)`; desugars to
+    /// `LoadSlot s; PushConst 1; BinOp Add; StoreSlot s`.
+    SlotInc {
+        slot: u16,
+    },
+    /// `slot[dst] = Int(slot[dst] + imm)`; desugars to
+    /// `LoadSlot dst; PushConst imm; BinOp Add; StoreSlot dst`.
+    SlotAddIntImm {
+        dst: u16,
+        imm: i64,
+    },
+    /// Push `Bool(slot[a] < slot[b])`; desugars to
+    /// `LoadSlot a; LoadSlot b; BinOp Lt`.
+    SlotLessIntSlot {
+        a: u16,
+        b: u16,
+    },
+    /// Push `Bool(slot[a] < imm)`; desugars to
+    /// `LoadSlot a; PushConst imm; BinOp Lt`.
+    SlotLessIntImm {
+        a: u16,
+        imm: i64,
+    },
+    /// `slot[dst] = Int(slot[lhs] op slot[rhs])`; desugars to
+    /// `LoadSlot lhs; LoadSlot rhs; BinOp op; StoreSlot dst`.
+    SlotBinaryInt {
+        dst: u16,
+        lhs: u16,
+        rhs: u16,
+        op: BinOp,
+    },
+    /// `slot[dst] = Int(slot[lhs] op imm)`; desugars to
+    /// `LoadSlot lhs; PushConst imm; BinOp op; StoreSlot dst`.
+    SlotBinaryIntImm {
+        dst: u16,
+        lhs: u16,
+        imm: i64,
+        op: BinOp,
+    },
+
     // ---- typed integer arithmetic (wrap; trap MIN/-1, MIN%-1, div0) ----
     IntAdd,
     IntSub,
@@ -369,6 +429,13 @@ impl Op {
             Op::FieldBinopTake { .. } => 77,
             Op::GetFieldIndex { .. } => 78,
             Op::LenField { .. } => 79,
+            Op::SlotAddInt { .. } => 80,
+            Op::SlotInc { .. } => 81,
+            Op::SlotAddIntImm { .. } => 82,
+            Op::SlotLessIntSlot { .. } => 83,
+            Op::SlotLessIntImm { .. } => 84,
+            Op::SlotBinaryInt { .. } => 85,
+            Op::SlotBinaryIntImm { .. } => 86,
             Op::IntAdd => 14,
             Op::IntSub => 15,
             Op::IntMul => 16,
@@ -455,6 +522,13 @@ impl Op {
             Op::FieldBinopTake { .. } => "fieldbinoptake",
             Op::GetFieldIndex { .. } => "getfieldindex",
             Op::LenField { .. } => "lenfield",
+            Op::SlotAddInt { .. } => "slotaddint",
+            Op::SlotInc { .. } => "slotinc",
+            Op::SlotAddIntImm { .. } => "slotaddintimm",
+            Op::SlotLessIntSlot { .. } => "slotlessintslot",
+            Op::SlotLessIntImm { .. } => "slotlessintimm",
+            Op::SlotBinaryInt { .. } => "slotbinint",
+            Op::SlotBinaryIntImm { .. } => "slotbinintimm",
             Op::IntAdd => "iadd",
             Op::IntSub => "isub",
             Op::IntMul => "imul",
@@ -515,6 +589,45 @@ impl Op {
             Op::EnterScope => "enterscope",
             Op::ExitScope => "exitscope",
             Op::DeferRecord => "defer",
+        }
+    }
+
+    /// Highest frame slot this op reads or writes; `None` when it names no
+    /// slot. Single source of truth for frame extents: lowering sizes the
+    /// locals table with it and the verifier re-checks the same set, so a
+    /// slot can never be named by an op and missed by the table. Covers
+    /// the ops that name slots directly — the home-carrying take ops name
+    /// one too, but always alongside the load/store their sequence opens
+    /// with, so they add nothing here (and adding them would resize
+    /// existing tables for no correctness gain).
+    pub fn slot_extent(&self) -> Option<u16> {
+        let mut max: Option<u16> = None;
+        self.for_each_slot(|s| max = Some(max.map_or(s, |m: u16| m.max(s))));
+        max
+    }
+
+    /// Call `f` with every frame slot this op reads or writes (order is
+    /// unspecified). [`Op::slot_extent`] is defined through this, so the
+    /// extents lowering and verification agree on are the same set by
+    /// construction.
+    pub fn for_each_slot(&self, mut f: impl FnMut(u16)) {
+        match self {
+            Op::LoadSlot(s) | Op::StoreSlot(s) | Op::SlotInc { slot: s } => f(*s),
+            Op::SlotAddInt { dst, src } | Op::SlotLessIntSlot { a: dst, b: src } => {
+                f(*dst);
+                f(*src);
+            }
+            Op::SlotAddIntImm { dst, .. } | Op::SlotLessIntImm { a: dst, .. } => f(*dst),
+            Op::SlotBinaryInt { dst, lhs, rhs, .. } => {
+                f(*dst);
+                f(*lhs);
+                f(*rhs);
+            }
+            Op::SlotBinaryIntImm { dst, lhs, .. } => {
+                f(*dst);
+                f(*lhs);
+            }
+            _ => {}
         }
     }
 }

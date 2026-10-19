@@ -1,9 +1,9 @@
-//! `.zzc` binary codec (spec §8, v2).
+//! `.zzc` binary codec (spec §8, v3).
 //!
 //! Little-endian throughout. Layout:
 //!
 //! ```text
-//! magic[4] = "ZZC1", version u32 (=2), section-count u32,
+//! magic[4] = "ZZC1", version u32 (=3), section-count u32,
 //! per section: tag u32, offset u32, length u32,
 //! TYPES | STRINGS | CONSTS | FUNCS | CODE | SPANS | ANNOT payloads
 //! ```
@@ -11,13 +11,16 @@
 //! Section tags: `TYPES=1 STRINGS=2 CONSTS=3 FUNCS=4 CODE=5 SPANS=6
 //! ANNOT=7`. `FUNCS` entries reference (offset, length) ranges into the
 //! concatenated `CODE`/`SPANS` streams, in function order, and carry the
-//! locals type table (v2; mandatory semantics, NOT annotations). The
+//! locals type table (v2; mandatory semantics, NOT annotations). Op tags
+//! are append-only: v3 adds the VM's fused slot fast paths (80–86), which
+//! are carried as ops rather than desugared (see [`crate::op`]). The
 //! encoder is deterministic: decoding then re-encoding yields identical
 //! bytes.
 //!
 //! Decoding never panics: every read is bounds-checked and every id is
 //! range-checked, so fuzzed inputs surface as [`IrError`], never a crash.
-//! Only version 2 decodes; v1 files are rejected (re-emit them).
+//! Only the current version decodes; older files are rejected (re-emit
+//! them).
 
 use crate::op::{BinOp, UnOp};
 use crate::ty::IrType;
@@ -420,6 +423,35 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
         }
         Op::BinOp(op) => encode_binop(v, *op),
         Op::UnOp(op) => encode_unop(v, *op),
+        Op::SlotAddInt { dst, src } => {
+            put_u16(v, *dst);
+            put_u16(v, *src);
+        }
+        Op::SlotInc { slot } => put_u16(v, *slot),
+        Op::SlotAddIntImm { dst, imm } => {
+            put_u16(v, *dst);
+            put_i64(v, *imm);
+        }
+        Op::SlotLessIntSlot { a, b } => {
+            put_u16(v, *a);
+            put_u16(v, *b);
+        }
+        Op::SlotLessIntImm { a, imm } => {
+            put_u16(v, *a);
+            put_i64(v, *imm);
+        }
+        Op::SlotBinaryInt { dst, lhs, rhs, op } => {
+            put_u16(v, *dst);
+            put_u16(v, *lhs);
+            put_u16(v, *rhs);
+            encode_binop(v, *op);
+        }
+        Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
+            put_u16(v, *dst);
+            put_u16(v, *lhs);
+            put_i64(v, *imm);
+            encode_binop(v, *op);
+        }
         Op::CompoundIndexOp { op } => encode_binop(v, *op),
         Op::CompoundFieldOp { name, op } => {
             put_u32(v, name.0);
@@ -1217,6 +1249,35 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
                 field: StrId(r.u32()?),
             })
         }
+        80 => Ok(Op::SlotAddInt {
+            dst: r.u16()?,
+            src: r.u16()?,
+        }),
+        81 => Ok(Op::SlotInc { slot: r.u16()? }),
+        82 => Ok(Op::SlotAddIntImm {
+            dst: r.u16()?,
+            imm: r.i64()?,
+        }),
+        83 => Ok(Op::SlotLessIntSlot {
+            a: r.u16()?,
+            b: r.u16()?,
+        }),
+        84 => Ok(Op::SlotLessIntImm {
+            a: r.u16()?,
+            imm: r.i64()?,
+        }),
+        85 => Ok(Op::SlotBinaryInt {
+            dst: r.u16()?,
+            lhs: r.u16()?,
+            rhs: r.u16()?,
+            op: decode_binop(r)?,
+        }),
+        86 => Ok(Op::SlotBinaryIntImm {
+            dst: r.u16()?,
+            lhs: r.u16()?,
+            imm: r.i64()?,
+            op: decode_binop(r)?,
+        }),
         14 => Ok(Op::IntAdd),
         15 => Ok(Op::IntSub),
         16 => Ok(Op::IntMul),
