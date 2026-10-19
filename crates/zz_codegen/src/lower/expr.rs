@@ -2292,9 +2292,10 @@ impl Lowerer {
                             if !type_ns.is_empty() {
                                 let candidate = format!("{type_ns}.{method}");
                                 let std_candidate = format!("std.{type_ns}.{method}");
-                                if self.reachable_natives.contains(&candidate)
-                                    || self.reachable_natives.contains(&std_candidate)
-                                    || native_supported(&candidate)
+                                if self.ns_method_usable(type_ns, method)
+                                    && (self.reachable_natives.contains(&candidate)
+                                        || self.reachable_natives.contains(&std_candidate)
+                                        || native_supported(&candidate))
                                 {
                                     found_ns = type_ns;
                                 }
@@ -2318,8 +2319,9 @@ impl Lowerer {
                                     .filter(|ns| {
                                         let candidate = format!("{ns}.{method}");
                                         let std_candidate = format!("std.{ns}.{method}");
-                                        self.reachable_natives.contains(&candidate)
-                                            || self.reachable_natives.contains(&std_candidate)
+                                        self.ns_method_usable(ns, method)
+                                            && (self.reachable_natives.contains(&candidate)
+                                                || self.reachable_natives.contains(&std_candidate))
                                     })
                                     .collect();
                                 if let Some(ns) =
@@ -2346,6 +2348,7 @@ impl Lowerer {
                                         n.strip_suffix(suffix.as_str())
                                             .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
                                     })
+                                    .filter(|ns| self.ns_method_usable(ns, method))
                                     .collect();
                                 cands.sort_unstable();
                                 cands.dedup();
@@ -2448,6 +2451,7 @@ impl Lowerer {
                                             hits.push(k);
                                         }
                                     }
+                                    hits.retain(|h| self.is_real_callee(h));
                                     hits.sort_unstable();
                                     hits.dedup();
                                     if hits.len() == 1 {
@@ -2695,7 +2699,10 @@ impl Lowerer {
                                 _ => "",
                             };
                             if !ns.is_empty() {
-                                (format!("{ns}.{method}"), Some(*obj.clone()))
+                                (
+                                    self.method_spelling(ns, method, args.len() + 1),
+                                    Some(*obj.clone()),
+                                )
                             } else {
                                 // Unknown-type receiver (e.g. a span the
                                 // checker never recorded): still resolve a
@@ -3546,6 +3553,7 @@ impl Lowerer {
                 .iter()
                 .filter(|f| f.ends_with(suffix.as_str()))
                 .collect();
+            hits.retain(|h| self.is_real_callee(h));
             hits.sort_unstable();
             hits.dedup();
             if hits.len() == 1 {
@@ -4327,6 +4335,65 @@ impl Lowerer {
     /// native, or specialization key) can contain it.
     const FUNC_FIELD_CNAME: &'static str = "\0funfield";
 
+    /// Whether a callgraph name is a spelling this backend can really
+    /// call: a definition in the program or an embedded-C/Rust native
+    /// impl (checked under the name and its `std.`-qualified twin — the
+    /// callgraph records native candidates std-qualified).
+    ///
+    /// `reachable_funcs` also carries ghost candidates: the callgraph
+    /// records `<recv-ns>.<method>` for every receiver type because the
+    /// IR keeps method calls generic (`callmethod "len"`), so a `str.len`
+    /// entry can exist in a program that never defines or implements that
+    /// spelling (#521).
+    fn is_real_callee(&self, name: &str) -> bool {
+        let twin = match name.strip_prefix("std.") {
+            Some(bare) => bare.to_string(),
+            None => format!("std.{name}"),
+        };
+        self.tp.funcs.contains_key(name)
+            || native_supported(name)
+            || self.tp.funcs.contains_key(&twin)
+            || native_supported(&twin)
+    }
+
+    /// Whether this backend can actually call the `<ns>.<method>`
+    /// spelling.
+    ///
+    /// Reachability alone is not evidence that a spelling exists: the
+    /// callgraph records a candidate for every receiver type (the IR
+    /// keeps method calls generic — `callmethod "len"` — and resolves
+    /// them by value at run time), so a `str` receiver always produces a
+    /// `str.len` edge even though no such native exists — the generic
+    /// `len` builtin covers strings. Selecting that ghost spelling
+    /// emitted the loud ``native `str.len` is not implemented`` stub for
+    /// programs the VM runs, and dropped the receiver expression with it
+    /// (#521).
+    fn ns_method_usable(&self, ns: &str, method: &str) -> bool {
+        let cand = format!("{ns}.{method}");
+        native_supported(&cand) || self.tp.funcs.contains_key(&cand)
+    }
+
+    /// Spelling for a receiver-typed method call (`s.len()`, `b.len()`).
+    ///
+    /// The checker resolves dot-calls bare-first (the receiver-type
+    /// namespace is consulted only when the bare name has no signature)
+    /// and the IR keeps the call generic, so when the namespace spelling
+    /// is unusable (see [`Self::ns_method_usable`]) the bare callable of
+    /// matching arity is the call the program means. Anything else keeps
+    /// the namespace spelling, whose ZZ body — or loud missing-native
+    /// stub — is handled downstream.
+    fn method_spelling(&self, ns: &str, method: &str, nvalues: usize) -> String {
+        if self.ns_method_usable(ns, method) {
+            return format!("{ns}.{method}");
+        }
+        if self.tp.funcs.contains_key(method)
+            || (native_supported(method) && native_arity(method) == Some(nvalues))
+        {
+            return method.to_string();
+        }
+        format!("{ns}.{method}")
+    }
+
     fn field_free_target(&self, method: &str, sname: Option<&str>) -> Option<String> {
         // Bare names count only with a real definition: reachable_funcs
         // can hold phantom short names (the callgraph records
@@ -4355,6 +4422,7 @@ impl Lowerer {
                 hits.push(k);
             }
         }
+        hits.retain(|h| self.is_real_callee(h));
         hits.sort_unstable();
         hits.dedup();
         if hits.len() == 1 {
@@ -4838,9 +4906,15 @@ impl Lowerer {
             let Some(ns) = ns else { continue };
             let candidate = format!("{ns}.{method}");
             let std_candidate = format!("std.{ns}.{method}");
-            if self.reachable_natives.contains(&candidate)
-                || self.reachable_natives.contains(&std_candidate)
-                || native_supported(&candidate)
+            // Reachable-first, but only for spellings this backend can
+            // really call: the callgraph records `<recv-ns>.<method>`
+            // candidates for every receiver type, so a ghost (`str.len`
+            // on a `str` field) would otherwise abort here instead of
+            // falling through to the bare native below (#521).
+            if self.ns_method_usable(&ns, &method)
+                && (self.reachable_natives.contains(&candidate)
+                    || self.reachable_natives.contains(&std_candidate)
+                    || native_supported(&candidate))
             {
                 let span = zz_frontend::span::Span::new(0, 0);
                 return Some((

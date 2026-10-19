@@ -1,0 +1,65 @@
+// features: arrays, comparison, dicts, for-loop, func-call, imports, locals, match, methods, option-result, print, std-str, string-literal, structs
+// Chained and derived receivers keep the generic `.len()` the IR
+// dispatches by value type (`callmethod "len"`). A str-typed receiver
+// used to be rewritten to the callgraph ghost `str.len` — a name no
+// native implements — so AOT builds emitted `native `str.len` is not
+// implemented` (dropping the receiver expression) where the VM printed
+// the length (#521).
+//
+// Also pins the namespace spellings that *do* exist (`byte_len`,
+// `length`, `trim`, `split`) and the receivers that keep their own
+// namespace (`vec.len`, `dict.len`, `bytes.len`).
+import std.fs
+import std.str
+
+struct P {
+    name: str,
+}
+
+func helper() -> str {
+    return "abcd"
+}
+
+func opt() -> Option<str> {
+    return .some("xy")
+}
+
+func from_match(x: Option<str>) -> int {
+    match x {
+        .some(s) => s.len()
+        .none => 0
+    }
+}
+
+func from_field(p: P) -> int {
+    return p.name.len()
+}
+
+func from_loop(xs: [str]) -> int {
+    total := 0
+    for s in xs {
+        total = total + s.trim().len()
+    }
+    return total
+}
+
+func main() {
+    println(("a" + "bc").len())
+    println(str.reverse("abc").len())
+    println(helper().split("b").len())
+    println(helper().trim().len())
+    // `.len()` counts characters, `.byte_len()` bytes — the rescue must
+    // not swap one spelling for the other.
+    println(("héllo").len())
+    println(("héllo").byte_len())
+    println(helper().length())
+    println(("  AbC  " + "").trim().len())
+    println(["a", "b", "c"].len())
+    println({"a": 1, "b": 2}.len())
+    println(from_match(opt()))
+    println(from_field(P{name: "hello"}))
+    println(from_loop([" a ", " bb "]))
+    // Computed bytes receiver (`bytes.len`, a spelling that really exists).
+    println(fs.read_bytes("tests/fixtures/stdlib/data/sample.tar").unwrap().len())
+    println("chained_len_ok")
+}
