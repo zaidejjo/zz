@@ -10,6 +10,15 @@
 //! `nested_vec` (take-push fusion on two live slots), and `bool_iter`
 //! ([bool] iteration through the boxed path) pin chunk↔HIR parity for
 //! the shapes the sieve bench exercises at scale.
+//!
+//! Deliberately uncovered, pending #508: `Op::CallMethod` and the `match`
+//! family (`MatchArm` / `MatchGuard` / `MatchError` / `IfLetMatch`) have
+//! no chunk arms. The VM dispatches them on the receiver *value*
+//! (`lookup_method_recv`), so chunk support needs a build-time resolution
+//! pass (or an emitted method table), not just an emitter arm — until
+//! that exists, corpus programs must avoid method calls on variants and
+//! `match` over Option/Result (`unwrap_or` and friends are covered by the
+//! VM/HIR legs only). Variant *construction* is covered since #508.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
