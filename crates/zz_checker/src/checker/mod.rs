@@ -1012,9 +1012,28 @@ fn check_program_impl(
     // Deep-resolve the recorded span types now that all unification is done.
     // Skip any that still contain inference variables (unresolvable at
     // compile time — the node lowers dynamically).
+    //
+    // Variant constructors are the exception: default their unconstrained
+    // payload parameters to `unit` first, the same rule that validates
+    // annotated declarations (`.ok(42)` is `Result<int, unit>`, `.none` is
+    // `Option<unit>`). The outer constructor is what method dispatch needs —
+    // `.ok(42).unwrap_or(0)` has to resolve `result.unwrap_or`, not the
+    // same-named `option` twin — and dropping the entry because the *payload*
+    // position was unconstrained lost exactly that: the AOT fell back to its
+    // arity-based namespace guess (`option` precedes `result`) and called
+    // `option.unwrap_or` on a `Result` value, while the VM dispatched on the
+    // value and printed the answer (#505). Variant payloads erase to
+    // `zz_value`, so defaulting matches the runtime representation. Arrays and
+    // dicts keep the drop: their element types select the unboxed
+    // representation, which cannot be guessed.
     let mut span_types: std::collections::HashMap<SpanKey, Type> = std::collections::HashMap::new();
     for (key, ty) in &checker.span_types {
-        let rt = checker.unifier.resolve_deep(ty);
+        let mut rt = checker.unifier.resolve_deep(ty);
+        if inference::contains_var(&rt)
+            && matches!(rt, Type::Option(_) | Type::Result(_, _) | Type::Enum(_, _))
+        {
+            inference::default_variant_vars(&mut rt);
+        }
         if !inference::contains_var(&rt) {
             span_types.insert(key.clone(), rt);
         }

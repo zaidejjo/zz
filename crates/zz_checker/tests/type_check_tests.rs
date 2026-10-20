@@ -3609,3 +3609,51 @@ fn unknown_root_gets_no_import_suggestion() {
         r.errors
     );
 }
+
+/// A variant constructor with an unconstrained payload position keeps its
+/// outer constructor in the span map (payloads default to `unit`, exactly as
+/// annotated declarations are validated). Method dispatch reads the outer
+/// type: dropping the entry made `.ok(42).unwrap_or(0)` resolve the
+/// `option.unwrap_or` twin in the AOT while the VM dispatched on the value
+/// (#505).
+#[test]
+fn bare_variant_constructor_keeps_outer_type_in_span_map() {
+    fn span_types_of(src: &str) -> Vec<Type> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let (_checked, span_types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        span_types.into_values().collect()
+    }
+
+    let ok = span_types_of("func main() {\n    r := .ok(42)\n}");
+    assert!(
+        ok.iter()
+            .any(|t| matches!(t, Type::Result(a, b) if **a == Type::Int && **b == Type::Unit)),
+        "`.ok(42)` must record `Result<int, unit>`, got {ok:?}"
+    );
+
+    let err = span_types_of("func main() {\n    e := .err(\"boom\")\n}");
+    assert!(
+        err.iter()
+            .any(|t| matches!(t, Type::Result(a, b) if **a == Type::Unit && **b == Type::Str)),
+        "`.err(\"boom\")` must record `Result<unit, str>`, got {err:?}"
+    );
+
+    let none = span_types_of("func main() {\n    n := .none\n}");
+    assert!(
+        none.iter()
+            .any(|t| matches!(t, Type::Option(x) if **x == Type::Unit)),
+        "`.none` must record `Option<unit>`, got {none:?}"
+    );
+}

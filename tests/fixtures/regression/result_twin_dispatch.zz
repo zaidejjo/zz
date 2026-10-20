@@ -1,0 +1,22 @@
+// features: func-call, locals, methods, option-result, print
+// A bare variant constructor must keep its inferred type through the
+// checker's span map: `.ok(42)` is `Result<int, unit>`, so `.unwrap_or`
+// resolves the `result` twin — the same twin the VM reaches by dispatching
+// on the value type. Dropping the entry because the *payload* position was
+// an unconstrained inference variable lost the outer constructor, and the
+// AOT's arity-based namespace fallback picked `option.unwrap_or`
+// (`option` precedes `result` in the scan order) for a `Result` value:
+// `error: option.unwrap_or: expected an option` on a check-green program
+// (#505). Annotated declarations were unaffected because the annotation
+// resolved the payload and the entry survived.
+func main() {
+    r := .ok(42)
+    println(r.unwrap_or(0))
+    // Inline receiver: no `checker_types` record to consult, so this one
+    // depends entirely on the span-map entry for the constructor.
+    println(.ok(1).unwrap_or(0))
+    s := .some(3)
+    println(s.unwrap_or(0))
+    println(.none.unwrap_or(9))
+    println("result_twin_dispatch_ok")
+}
