@@ -1594,6 +1594,18 @@ fn range_loop_fast_path_matches_the_tree_walker() {
     assert_same(
         "func f() -> int {\n    total := 0\n    for i in 0..3 {\n        g := |x: int| { x + i }\n        total = total + g(1)\n    }\n    total\n}\nf()",
     );
+    // Array iteration takes the same in-place path (the element is cloned
+    // out of the iterable copy the loop holds).
+    assert_same("total := 0\nfor x in [1, 2, 3, 4] {\n    total = total + x\n}\ntotal");
+    assert_same("total := 0\nfor x in [] {\n    total = total + 1\n}\ntotal");
+    assert_same(
+        "total := 0\nrows := [[1, 2], [3]]\nfor row in rows {\n    for v in row {\n        total = total + v\n    }\n}\ntotal",
+    );
+    // Mutating the source array mid-loop must not reach the loop's iterable
+    // copy (the detach the regression fixture also pins).
+    assert_same(
+        "b := [10, 20, 30]\ns := 0\nm := 0\nfor v in b {\n    m = m + 1\n    s = s + v\n    if m == 1 { b[1] = 200 }\n}\ns",
+    );
 }
 
 /// A `for` loop in non-final statement position has its value discarded by

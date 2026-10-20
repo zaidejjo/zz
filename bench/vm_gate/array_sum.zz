@@ -1,0 +1,15 @@
+// Gate: element iteration (`for x in array`) — the shape the `ForNext`
+// in-place fast path targets. Same 1e6 inner iterations as `loop_sum`, so
+// the two rows compare the per-iteration handler cost directly.
+import std.time
+
+t0 := time.now_ms()
+arr := [1, 2, 3, 4, 5]
+sum := 0
+for _r in 0..200000 {
+    for x in arr {
+        sum = sum + x
+    }
+}
+t1 := time.now_ms()
+println("array_sum: {t1 - t0}ms result={sum}")
