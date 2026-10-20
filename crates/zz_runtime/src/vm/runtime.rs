@@ -1671,6 +1671,44 @@ impl Vm {
                         self.frames.last_mut().unwrap().ip = ip - 1;
                         return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
                     }
+                    // Range fast path. `for i in a..b` — the shape nearly
+                    // every index loop compiles to — leaves `[range, idx,
+                    // var]` on top of the stack, so the generic churn below
+                    // (truncate the var, pop the index as a `Value`, match
+                    // the iterable, push idx + var back) is a compare and
+                    // two in-place writes. Both edges end in the exact same
+                    // state as the generic path: a live iteration leaves
+                    // `idx + step` under the new var, and the exhausted edge
+                    // pops the loop frame and truncates to its base, so the
+                    // caller's `Pop` still drops the range. `in_env` loops
+                    // (the var is defined in a scope) and multi-var loops
+                    // stay generic.
+                    {
+                        let len = self.stack.len();
+                        if !*in_env && vars.len() == 1 && len >= 3 {
+                            if let (Value::Range(r), Value::Int(i)) =
+                                (&self.stack[len - 3], &self.stack[len - 2])
+                            {
+                                let i = *i;
+                                let step = r.step;
+                                let end = r.end;
+                                let finished = if step > 0 { i >= end } else { i <= end };
+                                if finished {
+                                    record_branch!(true);
+                                    let li = self.loops.pop().unwrap();
+                                    self.stack.truncate(li.stack_base + 1);
+                                    interp.env = li.env;
+                                    ip = *exit;
+                                } else {
+                                    record_branch!(false);
+                                    self.stack[len - 1] = Value::Int(i);
+                                    self.stack[len - 2] = Value::Int(i.wrapping_add(step));
+                                    ip = *body;
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     let num_vars = vars.len();
                     // Pop num_vars loop variables from previous iteration
                     self.stack.truncate(self.stack.len() - num_vars);
