@@ -1562,6 +1562,40 @@ fn nested_loop_vartab_slots_follow_chunk_order() {
     );
 }
 
+/// `for i in a..b` takes the `ForNext` handler's in-place fast path (the
+/// value stack keeps `[range, idx, var]`, so a live iteration is a compare
+/// plus two writes). It must be indistinguishable from the generic
+/// truncate/pop/push path, including the exhausted edge's loop-frame pop and
+/// truncation — so every case is differential against the tree-walker.
+#[test]
+fn range_loop_fast_path_matches_the_tree_walker() {
+    // Straight line.
+    assert_same("total := 0\nfor i in 0..10 {\n    total = total + i\n}\ntotal");
+    // Empty range: the first test exits without running the body.
+    assert_same("total := 0\nfor i in 3..3 {\n    total = total + 1\n}\ntotal");
+    // Nonzero start.
+    assert_same("total := 0\nfor i in 5..9 {\n    total = total + i\n}\ntotal");
+    // Nested with `continue` (jumps to the test) and `break` (jumps to the
+    // exit after `Break` pops the loop frame).
+    assert_same(
+        "total := 0\nfor i in 0..6 {\n    if i == 1 { continue }\n    for j in 0..6 {\n        if j == 4 { break }\n        total = total + i * j\n    }\n}\ntotal",
+    );
+    // An inner range loop that *exhausts* must pop its loop frame, otherwise
+    // the outer `continue` below still sees the inner one.
+    assert_same(
+        "n := 0\nfor i in 0..4 {\n    for j in 0..2 {\n        n = n + j\n    }\n    if i == 1 { continue }\n    n = n + i\n}\nn",
+    );
+    // Statement-position loop whose body leaves a value: the exit stack must
+    // still line up with the caller's `Pop`.
+    assert_same("total := 0\nfor i in 0..4 {\n    total = total + i\n    total * 2\n}\ntotal");
+    // A captured loop variable takes the generic `in_env` path. (Wrapped in
+    // a function: at module scope a closure capturing the loop var is a
+    // pre-existing gap, tracked separately.)
+    assert_same(
+        "func f() -> int {\n    total := 0\n    for i in 0..3 {\n        g := |x: int| { x + i }\n        total = total + g(1)\n    }\n    total\n}\nf()",
+    );
+}
+
 /// A `for` loop in non-final statement position has its value discarded by
 /// the caller's `Op::Pop`, so the per-iteration `Unit` + `SetLoopResult`
 /// pair is dead work and must not be emitted. The `Unit` placeholder pushed
