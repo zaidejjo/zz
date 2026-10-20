@@ -255,9 +255,18 @@ pub enum Op {
     /// item(s) (bound to `var` in a fresh iteration scope when `in_env`, or
     /// left on the stack as a local slot(s)), or exit when the iterable is
     /// exhausted.
+    ///
+    /// `for` loops are laid out rotated — the test sits at the bottom of
+    /// the loop and jumps forward into the body — so this op is both the
+    /// test and the back-edge: one dispatch per iteration instead of a
+    /// test plus an unconditional `Jump`.
     ForNext {
         vars: Vec<String>,
+        /// Loop exit: the iterable is exhausted, so control lands just
+        /// past the `Pop` that drops it.
         exit: usize,
+        /// Body entry: where a non-exhausted iteration resumes.
+        body: usize,
         in_env: bool,
         span: Span,
     },

@@ -1491,6 +1491,77 @@ fn for_loop_header_is_fornext_carrying_the_safepoint() {
     );
 }
 
+/// v4 rotates `for` loops: the test is the loop's last op and jumps
+/// forward into the body, so a live iteration is one dispatch instead of a
+/// test plus an unconditional back-edge `Jump`. Guards the layout: the body
+/// sits between the loop's entry `Jump` and the test, `ForSetup` names the
+/// test, and the only jump to the test is that entry (no back-edge `Jump`).
+#[test]
+fn for_loop_back_edge_is_the_fornext_itself() {
+    let chunk =
+        compile_with_push_native("total := 0\nfor i in 0..10 {\n    total = total + i\n}\ntotal");
+    let (test_pc, body) = chunk
+        .code
+        .iter()
+        .enumerate()
+        .find_map(|(pc, op)| match op {
+            Op::ForNext { body, .. } => Some((pc, *body)),
+            _ => None,
+        })
+        .expect("expected a ForNext op");
+    assert!(
+        body < test_pc,
+        "rotated body must precede the test (body {body}, test {test_pc})"
+    );
+    assert!(
+        matches!(chunk.code[body - 1], Op::Jump(t) if t == test_pc),
+        "loop must enter at its test, got {:?}",
+        chunk.code[body - 1]
+    );
+    let header = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::ForSetup { header, .. } => Some(*header),
+            _ => None,
+        })
+        .expect("expected a ForSetup op");
+    assert_eq!(header, test_pc, "ForSetup must name the rotated test");
+    let jumps_to_test: Vec<usize> = chunk
+        .code
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, op)| match op {
+            Op::Jump(t) if *t == test_pc => Some(pc),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        jumps_to_test,
+        vec![body - 1],
+        "a rotated loop has no back-edge `Jump`; only the entry targets the test"
+    );
+}
+
+/// `fornext_slots[k]` must describe the kth `ForNext` in chunk order (AOT
+/// peels index it by op order). Rotation emits the test after the body, so
+/// an inner loop's op precedes its outer loop's — the slots table has to
+/// follow the ops, not the nesting.
+#[test]
+fn nested_loop_vartab_slots_follow_chunk_order() {
+    let chunk = compile_with_push_native(
+        "total := 0\nfor i in 0..2 {\n    for j in 0..3 {\n        total = total + j\n    }\n}\ntotal",
+    );
+    assert_eq!(chunk.fornext_slots.len(), 2, "two loops");
+    // The inner var sits above the outer var on the stack, and the inner
+    // test comes first in code order.
+    assert!(
+        chunk.fornext_slots[0][0] > chunk.fornext_slots[1][0],
+        "vartab order must match ForNext order: {:?}",
+        chunk.fornext_slots
+    );
+}
+
 /// A `for` loop in non-final statement position has its value discarded by
 /// the caller's `Op::Pop`, so the per-iteration `Unit` + `SetLoopResult`
 /// pair is dead work and must not be emitted. The `Unit` placeholder pushed

@@ -3155,7 +3155,9 @@ impl<'a> Emitter<'a> {
                 }
                 out.push_str("    }\n");
             }
-            Op::ForNext { vars, exit, in_env } => {
+            Op::ForNext {
+                vars, exit, in_env, ..
+            } => {
                 if *in_env {
                     return Err(ChunkError::op("for loop with captured env vars"));
                 }
@@ -3689,10 +3691,13 @@ pub fn build_module(
     entry_main: &str,
 ) -> Result<super::lower::LoweredC, ChunkError> {
     // The format carries the VM's fused slot fast paths (the interpreter
-    // runs them natively). Every pass below analyses and emits the core
-    // stream — int-twin selection, peels, cond-fusion — so expand first:
-    // the passes, and therefore the C output, are exactly the pre-v3 ones.
-    let expanded = zz_ir::lower::expand_fused(module)
+    // runs them natively) and its rotated `for` layout. Every pass below
+    // analyses and emits the core, unrotated stream — int-twin selection,
+    // peels, cond-fusion — so derotate and expand first: the passes, and
+    // therefore the C output, are exactly the pre-v3/v4 ones.
+    let derotated = zz_ir::lower::derotate_loops(module)
+        .map_err(|e| ChunkError::op(&format!("derotate loops: {e}")))?;
+    let expanded = zz_ir::lower::expand_fused(derotated.as_ref())
         .map_err(|e| ChunkError::op(&format!("expand fused slot ops: {e}")))?;
     let module: &Module = expanded.as_ref();
     coverage(module)?;

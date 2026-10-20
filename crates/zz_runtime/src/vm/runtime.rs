@@ -1656,6 +1656,7 @@ impl Vm {
                 Op::ForNext {
                     vars,
                     exit,
+                    body,
                     in_env,
                     span,
                 } => {
@@ -1804,6 +1805,10 @@ impl Vm {
                             }
                             interp.env = scope;
                         }
+                        // Rotated layout: the body follows in `body` (the
+                        // loop is entered at this op), so this jump is the
+                        // back-edge — one dispatch per iteration.
+                        ip = *body;
                     }
                 }
                 Op::WhileSetup { exit, header } => {

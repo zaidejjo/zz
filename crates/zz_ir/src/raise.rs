@@ -419,12 +419,18 @@ impl<'a> Raiser<'a> {
                 span: VmSpan::default(),
                 num_vars: *num_vars,
             }),
-            Op::ForNext { vars, exit, in_env } => Ok(VmOp::ForNext {
+            Op::ForNext {
+                vars,
+                exit,
+                body,
+                in_env,
+            } => Ok(VmOp::ForNext {
                 vars: vars
                     .iter()
                     .map(|v| self.str(*v))
                     .collect::<Result<_, _>>()?,
                 exit: *exit as usize,
+                body: *body as usize,
                 in_env: *in_env,
                 span: VmSpan::default(),
             }),

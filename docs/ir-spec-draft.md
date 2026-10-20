@@ -238,6 +238,14 @@ its own number rendering on both engines; float→int saturation is §5.
   int-twin/peel/cond-fuse passes) call `lower::expand_fused` first, so
   their input is byte-identical to v2 lowering.
   The v3 decoder rejects older files.
+- v4 rotates `for` loops: `ForNext` carries `body` — its target on a live
+  iteration — and is the loop's last op, so the body is entered from the
+  test instead of falling into it. A live iteration costs one dispatch
+  (`ForNext`) instead of the test plus an unconditional back-edge `Jump`.
+  Backends that pattern-match the historical layout (the `chunk→C`
+  int-twin / peel / cond-fuse passes) call `lower::derotate_loops` first:
+  a position-preserving swap that restores the pre-v4 stream exactly.
+  The v4 decoder rejects older files.
 - Constants pool holds all literals (including string-literal
   markers for `print` — the M2 subset needs no string machinery
   beyond this).

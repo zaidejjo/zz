@@ -9,7 +9,10 @@
 //!
 //! Fused/optimizer ops from the VM compiler (slot-int fast paths) travel
 //! as ops: the interpreter runs them natively, and [`lower`] /
-//! [`raise`] map them one to one (v3). [`lower::expand_fused`] restores
+//! [`raise`] map them one to one (v3). v4 rotates `for` loops — the test
+//! sits at the bottom, `Op::ForNext` carries its body entry and is also the
+//! back-edge — and [`lower::derotate_loops`] restores the historical shape
+//! for backends that pattern-match it. [`lower::expand_fused`] restores
 //! the desugared core stream for backends that re-specialize the code
 //! themselves (the chunk→C emitter), so those passes see exactly the
 //! pre-v3 stream. `TakeVar` (env chain), `VecPushField` / `VecPushMethod`
@@ -33,13 +36,16 @@ use std::fmt;
 
 /// Magic bytes opening every `.zzc` file (spec §8).
 pub const MAGIC: [u8; 4] = *b"ZZC1";
-/// Format version this crate reads and writes (spec §8: this spec = 3).
+/// Format version this crate reads and writes (spec §8: this spec = 4).
 /// v2 adds the per-function locals type table (`FUNCS` records); v3
 /// carries the VM's fused slot fast paths (`SlotInc`, `SlotBinaryInt`, …)
 /// as ops instead of desugaring them (the interpreter ran the desugared
-/// form on cached runs and paid 3 extra stack ops per loop iteration).
+/// form on cached runs and paid 3 extra stack ops per loop iteration);
+/// v4 rotates `for` loops (`ForNext` carries its body entry and is the
+/// back-edge, so an iteration is one test dispatch instead of a test plus
+/// a `Jump`).
 /// Older files are rejected (re-emit with `zz build --emit-ir`).
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// Identity of the running binary: executable length + mtime + inode.
 ///

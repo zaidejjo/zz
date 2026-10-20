@@ -104,7 +104,7 @@ fn jump_targets(op: &Op) -> Vec<u32> {
         Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfFalseBool(t) => {
             vec![*t]
         }
-        Op::ForNext { exit, .. } => vec![*exit],
+        Op::ForNext { exit, body, .. } => vec![*exit, *body],
         Op::WhileCond { exit } => vec![*exit],
         Op::MatchArm { next, .. } => vec![*next],
         Op::MatchGuard { next, .. } => vec![*next],
@@ -459,9 +459,17 @@ fn simulate(code: &[Op], spans: &[Span]) -> Result<u32, IrError> {
         // pollution out of downstream joins. MatchError traps the same
         // way (non-exhaustive match aborts) — its fallthrough edge
         // would carry a dead scrutinee-restore state into the join.
+        // `ForNext` always transfers (body on a live iteration, exit when
+        // exhausted), and in the rotated layout the pc after it is a loop
+        // exit whose depth model differs.
         let falls_through = !matches!(
             op,
-            Op::Jump(_) | Op::Return | Op::Break | Op::Continue | Op::MatchError
+            Op::Jump(_)
+                | Op::Return
+                | Op::Break
+                | Op::Continue
+                | Op::MatchError
+                | Op::ForNext { .. }
         );
         //
         // Restoring match ops push the scrutinee back on their MISS edge
@@ -1690,7 +1698,12 @@ fn infer_func(
         // the edge into whatever follows is dead (see above).
         let falls = !matches!(
             op,
-            Op::Jump(_) | Op::Return | Op::Break | Op::Continue | Op::MatchError
+            Op::Jump(_)
+                | Op::Return
+                | Op::Break
+                | Op::Continue
+                | Op::MatchError
+                | Op::ForNext { .. }
         );
         let miss = match op {
             Op::MatchArm {
