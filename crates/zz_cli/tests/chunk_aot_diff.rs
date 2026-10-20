@@ -400,6 +400,36 @@ func main() {
 }
 "#;
 
+// Variant construction (`MakeVariant`) and variant boxes crossing
+// container boundaries: `.some` / `.none` / `.ok` / `.err` were rejected
+// outright ("unsupported makevariant"), which kept the whole Option/Result
+// stdlib surface off the chunk backend (#508). The array case pins the
+// ownership rule too: variants are refcounted boxes now (`zz_vbox`), so
+// `MakeArray`'s clone-then-release is a net move — with the pre-#507
+// immortal box it double-freed (repro in the issue).
+const VARIANT_CONSTRUCT: &str = r#"
+import std.math
+import std.vec
+
+func mk(v: int) -> Option<int> {
+    return .some(v)
+}
+
+func main() {
+    println(vec.min_val([3, 1, 2]))
+    println(vec.max_val([3, 1, 2]))
+    println(math.min_arr([4, 2, 9]))
+    a := [mk(1), mk(2), mk(3)]
+    for v in a {
+        println(v)
+    }
+    println(.some(7))
+    println(.none)
+    println(.ok(41))
+    println(.err("boom"))
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -420,6 +450,7 @@ const CASES: &[(&str, &str)] = &[
     ("stdlib_str", STDLIB_STR),
     ("range_display", RANGE_DISPLAY),
     ("cond_cmp", COND_CMP),
+    ("variant_construct", VARIANT_CONSTRUCT),
 ];
 
 // Condition fusion pin: slot-vs-slot and slot-vs-const int compares

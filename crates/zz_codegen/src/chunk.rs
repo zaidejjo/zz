@@ -96,6 +96,7 @@ pub fn supported(op: &Op) -> bool {
             | Op::Safepoint
             | Op::MakeArray(_)
             | Op::MakeDict(_)
+            | Op::MakeVariant { .. }
             | Op::ArrayPush
             | Op::IndexOp
             | Op::StoreIndexOp
@@ -178,6 +179,7 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Op::Safepoint => (0, 0),
             Op::MakeArray(n) => (*n as usize, 1),
             Op::MakeDict(n) => (2 * *n as usize, 1),
+            Op::MakeVariant { has_arg, .. } => (usize::from(*has_arg), 1),
             Op::ArrayPush => (2, 1),
             Op::IndexOp => (2, 1),
             Op::StoreIndexOp => (3, 1),
@@ -809,6 +811,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>, HashSet<usize
             Op::Safepoint => (0, 0),
             Op::MakeArray(n) => (*n as usize, 1),
             Op::MakeDict(n) => (2 * *n as usize, 1),
+            Op::MakeVariant { has_arg, .. } => (usize::from(*has_arg), 1),
             Op::ArrayPush => (2, 1),
             Op::IndexOp => (2, 1),
             Op::StoreIndexOp => (3, 1),
@@ -3285,7 +3288,48 @@ impl<'a> Emitter<'a> {
                     "    { zz_value _v = st[--sp]; zz_cstore(&st[_lbase[_ldepth-1]], _v); }\n",
                 );
             }
+            Op::MakeVariant { name, has_arg } => {
+                // `.some(x)` / `.ok(x)` / `.err(x)` / `.none`. `zz_variant_*`
+                // is a take convention: `zz_vbox_new` stores the value with
+                // refs == 1, so the popped stack slot's reference moves into
+                // the box — the same call HIR emits for `Expr::Variant`.
+                // Cloning first would strand the stack reference unless it
+                // were released again; `.none` carries no payload, so it
+                // pushes the bare tag (#508).
+                let variant = self.str(*name).to_string();
+                match (variant.as_str(), *has_arg) {
+                    ("some", true) => out.push_str(
+                        "    { zz_value _v = st[--sp]; st[sp++] = zz_variant_some(_v); }\n",
+                    ),
+                    ("ok", true) => out.push_str(
+                        "    { zz_value _v = st[--sp]; st[sp++] = zz_variant_ok(_v); }\n",
+                    ),
+                    ("err", true) => out.push_str(
+                        "    { zz_value _v = st[--sp]; st[sp++] = zz_variant_err(_v); }\n",
+                    ),
+                    ("none", false) => {
+                        out.push_str("    st[sp++] = (zz_value){ZZ_OPTION_NONE, {0}};\n");
+                    }
+                    // The VM rejects these shapes at run time (`.ok` needs
+                    // an argument, `.none` takes none); checked programs
+                    // cannot build them, so fail the build loudly.
+                    _ => {
+                        return Err(ChunkError::op(&format!(
+                            "makevariant {variant} (has_arg={has_arg})"
+                        )))
+                    }
+                }
+            }
             Op::MakeArray(n) => {
+                // Net move per element: the push adopts the clone, then the
+                // stack slot's own reference is dropped. A bare move (push
+                // the slot, skip the release) would leak — `zz_array_push`
+                // heals arena-derived elements into a fresh heap copy, so
+                // the original wrapper's reference still has to go — and
+                // before the box refcount landed (#507) that release freed
+                // the immortal box the array element kept pointing at, i.e.
+                // the double free reproduced in #508. Variants are ordinary
+                // refcounted boxes now, so this pair is the box-aware path.
                 out.push_str(&format!(
                     "    {{ zz_value _a = zz_array_new(); for (int _k = 0; _k < {n}; _k++) {{ zz_value _e = st[sp-{n}+_k]; zz_array_push(_a.arr, zz_clone(_e)); }} for (int _k = 0; _k < {n}; _k++) zz_release(&st[sp-{n}+_k]); sp -= {n}; st[sp++] = _a; }}\n"
                 ));
