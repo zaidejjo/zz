@@ -87,6 +87,14 @@ impl Unifier {
     ///
     /// Used by duplicate-type scans that previously compared
     /// `resolve(a) == resolve(b)` (two full-tree clones per comparison).
+    ///
+    /// An *unbound* variable matches any type: it is a slot the merge can
+    /// still pin, and callers follow a `true` with `unify`, which binds it.
+    /// Treating it as distinct instead produced unions nobody resolves —
+    /// `[.some(1), .none]` merged `Option<int>` with `Option<?err>` into
+    /// `Union(Option<int>, Option<?err>)`, the declaration's annotation only
+    /// reached the first member, and `?err` survived to the "cannot infer"
+    /// check (#533).
     pub fn eq_resolved(&self, a: &Type, b: &Type) -> bool {
         let (mut a, mut b) = (a, b);
         // Peel bound top-level Vars iteratively (shared borrows only).
@@ -109,7 +117,8 @@ impl Unifier {
             }
         }
         match (a, b) {
-            (Type::Var(x), Type::Var(y)) => x == y,
+            // Unbound variable: compatible with anything (see the doc above).
+            (Type::Var(_), _) | (_, Type::Var(_)) => true,
             (Type::Int, Type::Int)
             | (Type::Float, Type::Float)
             | (Type::Bool, Type::Bool)
