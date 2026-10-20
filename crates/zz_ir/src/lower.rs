@@ -10,6 +10,10 @@
 //! - `SlotAddInt/Inc/Imm/Less*/Binary*` → slot loads, generic `BinOp`,
 //!   store (their non-int fallbacks already run generic `eval_binary`)
 //!
+//! `for` loops lower in the rotated v4 layout: the test sits at the bottom
+//! and `ForNext` is both the test and the back-edge. Backends tuned to the
+//! historical layout call [`derotate_loops`] before their own passes.
+//!
 //! Ops with dispatch/fallback semantics stay core: `TakeVar` (falls back
 //! to the funcs/natives chain), `VecPushField` / `VecPushMethod`
 //! (field/method dispatch), `SpawnClosure` (task-hook dispatch).
@@ -673,10 +677,15 @@ impl<'a> Lowerer<'a> {
                 num_vars: *num_vars,
             }]),
             VmOp::ForNext {
-                vars, exit, in_env, ..
+                vars,
+                exit,
+                body,
+                in_env,
+                ..
             } => Ok(vec![Op::ForNext {
                 vars: vars.iter().map(|v| self.intern(v)).collect(),
                 exit: *exit as u32,
+                body: *body as u32,
                 in_env: *in_env,
             }]),
             VmOp::WhileSetup { exit, header } => Ok(vec![Op::WhileSetup {
@@ -821,7 +830,7 @@ fn remap_and_flatten(
                     Some(vec![*t])
                 }
                 Op::ForSetup { exit, .. } => Some(vec![*exit]),
-                Op::ForNext { exit, .. } => Some(vec![*exit]),
+                Op::ForNext { exit, body, .. } => Some(vec![*exit, *body]),
                 Op::WhileSetup { exit, .. } => Some(vec![*exit]),
                 Op::WhileCond { exit } => Some(vec![*exit]),
                 Op::MatchArm { next, .. } => Some(vec![*next]),
@@ -853,9 +862,15 @@ fn remap_and_flatten(
                             .ok_or_else(|| IrError::new("loop header out of range"))?,
                         num_vars,
                     },
-                    Op::ForNext { vars, in_env, .. } => Op::ForNext {
+                    Op::ForNext {
+                        vars,
+                        body: _,
+                        in_env,
+                        ..
+                    } => Op::ForNext {
                         vars,
                         exit: nt[0],
+                        body: nt[1],
                         in_env,
                     },
                     Op::WhileSetup { header, .. } => Op::WhileSetup {
@@ -950,6 +965,162 @@ fn intern_int(consts: &mut Vec<Const>, i: i64) -> ConstId {
     let id = ConstId(consts.len() as u32);
     consts.push(c);
     id
+}
+
+/// Undo the v4 rotated `for` layout for backends that expect the
+/// historical shape. Borrows the input when every loop already falls
+/// through (`ForNext.body == pc + 1`).
+///
+/// The VM compiler emits each `for` loop rotated — the entry jumps to the
+/// test at the bottom, and a live `ForNext` jumps forward into the body:
+///
+/// ```text
+///   ForSetup{exit, header = check}
+///   Jump(check)                    ; entry
+/// body_start:
+///   <body>
+/// check:
+///   ForNext{body = body_start, exit}
+/// ```
+///
+/// The chunk→C backend's int-twin / peel / cond-fuse passes recognize the
+/// historical layout (`ForNext` header, straight-line body, `Jump` back
+/// edge), so this pass swaps the two op positions back:
+///
+/// ```text
+///   ForSetup{exit, header = check}
+/// check:
+///   ForNext{body = check + 1, exit}  ; falls through into the body
+///   <body>
+///   Jump(check)
+/// ```
+///
+/// The swap is position-preserving (`ForNext.body` is already the
+/// fall-through pc) and every pc-carrying field is retargeted, so the
+/// result is the pre-v4 stream — same op count, same spans. `vartab` (the
+/// per-`ForNext` loop-var slot table the peeler indexes by op order) is
+/// reordered with the ops: nesting reverses the pair, the inner test being
+/// emitted first in the rotated layout.
+pub fn derotate_loops(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrError> {
+    let rotated = module.funcs.iter().any(|f| {
+        f.code
+            .iter()
+            .enumerate()
+            .any(|(pc, op)| matches!(op, Op::ForNext { body, .. } if (*body as usize) <= pc))
+    });
+    if !rotated {
+        return Ok(std::borrow::Cow::Borrowed(module));
+    }
+    let mut out = module.clone();
+    for f in &mut out.funcs {
+        // Rotated loops as (entry `Jump` pc, `ForNext` pc).
+        let mut swaps: Vec<(usize, usize)> = Vec::new();
+        for (pc, op) in f.code.iter().enumerate() {
+            let Op::ForNext { body, .. } = op else {
+                continue;
+            };
+            let body = *body as usize;
+            if body == pc + 1 {
+                // Already the historical layout: falls through.
+                continue;
+            }
+            if body > pc {
+                return Err(IrError::new(format!(
+                    "cannot derotate loop: `ForNext` at {pc} has a forward body {body}"
+                )));
+            }
+            let entry = body.checked_sub(1);
+            let entry =
+                entry.filter(|e| matches!(f.code.get(*e), Some(Op::Jump(t)) if *t as usize == pc));
+            // A rotated loop whose entry jump is missing cannot happen in
+            // the compiler's output; fail closed instead of handing a
+            // backend a shape its peeler would misread.
+            let Some(entry) = entry else {
+                return Err(IrError::new(format!(
+                    "cannot derotate loop: `ForNext` at {pc} has body {body} but no entry `Jump`"
+                )));
+            };
+            swaps.push((entry, pc));
+        }
+        if swaps.is_empty() {
+            continue;
+        }
+        // vartab is indexed by `ForNext` order, and the swap can reverse a
+        // nested pair (the inner test is emitted first in the rotated
+        // layout). Record the old order so it can follow the ops.
+        let fornext_pcs: Vec<usize> = f
+            .code
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| matches!(op, Op::ForNext { .. }))
+            .map(|(pc, _)| pc)
+            .collect();
+        if f.vartab.len() != fornext_pcs.len() {
+            return Err(IrError::new(
+                "cannot derotate loop: vartab length does not match `ForNext` count",
+            ));
+        }
+        // Old pc -> new pc for every pc-carrying field. A target that
+        // named the test follows it to the entry slot (the historical
+        // `ForNext` header). One-past-the-end stays terminal.
+        let mut map: Vec<u32> = (0..=f.code.len() as u32).collect();
+        for &(entry, check) in &swaps {
+            map[check] = entry as u32;
+        }
+        for &(entry, check) in &swaps {
+            let test = std::mem::replace(&mut f.code[check], Op::Jump(entry as u32));
+            f.code[entry] = test;
+        }
+        for op in &mut f.code {
+            retarget_in_place(&map, op)?;
+        }
+        // The moved test falls through into the body in the historical
+        // layout, so its `body` is the op right after it — never a mapped
+        // old pc (`body == check` for an empty body, and an inner test can
+        // sit at `entry + 1`).
+        for &(entry, _) in &swaps {
+            if let Op::ForNext { body, .. } = &mut f.code[entry] {
+                *body = entry as u32 + 1;
+            }
+        }
+        let mut order: Vec<usize> = (0..fornext_pcs.len()).collect();
+        order.sort_by_key(|&i| map[fornext_pcs[i]]);
+        let vartab = std::mem::take(&mut f.vartab);
+        f.vartab = order.into_iter().map(|i| vartab[i].clone()).collect();
+    }
+    Ok(std::borrow::Cow::Owned(out))
+}
+
+/// Rewrite every pc-carrying field of `op` through `map`.
+fn retarget_in_place(map: &[u32], op: &mut Op) -> Result<(), IrError> {
+    let at = |t: &mut u32| -> Result<(), IrError> {
+        *t = map
+            .get(*t as usize)
+            .copied()
+            .ok_or_else(|| IrError::new("derotate: jump target out of range"))?;
+        Ok(())
+    };
+    match op {
+        Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfFalseBool(t) => at(t)?,
+        Op::ForSetup { exit, header, .. } => {
+            at(exit)?;
+            at(header)?;
+        }
+        Op::ForNext { exit, body, .. } => {
+            at(exit)?;
+            at(body)?;
+        }
+        Op::WhileSetup { exit, header } => {
+            at(exit)?;
+            at(header)?;
+        }
+        Op::WhileCond { exit } => at(exit)?,
+        Op::MatchArm { next, .. } => at(next)?,
+        Op::MatchGuard { next, .. } => at(next)?,
+        Op::IfLetMatch { els, .. } => at(els)?,
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Desugar the fused slot fast paths into the core sequences they stand

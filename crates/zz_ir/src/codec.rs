@@ -469,9 +469,15 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             put_u32(v, *header);
             put_u8(v, *num_vars);
         }
-        Op::ForNext { vars, exit, in_env } => {
+        Op::ForNext {
+            vars,
+            exit,
+            body,
+            in_env,
+        } => {
             put_ids(v, vars);
             put_u32(v, *exit);
+            put_u32(v, *body);
             put_u8(v, *in_env as u8);
         }
         Op::WhileSetup { exit, header } => {
@@ -1299,6 +1305,7 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
         28 => Ok(Op::ForNext {
             vars: str_ids(r)?,
             exit: r.u32()?,
+            body: r.u32()?,
             in_env: r.u8()? == 1,
         }),
         29 => Ok(Op::WhileSetup {

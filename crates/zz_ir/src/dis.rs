@@ -180,9 +180,17 @@ fn op_text(module: &Module, op: &Op) -> String {
         } => {
             format!("forsetup exit={exit} header={header} vars={num_vars}")
         }
-        Op::ForNext { vars, exit, in_env } => {
+        Op::ForNext {
+            vars,
+            exit,
+            body,
+            in_env,
+        } => {
             let v: Vec<String> = vars.iter().map(|x| str_text(module, *x)).collect();
-            format!("fornext [{}] exit={exit} env={in_env}", v.join(", "))
+            format!(
+                "fornext [{}] exit={exit} body={body} env={in_env}",
+                v.join(", ")
+            )
         }
         Op::WhileSetup { exit, header } => format!("whilesetup exit={exit} header={header}"),
         Op::WhileCond { exit } => format!("whilecond exit={exit}"),

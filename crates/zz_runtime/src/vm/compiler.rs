@@ -1884,10 +1884,15 @@ impl Compiler {
             Op::JumpIfTrue(_) => Op::JumpIfTrue(target),
             Op::JumpIfFalseBool(_, span) => Op::JumpIfFalseBool(target, span),
             Op::ForNext {
-                vars, in_env, span, ..
+                vars,
+                body,
+                in_env,
+                span,
+                ..
             } => Op::ForNext {
                 vars,
                 exit: target,
+                body,
                 in_env,
                 span,
             },
@@ -1896,11 +1901,15 @@ impl Compiler {
         };
     }
 
-    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool, span: Span) -> usize {
+    /// Emit the loop test/back-edge (`ForNext`) at the current position
+    /// and return its pc so the caller can patch the exit. `body` is the
+    /// rotated loop's body entry.
+    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool, body: usize, span: Span) -> usize {
         let pos = self.chunk.code.len();
         self.emit(Op::ForNext {
             vars,
             exit: 0,
+            body,
             in_env,
             span,
         });
@@ -2143,7 +2152,14 @@ impl Compiler {
                     span: *span,
                     num_vars: num_vars_u8,
                 });
-                let header = self.chunk.code.len();
+                // Rotated loop: enter at the test (emitted after the body),
+                // so a non-exhausted `ForNext` jumps straight into the body.
+                // That makes `ForNext` the back-edge as well as the test —
+                // one dispatch per iteration instead of two — while
+                // `continue` still targets it (the loop frame's header).
+                let entry_pos = self.chunk.code.len();
+                self.emit(Op::Jump(0));
+                let body_start = self.chunk.code.len();
                 // No standalone `Safepoint` here: the cooperative yield check
                 // is charged to `ForNext` instead. `ForNext` runs once per
                 // iteration and is the header target for both the back-edge
@@ -2152,7 +2168,6 @@ impl Compiler {
                 // Determine if any var is captured by an inner closure
                 let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
                 let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
-                let j = self.emit_for_next(var_names.clone(), any_captured, *span);
                 // Push locals for each var — last var at highest slot,
                 // first at lowest
                 let num_vars = vars.len();
@@ -2178,18 +2193,19 @@ impl Compiler {
                 // Loop-var slots for the IR vartab, in var order
                 // (`u16::MAX` = env-captured, no slot): lets AOT peels
                 // address the pushed values without re-deriving positions.
-                self.chunk.fornext_slots.push(
-                    (0..num_vars)
-                        .map(|i| {
-                            let v = &vars[i];
-                            if self.captured.contains(&v.name) {
-                                u16::MAX
-                            } else {
-                                (self.stack_height - num_vars + i) as u16
-                            }
-                        })
-                        .collect(),
-                );
+                // Pushed after the `ForNext` is emitted (below): vartab
+                // entries pair with `ForNext` ops in chunk order, and a
+                // nested loop in the body emits its op first.
+                let vartab_slots: Vec<u16> = (0..num_vars)
+                    .map(|i| {
+                        let v = &vars[i];
+                        if self.captured.contains(&v.name) {
+                            u16::MAX
+                        } else {
+                            (self.stack_height - num_vars + i) as u16
+                        }
+                    })
+                    .collect();
                 let body_needs_env = self.scope_declares_captured(body);
                 // The loop's result slot is written before `ForSetup` and only
                 // read by a caller that keeps the loop's value. When the caller
@@ -2223,9 +2239,14 @@ impl Compiler {
                 // Either way the loop's own slot keeps the `Unit` placeholder
                 // written before `ForSetup`, which the caller's `Op::Pop`
                 // removes.
-                self.emit(Op::Jump(header));
-                self.patch_jump(j);
+                // Test + back-edge last (rotated layout): `patch_jump` fills
+                // the exit, then the entry jump and the setup header point at
+                // it.
+                let header = self.emit_for_next(var_names, any_captured, body_start, *span);
+                self.patch_jump(header);
                 let exit = self.chunk.code.len();
+                self.chunk.fornext_slots.push(vartab_slots);
+                self.chunk.code[entry_pos] = Op::Jump(header);
                 self.chunk.code[setup_pos] = Op::ForSetup {
                     exit,
                     header,
@@ -3915,37 +3936,43 @@ impl Compiler {
                     span: *span,
                     num_vars: 1,
                 });
-                let header = self.chunk.code.len();
+                // Rotated loop (see the `for` site above): the test is
+                // emitted last, so the entry and the filter's skip both jump
+                // forward to it.
+                let entry_pos = self.chunk.code.len();
+                self.emit(Op::Jump(0));
+                let body_start = self.chunk.code.len();
                 let in_env = self.captured.contains(&var.name);
-                let j = self.emit_for_next(vec![var.name.clone()], in_env, *span);
                 self.locals.push(Local {
                     name: var.name.clone(),
                     slot: self.stack_height - 1,
                     in_env,
                 });
                 // vartab entry (see the `for` site above): single var.
-                self.chunk.fornext_slots.push(vec![if in_env {
+                let vartab_slots = vec![if in_env {
                     u16::MAX
                 } else {
                     (self.stack_height - 1) as u16
-                }]);
+                }];
+                // Filter skip, patched to the test once it is emitted.
+                let mut skip: Option<usize> = None;
                 if let Some(f) = filter {
                     self.compile_expr(f);
-                    self.emit(Op::JumpIfFalse(header));
-                    self.emit(Op::LoadSlot(result_slot as u16));
-                    self.compile_expr(body);
-                    self.emit(Op::ArrayPush(*span));
-                    self.emit(Op::StoreSlot(result_slot as u16));
-                    self.emit(Op::Jump(header));
-                } else {
-                    self.emit(Op::LoadSlot(result_slot as u16));
-                    self.compile_expr(body);
-                    self.emit(Op::ArrayPush(*span));
-                    self.emit(Op::StoreSlot(result_slot as u16));
-                    self.emit(Op::Jump(header));
+                    skip = Some(self.chunk.code.len());
+                    self.emit(Op::JumpIfFalse(0));
                 }
-                self.patch_jump(j);
+                self.emit(Op::LoadSlot(result_slot as u16));
+                self.compile_expr(body);
+                self.emit(Op::ArrayPush(*span));
+                self.emit(Op::StoreSlot(result_slot as u16));
+                let header = self.emit_for_next(vec![var.name.clone()], in_env, body_start, *span);
+                self.patch_jump(header);
                 let exit = self.chunk.code.len();
+                self.chunk.code[entry_pos] = Op::Jump(header);
+                if let Some(pos) = skip {
+                    self.chunk.code[pos] = Op::JumpIfFalse(header);
+                }
+                self.chunk.fornext_slots.push(vartab_slots);
                 self.chunk.code[setup_pos] = Op::ForSetup {
                     exit,
                     header,

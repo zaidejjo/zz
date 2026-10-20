@@ -236,9 +236,20 @@ pub enum Op {
         num_vars: u8,
     },
     /// Advance a `for` loop or exit when exhausted.
+    ///
+    /// Loops are laid out rotated (v4): the test is the loop's last op
+    /// and jumps forward into the body, so a non-exhausted iteration
+    /// costs one dispatch instead of a test plus a back-edge `Jump`.
+    /// Backends that want the historical layout (`ForNext` header,
+    /// straight-line body, `Jump` back-edge) call
+    /// [`crate::lower::derotate_loops`] first.
     ForNext {
         vars: Vec<StrId>,
         exit: u32,
+        /// Body entry for a non-exhausted iteration. In the rotated
+        /// layout this precedes the op; in the historical layout it is
+        /// simply `pc + 1`.
+        body: u32,
         in_env: bool,
     },
     /// Push a `while` loop frame.

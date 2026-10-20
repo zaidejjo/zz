@@ -739,8 +739,169 @@ fn dis_shows_locals_and_format_version() {
         &sigs,
     );
     let text = zz_ir::dis::disassemble(&module);
-    assert!(text.contains("; zzcz v3"), "missing v3 header:\n{text}");
+    assert!(text.contains("; zzcz v4"), "missing v4 header:\n{text}");
     assert!(text.contains("locals=[int"), "missing locals:\n{text}");
+}
+
+#[test]
+fn derotate_loops_restores_the_historical_layout() {
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    sigs.insert("m".to_string(), int_sig(0));
+    let module = lower_typed_spanmap(
+        "func m() {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n s\n}\nm()",
+        &sigs,
+    );
+    let fi = module
+        .funcs
+        .iter()
+        .position(|f| module.strings.get(f.name.0 as usize).map(String::as_str) == Some("m"))
+        .expect("func m");
+    let f = &module.funcs[fi];
+    let (test_pc, body) = f
+        .code
+        .iter()
+        .enumerate()
+        .find_map(|(pc, op)| match op {
+            zz_ir::Op::ForNext { body, .. } => Some((pc, *body as usize)),
+            _ => None,
+        })
+        .expect("expected a for loop");
+    // Rotated: the body runs up to the test, which the entry jump targets.
+    assert_eq!(body + 1, test_pc, "rotated layout puts the test last");
+    assert!(
+        matches!(f.code[body - 1], zz_ir::Op::Jump(t) if t as usize == test_pc),
+        "rotated loop must enter at the test, got {:?}",
+        f.code[body - 1]
+    );
+    let derotated = lower::derotate_loops(&module).expect("derotate");
+    let f = &derotated.funcs[fi];
+    // Historical: `ForNext` header, body after it, `Jump` back-edge.
+    assert!(
+        matches!(f.code[body - 1], zz_ir::Op::ForNext { body: b, .. } if b as usize == body),
+        "derotated loop must start with its test, got {:?}",
+        f.code[body - 1]
+    );
+    assert!(
+        matches!(f.code[test_pc], zz_ir::Op::Jump(t) if t as usize == body - 1),
+        "derotated loop must end with the back-edge, got {:?}",
+        f.code[test_pc]
+    );
+    assert!(
+        matches!(f.code[body - 2], zz_ir::Op::ForSetup { header, .. } if header as usize == body - 1),
+        "ForSetup must name the moved header, got {:?}",
+        f.code[body - 2]
+    );
+    verify::verify(&derotated).expect("derotated module verifies");
+    // Already-historical input is borrowed untouched.
+    match lower::derotate_loops(&derotated).expect("idempotent") {
+        std::borrow::Cow::Borrowed(_) => {}
+        std::borrow::Cow::Owned(_) => panic!("derotate rewrote an unrotated module"),
+    }
+}
+
+#[test]
+fn derotate_keeps_vartab_aligned_with_nested_loops() {
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    sigs.insert("m".to_string(), int_sig(0));
+    let module = lower_typed_spanmap(
+        "func m() {\n s := 0\n for _i in 0..2 {\n  for j in 0..3 {\n   s = s + j\n  }\n }\n s\n}\nm()",
+        &sigs,
+    );
+    let fi = module
+        .funcs
+        .iter()
+        .position(|f| module.strings.get(f.name.0 as usize).map(String::as_str) == Some("m"))
+        .expect("func m");
+    let f = &module.funcs[fi];
+    assert_eq!(f.vartab.len(), 2, "two loops");
+    let fornexts = f
+        .code
+        .iter()
+        .filter(|op| matches!(op, zz_ir::Op::ForNext { .. }))
+        .count();
+    assert_eq!(fornexts, 2);
+    // Rotated: the inner test is emitted first, so vartab starts with the
+    // inner (higher) slot.
+    assert!(
+        f.vartab[0][0] > f.vartab[1][0],
+        "rotated vartab must follow chunk order: {:?}",
+        f.vartab
+    );
+    let derotated = lower::derotate_loops(&module).expect("derotate");
+    let f = &derotated.funcs[fi];
+    // Derotated the outer header comes first, and the slots table follows
+    // so the kth `ForNext` still owns its own entry.
+    assert!(
+        f.vartab[0][0] < f.vartab[1][0],
+        "derotated vartab must follow the moved headers: {:?}",
+        f.vartab
+    );
+    verify::verify(&derotated).expect("derotated module verifies");
+}
+
+#[test]
+fn derotate_handles_an_empty_loop_body() {
+    // A body with no ops puts the test at the body entry itself
+    // (`ForNext.body == pc`). Today's compiler always emits something in
+    // the body, so build the shape by hand: the swap must still find the
+    // entry jump and produce the historical `ForNext; Jump(test)` pair.
+    use zz_ir::{
+        Const, ConstId, FuncDef, FuncId, FuncSig, IrType, Module, Op, Span, StrId, TypeId,
+    };
+    let module = Module {
+        types: vec![IrType::Unknown],
+        strings: vec!["m".to_string()],
+        consts: vec![Const::Unit],
+        funcs: vec![FuncDef {
+            name: StrId(0),
+            arity: 0,
+            params: vec![],
+            sig: FuncSig {
+                params: vec![],
+                ret: TypeId(0),
+            },
+            toplevel_slots: vec![],
+            vartab: vec![vec![]],
+            locals: vec![TypeId(0)],
+            // [placeholder, iterable, setup, entry jump, test (body ==
+            // test), exit pop].
+            code: vec![
+                Op::PushConst(ConstId(0)),
+                Op::LoadSlot(0),
+                Op::ForSetup {
+                    exit: 6,
+                    header: 4,
+                    num_vars: 0,
+                },
+                Op::Jump(4),
+                Op::ForNext {
+                    vars: vec![],
+                    exit: 6,
+                    body: 4,
+                    in_env: false,
+                },
+                Op::Pop,
+            ],
+            spans: vec![Span::new(0, 0); 6],
+            max_stack: 3,
+        }],
+        entry: FuncId(0),
+    };
+    let derotated = lower::derotate_loops(&module).expect("derotate");
+    let code = &derotated.funcs[0].code;
+    assert!(
+        matches!(code[3], Op::ForNext { body: 4, .. }),
+        "empty loop must start with its test, got {:?}",
+        code[3]
+    );
+    assert!(
+        matches!(code[4], Op::Jump(3)),
+        "empty loop must end with the back-edge, got {:?}",
+        code[4]
+    );
+    verify::verify(&derotated).expect("derotated module verifies");
 }
 
 #[test]
@@ -858,6 +1019,7 @@ fn verify_accepts_error_declared_iterable() {
                 Op::ForNext {
                     vars: vec![],
                     exit: 6,
+                    body: 5,
                     in_env: false,
                 },
                 Op::Jump(4),
