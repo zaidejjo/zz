@@ -10,6 +10,15 @@
 //! `nested_vec` (take-push fusion on two live slots), and `bool_iter`
 //! ([bool] iteration through the boxed path) pin chunk↔HIR parity for
 //! the shapes the sieve bench exercises at scale.
+//!
+//! Deliberately uncovered, pending #508: `Op::CallMethod` and the `match`
+//! family (`MatchArm` / `MatchGuard` / `MatchError` / `IfLetMatch`) have
+//! no chunk arms. The VM dispatches them on the receiver *value*
+//! (`lookup_method_recv`), so chunk support needs a build-time resolution
+//! pass (or an emitted method table), not just an emitter arm — until
+//! that exists, corpus programs must avoid method calls on variants and
+//! `match` over Option/Result (`unwrap_or` and friends are covered by the
+//! VM/HIR legs only). Variant *construction* is covered since #508.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -400,6 +409,36 @@ func main() {
 }
 "#;
 
+// Variant construction (`MakeVariant`) and variant boxes crossing
+// container boundaries: `.some` / `.none` / `.ok` / `.err` were rejected
+// outright ("unsupported makevariant"), which kept the whole Option/Result
+// stdlib surface off the chunk backend (#508). The array case pins the
+// ownership rule too: variants are refcounted boxes now (`zz_vbox`), so
+// `MakeArray`'s clone-then-release is a net move — with the pre-#507
+// immortal box it double-freed (repro in the issue).
+const VARIANT_CONSTRUCT: &str = r#"
+import std.math
+import std.vec
+
+func mk(v: int) -> Option<int> {
+    return .some(v)
+}
+
+func main() {
+    println(vec.min_val([3, 1, 2]))
+    println(vec.max_val([3, 1, 2]))
+    println(math.min_arr([4, 2, 9]))
+    a := [mk(1), mk(2), mk(3)]
+    for v in a {
+        println(v)
+    }
+    println(.some(7))
+    println(.none)
+    println(.ok(41))
+    println(.err("boom"))
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -420,6 +459,7 @@ const CASES: &[(&str, &str)] = &[
     ("stdlib_str", STDLIB_STR),
     ("range_display", RANGE_DISPLAY),
     ("cond_cmp", COND_CMP),
+    ("variant_construct", VARIANT_CONSTRUCT),
 ];
 
 // Condition fusion pin: slot-vs-slot and slot-vs-const int compares
