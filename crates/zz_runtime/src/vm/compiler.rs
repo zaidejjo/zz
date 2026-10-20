@@ -2585,6 +2585,24 @@ impl Compiler {
                 _ => unreachable!("unhandled compound assignment target"),
             },
             Stmt::Expr(e) => {
+                // A discarded `if` needs no value: compile it as a statement,
+                // which drops the missing-else arm's `const unit`, the `jmp`
+                // over it and the caller's `Pop` — three ops out of every
+                // statement-position `if` in a loop body. Only when the value
+                // is dead; a trailing `if` whose value is read keeps the
+                // value-producing shape.
+                if value_discarded {
+                    if let Expr::If {
+                        cond,
+                        then,
+                        els,
+                        span,
+                    } = e
+                    {
+                        self.compile_if_stmt(cond, then, els, *span);
+                        return StmtValue::None;
+                    }
+                }
                 // Move-take: fused `x.push(e)` / `x.append(e)` /
                 // `append(x, e)` statements (take, push reusing the owned
                 // `Vec`, store back — the existing write-back below stays
@@ -2735,6 +2753,76 @@ impl Compiler {
         if needs_env {
             self.emit(Op::ExitScope);
         }
+    }
+
+    /// Compile a block whose value nobody reads (statement position): the
+    /// trailing statement is told its value is unused, so it does not push
+    /// one, and a trailing slot declaration — whose value doubles as the
+    /// block's result and is left behind by `PopN(n - 1)` — is dropped here
+    /// instead of by a caller that does not exist.
+    fn compile_block_stmt(&mut self, block: &Block) {
+        let needs_env = self.scope_declares_captured(block);
+        if needs_env {
+            self.emit(Op::EnterScope);
+        }
+        self.scope_depth += 1;
+        let tail = self.compile_block_body(block, false, true);
+        self.scope_depth -= 1;
+        if needs_env {
+            self.emit(Op::ExitScope);
+        }
+        if tail.needs_result_unit {
+            self.emit(Op::Pop);
+        } else if matches!(tail.value, StmtValue::Discard) {
+            // The block's last statement left a value (a loop's placeholder,
+            // a call result) that nobody reads. Same settle the `for` arm
+            // does for a dead loop result.
+            self.emit(Op::Pop);
+        }
+    }
+
+    /// Statement-position `if`: no arm produces a value, so there is no
+    /// `const unit` in the missing-else arm, no `jmp` over it, and no `Pop`
+    /// at the caller. Every path leaves the stack where it started — `jfb`
+    /// pops the condition, each arm is compiled with its trailing value dead.
+    fn compile_if_stmt(&mut self, cond: &Expr, then: &Block, els: &Option<Box<Expr>>, span: Span) {
+        let pre = self.stack_height;
+        if let Some(op) = self.try_slot_compare(cond) {
+            self.emit(op);
+        } else {
+            self.compile_expr(cond);
+        }
+        let j = self.emit_jump(JumpKind::IfFalseBool(span));
+        self.compile_block_stmt(then);
+        match els.as_deref() {
+            // `else if` chains recurse so no arm materializes a value.
+            Some(Expr::If {
+                cond,
+                then,
+                els,
+                span,
+            }) => {
+                let j2 = self.emit_jump(JumpKind::Always);
+                self.patch_jump(j);
+                self.compile_if_stmt(cond, then, els, *span);
+                self.patch_jump(j2);
+            }
+            Some(Expr::Block(b)) => {
+                let j2 = self.emit_jump(JumpKind::Always);
+                self.patch_jump(j);
+                self.compile_block_stmt(b);
+                self.patch_jump(j2);
+            }
+            Some(other) => {
+                let j2 = self.emit_jump(JumpKind::Always);
+                self.patch_jump(j);
+                self.compile_expr(other);
+                self.emit(Op::Pop);
+                self.patch_jump(j2);
+            }
+            None => self.patch_jump(j),
+        }
+        debug_assert_eq!(self.stack_height, pre);
     }
 
     /// Compile a block body, cleaning up its locals.
@@ -3910,7 +3998,15 @@ impl Compiler {
                 span,
             } => {
                 let pre = self.stack_height;
-                self.compile_expr(cond);
+                // Fast path: `a < b` / `a < N` on local slots -> one fused
+                // comparison instead of LoadSlot/LoadSlot/BinOp — the same
+                // peephole `while` conditions get. `if` is the shape hot
+                // loop guards are written in (`if i < n { ... }`).
+                if let Some(op) = self.try_slot_compare(cond) {
+                    self.emit(op);
+                } else {
+                    self.compile_expr(cond);
+                }
                 let j = self.emit_jump(JumpKind::IfFalseBool(*span));
                 self.compile_block(then);
                 let j2 = self.emit_jump(JumpKind::Always);

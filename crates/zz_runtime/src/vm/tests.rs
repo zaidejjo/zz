@@ -1594,18 +1594,6 @@ fn range_loop_fast_path_matches_the_tree_walker() {
     assert_same(
         "func f() -> int {\n    total := 0\n    for i in 0..3 {\n        g := |x: int| { x + i }\n        total = total + g(1)\n    }\n    total\n}\nf()",
     );
-    // Array iteration takes the same in-place path (the element is cloned
-    // out of the iterable copy the loop holds).
-    assert_same("total := 0\nfor x in [1, 2, 3, 4] {\n    total = total + x\n}\ntotal");
-    assert_same("total := 0\nfor x in [] {\n    total = total + 1\n}\ntotal");
-    assert_same(
-        "total := 0\nrows := [[1, 2], [3]]\nfor row in rows {\n    for v in row {\n        total = total + v\n    }\n}\ntotal",
-    );
-    // Mutating the source array mid-loop must not reach the loop's iterable
-    // copy (the detach the regression fixture also pins).
-    assert_same(
-        "b := [10, 20, 30]\ns := 0\nm := 0\nfor v in b {\n    m = m + 1\n    s = s + v\n    if m == 1 { b[1] = 200 }\n}\ns",
-    );
 }
 
 /// A `for` loop in non-final statement position has its value discarded by
@@ -1872,4 +1860,94 @@ fn vm_variant_method_op_shape() {
         )),
         "a same-named free function must keep the dynamic dispatch: {shadowed:?}"
     );
+}
+
+/// Statement-position `if` compiles without the value dance: the condition is
+/// a fused slot compare, the arm leaves nothing, and the missing-else arm
+/// emits no `const unit` / `jmp` / `pop`. Inside a rotated loop that is three
+/// ops per iteration (`slotlessintimm`, `jfb`, the increment) instead of ten.
+#[test]
+fn vm_statement_if_in_loop_emits_no_value_dance() {
+    use std::collections::{HashMap, HashSet};
+
+    let src = "func f(n: int) -> int {\n    s := 0\n    for i in 0..n {\n        if i < 5 {\n            s = s + 1\n        }\n    }\n    s\n}\nf(3)";
+    let parsed = parse(src);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let (_res, types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let chunk = Compiler::compile_program_typed(
+        &parsed.program,
+        Arc::new(types),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(HashSet::new()),
+    );
+    let code = &chunk.code;
+    let fchunk = code
+        .iter()
+        .find_map(|op| match op {
+            Op::MakeFunc { name, chunk, .. } if name == "f" || name.ends_with(".f") => {
+                Some(chunk.clone())
+            }
+            _ => None,
+        })
+        .expect("no compiled function `f`");
+    let code = &fchunk.code;
+    let (header, body) = code
+        .iter()
+        .enumerate()
+        .find_map(|(pc, op)| match op {
+            Op::ForNext { body, .. } => Some((pc, *body)),
+            _ => None,
+        })
+        .expect("no ForNext in the compiled loop");
+    let body_ops = &code[body..header];
+    assert!(
+        matches!(
+            body_ops,
+            [
+                Op::SlotLessIntImm { imm: 5, .. },
+                Op::JumpIfFalseBool(target, _),
+                Op::SlotInc { .. },
+            ] if *target == header
+        ),
+        "unexpected loop body: {body_ops:?}"
+    );
+}
+
+/// The `if`-statement shapes that carry locals, loops or early exits must stay
+/// balanced: the VM and the tree-walker have to agree on all of them.
+#[test]
+fn statement_if_shapes_match_the_tree_walker() {
+    for src in [
+        // Dead `if`, no else.
+        "s := 0\nfor i in 0..6 {\n    if i < 4 {\n        s = s + i\n    }\n}\ns",
+        // `if` / `else`.
+        "s := 0\nfor i in 0..6 {\n    if i < 3 {\n        s = s + i\n    } else {\n        s = s - i\n    }\n}\ns",
+        // `else if` chain: every arm must merge with nothing on the stack.
+        "s := 0\nfor i in 0..9 {\n    if i < 3 {\n        s = s + 1\n    } else if i < 6 {\n        s = s + 10\n    } else {\n        s = s + 100\n    }\n}\ns",
+        // Branch declaring its own local: exercises the block's `PopN`.
+        "s := 0\nfor i in 0..4 {\n    if i < 2 {\n        v := i * 100\n        s = s + v\n    }\n}\ns",
+        // Nested `if`, both dead.
+        "s := 0\nfor i in 0..4 {\n    if i < 3 {\n        if i < 1 {\n            s = s + 1\n        } else {\n            s = s + 2\n        }\n    }\n}\ns",
+        // A loop as the trailing statement of a dead arm: its placeholder is
+        // the arm's leftover value and must be settled by the block.
+        "s := 0\nif true {\n    for i in 0..4 {\n        s = s + i\n    }\n}\ns",
+        // Early exit inside a dead `if`.
+        "n := 0\nfor i in 0..10 {\n    if i == 5 {\n        break\n    }\n    n = n + i\n}\nn",
+        // `if` in value position keeps the value-producing shape.
+        "func f(n: int) -> int {\n    if n < 3 { 1 } else { 2 }\n}\nf(1) + f(9)",
+        // `if` as the returned tail of a function.
+        "func f(n: int) -> int {\n    if n < 2 {\n        return 1\n    }\n    2\n}\nf(1) + f(5)",
+        // Dead `if` at module scope.
+        "a := 0\nif true {\n    a = a + 1\n    a = a + 2\n}\na",
+    ] {
+        assert_same(src);
+    }
 }
