@@ -1722,3 +1722,142 @@ fn for_loop_codegen_matches_tree_walker() {
         assert_same(src);
     }
 }
+
+/// Variant methods on a typed receiver compile to the receiver namespace's
+/// native (`option.unwrap_or`, `result.unwrap`, …) instead of the dynamic
+/// `CallMethod` op — the same function the VM's value-based dispatch picks,
+/// but visible to the AOT backends, which have no run-time method table
+/// (#508). The tree-walker resolves both spellings identically.
+#[test]
+fn vm_variant_method_calls_resolve_statically() {
+    // `main` returns its last expression, so `assert_same` compares the
+    // unwrapped value, not a discarded statement.
+    for src in [
+        "func main() {\n    a := .some(1)\n    a.unwrap_or(0)\n}",
+        "func main() {\n    a := .some(1)\n    a.unwrap()\n}",
+        "func main() {\n    a := .some(4)\n    a.expect(\"boom\")\n}",
+        "func main() {\n    a: Result<int, str> = .ok(2)\n    a.unwrap_or(3)\n}",
+        "func main() {\n    a: Result<int, str> = .err(\"x\")\n    a.unwrap_or(-1)\n}",
+        "func main() {\n    a: Result<int, str> = .ok(6)\n    a.expect(\"boom\")\n}",
+        // Compound receiver: no slot to type, so the span map supplies it.
+        "func main() {\n    .some(7).unwrap_or(0)\n}",
+        // Non-variant receivers keep their own namespaces.
+        "func main() {\n    [3, 1, 2].len()\n}",
+    ] {
+        assert_same(src);
+    }
+}
+
+/// Structural pin for the decision: the typed compile emits the resolved
+/// `CallNative`, untyped compiles keep the dynamic op, and a same-named
+/// free function keeps it too — `lookup_method_recv` tries a bare function
+/// first, so a static `option.unwrap_or` would silently run the stdlib
+/// method instead of the user's function.
+#[test]
+fn vm_variant_method_op_shape() {
+    use std::collections::{HashMap, HashSet};
+
+    /// Depth-first scan: function bodies live in nested `MakeFunc` chunks.
+    fn any_op(code: &[Op], pred: &dyn Fn(&Op) -> bool) -> bool {
+        code.iter().any(|op| {
+            pred(op)
+                || match op {
+                    Op::MakeFunc { chunk, .. } => any_op(&chunk.code, pred),
+                    _ => false,
+                }
+        })
+    }
+
+    fn ops(src: &str, typed: bool) -> Vec<Op> {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        if !typed {
+            return Compiler::compile_program(&parsed.program).code;
+        }
+        let (_res, types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let natives: HashSet<String> = [
+            "option.unwrap_or",
+            "option.unwrap",
+            "option.expect",
+            "result.unwrap_or",
+            "result.unwrap",
+            "result.expect",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        Compiler::compile_program_typed(
+            &parsed.program,
+            Arc::new(types),
+            HashMap::new(),
+            HashMap::new(),
+            Arc::new(natives),
+        )
+        .code
+    }
+
+    let local_body = "func main() {\n    a := .some(1)\n    a.unwrap_or(0)\n}";
+    let typed = ops(local_body, true);
+    assert!(
+        any_op(&typed, &|op| matches!(
+            op,
+            Op::CallNative { name, .. } if name == "option.unwrap_or"
+        )),
+        "typed variant method should compile to the resolved native: {typed:?}"
+    );
+    assert!(
+        !any_op(&typed, &|op| matches!(
+            op,
+            Op::CallMethod { name, .. } if name == "unwrap_or"
+        )),
+        "no dynamic method op should survive: {typed:?}"
+    );
+
+    let chained = ops("func main() {\n    .some(7).unwrap_or(0)\n}", true);
+    assert!(
+        any_op(&chained, &|op| matches!(
+            op,
+            Op::CallNative { name, .. } if name == "option.unwrap_or"
+        )),
+        "compound receiver should resolve from the span map: {chained:?}"
+    );
+
+    let untyped = ops(local_body, false);
+    assert!(
+        !any_op(&untyped, &|op| matches!(
+            op,
+            Op::CallNative { name, .. } if name.starts_with("option.")
+        )),
+        "without a type table the call must stay dynamic: {untyped:?}"
+    );
+    assert!(
+        any_op(&untyped, &|op| matches!(
+            op,
+            Op::CallMethod { name, .. } if name == "unwrap_or"
+        )),
+        "untyped compiles keep the dynamic op: {untyped:?}"
+    );
+
+    let shadowed = ops(
+        "func unwrap_or(v: Option<int>, d: int) -> int { d }\nfunc main() {\n    a := .some(1)\n    a.unwrap_or(0)\n}",
+        true,
+    );
+    assert!(
+        any_op(&shadowed, &|op| matches!(
+            op,
+            Op::CallMethod { name, .. } if name == "unwrap_or"
+        )),
+        "a same-named free function must keep the dynamic dispatch: {shadowed:?}"
+    );
+}

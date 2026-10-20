@@ -11,14 +11,16 @@
 //! ([bool] iteration through the boxed path) pin chunk↔HIR parity for
 //! the shapes the sieve bench exercises at scale.
 //!
-//! Deliberately uncovered, pending #508: `Op::CallMethod` and the `match`
-//! family (`MatchArm` / `MatchGuard` / `MatchError` / `IfLetMatch`) have
-//! no chunk arms. The VM dispatches them on the receiver *value*
-//! (`lookup_method_recv`), so chunk support needs a build-time resolution
-//! pass (or an emitted method table), not just an emitter arm — until
-//! that exists, corpus programs must avoid method calls on variants and
-//! `match` over Option/Result (`unwrap_or` and friends are covered by the
-//! VM/HIR legs only). Variant *construction* is covered since #508.
+//! Deliberately uncovered, pending #508: `Op::CallMethod` for receivers the
+//! compiler cannot type (struct methods, chained field receivers) and the
+//! `match` family (`MatchArm` / `MatchGuard` / `MatchError` /
+//! `IfLetMatch`) have no chunk arms. Variant methods that *are* typed
+//! (`Option`/`Result` receivers; `unwrap` / `unwrap_or` / `expect`) no
+//! longer reach the dynamic op — the compiler emits the resolved
+//! `option.*` / `result.*` native, so `variant_methods` pins them on all
+//! backends. Struct methods and `match` over Option/Result still need
+//! build-time resolution (or an emitted method table) and stay out of the
+//! corpus. Variant *construction* is covered since #508.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -439,6 +441,30 @@ func main() {
 }
 "#;
 
+// Variant methods resolved at compile time (#508): a typed receiver turns
+// `x.unwrap_or(d)` / `x.unwrap()` / `x.expect(m)` into the `option.` /
+// `result.` native (same receiver namespace the VM's dynamic `CallMethod`
+// dispatch would pick), so the call reaches the chunk backend, which has no
+// run-time method table. Covers locals, a chained receiver, both variant
+// families, and the error-arm `unwrap_or` fallback.
+const VARIANT_METHODS: &str = r#"
+func main() {
+    a := .some(1)
+    println(a.unwrap_or(0))
+    b: Result<int, str> = .ok(2)
+    println(b.unwrap_or(3))
+    println(.some(7).unwrap_or(0))
+    c := .some(5)
+    println(c.unwrap())
+    d: Result<int, str> = .err("bad")
+    println(d.unwrap_or(-1))
+    e := .some(4)
+    println(e.expect("boom"))
+    f: Result<int, str> = .ok(6)
+    println(f.expect("boom"))
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -460,6 +486,7 @@ const CASES: &[(&str, &str)] = &[
     ("range_display", RANGE_DISPLAY),
     ("cond_cmp", COND_CMP),
     ("variant_construct", VARIANT_CONSTRUCT),
+    ("variant_methods", VARIANT_METHODS),
 ];
 
 // Condition fusion pin: slot-vs-slot and slot-vs-const int compares

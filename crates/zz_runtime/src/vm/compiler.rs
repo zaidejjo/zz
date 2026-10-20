@@ -621,6 +621,68 @@ impl Compiler {
             .and_then(|t| t.get(&zz_checker::SpanKey::new(self.type_scope.as_str(), span)))
     }
 
+    /// Variant methods with a canonical `<ns>.<method>` native *and* an
+    /// AOT C twin (`option.*` / `result.*`, see `zz_stdlib` and
+    /// `zz_codegen::lower::native_impl`). Restricting static resolution to
+    /// this family keeps the emitter close to the runtime's method table.
+    const VARIANT_METHODS: &'static [&'static str] = &["unwrap", "unwrap_or", "expect"];
+
+    /// Method namespace of a variant receiver, or `None` for every other
+    /// type (including unresolved inference variables).
+    fn variant_ns(ty: &zz_checker::Type) -> Option<&'static str> {
+        match ty {
+            zz_checker::Type::Option(_) => Some("option"),
+            zz_checker::Type::Result(_, _) => Some("result"),
+            _ => None,
+        }
+    }
+
+    /// Resolve `<ns>.<method>` for a variant method call statically, or
+    /// `None` to keep the dynamic `CallMethod`.
+    ///
+    /// The VM's `CallMethod` dispatch is receiver-value driven: struct
+    /// field, then a bare free function, then the receiver's method
+    /// namespace. A variant has no fields, and this bails whenever a
+    /// same-named function exists, so the namespace step is exactly what
+    /// the call would take at run time. Emitting it as `CallNative` is
+    /// behaviour-identical for the VM and makes the call visible to the
+    /// AOT backends, which have no run-time method table (#508).
+    fn variant_method_native(&self, ns: &str, method: &str) -> Option<String> {
+        if !Self::VARIANT_METHODS.contains(&method) {
+            return None;
+        }
+        // `lookup_method_recv` tries a bare free function before the
+        // namespace; keep the dynamic path whenever one could exist.
+        let suffix = format!(".{method}");
+        if self
+            .func_info
+            .keys()
+            .any(|k| k == method || k.ends_with(&suffix))
+        {
+            return None;
+        }
+        let dotted = format!("{ns}.{method}");
+        self.native_names
+            .as_ref()
+            .filter(|natives| natives.contains(&dotted))
+            .map(|_| dotted)
+    }
+
+    /// Receiver's checker type, preferring the slot table for named
+    /// bindings (recorded for every binding, independent of span coverage)
+    /// and falling back to the span map for compound receivers such as
+    /// `.some(1).unwrap_or(0)`.
+    fn receiver_type(&self, recv: &Expr) -> Option<&zz_checker::Type> {
+        if let Expr::Ident { name, .. } = recv {
+            if let Resolved::Slot(slot) = self.resolve(name) {
+                if let Some(Some(ty)) = self.chunk.slot_types.get(slot) {
+                    return Some(ty);
+                }
+            }
+        }
+        self.type_of(recv.span())
+    }
+
     /// Record a named slot's declared type (see `Chunk::slot_types`).
     /// No-ops without type info; joins on reuse (conflicts widen to the
     /// `Error` top), so every entry over-approximates all values its slot
@@ -3558,11 +3620,38 @@ impl Compiler {
                         if is_input {
                             self.emit_const(Value::Str(String::new().into()));
                         }
-                        self.emit(Op::CallMethod {
-                            name: parts.last().unwrap().clone(),
-                            argc: argc as u16,
-                            span: *span,
-                        });
+                        // Ident receiver, plain call: the slot table already
+                        // carries its declared type, so a variant method can
+                        // take the static native form (see
+                        // `variant_method_native`). Paths with field access
+                        // (`a.b.unwrap_or(0)`) keep the dynamic op.
+                        let native = if parts.len() == 2
+                            && named.is_empty()
+                            && !is_range
+                            && !has_named_or_defaults
+                        {
+                            self.chunk
+                                .slot_types
+                                .get(slot)
+                                .and_then(Option::as_ref)
+                                .and_then(Self::variant_ns)
+                                .and_then(|ns| self.variant_method_native(ns, &parts[1]))
+                        } else {
+                            None
+                        };
+                        match native {
+                            Some(native) => self.emit(Op::CallNative {
+                                name: native,
+                                // Receiver first, then the call's arguments.
+                                argc: (args.len() + 1) as u16,
+                                span: *span,
+                            }),
+                            None => self.emit(Op::CallMethod {
+                                name: parts.last().unwrap().clone(),
+                                argc: argc as u16,
+                                span: *span,
+                            }),
+                        }
                     } else {
                         // Env-path receiver (e.g. top-level `mydb` lives in
                         // env, not a slot). Method-form db calls need
@@ -3702,11 +3791,29 @@ impl Compiler {
                     for (_, val) in named {
                         self.compile_expr(val);
                     }
-                    self.emit(Op::CallMethod {
-                        name: name.clone(),
-                        argc: (args.len() + named.len()) as u16,
-                        span: *span,
-                    });
+                    // Named args are reordered for the *dynamic* callee, so
+                    // they are not eligible for the static native form.
+                    let native = if named.is_empty() {
+                        self.receiver_type(obj)
+                            .and_then(Self::variant_ns)
+                            .and_then(|ns| self.variant_method_native(ns, name))
+                    } else {
+                        None
+                    };
+                    match native {
+                        Some(native) => self.emit(Op::CallNative {
+                            name: native,
+                            // Receives the receiver as its first argument;
+                            // `CallNative` pops the whole list.
+                            argc: (args.len() + 1) as u16,
+                            span: *span,
+                        }),
+                        None => self.emit(Op::CallMethod {
+                            name: name.clone(),
+                            argc: (args.len() + named.len()) as u16,
+                            span: *span,
+                        }),
+                    }
                 }
                 _ => {
                     let is_input = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "input")

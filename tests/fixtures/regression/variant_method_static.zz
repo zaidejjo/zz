@@ -1,0 +1,29 @@
+// features: func-call, locals, methods, option-result, print, string-literal
+// Method calls on Option/Result resolve to the receiver's method namespace
+// (`option.unwrap_or`, `result.unwrap_or`, …). The compiler now emits that
+// native directly for typed receivers instead of the dynamic `CallMethod`
+// op — which the AOT backends cannot execute (no run-time method table),
+// and which the VM had to look up per call. VM and HIR agree line for line;
+// the chunk side of the same surface is pinned by the `variant_methods`
+// corpus in `tests/chunk_aot_diff.rs` (interpolation has no chunk arm yet)
+// (#508).
+func main() {
+    msg := "boom"
+    a := .some(1)
+    println("a={a.unwrap_or(0)}")
+    b:Result<int, str> = .ok(2)
+    println("b={b.unwrap_or(3)}")
+    chained := .some(7)
+    println("chained={chained.unwrap_or(0)}")
+    empty: Option<int> = .none
+    println("none={empty.unwrap_or(9)}")
+    c := .some(5)
+    println("c={c.unwrap()}")
+    d:Result<int, str> = .err("bad")
+    println("d={d.unwrap_or(-1)}")
+    e := .some(4)
+    println("e={e.expect(msg)}")
+    f:Result<int, str> = .ok(6)
+    println("f={f.expect(msg)}")
+    println("variant_method_static_ok")
+}
