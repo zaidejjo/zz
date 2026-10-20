@@ -173,13 +173,60 @@ the build (debug or release) fails after still emitting `app.c` +
 build scripts next to the planned destination so the program can be
 built manually on a machine with Clang.
 
-### `zz run [--native] [<file.zz>]`
+### `zz run [--native|--bytecode] [<file.zz>]`
 
 `zz run` executes through the VM and leaves no build artifacts.
 `zz run --native` builds through the cached Clang pipeline (publishing
 to the same authoritative destination as `zz build`, `-o` overrides
 like `build`) and executes the binary. The file argument defaults to
 the project entry inside a project.
+
+| Flag | Effect |
+|------|--------|
+| `--bytecode` | Compile to IR and execute the chunk VM, never the tree walker; also accepts a `.zzc` file to load directly |
+| `--embed <dir>` | Expose a static asset directory to the program (`fs.embedfs()`) |
+| `-o, --output <name>` | Name the published binary (`--native` only) |
+| `--watch` | Hot reload (see below; VM only) |
+| `-h, --help` | Print the flags, engines and run-cache controls |
+
+Arguments after the file are passed to the program.
+
+#### The run cache: which engine executes your file
+
+`zz run` keeps a content-addressed cache of compiled IR, and **cache
+state selects the engine**:
+
+| Cache | Engine | Work done |
+|-------|--------|-----------|
+| **hit** | chunk VM (`decode` → `raise` → `run_loaded_chunk`) | key check, scoped native rebuild, execute |
+| **miss** | tree walker (`run_typed`) | parse, check, HIR, execute; then compile and store IR for next time |
+
+So the same file can run on either engine from one invocation to the
+next. Both are gated for semantic equality (`dual_engine_parity`), but a
+benchmark that does not pin the engine is measuring "whichever the cache
+had". Pin the chunk VM with `--bytecode`; pin the tree walker with
+`ZZ_RUN_CACHE=0`.
+
+The key covers the entry bytes and canonical path (namespace), every
+`.zz` source under the project directory, live path-dependency content,
+the `vm-run` target string, a toolchain fingerprint (CLI version, IR
+format version, build identity, sorted plugin manifest names), and
+`--embed` asset bytes. Script arguments are runtime-only and excluded.
+Entries live in `<build-cache>/run-v2` (`ZZ_HOME` relocates the build
+cache), one directory per slug holding `meta.json` and one `.zzc` per
+module in execution order; stores are atomic, the tree is bounded at 256
+entries (LRU by mtime), and no-change runs validate a stat-signature
+sidecar instead of re-hashing every source.
+
+A miss is never an error: cold caches, unreadable entries, and toolchain
+changes fall back to the full pipeline and re-store. Levers:
+
+```bash
+ZZ_VERBOSE=1 zz run main.zz     # print hit/miss and stage lines
+ZZ_RUN_CACHE=0 zz run main.zz   # force the tree walker (benchmark this)
+zz cache clean                  # wipe ~/.zz/cache, run entries included
+zz cache gc                     # collect unused CAS entries only
+```
 
 ### `zz run --watch [<file.zz>]`
 
