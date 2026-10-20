@@ -123,6 +123,49 @@ fn run_without_arg_outside_project_requires_file() {
 }
 
 #[test]
+fn run_help_lists_its_flags() {
+    let (dir, _) = standalone_dir();
+    let (code, stdout, stderr) = run(&dir, &["run", "--help"], &[]);
+    assert_eq!(code, 0, "`zz run --help` must succeed; stderr:\n{stderr}");
+    for needle in [
+        "--native",
+        "--bytecode",
+        "--watch",
+        "--embed",
+        "--debounce",
+        "ZZ_RUN_CACHE=0",
+        "run cache",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "`zz run --help` must mention `{needle}`, got:\n{stdout}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_forwards_help_after_the_file() {
+    let dir = fresh_root("run-args");
+    std::fs::write(
+        dir.join("args.zz"),
+        "import std.env\n\nfunc main() {\n    for a in env.args() {\n        println(a)\n    }\n}\n",
+    )
+    .expect("fixture");
+    let (code, stdout, stderr) = run(&dir, &["run", "args.zz", "--help"], &[]);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(
+        stdout.contains("--help"),
+        "`--help` after the file belongs to the program, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("usage: zz run"),
+        "run help must not swallow a program argument:\n{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn profile_without_arg_outside_project_requires_file() {
     let (dir, _) = standalone_dir();
     let (code, _, stderr) = run(&dir, &["profile"], &[]);

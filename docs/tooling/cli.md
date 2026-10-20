@@ -14,6 +14,13 @@ zz eval "println('hi')"    # hi + ()
 
 Inside a project the file defaults to the entry (`src/main.zz`).
 
+`--bytecode` always executes the chunk VM (never the tree walker).
+Otherwise the [run cache](../cli.md) picks the engine: a warm entry runs
+the cached IR in the chunk VM, a miss runs the tree walker and stores IR
+for next time. `ZZ_RUN_CACHE=0` forces the walker, `ZZ_VERBOSE=1` prints
+hit/miss lines, `zz cache clean` wipes the cache (`zz cache gc` collects
+unused CAS entries only).
+
 ## `zz build` — single Clang backend
 
 Every build is a real native binary; needs `clang` 18+ or `zig` on PATH.

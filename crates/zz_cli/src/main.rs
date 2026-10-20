@@ -248,6 +248,10 @@ fn main() -> ExitCode {
             }
         }
         Some("run") => {
+            if help_before_entry(rest) {
+                print_run_help();
+                return ExitCode::SUCCESS;
+            }
             let native = rest.iter().any(|a| a == "--native");
             let bytecode = rest.iter().any(|a| a == "--bytecode");
             let watching = rest.iter().any(|a| a == "--watch");
@@ -1849,6 +1853,51 @@ fn run_native(
     Ok(())
 }
 
+/// `zz run [FLAGS] [<file>]`: the VM by default, the native backend with
+/// `--native`. Flags and the run-cache engine switch were undiscoverable
+/// from the subcommand (it answered `--help` with "missing file argument"),
+/// so print them here (#509).
+fn print_run_help() {
+    println!(
+        "\
+usage: zz run [--native|--bytecode] [--watch] [--embed <dir>] [-o <name>] [<file.zz>]
+
+type-check and run a ZZ source file through the VM (leaving no build
+artifacts), or through the native backend with `--native`. Inside a
+project the file defaults to the entry (`src/main.zz`, then `main.zz`).
+
+ENGINES:
+  (default)            VM: a warm run cache executes the cached IR in the chunk VM;
+                       a cold one executes the tree walker and refreshes the cache
+  --bytecode           always compile to IR and execute the chunk VM (never the
+                       walker); accepts a `.zzc` file to load directly
+  --native             build through the cached Clang pipeline and run the binary
+
+FLAGS:
+  --embed <dir>        expose a static asset directory (`fs.embedfs()`)
+  -o, --output <name>  name the published binary (`--native` only)
+  --watch              re-check and restart on save (VM only)
+  --clear              clear the screen per restart (with `--watch`)
+  --debounce <ms>      quiet time before a restart (default 150; with `--watch`)
+  --watch-ignore <glob>  skip matching paths (repeatable; with `--watch`)
+  -h, --help           show this help
+
+RUN CACHE:
+  Warm runs decode the cached IR for the whole dependency closure and execute it
+  in the chunk VM; cold runs execute the tree walker and cache the IR they compile.
+  Entries live under `~/.zz/cache/run-v2` (LRU, 256 entries); a miss, a corrupt
+  entry or any toolchain change falls back to a full recompile.
+
+ENVIRONMENT:
+  ZZ_RUN_CACHE=0       disable the run cache (read and write) — this forces the
+                       tree walker, which is what interpreter benchmarks must measure
+  ZZ_VERBOSE=1         print run-cache hit/miss and stage lines
+
+Arguments after the file are passed to the program. `zz cache clean` wipes the
+global cache, run entries included."
+    );
+}
+
 /// `zz build [FLAGS] [<file>]`: always a native Clang binary.
 ///
 /// Default (`zz build`): static self-contained binary (ThinLTO, DCE,
@@ -2341,6 +2390,37 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether `run`'s help flag appears before the entry file.
+///
+/// `zz run --help` must describe the subcommand, but everything after the
+/// file belongs to the program: `zz run main.zz --help` forwards `--help`
+/// and must not be swallowed. Values of value-taking flags are skipped so
+/// `zz run --embed assets --help` still reaches the help.
+fn help_before_entry(args: &[String]) -> bool {
+    const VALUE_FLAGS: [&str; 5] = ["--embed", "-o", "--output", "--debounce", "--watch-ignore"];
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "--help" || a == "-h" {
+            return true;
+        }
+        if a.starts_with('-') {
+            // `--flag=value` carries its value inline.
+            if !a.contains('=') && VALUE_FLAGS.contains(&a.as_str()) {
+                skip_next = true;
+            }
+            continue;
+        }
+        // First positional: the entry file. Everything after it is the
+        // program's argument vector.
+        return false;
+    }
+    false
 }
 
 /// Strip value-flags (`--embed <dir>` / `--embed=<dir>`) plus any bare

@@ -8,7 +8,10 @@ Exit `0` success, `1` errors / fmt-check failed, `2` test discovery/compile erro
 ```bash
 zz                              # REPL (:help, :quit, :type expr, :clear)
 zz run [<file.zz>]              # VM, no artifacts; defaults to project entry
+zz run --bytecode [<file.zz>|file.zzc]  # force the chunk VM (never the tree walker)
 zz run --native [<file.zz>]     # AOT cached build + exec private staged copy
+zz run --embed <dir> [<file.zz>]        # expose assets (`fs.embedfs()`)
+zz run --native -o <name> [<file.zz>]   # name the published binary
 zz run --watch [<file.zz>] [--clear] [--debounce <ms>] [--watch-ignore <glob>]...
 zz eval "<src>"                 # eval string, print result
 zz dis [<file.zzc|file.zz>]     # disassemble bytecode/chunk
@@ -16,6 +19,11 @@ zz profile [<file.zz>] [-- args]# PGO profile flow (llvm-profdata merge)
 ```
 
 `--watch` rejects `--native`/`--bytecode`. Roots >20k entries refuse with a hint.
+
+`zz run` engine = run-cache state: warm → cached IR in the chunk VM, miss →
+tree walker (+ store). `ZZ_RUN_CACHE=0` forces the walker, `ZZ_VERBOSE=1`
+prints hit/miss and stage lines; entries live in `<build-cache>/run-v2`
+(LRU, 256), cleared by `zz cache clean`. `zz run --help` lists the flags.
 
 ## Build
 
