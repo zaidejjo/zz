@@ -1,0 +1,19 @@
+// features: func-call, locals, option-result, print
+// A bare variant next to a concrete sibling has to fold into the element
+// type: `[.some(1), .none]` used to merge `Option<int>` with `Option<?err>`
+// into a union, the annotation only reached the first member, and `?err`
+// survived to the declaration's inference check — `cannot infer the type of
+// `a`; add a type annotation`, even with the annotation written out. Both
+// element orders, the annotated form, and dict values now infer
+// `Option<int>` (#533).
+func main() {
+    a: [Option<int>] = [.some(1), .none]
+    println(a)
+    b := [.none, .some(2)]
+    println(b)
+    c := [.some(3), .none]
+    println(c)
+    d := {"x": .some(5), "y": .none}
+    println(d)
+    println("variant_array_infer_ok")
+}

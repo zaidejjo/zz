@@ -1225,6 +1225,50 @@ fn array_union_member_accepted() {
 }
 
 #[test]
+fn array_variant_payload_var_merges() {
+    // A bare `.none` carries an unbound payload variable. Merging it with a
+    // concrete sibling has to fold into that type (and bind the variable),
+    // in either element order — a union would strand the variable and the
+    // declaration was rejected with "cannot infer the type of `a`" (#533).
+    for src in ["a := [.some(1), .none]", "a := [.none, .some(1)]"] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src}: errors: {:?}", r.errors);
+        assert_eq!(
+            r.bindings["a"],
+            Type::Array(Box::new(Type::Option(Box::new(Type::Int)))),
+            "{src}"
+        );
+    }
+
+    // Same for the Result payload positions and for dict values.
+    let r = check_src("d := {\"x\": .some(5), \"y\": .none}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["d"],
+        Type::Dict(
+            Box::new(Type::Str),
+            Box::new(Type::Option(Box::new(Type::Int)))
+        )
+    );
+}
+
+#[test]
+fn array_variant_annotation_accepts_bare_none() {
+    for src in [
+        "a: [Option<int>] = [.some(1), .none]",
+        "a: [Option<int>] = [.none, .some(1)]",
+    ] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src}: errors: {:?}", r.errors);
+        assert_eq!(
+            r.bindings["a"],
+            Type::Array(Box::new(Type::Option(Box::new(Type::Int)))),
+            "{src}"
+        );
+    }
+}
+
+#[test]
 fn empty_array_deferred_inference() {
     // Empty array without context: inference is deferred, no error.
     let r = check_src("v := []");
