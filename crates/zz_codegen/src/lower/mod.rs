@@ -1187,6 +1187,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "http.pipe" | "std.http.pipe" => Some("zz_http_pipe"),
         "http.rate_limit" | "std.http.rate_limit" => Some("zz_http_rate_limit"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
+        "http.listen_cfg" | "std.http.listen_cfg" => Some("zz_http_listen_cfg"),
         "http.test" | "std.http.test" => Some("zz_http_test"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),
         "http.respond" | "std.http.respond" => Some("zz_http_respond"),
