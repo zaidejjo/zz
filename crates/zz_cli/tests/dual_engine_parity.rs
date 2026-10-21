@@ -376,20 +376,23 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // VM and pass as strict error fixtures.
 
         // --- Phase 2/3 HTTP: VM-only natives abort loudly on AOT ---
-        // `listen_tls`, `listen_cfg`, `fetch_insecure`, `body_bytes`,
-        // `hijack` et al have no C impl yet (tracked in
-        // zz_codegen/tests.rs KNOWN_CODEGEN_GAPS as "P3 AOT"). Native
-        // legs abort at first use via `zz_unimplemented_native` (exit 1
-        // with `not implemented in AOT builds`) instead of the old
-        // silent unit, which wedged retry loops forever.
+        // `listen_tls`, `fetch_insecure`, `body_bytes`, `hijack`,
+        // `serve_dir_at`, and `test_req` et al have no C impl yet
+        // (tracked in zz_codegen/tests.rs KNOWN_CODEGEN_GAPS as "P3
+        // AOT"). Native legs abort at first use via
+        // `zz_unimplemented_native` (exit 1 with `not implemented in AOT
+        // builds`) instead of the old silent unit, which wedged retry
+        // loops forever.
         "http_tls_p3" => Some(
             "P3 AOT: listen_tls + fetch_insecure are VM-only; native aborts",
         ),
         "http_hijack_p3" | "http_bytes_p3" => {
             Some("P3 AOT: hijack / body_bytes are VM-only; native aborts")
         }
-        "http_limits_p2" | "http_middleware_p2" | "http_static_p2" => {
-            Some("P3 AOT: listen_cfg / serve_dir_at are VM-only; native aborts")
+        // `http_limits_p2` is strict parity now: AOT implements
+        // `http.listen_cfg` with the same limits/shutdown behavior as the VM.
+        "http_middleware_p2" | "http_static_p2" => {
+            Some("P3 AOT: serve_dir_at / test_req are VM-only; native aborts")
         }
         _ => None,
     }
