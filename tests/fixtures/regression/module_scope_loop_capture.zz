@@ -1,4 +1,4 @@
-// features: closure, for-loop, int-arith, locals, print, string-literal
+// features: closures, for-loop, int-arith, locals, print, string-literal
 // Module-scope loop variables captured by a closure must bind in the
 // environment, exactly like function-local ones: the closure body runs in
 // its own frame and can only read environment bindings, so a slot-homed
