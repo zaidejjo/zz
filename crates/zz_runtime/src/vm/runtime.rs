@@ -436,6 +436,10 @@ impl Vm {
         let mut cached_code: *const Vec<Op>;
         let mut cached_constants: *const Vec<Value>;
         let mut ip: usize;
+        // Flat base of the current frame's stack window. Every slot op adds
+        // it to the op's slot index; cached here (re-synced by `re_cache!`)
+        // so a slot op does not re-walk `self.frames` per execution.
+        let mut cached_base: usize;
         // Coverage: parallel span-id array + resolved file index for the
         // current frame's chunk (`usize::MAX` = skip: unattributed chunk
         // or coverage disabled). Re-resolved per frame change; the per-op
@@ -459,6 +463,7 @@ impl Vm {
                 cached_code = &c.code;
                 cached_constants = &c.constants;
                 ip = f.ip;
+                cached_base = f.stack_base;
                 cached_cov_ids = &c.cov_ids;
                 cached_cov_file = match &interp.coverage {
                     Some(cov) => c
@@ -535,7 +540,7 @@ impl Vm {
             let constants: &Vec<Value> = unsafe { &*cached_constants };
 
             if ip >= code.len() {
-                let sb = self.frames.last().unwrap().stack_base;
+                let sb = cached_base;
                 let f = self.frames.last().unwrap();
                 // Sync promoted top-level slots back into the environment so
                 // later chunks (REPL statements, other modules) can read them.
@@ -764,17 +769,17 @@ impl Vm {
                     interp.assign_path(parts, v, *span)?;
                 }
                 Op::LoadSlot(slot) => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let v = self.stack[base + *slot as usize].clone();
                     self.stack.push(v);
                 }
                 Op::StoreSlot(slot) => {
                     let v = self.stack.pop().unwrap();
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     self.stack[base + *slot as usize] = v;
                 }
                 Op::TakeSlot(slot) => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let v = std::mem::replace(&mut self.stack[base + *slot as usize], Value::Unit);
                     self.stack.push(v);
                 }
@@ -1136,7 +1141,7 @@ impl Vm {
                     }
                 }
                 Op::SlotAddInt { dst, src } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx_dst = base + *dst as usize;
                     let idx_src = base + *src as usize;
                     match (&self.stack[idx_dst], &self.stack[idx_src]) {
@@ -1153,7 +1158,7 @@ impl Vm {
                     }
                 }
                 Op::SlotInc { slot } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx = base + *slot as usize;
                     match &self.stack[idx] {
                         Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(1)),
@@ -1167,7 +1172,7 @@ impl Vm {
                     }
                 }
                 Op::SlotAddIntImm { dst, imm } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx = base + *dst as usize;
                     match &self.stack[idx] {
                         Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(*imm)),
@@ -1185,7 +1190,7 @@ impl Vm {
                     }
                 }
                 Op::SlotLessIntSlot { a, b } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx_a = base + *a as usize;
                     let idx_b = base + *b as usize;
                     match (&self.stack[idx_a], &self.stack[idx_b]) {
@@ -1201,7 +1206,7 @@ impl Vm {
                     }
                 }
                 Op::SlotLessIntImm { a, imm } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx = base + *a as usize;
                     match &self.stack[idx] {
                         Value::Int(x) => self.stack.push(Value::Bool(x < imm)),
@@ -1219,7 +1224,7 @@ impl Vm {
                     }
                 }
                 Op::SlotBinaryInt { dst, lhs, rhs, op } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx_d = base + *dst as usize;
                     let idx_l = base + *lhs as usize;
                     let idx_r = base + *rhs as usize;
@@ -1237,7 +1242,7 @@ impl Vm {
                     }
                 }
                 Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx_d = base + *dst as usize;
                     let idx_l = base + *lhs as usize;
                     match &self.stack[idx_l] {
@@ -1671,43 +1676,83 @@ impl Vm {
                         self.frames.last_mut().unwrap().ip = ip - 1;
                         return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
                     }
-                    // Range fast path. `for i in a..b` — the shape nearly
-                    // every index loop compiles to — leaves `[range, idx,
-                    // var]` on top of the stack, so the generic churn below
-                    // (truncate the var, pop the index as a `Value`, match
-                    // the iterable, push idx + var back) is a compare and
-                    // two in-place writes. Both edges end in the exact same
-                    // state as the generic path: a live iteration leaves
-                    // `idx + step` under the new var, and the exhausted edge
-                    // pops the loop frame and truncates to its base, so the
-                    // caller's `Pop` still drops the range. `in_env` loops
-                    // (the var is defined in a scope) and multi-var loops
-                    // stay generic.
-                    {
+                    // In-place fast paths. `for i in a..b` and `for x in xs`
+                    // — the shapes nearly every index/element loop compiles
+                    // to — leave `[iterable, idx, var]` on top of the stack,
+                    // so the generic churn below (truncate the var, pop the
+                    // index as a `Value`, match the iterable, push idx + var
+                    // back) is a compare and two in-place writes. Both edges
+                    // end in the exact state the generic path ends in: a live
+                    // iteration leaves the next index under the new var, and
+                    // the exhausted edge pops the loop frame and truncates to
+                    // its base, so the caller's `Pop` still drops the
+                    // iterable. `in_env` loops (the var lives in a scope),
+                    // multi-var loops and every other iterable (dict,
+                    // `enumerate()` pairs) stay generic.
+                    //
+                    // The window is split so the entry can be read while the
+                    // var is written (`head` ends at the index, `tail` is
+                    // `[idx, var]`). Nothing is staged in a temporary: an
+                    // `Option<(Value, Value)>` here copies two `Value`s per
+                    // iteration and measured -21% on `loop_sum`.
+                    let fast: Option<bool> = {
                         let len = self.stack.len();
+                        let mut step = None;
                         if !*in_env && vars.len() == 1 && len >= 3 {
-                            if let (Value::Range(r), Value::Int(i)) =
-                                (&self.stack[len - 3], &self.stack[len - 2])
-                            {
-                                let i = *i;
-                                let step = r.step;
-                                let end = r.end;
-                                let finished = if step > 0 { i >= end } else { i <= end };
-                                if finished {
-                                    record_branch!(true);
-                                    let li = self.loops.pop().unwrap();
-                                    self.stack.truncate(li.stack_base + 1);
-                                    interp.env = li.env;
-                                    ip = *exit;
-                                } else {
-                                    record_branch!(false);
-                                    self.stack[len - 1] = Value::Int(i);
-                                    self.stack[len - 2] = Value::Int(i.wrapping_add(step));
-                                    ip = *body;
-                                }
-                                continue;
+                            let (head, tail) = self.stack.split_at_mut(len - 2);
+                            if let &Value::Int(i) = &tail[0] {
+                                step = match &head[len - 3] {
+                                    Value::Range(r) => {
+                                        let (s, end) = (r.step, r.end);
+                                        if (s > 0 && i >= end) || (s <= 0 && i <= end) {
+                                            Some(true)
+                                        } else {
+                                            tail[0] = Value::Int(i.wrapping_add(s));
+                                            tail[1] = Value::Int(i);
+                                            Some(false)
+                                        }
+                                    }
+                                    Value::Array(arr) => {
+                                        if i >= arr.len() as i64 {
+                                            Some(true)
+                                        } else {
+                                            // Clone while the entry borrows
+                                            // the front of the window.
+                                            tail[1] = arr[i as usize].clone();
+                                            tail[0] = Value::Int(i.wrapping_add(1));
+                                            Some(false)
+                                        }
+                                    }
+                                    Value::Bytes(b) => {
+                                        if i >= b.len() as i64 {
+                                            Some(true)
+                                        } else {
+                                            tail[1] = Value::Int(b.as_slice()[i as usize] as i64);
+                                            tail[0] = Value::Int(i.wrapping_add(1));
+                                            Some(false)
+                                        }
+                                    }
+                                    _ => None,
+                                };
                             }
                         }
+                        step
+                    };
+                    match fast {
+                        Some(true) => {
+                            record_branch!(true);
+                            let li = self.loops.pop().unwrap();
+                            self.stack.truncate(li.stack_base + 1);
+                            interp.env = li.env;
+                            ip = *exit;
+                            continue;
+                        }
+                        Some(false) => {
+                            record_branch!(false);
+                            ip = *body;
+                            continue;
+                        }
+                        None => {}
                     }
                     let num_vars = vars.len();
                     // Pop num_vars loop variables from previous iteration

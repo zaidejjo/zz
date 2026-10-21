@@ -1,0 +1,14 @@
+// Gate: a guarded body — `if` in statement position inside a hot loop, the
+// shape 6.7 targets (slot-compare fusion + no value dance in the dead arm).
+// 1e6 iterations, half of them take the arm, so both edges are exercised.
+import std.time
+
+t0 := time.now_ms()
+sum := 0
+for i in 0..1000000 {
+    if i < 500000 {
+        sum = sum + i
+    }
+}
+t1 := time.now_ms()
+println("if_loop: {t1 - t0}ms result={sum}")
