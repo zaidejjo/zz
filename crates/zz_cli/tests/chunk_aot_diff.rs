@@ -507,6 +507,7 @@ const CASES: &[(&str, &str)] = &[
     ("match_literals", MATCH_LITERALS),
     ("match_enum", MATCH_ENUM),
     ("match_iflet", MATCH_IFLET),
+    ("match_shadow", MATCH_SHADOW),
 ];
 
 // Module-scope bindings read and written from functions: the VM keeps
@@ -700,6 +701,61 @@ func main() {
         v = v + 100
     }
     println(v)
+}
+"#;
+
+// Arm bindings are scoped, not function-wide: a nested arm that reuses a
+// name shadows the enclosing binding (the VM binds each arm in a child
+// environment), and the enclosing value must survive the inner match.
+const MATCH_SHADOW: &str = r#"func nested(o: Option<Option<int>>) -> int {
+    match o {
+        .some(px) => {
+            inner := match px {
+                .some(q) => q * 2,
+                .none => 0 - 1,
+            }
+            outer := match px {
+                .some(q) => q,
+                .none => 0 - 2,
+            }
+            inner + outer
+        }
+        .none => 0 - 99,
+    }
+}
+func same_name(o: Option<Option<int>>) -> int {
+    match o {
+        .some(inner) => {
+            w := match inner {
+                .some(inner) => inner * 3,
+                .none => 0,
+            }
+            outer := match inner {
+                .some(z) => z,
+                .none => 0 - 1,
+            }
+            w + outer
+        }
+        .none => 0 - 7,
+    }
+}
+func guard(o: Option<int>) -> int {
+    match o {
+        .some(x) if x > 3 => x,
+        .some(x) => x * 10,
+        .none => 0,
+    }
+}
+func main() {
+    println(nested(.some(.some(5))))
+    println(nested(.some(.none)))
+    println(nested(.none))
+    println(same_name(.some(.some(5))))
+    println(same_name(.some(.none)))
+    println(same_name(.none))
+    println(guard(.some(9)))
+    println(guard(.some(2)))
+    println(guard(.none))
 }
 "#;
 
