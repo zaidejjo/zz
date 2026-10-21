@@ -4233,9 +4233,40 @@ typedef enum {
 // anything larger is rejected before buffering).
 #define HTTP_MAX_HEAD_BYTES (64 * 1024)
 #define HTTP_MAX_BODY_BYTES (50 * 1024 * 1024)
+// Listen defaults, matching `ServerLimits::default()` in the VM.
+#define HTTP_DEFAULT_READ_MS 30000ULL
+#define HTTP_DEFAULT_MAX_REQS_CONN 1000ULL
+#define HTTP_DEFAULT_SHUTDOWN_MS 5000ULL
 // Responses larger than this after a big request return heap to the OS
 // (same 8 MB tripwire the VM uses after large publishes).
 #define HTTP_TRIM_AFTER_BYTES (8 * 1024 * 1024)
+
+typedef struct {
+    uint64_t read_ms;
+    uint64_t max_reqs_conn;
+    uint64_t max_body_bytes;
+    uint64_t shutdown_ms;
+} http_limits;
+
+static http_limits g_http_limits = {
+    HTTP_DEFAULT_READ_MS,
+    HTTP_DEFAULT_MAX_REQS_CONN,
+    HTTP_MAX_BODY_BYTES,
+    HTTP_DEFAULT_SHUTDOWN_MS,
+};
+
+static void http_limits_default(void) {
+    g_http_limits.read_ms = HTTP_DEFAULT_READ_MS;
+    g_http_limits.max_reqs_conn = HTTP_DEFAULT_MAX_REQS_CONN;
+    g_http_limits.max_body_bytes = HTTP_MAX_BODY_BYTES;
+    g_http_limits.shutdown_ms = HTTP_DEFAULT_SHUTDOWN_MS;
+}
+
+static int64_t http_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 typedef struct {
     int     fd;
@@ -4270,6 +4301,10 @@ typedef struct {
     size_t  req_tgt_len;
     // Rate-limit key (peer address text; "unknown" if inet_ntop fails).
     char    peer[46];
+    // Listen limits: per-read deadline (monotonic ms) and keep-alive
+    // request count for this connection.
+    int64_t  read_deadline_ms;
+    uint64_t reqs_served;
 } Connection;
 
 // Per-thread connection pool: calloc'd once per worker thread; the
@@ -4288,6 +4323,10 @@ static int find_free_slot(void) {
         if (t_conns[i].fd == -1) return i;
     }
     return -1;
+}
+
+static void http_note_read(Connection *c) {
+    c->read_deadline_ms = http_monotonic_ms() + (int64_t)g_http_limits.read_ms;
 }
 
 static Connection* alloc_connection(int fd) {
@@ -4314,6 +4353,8 @@ static Connection* alloc_connection(int fd) {
     c->body_truncated = 0;
     c->req_consumed = 0;
     c->peer[0] = '\0';
+    c->reqs_served = 0;
+    http_note_read(c);
     return c;
 }
 
@@ -4370,7 +4411,7 @@ static void set_nonblock(int fd) {
 // The static read_buf serves heads up to 8 KB on the fast path; larger
 // header blocks grow a dynamic buffer up to HTTP_MAX_HEAD_BYTES (431
 // beyond, mirroring the VM). Bodies buffer exactly Content-Length bytes
-// up to HTTP_MAX_BODY_BYTES (413 beyond). Truncated bodies (EOF first)
+// up to max_body_bytes (413 beyond). Truncated bodies (EOF first)
 // reply 400. Request parsing + ZZ dispatch live after the http natives
 // below (they need the route table); the entry points are fwd-declared.
 static void http_on_head(Connection *c);
@@ -4527,6 +4568,7 @@ static int read_from_socket(Connection *c) {
         ssize_t n = read(c->fd, c->body_buf + c->body_len, room);
         if (n > 0) {
             c->body_len += (size_t)n;
+            http_note_read(c);
             return 1;
         }
         if (n == 0) {
@@ -4543,6 +4585,7 @@ static int read_from_socket(Connection *c) {
     ssize_t n = read(c->fd, tmp, sizeof tmp);
     if (n > 0) {
         int rc = http_head_append(c, tmp, (size_t)n);
+        http_note_read(c);
         if (rc < 0) return 1; // cap exceeded; process_connection replies 431
         return 1;
     }
@@ -4639,6 +4682,30 @@ static int get_cpu_count(void) {
     return (n > 0) ? (int)n : 4;
 }
 
+// ---- Graceful shutdown (SIGINT/SIGTERM) ----
+// First signal starts a drain bounded by listen_cfg.shutdown_ms; a second
+// signal force-exits so a wedged keep-alive client cannot trap Ctrl+C.
+// POSIX-only: the AOT HTTP server itself is Linux-only, but the runtime
+// still has to compile on Windows/macOS.
+#ifndef ZZ_OS_WINDOWS
+#include <signal.h>
+static volatile sig_atomic_t g_http_shutdown_requested = 0;
+static volatile sig_atomic_t g_http_shutdown_signals = 0;
+
+static void http_shutdown_handler(int sig) {
+    (void)sig;
+    g_http_shutdown_requested = 1;
+    if (++g_http_shutdown_signals >= 2) _exit(130);
+}
+#endif
+
+static void http_install_shutdown_handlers(void) {
+#ifndef ZZ_OS_WINDOWS
+    signal(SIGINT, http_shutdown_handler);
+    signal(SIGTERM, http_shutdown_handler);
+#endif
+}
+
 // ---- Epoll worker loop (runs in each pthread) ----
 // Linux-only: epoll exists nowhere else. Other targets (macOS, Windows)
 // get a clear runtime error instead of a compile wall — the AOT HTTP
@@ -4649,6 +4716,13 @@ static int get_cpu_count(void) {
 // thread-local. No worker touches another's pool.
 #ifdef __linux__
 typedef struct { int listen_fd; int worker_id; } http_worker_arg;
+
+static int http_worker_has_active(void) {
+    for (int i = 0; i < t_nconns; i++) {
+        if (t_conns[i].fd >= 0) return 1;
+    }
+    return 0;
+}
 
 static void *worker_loop(void *arg) {
     int listen_fd = ((http_worker_arg *)arg)->listen_fd;
@@ -4681,11 +4755,39 @@ static void *worker_loop(void *arg) {
     }
 
     struct epoll_event events[MAX_EVENTS];
+    int64_t shutdown_deadline = 0;
+    int shutdown_started = 0;
 
     while (g_http_server_running) {
+        int64_t now = http_monotonic_ms();
+        // Enforce read_ms on idle/partial requests. This is checked on
+        // the 500 ms tick as well as after events, so a client that
+        // sends nothing is reaped without pinning a worker slot.
+        for (int s = 0; s < t_nconns; s++) {
+            Connection *sc = &t_conns[s];
+            if (sc->fd < 0) continue;
+            if (sc->state != CONN_READING && sc->state != CONN_READING_BODY
+                && sc->state != CONN_KEEP_ALIVE) continue;
+            if (now < sc->read_deadline_ms) continue;
+            int dead_fd = sc->fd;
+            connection_to_closed(sc);
+            epoll_ctl(epfd, EPOLL_CTL_DEL, dead_fd, NULL);
+        }
+
+        if (g_http_shutdown_requested) {
+            if (!shutdown_started) {
+                shutdown_started = 1;
+                shutdown_deadline = http_monotonic_ms() + (int64_t)g_http_limits.shutdown_ms;
+            }
+            if (!http_worker_has_active() || http_monotonic_ms() >= shutdown_deadline) break;
+        }
+
         // 500 ms timeout (not -1): lets a shutdown flag change drain
-        // promptly; the wakeup cost is one syscall per thread per 500 ms.
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, 500);
+        // promptly; shorter when read_ms itself is tighter.
+        int poll_ms = 500;
+        if (g_http_limits.read_ms < (uint64_t)poll_ms) poll_ms = (int)g_http_limits.read_ms;
+        if (poll_ms < 1) poll_ms = 1;
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, poll_ms);
         if (nfds < 0) {
             if (errno == EINTR) continue;
             break;
@@ -4696,6 +4798,9 @@ static void *worker_loop(void *arg) {
             uint32_t revents = events[i].events;
 
             if (ptr == NULL) {
+                // Stop accepting once shutdown starts; existing
+                // connections keep draining.
+                if (g_http_shutdown_requested) continue;
                 // Accept all pending connections
                 while (1) {
                     struct sockaddr_in client_addr;
@@ -4865,6 +4970,7 @@ static void *worker_loop(void *arg) {
                             } else {
                                 c->state = CONN_KEEP_ALIVE;
                             }
+                            http_note_read(c);
                             struct epoll_event cev;
                             cev.events = EPOLLIN | EPOLLET;
                             cev.data.ptr = c;
@@ -4980,12 +5086,6 @@ static uint64_t g_http_rate_window_ms = 0;
 static http_rate_bucket g_http_rate_buckets[HTTP_RATE_MAX_KEYS];
 static size_t g_http_rate_count = 0;
 static pthread_mutex_t g_http_rate_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static int64_t http_monotonic_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
 
 // Returns 1 when the request is limited (and stores a Retry-After in
 // seconds), 0 when admitted. Mirrors the VM bucket_take/check_rate_limit
@@ -6273,7 +6373,7 @@ static void http_on_head(Connection *c) {
     int ka = 0;
     http_scan_head(head, c->head_end, &cl, &expect, &ka);
     c->keep_alive = ka;
-    if (cl > HTTP_MAX_BODY_BYTES) {
+    if ((uint64_t)cl > g_http_limits.max_body_bytes) {
         http_reply(c, 413, "payload too large", 17);
         return;
     }
@@ -6326,7 +6426,11 @@ static void http_run_handler(Connection *c) {
     const char *tg = head + c->req_tgt_off;
     size_t tl = c->req_tgt_len;
     // Persistence stashed at head time by the fused scan (no rescan).
+    // Enforce max_reqs_conn on the response that reaches the cap so the
+    // final reply advertises close and the slot is reclaimed.
+    c->reqs_served++;
     int keep_alive = c->keep_alive;
+    if (c->reqs_served >= g_http_limits.max_reqs_conn) keep_alive = 0;
     // ── FAST PATH (socket only) ──
     // No middleware, matched entry provably ignores its request: skip
     // request-dict construction AND (for string results) the
@@ -6592,16 +6696,54 @@ zz_value zz_http_rate_limit(zz_value server, zz_value max_requests,
     return server;
 }
 
-// zz_http_listen(server, port, err) — starts HTTP server, blocks forever
-zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
-    (void)server;
+// Parse `http.listen_cfg` options. Unknown keys and non-positive
+// values are rejected like the VM's EvalError path.
+static int http_apply_listen_opts(zz_value opts, int *err) {
+    if (opts.tag != ZZ_DICT || !opts.dict) {
+        *err = 1;
+        return 0;
+    }
+    for (size_t i = 0; i < opts.dict->len; i++) {
+        zz_str *k = opts.dict->entries[i].key;
+        zz_value v = opts.dict->entries[i].val;
+        if (!k || v.tag != ZZ_INT || v.i <= 0) {
+            *err = 1;
+            return 0;
+        }
+        const char *key = zz_str_cptr(k);
+        size_t kl = k->len;
+        uint64_t n = (uint64_t)v.i;
+        if (kl == 7 && memcmp(key, "read_ms", 7) == 0) {
+            g_http_limits.read_ms = n;
+        } else if (kl == 13 && memcmp(key, "max_reqs_conn", 13) == 0) {
+            g_http_limits.max_reqs_conn = n;
+        } else if (kl == 14 && memcmp(key, "max_body_bytes", 14) == 0) {
+            g_http_limits.max_body_bytes = n;
+        } else if (kl == 11 && memcmp(key, "shutdown_ms", 11) == 0) {
+            g_http_limits.shutdown_ms = n;
+        } else {
+            *err = 1;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// Shared blocking server loop. Limits are set by the public wrappers
+// before this runs.
+static zz_value http_listen_impl(zz_value port, int *err) {
     *err = 0;
 
     int p = (port.tag == ZZ_INT) ? (int)port.i : 8080;
     if (p <= 0 || p > 65535) p = 8080;
 
-    // Ignore SIGPIPE to avoid crash on closed connections
+    // Ignore SIGPIPE to avoid crash on closed connections.
     signal(SIGPIPE, SIG_IGN);
+#ifndef ZZ_OS_WINDOWS
+    g_http_shutdown_requested = 0;
+    g_http_shutdown_signals = 0;
+#endif
+    http_install_shutdown_handlers();
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
@@ -6687,6 +6829,25 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     g_http_server_running = 0;
     close(listen_fd);
     return zz_unit();
+}
+
+// zz_http_listen(server, port, err) — starts HTTP server with defaults,
+// blocks forever (or until SIGINT/SIGTERM drains).
+zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
+    (void)server;
+    http_limits_default();
+    return http_listen_impl(port, err);
+}
+
+// zz_http_listen_cfg(server, port, opts, err) — starts HTTP server with
+// per-server limits from `opts`: read_ms, max_reqs_conn, max_body_bytes,
+// shutdown_ms.
+zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *err) {
+    (void)server;
+    *err = 0;
+    http_limits_default();
+    if (!http_apply_listen_opts(opts, err)) return zz_unit();
+    return http_listen_impl(port, err);
 }
 
 // ---- entry --------------------------------------------------------------
