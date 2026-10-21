@@ -25,7 +25,7 @@ pub use walk::{walk_expr, walk_exprs, walk_stmt, TypedExpr};
 pub mod callgraph;
 
 pub mod capture;
-pub use capture::{captured_in_block, captured_in_expr, closure_free_vars};
+pub use capture::{captured_in_block, captured_in_expr, captured_in_stmts, closure_free_vars};
 
 pub mod escape;
 pub use callgraph::{dce, prune_program, reachable, reachable_from, CallGraph, ReachableSet, TOP};

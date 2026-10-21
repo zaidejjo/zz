@@ -238,6 +238,14 @@ impl Compiler {
             }
         }
         c.captured_at_top = captured;
+        // Names referenced from nested bodies must resolve through the
+        // environment wherever they are bound — including bindings that are
+        // not top-level declarations: loop variables and block locals in
+        // inline top-level code (`for i in 0..3 { f := |x| x + i }`). Inside
+        // a function the same set comes from `scan_block_captured`; at the
+        // top level the scan's `free` set *is* that set, because only nested
+        // bodies contribute (`nested = false` for the inline statements).
+        c.captured = free.clone();
         for stmt in &program.stmts {
             if let Stmt::Func { name, params, .. } = stmt {
                 let full = name.join(".");
@@ -368,6 +376,14 @@ impl Compiler {
             }
         }
         c.captured_at_top = captured;
+        // Names referenced from nested bodies must resolve through the
+        // environment wherever they are bound — including bindings that are
+        // not top-level declarations: loop variables and block locals in
+        // inline top-level code (`for i in 0..3 { f := |x| x + i }`). Inside
+        // a function the same set comes from `scan_block_captured`; at the
+        // top level the scan's `free` set *is* that set, because only nested
+        // bodies contribute (`nested = false` for the inline statements).
+        c.captured = free.clone();
         for stmt in &program.stmts {
             if let Stmt::Func { name, params, .. } = stmt {
                 let full = name.join(".");

@@ -277,6 +277,13 @@ impl Lowerer {
         // globals. Top-level Decl assigns into its global (no local redecl).
         let mut names = NameCtx::new();
         self.seed_globals(&mut names);
+        // `zz_main` is a C frame too: a closure created in top-level code
+        // cannot read its C locals. Bindings that live only in that frame —
+        // loop variables and block locals — must be heap cells when a nested
+        // closure uses them, exactly like function locals. Module globals are
+        // excluded by the walker (closures read those directly), so this set
+        // only ever names inline-scope bindings.
+        names.capture_set = zz_hir::captured_in_stmts(&[], self.tp.stmts(), &self.global_set);
         self.seed_scalar_fns(&mut names);
         let mut global_init_done: std::collections::HashSet<String> =
             std::collections::HashSet::new();
