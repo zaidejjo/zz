@@ -1861,6 +1861,81 @@ fn used_variable_no_warning() {
 }
 
 #[test]
+fn unused_closure_param_no_warning() {
+    // Callback signatures are dictated by the callee: `.route(..., |req| ...)`
+    // cannot drop `req`, so an unread closure parameter is not a mistake.
+    let r = check_src("f := |req: int| \"x\"\ns := f(1)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|d| d.message.contains("unused variable `req`")),
+        "closure parameter must not warn: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_closure_param_no_warning() {
+    let r = check_src("f := |x: int| x + 1\ny := f(1)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|d| d.message.contains("unused variable `x`")),
+        "used closure parameter must not warn: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_named_param_still_warns() {
+    // Named-function parameters are the author's choice — keep warning.
+    let r = check_src("func f(a: int) -> int { return 1 }\nz := f(1)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused variable `a`")),
+        "named parameter must still warn: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_local_warns_despite_same_name_used_elsewhere() {
+    // Binding-scoped tracking: reads of a *different* `x` in another
+    // function must not silence this function's unused `x`.
+    let r = check_src("func f() {\n    x := 1\n}\nfunc g() -> int {\n    x := 2\n    return x\n}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let unused_x = r
+        .errors
+        .iter()
+        .filter(|d| d.message.contains("unused variable `x`"))
+        .count();
+    assert_eq!(
+        unused_x, 1,
+        "f's unused `x` must warn exactly once: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_inner_shadow_warns_with_outer_use() {
+    // The outer `x` is read, the inner shadow is not: only the inner one
+    // is unused. Name-level tracking used to hide both.
+    let r = check_src("x := 1\ny := x\nfunc f() {\n    x := 2\n}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused variable `x`")),
+        "inner shadow must warn: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn typo_suggestion_variable() {
     let mut funcs = HashMap::new();
     funcs.insert(

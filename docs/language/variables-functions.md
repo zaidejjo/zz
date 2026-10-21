@@ -70,6 +70,11 @@ doubled := map(nums, |x| x * 2)
 Closures capture by copy (snapshot). They are values and can be passed to
 `map` / `filter` / `task.spawn`.
 
+Closure parameters are exempt from `unused variable` warnings: the caller
+dictates the closure's arity (`s.route("GET", "/", |req| "ok")` cannot drop
+`req`), so an unread parameter is not a mistake. Named-function parameters
+still warn.
+
 ## Method syntax
 
 `p.dist()` is `dist(p)` — receiver becomes first arg:
