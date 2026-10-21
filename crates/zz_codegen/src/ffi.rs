@@ -16,9 +16,11 @@
 //!   symbol, injected into the generated translation unit by the lowerer.
 //!
 //! [`ensure_staticlib`] builds (incrementally — plain `cargo build`, whose
-//! own cache makes repeat invocations cheap) and locates the archive;
-//! [`link_args`] returns the extra `cc` flags. Both are shared by `zz build`
-//! and by the link test below, so the test exercises the real link path.
+//! own cache makes repeat invocations cheap) and publishes an immutable
+//! snapshot of the archive that links resolve against (the cargo output is
+//! rewritten in place and must never be handed to a linker); [`link_args`]
+//! returns the extra `cc` flags. Both are shared by `zz build` and by the
+//! link test below, so the test exercises the real link path.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -704,14 +706,7 @@ fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, Ffi
         if let Some(lib_mtime) = file_mtime(&lib) {
             let src_dir = root.join("crates").join("zz_native_rt").join("src");
             if !src_dir_mtime_newer_than(&src_dir, lib_mtime) {
-                // Sources unchanged — but the archive may predate
-                // debug-stripping (built before this guard existed).
-                // The stamp makes the check O(1): missing/stale stamp
-                // means strip once, then never again for this archive.
-                if release {
-                    ensure_stripped(&lib);
-                }
-                return Ok(lib);
+                return snapshot_staticlib(&lib, release);
             }
         }
     }
@@ -752,33 +747,169 @@ fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, Ffi
     // Release archives ship debug info (workspace profile keeps it:
     // ~200M with DWARF) and every downstream `-O3 -flto=thin` link
     // would page it all in — the link-time OOM on small boxes. The
-    // final binaries are stripped anyway (`-s`), so debug info in the
-    // archive is pure link cost: drop it in place. Best-effort and
-    // silent (linking works regardless; any chatter here would merge
-    // with program output on `zz run --native`, breaking piped
-    // captures). Debug (`zz build`) archives keep their symbols.
-    if release {
-        ensure_stripped(&lib);
-    }
-    Ok(lib)
+    // final binaries are stripped anyway (`-s`), so debug info is pure
+    // link cost: `snapshot_staticlib` strips the copy it publishes and
+    // never mutates the cargo output (a linker may be reading it).
+    snapshot_staticlib(&lib, release)
 }
 
-/// Stamp-guarded debug strip: brings pre-existing release archives
-/// (built before stripping existed) up to date without re-scanning on
-/// every build. The stamp sits next to the archive; a missing stamp or
-/// one older than the archive means strip once, then stamp.
-fn ensure_stripped(lib: &std::path::Path) {
-    let stamp = lib.with_extension("stripped");
-    let lib_mtime = file_mtime(lib);
-    let fresh = match (file_mtime(&stamp), lib_mtime) {
-        (Some(s), Some(l)) => s >= l,
-        _ => false,
+/// Immutable snapshot of the cargo-built archive, for linking.
+///
+/// The cargo output path is not stable: `cargo build` replaces the file,
+/// and the debug strip used to rewrite it in place, so a concurrent linker
+/// could read a torn archive — `file truncated`, `file format not
+/// recognized`, or `undefined reference to zz_float_format_raw` when the
+/// C runtime archive's member was already published (#548).
+///
+/// Every link now consumes a snapshot keyed by the archive's length + mtime:
+/// copied to a private temp, stripped there, and published with one atomic
+/// `rename`. A reader can only ever observe a complete, immutable file, and
+/// a writer never sees a reader's path change under it. Cross-process
+/// publishers of the same key race harmlessly (identical bytes, `rename`
+/// picks the winner).
+fn snapshot_staticlib(lib: &std::path::Path, strip: bool) -> Result<PathBuf, FfiError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant, UNIX_EPOCH};
+
+    // Serialize this process's copies; the double-check under the lock
+    // keeps parallel transient builds from each copying ~200M.
+    static SNAPSHOT_LOCK: Mutex<()> = Mutex::new(());
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn stamp(path: &std::path::Path) -> Option<(u64, u128)> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        Some((meta.len(), mtime))
+    }
+
+    let Some((len, mtime)) = stamp(lib) else {
+        // Missing archive: let the caller's link report it in its own
+        // words instead of masking it with a snapshot error.
+        return Ok(lib.to_path_buf());
     };
-    if fresh {
+    let parent = lib
+        .parent()
+        .ok_or_else(|| FfiError(format!("static library has no parent: {}", lib.display())))?;
+    let root = parent.join("zz_native_rt-snapshots");
+    let key = format!("{len}-{mtime}-{}", if strip { "stripped" } else { "plain" });
+    let dir = root.join(&key);
+    let snap = dir.join(lib_file_name());
+
+    // Reuse: the key pins the source archive version and the stripping
+    // mode, and publishing is atomic, so any non-empty file in the key
+    // dir is a complete copy of exactly this input.
+    if let Some((snap_len, _)) = stamp(&snap) {
+        if snap_len > 0 {
+            return Ok(snap);
+        }
+        // Torn/garbage snapshot (killed mid-copy before the rename guard
+        // existed): rebuild rather than link it.
+        let _ = std::fs::remove_file(&snap);
+    }
+
+    let _guard = SNAPSHOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((snap_len, _)) = stamp(&snap) {
+        if snap_len > 0 {
+            return Ok(snap);
+        }
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| FfiError(format!("cannot create {}: {e}", dir.display())))?;
+
+    // Copy only from a stable source: a writer that changes the archive
+    // mid-copy (cargo building another target, another process's build)
+    // must be waited out, never published. Release static libs are ~200M
+    // on a cold cache, hence the generous deadline.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let before = stamp(lib);
+        let tmp = dir.join(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let copied = std::fs::copy(lib, &tmp).ok().and_then(|_| stamp(&tmp));
+        let after = stamp(lib);
+        let stable = match (before, copied, after) {
+            (Some(b), Some(c), Some(a)) => b == a && c.0 == b.0 && c.0 > 0,
+            _ => false,
+        };
+        if stable {
+            if strip {
+                strip_debug_symbols(&tmp);
+            }
+            match std::fs::rename(&tmp, &snap) {
+                Ok(()) => {
+                    prune_staticlib_snapshots(&root, &key);
+                    return Ok(snap);
+                }
+                // Lost a publish race: adopt whatever won.
+                Err(_) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    if let Some((snap_len, _)) = stamp(&snap) {
+                        if snap_len > 0 {
+                            return Ok(snap);
+                        }
+                    }
+                }
+            }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        if Instant::now() >= deadline {
+            return Err(FfiError(format!(
+                "native runtime archive keeps changing while snapshotting: {} ({:?})",
+                lib.display(),
+                stamp(lib)
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Bound snapshot growth: superseded archive versions are dead weight
+/// (~200M each in release). Keep the newest few — a concurrent process may
+/// still be linking one it resolved moments ago — and only delete entries
+/// past a grace window.
+fn prune_staticlib_snapshots(root: &std::path::Path, keep: &str) {
+    use std::time::{Duration, SystemTime};
+    const KEEP: usize = 4;
+    // A day of grace: any build that resolved an old snapshot has long
+    // finished linking by then, so pruning can never pull a file out from
+    // under a live `clang`.
+    const GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut dirs: Vec<(SystemTime, PathBuf, String)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            Some((mtime, e.path(), name))
+        })
+        .collect();
+    if dirs.len() <= KEEP {
         return;
     }
-    strip_debug_symbols(lib);
-    let _ = std::fs::write(&stamp, b"stripped\n");
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
+    let now = SystemTime::now();
+    for (mtime, path, name) in dirs.into_iter().skip(KEEP) {
+        if name == keep {
+            continue;
+        }
+        if now.duration_since(mtime).map(|d| d < GRACE).unwrap_or(true) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(&path);
+    }
 }
 
 /// Drop DWARF/debug sections from `path` in place, keeping the symbol
@@ -1369,13 +1500,99 @@ mod tests {
         // Non-archives fail gracefully (false, no panic, no rewrite):
         // link inputs stay usable, downstream links just stay heavy.
         assert!(!strip_debug_symbols(&src));
-        // Stamp-guard: first ensure strips, second is a no-op, and the
-        // stamp trails the archive mtime so stale archives heal once.
-        ensure_stripped(&arch);
-        let stamped_len = std::fs::metadata(&arch).unwrap().len();
-        assert_eq!(stamped_len, after);
-        ensure_stripped(&arch);
-        assert_eq!(std::fs::metadata(&arch).unwrap().len(), after);
+        // Snapshot publishing (#548): the linker gets a stripped private
+        // copy under a content-keyed name, the cargo archive is never
+        // mutated, and a second call reuses the published snapshot.
+        let tiny2 = tmp.join("tiny2.a");
+        let ar2 = std::process::Command::new("ar")
+            .arg("rcs")
+            .arg(&tiny2)
+            .arg(tmp.join("tiny.o"))
+            .output()
+            .expect("run ar");
+        assert!(ar2.status.success());
+        let src_len = std::fs::metadata(&tiny2).unwrap().len();
+        let snapshot = snapshot_staticlib(&tiny2, true).expect("snapshot");
+        assert_ne!(snapshot, tiny2);
+        assert_eq!(
+            std::fs::metadata(&tiny2).unwrap().len(),
+            src_len,
+            "snapshot must not mutate the cargo archive"
+        );
+        let snap_len = std::fs::metadata(&snapshot).unwrap().len();
+        assert!(
+            snap_len < src_len,
+            "snapshot not stripped: {snap_len} >= {src_len}"
+        );
+        let snap_mtime = std::fs::metadata(&snapshot).unwrap().modified().unwrap();
+        assert_eq!(
+            snapshot_staticlib(&tiny2, true).expect("snapshot"),
+            snapshot
+        );
+        assert_eq!(
+            std::fs::metadata(&snapshot).unwrap().modified().unwrap(),
+            snap_mtime,
+            "reuse must not rewrite the snapshot"
+        );
         cleanup();
+    }
+
+    /// #548, reader half: parallel snapshotting while the archive is being
+    /// replaced must never yield a torn copy or the live path. Guards the
+    /// retry/stability logic — a snapshot is always exactly one complete
+    /// writer payload.
+    #[test]
+    fn snapshot_staticlib_publishes_immutable_copies() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::time::Duration;
+        static N: AtomicU64 = AtomicU64::new(0);
+        let tmp = std::env::temp_dir().join(format!(
+            "zz-snapshot-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let lib = tmp.join(lib_file_name());
+        // Two distinct payloads (different lengths on purpose), both
+        // written by truncate + write — how cargo replaces the archive.
+        let a = vec![b'a'; 48 * 1024];
+        let b: Vec<u8> = (0..32 * 1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&lib, &a).unwrap();
+
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for round in 0..2000usize {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::fs::write(&lib, if round % 2 == 0 { &a } else { &b }).unwrap();
+                    // Leave windows where the archive is stable, so this
+                    // exercises both "copy now" and "wait out the writer".
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            });
+            let readers: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        for _ in 0..25 {
+                            let snap = snapshot_staticlib(&lib, false).expect("snapshot");
+                            assert_ne!(snap, lib, "snapshot must never be the live archive");
+                            let bytes = std::fs::read(&snap).expect("read snapshot");
+                            assert!(
+                                bytes == a || bytes == b,
+                                "torn snapshot: {} bytes",
+                                bytes.len()
+                            );
+                        }
+                    })
+                })
+                .collect();
+            for h in readers {
+                h.join().unwrap();
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
