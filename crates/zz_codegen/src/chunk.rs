@@ -2269,6 +2269,12 @@ impl<'a> Emitter<'a> {
                 }
             }
             Pattern::Or(pats) => {
+                // The verifier admits an empty alternative list; no
+                // alternative can match, exactly like the VM's loop.
+                if pats.is_empty() {
+                    conds.push("0".to_string());
+                    return Ok(());
+                }
                 let mut alts = Vec::new();
                 for alt in pats {
                     let mut c = Vec::new();
