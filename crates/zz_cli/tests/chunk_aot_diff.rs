@@ -11,16 +11,28 @@
 //! ([bool] iteration through the boxed path) pin chunk↔HIR parity for
 //! the shapes the sieve bench exercises at scale.
 //!
-//! Deliberately uncovered, pending #508: `Op::CallMethod` for receivers the
-//! compiler cannot type (struct methods, chained field receivers) and the
 //! `match` family (`MatchArm` / `MatchGuard` / `MatchError` /
-//! `IfLetMatch`) have no chunk arms. Variant methods that *are* typed
+//! `IfLetMatch`): covered since #508. Arm bindings live in function-local
+//! `zz_value` cells (the VM uses a child env), pattern tests read through
+//! borrowed places, and `|`, guards, nested payloads, user enums (with
+//! `MakeEnum`/`RegisterEnum`) and `if let` all pin chunk↔HIR parity in
+//! `match_option` / `match_result` / `match_guard` / `match_literals` /
+//! `match_enum` / `match_iflet`.
+//!
+//! Deliberately uncovered, pending #508: `Op::CallMethod` for receivers the
+//! compiler cannot type (struct methods, chained field receivers, and
+//! methods on module-scope bindings). Variant methods that *are* typed
 //! (`Option`/`Result` receivers; `unwrap` / `unwrap_or` / `expect`) no
 //! longer reach the dynamic op — the compiler emits the resolved
 //! `option.*` / `result.*` native, so `variant_methods` pins them on all
-//! backends. Struct methods and `match` over Option/Result still need
-//! build-time resolution (or an emitted method table) and stay out of the
-//! corpus. Variant *construction* is covered since #508.
+//! backends. Struct methods still need build-time resolution (or an
+//! emitted method table) and stay out of the corpus. Variant
+//! *construction* is covered since #508.
+//!
+//! Not in the corpus because the *HIR* backend miscompiles them today
+//! (chunk output matches the VM): tuple patterns (`match (3, 4)`, HIR
+//! prints 0) and `match` on `bool` with `true`/`false` arms (HIR emits
+//! unbalanced C).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -489,6 +501,12 @@ const CASES: &[(&str, &str)] = &[
     ("variant_methods", VARIANT_METHODS),
     ("module_globals", MODULE_GLOBALS),
     ("module_globals_main", MODULE_GLOBALS_MAIN),
+    ("match_option", MATCH_OPTION),
+    ("match_result", MATCH_RESULT),
+    ("match_guard", MATCH_GUARD),
+    ("match_literals", MATCH_LITERALS),
+    ("match_enum", MATCH_ENUM),
+    ("match_iflet", MATCH_IFLET),
 ];
 
 // Module-scope bindings read and written from functions: the VM keeps
@@ -546,6 +564,142 @@ func main() {
         t = t + 1
     }
     println(t)
+}
+"#;
+
+// `match` family: the VM keeps arm bindings in a child environment; the
+// chunk backend gives each binding a function-local `zz_value` cell and
+// tests patterns with borrowed reads (no clone on a miss).
+const MATCH_OPTION: &str = r#"func pick(n: int) -> Option<int> {
+    if n > 0 { .some(n) } else { .none }
+}
+func wrap(n: int) -> Option<Result<int, str>> {
+    if n > 0 { .some(.ok(n)) } else { .some(.err("no")) }
+}
+func main() {
+    a := pick(5)
+    println(match a {
+        .some(x) => x * 2,
+        .none => 0 - 1,
+    })
+    println(match pick(0) {
+        .some(x) => x * 2,
+        .none => 0 - 1,
+    })
+    nested := wrap(3)
+    println(match nested {
+        .some(.ok(y)) => y + 100,
+        .some(.err(e)) => 0 - 2,
+        .none => 0 - 3,
+    })
+    println(match wrap(0) {
+        .some(.ok(y)) => y + 100,
+        .some(.err(e)) => 0 - 2,
+        .none => 0 - 3,
+    })
+}
+"#;
+
+const MATCH_RESULT: &str = r#"func check(n: int) -> Result<int, str> {
+    if n > 0 { .ok(n * 2) } else { .err("neg") }
+}
+func main() {
+    a := check(3)
+    println(match a {
+        .ok(x) => x,
+        .err(e) => 0 - 1,
+    })
+    b := check(-2)
+    println(match b {
+        .ok(x) => x,
+        .err(e) => 0 - 2,
+    })
+}
+"#;
+
+const MATCH_GUARD: &str = r#"func grade(o: Option<int>) -> int {
+    match o {
+        .some(x) if x > 10 => 1,
+        .some(x) => x * 10,
+        .none => 0,
+    }
+}
+func main() {
+    println(grade(.some(50)))
+    println(grade(.some(5)))
+    println(grade(.none))
+}
+"#;
+
+const MATCH_LITERALS: &str = r#"func classify(n: int) -> int {
+    match n {
+        0 => 100,
+        1 | 2 => 200,
+        _ => 300,
+    }
+}
+func nested(n: int) -> int {
+    match n {
+        7 => match n {
+            7 => 77,
+            _ => 0,
+        },
+        _ => 0 - 1,
+    }
+}
+func main() {
+    println(classify(0))
+    println(classify(1))
+    println(classify(2))
+    println(classify(9))
+    println(nested(7))
+    println(nested(8))
+}
+"#;
+
+const MATCH_ENUM: &str = r#"enum Shape {
+    Circle(int),
+    Square(int),
+    Empty,
+}
+func area(s: Shape) -> int {
+    match s {
+        .Circle(r) => r * r,
+        .Square(w) => w * w,
+        .Empty => 0,
+    }
+}
+func main() {
+    println(area(Shape.Circle(3)))
+    println(area(Shape.Square(4)))
+    println(area(Shape.Empty))
+    e := Shape.Empty
+    println(match e {
+        .Circle(r) => r,
+        .Square(w) => w,
+        .Empty => 0 - 1,
+    })
+}
+"#;
+
+const MATCH_IFLET: &str = r#"func take(o: Option<int>) -> int {
+    if let .some(x) = o {
+        x
+    } else {
+        0 - 1
+    }
+}
+func main() {
+    println(take(.some(9)))
+    println(take(.none))
+    v := 0
+    if let .some(x) = .some(4) {
+        v = v + x
+    }
+    if let .some(y) = .none {
+        v = v + 100
+    }
+    println(v)
 }
 "#;
 
