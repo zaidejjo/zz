@@ -1185,6 +1185,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "http.route" | "std.http.route" => Some("zz_http_route"),
         "http.log" | "std.http.log" => Some("zz_http_log"),
         "http.pipe" | "std.http.pipe" => Some("zz_http_pipe"),
+        "http.rate_limit" | "std.http.rate_limit" => Some("zz_http_rate_limit"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
         "http.test" | "std.http.test" => Some("zz_http_test"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),

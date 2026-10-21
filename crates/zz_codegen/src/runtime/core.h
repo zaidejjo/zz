@@ -1106,6 +1106,7 @@ zz_value zz_http_route_delete_fast(zz_value server, zz_value path, zz_value hand
 zz_value zz_http_route_fast(zz_value server, zz_value method, zz_value path, zz_value handler, int *err);
 zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err);  // 2 args
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
+zz_value zz_http_rate_limit(zz_value server, zz_value max_requests, zz_value window_ms, int *err);  // 3 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
 zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args

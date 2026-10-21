@@ -4268,6 +4268,8 @@ typedef struct {
     char    req_method[16];
     size_t  req_tgt_off;
     size_t  req_tgt_len;
+    // Rate-limit key (peer address text; "unknown" if inet_ntop fails).
+    char    peer[46];
 } Connection;
 
 // Per-thread connection pool: calloc'd once per worker thread; the
@@ -4311,6 +4313,7 @@ static Connection* alloc_connection(int fd) {
     c->head_too_large = 0;
     c->body_truncated = 0;
     c->req_consumed = 0;
+    c->peer[0] = '\0';
     return c;
 }
 
@@ -4710,6 +4713,9 @@ static void *worker_loop(void *arg) {
                         close(client_fd);
                         continue;
                     }
+                    if (!inet_ntop(AF_INET, &client_addr.sin_addr, c->peer, sizeof c->peer)) {
+                        snprintf(c->peer, sizeof c->peer, "%s", "unknown");
+                    }
 
                     set_nonblock(client_fd);
                     struct epoll_event cev;
@@ -4956,6 +4962,83 @@ static zz_value g_http_middlewares[HTTP_MAX_MIDDLEWARE];
 static int g_http_middleware_count = 0;
 // Access-log flag for the socket serve path (http.log).
 static int g_http_log_enabled = 0;
+
+// Rate limiter (http.rate_limit) — one token bucket per client key.
+// Bounded like the VM (RATE_LIMIT_MAX_KEYS = 4096); a key flood resets
+// the table rather than growing without bound, and lock failure fails
+// open (a limiter must never turn into a 500).
+#define HTTP_RATE_MAX_KEYS 4096
+typedef struct {
+    char key[46];       // IPv4/IPv6 text or "http.test"
+    double tokens;
+    int64_t last_ms;
+    int used;
+} http_rate_bucket;
+static int g_http_rate_enabled = 0;
+static uint64_t g_http_rate_max_requests = 0;
+static uint64_t g_http_rate_window_ms = 0;
+static http_rate_bucket g_http_rate_buckets[HTTP_RATE_MAX_KEYS];
+static size_t g_http_rate_count = 0;
+static pthread_mutex_t g_http_rate_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int64_t http_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// Returns 1 when the request is limited (and stores a Retry-After in
+// seconds), 0 when admitted. Mirrors the VM bucket_take/check_rate_limit
+// arithmetic exactly: lazy refill, one token per request, fail open.
+static int http_rate_check(const char *key, uint64_t *retry_after) {
+    if (!g_http_rate_enabled) return 0;
+    if (!key) key = "";
+    if (pthread_mutex_lock(&g_http_rate_lock) != 0) return 0;
+
+    int64_t now = http_monotonic_ms();
+    size_t slot = HTTP_RATE_MAX_KEYS;
+    for (size_t i = 0; i < g_http_rate_count; i++) {
+        if (g_http_rate_buckets[i].used &&
+            strncmp(g_http_rate_buckets[i].key, key, sizeof g_http_rate_buckets[i].key) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == HTTP_RATE_MAX_KEYS) {
+        if (g_http_rate_count >= HTTP_RATE_MAX_KEYS) {
+            memset(g_http_rate_buckets, 0, sizeof g_http_rate_buckets);
+            g_http_rate_count = 0;
+        }
+        slot = g_http_rate_count++;
+        http_rate_bucket *nb = &g_http_rate_buckets[slot];
+        snprintf(nb->key, sizeof nb->key, "%s", key);
+        nb->tokens = (double)g_http_rate_max_requests;
+        nb->last_ms = now;
+        nb->used = 1;
+    }
+
+    http_rate_bucket *b = &g_http_rate_buckets[slot];
+    int64_t elapsed = now - b->last_ms;
+    if (elapsed > 0) {
+        b->tokens = fmin(
+            (double)g_http_rate_max_requests,
+            b->tokens + (double)elapsed * (double)g_http_rate_max_requests /
+                            (double)g_http_rate_window_ms);
+        b->last_ms = now;
+    }
+    if (b->tokens >= 1.0) {
+        b->tokens -= 1.0;
+        pthread_mutex_unlock(&g_http_rate_lock);
+        return 0;
+    }
+    double wait_ms = ceil((1.0 - b->tokens) * (double)g_http_rate_window_ms /
+                          (double)g_http_rate_max_requests);
+    uint64_t retry = (uint64_t)(wait_ms / 1000.0);
+    if (retry == 0) retry = 1;
+    *retry_after = retry;
+    pthread_mutex_unlock(&g_http_rate_lock);
+    return 1;
+}
 
 // zz_http_server(unused, err) — creates an HTTP server handle (int 0;
 // routes live in the global table above).
@@ -5767,14 +5850,49 @@ static zz_value http_405(const char *allow) {
     return r;
 }
 
+// 429 response for a tripped rate limiter. Mirrors the VM's
+// dispatch_with_request short-circuit: plain-text body + Retry-After.
+static zz_value http_rate_limited(uint64_t retry_after) {
+    static const char msg[] = "Too Many Requests";
+    zz_str *b = str_alloc(sizeof msg - 1);
+    memcpy(zz_str_ptr(b), msg, sizeof msg - 1);
+    zz_str_ptr(b)[sizeof msg - 1] = '\0';
+    b->len = sizeof msg - 1;
+    zz_value hdrs = zz_dict_new();
+    zz_value ct = zz_str_new("text/plain; charset=utf-8", 25);
+    zz_dict_set(hdrs.dict, zz_str_static("Content-Type"), ct);
+    char retry_buf[32];
+    int retry_len = snprintf(retry_buf, sizeof retry_buf, "%llu",
+                             (unsigned long long)retry_after);
+    if (retry_len > 0) {
+        zz_value ra = zz_str_new(retry_buf, (size_t)retry_len);
+        zz_dict_set(hdrs.dict, zz_str_static("Retry-After"), ra);
+    }
+    zz_value resp = http_response_new(429, b, hdrs);
+    zz_release(&hdrs);
+    zz_value owned = {ZZ_STR, {.s = b}};
+    zz_release(&owned);
+    return resp;
+}
+
 // Shared dispatch core: match, middleware chain, handler call. Returns an
 // http.response object in all cases (VM http.test semantics). Sets
 // *failed when the 500 came from the dispatcher itself (no route,
 // middleware violation) as opposed to the handler — http.handle maps the
 // former to .err and the latter to .ok, exactly like the VM.
+// `peer` is the rate-limit key: the socket peer for live requests,
+// "http.test" for in-process dispatch (same key the VM uses).
 static zz_value http_dispatch(const char *method, const char *path, size_t pathlen,
-                              zz_value body, zz_value headers, int *failed) {
+                              zz_value body, zz_value headers, const char *peer,
+                              int *failed) {
     *failed = 0;
+    // Rate limit first, before route/middleware work (VM parity).
+    if (g_http_rate_enabled) {
+        uint64_t retry_after = 0;
+        if (http_rate_check(peer, &retry_after)) {
+            return http_rate_limited(retry_after);
+        }
+    }
     // Split off '?query' (first '?' wins, like the VM's split_once).
     const char *qm = memchr(path, '?', pathlen);
     size_t plen = qm ? (size_t)(qm - path) : pathlen;
@@ -6222,7 +6340,7 @@ static void http_run_handler(Connection *c) {
     // Zero-alloc probe: exact routes hit without touching the heap.
     // Param patterns (":id", "*") fall back to the allocating matcher
     // only when the exact probe misses.
-    if (g_http_middleware_count == 0) {
+    if (g_http_middleware_count == 0 && !g_http_rate_enabled) {
         const char *qm0 = memchr(tg, '?', tl);
         size_t plen0 = qm0 ? (size_t)(qm0 - tg) : tl;
         http_route_entry *fe = http_match_exact(method, tg, plen0);
@@ -6320,7 +6438,7 @@ static void http_run_handler(Connection *c) {
         }
         zz_value bodyval = {ZZ_STR, {.s = bs}};
         int failed = 0;
-        zz_value resp = http_dispatch(method, tg, tl, bodyval, headers, &failed);
+        zz_value resp = http_dispatch(method, tg, tl, bodyval, headers, c->peer, &failed);
         zz_release(&bodyval);
         // The response owns its copies now — drop request bytes before
         // serializing so peak stays at one body, not two.
@@ -6405,7 +6523,7 @@ zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value 
         return zz_variant_err(zz_str_static("std.http.test: expected (server, method, path, body) strings"));
     }
     int failed = 0;
-    zz_value out = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), &failed);
+    zz_value out = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), "http.test", &failed);
     *err = 0;
     return out;
 }
@@ -6421,7 +6539,7 @@ zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_valu
         return zz_variant_err(zz_str_static("std.http.handle: expected (server, method, path, body) strings"));
     }
     int failed = 0;
-    zz_value resp = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), &failed);
+    zz_value resp = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), "http.test", &failed);
     *err = 0;
     zz_value text = zz_object_get_field(&resp, "text");
     zz_value out;
@@ -6450,6 +6568,27 @@ zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err) {
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err) {
     *err = 0;
     g_http_log_enabled = zz_truthy(enabled) ? 1 : 0;
+    return server;
+}
+
+// zz_http_rate_limit(server, max_requests, window_ms, err) — arms the
+// per-peer token bucket. Validates like the VM (positive ints).
+zz_value zz_http_rate_limit(zz_value server, zz_value max_requests,
+                            zz_value window_ms, int *err) {
+    *err = 0;
+    if (max_requests.tag != ZZ_INT || max_requests.i <= 0 ||
+        window_ms.tag != ZZ_INT || window_ms.i <= 0) {
+        *err = 1;
+        return server;
+    }
+    if (pthread_mutex_lock(&g_http_rate_lock) == 0) {
+        memset(g_http_rate_buckets, 0, sizeof g_http_rate_buckets);
+        g_http_rate_count = 0;
+        pthread_mutex_unlock(&g_http_rate_lock);
+    }
+    g_http_rate_max_requests = (uint64_t)max_requests.i;
+    g_http_rate_window_ms = (uint64_t)window_ms.i;
+    g_http_rate_enabled = 1;
     return server;
 }
 

@@ -554,8 +554,6 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("http.serve_dir_at", "P3 AOT; prefix-static C impl"),
     ("std.http.listen_cfg", "P3 AOT; listen-limits C impl"),
     ("http.listen_cfg", "P3 AOT; listen-limits C impl"),
-    ("std.http.rate_limit", "P3 AOT; token-bucket C impl"),
-    ("http.rate_limit", "P3 AOT; token-bucket C impl"),
     ("std.http.test_req", "P3 AOT; header-injecting test C impl"),
     ("std.http.body_bytes", "P3 AOT; request-bytes C impl"),
     ("http.body_bytes", "P3 AOT; request-bytes C impl"),
