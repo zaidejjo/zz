@@ -1,0 +1,42 @@
+// features: closure, for-loop, int-arith, locals, print, string-literal
+// Module-scope loop variables captured by a closure must bind in the
+// environment, exactly like function-local ones: the closure body runs in
+// its own frame and can only read environment bindings, so a slot-homed
+// loop var left it undefined at run time (#532). Inside `func main()` the
+// same source always worked. All three engines must agree.
+total := 0
+for i in 0..3 {
+    f := |x: int| {
+        x + i
+    }
+    total = total + f(1)
+}
+println("total={total}")
+
+vals := [7, 8, 9]
+acc := 0
+for i in 0..3 {
+    g := |x: int| {
+        x + i
+    }
+    acc = acc + g(vals[i])
+}
+println("acc={acc}")
+
+nested := 0
+for i in 0..2 {
+    for j in 0..2 {
+        h := |x: int| {
+            x + i * 10 + j
+        }
+        nested = nested + h(0)
+    }
+}
+println("nested={nested}")
+
+plain := 0
+for i in 0..4 {
+    plain = plain + i
+}
+println("plain={plain}")
+println("module_scope_loop_capture_ok")

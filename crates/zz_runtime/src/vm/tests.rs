@@ -1951,3 +1951,30 @@ fn statement_if_shapes_match_the_tree_walker() {
         assert_same(src);
     }
 }
+
+/// Module-scope loop variables captured by a closure must bind in the
+/// environment, exactly like a function-local captured loop var: the
+/// closure body runs in its own frame and can only read env bindings, so a
+/// slot-homed `i` left it undefined at run time (#532). Same source inside
+/// `func main()` always worked.
+#[test]
+fn vm_module_scope_loop_capture() {
+    for src in [
+        // Closure captures the loop var, reads it per iteration.
+        "total := 0\nfor i in 0..3 {\n    f := |x: int| { x + i }\n    total = total + f(1)\n}\nprintln(total)",
+        // Per-iteration rebinding: the captured value tracks the current
+        // iteration, not a stale first binding.
+        "vals := [7, 8, 9]\ntotal := 0\nfor i in 0..3 {\n    f := |x: int| { x + i }\n    total = total + f(vals[i])\n}\nprintln(total)",
+        // Captured loop var over a non-range iterable.
+        "total := 0\nfor x in [5, 6] {\n    add := |y: int| { y + x }\n    total = total + add(1)\n}\nprintln(total)",
+        // Block-local captured inside a top-level loop (no loop var).
+        "total := 0\nfor _ in 0..2 {\n    bump := 3\n    f := |y: int| { y + bump }\n    total = total + f(0)\n}\nprintln(total)",
+        // Nested top-level loops: inner closure captures both vars.
+        "total := 0\nfor i in 0..2 {\n    for j in 0..2 {\n        f := |x: int| { x + i * 10 + j }\n        total = total + f(0)\n    }\n}\nprintln(total)",
+        // Control: uncaptured loop var keeps the slot fast path and the
+        // same result.
+        "total := 0\nfor i in 0..4 {\n    total = total + i\n}\nprintln(total)",
+    ] {
+        assert_same(src);
+    }
+}
