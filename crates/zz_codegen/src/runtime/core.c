@@ -5163,9 +5163,13 @@ static int http_rate_check(const char *key, uint64_t *retry_after) {
         pthread_mutex_unlock(&g_http_rate_lock);
         return 0;
     }
-    double wait_ms = ceil((1.0 - b->tokens) * (double)g_http_rate_window_ms /
-                          (double)g_http_rate_max_requests);
-    uint64_t retry = (uint64_t)(wait_ms / 1000.0);
+    uint64_t wait_ms = (uint64_t)ceil(
+        (1.0 - b->tokens) * (double)g_http_rate_window_ms /
+        (double)g_http_rate_max_requests);
+    // Match the VM's `wait_ms.div_ceil(1000).max(1)`: Retry-After must
+    // round up, or a client retrying at the advertised second still
+    // lands inside the exhausted window.
+    uint64_t retry = wait_ms / 1000 + (wait_ms % 1000 != 0);
     if (retry == 0) retry = 1;
     *retry_after = retry;
     pthread_mutex_unlock(&g_http_rate_lock);

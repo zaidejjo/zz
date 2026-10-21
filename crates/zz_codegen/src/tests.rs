@@ -1370,9 +1370,19 @@ fn db_locals_get_scope_cleanup_and_borrow_native_calls() {
     // cleanup handler, and the query/exec/close natives borrow the live
     // local instead of taking an unreleased clone share.
     let src = r#"
+func touch(d: db) {
+    sqlz.exec(d, "CREATE TABLE t (n INTEGER)")
+}
+
+func open_db() -> db {
+    sqlz.open(":memory:")
+}
+
 func main() {
     db := sqlz.open(":memory:")
-    sqlz.exec(db, "CREATE TABLE t (n INTEGER)")
+    touch(db)
+    rows := open_db().query("SELECT 1")
+    println(len(rows))
     sqlz.close(db)
 }
 "#;
@@ -1384,8 +1394,14 @@ func main() {
     );
     let user = c.split("// ---- generated code ----").nth(1).unwrap_or("");
     assert!(
-        user.contains("zz_db_exec, v"),
-        "DB exec must borrow the live local:\n{user}"
+        user.lines().any(|line| {
+            line.contains("cleanup(zz_db_value_cleanup)") && line.contains("= args[0];")
+        }),
+        "DB parameter must release the caller's owning clone:\n{user}"
+    );
+    assert!(
+        user.contains("zz_release(&zz_db_arg"),
+        "DB calls must release the borrowed receiver:\n{user}"
     );
     assert!(
         !user.contains("zz_db_exec, zz_clone("),
