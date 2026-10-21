@@ -971,7 +971,18 @@ fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
     drop(module);
     let loaded = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
     zz_ir::verify::verify(&loaded).map_err(|e| format!("zz: .zzc verify failed: {e}"))?;
-    Ok((loaded, format!("{entry_ns}.main")))
+    // Script-style programs (top-level statements only) have no
+    // `<ns>.main`; the synthetic entry chunk is the whole program, exactly
+    // like the HIR backend's `zz_main`-only shape. An empty key tells the
+    // chunk backend to emit no CLI main call.
+    let main_key = format!("{entry_ns}.main");
+    let has_main = loaded.funcs.iter().any(|f| {
+        loaded
+            .strings
+            .get(f.name.0 as usize)
+            .is_some_and(|n| n == &main_key)
+    });
+    Ok((loaded, if has_main { main_key } else { String::new() }))
 }
 
 /// Output directory for a build of `src` (authoritative, no duplicates):

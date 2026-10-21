@@ -487,7 +487,44 @@ const CASES: &[(&str, &str)] = &[
     ("cond_cmp", COND_CMP),
     ("variant_construct", VARIANT_CONSTRUCT),
     ("variant_methods", VARIANT_METHODS),
+    ("module_globals", MODULE_GLOBALS),
+    ("module_globals_main", MODULE_GLOBALS_MAIN),
 ];
+
+// Module-scope bindings read and written from functions: the VM keeps
+// them in the program environment, so the chunk backend emits file-scope
+// C globals (`module_globals`). Script shape (top-level statements, no
+// user `main`) and `func main` shape both pinned.
+const MODULE_GLOBALS: &str = r#"
+greeting := "hi"
+count := 0
+func show() {
+    println(greeting)
+    println(count)
+}
+func bump() {
+    count = count + 1
+}
+show()
+bump()
+bump()
+println(count)
+show()
+"#;
+
+const MODULE_GLOBALS_MAIN: &str = r#"
+total := 0
+limit := 3
+func add(n: int) {
+    total = total + n
+}
+func main() {
+    for i in 0..limit {
+        add(i)
+    }
+    println(total)
+}
+"#;
 
 // Condition fusion pin: slot-vs-slot and slot-vs-const int compares
 // feeding WhileCond stay identical across backends (chunk fuses them
