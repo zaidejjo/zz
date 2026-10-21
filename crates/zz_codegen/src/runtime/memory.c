@@ -270,6 +270,9 @@ void zz_retain_arc(zz_value *v) {
     case ZZ_JSON:
         zz_vbox_retain(v->payload);
         break;
+    case ZZ_DB:
+        if (v->db) zz_db_retain_handle(v->db);
+        break;
     default:
         break;
     }
@@ -314,6 +317,13 @@ void zz_release_arc(zz_value *v) {
     case ZZ_JSON:
         zz_release_variant(v);
         break;
+    case ZZ_DB:
+        if (v->db) {
+            void *db = v->db;
+            v->db = NULL;
+            zz_db_release_handle(db);
+        }
+        break;
     default:
         break;
     }
@@ -348,6 +358,9 @@ zz_value zz_clone_arc(zz_value v) {
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
         zz_vbox_retain(v.payload);
+        break;
+    case ZZ_DB:
+        if (v.db) zz_db_retain_handle(v.db);
         break;
     default:
         break;
