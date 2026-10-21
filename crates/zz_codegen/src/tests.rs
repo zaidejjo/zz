@@ -1364,6 +1364,27 @@ func main() {
 }
 
 #[test]
+fn native_rate_limit_retry_after_rounds_up() {
+    // VM: `wait_ms.div_ceil(1000).max(1)`. A 1500 ms window with one
+    // token must advertise 2 seconds, not truncate to 1 and send the
+    // client back inside the exhausted window.
+    let src = r#"
+import std.http
+
+func main() {
+    s := http.server()
+    s = s.route("GET", "/x", |_req| "x")
+    s = http.rate_limit(s, 1, 1500)
+    r1 := http.test(s, "GET", "/x", "")
+    r2 := http.test(s, "GET", "/x", "")
+    println("{r1.status()}:{r2.status()}:{r2.headers()["Retry-After"]}")
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "200:429:2\n");
+}
+
+#[test]
 fn db_locals_get_scope_cleanup_and_borrow_native_calls() {
     // AOT has no VM Arc drop for plain C locals: a handler that opens a
     // DB per request must still close it. DB declarations carry a C
