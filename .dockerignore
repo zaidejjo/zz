@@ -9,3 +9,9 @@ dist/
 bin/
 examples/
 plans/
+tests/
+bench/
+benchmarks/
+docs/
+.opencode/
+.ruff_cache/

@@ -1,14 +1,22 @@
 name: docker-publish
 
-# Publishes the pre-built `zz` toolchain image to GHCR **and** Docker Hub.
-# Image names follow the repo owner automatically
-# (`github.repository_owner`), so moving zaidejjo/zz -> zz-language/zz
-# needs zero workflow changes — the tags below resolve the owner at
-# runtime. The Docker Hub namespace comes from the `DOCKERHUB_USERNAME`
-# repo secret instead (it may differ from the GitHub owner).
+# Publishes the pre-built `zz` toolchain, AOT builder, and AOT runtime
+# images to GHCR **and** Docker Hub. Image names follow the repo owner
+# automatically (`github.repository_owner`), so moving zaidejjo/zz ->
+# zz-language/zz needs zero workflow changes — the tags below resolve the
+# owner at runtime. The Docker Hub namespace comes from the
+# `DOCKERHUB_USERNAME` repo secret instead (it may differ from the GitHub
+# owner).
 #
-# Triggers: a published GitHub Release, or manual dispatch. The image
-# installs the Release's prebuilt zips — nothing here compiles (the
+# Tags published from one release stay pinned together:
+#   <owner>/zz:<version>            CLI/toolchain only
+#   <owner>/zz:<version>-builder    Clang + dev headers + zz
+#   <owner>/zz:<version>-runtime    runtime shared libraries only
+#   <owner>/zz:latest-builder       moving preview aliases
+#   <owner>/zz:latest-runtime
+#
+# Triggers: a published GitHub Release, or manual dispatch. The images
+# install the Release's prebuilt zips — nothing here compiles (the
 # compiler was built exactly once by the release workflow). This workflow
 # runs no tests: the Release it consumes was cut from a green main.
 #
@@ -33,7 +41,7 @@ env:
 
 jobs:
   build-push:
-    name: build + push toolchain image
+    name: build + push toolchain, builder, runtime images
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -62,13 +70,19 @@ jobs:
           SHA="$(git rev-parse --short HEAD)"
           GHCR="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           TAGS="$GHCR:latest,$GHCR:$VER,$GHCR:$MAJ.$MIN,$GHCR:$MAJ,$GHCR:v$VER,$GHCR:sha-$SHA"
+          BUILDER_TAGS="$GHCR:latest-builder,$GHCR:$VER-builder,$GHCR:sha-$SHA-builder"
+          RUNTIME_TAGS="$GHCR:latest-runtime,$GHCR:$VER-runtime,$GHCR:sha-$SHA-runtime"
           echo "image tags: latest, $VER, $MAJ.$MIN, $MAJ, v$VER, sha-$SHA"
+          echo "builder tags: latest-builder, $VER-builder, sha-$SHA-builder"
+          echo "runtime tags: latest-runtime, $VER-runtime, sha-$SHA-runtime"
           # Docker Hub mirror (same tags, docker.io namespace). Guarded on
           # the secret so forks without it still publish GHCR-only instead
           # of failing at login/push.
           if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
             DHUB="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/zz"
             TAGS="$TAGS,$DHUB:latest,$DHUB:$VER,$DHUB:$MAJ.$MIN,$DHUB:$MAJ,$DHUB:v$VER,$DHUB:sha-$SHA"
+            BUILDER_TAGS="$BUILDER_TAGS,$DHUB:latest-builder,$DHUB:$VER-builder,$DHUB:sha-$SHA-builder"
+            RUNTIME_TAGS="$RUNTIME_TAGS,$DHUB:latest-runtime,$DHUB:$VER-runtime,$DHUB:sha-$SHA-runtime"
             echo "dockerhub=true" >> "$GITHUB_OUTPUT"
             echo "docker hub tags: latest, $VER, $MAJ.$MIN, $MAJ, v$VER, sha-$SHA"
           else
@@ -78,10 +92,19 @@ jobs:
           {
             echo "version=$VER"
             echo "tags=$TAGS"
+            echo "builder_tags=$BUILDER_TAGS"
+            echo "runtime_tags=$RUNTIME_TAGS"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
+
+      # Builder/runtime images run apt under the target architecture; the
+      # toolchain image itself still needs no emulation.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -100,7 +123,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push toolchain image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -111,7 +134,37 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.ver.outputs.tags }}
-          labels: org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=zz
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
           build-args: |
             ZZ_VERSION=${{ steps.ver.outputs.version }}
             GITHUB_REPOSITORY=${{ github.repository }}
+
+      # Builder/runtime tags are tied to the exact toolchain version just
+      # pushed, so Clang and the runtime shared libraries cannot drift.
+      - name: Build and push AOT builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.builder
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.ver.outputs.builder_tags }}
+          labels: |
+            org.opencontainers.image.title=zz-builder
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+          build-args: |
+            TOOLCHAIN_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+
+      - name: Build and push AOT runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.ver.outputs.runtime_tags }}
+          labels: |
+            org.opencontainers.image.title=zz-runtime
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}

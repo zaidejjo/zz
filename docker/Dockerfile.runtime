@@ -1,0 +1,39 @@
+# Official ZZ AOT runtime image.
+#
+# Published by .github/workflows/docker-publish.yml as
+#   ghcr.io/<owner>/zz:<version>-runtime
+#   ghcr.io/<owner>/zz:latest-runtime   (moving preview alias)
+# and mirrored to Docker Hub when configured.
+#
+# Contains only what a dynamically linked ZZ AOT binary needs at run time:
+# glibc, libgcc, curl, SQLite, OpenSSL, and CA roots. No compiler, linker,
+# dev headers, or package manager cache. Pair it with the same version's
+# `-builder` tag:
+#
+#   FROM ghcr.io/<owner>/zz:<version>-runtime
+#   COPY --from=build /out/app /app
+#   USER 10001:10001
+#   ENTRYPOINT ["/app"]
+#
+# The Ubuntu base is intentionally the same as `Dockerfile.builder` and the
+# release builders; mixing a newer builder glibc with an older runtime base
+# is the failure mode this image exists to avoid.
+#
+# Local build:
+#   docker build -f docker/Dockerfile.runtime -t zz:runtime .
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libcurl4t64 \
+        libsqlite3-0 \
+        libssl3t64 \
+        libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Numeric user keeps the image free of account-management packages. Apps
+# can override this, but the default is already non-root.
+USER 10001:10001
+WORKDIR /app
+ENTRYPOINT []

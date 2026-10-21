@@ -500,6 +500,18 @@
       "excerpt": "VM (`zz run`) and AOT (`zz build` / `zz run --native` / `zz test --engine native`)"
     },
     {
+      "path": "guides/docker.md",
+      "title": "Docker and production AOT",
+      "keywords": [
+        "docker",
+        "AOT",
+        "builder",
+        "runtime",
+        "production"
+      ],
+      "excerpt": "FROM ghcr.io/zaidejjo/zz:<version>-builder AS build"
+    },
+    {
       "path": "guides/faq-glossary.md",
       "title": "FAQ and glossary",
       "keywords": [

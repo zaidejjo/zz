@@ -1,9 +1,11 @@
-# Pre-built `zz` toolchain image: release binaries on slim Debian.
+# Pre-built `zz` toolchain image: release binaries on Ubuntu 24.04.
 #
 # Published to GHCR (and mirrored to Docker Hub) by
 # .github/workflows/docker-publish.yml as
 #   ghcr.io/<owner>/zz:latest    (latest Release)
 #   ghcr.io/<owner>/zz:1.2.3     (release tags + major/minor shorthands)
+#   ghcr.io/<owner>/zz:1.2.3-builder  (AOT build environment)
+#   ghcr.io/<owner>/zz:1.2.3-runtime  (AOT runtime libraries)
 #   <dockerhub-user>/zz:latest, :1.2.3, … (same tags on Docker Hub)
 # `<owner>` follows the repo automatically (`zaidejjo` today,
 # `zz-language` after the move) — no hardcoded owner anywhere.
@@ -13,8 +15,12 @@
 # workflow), and both binaries ship. No Rust toolchain, no QEMU — both
 # architectures are plain file copies.
 #
-# Downstream services (zz-registry) use this as a base image instead of
-# compiling the toolchain themselves:
+# Application images should not install Clang themselves. Use the matching
+# split images instead:
+#   FROM ghcr.io/<owner>/zz:<version>-builder AS build
+#   FROM ghcr.io/<owner>/zz:<version>-runtime
+# This toolchain image remains the base for CLI-only use and for the builder
+# image, which copies `zz`/`zz-lsp` out of it:
 #   FROM ghcr.io/<owner>/zz:latest AS tool
 #
 # Local build (needs network for the Release zips):
