@@ -1,6 +1,6 @@
 //! Scope management and variable lookup.
 
-use crate::checker::Checker;
+use crate::checker::{Checker, DefinedBinding};
 use crate::type_::Type;
 use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::{suggest_all, suggest_dotted};
@@ -68,38 +68,59 @@ impl Checker {
     pub(crate) fn pop_scope(&mut self) {
         // Warn about unused variables in this scope (skip the global scope).
         if let Some(defined) = self.defined_names.pop() {
+            let scope_index = self.defined_names.len();
             // Sort by (span, name): HashMap iteration order is
             // per-process random, and diagnostics must be byte-identical
             // across runs (the dual-engine parity harness diffs stderr
             // between two separate `zz` processes).
-            let mut entries: Vec<(&String, &Span)> = defined.iter().collect();
-            entries.sort_by(|a, b| (a.1.start, a.1.end, a.0).cmp(&(b.1.start, b.1.end, b.0)));
-            for (name, span) in entries {
-                let display = Self::display_name(name);
-                if !self.used_names.contains(name)
-                    && !self.pub_names.contains(name)
-                    && !display.starts_with('_')
-                {
-                    let fixit_name = format!("_{display}");
-                    self.errors.push(
-                        warning_at(
-                            format!(
-                                "unused variable `{display}`, consider prefixing with `_{display}`"
-                            ),
-                            *span,
-                        )
-                        .with_note("variable is never read")
-                        .with_fixit(FixIt::safe(
-                            *span,
-                            fixit_name,
-                            "rename to",
-                        )),
-                    );
-                }
-            }
+            let mut entries: Vec<(String, DefinedBinding)> = defined.into_iter().collect();
+            entries.sort_by(|a, b| {
+                (a.1.span.start, a.1.span.end, &a.0).cmp(&(b.1.span.start, b.1.span.end, &b.0))
+            });
+            self.emit_unused_binding_warnings(scope_index, &entries);
+            // Reads of this scope's bindings can no longer be observed.
+            self.used_bindings.retain(|(idx, _)| *idx != scope_index);
         }
         self.env.pop();
         self.const_env.pop();
+    }
+
+    /// Emit `unused variable` warnings for one scope's recorded bindings,
+    /// in the caller-provided (source) order. Bindings marked
+    /// `warn_unused: false` (closure parameters) are skipped: their
+    /// position comes from the callee's signature, so there is nothing
+    /// the author could remove.
+    fn emit_unused_binding_warnings(
+        &mut self,
+        scope_index: usize,
+        entries: &[(String, DefinedBinding)],
+    ) {
+        for (name, binding) in entries {
+            if !binding.warn_unused {
+                continue;
+            }
+            let display = Self::display_name(name);
+            if !self.used_bindings.contains(&(scope_index, name.clone()))
+                && !self.pub_names.contains(name)
+                && !display.starts_with('_')
+            {
+                let fixit_name = format!("_{display}");
+                self.errors.push(
+                    warning_at(
+                        format!(
+                            "unused variable `{display}`, consider prefixing with `_{display}`"
+                        ),
+                        binding.span,
+                    )
+                    .with_note("variable is never read")
+                    .with_fixit(FixIt::safe(
+                        binding.span,
+                        fixit_name,
+                        "rename to",
+                    )),
+                );
+            }
+        }
     }
 
     pub(crate) fn define(&mut self, name: &str, ty: Type) {
@@ -107,10 +128,24 @@ impl Checker {
     }
 
     pub(crate) fn define_at(&mut self, name: &str, ty: Type, span: Span) {
+        self.define_binding_at(name, ty, span, true);
+    }
+
+    /// Define a binding, recording whether its unused-ness is worth
+    /// warning about. Closure parameters pass `warn_unused: false`: the
+    /// callee dictates the closure's arity, so a parameter cannot be
+    /// removed and `_name` would only hide what the API signature says.
+    pub(crate) fn define_binding_at(
+        &mut self,
+        name: &str,
+        ty: Type,
+        span: Span,
+        warn_unused: bool,
+    ) {
         self.env.last_mut().unwrap().insert(name.to_string(), ty);
         // Record the definition span for unused-variable warnings.
         if let Some(scope) = self.defined_names.last_mut() {
-            scope.insert(name.to_string(), span);
+            scope.insert(name.to_string(), DefinedBinding { span, warn_unused });
         }
         // A binding reusing a namespace root (own module name or imported
         // head) shadows the namespace object: qualified calls through it
@@ -172,36 +207,24 @@ impl Checker {
     /// fire for top-level definitions. Also emits unused-import warnings.
     pub(crate) fn emit_global_unused_warnings(&mut self) {
         // --- Unused variables ---
-        if let Some(defined) = self.defined_names.first() {
+        {
             // Snapshot defined names to avoid borrow issues, sorted by
             // (span, name): HashMap iteration order is per-process random
             // (see pop_scope).
-            let mut entries: Vec<(String, Span)> =
-                defined.iter().map(|(k, &v)| (k.clone(), v)).collect();
-            entries.sort_by(|a, b| (a.1.start, a.1.end, &a.0).cmp(&(b.1.start, b.1.end, &b.0)));
-            for (name, span) in &entries {
-                let display = Self::display_name(name);
-                if !self.used_names.contains(name)
-                    && !self.pub_names.contains(name)
-                    && !display.starts_with('_')
-                {
-                    let fixit_name = format!("_{display}");
-                    self.errors.push(
-                        warning_at(
-                            format!(
-                                "unused variable `{display}`, consider prefixing with `_{display}`"
-                            ),
-                            *span,
-                        )
-                        .with_note("variable is never read")
-                        .with_fixit(FixIt::safe(
-                            *span,
-                            fixit_name,
-                            "rename to",
-                        )),
-                    );
-                }
-            }
+            let mut entries: Vec<(String, DefinedBinding)> = self
+                .defined_names
+                .first()
+                .map(|defined| {
+                    defined
+                        .iter()
+                        .map(|(k, &v)| (k.clone(), v))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            entries.sort_by(|a, b| {
+                (a.1.span.start, a.1.span.end, &a.0).cmp(&(b.1.span.start, b.1.span.end, &b.0))
+            });
+            self.emit_unused_binding_warnings(0, &entries);
         }
 
         // --- Unused imports ---
@@ -401,6 +424,9 @@ impl Checker {
             if let Some(t) = scope.get(name) {
                 let t = t.clone();
                 self.used_names.insert(name.to_string());
+                // Binding-level usage: an inner shadow must not keep an
+                // outer same-named binding alive (and vice versa).
+                self.used_bindings.insert((depth, name.to_string()));
                 // #518: a read resolving to a *shallower* scope hit the
                 // binding the declaration under check would shadow. Fields
                 // are borrowed disjointly — `self.env` above is still live.
