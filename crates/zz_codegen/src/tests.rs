@@ -1364,15 +1364,46 @@ func main() {
 }
 
 #[test]
+fn native_rate_limit_retry_after_rounds_up() {
+    // VM: `wait_ms.div_ceil(1000).max(1)`. A 1500 ms window with one
+    // token must advertise 2 seconds, not truncate to 1 and send the
+    // client back inside the exhausted window.
+    let src = r#"
+import std.http
+
+func main() {
+    s := http.server()
+    s = s.route("GET", "/x", |_req| "x")
+    s = http.rate_limit(s, 1, 1500)
+    r1 := http.test(s, "GET", "/x", "")
+    r2 := http.test(s, "GET", "/x", "")
+    println("{r1.status()}:{r2.status()}:{r2.headers()["Retry-After"]}")
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "200:429:2\n");
+}
+
+#[test]
 fn db_locals_get_scope_cleanup_and_borrow_native_calls() {
     // AOT has no VM Arc drop for plain C locals: a handler that opens a
     // DB per request must still close it. DB declarations carry a C
     // cleanup handler, and the query/exec/close natives borrow the live
     // local instead of taking an unreleased clone share.
     let src = r#"
+func touch(d: db) {
+    sqlz.exec(d, "CREATE TABLE t (n INTEGER)")
+}
+
+func open_db() -> db {
+    sqlz.open(":memory:")
+}
+
 func main() {
     db := sqlz.open(":memory:")
-    sqlz.exec(db, "CREATE TABLE t (n INTEGER)")
+    touch(db)
+    rows := open_db().query("SELECT 1")
+    println(len(rows))
     sqlz.close(db)
 }
 "#;
@@ -1384,8 +1415,14 @@ func main() {
     );
     let user = c.split("// ---- generated code ----").nth(1).unwrap_or("");
     assert!(
-        user.contains("zz_db_exec, v"),
-        "DB exec must borrow the live local:\n{user}"
+        user.lines().any(|line| {
+            line.contains("cleanup(zz_db_value_cleanup)") && line.contains("= args[0];")
+        }),
+        "DB parameter must release the caller's owning clone:\n{user}"
+    );
+    assert!(
+        user.contains("zz_release(&zz_db_arg"),
+        "DB calls must release the borrowed receiver:\n{user}"
     );
     assert!(
         !user.contains("zz_db_exec, zz_clone("),

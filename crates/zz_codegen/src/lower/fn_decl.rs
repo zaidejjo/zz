@@ -127,8 +127,18 @@ impl Lowerer {
                     names.enter_cell(&p.name.name, &ptr, &deref, "zz_value", n);
                 } else {
                     let cid = names.enter(&p.name.name);
+                    // The caller passes an owning clone (or a fresh
+                    // temporary) for every argument. DB handles must drop
+                    // that share on function exit, exactly like DB locals;
+                    // otherwise a helper that receives a handle leaks one
+                    // reference and keeps the connection open.
+                    let db_attr = if matches!(&pt, zz_checker::Type::Db) {
+                        " __attribute__((cleanup(zz_db_value_cleanup)))"
+                    } else {
+                        ""
+                    };
                     o.push_str(&format!(
-                        "    zz_value {cid} = args[{idx}];\n",
+                        "    zz_value {cid}{db_attr} = args[{idx}];\n",
                         idx = i - arg_offset
                     ));
                 }

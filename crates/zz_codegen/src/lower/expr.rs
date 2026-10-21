@@ -5179,36 +5179,19 @@ impl Lowerer {
             None => (None, sql_args),
         };
         // The DB natives only borrow the handle for the duration of the
-        // call, so a bare local must not be cloned: nothing releases the
-        // call share, and a leaked +1 keeps the connection (and backend
-        // socket) alive past scope exit. Passing the live local lets its
-        // ordinary scope release drop the last reference and close it.
-        fn borrow_db_local(raw: String) -> String {
-            if let Some(inner) = raw
-                .strip_prefix("zz_clone(")
-                .and_then(|s| s.strip_suffix(')'))
-            {
-                if !inner.is_empty()
-                    && inner
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    && !inner.starts_with("zz_")
-                {
-                    return inner.to_string();
-                }
-            }
-            raw
-        }
+        // call. Give the receiver an owned temporary (locals arrive as a
+        // clone, calls as an owned result) and release it after the call,
+        // so neither a helper return nor a local's +1 leaks the backend.
         let recv_c = match (method_receiver, recv_expr.as_ref()) {
             (Some(r), _) => {
-                let raw = borrow_db_local(self.emit_expr(r, names, out));
+                let raw = self.emit_expr(r, names, out);
                 match r {
                     Expr::Ident { name, .. } => auto_box(&raw, names.lookup_type(name)),
                     _ => raw,
                 }
             }
             (None, Some(db)) => {
-                let raw = borrow_db_local(self.emit_expr(db, names, out));
+                let raw = self.emit_expr(db, names, out);
                 match db {
                     Expr::Ident { name, .. } => auto_box(&raw, names.lookup_type(name)),
                     _ => raw,
@@ -5305,7 +5288,15 @@ impl Lowerer {
         };
         // Native convention (db, sql_str, binds_array) → route through
         // zz_call_native3 so err plumbing matches every other native.
-        format!("zz_call_native3({rt}, {recv_c}, {tvar}, {arr})")
+        // The statement expression scopes the borrowed receiver so the
+        // release runs immediately after the call, not at block exit.
+        let db_tmp = names.fresh("zz_db_arg");
+        let ret_tmp = names.fresh("zz_db_ret");
+        format!(
+            "({{ zz_value {db_tmp} = {recv_c}; \
+             zz_value {ret_tmp} = zz_call_native3({rt}, {db_tmp}, {tvar}, {arr}); \
+             zz_release(&{db_tmp}); {ret_tmp}; }})"
+        )
     }
 
     /// Best-effort static text of a non-Fmt SQL arg (plain string literal
