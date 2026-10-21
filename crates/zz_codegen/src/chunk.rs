@@ -75,6 +75,10 @@ pub fn supported(op: &Op) -> bool {
             | Op::LoadSlot(_)
             | Op::StoreSlot(_)
             | Op::LoadVar(_)
+            | Op::LoadPath(_)
+            | Op::DefineVar(_)
+            | Op::StoreVar(_)
+            | Op::StorePath(_)
             | Op::IntAdd
             | Op::IntSub
             | Op::IntMul
@@ -161,8 +165,10 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Op::PopN(n) => (*n as usize + 1, 1),
             Op::Swap => (0, 0),
             Op::Truthy => (1, 1),
-            Op::LoadSlot(_) | Op::LoadVar(_) => (0, 1),
+            Op::LoadSlot(_) | Op::LoadVar(_) | Op::LoadPath(_) => (0, 1),
             Op::StoreSlot(_) => (1, 0),
+            Op::DefineVar(_) => (1, 1),
+            Op::StoreVar(_) | Op::StorePath(_) => (1, 0),
             Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => (2, 1),
             Op::IntNeg => (1, 1),
             Op::BinOp(_) => (2, 1),
@@ -795,8 +801,10 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>, HashSet<usize
             Op::PopN(n) => (*n as usize + 1, 1),
             Op::Swap => (0, 0),
             Op::Truthy => (1, 1),
-            Op::LoadSlot(_) | Op::LoadVar(_) => (0, 1),
+            Op::LoadSlot(_) | Op::LoadVar(_) | Op::LoadPath(_) => (0, 1),
             Op::StoreSlot(_) => (1, 0),
+            Op::DefineVar(_) => (1, 1),
+            Op::StoreVar(_) | Op::StorePath(_) => (1, 0),
             Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => (2, 1),
             Op::IntNeg => (1, 1),
             Op::BinOp(_) => (2, 1),
@@ -1486,6 +1494,24 @@ fn condfuse_scan(
 /// Coverage verdict for one module: every op supported, no default args
 /// (arity fill needs caller-env evaluation), and every `Call`/`CallPath`
 /// statically resolvable. Fails with the first gap found.
+/// Module-scope bindings the VM keeps in the environment: every name the
+/// top-level function binds with `DefineVar`. The chunk backend has no
+/// run-time environment (and closures are not covered here yet), so these
+/// lower to file-scope C globals that every compiled function can read.
+fn module_globals(module: &Module) -> HashSet<String> {
+    let mut out = HashSet::new();
+    if let Some(top) = module.funcs.get(module.entry.0 as usize) {
+        for op in &top.code {
+            if let Op::DefineVar(id) = op {
+                if let Some(name) = module.strings.get(id.0 as usize) {
+                    out.insert(name.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn coverage(module: &Module) -> Result<(), ChunkError> {
     // Index funcs by dotted name for resolution.
     let mut func_names: HashSet<String> = HashSet::new();
@@ -1514,6 +1540,7 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
         }
         Callee::Unknown
     };
+    let globals = module_globals(module);
     for f in &module.funcs {
         for p in &f.params {
             if p.default.is_some() {
@@ -1532,6 +1559,23 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                     op.name(),
                     f.name
                 )));
+            }
+            if let Op::DefineVar(id) | Op::StoreVar(id) = op {
+                let var = module
+                    .strings
+                    .get(id.0 as usize)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if !globals.contains(var) {
+                    let name = module
+                        .strings
+                        .get(f.name.0 as usize)
+                        .map(String::as_str)
+                        .unwrap_or("?");
+                    return Err(ChunkError::op(&format!(
+                        "runtime binding `{var}` in {name}"
+                    )));
+                }
             }
         }
         // Resolve every Call's callee origin.
@@ -1616,6 +1660,14 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
         // (globals, captures) are rejected outright.
         for (pc, op) in f.code.iter().enumerate() {
             if let Op::LoadVar(id) = op {
+                let var = module
+                    .strings
+                    .get(id.0 as usize)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if globals.contains(var) {
+                    continue;
+                }
                 match resolve_load(*id, pc) {
                     Callee::Unknown => {
                         let name = module
@@ -1829,6 +1881,8 @@ struct Emitter<'a> {
     module: &'a Module,
     /// Dotted IR name -> C symbol.
     csyms: HashMap<String, String>,
+    /// Module-scope env bindings (`module_globals`): IR name -> C global id.
+    globals: HashMap<String, String>,
     /// Dotted IR names with unboxed twins.
     twins: HashSet<String>,
     /// C-impl natives referenced: (dotted name, C impl, needs Rust staticlib).
@@ -1845,6 +1899,16 @@ impl<'a> Emitter<'a> {
             .get(id.0 as usize)
             .map(String::as_str)
             .unwrap_or("")
+    }
+
+    /// Dotted spelling of a path (`"g2"."count"` -> `g2.count`), which is
+    /// the key module-scope bindings are recorded under.
+    fn join_path(&self, parts: &[StrId]) -> String {
+        parts
+            .iter()
+            .map(|p| self.str(*p))
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     fn csym(&self, dotted: &str) -> String {
@@ -2986,11 +3050,49 @@ impl<'a> Emitter<'a> {
             Op::StoreSlot(s) => {
                 out.push_str(&format!("    zz_cstore(&st[{s}], st[--sp]);\n"));
             }
-            // LoadVar pushes a dummy: every covered use resolves its
-            // origin statically and consumes the slot directly (see
-            // `Call`). Unconsumed loads fail coverage first.
-            Op::LoadVar(_) => {
-                out.push_str("    st[sp++] = zz_unit();\n");
+            // A module-scope binding reads its C global. Every other
+            // LoadVar pushes a dummy: covered uses resolve their origin
+            // statically and consume the slot directly (see `Call`).
+            Op::LoadVar(id) => {
+                let name = self.str(*id);
+                match self.globals.get(name) {
+                    Some(cid) => out.push_str(&format!("    st[sp++] = zz_clone({cid});\n")),
+                    None => out.push_str("    st[sp++] = zz_unit();\n"),
+                }
+            }
+            // Dotted path read: only the one-component form that names a
+            // module-scope binding is covered (`{greeting}` in a template
+            // lowers to a path). Namespaces and field access stay loud.
+            Op::LoadPath(parts) => {
+                let joined = self.join_path(parts);
+                let Some(cid) = self.globals.get(&joined).cloned() else {
+                    return Err(ChunkError::op(&format!("dotted path read `{joined}`")));
+                };
+                out.push_str(&format!("    st[sp++] = zz_clone({cid});\n"));
+            }
+            // `DefineVar` binds and keeps the value on the stack: the
+            // global takes a clone, the stack keeps the original.
+            Op::DefineVar(id) => {
+                let Some(cid) = self.globals.get(self.str(*id)).cloned() else {
+                    return Err(ChunkError::op("define outside module scope"));
+                };
+                out.push_str(&format!("    zz_cstore(&{cid}, zz_clone(st[sp-1]));\n"));
+            }
+            Op::StoreVar(id) => {
+                let Some(cid) = self.globals.get(self.str(*id)).cloned() else {
+                    return Err(ChunkError::op("store to a runtime binding"));
+                };
+                out.push_str(&format!("    zz_cstore(&{cid}, st[--sp]);\n"));
+            }
+            // Assignment to a dotted path: the one-component form that
+            // names a module-scope binding (`count = count + 1` inside a
+            // function) writes the global. Namespaces/fields stay loud.
+            Op::StorePath(parts) => {
+                let joined = self.join_path(parts);
+                let Some(cid) = self.globals.get(&joined).cloned() else {
+                    return Err(ChunkError::op(&format!("dotted path store `{joined}`")));
+                };
+                out.push_str(&format!("    zz_cstore(&{cid}, st[--sp]);\n"));
             }
             Op::IntAdd => {
                 out.push_str(
@@ -3728,8 +3830,11 @@ __attribute__((cold)) static void zz_ftrap(const char *msg) {
 /// treat both backends uniformly.
 ///
 /// `entry_main` is the dotted main (e.g. `fib35.main`); the module
-/// entry chunk (top-level effects) runs first, then `entry_main`.
-/// Fails cleanly via [`coverage`] before emitting anything.
+/// entry chunk (top-level effects) runs first, then `entry_main`. An
+/// empty `entry_main` means the program has no user `main` (script
+/// style: the entry chunk is the whole program, like the HIR backend's
+/// `zz_main`-only shape). Fails cleanly via [`coverage`] before emitting
+/// anything.
 pub fn build_module(
     module: &Module,
     entry_main: &str,
@@ -3748,6 +3853,7 @@ pub fn build_module(
     let mut em = Emitter {
         module,
         csyms: HashMap::new(),
+        globals: HashMap::new(),
         twins: closable_all(module),
         used_natives: Vec::new(),
         needs_native_rt: false,
@@ -3760,8 +3866,16 @@ pub fn build_module(
             .ok_or_else(|| ChunkError::op("func name id"))?;
         em.csyms.insert(nm.clone(), em.csym(nm));
     }
-    if !em.csyms.contains_key(entry_main) {
+    // Script-style programs (no user `main`) pass an empty key: the
+    // synthetic top-level chunk already ran in `zz_main`, so the CLI glue
+    // has nothing to call (mirrors the HIR backend's `zz_call_main`).
+    let has_main = !entry_main.is_empty();
+    if has_main && !em.csyms.contains_key(entry_main) {
         return Err(ChunkError::name(&format!("entry {entry_main}")));
+    }
+    for name in module_globals(module) {
+        em.globals
+            .insert(name.clone(), format!("zz_g_{}", mangle(&name)));
     }
     // Origins per function for `Call` dispatch.
     let mut origins_map: HashMap<usize, Vec<Vec<Callee>>> = HashMap::new();
@@ -3788,6 +3902,13 @@ pub fn build_module(
         origins_map.insert(i, origins(&f.code, &resolve));
     }
     let mut bodies = String::new();
+    // Module-scope env bindings: zero-initialized (`ZZ_UNIT`) file-scope
+    // globals, assigned by the top-level function before `main` runs.
+    let mut gids: Vec<&String> = em.globals.values().collect();
+    gids.sort();
+    for cid in gids {
+        bodies.push_str(&format!("static zz_value {cid};\n"));
+    }
     // Forward declarations (boxed symbols only; twins are static and
     // called after definition order — emit twins first instead).
     for f in &module.funcs {
@@ -3839,7 +3960,9 @@ pub fn build_module(
         })
         .map(|f| f.params.len())
         .unwrap_or(0);
-    let main_call = if main_arity == 0 {
+    let main_call = if !has_main {
+        "zz_unit()".to_string()
+    } else if main_arity == 0 {
         format!("{main_sym}(NULL, 0)")
     } else {
         // `main(cli_args)` receives argv (mirrors the VM + HIR backend).
