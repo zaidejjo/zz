@@ -19,9 +19,9 @@
 //! `match_option` / `match_result` / `match_guard` / `match_literals` /
 //! `match_enum` / `match_iflet`.
 //!
-//! Deliberately uncovered, pending #508: `Op::CallMethod` for receivers the
-//! compiler cannot type (struct methods, chained field receivers, and
-//! methods on module-scope bindings). Variant methods that *are* typed
+//! Deliberately uncovered: `Op::CallMethod` for receivers the compiler
+//! cannot type (chained field receivers, `match` arm bindings, and methods
+//! on module-scope bindings — #557 tracks the IR-side resolution). Variant methods that *are* typed
 //! (`Option`/`Result` receivers; `unwrap` / `unwrap_or` / `expect`) no
 //! longer reach the dynamic op — the compiler emits the resolved
 //! `option.*` / `result.*` native, so `variant_methods` pins them on all
