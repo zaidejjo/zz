@@ -1108,6 +1108,7 @@ zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err);  // 2 arg
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
 zz_value zz_http_rate_limit(zz_value server, zz_value max_requests, zz_value window_ms, int *err);  // 3 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
+zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *err);  // 3 args
 zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *err);  // 3 args
