@@ -1364,6 +1364,40 @@ func main() {
 }
 
 #[test]
+fn db_locals_get_scope_cleanup_and_borrow_native_calls() {
+    // AOT has no VM Arc drop for plain C locals: a handler that opens a
+    // DB per request must still close it. DB declarations carry a C
+    // cleanup handler, and the query/exec/close natives borrow the live
+    // local instead of taking an unreleased clone share.
+    let src = r#"
+func main() {
+    db := sqlz.open(":memory:")
+    sqlz.exec(db, "CREATE TABLE t (n INTEGER)")
+    sqlz.close(db)
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let c = lower_only(&pruned, &reach, "main").source;
+    assert!(
+        c.contains("cleanup(zz_db_value_cleanup)"),
+        "DB local must carry a scope cleanup handler:\n{c}"
+    );
+    let user = c.split("// ---- generated code ----").nth(1).unwrap_or("");
+    assert!(
+        user.contains("zz_db_exec, v"),
+        "DB exec must borrow the live local:\n{user}"
+    );
+    assert!(
+        !user.contains("zz_db_exec, zz_clone("),
+        "DB exec must not pass an unreleased clone share:\n{user}"
+    );
+    assert!(
+        user.contains("zz_db_close, v"),
+        "DB close must borrow the live local:\n{user}"
+    );
+}
+
+#[test]
 fn generated_c_contains_arena_in_all_functions() {
     let src = r#"
 func helper(x: int) -> int { x + 1 }

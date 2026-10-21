@@ -164,6 +164,12 @@ impl Lowerer {
                 } else {
                     ("zz_value".to_string(), None) // fallback
                 };
+                // DB handles own a live backend connection; ordinary C
+                // locals are not released at function exit, so attach a
+                // cleanup handler that drops the last reference (and
+                // closes the connection) on every exit path. Captured and
+                // green bindings live in heap/frame cells and are skipped.
+                let db_local = matches!(&checker_ty, Some(zz_checker::Type::Db));
                 // Store the checker type for method dispatch (e.g., to distinguish
                 // str.contains from vec.contains when the receiver is a local).
                 if let Some(ct) = checker_ty {
@@ -287,7 +293,12 @@ impl Lowerer {
                             *existing_ty = ctype.clone();
                         }
                     }
-                    out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
+                    let db_attr = if db_local {
+                        " __attribute__((cleanup(zz_db_value_cleanup)))"
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!("    {ctype} {cid}{db_attr} = {final_val};\n"));
                 }
                 // Track array literals so `len(v)` can fold to the arity,
                 // and record pure-scalar literals for index forwarding

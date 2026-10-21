@@ -576,6 +576,12 @@ static inline void zz_vbox_retain(zz_value *payload) {
     }
 }
 
+// ZZ_DB owns a live sqlite/Postgres connection; the full handle type
+// lives in core.c. These hooks keep the inline ARC switches below
+// backend-agnostic and close the connection on the last release.
+void zz_db_retain_handle(void *db);
+void zz_db_release_handle(void *db);
+
 static inline void zz_retain(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
@@ -608,6 +614,9 @@ static inline void zz_retain(zz_value *v) {
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
         zz_vbox_retain(v->payload);
+        break;
+    case ZZ_DB:
+        if (v->db) zz_db_retain_handle(v->db);
         break;
     default:
         break;
@@ -658,9 +667,28 @@ static inline void zz_release(zz_value *v) {
     case ZZ_OBJECT:
         zz_release_object(v);
         break;
+    case ZZ_DB:
+        if (v->db) {
+            // Clear the slot before releasing so a C cleanup handler
+            // attached to a DB local cannot double-release, and a
+            // later stale read degrades to the closed tombstone.
+            void *db = v->db;
+            v->db = NULL;
+            zz_db_release_handle(db);
+        }
+        break;
     default:
         break;
     }
+}
+
+// `__attribute__((cleanup))` endpoint for DB locals: function-scope
+// locals in generated C are not otherwise released, so an AOT handler
+// that opens a connection per request would leak it. Release is
+// idempotent (the DB case above nulls the slot), so an explicit
+// `sqlz.close`/loop release followed by cleanup is safe.
+static inline void zz_db_value_cleanup(zz_value *v) {
+    zz_release(v);
 }
 
 // Forward: defined in strings.c (same translation unit once the runtime
@@ -682,7 +710,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
     if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
         dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
-        dst->tag == ZZ_RANGE ||
+        dst->tag == ZZ_RANGE || dst->tag == ZZ_DB ||
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
         zz_release(dst);
@@ -704,7 +732,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     *dst = src;
     // Retain the new value for refcounted types.
     if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
-        src.tag == ZZ_OBJECT || src.tag == ZZ_RANGE ||
+        src.tag == ZZ_OBJECT || src.tag == ZZ_RANGE || src.tag == ZZ_DB ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
         src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON)) {
         zz_retain(dst);
@@ -748,6 +776,9 @@ static inline zz_value zz_clone(zz_value v) {
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
         zz_vbox_retain(v.payload);
+        break;
+    case ZZ_DB:
+        if (v.db) zz_db_retain_handle(v.db);
         break;
     default:
         break;
@@ -1132,6 +1163,7 @@ zz_value zz_http_response_headers(zz_value resp, int *err);
 // Opaque handle: a heap `zz_db_handle` recording the backend (sqlite3*
 // or staticlib pool id) boxed as ZZ_DB. `sqlz.open` sniffs the scheme
 // once (postgres:// → PG); query/exec/close dispatch on the handle.
+// The handle is refcounted: the last reference closes the backend.
 // query/exec take a static SQL template (with ?N placeholders; the PG
 // path rewrites to $N) plus bound zz_values.
 // Native call convention: (args..., int *err) so codegen can route via

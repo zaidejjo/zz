@@ -3839,9 +3839,16 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 //    - `zz_db_query(db, sql, binds, n)` → array of row dicts
 //      (positional c0..cN keys; struct mapping happens at the ZZ
 //      layer via field order).
-//    - `zz_db_close(db)` → unit (also closed at process exit).
+//    - `zz_db_close(db)` → unit (or closed when the last reference drops).
 #ifdef ZZ_HAS_SQLITE3
 #include <sqlite3.h>
+// Non-DB programs still carry the inline ARC DB hook, which resolves to
+// `zz_db_backend_close`; keep its only SQLite reference weak so binaries
+// that never open a SQLite handle do not need to link libsqlite3. A
+// SQLite handle can only exist when the compiler linked the library.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma weak sqlite3_close
+#endif
 #endif
 
 // ---- SQL backends (sqlite embedded, postgres via staticlib) ----
@@ -3853,6 +3860,7 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 // native is reachable (see `needs_native_rt`).
 typedef enum { ZZDB_CLOSED = -1, ZZDB_SQLITE = 0, ZZDB_PG = 1 } zz_db_backend;
 typedef struct {
+    size_t refs;        // atomic: last release closes the backend
     int backend;
     union {
         void *sqlite;   // sqlite3* (ZZDB_SQLITE)
@@ -3875,6 +3883,38 @@ uint64_t zz_pg_connect_raw(const char *info, size_t len) ZZ_WEAK_IMPORT;
 int64_t zz_pg_exec_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 zz_value zz_pg_query_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 void zz_pg_close_raw(uint64_t id) ZZ_WEAK_IMPORT;
+
+// Close the backend once and leave the shell as a tombstone. Idempotent:
+// a closed handle stays closed, and stale ZZ values read empty results.
+static void zz_db_backend_close(zz_db_handle *h) {
+    if (!h) return;
+    if (h->backend == ZZDB_PG) {
+        zz_pg_close_raw(h->pg_id);
+    }
+#ifdef ZZ_HAS_SQLITE3
+    else if (h->backend == ZZDB_SQLITE) {
+        sqlite3_close((sqlite3 *)h->sqlite);
+    }
+#endif
+    h->backend = ZZDB_CLOSED;
+    h->sqlite = NULL;
+}
+
+void zz_db_retain_handle(void *db) {
+    if (!db) return;
+    __atomic_add_fetch(&((zz_db_handle *)db)->refs, 1, __ATOMIC_RELAXED);
+}
+
+// Last ZZ reference: close the connection and free the shell, matching
+// the VM's Arc-drop lifetime. Explicit sqlz.close still tombstones the
+// handle early; this only reclaims it after every alias is gone.
+void zz_db_release_handle(void *db) {
+    if (!db) return;
+    zz_db_handle *h = (zz_db_handle *)db;
+    if (__atomic_sub_fetch(&h->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    zz_db_backend_close(h);
+    free(h);
+}
 
 // `pg.connect(conninfo)` — URL or keyword form (the driver parses both).
 // Connection failures trap (VM parity: `pg.connect failed`), never a
@@ -3901,6 +3941,7 @@ zz_value zz_pg_connect(zz_value info, int *err) {
         fprintf(stderr, "zz: out of memory (pg handle)\n");
         exit(1);
     }
+    h->refs = 1;
     h->backend = ZZDB_PG;
     h->pg_id = id;
     return (zz_value){ZZ_DB, {.db = h}};
@@ -3928,6 +3969,7 @@ zz_value zz_db_open(zz_value path, int *err) {
             fprintf(stderr, "zz: out of memory (pg handle)\n");
             exit(1);
         }
+        h->refs = 1;
         h->backend = ZZDB_PG;
         h->pg_id = id;
         return (zz_value){ZZ_DB, {.db = h}};
@@ -3951,6 +3993,7 @@ zz_value zz_db_open(zz_value path, int *err) {
         sqlite3_close(conn);
         return (zz_value){ZZ_DB, {.db = NULL}};
     }
+    h->refs = 1;
     h->backend = ZZDB_SQLITE;
     h->sqlite = conn;
     return (zz_value){ZZ_DB, {.db = h}};
@@ -4143,22 +4186,11 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
 zz_value zz_db_close(zz_value db, int *err) {
     (void)err;
     if (db.tag == ZZ_DB && db.db) {
-        zz_db_handle *h = (zz_db_handle *)db.db;
-        if (h->backend == ZZDB_PG) {
-            zz_pg_close_raw(h->pg_id);
-        }
-#ifdef ZZ_HAS_SQLITE3
-        else if (h->backend == ZZDB_SQLITE) {
-            sqlite3_close((sqlite3 *)h->sqlite);
-        }
-#else
-        (void)0;
-#endif
         // Tombstone, don't free: the ZZ value still points here and a
         // use-after-close must degrade to empty results (like the VM's
-        // error), never a dangling read. One 16-byte shell per close.
-        h->backend = ZZDB_CLOSED;
-        h->sqlite = NULL;
+        // error), never a dangling read. The shell is freed when the
+        // last ZZ reference is released (zz_db_release_handle).
+        zz_db_backend_close((zz_db_handle *)db.db);
     }
     return zz_unit();
 }

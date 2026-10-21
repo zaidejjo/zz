@@ -3418,7 +3418,15 @@ impl Lowerer {
             // `zz_clone(barecid)` shapes are stripped (live C locals and
             // globals, which outlive the synchronous call); complex
             // temporaries keep their owned form.
-            if matches!(effective_name, "zz_len" | "zz_fs_write" | "zz_fs_append") {
+            if matches!(
+                effective_name,
+                "zz_len"
+                    | "zz_fs_write"
+                    | "zz_fs_append"
+                    | "zz_db_query"
+                    | "zz_db_exec"
+                    | "zz_db_close"
+            ) {
                 for item in arg_items.iter_mut() {
                     if let Some(inner) = item
                         .strip_prefix("zz_clone(")
@@ -5170,16 +5178,37 @@ impl Lowerer {
             }
             None => (None, sql_args),
         };
+        // The DB natives only borrow the handle for the duration of the
+        // call, so a bare local must not be cloned: nothing releases the
+        // call share, and a leaked +1 keeps the connection (and backend
+        // socket) alive past scope exit. Passing the live local lets its
+        // ordinary scope release drop the last reference and close it.
+        fn borrow_db_local(raw: String) -> String {
+            if let Some(inner) = raw
+                .strip_prefix("zz_clone(")
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                if !inner.is_empty()
+                    && inner
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    && !inner.starts_with("zz_")
+                {
+                    return inner.to_string();
+                }
+            }
+            raw
+        }
         let recv_c = match (method_receiver, recv_expr.as_ref()) {
             (Some(r), _) => {
-                let raw = self.emit_expr(r, names, out);
+                let raw = borrow_db_local(self.emit_expr(r, names, out));
                 match r {
                     Expr::Ident { name, .. } => auto_box(&raw, names.lookup_type(name)),
                     _ => raw,
                 }
             }
             (None, Some(db)) => {
-                let raw = self.emit_expr(db, names, out);
+                let raw = borrow_db_local(self.emit_expr(db, names, out));
                 match db {
                     Expr::Ident { name, .. } => auto_box(&raw, names.lookup_type(name)),
                     _ => raw,
