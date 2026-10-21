@@ -1554,37 +1554,124 @@ fn pattern_binds(module: &Module, pat: &Pattern, out: &mut Vec<String>) {
 /// Function-local env cells: names the VM keeps in the frame environment
 /// — captured function-local decls, `match` arm bindings, and the
 /// compiler's `__match_scrutinee_*` reload temps. Each becomes one
-/// `zz_value` C local (`zz_e_*`) instead of an env lookup.
-fn func_env_names(module: &Module, f: &FuncDef, is_global: &dyn Fn(&str) -> bool) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let push = |name: &str, out: &mut Vec<String>| {
-        if !is_global(name) && !out.iter().any(|n| n == name) {
-            out.push(name.to_string());
-        }
-    };
-    for op in &f.code {
+/// `zz_value` C local instead of an env lookup.
+///
+/// The VM binds `match` arm names in a *child* environment, so a nested
+/// scope that reuses a name shadows the enclosing binding instead of
+/// clobbering it. Cells are therefore named per nesting depth: the
+/// function frame keeps `zz_e_<name>`, a scope at depth `d` uses
+/// `zz_e<d>_<name>`. Sibling scopes at the same depth never overlap in
+/// time (only one arm of a `match` runs, and a block is entered once per
+/// execution), so they may share a cell.
+struct EnvLayout {
+    /// The function frame: captured function-locals and the compiler's
+    /// `__match_scrutinee_*` reload temps. Module globals never appear
+    /// here — `DefineVar` for a global stays the global.
+    base: HashMap<String, String>,
+    /// `MatchArm` / `IfLetMatch` pc -> the cells its pattern binds, innermost
+    /// scope. The emitter pushes this frame for the arm body and the arm's
+    /// trailing `ExitScope` pops it.
+    arm_scopes: HashMap<usize, Vec<(String, String)>>,
+    /// Every cell C local to declare in the prologue.
+    decls: Vec<String>,
+    /// Every IR name that has a cell at any depth (coverage checks).
+    names: Vec<String>,
+}
+
+/// C local for the env cell of `name` in the scope at `depth`.
+fn cell_id(depth: usize, name: &str) -> String {
+    if depth == 0 {
+        format!("zz_e_{}", mangle(name))
+    } else {
+        format!("zz_e{depth}_{}", mangle(name))
+    }
+}
+
+/// Allocate (or find) the cell for `name` in the innermost scope.
+fn bind_cell(
+    frames: &mut [HashMap<String, String>],
+    decls: &mut Vec<String>,
+    names: &mut Vec<String>,
+    name: &str,
+) -> String {
+    let depth = frames.len() - 1;
+    let frame = &mut frames[depth];
+    if let Some(id) = frame.get(name) {
+        return id.clone();
+    }
+    let id = cell_id(depth, name);
+    frame.insert(name.to_string(), id.clone());
+    if !decls.iter().any(|d| d == &id) {
+        decls.push(id.clone());
+    }
+    if !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+    id
+}
+
+/// Walk one function and decide every env cell, mirroring the emitter's
+/// scope discipline (`EnterScope` opens a frame, a binding arm opens one,
+/// `ExitScope` closes either). A scope that does not balance is rejected:
+/// a half-tracked frame would resolve a name to the wrong cell, so this
+/// fails loudly instead.
+fn env_layout(
+    module: &Module,
+    f: &FuncDef,
+    is_global: &dyn Fn(&str) -> bool,
+) -> Result<EnvLayout, ChunkError> {
+    let mut frames: Vec<HashMap<String, String>> = vec![HashMap::new()];
+    let mut arm_scopes: HashMap<usize, Vec<(String, String)>> = HashMap::new();
+    let mut decls: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for (pc, op) in f.code.iter().enumerate() {
         match op {
             Op::DefineVar(id) | Op::StoreVar(id) => {
-                if let Some(name) = module.strings.get(id.0 as usize) {
-                    push(name, &mut out);
+                let Some(name) = module.strings.get(id.0 as usize) else {
+                    continue;
+                };
+                if is_global(name) {
+                    continue;
                 }
+                let name = name.clone();
+                bind_cell(&mut frames, &mut decls, &mut names, &name);
+            }
+            Op::EnterScope => frames.push(HashMap::new()),
+            Op::ExitScope => {
+                if frames.len() == 1 {
+                    return Err(ChunkError::op("unbalanced env scope"));
+                }
+                frames.pop();
             }
             Op::MatchArm { pat, .. } | Op::IfLetMatch { pat, .. } => {
                 // Arm bindings shadow module globals (the VM binds them in
                 // a child env), so they always get their own cell.
-                let mut names = Vec::new();
-                pattern_binds(module, pat, &mut names);
-                for name in names {
-                    if !out.iter().any(|n| n == &name) {
-                        out.push(name);
-                    }
+                let mut bound = Vec::new();
+                pattern_binds(module, pat, &mut bound);
+                if bound.is_empty() {
+                    continue;
                 }
+                frames.push(HashMap::new());
+                let mut cells = Vec::new();
+                for name in bound {
+                    let id = bind_cell(&mut frames, &mut decls, &mut names, &name);
+                    cells.push((name, id));
+                }
+                arm_scopes.insert(pc, cells);
             }
             _ => {}
         }
     }
-    out.sort();
-    out
+    if frames.len() != 1 {
+        return Err(ChunkError::op("unbalanced env scope"));
+    }
+    let base = frames.pop().unwrap_or_default();
+    Ok(EnvLayout {
+        base,
+        arm_scopes,
+        decls,
+        names,
+    })
 }
 
 /// Reject pattern shapes the chunk emitter has no C form for.
@@ -1660,7 +1747,7 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
     };
     let globals = module_globals(module);
     for f in &module.funcs {
-        let env = func_env_names(module, f, &|n| globals.contains(n));
+        let env = env_layout(module, f, &|n| globals.contains(n))?;
         for p in &f.params {
             if p.default.is_some() {
                 let name = module
@@ -1690,7 +1777,7 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                     .get(id.0 as usize)
                     .map(String::as_str)
                     .unwrap_or("");
-                if !globals.contains(var) && !env.iter().any(|n| n == var) {
+                if !globals.contains(var) && !env.names.iter().any(|n| n == var) {
                     let name = module
                         .strings
                         .get(f.name.0 as usize)
@@ -1789,7 +1876,7 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                     .get(id.0 as usize)
                     .map(String::as_str)
                     .unwrap_or("");
-                if globals.contains(var) || env.iter().any(|n| n == var) {
+                if globals.contains(var) || env.names.iter().any(|n| n == var) {
                     continue;
                 }
                 match resolve_load(*id, pc) {
@@ -2016,9 +2103,14 @@ struct Emitter<'a> {
     csyms: HashMap<String, String>,
     /// Module-scope env bindings (`module_globals`): IR name -> C global id.
     globals: HashMap<String, String>,
-    /// Function-local env cells (`func_env_names`) of the function being
-    /// emitted: IR name -> C local id.
-    env_cells: HashMap<String, String>,
+    /// Function-local env scopes of the function being emitted, outermost
+    /// first (index 0 is the function frame): IR name -> C local id. A
+    /// binding arm pushes a frame, so a nested arm that reuses a name
+    /// resolves to its own cell and leaves the enclosing binding intact.
+    env_scopes: Vec<HashMap<String, String>>,
+    /// `MatchArm` / `IfLetMatch` pc -> the cells its pattern binds (see
+    /// [`env_layout`]).
+    arm_scopes: HashMap<usize, Vec<(String, String)>>,
     /// Qualified unit enum variants (`Token.End`): a path naming one
     /// constructs the value (`RegisterEnum` supplies the set).
     unit_enums: HashSet<String>,
@@ -2040,9 +2132,21 @@ impl<'a> Emitter<'a> {
             .unwrap_or("")
     }
 
-    /// C local of a function-local env cell, if this function has one.
+    /// C local of the innermost env cell for `name`, if this function has
+    /// one (arm scopes shadow the function frame).
     fn env_cell(&self, name: &str) -> Option<&String> {
-        self.env_cells.get(name)
+        self.env_scopes.iter().rev().find_map(|f| f.get(name))
+    }
+
+    /// Whether `name` can be a call target (mirrors the coverage-side
+    /// `resolve_load` order), i.e. a `LoadVar` of it is a callee
+    /// placeholder rather than a value.
+    fn is_callee_name(&self, name: &str) -> bool {
+        self.csyms.contains_key(name)
+            || super::lower::native_impl(name).is_some()
+            || super::ffi_impl(name).is_some()
+            || super::lower::native_impl(&format!("std.{name}")).is_some()
+            || super::ffi_impl(&format!("std.{name}")).is_some()
     }
 
     /// Dotted spelling of a path (`"g2"."count"` -> `g2.count`), which is
@@ -2445,12 +2549,10 @@ impl<'a> Emitter<'a> {
             .cloned()
             .unwrap_or_default();
         let is_twin = self.twins.contains(&dotted);
-        // Function-local env cells (see `func_env_names`).
-        let env = func_env_names(self.module, f, &|n| self.globals.contains_key(n));
-        self.env_cells = env
-            .iter()
-            .map(|n| (n.clone(), format!("zz_e_{}", mangle(n))))
-            .collect();
+        // Function-local env cells (see `env_layout`).
+        let env = env_layout(self.module, f, &|n| self.globals.contains_key(n))?;
+        self.env_scopes = vec![env.base];
+        self.arm_scopes = env.arm_scopes;
         out.push_str(&format!(
             "static zz_value {sym}(zz_value *args, size_t argc) {{\n"
         ));
@@ -2476,8 +2578,8 @@ impl<'a> Emitter<'a> {
         ));
         out.push_str(&format!("    int sp = {nparams};\n"));
         out.push_str("    int _lbase[256];\n    int _ldepth = 0;\n");
-        for n in &env {
-            out.push_str(&format!("    zz_value zz_e_{} = zz_unit();\n", mangle(n)));
+        for id in &env.decls {
+            out.push_str(&format!("    zz_value {id} = zz_unit();\n"));
         }
         // Int-declared slots eligible for fused windows (see `int_slots`).
         let uint = int_slots(self.module, f);
@@ -3258,6 +3360,23 @@ impl<'a> Emitter<'a> {
         out: &mut String,
     ) -> Result<(), ChunkError> {
         let (callee, fuse_slot, fuse_borrow) = (cx.callee, cx.fuse_slot, cx.fuse_borrow);
+        // A binding arm opens a scope: push its cells before the pattern's
+        // bindings are emitted, so they (and the body's loads) resolve to
+        // the arm's own cells. The arm's trailing `ExitScope` pops it.
+        if let Op::MatchArm { pat, .. } | Op::IfLetMatch { pat, .. } = op {
+            match self.arm_scopes.get(&pc) {
+                Some(cells) => self.env_scopes.push(cells.iter().cloned().collect()),
+                None => {
+                    // `env_layout` records every binding arm; without the
+                    // record the bindings would land in an enclosing cell.
+                    let mut names = Vec::new();
+                    pattern_binds(self.module, pat, &mut names);
+                    if !names.is_empty() {
+                        return Err(ChunkError::op("binding arm without an env scope"));
+                    }
+                }
+            }
+        }
         // Peeled counted loop (see `peel_scan`): raw C loop over the
         // fused body, then the exit edge. The `ForSetup` emission stands
         // (placeholders + `_lbase`), so exit accounting is untouched.
@@ -3363,7 +3482,18 @@ impl<'a> Emitter<'a> {
                     .or_else(|| self.globals.get(&name).cloned());
                 match cid {
                     Some(cid) => out.push_str(&format!("    st[sp++] = zz_clone({cid});\n")),
-                    None => out.push_str("    st[sp++] = zz_unit();\n"),
+                    // A callee load is a placeholder the following `Call`
+                    // consumes (coverage guarantees it); anything else is a
+                    // name that is not in scope here — refuse rather than
+                    // hand the program a silent `unit`.
+                    None if self.is_callee_name(&name) => {
+                        out.push_str("    st[sp++] = zz_unit();\n")
+                    }
+                    None => {
+                        return Err(ChunkError::op(&format!(
+                            "load `{name}` outside an env cell"
+                        )))
+                    }
                 }
             }
             // Dotted path read: a module-scope binding (`{greeting}` in a
@@ -3496,9 +3626,18 @@ impl<'a> Emitter<'a> {
                 out.push_str("    zz_release(&st[sp-1]); sp--;\n");
             }
             // The VM pops the arm's child environment (dropping its
-            // bindings). Here bindings are function-local cells that the
-            // next binding overwrites, so there is nothing to pop.
-            Op::ExitScope => out.push_str("    ;\n"),
+            // bindings). Here the cells are C locals: pop the compile-time
+            // frame so later loads resolve to the enclosing binding again.
+            Op::ExitScope => {
+                if self.env_scopes.len() > 1 {
+                    self.env_scopes.pop();
+                }
+                out.push_str("    ;\n");
+            }
+            Op::EnterScope => {
+                self.env_scopes.push(HashMap::new());
+                out.push_str("    ;\n");
+            }
             Op::IntAdd => {
                 out.push_str(
                     "    { zz_value _b = st[--sp]; zz_value _a = st[--sp]; if (_a.tag == ZZ_INT && _b.tag == ZZ_INT) { st[sp++] = zz_int(_a.i + _b.i); } else { st[sp++] = zz_binop(ZZOP_ADD, _a, _b); } zz_release(&_a); zz_release(&_b); }\n",
@@ -4299,7 +4438,8 @@ pub fn build_module(
         module,
         csyms: HashMap::new(),
         globals: HashMap::new(),
-        env_cells: HashMap::new(),
+        env_scopes: vec![HashMap::new()],
+        arm_scopes: HashMap::new(),
         unit_enums: HashSet::new(),
         twins: closable_all(module),
         used_natives: Vec::new(),
