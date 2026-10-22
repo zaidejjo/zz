@@ -58,4 +58,5 @@
   - [Error index](guides/error-index.md)
   - [Examples index](guides/examples-index.md)
   - [VM vs native parity](guides/parity.md)
+  - [Docker and production AOT](guides/docker.md)
   - [FAQ and glossary](guides/faq-glossary.md)

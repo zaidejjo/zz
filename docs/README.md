@@ -76,6 +76,7 @@ This is the developer-friendly entry point. Pick a path below.
 - [Error index](guides/error-index.md) — verbatim messages with fixes.
 - [Examples index](guides/examples-index.md) — curated map (examples/ is scratch).
 - [VM vs native parity](guides/parity.md) — what is guaranteed identical.
+- [Docker and production AOT](guides/docker.md) — builder/runtime images, no app-level Clang.
 - [FAQ and glossary](guides/faq-glossary.md) — quick answers + terms.
 
 ## Conventions used in these docs

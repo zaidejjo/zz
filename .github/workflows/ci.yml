@@ -51,6 +51,16 @@ jobs:
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: 'docker smoke fixture (AOT compile + run)'
+        if: runner.os != 'Windows'
+        # docker-publish compiles this exact file inside the published
+        # builder image. Running it here too means a language change that
+        # breaks the fixture fails a normal PR, not the release.
+        run: |
+          cargo run -q -p zz_cli -- build -p docker/smoke/hello.zz -o /tmp/zz-docker-smoke
+          out=$(/tmp/zz-docker-smoke)
+          echo "$out"
+          echo "$out" | grep -qx 'smoke-ok'
       - name: 'test (PR: fast suite — VM legs only)'
         if: runner.os != 'Windows' && github.event_name == 'pull_request'
         # PR signal in minutes: unit + e2e (VM) + VM-only parity.
