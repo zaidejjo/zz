@@ -1151,7 +1151,11 @@ fn vm_if_let_result_does_not_alias_later_slots() {
     let _ = v;
     let f = interp.funcs.get("main").cloned().expect("main registered");
     let out = interp
-        .call(Value::Func(Box::new(f)), Vec::new(), Span::new(0, 0))
+        .call(
+            Value::Func(std::rc::Rc::new(f)),
+            Vec::new(),
+            Span::new(0, 0),
+        )
         .expect("call main");
     assert_eq!(out, Value::Int(7));
 }
@@ -2147,4 +2151,152 @@ fn while_sum_hot_shape_is_test_body_and_backedge() {
         ),
         "unexpected while iteration shape: {body:?}"
     );
+}
+
+#[test]
+fn for_loop_var_reassignment_drops_the_replaced_value() {
+    // Dynamic (untyped) compilation can put a heap value in a `for`
+    // loop-variable slot, which the `ForNext` fast path rewrites every
+    // iteration. The fast path skips `drop_in_place` when the slot already
+    // holds a scalar; anything else must still be dropped, so this pins the
+    // checked branch (a blanket elision would trip `overwrite_scalar`'s
+    // debug assertion and would leak the string in release).
+    let v = run_vm_native(
+        "func f() {\n    total := 0\n    for i in 0..3 {\n        i = \"heap value\"\n        total = total + 1\n    }\n    total\n}\nf()",
+    )
+    .expect("run");
+    assert_eq!(v, Value::Int(3));
+}
+
+#[test]
+fn int_slot_writes_keep_value_semantics() {
+    // The drop-eliding writes are only safe because the old value is a
+    // scalar; make sure a slot that goes from heap back to int (and back)
+    // keeps the value/ownership semantics of a plain assignment.
+    let v = run_vm_native(
+        "func f() {\n    x := \"s\"\n    x = 1\n    n := 0\n    for i in 0..3 {\n        n = n + 1\n        x = \"t{i}\"\n        x = i\n    }\n    n * 100 + x\n}\nf()",
+    )
+    .expect("run");
+    assert_eq!(v, Value::Int(302));
+}
+/// Compile `src` with `natives` registered, as `zz run` does.
+fn compile_with_natives(src: &str, natives: &[&str]) -> super::Chunk {
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let names: Arc<std::collections::HashSet<String>> =
+        Arc::new(natives.iter().map(|n| n.to_string()).collect());
+    Compiler::compile_program_with_natives(&parsed.program, names)
+}
+
+/// Depth-first search through function bodies (`MakeFunc` chunks).
+fn any_op(code: &[Op], pred: &dyn Fn(&Op) -> bool) -> bool {
+    code.iter().any(|op| {
+        pred(op)
+            || match op {
+                Op::MakeFunc { chunk, .. } | Op::MakeClosure { chunk, .. } => {
+                    any_op(&chunk.code, pred)
+                }
+                _ => false,
+            }
+    })
+}
+
+#[test]
+fn bare_native_call_emits_direct_dispatch() {
+    // A registered native must compile to one `CallNative`: the generic
+    // shape builds a throwaway `Value::Native` (box + name `String`) and
+    // pays the dynamic call plumbing on every invocation.
+    let chunk = compile_with_natives("func main() {\n    len(\"abcd\")\n}", &["len"]);
+    assert!(
+        any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::CallNative { name, argc, .. } if name == "len" && *argc == 1)
+        ),
+        "registered native should emit CallNative: {:?}",
+        chunk.code
+    );
+    assert!(
+        !any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::LoadVar(name, _) if name == "len")
+        ),
+        "fused native call must not also load the callee: {:?}",
+        chunk.code
+    );
+}
+
+#[test]
+fn bare_native_dispatch_calls_the_registered_entry() {
+    // Fused dispatch must hit the registered native (arity gate, argument
+    // order, result placement) exactly like the generic path.
+    let v = run_vm_native("len([1, 2, 3])").expect("run");
+    assert_eq!(v, Value::Int(3));
+}
+
+#[test]
+fn user_function_shadowing_keeps_the_generic_call() {
+    // `func len` must win over the native: the direct-dispatch guard sees
+    // the user signature and keeps `LoadVar` + `Call`.
+    let src = "func len(x: int) -> int {\n    x + 100\n}\nlen(1)";
+    let chunk = compile_with_natives(src, &["len"]);
+    assert!(
+        !any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::CallNative { name, .. } if name == "len")
+        ),
+        "shadowed `len` must not take native dispatch: {:?}",
+        chunk.code
+    );
+    assert!(
+        any_op(&chunk.code, &|op| matches!(op, Op::Call { .. })),
+        "shadowed `len` keeps the generic call: {:?}",
+        chunk.code
+    );
+    let v = run_vm_native(src).expect("run");
+    assert_eq!(v, Value::Int(101));
+}
+
+#[test]
+fn local_binding_shadowing_keeps_the_generic_call() {
+    let src = "func main() {\n    len := |x| x + 100\n    len(1)\n}";
+    let chunk = compile_with_natives(src, &["len"]);
+    assert!(
+        !any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::CallNative { name, .. } if name == "len")
+        ),
+        "local `len` must not take native dispatch: {:?}",
+        chunk.code
+    );
+    assert_same(src);
+}
+
+#[test]
+fn top_level_binding_shadowing_keeps_the_generic_call() {
+    // A promoted top-level declaration is a frame slot, not an env
+    // binding; the guard must still refuse to fuse.
+    let src = "len := |x| x + 100\nlen(1)";
+    let chunk = compile_with_natives(src, &["len"]);
+    assert!(
+        !any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::CallNative { name, .. } if name == "len")
+        ),
+        "top-level `len` must not take native dispatch: {:?}",
+        chunk.code
+    );
+    assert_same(src);
+}
+
+#[test]
+fn native_call_arity_errors_match_the_generic_path() {
+    // Both shapes must reject a wrong-arity native call with the same
+    // message (`CallNative` gates on the registry entry's arity).
+    let fused = run_vm_native("len()").expect_err("arity").message;
+    let generic = run_vm_native("f := len\nf()").expect_err("arity").message;
+    assert_eq!(fused, generic, "arity error text drifted");
 }

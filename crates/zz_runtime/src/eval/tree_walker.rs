@@ -87,7 +87,8 @@ impl Interp {
                 };
                 self.funcs.insert(name.join("."), fv.clone());
                 self.funcs_version = self.funcs_version.wrapping_add(1);
-                self.env.define(&name.join("."), Value::Func(Box::new(fv)));
+                self.env
+                    .define(&name.join("."), Value::Func(std::rc::Rc::new(fv)));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Return { value, .. } => match value {
@@ -145,7 +146,8 @@ impl Interp {
                         };
                         self.funcs.insert(full_name.clone(), fv.clone());
                         self.funcs_version = self.funcs_version.wrapping_add(1);
-                        self.env.define(&full_name, Value::Func(Box::new(fv)));
+                        self.env
+                            .define(&full_name, Value::Func(std::rc::Rc::new(fv)));
                     }
                 }
                 Ok(Flow::Value(Value::Unit))
@@ -305,7 +307,7 @@ impl Interp {
                 self.defer_stacks
                     .last_mut()
                     .unwrap()
-                    .push(Value::Func(Box::new(closure)));
+                    .push(Value::Func(std::rc::Rc::new(closure)));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Destructure { pat, value, .. } => {
@@ -817,7 +819,7 @@ impl Interp {
             return Ok(v);
         }
         if let Some(fv) = zz_checker::lookup_std(&self.funcs, &name) {
-            return Ok(Value::Func(Box::new(fv.clone())));
+            return Ok(Value::Func(std::rc::Rc::new(fv.clone())));
         }
         if let Some(entry) = zz_checker::lookup_std(&self.natives, &name) {
             return Ok(Value::Native(Box::new(NativeFunc {
@@ -862,7 +864,7 @@ impl Interp {
             return Ok(v);
         }
         if let Some(fv) = zz_checker::lookup_std(&self.funcs, name) {
-            return Ok(Value::Func(Box::new(fv.clone())));
+            return Ok(Value::Func(std::rc::Rc::new(fv.clone())));
         }
         if let Some(entry) = zz_checker::lookup_std(&self.natives, name) {
             return Ok(Value::Native(Box::new(NativeFunc {
@@ -975,7 +977,7 @@ impl Interp {
         // Bare (same-module) keys first, then namespaced cross-module keys.
         for (name, fv) in &self.funcs.clone() {
             if name.starts_with(&prefix) {
-                hits.push((name.clone(), Value::Func(Box::new(fv.clone()))));
+                hits.push((name.clone(), Value::Func(std::rc::Rc::new(fv.clone()))));
             }
         }
         if hits.is_empty() {
@@ -990,7 +992,7 @@ impl Interp {
                         .join(".")
                         .starts_with(&prefix)
                 {
-                    hits.push((name.clone(), Value::Func(Box::new(fv.clone()))));
+                    hits.push((name.clone(), Value::Func(std::rc::Rc::new(fv.clone()))));
                 }
             }
         }
@@ -1077,7 +1079,7 @@ impl Interp {
                     return Ok(Flow::Value(v));
                 }
                 if let Some(fv) = zz_checker::lookup_std(&self.funcs, name) {
-                    return Ok(Flow::Value(Value::Func(Box::new(fv.clone()))));
+                    return Ok(Flow::Value(Value::Func(std::rc::Rc::new(fv.clone()))));
                 }
                 if let Some(entry) = zz_checker::lookup_std(&self.natives, name) {
                     return Ok(Flow::Value(Value::Native(Box::new(NativeFunc {
@@ -1347,7 +1349,7 @@ impl Interp {
                 self.call(f, arg_vals, *span).map(Flow::Value)
             }
             Expr::Closure { params, body, .. } => {
-                Ok(Flow::Value(Value::Func(Box::new(FuncValue {
+                Ok(Flow::Value(Value::Func(std::rc::Rc::new(FuncValue {
                     params: params.clone(),
                     body: (**body).clone(),
                     env: self.env.clone(),
@@ -1818,7 +1820,7 @@ impl Interp {
                     },
                 }
             }
-            Value::Func(fv) => self.call_func(*fv, args, span),
+            Value::Func(fv) => self.call_func(fv, args, span),
             other => Err(EvalError::new(
                 format!("cannot call a value of type `{other}`"),
                 span,
@@ -1828,7 +1830,7 @@ impl Interp {
 
     fn call_func(
         &mut self,
-        fv: FuncValue,
+        fv: std::rc::Rc<FuncValue>,
         mut args: Vec<Value>,
         span: Span,
     ) -> Result<Value, EvalError> {
