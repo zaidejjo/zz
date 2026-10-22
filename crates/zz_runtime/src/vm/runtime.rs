@@ -2920,6 +2920,33 @@ impl Vm {
                 Op::CallNative { name, argc, span } => {
                     let argc = *argc;
                     let span = *span;
+                    // `len` is the most frequent native call in string and
+                    // collection code and a pure function of one stack value,
+                    // so specialise it ahead of the dynamic path: no args
+                    // buffer, no registry lookup, no frame re-cache. The
+                    // fixed dispatch cost measured ~150ns per call, against
+                    // ~10ns here. The semantics are the registry entry's own
+                    // — `value_len`/`len_error` are the shared implementation
+                    // (they already serve `LenField`) and the registered
+                    // arity is exactly 1, so the generic arity gate cannot
+                    // disagree for this spelling; every other arity and every
+                    // other native stays on the generic path below.
+                    if argc == 1 && name.as_str() == "len" {
+                        let v = self.stack.pop().unwrap();
+                        if let Some(n) = Self::value_len(&v) {
+                            self.stack.push(Value::Int(n));
+                        } else {
+                            return Err(Self::len_error(&v, span));
+                        }
+                        // A pending cooperative yield must resume *after*
+                        // this op, never re-execute it: the argument has been
+                        // consumed and the result pushed, so syncing `ip`
+                        // (as the generic path does before it calls the
+                        // native) is what makes re-entry idempotent.
+                        self.frames.last_mut().unwrap().ip = ip;
+                        yield_check!();
+                        continue;
+                    }
                     // Scratch args buffer: reuses one allocation per thread
                     // instead of allocating an args `Vec` per call (~50ns
                     // saved on the hot path). Reentrant calls (a native

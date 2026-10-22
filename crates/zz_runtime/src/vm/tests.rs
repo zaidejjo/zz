@@ -664,6 +664,19 @@ fn len_fake(_interp: &mut Interp, args: &mut Vec<Value>, span: Span) -> Result<V
     }
 }
 
+/// Bare-native stand-in with no VM specialisation, so the fused-dispatch
+/// test can prove the registry entry itself ran.
+#[allow(clippy::ptr_arg)]
+fn tally_fake(_interp: &mut Interp, args: &mut Vec<Value>, span: Span) -> Result<Value, EvalError> {
+    match args.first() {
+        Some(Value::Int(n)) => Ok(Value::Int(n * 2 + 1)),
+        other => Err(EvalError::new(
+            format!("`tally` expects an int, found `{other:?}`"),
+            span,
+        )),
+    }
+}
+
 /// Minimal `vec.push` stand-in (clone + push, like the real native).
 /// The bare test `Interp` ships no natives; registering the real
 /// `zz_stdlib` table would pull a dependency cycle into unit tests.
@@ -711,6 +724,13 @@ fn run_vm_native(src: &str) -> Result<Value, EvalError> {
         crate::runtime::NativeEntry {
             arity: 1,
             f: len_fake,
+        },
+    );
+    natives.insert(
+        "tally".to_string(),
+        crate::runtime::NativeEntry {
+            arity: 1,
+            f: tally_fake,
         },
     );
     let mut interp = Interp::with_natives(natives);
@@ -2179,6 +2199,7 @@ fn int_slot_writes_keep_value_semantics() {
     .expect("run");
     assert_eq!(v, Value::Int(302));
 }
+
 /// Compile `src` with `natives` registered, as `zz run` does.
 fn compile_with_natives(src: &str, natives: &[&str]) -> super::Chunk {
     let parsed = parse(src);
@@ -2232,9 +2253,45 @@ fn bare_native_call_emits_direct_dispatch() {
 #[test]
 fn bare_native_dispatch_calls_the_registered_entry() {
     // Fused dispatch must hit the registered native (arity gate, argument
-    // order, result placement) exactly like the generic path.
-    let v = run_vm_native("len([1, 2, 3])").expect("run");
-    assert_eq!(v, Value::Int(3));
+    // order, result placement) exactly like the generic path. `tally` has
+    // no VM specialisation, so the result can only come from the registry
+    // entry itself (`len` is specialised inside the handler; see
+    // `len_fast_path_matches_the_native_semantics`).
+    let v = run_vm_native("tally(20)").expect("run");
+    assert_eq!(v, Value::Int(41));
+}
+
+#[test]
+fn len_fast_path_matches_the_native_semantics() {
+    // The handler specialises the bare `len` call ahead of the registry;
+    // both must agree on every sized variant, on non-ASCII char counting,
+    // and on the failure message for unsized values.
+    let cases = [
+        ("len([1, 2, 3])", "3"),
+        ("len((1, 2))", "2"),
+        ("len(\"abc\")", "3"),
+        ("len(\"héllo\")", "5"),
+        ("len(1..4)", "3"),
+    ];
+    for (src, want) in cases {
+        let v = run_vm_native(src).expect("run");
+        assert_eq!(v.to_string(), want, "wrong `len` for {src}");
+    }
+    let d = run_vm_native("d:{str: int} = {\"a\": 1, \"b\": 2}\nlen(d)").expect("run");
+    assert_eq!(d, Value::Int(2));
+
+    let err = run_vm_native("len(5)").expect_err("unsized").message;
+    assert_eq!(
+        err,
+        "len expects array, tuple, bytes, string, dict, or range, found `5`"
+    );
+
+    // Arity still goes through the registry gate, not the fast path.
+    let err = run_vm_native("len()").expect_err("arity").message;
+    assert!(
+        err.contains("expected 1 arguments, found 0"),
+        "unexpected arity error: {err}"
+    );
 }
 
 #[test]
