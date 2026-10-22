@@ -1905,6 +1905,17 @@ impl Vm {
                     });
                 }
                 Op::WhileCond { exit, span } => {
+                    // Cooperative safepoint for `while` loops, folded in from
+                    // the header (see `Compiler::compile_while`): this op is
+                    // reached once per test — entry, back-edge and `continue`
+                    // all land on the condition — so the check cannot be
+                    // skipped, at one dispatch less per iteration. Taken
+                    // before the condition is popped so a yield rewinds to
+                    // this op and re-executes it whole.
+                    if self.safepoint_expired() {
+                        self.frames.last_mut().unwrap().ip = ip - 1;
+                        return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
+                    }
                     let c = self.stack.pop().unwrap();
                     if !matches!(c, Value::Bool(_)) {
                         return Err(self.error("`while` condition must be a bool", *span));

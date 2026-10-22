@@ -1673,14 +1673,75 @@ fn type_alias_statement_owns_no_value() {
     );
 }
 
-/// `while` is compiled as an expression, where its value cannot be proven
-/// dead, so its standalone header `Safepoint` stays.
+/// `while` used to pay a standalone header `Safepoint`. The check now rides
+/// on `WhileCond` (see `Compiler::compile_while`), which entry, the
+/// back-edge and `continue` all pass through — so the op has to be gone
+/// from the stream, not merely unreachable.
 #[test]
-fn while_loop_keeps_header_safepoint() {
+fn while_loop_folds_its_safepoint_into_the_test() {
     let chunk = compile_with_push_native("i := 0\nwhile i < 10 {\n    i = i + 1\n}\ni");
     assert!(
-        has_op(&chunk, |op| matches!(op, Op::Safepoint)),
-        "while loops keep their standalone header safepoint"
+        !has_op(&chunk, |op| matches!(op, Op::Safepoint)),
+        "while loops fold the safepoint into `WhileCond`: {:#?}",
+        chunk.code
+    );
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::WhileCond { .. })),
+        "expected a WhileCond: {:#?}",
+        chunk.code
+    );
+}
+
+/// The fold must keep the loop cooperative: a CPU-bound `while` loop still
+/// has to reach `Flow::Yield`, or `task.spawn` siblings would starve.
+#[test]
+fn while_loop_still_yields_cooperatively() {
+    let chunk = Arc::new(compile_with_push_native(
+        "i := 0\nwhile i < 200000 {\n    i = i + 1\n}\ni",
+    ));
+    // Safepoints only yield on executor threads (main-thread runs have no
+    // executor to hand the slice to), so run this slice as a green task.
+    let outcome = crate::value::with_executor_task(1, || {
+        let mut vm = Vm::new();
+        let mut interp = Interp::new();
+        vm.run_chunk(&chunk, &mut interp)
+    });
+    match outcome {
+        Ok(crate::runtime::Flow::Yield(crate::value::YieldReason::Timeslice)) => {}
+        other => panic!("while loop must hit a cooperative safepoint, got {other:?}"),
+    }
+}
+
+/// A statement-position `while` writes no loop result: no `SetLoopResult`
+/// per iteration, no unit pushed for it, and the result placeholder is
+/// dropped once on exit.
+#[test]
+fn vm_statement_while_emits_no_result_dance() {
+    let chunk = compile_with_push_native("i := 0\nwhile i < 10 {\n    i = i + 1\n}\ni");
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::SetLoopResult)),
+        "a dead `while` must not store a loop result: {:#?}",
+        chunk.code
+    );
+    let cond = chunk
+        .code
+        .iter()
+        .position(|op| matches!(op, Op::WhileCond { .. }))
+        .expect("expected a WhileCond");
+    let body: Vec<&Op> = chunk.code[cond + 1..]
+        .iter()
+        .take_while(|op| !matches!(op, Op::Jump(_)))
+        .collect();
+    let pushes_unit = body.iter().any(|op| match op {
+        Op::PushConst(i) => matches!(chunk.constants.get(*i as usize), Some(Value::Unit)),
+        _ => false,
+    });
+    assert!(
+        !pushes_unit
+            && !body
+                .iter()
+                .any(|op| matches!(op, Op::Pop | Op::SetLoopResult)),
+        "a dead `while` body must neither push nor drop a value, got {body:?}"
     );
 }
 
@@ -1977,4 +2038,113 @@ fn vm_module_scope_loop_capture() {
     ] {
         assert_same(src);
     }
+}
+
+/// The `while` shapes whose value can be proven dead (6.8) must stay
+/// balanced against the tree-walker: statement position, value position
+/// (the loop is the tail of a function or the program), every body-tail
+/// kind, early exits, nesting and env-captured bodies.
+#[test]
+fn statement_while_shapes_match_the_tree_walker() {
+    for src in [
+        // Dead `while` in a loop body (the hot shape 6.8 elides).
+        "s := 0\nfor i in 0..4 {\n    j := 0\n    while j < 3 {\n        s = s + j\n        j = j + 1\n    }\n}\ns",
+        // `break` and `continue` inside a dead `while`.
+        "i := 0\nwhile true {\n    i = i + 1\n    if i == 3 {\n        break\n    }\n}\ni",
+        "i := 0\nn := 0\nwhile i < 6 {\n    i = i + 1\n    if i < 4 {\n        continue\n    }\n    n = n + i\n}\nn",
+        // Body declaring a local: the block's `PopN` settle.
+        "i := 0\ns := 0\nwhile i < 4 {\n    v := i * 2\n    s = s + v\n    i = i + 1\n}\ns",
+        // Trailing slot declaration as the body's last statement: the
+        // `needs_result_unit` path is skipped in the dead form.
+        "i := 0\nwhile i < 3 {\n    i = i + 1\n    v := i\n}\ni",
+        // Empty body.
+        "i := 0\nwhile i < 3 {\n    i = i + 1\n}\ni",
+        // Nested `while`, both dead.
+        "i := 0\nn := 0\nwhile i < 3 {\n    j := 0\n    while j < 3 {\n        j = j + 1\n        n = n + 1\n    }\n    i = i + 1\n}\nn",
+        // Dead `while` inside a dead `if` arm.
+        "i := 0\nif true {\n    while i < 3 {\n        i = i + 1\n    }\n}\ni",
+        // Env-captured body (the loop var is captured): keeps the
+        // value-producing path, and the placeholder must still be dropped
+        // exactly once.
+        "total := 0\ni := 0\nwhile i < 3 {\n    f := |x: int| { x + i }\n    total = total + f(1)\n    i = i + 1\n}\ntotal",
+        // Value position: the program's own tail and a unit function's tail
+        // keep the value-producing shape.
+        "i := 0\nwhile i < 3 {\n    i = i + 1\n}",
+        "func f() {\n    i := 0\n    while i < 3 {\n        i = i + 1\n    }\n}\nf()",
+        // Loop result read by the caller (`while` value used).
+        "func f() {\n    i := 0\n    r := 0\n    while i < 3 {\n        i = i + 1\n        r = i\n    }\n    r\n}\nf()",
+        // Early `return` out of a dead `while`.
+        "func f(n: int) -> int {\n    i := 0\n    while true {\n        i = i + 1\n        if i >= n {\n            return i\n        }\n    }\n    return 0\n}\nf(4) + f(9)",
+        // 5k iterations: a per-iteration stack imbalance shows up as a
+        // shifted slot rather than passing quietly.
+        "i := 0\ns := 0\nwhile i < 5000 {\n    s = s + i\n    i = i + 1\n}\ns",
+    ] {
+        assert_same(src);
+    }
+}
+
+/// The `while` hot shape (see `bench/vm_gate/while_sum.zz`): one iteration
+/// is exactly the test, the body and the back-edge. The cooperative check
+/// rides inside `WhileCond` and the dead loop result no longer costs a
+/// `PushConst unit` + `SetLoopResult` pair, so nothing may sneak back in.
+#[test]
+fn while_sum_hot_shape_is_test_body_and_backedge() {
+    use std::collections::{HashMap, HashSet};
+
+    let parsed =
+        parse("sum := 0\ni := 0\nwhile i < 1000000 {\n    sum = sum + i\n    i = i + 1\n}\nsum");
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_res, types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let chunk = super::Compiler::compile_program_typed(
+        &parsed.program,
+        Arc::new(types),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(HashSet::new()),
+    );
+    let setup = chunk
+        .code
+        .iter()
+        .position(|op| matches!(op, Op::WhileSetup { .. }))
+        .expect("expected a WhileSetup");
+    let (exit, header) = match &chunk.code[setup] {
+        Op::WhileSetup { exit, header } => (*exit, *header),
+        other => panic!("expected a WhileSetup, got {other:?}"),
+    };
+    assert_eq!(
+        header,
+        setup + 2,
+        "the header follows the setup and its result placeholder: {:#?}",
+        chunk.code
+    );
+    assert!(
+        matches!(chunk.code.get(exit), Some(Op::Pop)),
+        "a dead `while` drops its result placeholder on exit: {:#?}",
+        chunk.code
+    );
+    let body = &chunk.code[header..exit];
+    assert!(
+        matches!(
+            body,
+            [
+                Op::SlotLessIntImm { .. },
+                Op::WhileCond { .. },
+                Op::SlotAddInt { .. },
+                Op::SlotInc { .. },
+                Op::Jump(_),
+            ]
+        ),
+        "unexpected while iteration shape: {body:?}"
+    );
 }
