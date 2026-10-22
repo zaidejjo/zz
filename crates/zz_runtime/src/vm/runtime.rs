@@ -23,6 +23,56 @@ const SAFEPOINT_BUDGET: u32 = 1024;
 /// (channel ping) latency low while requeue churn stays negligible.
 const SAFEPOINT_QUANTUM_MS: u128 = 1;
 
+/// Overwrite a stack slot in place without running `drop_in_place` on the
+/// value it replaces.
+///
+/// The int-specialised slot ops match the slot as `Value::Int` in the same
+/// arm (and `ForNext`'s fast paths only ever replace an `Int` index or a
+/// loop-var slot this op last filled — `Unit` on the first iteration, `Int`
+/// afterwards), so the old value owns no heap payload and dropping it is a
+/// no-op. The drop glue for the 16-variant `Value` enum is a call that LLVM
+/// cannot see through; measured at ~3ns per write on a 16-byte `Value`,
+/// roughly a fifth of a `SlotAddInt` iteration.
+///
+/// The caller still indexes the stack normally, so a bad slot index panics
+/// exactly as before — only the drop is elided.
+///
+/// # Safety
+///
+/// The value currently in `slot` must be a scalar (`Int`, `Float`, `Bool` or
+/// `Unit`): nothing that needs dropping.
+#[inline(always)]
+unsafe fn overwrite_scalar(slot: &mut Value, v: Value) {
+    debug_assert!(
+        matches!(
+            slot,
+            Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit
+        ),
+        "overwrite_scalar replaced a heap-owning value"
+    );
+    unsafe { std::ptr::write(slot, v) };
+}
+
+/// Write `v` into a user-assignable slot, skipping the drop glue when the
+/// slot currently holds a scalar.
+///
+/// Unlike the int-specialised slot ops (`x = x + y`), this slot can hold
+/// anything: a loop variable is assignable (`for i in 0..3 { i = 5 }`), and
+/// dynamic code can put a heap value there. The scalar match keeps the
+/// elision safe and costs one predictable branch.
+#[inline(always)]
+fn write_slot_checked(slot: &mut Value, v: Value) {
+    if matches!(
+        slot,
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit
+    ) {
+        // SAFETY: matched as a scalar just above.
+        unsafe { overwrite_scalar(slot, v) };
+    } else {
+        *slot = v;
+    }
+}
+
 // Per-thread scratch args buffer for native calls (see the `CallNative`
 // arm): one reusable allocation instead of one per call.
 thread_local! {
@@ -338,7 +388,7 @@ impl Vm {
         let state = self.defer_return.as_mut().unwrap();
         let closure = state.remaining.pop().unwrap();
         if let Value::Func(fv) = closure {
-            if let Some(chunk) = fv.chunk {
+            if let Some(chunk) = fv.chunk.clone() {
                 let stack_base = self.stack.len();
                 let prev_env = std::mem::replace(&mut interp.env, fv.env.clone());
                 let saved_defers = std::mem::take(&mut self.defer_stack);
@@ -454,6 +504,12 @@ impl Vm {
         // Recording goes through `record_branch!` inside the five
         // conditional handlers below.
         let mut cached_cov_branch: *const Vec<u32>;
+        // Instrumentation gate: `true` when this frame records coverage or a
+        // debugger session is attached. The per-op prelude then costs one
+        // flag test in the steady state (neither hook active) instead of a
+        // coverage compare plus a debugger discriminant check per op; each
+        // hook re-checks its own condition inside the gate.
+        let mut hooks_on: bool;
 
         // Re-cache from the current top frame (after any frame push/pop).
         macro_rules! re_cache {
@@ -475,7 +531,16 @@ impl Vm {
                 };
                 cached_cov_branch = &c.cov_branch;
                 cached_spans = &c.spans;
-                cached_dbg_label = c.source.clone();
+                // Only paid when a debugger session is attached: the label
+                // is a per-frame `Arc` clone otherwise, and `re_cache!` runs
+                // on every call/return. A session attached later (between
+                // yields) refreshes this on the resume path.
+                cached_dbg_label = if self.debug.is_some() {
+                    c.source.clone()
+                } else {
+                    None
+                };
+                hooks_on = cached_cov_file != usize::MAX || cached_dbg_label.is_some();
             }};
         }
 
@@ -644,40 +709,42 @@ impl Vm {
             let op = &code[ip];
             ip += 1;
             // NO frame.ip write-back here — ip lives in a register.
-            // Coverage: one integer compare when disabled; two array reads
-            // plus a counter bump when recording (see `crate::coverage`).
-            if cached_cov_file != usize::MAX {
-                let ids: &Vec<u32> = unsafe { &*cached_cov_ids };
-                if let Some(&id) = ids.get(ip - 1) {
-                    if id != crate::coverage::COV_UNMAPPED {
-                        if let Some(cov) = interp.coverage.as_mut() {
-                            if let Some(h) = cov.hits.get_mut(id as usize) {
-                                *h += 1;
+            // Instrumentation: one flag test in the steady state (no
+            // coverage, no debugger). Coverage then costs one integer
+            // compare; the debugger one discriminant check.
+            if hooks_on {
+                if cached_cov_file != usize::MAX {
+                    let ids: &Vec<u32> = unsafe { &*cached_cov_ids };
+                    if let Some(&id) = ids.get(ip - 1) {
+                        if id != crate::coverage::COV_UNMAPPED {
+                            if let Some(cov) = interp.coverage.as_mut() {
+                                if let Some(h) = cov.hits.get_mut(id as usize) {
+                                    *h += 1;
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // Debugger breakpoints: one discriminant check when detached.
-            // Attributed ops resolve (label, line) through the session and
-            // suspend on a line-change hit with the frame ip rewound to the
-            // breaking op (`ip` already advanced past it), so resume_chunk
-            // executes it instead of skipping it, with the environment
-            // intact for inspection.
-            if self.debug.is_some() {
-                let spans: &Vec<Span> = unsafe { &*cached_spans };
-                let depth = self.frames.len();
-                let hit = spans.get(ip - 1).and_then(|span| {
-                    self.debug.as_ref().and_then(|dbg| {
-                        dbg.lock().ok().and_then(|mut session| {
-                            session.check_span(cached_dbg_label.as_deref(), *span, depth)
+                // Debugger breakpoints: attributed ops resolve (label, line)
+                // through the session and suspend on a line-change hit with
+                // the frame ip rewound to the breaking op (`ip` already
+                // advanced past it), so resume_chunk executes it instead of
+                // skipping it, with the environment intact for inspection.
+                if self.debug.is_some() {
+                    let spans: &Vec<Span> = unsafe { &*cached_spans };
+                    let depth = self.frames.len();
+                    let hit = spans.get(ip - 1).and_then(|span| {
+                        self.debug.as_ref().and_then(|dbg| {
+                            dbg.lock().ok().and_then(|mut session| {
+                                session.check_span(cached_dbg_label.as_deref(), *span, depth)
+                            })
                         })
-                    })
-                });
-                if let Some(line) = hit {
-                    self.frames.last_mut().unwrap().ip = ip - 1;
-                    return Ok(Flow::Yield(crate::value::YieldReason::DebugBreak { line }));
+                    });
+                    if let Some(line) = hit {
+                        self.frames.last_mut().unwrap().ip = ip - 1;
+                        return Ok(Flow::Yield(crate::value::YieldReason::DebugBreak { line }));
+                    }
                 }
             }
 
@@ -1146,7 +1213,9 @@ impl Vm {
                     let idx_src = base + *src as usize;
                     match (&self.stack[idx_dst], &self.stack[idx_src]) {
                         (Value::Int(a), Value::Int(b)) => {
-                            self.stack[idx_dst] = Value::Int(a.wrapping_add(*b));
+                            let v = Value::Int(a.wrapping_add(*b));
+                            // SAFETY: `idx_dst` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx_dst], v) };
                         }
                         // Slow path: fall back to generic add semantics.
                         _ => {
@@ -1161,7 +1230,11 @@ impl Vm {
                     let base = cached_base;
                     let idx = base + *slot as usize;
                     match &self.stack[idx] {
-                        Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(1)),
+                        Value::Int(a) => {
+                            let v = Value::Int(a.wrapping_add(1));
+                            // SAFETY: `idx` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx], v) };
+                        }
                         _ => {
                             let v = self.stack[idx].clone();
                             let span = Span::default();
@@ -1175,7 +1248,11 @@ impl Vm {
                     let base = cached_base;
                     let idx = base + *dst as usize;
                     match &self.stack[idx] {
-                        Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(*imm)),
+                        Value::Int(a) => {
+                            let v = Value::Int(a.wrapping_add(*imm));
+                            // SAFETY: `idx` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx], v) };
+                        }
                         _ => {
                             let v = self.stack[idx].clone();
                             let span = Span::default();
@@ -1231,13 +1308,13 @@ impl Vm {
                     match (&self.stack[idx_l], &self.stack[idx_r]) {
                         (Value::Int(a), Value::Int(b)) => {
                             let v = eval_int_binary(*op, *a, *b, Span::default())?;
-                            self.stack[idx_d] = v;
+                            write_slot_checked(&mut self.stack[idx_d], v);
                         }
                         _ => {
                             let (l, r) = (self.stack[idx_l].clone(), self.stack[idx_r].clone());
                             let span = Span::default();
                             let v = eval_binary(*op, l, r, span)?;
-                            self.stack[idx_d] = v;
+                            write_slot_checked(&mut self.stack[idx_d], v);
                         }
                     }
                 }
@@ -1248,13 +1325,13 @@ impl Vm {
                     match &self.stack[idx_l] {
                         Value::Int(a) => {
                             let v = eval_int_binary(*op, *a, *imm, Span::default())?;
-                            self.stack[idx_d] = v;
+                            write_slot_checked(&mut self.stack[idx_d], v);
                         }
                         _ => {
                             let l = self.stack[idx_l].clone();
                             let span = Span::default();
                             let v = eval_binary(*op, l, Value::Int(*imm), span)?;
-                            self.stack[idx_d] = v;
+                            write_slot_checked(&mut self.stack[idx_d], v);
                         }
                     }
                 }
@@ -1276,7 +1353,7 @@ impl Vm {
                     };
                     interp.funcs.insert(name.clone(), fv.clone());
                     interp.funcs_version = interp.funcs_version.wrapping_add(1);
-                    interp.env.define(name, Value::Func(Box::new(fv)));
+                    interp.env.define(name, Value::Func(std::rc::Rc::new(fv)));
                     self.stack.push(Value::Unit);
                 }
                 Op::RegisterStruct { name, fields } => {
@@ -1707,8 +1784,16 @@ impl Vm {
                                         if (s > 0 && i >= end) || (s <= 0 && i <= end) {
                                             Some(true)
                                         } else {
-                                            tail[0] = Value::Int(i.wrapping_add(s));
-                                            tail[1] = Value::Int(i);
+                                            // SAFETY: `tail[0]` was matched as
+                                            // `Int` above; `tail[1]` is the
+                                            // loop var, checked scalar.
+                                            unsafe {
+                                                overwrite_scalar(
+                                                    &mut tail[0],
+                                                    Value::Int(i.wrapping_add(s)),
+                                                )
+                                            };
+                                            write_slot_checked(&mut tail[1], Value::Int(i));
                                             Some(false)
                                         }
                                     }
@@ -1719,7 +1804,14 @@ impl Vm {
                                             // Clone while the entry borrows
                                             // the front of the window.
                                             tail[1] = arr[i as usize].clone();
-                                            tail[0] = Value::Int(i.wrapping_add(1));
+                                            // SAFETY: `tail[0]` was matched
+                                            // as `Int` above.
+                                            unsafe {
+                                                overwrite_scalar(
+                                                    &mut tail[0],
+                                                    Value::Int(i.wrapping_add(1)),
+                                                )
+                                            };
                                             Some(false)
                                         }
                                     }
@@ -1727,8 +1819,18 @@ impl Vm {
                                         if i >= b.len() as i64 {
                                             Some(true)
                                         } else {
-                                            tail[1] = Value::Int(b.as_slice()[i as usize] as i64);
-                                            tail[0] = Value::Int(i.wrapping_add(1));
+                                            write_slot_checked(
+                                                &mut tail[1],
+                                                Value::Int(b.as_slice()[i as usize] as i64),
+                                            );
+                                            // SAFETY: `tail[0]` was matched
+                                            // as `Int` above.
+                                            unsafe {
+                                                overwrite_scalar(
+                                                    &mut tail[0],
+                                                    Value::Int(i.wrapping_add(1)),
+                                                )
+                                            };
                                             Some(false)
                                         }
                                     }
@@ -2199,7 +2301,7 @@ impl Vm {
                         chunk: Some(Arc::clone(chunk)),
                         chunk_defaults: defaults.clone(),
                     };
-                    self.stack.push(Value::Func(Box::new(fv)));
+                    self.stack.push(Value::Func(std::rc::Rc::new(fv)));
                 }
                 Op::SpawnClosure {
                     params,
@@ -2360,12 +2462,12 @@ impl Vm {
                                         let err_c = e.clone();
                                         if fv.chunk.is_some() {
                                             self.frames.last_mut().unwrap().ip = ip;
-                                            let callee = Value::Func(Box::new(fv));
+                                            let callee = Value::Func(std::rc::Rc::new(fv));
                                             self.call_value(callee, vec![err_c], span_c, interp)?;
                                             self.try_convert_depths.push(self.frames.len());
                                             re_cache!();
                                         } else {
-                                            let callee = Value::Func(Box::new(fv));
+                                            let callee = Value::Func(std::rc::Rc::new(fv));
                                             let converted =
                                                 interp.call(callee, vec![err_c], span_c)?;
                                             match self.unwind_frame(
@@ -2818,6 +2920,33 @@ impl Vm {
                 Op::CallNative { name, argc, span } => {
                     let argc = *argc;
                     let span = *span;
+                    // `len` is the most frequent native call in string and
+                    // collection code and a pure function of one stack value,
+                    // so specialise it ahead of the dynamic path: no args
+                    // buffer, no registry lookup, no frame re-cache. The
+                    // fixed dispatch cost measured ~150ns per call, against
+                    // ~10ns here. The semantics are the registry entry's own
+                    // — `value_len`/`len_error` are the shared implementation
+                    // (they already serve `LenField`) and the registered
+                    // arity is exactly 1, so the generic arity gate cannot
+                    // disagree for this spelling; every other arity and every
+                    // other native stays on the generic path below.
+                    if argc == 1 && name.as_str() == "len" {
+                        let v = self.stack.pop().unwrap();
+                        if let Some(n) = Self::value_len(&v) {
+                            self.stack.push(Value::Int(n));
+                        } else {
+                            return Err(Self::len_error(&v, span));
+                        }
+                        // A pending cooperative yield must resume *after*
+                        // this op, never re-execute it: the argument has been
+                        // consumed and the result pushed, so syncing `ip`
+                        // (as the generic path does before it calls the
+                        // native) is what makes re-entry idempotent.
+                        self.frames.last_mut().unwrap().ip = ip;
+                        yield_check!();
+                        continue;
+                    }
                     // Scratch args buffer: reuses one allocation per thread
                     // instead of allocating an args `Vec` per call (~50ns
                     // saved on the hot path). Reentrant calls (a native
@@ -3050,7 +3179,8 @@ impl Vm {
                         }
                     }
                 }
-                self.enter_call_frame(fv.chunk.unwrap(), fv.env.clone(), args, span, interp);
+                let chunk = fv.chunk.clone().expect("chunk presence checked above");
+                self.enter_call_frame(chunk, fv.env.clone(), args, span, interp);
                 Ok(())
             }
             other => {
@@ -3169,7 +3299,7 @@ impl Vm {
             .get(name)
             .or_else(|| {
                 zz_checker::lookup_std(&interp.funcs, name)
-                    .map(|fv| Value::Func(Box::new(fv.clone())))
+                    .map(|fv| Value::Func(std::rc::Rc::new(fv.clone())))
             })
             .or_else(|| {
                 zz_checker::lookup_std(&interp.natives, name).map(|entry| {

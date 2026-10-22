@@ -861,6 +861,29 @@ impl Compiler {
         zz_checker::lookup_std(&self.func_info, name).cloned()
     }
 
+    /// True when a bare `name` call must dispatch straight to the stdlib
+    /// native registry via [`Op::CallNative`].
+    ///
+    /// Mirrors [`Compiler::len_native_spelling`]'s guard set — user
+    /// functions (through `func_info`, including the unique `*.name`
+    /// suffix form) and local bindings shadow the native — plus the
+    /// top-level declaration tables the main compiler owns, so a
+    /// promoted or captured top-level binding also keeps the generic
+    /// `LoadVar` + `Call` path. Any shadow means exact name resolution
+    /// must happen at runtime.
+    fn direct_native_call(&self, name: &str) -> bool {
+        if self.func_info.contains_key(name)
+            || self.promoted_slots.contains_key(name)
+            || self.captured_at_top.contains(name)
+            || self.locals.iter().any(|l| l.name == name)
+        {
+            return false;
+        }
+        self.native_names
+            .as_ref()
+            .is_some_and(|n| zz_checker::contains_std(n, name))
+    }
+
     /// Canonical free push callee resolving to the real native (not
     /// shadowed by a user func, registered). Returns the spelling.
     /// (`vec.push` plus the method form `xs.push(x)` is the only spelling —
@@ -4033,6 +4056,30 @@ impl Compiler {
                                 .is_some_and(|fi| fi.has_default.iter().any(|&d| d))
                     });
 
+                    // Bare native dispatch (mirrors the dotted `Expr::Path`
+                    // form above): a call to a registered stdlib native
+                    // compiles to one `CallNative` instead of `LoadVar` +
+                    // `Call`. The generic shape materialises a throwaway
+                    // `Value::Native` (name `String` + box) per invocation
+                    // and pays the full dynamic call plumbing — argument
+                    // buffer round-trip, callee match, `call_value` — while
+                    // `CallNative` resolves the registry entry in place.
+                    // Any user shadow keeps the generic path (see
+                    // `direct_native_call`).
+                    let direct_native: Option<String> =
+                        if named.is_empty() && info_key.is_none() && !is_input && !is_range {
+                            match callee.as_ref() {
+                                Expr::Ident { name: cname, .. }
+                                    if self.direct_native_call(cname) =>
+                                {
+                                    Some(cname.clone())
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+
                     let argc = if is_input {
                         1
                     } else if is_range {
@@ -4046,7 +4093,9 @@ impl Compiler {
                         args.len() + named.len()
                     };
 
-                    self.compile_expr(callee);
+                    if direct_native.is_none() {
+                        self.compile_expr(callee);
+                    }
                     if is_range {
                         if args.len() == 1 {
                             self.emit_const(Value::Int(0));
@@ -4071,10 +4120,17 @@ impl Compiler {
                     if is_input {
                         self.emit_const(Value::Str(String::new().into()));
                     }
-                    self.emit(Op::Call {
-                        argc: argc as u16,
-                        span: *span,
-                    });
+                    match direct_native {
+                        Some(name) => self.emit(Op::CallNative {
+                            name,
+                            argc: argc as u16,
+                            span: *span,
+                        }),
+                        None => self.emit(Op::Call {
+                            argc: argc as u16,
+                            span: *span,
+                        }),
+                    }
                 }
             },
             Expr::If {

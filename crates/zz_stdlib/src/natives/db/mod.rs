@@ -999,7 +999,7 @@ pub(crate) fn db_transaction(
     // Never hold the connection lock across the closure body (it would
     // deadlock the body's own queries on the same thread).
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        interp.call(Value::Func(Box::new(closure)), vec![tx], span)
+        interp.call(Value::Func(std::rc::Rc::new(closure)), vec![tx], span)
     }));
     match outcome {
         Ok(Ok(v)) => match tx_commit(&handle, span) {

@@ -2599,7 +2599,7 @@ pub(crate) fn expect_array(
 
 pub(crate) fn expect_func(args: &mut Vec<Value>, i: usize, name: &str) -> Result<Value, EvalError> {
     match arg(args, i, name)? {
-        Value::Func(f) => Ok(Value::Func(Box::new((**f).clone()))),
+        Value::Func(f) => Ok(Value::Func(std::rc::Rc::new((**f).clone()))),
         Value::Native(n) => Ok(Value::Native(Box::new((**n).clone()))),
         other => Err(EvalError::new(
             format!("`{name}` expects a function, found `{other}`"),

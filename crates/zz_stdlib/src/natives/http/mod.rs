@@ -1907,7 +1907,7 @@ impl FuncSnapshot {
             fresh.define(k, v.clone());
         }
         let env = EnvLink::Owned(Rc::new(std::cell::RefCell::new(fresh)));
-        Value::Func(Box::new(FuncValue {
+        Value::Func(std::rc::Rc::new(FuncValue {
             params: self.params.clone(),
             body: self.body.clone(),
             env,
