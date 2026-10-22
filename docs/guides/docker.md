@@ -8,8 +8,9 @@ ZZ publishes three related images from every release:
 | `zz:<version>-builder` | toolchain + Clang + dev headers | compile AOT apps |
 | `zz:<version>-runtime` | glibc, libgcc, curl, SQLite, OpenSSL, CA roots | run dynamic AOT apps |
 
-Pin the builder and runtime tags to the same version. `latest-builder` and
-`latest-runtime` are moving preview aliases; do not use them in production.
+Pin the builder and runtime tags to the same released version. `latest`,
+`latest-builder`, and `latest-runtime` are moving aliases: convenient for a
+manual look, never acceptable in a production Dockerfile.
 
 ## Recommended: builder + runtime
 
@@ -34,8 +35,42 @@ ENTRYPOINT ["/app"]
 image contains the shared libraries that binary needs, so the final stage
 stays free of compilers, linkers, and development headers.
 
-The runtime image already defaults to a non-root numeric user. Override
-`USER` only when the application has a specific account requirement.
+The builder and runtime images share one Ubuntu base, pinned by digest, so a
+binary compiled by a released builder always finds the library versions it
+was tested against. The runtime image already defaults to a non-root numeric
+user; override `USER` only when the application has a specific account
+requirement.
+
+## Pinning and verification
+
+Both tags are multi-arch (`linux/amd64`, `linux/arm64`). For a truly
+immutable deploy, pin the index digest that the tag resolved to:
+
+```dockerfile
+FROM ghcr.io/zaidejjo/zz:<version>-builder@sha256:<builder-digest> AS build
+FROM ghcr.io/zaidejjo/zz:<version>-runtime@sha256:<runtime-digest>
+```
+
+Resolve digests without pulling the image:
+
+```bash
+docker buildx imagetools inspect ghcr.io/zaidejjo/zz:<version>-runtime
+```
+
+Every published digest is signed keylessly with Sigstore (GitHub OIDC, no
+long-lived key) and carries SLSA provenance plus an SBOM attestation:
+
+```bash
+cosign verify ghcr.io/zaidejjo/zz:<version>-runtime \
+  --certificate-identity-regexp \
+    'https://github.com/zaidejjo/zz/.github/workflows/docker-publish.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+docker buildx imagetools inspect ghcr.io/zaidejjo/zz:<version>-runtime \
+  --format '{{json .Provenance}}'
+```
+
+Verification binds the image to this repository's publish workflow; an image
+pushed from a fork or a local build will not verify.
 
 ## Why not compile in the runtime stage?
 
@@ -55,7 +90,7 @@ covered by CI for TLS, DNS, SQLite, and Postgres.
 
 ## Image versions
 
-The release workflow publishes matching tags for both architectures:
+The publish workflow produces matching tags for both architectures:
 
 ```text
 ghcr.io/<owner>/zz:<version>-builder
@@ -64,9 +99,16 @@ ghcr.io/<owner>/zz:sha-<commit>-builder
 ghcr.io/<owner>/zz:sha-<commit>-runtime
 ```
 
-The builder is based on Ubuntu 24.04, matching the release toolchain glibc
-and the runtime image. Mixing a newer builder with an older runtime base is
-the library-drift failure this split avoids.
+The legacy `zz:<version>` tag still carries the released CLI. The builder and
+runtime tags are only published together for the same version, so mixing a
+`-builder` from one release with a `-runtime` from another is not a supported
+combination.
+
+The builder is based on the same pinned Ubuntu 24.04 digest as the release
+toolchain and the runtime image. Mixing a newer builder with an older runtime
+base is the library-drift failure this split avoids. After publishing, the
+workflow compiles `docker/smoke/hello.zz` in the new builder and runs the
+binary on the new runtime; a failed smoke test marks the publish failed.
 
 ## Related
 

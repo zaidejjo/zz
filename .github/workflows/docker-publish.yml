@@ -17,8 +17,26 @@ name: docker-publish
 #
 # Triggers: a published GitHub Release, or manual dispatch. The images
 # install the Release's prebuilt zips — nothing here compiles (the
-# compiler was built exactly once by the release workflow). This workflow
-# runs no tests: the Release it consumes was cut from a green main.
+# compiler was built exactly once by the release workflow). The Release it
+# consumes was cut from a green main, so this workflow only runs the
+# builder -> runtime smoke job described below.
+#
+# Supply chain:
+#   * every image is pushed with SLSA provenance (`mode=max`) and an SBOM
+#     attestation, stored by the registry next to the image index;
+#   * every pushed digest is signed keylessly with Sigstore/Fulcio using the
+#     workflow's GitHub OIDC identity (`id-token: write`, no long-lived key);
+#   * `smoke` then compiles docker/smoke/hello.zz in the just-published
+#     builder and runs it on the matching runtime, so a glibc or shared
+#     library drift fails the publish instead of shipping.
+#
+# Verify a published image:
+#   cosign verify ghcr.io/<owner>/zz:<version>-runtime \
+#     --certificate-identity-regexp \
+#       'https://github.com/<owner>/zz/.github/workflows/docker-publish.yml@.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#   docker buildx imagetools inspect ghcr.io/<owner>/zz:<version>-runtime \
+#     --format '{{json .Provenance}}'
 #
 # Runs in parallel with aur-publish off the same `release: published`
 # event; both consume the same attached zips.
@@ -46,6 +64,15 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless cosign signing: Fulcio exchanges this OIDC token for a
+      # short-lived signing certificate. No key material is stored.
+      id-token: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      ghcr_repo: ${{ steps.ver.outputs.ghcr_repo }}
+      dhub_repo: ${{ steps.ver.outputs.dhub_repo }}
+      builder_digest: ${{ steps.builder.outputs.digest }}
+      runtime_digest: ${{ steps.runtime.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +96,7 @@ jobs:
           MIN="${REST%%.*}"
           SHA="$(git rev-parse --short HEAD)"
           GHCR="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          DHUB=""
           TAGS="$GHCR:latest,$GHCR:$VER,$GHCR:$MAJ.$MIN,$GHCR:$MAJ,$GHCR:v$VER,$GHCR:sha-$SHA"
           BUILDER_TAGS="$GHCR:latest-builder,$GHCR:$VER-builder,$GHCR:sha-$SHA-builder"
           RUNTIME_TAGS="$GHCR:latest-runtime,$GHCR:$VER-runtime,$GHCR:sha-$SHA-runtime"
@@ -91,6 +119,8 @@ jobs:
           fi
           {
             echo "version=$VER"
+            echo "ghcr_repo=$GHCR"
+            echo "dhub_repo=$DHUB"
             echo "tags=$TAGS"
             echo "builder_tags=$BUILDER_TAGS"
             echo "runtime_tags=$RUNTIME_TAGS"
@@ -124,6 +154,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push toolchain image
+        id: toolchain
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -133,6 +164,11 @@ jobs:
           # it for arm64 at ~5-10x slowdown).
           platforms: linux/amd64,linux/arm64
           push: true
+          # SLSA provenance (max: inputs, base images, build args) + SPDX
+          # SBOM, both attached to the image index. GHCR and Docker Hub both
+          # store attestation manifests.
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.ver.outputs.tags }}
           labels: |
             org.opencontainers.image.title=zz
@@ -144,12 +180,15 @@ jobs:
       # Builder/runtime tags are tied to the exact toolchain version just
       # pushed, so Clang and the runtime shared libraries cannot drift.
       - name: Build and push AOT builder image
+        id: builder
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.builder
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.ver.outputs.builder_tags }}
           labels: |
             org.opencontainers.image.title=zz-builder
@@ -158,13 +197,97 @@ jobs:
             TOOLCHAIN_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
 
       - name: Build and push AOT runtime image
+        id: runtime
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.runtime
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.ver.outputs.runtime_tags }}
           labels: |
             org.opencontainers.image.title=zz-runtime
             org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+
+      # Sign the pushed *index* digests, not the tags: tags move (latest,
+      # major/minor shorthands), digests do not. Signing both registries when
+      # the mirror is configured keeps GHCR and Docker Hub verifiable with one
+      # identity. cosign reuses the docker logins above for registry auth.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          # Pinned: the action's default moves with its major tag.
+          cosign-release: 'v2.5.2'
+
+      - name: Sign published image digests
+        env:
+          GHCR_REPO: ${{ steps.ver.outputs.ghcr_repo }}
+          DHUB_REPO: ${{ steps.ver.outputs.dhub_repo }}
+          TOOLCHAIN_DIGEST: ${{ steps.toolchain.outputs.digest }}
+          BUILDER_DIGEST: ${{ steps.builder.outputs.digest }}
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+        run: |
+          set -euo pipefail
+          repos="$GHCR_REPO"
+          if [ -n "$DHUB_REPO" ]; then
+            repos="$repos $DHUB_REPO"
+          fi
+          for repo in $repos; do
+            for digest in "$TOOLCHAIN_DIGEST" "$BUILDER_DIGEST" "$RUNTIME_DIGEST"; do
+              if [ -z "$digest" ]; then
+                echo "error: build-push produced no digest for $repo" >&2
+                exit 1
+              fi
+              echo "signing $repo@$digest"
+              cosign sign --yes "$repo@$digest"
+            done
+          done
+
+  smoke:
+    name: builder -> runtime smoke test
+    needs: build-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Compiles a real fixture in the published builder, checks the produced
+      # binary is dynamically linked against the runtime libraries, then runs
+      # it on the published runtime. A missing libsqlite3, a glibc skew, or an
+      # unusable `zz` binary fails the publish.
+      - name: Build in -builder and run on -runtime
+        env:
+          VERSION: ${{ needs.build-push.outputs.version }}
+        run: |
+          set -euo pipefail
+          repo="${REGISTRY}/${IMAGE_NAME}"
+          builder="${repo}:${VERSION}-builder"
+          runtime="${repo}:${VERSION}-runtime"
+          docker pull "$builder"
+          docker pull "$runtime"
+
+          mkdir -p smoke-out
+          docker run --rm \
+            -v "$PWD/docker/smoke:/src:ro" \
+            -v "$PWD/smoke-out:/out" \
+            "$builder" zz build -p /src/hello.zz -o /out/hello
+
+          docker run --rm -v "$PWD/smoke-out:/out" \
+            --entrypoint ldd "$builder" /out/hello | tee smoke-ldd.txt
+          grep -q 'libsqlite3' smoke-ldd.txt
+
+          out=$(docker run --rm -v "$PWD/smoke-out:/out" "$runtime" /out/hello)
+          echo "$out"
+          grep -qx 'smoke-ok' <<<"$out"
+          grep -q 'smoke-sha256: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' <<<"$out"

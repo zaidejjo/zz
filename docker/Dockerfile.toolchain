@@ -24,7 +24,7 @@
 #   FROM ghcr.io/<owner>/zz:latest AS tool
 #
 # Local build (needs network for the Release zips):
-#   docker build -f docker/Dockerfile.toolchain --build-arg ZZ_VERSION=0.1.5 -t zz:local .
+#   docker build -f docker/Dockerfile.toolchain --build-arg ZZ_VERSION=0.4.0 -t zz:local .
 
 ARG TARGETARCH
 ARG ZZ_VERSION
@@ -35,23 +35,34 @@ ARG GITHUB_REPOSITORY=zaidejjo/zz
 # link the builders' glibc, and a base with an OLDER glibc fails at
 # `zz --version` with `GLIBC_X.YY not found`. If runners move on
 # (e.g. ubuntu-26.04), bump this base to match.
-FROM ubuntu:24.04
+#
+# Pinned by digest (`ubuntu:24.04` at 2026-10-21), same as the builder and
+# runtime images. Refresh with `docker buildx imagetools inspect ubuntu:24.04`
+# and update all three Dockerfiles in one commit.
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 ARG TARGETARCH
 ARG ZZ_VERSION
 ARG GITHUB_REPOSITORY
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl unzip libssl3t64 && rm -rf /var/lib/apt/lists/*
-# Release zips are per-arch; map Docker arches onto their names.
-RUN case "$TARGETARCH" in \
-        amd64) ZZARCH=x86_64 ;; \
-        arm64) ZZARCH=aarch64 ;; \
-        *) echo "error: unsupported arch '$TARGETARCH'" >&2; exit 1 ;; \
+# Release zips are per-arch; map Docker arches onto their names. buildx sets
+# TARGETARCH for every platform it builds; plain `docker build` leaves it
+# empty, so fall back to the host architecture (the documented local flow).
+#
+# AOT builds link the shipped `libzz_native_rt.a` (+ static libstd rlib). The
+# compiler looks in `<exe>/lib` and `<exe>/../lib/zz`, so the archive has to
+# land on the AUR layout at /usr/local/lib/zz. Dropping `lib/` makes every
+# `zz build` fail with "cannot locate workspace".
+RUN case "${TARGETARCH:-$(uname -m)}" in \
+        amd64|x86_64) ZZARCH=x86_64 ;; \
+        arm64|aarch64) ZZARCH=aarch64 ;; \
+        *) echo "error: unsupported arch '${TARGETARCH:-$(uname -m)}'" >&2; exit 1 ;; \
     esac && \
     curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${ZZ_VERSION}/zz-${ZZ_VERSION}-linux-${ZZARCH}.zip" -o /tmp/zz.zip && \
-    unzip -p /tmp/zz.zip zz > /usr/local/bin/zz && \
-    unzip -p /tmp/zz.zip zz-lsp > /usr/local/bin/zz-lsp && \
-    chmod +x /usr/local/bin/zz /usr/local/bin/zz-lsp && \
-    rm /tmp/zz.zip && \
+    mkdir -p /tmp/zzdist && unzip -q /tmp/zz.zip -d /tmp/zzdist && \
+    install -m755 /tmp/zzdist/zz /tmp/zzdist/zz-lsp /usr/local/bin/ && \
+    mkdir -p /usr/local/lib/zz && cp -a /tmp/zzdist/lib/. /usr/local/lib/zz/ && \
+    rm -rf /tmp/zzdist /tmp/zz.zip && \
     zz --version
 ENTRYPOINT ["zz"]
 CMD ["--version"]

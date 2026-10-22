@@ -22,7 +22,10 @@
 # Local build:
 #   docker build -f docker/Dockerfile.runtime -t zz:runtime .
 
-FROM ubuntu:24.04
+# Same pinned base as Dockerfile.builder (`ubuntu:24.04` at 2026-10-21). Pinning
+# the digest guarantees the runtime library versions a released `-builder` was
+# smoke-tested against cannot move afterwards.
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
