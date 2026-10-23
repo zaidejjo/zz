@@ -226,10 +226,16 @@ pub fn with_executor_task<R>(task: TaskId, f: impl FnOnce() -> R) -> R {
 }
 
 /// A struct instance payload (boxed so `Value` stays small).
+///
+/// Field names are interned `Arc<str>`: a struct type's declared names are
+/// created once (by the compiler for literals, by the runtime for enums), so
+/// construction copies refcounts instead of allocating one `String` per
+/// field. `Value::Object` compares and prints by content, so sharing is
+/// invisible.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectValue {
     pub name: String,
-    pub fields: Vec<(String, Value)>,
+    pub fields: Vec<(std::sync::Arc<str>, Value)>,
 }
 
 impl ObjectValue {
@@ -1350,7 +1356,8 @@ impl Value {
                 // and prints as `Wrap(5)` — cosmetic only, equality and
                 // field access are unaffected.
                 let is_enum_shape = o.name.contains('.')
-                    && (o.fields.is_empty() || (o.fields.len() == 1 && o.fields[0].0 == "value"));
+                    && (o.fields.is_empty()
+                        || (o.fields.len() == 1 && o.fields[0].0.as_ref() == "value"));
                 if is_enum_shape {
                     // Like structs, the module namespace is shortened off
                     // (`shapes.Token.Eof` → `Token.Eof`); identity keeps

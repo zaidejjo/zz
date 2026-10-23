@@ -8,6 +8,7 @@ use zz_frontend::ast::{BinOp, UnOp};
 use zz_frontend::span::Span;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::EvalError;
 use crate::value::{DictData, ObjectValue, Value};
@@ -64,7 +65,7 @@ pub(crate) fn build_struct_literal(
     layouts: &HashMap<String, Vec<String>>,
     sname: &str,
     registered: &[String],
-    given: &[(String, Value)],
+    given: &[(Arc<str>, Value)],
     span: Span,
     depth: usize,
 ) -> Result<ObjectValue, EvalError> {
@@ -76,15 +77,15 @@ pub(crate) fn build_struct_literal(
     }
     // Leftovers: given fields that are not direct fields of this struct —
     // candidates for embedded sub-objects.
-    let leftovers: Vec<(String, Value)> = given
+    let leftovers: Vec<(Arc<str>, Value)> = given
         .iter()
-        .filter(|(n, _)| !registered.contains(n))
+        .filter(|(n, _)| !registered.iter().any(|r| r.as_str() == n.as_ref()))
         .cloned()
         .collect();
-    let mut out = Vec::with_capacity(registered.len());
+    let mut out: Vec<(Arc<str>, Value)> = Vec::with_capacity(registered.len());
     for fname in registered {
-        if let Some((_, v)) = given.iter().find(|(n, _)| n == fname) {
-            out.push((fname.clone(), v.clone()));
+        if let Some((name, v)) = given.iter().find(|(n, _)| n.as_ref() == fname.as_str()) {
+            out.push((Arc::clone(name), v.clone()));
         } else if let Some(inner_name) = embedded_layout_name(layouts, fname) {
             let Some(inner_layout) = layouts.get(&inner_name).cloned() else {
                 return Err(EvalError::new(
@@ -100,7 +101,10 @@ pub(crate) fn build_struct_literal(
                 span,
                 depth + 1,
             )?;
-            out.push((fname.clone(), Value::Object(std::sync::Arc::new(inner))));
+            out.push((
+                Arc::from(fname.as_str()),
+                Value::Object(std::sync::Arc::new(inner)),
+            ));
         } else {
             return Err(EvalError::new(
                 format!("missing field `{fname}` in struct literal"),
@@ -142,7 +146,7 @@ pub(crate) fn object_field_opt(obj: &Value, name: &str) -> Option<Value> {
 fn object_field_depth_opt(obj: &Value, name: &str, depth: usize) -> Option<Value> {
     match obj {
         Value::Object(o) => {
-            if let Some((_, v)) = o.fields.iter().find(|(n, _)| n == name) {
+            if let Some((_, v)) = o.fields.iter().find(|(n, _)| &**n == name) {
                 return Some(v.clone());
             }
             if depth < MAX_EMBED_DEPTH {
@@ -224,7 +228,7 @@ fn set_object_field_depth(
             // Copy-on-write: uniquely-owned objects mutate in place,
             // shared ones copy once here.
             let o = std::sync::Arc::make_mut(o);
-            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == name) {
+            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| &**n == name) {
                 *slot = value;
                 Ok(())
             } else if depth < MAX_EMBED_DEPTH {

@@ -184,13 +184,13 @@ fn diff_objects(
     let name = &a.name;
     let mut out = String::new();
     out.push_str(&format!("{}{} {{\n", pad, name));
-    let b_map: std::collections::HashMap<&String, &Value> =
-        b.fields.iter().map(|(k, v)| (k, v)).collect();
+    let b_map: std::collections::HashMap<&str, &Value> =
+        b.fields.iter().map(|(k, v)| (k.as_ref(), v)).collect();
     // Preserve order of `a`, then any extra `b` fields.
     let mut seen = std::collections::HashSet::new();
     for (k, va) in &a.fields {
-        seen.insert(k);
-        if let Some(vb) = b_map.get(k) {
+        seen.insert(k.as_ref());
+        if let Some(vb) = b_map.get(k.as_ref()) {
             if va == *vb {
                 out.push_str(&format!("{}  {}: {},\n", inner_pad, k, val_to_string(va)));
             } else {
@@ -202,7 +202,7 @@ fn diff_objects(
         }
     }
     for (k, vb) in &b.fields {
-        if !seen.contains(k) {
+        if !seen.contains(k.as_ref()) {
             out.push_str(&format!("{}+ {}: {},\n", inner_pad, k, val_to_string(vb)));
         }
     }

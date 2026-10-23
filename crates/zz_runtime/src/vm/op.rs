@@ -349,9 +349,13 @@ pub enum Op {
     // ---- structs ----
     /// Pop `field_names.len()` values and build a struct instance, matching
     /// them to the registered field order by name.
+    ///
+    /// The names are the chunk's interned copies: the literal site pays for
+    /// them once at compile time, and every execution copies a refcount into
+    /// the instance instead of allocating a `String` per field.
     MakeStruct {
         name: String,
-        field_names: Vec<String>,
+        field_names: Vec<Arc<str>>,
         span: Span,
     },
     /// Pop an object, push `object.field`.

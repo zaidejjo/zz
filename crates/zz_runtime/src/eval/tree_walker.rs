@@ -699,15 +699,21 @@ impl Interp {
             .filter(|(n, _)| !layout.contains(n))
             .cloned()
             .collect();
-        let mut out = Vec::with_capacity(layout.len());
+        let mut out: Vec<(std::sync::Arc<str>, Value)> = Vec::with_capacity(layout.len());
         for fname in &layout {
-            if let Some((_, expr)) = given.iter().find(|(n, _)| n == fname) {
-                out.push((fname.clone(), self.eval(expr)?.into_value()?));
+            if let Some((_, expr)) = given.iter().find(|(n, _)| &**n == fname) {
+                out.push((
+                    std::sync::Arc::from(fname.as_str()),
+                    self.eval(expr)?.into_value()?,
+                ));
             } else if let Some(inner_name) =
                 crate::runtime::ops::embedded_layout_name(&self.structs, fname)
             {
                 let inner = self.build_struct_value(&inner_name, &leftovers, span, depth + 1)?;
-                out.push((fname.clone(), Value::Object(std::sync::Arc::new(inner))));
+                out.push((
+                    std::sync::Arc::from(fname.as_str()),
+                    Value::Object(std::sync::Arc::new(inner)),
+                ));
             } else {
                 return Err(EvalError::new(
                     format!("missing field `{fname}` in struct literal"),
@@ -778,7 +784,10 @@ impl Interp {
         // second positional is never silently dropped.
         let fields = match args {
             [] => Vec::new(),
-            [payload] => vec![("value".to_string(), self.eval(payload)?.into_value()?)],
+            [payload] => vec![(
+                std::sync::Arc::from("value"),
+                self.eval(payload)?.into_value()?,
+            )],
             _ => {
                 return Err(EvalError::new(
                     format!(
@@ -1739,7 +1748,7 @@ impl Interp {
                             arg.as_deref(),
                             obj.fields
                                 .iter()
-                                .find(|(k, _)| k == "value")
+                                .find(|(k, _)| &**k == "value")
                                 .map(|(_, v)| v),
                         ) {
                             (Some(p), Some(v)) => Self::match_pattern(p, v, scope),

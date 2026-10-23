@@ -1008,12 +1008,14 @@ impl Vm {
                     // `field_val` is untouched and writing it back
                     // restores the exact pre-op object.
                     let mut field_val = match &mut taken {
-                        Value::Object(o) if o.fields.iter().any(|(n, _)| n == field) => {
+                        Value::Object(o)
+                            if o.fields.iter().any(|(n, _)| n.as_ref() == field.as_str()) =>
+                        {
                             let o = std::sync::Arc::make_mut(o);
                             let slot = o
                                 .fields
                                 .iter_mut()
-                                .find(|(n, _)| n == field)
+                                .find(|(n, _)| n.as_ref() == field.as_str())
                                 .expect("direct field re-resolved");
                             std::mem::replace(&mut slot.1, Value::Unit)
                         }
@@ -1100,9 +1102,11 @@ impl Vm {
                     // not the field. Anything else completes generically
                     // on the owned object (same calls, same errors).
                     let direct = match &taken {
-                        Value::Object(o) => {
-                            o.fields.iter().find(|(n, _)| n == field).map(|(_, v)| v)
-                        }
+                        Value::Object(o) => o
+                            .fields
+                            .iter()
+                            .find(|(n, _)| n.as_ref() == field.as_str())
+                            .map(|(_, v)| v),
                         _ => None,
                     };
                     let elem = match (direct, &index) {
@@ -1171,13 +1175,15 @@ impl Vm {
                         Err(EvalError),
                     }
                     let fast = match &taken {
-                        Value::Object(o) => match o.fields.iter().find(|(n, _)| n == field) {
-                            Some((_, v)) => match Self::value_len(v) {
-                                Some(n) => LenFast::Hit(n),
-                                None => LenFast::Err(Self::len_error(v, *span)),
-                            },
-                            None => LenFast::Miss,
-                        },
+                        Value::Object(o) => {
+                            match o.fields.iter().find(|(n, _)| n.as_ref() == field.as_str()) {
+                                Some((_, v)) => match Self::value_len(v) {
+                                    Some(n) => LenFast::Hit(n),
+                                    None => LenFast::Err(Self::len_error(v, *span)),
+                                },
+                                None => LenFast::Miss,
+                            }
+                        }
                         _ => LenFast::Miss,
                     };
                     match fast {
@@ -1409,7 +1415,10 @@ impl Vm {
                     let fields = match (has_payload, vals.len()) {
                         (false, 0) => Vec::new(),
                         (true, 1) => {
-                            vec![("value".to_string(), vals.into_iter().next().unwrap())]
+                            vec![(
+                                std::sync::Arc::from("value"),
+                                vals.into_iter().next().unwrap(),
+                            )]
                         }
                         _ => {
                             return Err(self.error(
@@ -2255,7 +2264,10 @@ impl Vm {
                     } else {
                         return Err(self.error(format!("unknown struct `{name}`"), *span));
                     };
-                    let Some(registered) = interp.structs.get(lookup).cloned() else {
+                    // Borrowed, not cloned: the layout lives in `interp` for
+                    // the whole run, and a clone is a `Vec<String>` plus one
+                    // `String` per field on every construction.
+                    let Some(registered) = interp.structs.get(lookup) else {
                         return Err(self.error(format!("unknown struct `{name}`"), *span));
                     };
                     let mut vals = Vec::with_capacity(field_names.len());
@@ -2263,18 +2275,64 @@ impl Vm {
                         vals.push(self.stack.pop().unwrap());
                     }
                     vals.reverse();
-                    let given: Vec<(String, Value)> =
-                        field_names.iter().cloned().zip(vals).collect();
-                    // Flattened (promoted) fields are distributed into
-                    // embedded sub-objects inside `build_struct_literal`.
-                    let obj = crate::runtime::ops::build_struct_literal(
-                        &interp.structs,
-                        lookup,
-                        &registered,
-                        &given,
-                        *span,
-                        0,
-                    )?;
+                    // Fast path: the literal names exactly the struct's own
+                    // fields, so none is an embedded (promoted) field.
+                    // `build_struct_literal` would then pay a `given` vector,
+                    // a `leftovers` filter, a `contains` per field and a
+                    // `find` per field — all avoidable once positions are
+                    // known. The names come interned from the chunk, so each
+                    // instance copies refcounts instead of allocating.
+                    let direct = field_names.len() == registered.len()
+                        && field_names
+                            .iter()
+                            .all(|n| registered.iter().any(|r| r.as_str() == n.as_ref()))
+                        && registered
+                            .iter()
+                            .all(|r| field_names.iter().any(|n| n.as_ref() == r.as_str()));
+                    let obj = if direct {
+                        let mut out: Vec<(std::sync::Arc<str>, Value)> =
+                            Vec::with_capacity(registered.len());
+                        if field_names
+                            .iter()
+                            .zip(registered.iter())
+                            .all(|(a, b)| a.as_ref() == b.as_str())
+                        {
+                            // Declared order: pair positionally.
+                            for (fname, v) in field_names.iter().zip(vals) {
+                                out.push((std::sync::Arc::clone(fname), v));
+                            }
+                        } else {
+                            let mut slots: Vec<Option<Value>> =
+                                vals.into_iter().map(Some).collect();
+                            for fname in registered.iter() {
+                                let pos = field_names
+                                    .iter()
+                                    .position(|n| n.as_ref() == fname.as_str())
+                                    .expect("direct fast path proved membership");
+                                let v = slots[pos]
+                                    .take()
+                                    .expect("direct fast path proved uniqueness");
+                                out.push((std::sync::Arc::clone(&field_names[pos]), v));
+                            }
+                        }
+                        crate::value::ObjectValue {
+                            name: lookup.to_string(),
+                            fields: out,
+                        }
+                    } else {
+                        // Flattened (promoted) fields are distributed into
+                        // embedded sub-objects inside `build_struct_literal`.
+                        let given: Vec<(std::sync::Arc<str>, Value)> =
+                            field_names.iter().cloned().zip(vals).collect();
+                        crate::runtime::ops::build_struct_literal(
+                            &interp.structs,
+                            lookup,
+                            registered,
+                            &given,
+                            *span,
+                            0,
+                        )?
+                    };
                     self.stack.push(Value::Object(std::sync::Arc::new(obj)));
                 }
                 Op::GetField(name, span) => {
@@ -2709,7 +2767,7 @@ impl Vm {
                                         Some(has_payload) if has_payload == (args.len() == 1) => {
                                             let fields = if has_payload {
                                                 vec![(
-                                                    "value".to_string(),
+                                                    std::sync::Arc::from("value"),
                                                     args.into_iter().next().unwrap(),
                                                 )]
                                             } else {
@@ -3488,7 +3546,7 @@ impl Vm {
     ) -> Result<(), String> {
         if let Value::Object(o) = home {
             let o = std::sync::Arc::make_mut(o);
-            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == field) {
+            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n.as_ref() == field) {
                 let mut vs = match std::mem::replace(slot, Value::Unit) {
                     Value::Array(b) => {
                         std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone())

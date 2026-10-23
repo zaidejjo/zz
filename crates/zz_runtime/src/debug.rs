@@ -237,7 +237,7 @@ pub fn debug_children(value: &crate::value::Value) -> Vec<DebugChild> {
             .fields
             .iter()
             .map(|(name, value)| DebugChild::Value {
-                name: name.clone(),
+                name: name.to_string(),
                 value: value.clone(),
             })
             .collect(),
