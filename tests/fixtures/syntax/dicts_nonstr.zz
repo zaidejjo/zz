@@ -1,0 +1,55 @@
+// features: dicts, indexing, for-loop, func-call, locals, print, string-literal
+// E2E: Dicts keyed by non-string values (int/bool/float). The native (AOT)
+// backend used to store string keys only, so `d[1] = 10` was silently dropped
+// and the read that followed trapped ("index 1 out of bounds"). Also locks in
+// insertion order, first-occurrence updates and value semantics.
+
+func main() {
+    // typed empty dict, int keys
+    ints:{int: int} = {}
+    ints[1] = 10
+    ints[2] = 20
+    ints[40] = 400
+    println(len(ints))
+    println(ints[1] + ints[2] + ints[40])
+    // updating an existing key keeps its position and the count
+    ints[2] = 22
+    println(ints[2])
+    println(len(ints))
+    // int-keyed literal, then a fresh key (arena dict detaches to heap)
+    lit := {1: "one", 2: "two"}
+    lit[3] = "three"
+    println(len(lit))
+    println(lit[1])
+    println(lit[2])
+    println(lit[3])
+    // bool keys
+    flags:{bool: str} = {}
+    flags[true] = "yes"
+    flags[false] = "no"
+    println(flags[true])
+    println(flags[false])
+    println(len(flags))
+    // float keys
+    nums:{float: int} = {}
+    nums[1.0] = 1
+    nums[2.5] = 2
+    println(nums[1.0])
+    println(nums[2.5])
+    println(len(nums))
+    // value semantics: a copy does not alias the original
+    copy := lit
+    copy[4] = "four"
+    println(len(lit))
+    println(len(copy))
+    println(copy[4])
+    // iteration keeps insertion order (keys-only and key-value forms)
+    for k in ints {
+        println(k)
+    }
+    for k, v in lit {
+        println(k)
+        println(v)
+    }
+    println("dicts_nonstr_ok")
+}

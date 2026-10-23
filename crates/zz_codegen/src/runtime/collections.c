@@ -99,11 +99,11 @@ static zz_value heal_deep_copy(zz_value v, int depth) {
         if (!v.dict || !zz_dict_is_arena(v.dict)) return zz_clone(v);
         zz_value out = zz_dict_new();
         for (size_t i = 0; i < v.dict->len; i++) {
-            zz_value k = heal_deep_copy((zz_value){ZZ_STR, {.s = v.dict->entries[i].key}}, depth + 1);
+            zz_value k = heal_deep_copy(v.dict->entries[i].key, depth + 1);
             zz_value val = heal_deep_copy(v.dict->entries[i].val, depth + 1);
-            // `zz_dict_set` adopts the value as-is (move convention) but
-            // shares the key (`refs++`), so drop our key temp only: the
-            // dict keeps exactly one share of each.
+            // `zz_dict_set` adopts the value as-is (move convention) and
+            // retains the key, so drop our key temp only: the dict keeps
+            // exactly one share of each.
             zz_dict_set(out.dict, k, val);
             zz_release(&k);
         }
@@ -589,12 +589,12 @@ zz_value zz_dict_dup_value(const zz_dict *d) {
     zz_value out = zz_dict_new_sized(d->len);
     if (!out.dict) return zz_unit();
     for (size_t i = 0; i < d->len; i++) {
-        if (!d->entries[i].key) continue; // corrupt entry: skip, never crash
-        zz_value k;
-        k.tag = ZZ_STR;
-        k.s = d->entries[i].key;
+        // Keys are borrowed (the setter takes its own share); values are
+        // cloned shares handed over per the setter's move convention. The
+        // setter also heals arena-backed keys/values to heap, so the copy
+        // outlives the arena that built the original.
         zz_value v = zz_clone(d->entries[i].val);
-        zz_dict_set(out.dict, k, v);
+        zz_dict_set(out.dict, d->entries[i].key, v);
     }
     return out;
 }
@@ -650,12 +650,12 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
 }
 
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
-    if (key.tag != ZZ_STR)
-        return;
+    if (!d) return;
     for (size_t i = 0; i < d->len; i++) {
         zz_dict_entry *e = &d->entries[i];
-        if (e->key->len == key.s->len &&
-            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
+        if (zz_key_eq(e->key, key)) {
+            // First occurrence wins on the key, the value is replaced
+            // (mirrors the VM's `DictData::insert`).
             zz_assign(&e->val, val);
             return;
         }
@@ -671,20 +671,13 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
         d->cap = nc;
     }
     zz_dict_entry *e = &d->entries[d->len++];
-    if (key.s && !key.s->interned && key.s->refs == 0) {
-        // Arena-owned key: duplicate to heap. The `refs++` adoption below
-        // would claim arena memory as heap-owned (reset corruption, then a
-        // wild free when the entry releases).
-        zz_str *k = str_alloc(key.s->len);
-        memcpy(zz_str_ptr(k), zz_str_cptr(key.s), key.s->len);
-        zz_str_ptr(k)[key.s->len] = '\0';
-        e->key = k;
-    } else {
-        e->key = key.s;
-        key.s->refs++;
-    }
-    // Move convention (callers transfer ownership): arena-owned values
-    // heal to heap copies so the stored element survives the loop-arena
+    // Keys use the share convention: callers keep their own share (borrowed
+    // keys are common — interned field names, another dict's entry), so store
+    // an independent share. `zz_clone_for_store` also heals arena-backed
+    // keys to heap copies, else the loop-arena reset would corrupt the slot.
+    e->key = zz_clone_for_store(key);
+    // Values use the move convention (callers transfer ownership): arena-owned
+    // values heal to heap copies so the stored element survives the loop-arena
     // reset; heap values are adopted as-is (no bump — same as the old
     // `zz_str_heal_arena` passthrough, extended to containers).
     e->val = zz_heal_for_move(val);
@@ -1434,7 +1427,7 @@ zz_value zz_dict_keys(zz_value d, int *err) {
     zz_value arr = zz_array_new();
     for (size_t i = 0; i < d.dict->len; i++) {
         int sub_err = 0;
-        zz_vec_append(arr, (zz_value){ZZ_STR, {.s = d.dict->entries[i].key}}, &sub_err);
+        zz_vec_append(arr, d.dict->entries[i].key, &sub_err);
     }
     return arr;
 }
@@ -1442,9 +1435,9 @@ zz_value zz_dict_keys(zz_value d, int *err) {
 // dict.has(d, key)
 zz_value zz_dict_has(zz_value d, zz_value key, int *err) {
     (void)err;
-    if (d.tag != ZZ_DICT || key.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
+    if (d.tag != ZZ_DICT) return (zz_value){ZZ_BOOL, {.b = false}};
     for (size_t i = 0; i < d.dict->len; i++) {
-        if (strcmp(zz_str_cptr(d.dict->entries[i].key), zz_str_cptr(key.s)) == 0)
+        if (zz_key_eq(d.dict->entries[i].key, key))
             return (zz_value){ZZ_BOOL, {.b = true}};
     }
     return (zz_value){ZZ_BOOL, {.b = false}};

@@ -116,6 +116,10 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "destructure_method_test.zz", true),
     ("syntax", "short_circuit.zz", true),
     ("stdlib", "json_extended_test.zz", false),
+    // Append-only: `batched_parity` groups this list by position
+    // (`chunks(PER_BATCH)`), so inserting in the middle reshuffles every
+    // later batch and can surface latent cross-case collisions.
+    ("syntax", "dicts_nonstr.zz", true),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors

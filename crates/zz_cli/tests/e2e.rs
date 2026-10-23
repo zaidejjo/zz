@@ -210,6 +210,7 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
+e2e_success_test!(e2e_syntax_dicts_nonstr, "syntax", "dicts_nonstr.zz");
 e2e_success_test!(
     e2e_syntax_destructure_method_test,
     "syntax",

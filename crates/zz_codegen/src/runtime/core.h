@@ -225,10 +225,35 @@ struct zz_dict {
     zz_dict_entry *entries;
 };
 
+// Dict keys are full values, not strings: `{int: int}`, `{bool: str}` and
+// `{float: _}` are legal ZZ dict types, and the VM keys on the value itself
+// (`DictData::entries` is `Vec<(Value, Value)>`). Key ownership follows the
+// ordinary value rules — `zz_assign` on insert (healing arena strings),
+// `zz_release` on drop. Entries are kept in insertion order; the first
+// occurrence of a key wins (VM parity).
 struct zz_dict_entry {
-    zz_str *key;
+    zz_value key;
     zz_value val;
 };
+
+// Borrow an entry's STRING key, or NULL when the key is some other type.
+// Helpers whose parameter type is `{str: _}` (HTTP headers, JSON objects,
+// env maps) use this to skip entries a `{int: _}`/`{bool: _}` dict can hold.
+static inline zz_str *zz_dict_key_str(const zz_dict_entry *e) {
+    return e->key.tag == ZZ_STR ? e->key.s : NULL;
+}
+
+// Deep structural equality over every value tag (defined in core.c; shared
+// by `==` and by dict key matching). Numeric comparison coerces int/float,
+// matching `==`.
+int zz_values_equal(zz_value a, zz_value b);
+
+// Dict key equality: the VM's `Value: PartialEq` requires identical tags,
+// so `1` and `1.0` are *different* keys even though `1 == 1.0` is true.
+static inline int zz_key_eq(zz_value a, zz_value b) {
+    if (a.tag != b.tag) return 0;
+    return zz_values_equal(a, b);
+}
 
 // First-class integer range `start..end` (+ `step`, always 1 from ZZ
 // source today; carried for VM iteration parity and future step
