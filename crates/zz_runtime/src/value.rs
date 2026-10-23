@@ -561,6 +561,7 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
                 env: new_env,
                 chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
+                tail_value: fv.tail_value,
             },
         );
     }
@@ -593,6 +594,7 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
                 env: new_env,
                 chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
+                tail_value: fv.tail_value,
             },
         );
     }
@@ -808,6 +810,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 env: EnvLink::new(),
                 chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
+                tail_value: fv.tail_value,
             };
             let placeholder_val = Value::Func(Box::new(placeholder));
             seen.insert(key, placeholder_val.clone());
@@ -825,6 +828,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 env: new_env,
                 chunk: fv.chunk,
                 chunk_defaults: fv.chunk_defaults.clone(),
+                tail_value: fv.tail_value,
             }));
             seen.insert(key, cloned.clone());
             cloned
@@ -1231,6 +1235,10 @@ pub struct FuncValue {
     /// the normal compile path leaves this empty and evaluates the AST
     /// `Param::default` instead. Tree-walker values never set it.
     pub chunk_defaults: Vec<Option<std::sync::Arc<crate::vm::Chunk>>>,
+    /// Whether the body's trailing expression is its value. `true` for
+    /// closures (expression bodies); `false` for named functions, which
+    /// return only through `return` and fall off with `unit`.
+    pub tail_value: bool,
 }
 
 impl Value {
@@ -1724,6 +1732,7 @@ mod snapshot_tests {
             env: env.clone(),
             chunk: None,
             chunk_defaults: Vec::new(),
+            tail_value: true,
         }))
     }
 

@@ -38,7 +38,7 @@ across threads stay safe.
 import std.task
 import std.chan
 
-func risky() -> int { 1 }
+func risky() -> int { return 1 }
 
 // Fan-out / fan-in.
 c := std.chan()

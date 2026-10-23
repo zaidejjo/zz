@@ -77,7 +77,7 @@ dot-prefixed patterns with payload bindings, including nesting:
 
 ```zz
 func tag(t: Token) -> str {
-    match t {
+    return match t {
         .Eof => "eof"
         .IntLit(_) => "int"
         .Name(_) => "name"
@@ -131,7 +131,7 @@ func add(a: int, b: int) { a + b }
 ### Generic Type Inference
 
 ```zz
-func identity<T>(x: T) -> T { x }
+func identity<T>(x: T) -> T { return x }
 result := identity(42)    // T inferred as int
 ```
 

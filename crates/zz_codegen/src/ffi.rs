@@ -837,7 +837,14 @@ fn snapshot_staticlib(lib: &std::path::Path, strip: bool) -> Result<PathBuf, Ffi
         let copied = std::fs::copy(lib, &tmp).ok().and_then(|_| stamp(&tmp));
         let after = stamp(lib);
         let stable = match (before, copied, after) {
-            (Some(b), Some(c), Some(a)) => b == a && c.0 == b.0 && c.0 > 0,
+            (Some(b), Some(c), Some(a)) if b == a && c.0 == b.0 && c.0 > 0 => {
+                // Filesystem timestamps can be coarse enough that a fast
+                // truncate+write leaves `(len, mtime)` unchanged across a
+                // partial write. Require the source to stay put across a
+                // short settling window before trusting the copy.
+                std::thread::sleep(Duration::from_millis(2));
+                stamp(lib) == Some(b)
+            }
             _ => false,
         };
         if stable {

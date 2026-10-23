@@ -7,7 +7,7 @@ import std.http
 import std.json
 
 func handler(req: http.request) -> http.response {
-    match http.body_json(req) {
+    return match http.body_json(req) {
         .ok(body) => http.ok(json.stringify(body) ?? "{}"),
         .err(e)   => http.respond(400, "bad json: {e}"),
     }
@@ -16,7 +16,7 @@ func handler(req: http.request) -> http.response {
 func routes() -> http.server {
     s := http.server()
     s = http.route(s, "POST", "/echo", handler)
-    s
+    return s
 }
 
 func main() {
@@ -76,7 +76,7 @@ func main() -> Result<int, str> {
     src := fs.read("data.csv")?
     rows := csv.parse(src)
     println(json.stringify(csv.to_json(rows)) ?? "[]")
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -115,7 +115,7 @@ import std.crypto
 func main() -> Result<int, str> {
     b := fs.read_bytes("data.bin")?
     println(crypto.sha256_bytes(b))
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -139,7 +139,7 @@ import std.env
 import std.http
 
 func port() -> int {
-    match env.get("PORT") {
+    return match env.get("PORT") {
         .some(p) => int(p) ?? 8080,
         .none    => 8080,
     }
@@ -170,7 +170,7 @@ func main() -> Result<int, str> {
     rows := sqlz.query(db, "SELECT * FROM users")
     println(rows)
     sqlz.close(db)
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -214,10 +214,10 @@ match crypto.jwt_decode("secret", tok) {
 ```zz
 import std.property
 
-func double(n: int) -> int { n * 2 }
+func double(n: int) -> int { return n * 2 }
 
 func is_even_twice(x: int) -> bool {
-    double(x) % 2 == 0
+    return double(x) % 2 == 0
 }
 
 property.for_all_int(-1000, 1000, is_even_twice, 200, 7)
@@ -251,7 +251,7 @@ func main() -> Result<int, str> {
         println("bad csv")
     }
     println(csv.get_cell(csv.parse(src), 0, 0, "?"))
-    .ok(0)
+    return .ok(0)
 }
 ```
 

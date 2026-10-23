@@ -152,7 +152,7 @@ func main() -> Result<int, str> {
     res := http.get("https://api.example.com/users")?
     body := res.json()?
     println(json.stringify(body) ?? "{}")
-    .ok(0)
+    return .ok(0)
 }
 ```
 

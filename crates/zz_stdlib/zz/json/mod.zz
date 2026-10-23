@@ -16,7 +16,7 @@
 // ── Validation ──────────────────────────────────────────────────────────────
 
 func json.validate(s: str) -> bool {
-    match json.parse(s) {
+    return match json.parse(s) {
         .ok(_) => true
         .err(_) => false
     }
@@ -25,27 +25,27 @@ func json.validate(s: str) -> bool {
 // ── Safe parsing ────────────────────────────────────────────────────────────
 
 func json.parse_or(s: str, default: json) -> json {
-    match json.parse(s) {
+    return match json.parse(s) {
         .ok(v) => v
         .err(_) => default
     }
 }
 
 func json.parse_or_null(s: str) -> json {
-    json.parse_or(s, json.null())
+    return json.parse_or(s, json.null())
 }
 
 // ── Path operations ─────────────────────────────────────────────────────────
 
 func json.path_exists(j: json, path: str) -> bool {
-    match json.deep_get(j, path) {
+    return match json.deep_get(j, path) {
         .ok(_) => true
         .err(_) => false
     }
 }
 
 func json.path_get_or(j: json, path: str, default: json) -> json {
-    match json.deep_get(j, path) {
+    return match json.deep_get(j, path) {
         .ok(v) => v
         .err(_) => default
     }
@@ -54,31 +54,31 @@ func json.path_get_or(j: json, path: str, default: json) -> json {
 // ── Type predicates (convenience) ──────────────────────────────────────────
 
 func json.is_null(j: json) -> bool {
-    json.type(j) == "null"
+    return json.type(j) == "null"
 }
 
 func json.is_bool(j: json) -> bool {
-    json.type(j) == "bool"
+    return json.type(j) == "bool"
 }
 
 func json.is_number(j: json) -> bool {
-    json.type(j) == "number"
+    return json.type(j) == "number"
 }
 
 func json.is_string(j: json) -> bool {
-    json.type(j) == "string"
+    return json.type(j) == "string"
 }
 
 func json.is_array(j: json) -> bool {
-    json.type(j) == "array"
+    return json.type(j) == "array"
 }
 
 func json.is_object(j: json) -> bool {
-    json.type(j) == "object"
+    return json.type(j) == "object"
 }
 
 // ── Aggregate helpers ───────────────────────────────────────────────────────
 
 func json.is_empty(j: json) -> bool {
-    json.len(j) == 0
+    return json.len(j) == 0
 }

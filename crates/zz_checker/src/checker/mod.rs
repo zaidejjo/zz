@@ -1169,6 +1169,12 @@ pub(crate) struct Checker {
     /// with tail position, so `-> Result` tails never warn while loop
     /// tails that drop errors do. Saved/restored across nested blocks.
     pub(crate) tail_is_value: bool,
+    /// Span and resolved type of the last statement of the most recently
+    /// checked block. `check_block` sets it *after* any nested block has
+    /// been checked, so after a named function body it holds that body's
+    /// tail. The missing-return diagnostic uses it to avoid an insertion
+    /// fixit before a tail that yields `unit`.
+    pub(crate) last_block_tail: Option<(Span, Type)>,
     /// Whether the statement currently being checked directly discards
     /// a `match` value (`match ...` as a bare statement/defer, not the
     /// tail). `check_match` uses this to warn on bare `Result`/`Option`
@@ -1256,6 +1262,7 @@ impl Checker {
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             tail_is_value: false,
+            last_block_tail: None,
             direct_discard: false,
             imports: Vec::new(),
             import_aliases: HashMap::new(),
@@ -1466,8 +1473,8 @@ mod span_scope_tests {
     // the other's type; scoped keys keep both.
     #[test]
     fn same_span_different_functions_keep_types() {
-        let a = zz_frontend::parse("func f() -> int {\n    v :=  1234\n    v\n}\n");
-        let b = zz_frontend::parse("func g() -> bool {\n    v := true\n    v\n}\n");
+        let a = zz_frontend::parse("func f() -> int {\n    v :=  1234\n    return v\n}\n");
+        let b = zz_frontend::parse("func g() -> bool {\n    v := true\n    return v\n}\n");
         assert!(a.errors.is_empty(), "parse a: {:?}", a.errors);
         assert!(b.errors.is_empty(), "parse b: {:?}", b.errors);
         let mut stmts = Vec::new();

@@ -34,7 +34,7 @@ func main() -> Result<int, str> {
     println("got: {line}")
     client.close()?
     server.close()?
-    .ok(0)
+    return .ok(0)
 }
 ```
 

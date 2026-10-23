@@ -50,11 +50,11 @@ fn round_trip_locals_and_loop() {
 fn round_trip_default_args() {
     // Default bodies travel as tabled chunks (no AST on the load path).
     assert_eq!(
-        round_trip_value("func f(a = 41) {\n a + 1\n}\nf()"),
+        round_trip_value("func f(a = 41) -> int {\n return a + 1\n}\nf()"),
         Value::Int(42)
     );
     assert_eq!(
-        round_trip_value("func f(a = 41) {\n a + 1\n}\nf(10)"),
+        round_trip_value("func f(a = 41) -> int {\n return a + 1\n}\nf(10)"),
         Value::Int(11)
     );
 }
@@ -62,7 +62,7 @@ fn round_trip_default_args() {
 #[test]
 fn round_trip_closure_capture() {
     assert_eq!(
-        round_trip_value("func mk() {\n n := 10\n |x| { n + x }\n}\nf := mk()\nf(5)"),
+        round_trip_value("func mk() {\n n := 10\n return |x| { n + x }\n}\nf := mk()\nf(5)"),
         Value::Int(15)
     );
 }
@@ -89,7 +89,7 @@ fn round_trip_index_store_order() {
     // Source order: base(1), index(0), value(9). Needs the `vec` native,
     // so this test seeds stdlib natives on both interpreters.
     let parsed = zz_frontend::parse(
-        "log := []\nfunc rec(n: int) -> int {\n log = vec.push(log, n)\n n\n}\nfunc mkarr() {\n rec(1)\n [10, 20, 30]\n}\nmkarr()[rec(0)] = rec(9)\nlog",
+        "log := []\nfunc rec(n: int) -> int {\n log = vec.push(log, n)\n return n\n}\nfunc mkarr() -> [int] {\n rec(1)\n return [10, 20, 30]\n}\nmkarr()[rec(0)] = rec(9)\nlog",
     );
     assert!(parsed.errors.is_empty());
     let natives = zz_stdlib::stdlib_natives();
@@ -382,7 +382,8 @@ fn typed_signatures_populate() {
     };
     let mut sigs = HashMap::new();
     sigs.insert("add".to_string(), sig);
-    let parsed = zz_frontend::parse("func add(a: int, b: int) -> int {\n a + b\n}\nadd(40, 2)");
+    let parsed =
+        zz_frontend::parse("func add(a: int, b: int) -> int {\n return a + b\n}\nadd(40, 2)");
     assert!(parsed.errors.is_empty());
     let chunk = Compiler::compile_program(&parsed.program);
     let module = lower::lower_typed(&chunk, &sigs).expect("lower_typed failed");
@@ -502,7 +503,7 @@ fn locals_declare_int_slots() {
     let mut sigs = HashMap::new();
     sigs.insert("f".to_string(), int_sig(1));
     let module = lower_typed_spanmap(
-        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n s\n}\nf(1)",
+        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n return s\n}\nf(1)",
         &sigs,
     );
     // Slot 0 = param n (Int from sig), slot 1 = s (Int recorded).
@@ -515,7 +516,7 @@ fn locals_declare_loop_and_array_slots() {
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     let module = lower_typed_spanmap(
-        "func m() {\n a := [1, 2]\n a[0] = 3\n s := 0\n for v in a {\n s = s + v\n }\n s\n}\nm()",
+        "func m() {\n a := [1, 2]\n a[0] = 3\n s := 0\n for v in a {\n s = s + v\n }\n return s\n}\nm()",
         &sigs,
     );
     let locals = local_types(&module, "m");
@@ -735,7 +736,7 @@ fn dis_shows_locals_and_format_version() {
     let mut sigs = HashMap::new();
     sigs.insert("f".to_string(), int_sig(1));
     let module = lower_typed_spanmap(
-        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n s\n}\nf(1)",
+        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n return s\n}\nf(1)",
         &sigs,
     );
     let text = zz_ir::dis::disassemble(&module);
@@ -1080,12 +1081,12 @@ fn round_trip_unread_parameters() {
     // died in verification with "locals: fewer slots than signature
     // params". `b` is never read; `a` is.
     assert_eq!(
-        round_trip_value("func f(a: int, b: int) -> int {\n a\n}\nf(7, 9)"),
+        round_trip_value("func f(a: int, b: int) -> int {\n return a\n}\nf(7, 9)"),
         Value::Int(7)
     );
     // No parameter read at all.
     assert_eq!(
-        round_trip_value("func g(n: int) -> int {\n 5\n}\ng(1)"),
+        round_trip_value("func g(n: int) -> int {\n return 5\n}\ng(1)"),
         Value::Int(5)
     );
     // Same shape for a closure: its lifted chunk carries the lambda's

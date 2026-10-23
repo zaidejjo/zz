@@ -37,7 +37,7 @@ zz> x := 42
 42
 zz> x + 1
 43
-zz> func add(a: int, b: int) -> int { a + b }
+zz> func add(a: int, b: int) -> int { return a + b }
 <func add>
 zz> add(3, 4)
 7

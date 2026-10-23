@@ -31,7 +31,7 @@ func path.is_absolute(p: str) -> bool {
             }
         }
     }
-    false
+    return false
 }
 
 // ── Normalization & joining ──────────────────────────────────────────────────
@@ -144,7 +144,7 @@ func path.normalize(p: str) -> str {
     if windows {
         result = str.replace(result, "/", "\\")
     }
-    result
+    return result
 }
 
 func path.join(a: str, b: str) -> str {
@@ -157,7 +157,7 @@ func path.join(a: str, b: str) -> str {
     if a == "" {
         return path.normalize(b)
     }
-    path.normalize(a + "/" + b)
+    return path.normalize(a + "/" + b)
 }
 
 func path.join_all(parts: [str]) -> str {
@@ -171,7 +171,7 @@ func path.join_all(parts: [str]) -> str {
             result = path.join(result, p)
         }
     }
-    path.normalize(result)
+    return path.normalize(result)
 }
 
 // ── Decomposition ────────────────────────────────────────────────────────────
@@ -201,7 +201,7 @@ func path.basename(p: str) -> str {
         }
     }
     parts := str.split(n, sep)
-    parts[vec.len(parts) - 1]
+    return parts[vec.len(parts) - 1]
 }
 
 func path.dirname(p: str) -> str {
@@ -262,7 +262,7 @@ func path.dirname(p: str) -> str {
     if result == "" {
         return "."
     }
-    result
+    return result
 }
 
 func path.extension(p: str) -> str {
@@ -283,5 +283,5 @@ func path.extension(p: str) -> str {
             return ""
         }
     }
-    parts[vec.len(parts) - 1]
+    return parts[vec.len(parts) - 1]
 }

@@ -13,7 +13,7 @@ func csv.delim_first(delimiter: str) -> str {
     if delimiter == "" {
         return ","
     }
-    delimiter[0]
+    return delimiter[0]
 }
 
 func csv.json_escape(s: str) -> str {
@@ -21,11 +21,11 @@ func csv.json_escape(s: str) -> str {
     t = str.replace(t, "\"", "\\\"")
     t = str.replace(t, "\n", "\\n")
     t = str.replace(t, "\t", "\\t")
-    t
+    return t
 }
 
 func csv.parse(src: str) -> [[str]] {
-    csv.parse_delim(src, ",")
+    return csv.parse_delim(src, ",")
 }
 
 func csv.parse_delim(src: str, delimiter: str) -> [[str]] {
@@ -144,7 +144,7 @@ func csv.parse_delim(src: str, delimiter: str) -> [[str]] {
             }
         }
     }
-    rows
+    return rows
 }
 
 func csv.needs_quote(cell: str, d: str) -> bool {
@@ -157,15 +157,15 @@ func csv.needs_quote(cell: str, d: str) -> bool {
     if str.contains(cell, "\n") {
         return true
     }
-    str.contains(cell, "\r")
+    return str.contains(cell, "\r")
 }
 
 func csv.escape_cell(cell: str) -> str {
-    str.replace(cell, "\"", "\"\"")
+    return str.replace(cell, "\"", "\"\"")
 }
 
 func csv.stringify(rows: [[str]]) -> str {
-    csv.stringify_delim(rows, ",")
+    return csv.stringify_delim(rows, ",")
 }
 
 func csv.stringify_delim(rows: [[str]], delimiter: str) -> str {
@@ -197,7 +197,7 @@ func csv.stringify_delim(rows: [[str]], delimiter: str) -> str {
         }
         ri = ri + 1
     }
-    out
+    return out
 }
 
 func csv.header(rows: [[str]]) -> [str] {
@@ -205,7 +205,7 @@ func csv.header(rows: [[str]]) -> [str] {
         empty: [str] = []
         return empty
     }
-    rows[0]
+    return rows[0]
 }
 
 func csv.records(rows: [[str]]) -> [[str]] {
@@ -215,11 +215,11 @@ func csv.records(rows: [[str]]) -> [[str]] {
         out = vec.push(out, rows[i])
         i = i + 1
     }
-    out
+    return out
 }
 
 func csv.len(rows: [[str]]) -> int {
-    vec.len(rows)
+    return vec.len(rows)
 }
 
 func csv.get_cell(rows: [[str]], r: int, c: int, default: str) -> str {
@@ -236,12 +236,12 @@ func csv.get_cell(rows: [[str]], r: int, c: int, default: str) -> str {
     if c >= vec.len(row) {
         return default
     }
-    row[c]
+    return row[c]
 }
 
 func csv.validate(src: str) -> bool {
     rows := csv.parse(src)
-    vec.len(rows) > 0
+    return vec.len(rows) > 0
 }
 
 func csv.to_json(rows: [[str]]) -> json {
@@ -280,7 +280,7 @@ func csv.to_json(rows: [[str]]) -> json {
     }
     obj = obj + "]"
     r := json.parse(obj)
-    match r {
+    return match r {
         .ok(j) => j,
         .err(e) => json.parse_or_null("[]"),
     }

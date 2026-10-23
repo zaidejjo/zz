@@ -52,7 +52,7 @@ match fs.read("data.txt") {
 // Propagate with ? inside Result/Option functions:
 func load(p: str) -> Result<str, str> {
     c := fs.read(p)?
-    .ok(c)
+    return .ok(c)
 }
 ```
 

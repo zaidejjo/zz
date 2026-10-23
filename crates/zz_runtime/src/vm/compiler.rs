@@ -124,13 +124,14 @@ enum StmtValue {
 }
 
 /// What a compiled block body left on the stack, reported to its caller.
+///
+/// A live body leaves its result value (settled by the caller's
+/// `SetLoopResult`/use); a dead body leaves nothing at all.
 struct BodyTail {
     /// The body's final statement left slot storage that `PopN` consumed:
     /// a loop caller's `SetLoopResult` pops one more value, so it must then
     /// emit a `Unit` top-up to stay balanced.
     needs_result_unit: bool,
-    /// What the body's last statement left behind.
-    value: StmtValue,
 }
 
 impl Default for Compiler {
@@ -2307,13 +2308,9 @@ impl Compiler {
                         self.emit_const(Value::Unit);
                     }
                     self.emit(Op::SetLoopResult);
-                } else if matches!(body_tail.value, StmtValue::Discard) {
-                    // The body left a value of its own (a call result, an `if`
-                    // expression, ...) that nothing reads: drop it rather than
-                    // storing it. A body whose trailing statement could skip
-                    // its value reports `None` and owes nothing at all.
-                    self.emit(Op::Pop);
                 }
+                // A dead-result body leaves nothing behind (see
+                // `compile_block_body`), so there is no tail value to settle.
                 // Either way the loop's own slot keeps the `Unit` placeholder
                 // written before `ForSetup`, which the caller's `Op::Pop`
                 // removes.
@@ -2782,18 +2779,10 @@ impl Compiler {
             self.emit(Op::EnterScope);
         }
         self.scope_depth += 1;
-        let tail = self.compile_block_body(block, false, true);
+        let _ = self.compile_block_body(block, false, true);
         self.scope_depth -= 1;
         if needs_env {
             self.emit(Op::ExitScope);
-        }
-        if tail.needs_result_unit {
-            self.emit(Op::Pop);
-        } else if matches!(tail.value, StmtValue::Discard) {
-            // The block's last statement left a value (a loop's placeholder,
-            // a call result) that nobody reads. Same settle the `for` arm
-            // does for a dead loop result.
-            self.emit(Op::Pop);
         }
     }
 
@@ -2850,11 +2839,12 @@ impl Compiler {
     /// the last local) and need `PopN(n - 1)`.
     ///
     /// `trailing_value_dead`: nothing reads this body's value — not even the
-    /// caller (a `for` whose own value is discarded). The trailing statement
-    /// is then compiled knowing its value is dead, so a value-producing
-    /// statement skips the push instead of leaving the caller to drop it one
-    /// op later. The body reports what it left on the stack either way, so the
-    /// caller can settle the tail without guessing.
+    /// caller (a `for` whose own value is discarded, a statement-position
+    /// block, a named function body that returns through `return`). The
+    /// trailing statement is then compiled knowing its value is dead, and the
+    /// cleanup leaves **no** result on the stack, so the caller owes no settle
+    /// `Pop` and a statement-shaped tail stays a pure statement (`if`, `for`,
+    /// `return`) instead of growing a placeholder `Unit`.
     fn compile_block_body(
         &mut self,
         block: &Block,
@@ -2873,7 +2863,8 @@ impl Compiler {
                 self.emit(Op::Pop);
             }
         }
-        if !trailing_value_dead && (block.stmts.is_empty() || matches!(last, StmtValue::None)) {
+        let value_expected = !trailing_value_dead;
+        if value_expected && (block.stmts.is_empty() || matches!(last, StmtValue::None)) {
             // The body must still produce a value for whoever reads it.
             self.emit_const(Value::Unit);
             last = StmtValue::Discard;
@@ -2887,15 +2878,31 @@ impl Compiler {
         // loop frame (the `ForNext on non-iterable` misalignment). An
         // env-captured (`in_env`) trailing declaration instead leaves its
         // `DefineVar` value behind, which already serves as the result.
-        let trailing_slot_decl = matches!(last, StmtValue::Keep)
+        let trailing_slot_decl = value_expected
+            && matches!(last, StmtValue::Keep)
             && self.locals[scope_base..].last().is_some_and(|l| !l.in_env);
-        if n > 0 {
+        if !value_expected {
+            // Dead value: drop every local plus a pushed tail value.
+            // `PopN { n }` drops `n + 1` values but keeps the top one as its
+            // result, so settle that placeholder with a plain `Pop`.
+            let values = n + usize::from(matches!(last, StmtValue::Discard));
+            if values == 1 {
+                // Common case (no locals, one tail value): one `Pop`.
+                self.emit(Op::Pop);
+            } else if values > 1 {
+                self.emit(Op::PopN {
+                    n: (values - 1) as u16,
+                    span: block.span,
+                });
+                self.emit(Op::Pop);
+            }
+        } else {
             // Trailing slot declaration in a plain block: the stack holds
             // n values (the result IS the last local), not n+1 — PopN(n-1).
             // Otherwise the cleanup underflows (or corrupts silently in
             // release). Loop bodies keep PopN(n): see `is_loop_body`.
             let drop = if trailing_slot_decl && !is_loop_body {
-                n - 1
+                n.saturating_sub(1)
             } else {
                 n
             };
@@ -2909,7 +2916,6 @@ impl Compiler {
         self.locals.truncate(scope_base);
         BodyTail {
             needs_result_unit: trailing_slot_decl,
-            value: last,
         }
     }
 
@@ -2951,23 +2957,17 @@ impl Compiler {
             }
         }
         sub.stack_height = params.len();
-        // Tail-take: a function ending in `return x` / bare `x` moves the
-        // local out of its slot instead of deep-cloning it. The frame dies
-        // on return, so the vacated slot (Unit) is never observed — this
-        // is the NRVO-equivalent for threaded accumulators
-        // (`doc = push_node(doc, x)`): without it the final `doc`
-        // costs a full O(n) deep clone per key (quadratic overall).
-        // Only frame locals qualify (params or block-declared names):
-        // an outer/global binding must keep the cloning load so the
-        // owner still holds its value after the call.
+        // Tail-take: a function ending in `return x` moves the local out of
+        // its slot instead of deep-cloning it. Only an explicit `return`
+        // qualifies: a bare trailing expression is discarded (named
+        // functions return values only through `return`), so there is no
+        // value to move.
         if let Some(last) = block.stmts.last() {
             let tail_name: Option<String> = match last {
                 Stmt::Return {
                     value: Some(Expr::Ident { name, .. }),
                     ..
                 } => Some(name.clone()),
-                Stmt::Return { .. } => None,
-                Stmt::Expr(Expr::Ident { name, .. }) => Some(name.clone()),
                 _ => None,
             };
             if let Some(name) = tail_name {
@@ -3058,10 +3058,14 @@ impl Compiler {
                 }
             }
         }
-        sub.compile_block_body(block, false, false);
+        // No `return` tail: the body's trailing expression is discarded and
+        // the frame falls off with `unit`. This is the only way a named
+        // function returns without an explicit `return`.
+        sub.compile_block_body(block, false, true);
         if needs_env {
             sub.emit(Op::ExitScope);
         }
+        sub.emit_const(Value::Unit);
         Arc::new(sub.chunk)
     }
 

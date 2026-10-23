@@ -188,7 +188,7 @@ match x {
 
 ```zz
 func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 ```
 
@@ -225,7 +225,7 @@ create_user("Alice", age: 30, active: true)
 
 ```zz
 func identity<T>(x: T) -> T {
-    x
+    return x
 }
 ```
 
@@ -247,6 +247,7 @@ square := |x: int| {
 ```zz
 func shapes.distance(p1: Point, p2: Point) -> float {
     // ...
+    return 0.0
 }
 ```
 
@@ -612,7 +613,7 @@ struct Counter { n: int }
 
 func bump(c: Counter) -> int {
     c.n += 100   // mutates only the local copy
-    c.n
+    return c.n
 }
 
 c := Counter{ n: 10 }
@@ -664,8 +665,8 @@ val := 42 ?? 0                       // 42
 Passes the left value as the first argument to the right function:
 
 ```zz
-func inc(n: int) -> int { n + 1 }
-func dbl(n: int) -> int { n * 2 }
+func inc(n: int) -> int { return n + 1 }
+func dbl(n: int) -> int { return n * 2 }
 
 5 |> inc |> dbl    // dbl(inc(5)) = dbl(6) = 12
 
@@ -724,7 +725,7 @@ struct Base { id: int, name: str }
 struct User { Base, age: int }   // embeds Base
 
 impl Base {
-    func area(self) -> int { self.id * 2 }
+    func area(self) -> int { return self.id * 2 }
 }
 
 zaid := User{ id: 1, name: "Zaid Ajo", age: 19 }  // flat init nests into Base
@@ -750,7 +751,7 @@ struct Box<T> { v: T }
 
 impl Box<T> {
     func get(self) -> T {
-        self.v
+        return self.v
     }
 }
 
@@ -782,7 +783,7 @@ Method calls desugar to function calls with the receiver as the first argument:
 
 ```zz
 struct Point { x: int, y: int }
-func dist(p: Point) -> int { p.x + p.y }
+func dist(p: Point) -> int { return p.x + p.y }
 
 p := Point{ x: 3, y: 4 }
 dist(p)       // function call
@@ -805,7 +806,7 @@ coexist: `w.get()` calls `W.get`, `get(w)` calls the free function.
 Unwraps a variant, propagating `.none`/`.err` upward on failure:
 
 ```zz
-func process(input: str) -> Option<int> { val := int(input)?; .some(val + 1) }
+func process(input: str) -> Option<int> { val := int(input)?; return .some(val + 1) }
 ```
 
 Note: `?` joins with the next line. Use `match` for branching across lines:
@@ -969,7 +970,8 @@ rewrite through it, so values and types keep one identity. Two
 
 ## Blocks as Expressions
 
-Blocks evaluate to their last expression:
+Blocks evaluate to their last expression (closures and block expressions
+keep this; named `func` bodies return only through `return`):
 
 ```zz
 result := {
@@ -985,6 +987,10 @@ Functions without a return type return `unit`:
 
 ```zz
 func do_nothing() {
-    // returns unit implicitly
+    // returns unit implicitly (no `return`, no value)
+}
+
+func double(x: int) -> int {
+    return x * 2   // named functions need an explicit `return`
 }
 ```

@@ -84,6 +84,8 @@ impl Interp {
                     env: self.env.clone(),
                     chunk: None,
                     chunk_defaults: Vec::new(),
+                    // Named function: only `return` yields a value.
+                    tail_value: false,
                 };
                 self.funcs.insert(name.join("."), fv.clone());
                 self.funcs_version = self.funcs_version.wrapping_add(1);
@@ -142,6 +144,8 @@ impl Interp {
                             env: self.env.clone(),
                             chunk: None,
                             chunk_defaults: Vec::new(),
+                            // Impl method: named-function semantics.
+                            tail_value: false,
                         };
                         self.funcs.insert(full_name.clone(), fv.clone());
                         self.funcs_version = self.funcs_version.wrapping_add(1);
@@ -301,6 +305,8 @@ impl Interp {
                     env: self.env.clone(),
                     chunk: None,
                     chunk_defaults: Vec::new(),
+                    // Deferred expression: value ignored.
+                    tail_value: true,
                 };
                 self.defer_stacks
                     .last_mut()
@@ -1353,6 +1359,8 @@ impl Interp {
                     env: self.env.clone(),
                     chunk: None,
                     chunk_defaults: Vec::new(),
+                    // Closure: the body's tail expression is the value.
+                    tail_value: true,
                 }))))
             }
             Expr::If {
@@ -1905,7 +1913,10 @@ impl Interp {
         };
         self.env = prev;
         match result? {
-            Flow::Value(v) => Ok(v),
+            // Only closures yield their body's tail expression. A named
+            // function's fall-through is `unit`; values come from `return`.
+            Flow::Value(v) if fv.tail_value => Ok(v),
+            Flow::Value(_) => Ok(Value::Unit),
             Flow::Return(v) => Ok(v),
             Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
             Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),

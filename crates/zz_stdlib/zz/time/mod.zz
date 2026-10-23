@@ -13,31 +13,31 @@
 //   time.to_secs(d)
 //   time.sleep(d)
 func time.micros(us: int) -> int {
-    us
+    return us
 }
 
 func time.millis(ms: int) -> int {
-    ms * 1000
+    return ms * 1000
 }
 
 func time.secs(s: int) -> int {
-    s * 1000000
+    return s * 1000000
 }
 
 func time.to_micros(d: int) -> int {
-    d
+    return d
 }
 
 func time.to_millis(d: int) -> int {
-    d / 1000
+    return d / 1000
 }
 
 func time.to_secs(d: int) -> int {
-    d / 1000000
+    return d / 1000000
 }
 
 func time.to_nanos(d: int) -> int {
-    d * 1000
+    return d * 1000
 }
 
 func time.sleep(d: int) {
@@ -58,11 +58,11 @@ func time.make_date(y: int, mo: int, d: int, h: int, mi: int, se: int) -> {str: 
     out["hour"] = h
     out["min"] = mi
     out["sec"] = se
-    out
+    return out
 }
 
 func time.epoch_fallback() -> {str: int} {
-    time.make_date(1970, 1, 1, 0, 0, 0)
+    return time.make_date(1970, 1, 1, 0, 0, 0)
 }
 
 func time.is_leap(y: int) -> bool {
@@ -72,7 +72,7 @@ func time.is_leap(y: int) -> bool {
     if y % 100 != 0 {
         return true
     }
-    y % 400 == 0
+    return y % 400 == 0
 }
 
 func time.days_in_month(y: int, m: int) -> int {
@@ -94,7 +94,7 @@ func time.days_in_month(y: int, m: int) -> int {
     if m == 11 {
         return 30
     }
-    31
+    return 31
 }
 
 func time.date_valid(y: int, m: int, d: int) -> bool {
@@ -107,7 +107,7 @@ func time.date_valid(y: int, m: int, d: int) -> bool {
     if d < 1 {
         return false
     }
-    d <= time.days_in_month(y, m)
+    return d <= time.days_in_month(y, m)
 }
 
 func time.days_from_civil(y: int, m: int, d: int) -> int {
@@ -124,7 +124,7 @@ func time.days_from_civil(y: int, m: int, d: int) -> int {
     yoe := yy - era * 400
     doy := (153 * (mm - 3) + 2) / 5 + d - 1
     doe := yoe * 365 + yoe / 4 - yoe / 100 + doy
-    era * 146097 + doe - 719468
+    return era * 146097 + doe - 719468
 }
 
 func time.civil_from_days(z: int) -> {str: int} {
@@ -146,7 +146,7 @@ func time.civil_from_days(z: int) -> {str: int} {
     } else {
         m = mp + 3
     }
-    time.make_date(y, m, d, 0, 0, 0)
+    return time.make_date(y, m, d, 0, 0, 0)
 }
 
 func time.parse_rfc3339(s: str) -> {str: int} {
@@ -176,34 +176,34 @@ func time.parse_rfc3339(s: str) -> {str: int} {
     if time.date_valid(y, mo, d) == false {
         return time.epoch_fallback()
     }
-    time.make_date(y, mo, d, h, mi, se)
+    return time.make_date(y, mo, d, h, mi, se)
 }
 
 func time.pad2(n: int) -> str {
     if n < 10 {
         return "0" + str(n)
     }
-    str(n)
+    return str(n)
 }
 
 func time.format_rfc3339(d: {str: int}) -> str {
-    str(d["year"]) + "-" + time.pad2(d["month"]) + "-" + time.pad2(d["day"]) + "T" + time.pad2(d["hour"]) + ":" + time.pad2(d["min"]) + ":" + time.pad2(d["sec"]) + "Z"
+    return str(d["year"]) + "-" + time.pad2(d["month"]) + "-" + time.pad2(d["day"]) + "T" + time.pad2(d["hour"]) + ":" + time.pad2(d["min"]) + ":" + time.pad2(d["sec"]) + "Z"
 }
 
 func time.to_epoch_days(d: {str: int}) -> int {
-    time.days_from_civil(d["year"], d["month"], d["day"])
+    return time.days_from_civil(d["year"], d["month"], d["day"])
 }
 
 func time.from_epoch_days(z: int) -> {str: int} {
-    time.civil_from_days(z)
+    return time.civil_from_days(z)
 }
 
 func time.add_days(d: {str: int}, n: int) -> {str: int} {
     base := time.days_from_civil(d["year"], d["month"], d["day"]) + n
     r := time.civil_from_days(base)
-    time.make_date(r["year"], r["month"], r["day"], d["hour"], d["min"], d["sec"])
+    return time.make_date(r["year"], r["month"], r["day"], d["hour"], d["min"], d["sec"])
 }
 
 func time.diff_days(a: {str: int}, b: {str: int}) -> int {
-    time.days_from_civil(a["year"], a["month"], a["day"]) - time.days_from_civil(b["year"], b["month"], b["day"])
+    return time.days_from_civil(a["year"], a["month"], a["day"]) - time.days_from_civil(b["year"], b["month"], b["day"])
 }

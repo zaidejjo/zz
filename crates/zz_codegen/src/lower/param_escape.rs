@@ -1262,7 +1262,7 @@ mod tests {
     #[test]
     fn captured_param_escapes() {
         let m = analyze_src(
-            "func f(r: Rng) -> int { g(| | r.s0) }",
+            "func f(r: Rng) -> int { return g(| | r.s0) }",
             &[("f", vec![("r", rng())])],
         );
         assert_eq!(m["f"], vec![false]);
@@ -1341,7 +1341,7 @@ mod tests {
     #[test]
     fn match_on_param_is_a_read() {
         let m = analyze_src(
-            "func f(r: Rng) -> int { match r.s0 { 0 => 0, _ => 1 } }",
+            "func f(r: Rng) -> int { return match r.s0 { 0 => 0, _ => 1 } }",
             &[("f", vec![("r", rng())])],
         );
         assert_eq!(m["f"], vec![true]);

@@ -8,15 +8,15 @@
 // need a struct definition: `b := str.builder()` is `[str]`.
 
 func str.builder() -> [str] {
-    []
+    return []
 }
 
 func str.push_part(b: [str], s: str) -> [str] {
-    vec.push(b, s)
+    return vec.push(b, s)
 }
 
 func str.finish(b: [str]) -> str {
-    vec.join(b, "")
+    return vec.join(b, "")
 }
 
 func str.builder_len(b: [str]) -> int {
@@ -24,17 +24,17 @@ func str.builder_len(b: [str]) -> int {
     for p in b {
         n = n + str.length(p)
     }
-    n
+    return n
 }
 
 func str.join_parts(parts: [str], sep: str) -> str {
-    vec.join(parts, sep)
+    return vec.join(parts, sep)
 }
 
 // Byte assembly collects ints 0-255; callers convert at the
 // boundary via existing `fs`/`net` byte natives.
 func bytes.builder() -> [int] {
-    []
+    return []
 }
 
 func bytes.push_byte(b: [int], v: int) -> [int] {
@@ -42,7 +42,7 @@ func bytes.push_byte(b: [int], v: int) -> [int] {
     if x < 0 {
         x = x + 256
     }
-    vec.push(b, x)
+    return vec.push(b, x)
 }
 
 func bytes.extend(b: [int], vs: [int]) -> [int] {
@@ -50,11 +50,11 @@ func bytes.extend(b: [int], vs: [int]) -> [int] {
     for v in vs {
         out = bytes.push_byte(out, v)
     }
-    out
+    return out
 }
 
 func bytes.len_of(vs: [int]) -> int {
-    vec.len(vs)
+    return vec.len(vs)
 }
 
 func bytes.from_ints(vs: [int]) -> [int] {
@@ -62,5 +62,5 @@ func bytes.from_ints(vs: [int]) -> [int] {
     for v in vs {
         out = bytes.push_byte(out, v)
     }
-    out
+    return out
 }

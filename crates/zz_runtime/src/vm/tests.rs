@@ -53,10 +53,10 @@ fn vm_nested_path_assignment_keeps_shape() {
         "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.w",
         "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.p.y",
         "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = r.p.x + 8\nr.p.x",
-        "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nfunc f(r: Rect) -> int { r.p.x = 9\nr.p.x + r.w }\nf(Rect{ p: Point{ x: 1, y: 2 }, w: 3 })",
-        "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nfunc f(r: Rect) -> int { r.p.x = 9\nr.p.x }\nf(Rect{ p: Point{ x: 1, y: 2 }, w: 3 })",
+        "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nfunc f(r: Rect) -> int { r.p.x = 9\nreturn r.p.x + r.w }\nf(Rect{ p: Point{ x: 1, y: 2 }, w: 3 })",
+        "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nfunc f(r: Rect) -> int { r.p.x = 9\nreturn r.p.x }\nf(Rect{ p: Point{ x: 1, y: 2 }, w: 3 })",
         "struct A { b: B }\nstruct B { c: C }\nstruct C { v: int }\na := A{ b: B{ c: C{ v: 1 } } }\na.b.c.v = 42\na.b.c.v",
-        "struct A { b: B }\nstruct B { c: C }\nstruct C { v: int }\nfunc f(a: A) -> int { a.b.c.v = 42\na.b.c.v }\nf(A{ b: B{ c: C{ v: 1 } } })",
+        "struct A { b: B }\nstruct B { c: C }\nstruct C { v: int }\nfunc f(a: A) -> int { a.b.c.v = 42\nreturn a.b.c.v }\nf(A{ b: B{ c: C{ v: 1 } } })",
         "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.p.x + r.p.y + r.w",
     ] {
         assert_same(src);
@@ -107,23 +107,23 @@ fn vm_slot_locals_match_tree_walker() {
         "x := 1\n{ y := 2\n{ z := 3\nx + y + z } }",
         "x := 1\n{ x := 2\n{ x := 3\nx } }",
         "x := 1\ny := 2\n{ y := 3\ny }\ny",
-        "func f() -> int { a := 1\nb := 2\nc := a + b\nc }\nf()",
-        "func f(n: int) -> int { m := n * 2\nm + n }\nf(5)",
-        "func f(n: int) -> int { n := n + 1\nn }\nf(5)",
-        "func f() -> int { x := 1\n{ x := 2\nx }\nx }\nf()",
+        "func f() -> int { a := 1\nb := 2\nc := a + b\nreturn c }\nf()",
+        "func f(n: int) -> int { m := n * 2\nreturn m + n }\nf(5)",
+        "func f(n: int) -> int { n := n + 1\nreturn n }\nf(5)",
+        "func f() -> int { x := 1\n{ x := 2\nx }\nreturn x }\nf()",
         "match 5 { n => { m := n * 2\nm } }",
         "match 5 { 1 => 10, n => { m := n * 2\nm } }",
         "x := .some(5)\nif let .some(n) = x { m := n + 1\nm } else { 0 }",
         "x := .none\nif let .some(n) = x { m := n + 1\nm } else { 0 }",
         "x := .some(5)\nif let .some(n) = x { m := n + 1\nm }",
-        "struct Point { x: int }\nfunc f(p: Point) -> int { p.x }\nf(Point{ x: 7 })",
-        "struct Point { x: int }\nfunc dist(p: Point) -> int { p.x }\np := Point{ x: 9 }\np.dist()",
-        "struct Point { x: int }\nstruct Holder { p: Point }\nfunc dist(p: Point) -> int { p.x }\nh := Holder{ p: Point{ x: 9 } }\nh.p.dist()",
-        "struct Point { x: int }\nfunc f(p: Point) -> int { p.x = 5\np.x }\nf(Point{ x: 1 })",
-        "func outer() { x := 10\n|x| x + 1 }\ng := outer()\ng(5)",
-        "func outer() { x := 10\ny := 20\n|x| x + y }\ng := outer()\ng(5)",
-        "func outer() { x := 10\n{ y := x + 1\ny } }\ng := outer()\ng(5)",
-        "func counter() { n := 0\n|inc| { n = n + inc\nn } }\nc := counter()\nc(1)\nc(2)",
+        "struct Point { x: int }\nfunc f(p: Point) -> int { return p.x }\nf(Point{ x: 7 })",
+        "struct Point { x: int }\nfunc dist(p: Point) -> int { return p.x }\np := Point{ x: 9 }\np.dist()",
+        "struct Point { x: int }\nstruct Holder { p: Point }\nfunc dist(p: Point) -> int { return p.x }\nh := Holder{ p: Point{ x: 9 } }\nh.p.dist()",
+        "struct Point { x: int }\nfunc f(p: Point) -> int { p.x = 5\nreturn p.x }\nf(Point{ x: 1 })",
+        "func outer() { x := 10\nreturn |x| x + 1 }\ng := outer()\ng(5)",
+        "func outer() { x := 10\ny := 20\nreturn |x| x + y }\ng := outer()\ng(5)",
+        "func outer() { x := 10\nreturn { y := x + 1\ny } }\ng := outer()\ng(5)",
+        "func counter() { n := 0\nreturn |inc| { n = n + inc\nn } }\nc := counter()\nc(1)\nc(2)",
         "x := 0\nfor x in 0..3 { x }\nx",
         "x := 5\nfor i in 0..3 { x := i\nx }\nx",
         "sum := 0\nfor i in 0..3 { j := i * 2\nsum = sum + j }\nsum",
@@ -160,15 +160,15 @@ fn vm_matches_tree_walker_on_basics() {
         "if 1 < 2 { \"yes\" } else { \"no\" }",
         "name := \"World\"\n\"Hello {name}\"",
         "\"sum: {1 + 2}\"",
-        "func dbl(n: int) -> int { n * 2 }\ndbl(21)",
-        "func fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(5)",
+        "func dbl(n: int) -> int { return n * 2 }\ndbl(21)",
+        "func fib(n: int) -> int { return if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(5)",
         "func f() -> int { return 5 }\nf()",
-        "func f() -> int { if true { return 5 }\n3 }\nf()",
-        "func add(a: int, b: int) -> int { a + b }\nadd(2, 3)",
+        "func f() -> int { if true { return 5 }\nreturn 3 }\nf()",
+        "func add(a: int, b: int) -> int { return a + b }\nadd(2, 3)",
         "x := 1\nx = 5\nx",
         "x := 1\nx = x + 1\nx",
         "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\np.x",
-        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
+        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { return p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
         "v := [1, 2, 3]\nv[1]",
         "s := \"hello\"\ns[1:3]",
         "m := {1: 2}\nm[1]",
@@ -181,11 +181,11 @@ fn vm_matches_tree_walker_on_basics() {
         "count := 0\nfor i in 0..5 { if i == 2 { continue }; count = count + 1 }\ncount",
         "x := 1\nif x > 0 { x = 5 }\nx",
         "a := 1\nb := 2\nc := a + b\nc",
-        "func even(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } }\nfunc odd(n: int) -> bool { if n == 0 { false } else { even(n - 1) } }\neven(4)",
-        "func apply(f, x) { f(x) }\napply(|n| n + 1, 41)",
-        "func outer() { func inner(n: int) -> int { n * 3 }\ninner }\ng := outer()\ng(7)",
+        "func even(n: int) -> bool { return if n == 0 { true } else { odd(n - 1) } }\nfunc odd(n: int) -> bool { return if n == 0 { false } else { even(n - 1) } }\neven(4)",
+        "func apply(f, x) { return f(x) }\napply(|n| n + 1, 41)",
+        "func outer() { func inner(n: int) -> int { return n * 3 }\nreturn inner }\ng := outer()\ng(7)",
         "x := 1\n{ y := 2\nx + y }",
-        "func f() -> int { { return 7 }\n0 }\nf()",
+        "func f() -> int { { return 7 }\nreturn 0 }\nf()",
         "func f() -> int { x := .none\nx? }\nf()",
         "func f() -> result<int, str> { x := .none\nx? }\nf()",
         "func f() -> result<int, str> { x := .ok(5)\nx? }\nf()",
@@ -201,7 +201,7 @@ fn vm_matches_tree_walker_on_basics() {
         "out := 0\nfor i in 0..3 { for j in 0..3 { out = out + 1 } }\nout",
         "out := 0\nfor i in 0..3 { for j in 0..3 { if j == 1 { break }; out = out + 1 } }\nout",
         "out := 0\nfor i in 0..3 { for j in 0..3 { if j == 1 { continue }; out = out + 1 } }\nout",
-        "func f() -> int { for i in 0..3 { if i == 1 { return 42 } }\n0 }\nf()",
+        "func f() -> int { for i in 0..3 { if i == 1 { return 42 } }\nreturn 0 }\nf()",
         "x := 0\nwhile x < 3 { x = x + 1 }\nx",
         "x := 0\nwhile true { x = x + 1\nif x == 3 { break } }\nx",
         "x := 0\nwhile x < 3 { x = x + 1\nif x == 2 { continue } }\nx",
@@ -236,17 +236,17 @@ fn vm_matches_tree_walker_on_basics() {
         "struct Point { x: int, y: int }\nstruct Rect { p: Point, w: int }\nr := Rect{ p: Point{ x: 1, y: 2 }, w: 3 }\nr.p.x = 9\nr.p.x",
         "struct Bag { items: [int] }\nb := Bag{ items: [1, 2, 3] }\nb.items[1]",
         "struct Bag { items: [int] }\nb := Bag{ items: [1, 2, 3] }\nb.items[1] = 9\nb.items[1]",
-        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
-        "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nfunc sum(p: Point) -> int { p.x + p.y }\nsum(p)",
-        "struct Point { x: int, y: int }\nfunc mk() -> Point { Point{ x: 7, y: 8 } }\nmk().x",
+        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { return p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
+        "struct Point { x: int, y: int }\np := Point{ x: 1, y: 2 }\nfunc sum(p: Point) -> int { return p.x + p.y }\nsum(p)",
+        "struct Point { x: int, y: int }\nfunc mk() -> Point { return Point{ x: 7, y: 8 } }\nmk().x",
         "f := |x| x * 2\nf(5)",
         "f := |x, y| x + y\nf(2, 3)",
         "n := 10\nf := |x| x + n\nf(5)",
         "f := |x| |y| x + y\nf(2)(3)",
         "f := |x| { y := x * 2\ny }\nf(5)",
         "f := |n| if n < 2 { n } else { f(n - 1) + f(n - 2) }\nf(5)",
-        "func apply(f, x) { f(x) }\napply(|n| n + 1, 41)",
-        "func outer() { func inner(n: int) -> int { n * 3 }\ninner }\ng := outer()\ng(7)",
+        "func apply(f, x) { return f(x) }\napply(|n| n + 1, 41)",
+        "func outer() { func inner(n: int) -> int { return n * 3 }\nreturn inner }\ng := outer()\ng(7)",
         ".ok(5)",
         ".err(\"boom\")",
         ".some(1)",
@@ -337,9 +337,9 @@ fn vm_interpolation_unwraps_option_parity() {
 #[test]
 fn vm_multiline_pipe() {
     for src in [
-        "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\n5\n  |> inc\n  |> dbl",
-        "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\nval := 10\nval\n  |> inc\n  |> dbl\n  |> inc",
-        "func inc(n: int) -> int { n + 1 }\nresult := {\n  5\n    |> inc\n    |> inc\n}\nresult",
+        "func inc(n: int) -> int { return n + 1 }\nfunc dbl(n: int) -> int { return n * 2 }\n5\n  |> inc\n  |> dbl",
+        "func inc(n: int) -> int { return n + 1 }\nfunc dbl(n: int) -> int { return n * 2 }\nval := 10\nval\n  |> inc\n  |> dbl\n  |> inc",
+        "func inc(n: int) -> int { return n + 1 }\nresult := {\n  5\n    |> inc\n    |> inc\n}\nresult",
     ] {
         assert_same(src);
     }
@@ -349,14 +349,14 @@ fn vm_multiline_pipe() {
 fn vm_deep_recursion_no_rust_stack_overflow() {
     assert_eq!(
         run_src(
-            "func fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(20)"
+            "func fib(n: int) -> int { return if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(20)"
         )
         .unwrap(),
         Value::Int(6765)
     );
     assert_eq!(
         run_src(
-            "func count(n: int) -> int { if n == 0 { 0 } else { count(n - 1) + 1 } }\ncount(100000)"
+            "func count(n: int) -> int { return if n == 0 { 0 } else { count(n - 1) + 1 } }\ncount(100000)"
         )
         .unwrap(),
         Value::Int(100000)
@@ -412,7 +412,7 @@ fn vm_short_circuit_skips_side_effects() {
 #[test]
 fn vm_method_call_and_cross_module() {
     assert_same(
-        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\np := Point{ x: 3, y: 4 }\np.dist()",
+        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { return p.x + p.y }\np := Point{ x: 3, y: 4 }\np.dist()",
     );
     let parsed = parse("p := shapes.Point{ x: 3, y: 4 }\np.dist()");
     let mut interp = Interp::new();
@@ -437,6 +437,8 @@ fn vm_method_call_and_cross_module() {
         env: interp.env.clone(),
         chunk: Some(Arc::new(chunk)),
         chunk_defaults: Vec::new(),
+        // Named function from a chunk: explicit `return` only.
+        tail_value: false,
     };
     interp.funcs.insert("shapes.dist".into(), fv);
     let v = interp.run(&parsed.program).unwrap();
@@ -487,7 +489,7 @@ fn bench_loop_vm_vs_tree() {
 #[ignore]
 fn bench_fib_vm_vs_tree() {
     let src =
-        "func fib(n: int) -> int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(20)";
+        "func fib(n: int) -> int { return if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(20)";
     let parsed = parse(src);
     let start = std::time::Instant::now();
     let mut interp = Interp::new();
@@ -528,7 +530,7 @@ fn vm_bitwise_matches_tree_walker() {
         "15 & 7 == 7",
         "1 << -1",
         "1 >> -5",
-        "func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(305419896, 4)",
+        "func rotl(x: int, k: int) -> int { return (x << k) | (x >> (64 - k)) }\nrotl(305419896, 4)",
         "s := 123456789\ni := 0\nwhile i < 10 { s = (s << 13) ^ s\ns = s ^ (s >> 17)\ns = s ^ (s << 5)\ni = i + 1 }\ns",
     ] {
         assert_same(src);
@@ -605,7 +607,7 @@ fn vm_fused_field_push_emits_vec_push_field() {
 #[test]
 fn vm_thread_call_emits_take_slot() {
     let chunk = compile_with_push_native(
-        "func f(x: [int], y: int) -> [int] { x }\nfunc g() -> [int] {\nb := [1]\nb = f(b, 2)\nb\n}\n",
+        "func f(x: [int], y: int) -> [int] { return x }\nfunc g() -> [int] {\nb := [1]\nb = f(b, 2)\nreturn b\n}\n",
     );
     let body_code = chunk
         .code
@@ -629,22 +631,22 @@ fn vm_thread_call_emits_take_slot() {
 #[test]
 fn vm_tail_take_moves_param_and_spares_outer() {
     for src in [
-        "func f(x: [int]) -> [int] { x }\nf([1, 2])[1]",
+        "func f(x: [int]) -> [int] { return x }\nf([1, 2])[1]",
         "func f(x: [int]) -> [int] { return x }\nf([1, 2])[0]",
-        "func f(n: int) -> int { m := n * 2\nm }\nf(20)",
-        "struct W { f: [int] }\nfunc g(w: W) -> W { w }\ng(W{f: [7]}).f[0]",
+        "func f(n: int) -> int { m := n * 2\nreturn m }\nf(20)",
+        "struct W { f: [int] }\nfunc g(w: W) -> W { return w }\ng(W{f: [7]}).f[0]",
         "x := 10\nf := |u: int| x + u\nf(0) + x",
         "x := [1, 2]\nf := |u: int| x[u]\nf(1) + x[0]",
-        "func f(x: int) -> int { g := |u: int| x + u\ng(0) + x }\nf(3)",
-        "func f(x: int) -> int { g := |u: int| x + u\ng(1) + g(2) + x }\nf(3)",
+        "func f(x: int) -> int { g := |u: int| x + u\nreturn g(0) + x }\nf(3)",
+        "func f(x: int) -> int { g := |u: int| x + u\nreturn g(1) + g(2) + x }\nf(3)",
         "f := |u: int| u + 1\nf(1) + f(2)",
-        "func f(n: int) -> int { defer println(\"dd\")\nn }\nf(41)",
-        "outer := 99\nfunc f() -> int { outer }\nf() + outer",
+        "func f(n: int) -> int { defer println(\"dd\")\nreturn n }\nf(41)",
+        "outer := 99\nfunc f() -> int { return outer }\nf() + outer",
     ] {
         assert_same(src);
     }
     assert_eq!(
-        run_src("func f(x: [int]) -> [int] { x }\nf([1, 2, 3])[2]").unwrap(),
+        run_src("func f(x: [int]) -> [int] { return x }\nf([1, 2, 3])[2]").unwrap(),
         Value::Int(3)
     );
     assert_eq!(
@@ -740,9 +742,9 @@ fn vm_method_fallback_struct_copy_matches_tree_walker() {
     // fails; `run_vm_native` wires the real native table like `run_typed`.
     // VM/tree agreement for this shape is covered by the
     // `move_append_*` e2e + parity fixtures (full loader pipeline).
-    let src = "struct W { f: [int] }\nimpl W {\n func push(w: W, x: int) -> W {\n W{f: vec.push(w.f, x)}\n }\n}\nfunc go(s: W) -> int {\nt := s\nt = t.push(2)\nlen(t.f)\n}\ngo(W{f: [1]})\n";
+    let src = "struct W { f: [int] }\nimpl W {\n func push(w: W, x: int) -> W {\n return W{f: vec.push(w.f, x)}\n }\n}\nfunc go(s: W) -> int {\nt := s\nt = t.push(2)\nreturn len(t.f)\n}\ngo(W{f: [1]})\n";
     assert_eq!(run_vm_native(src).unwrap(), Value::Int(2));
-    let src2 = "struct W { f: [int] }\nimpl W {\n func push(w: W, x: int) -> W {\n W{f: vec.push(w.f, x)}\n }\n}\nt := W{f: [1]}\nt = t.push(2)\nlen(t.f)\n";
+    let src2 = "struct W { f: [int] }\nimpl W {\n func push(w: W, x: int) -> W {\n return W{f: vec.push(w.f, x)}\n }\n}\nt := W{f: [1]}\nt = t.push(2)\nlen(t.f)\n";
     assert_eq!(run_vm_native(src2).unwrap(), Value::Int(2));
 }
 
@@ -783,7 +785,7 @@ fn vm_compound_assign_matches_tree_walker() {
         "a := [10, 20, 30]\na[1] *= 2\na[1]",
         "a := [10, 20, 30]\na[0] += 1\na[2] -= 1\na[0] * 100 + a[2]",
         "x := 0\nx += 1\nx += 1\nx += 1\nx",
-        "struct Rng { s0: int }\nfunc change(r: Rng) -> int { r.s0 += 100\nr.s0 }\nrng := Rng{ s0: 10 }\nchange(rng) * 1000 + rng.s0",
+        "struct Rng { s0: int }\nfunc change(r: Rng) -> int { r.s0 += 100\nreturn r.s0 }\nrng := Rng{ s0: 10 }\nchange(rng) * 1000 + rng.s0",
     ] {
         assert_same(src);
     }
@@ -996,8 +998,8 @@ fn vm_generic_struct_erases_like_monomorphic() {
         chunk.code.iter().map(disc).collect()
     }
 
-    let generic = "struct Box<T> { v: T }\nfunc main() {\n b := Box{ v: 42 }\n b.v\n}";
-    let mono = "struct BoxInt { v: int }\nfunc main() {\n b := BoxInt{ v: 42 }\n b.v\n}";
+    let generic = "struct Box<T> { v: T }\nfunc main() {\n b := Box{ v: 42 }\n return b.v\n}";
+    let mono = "struct BoxInt { v: int }\nfunc main() {\n b := BoxInt{ v: 42 }\n return b.v\n}";
     assert_eq!(opcodes(generic), opcodes(mono));
 }
 
@@ -1008,20 +1010,20 @@ fn vm_default_args_match_tree_walker() {
     // (runtime fill from `FuncValue` defaults, which the per-program
     // compiler never saw).
     for src in [
-        "func g(a: int, b: int = 5) -> int { a + b }\ng(1)",
-        "func g(a: int, b: int = 5) -> int { a + b }\ng(1, 2)",
-        "func g(a: int, b: int = 5, c: int = 7) -> int { a + b + c }\ng(1)",
-        "func g(a: int, b: int = 5, c: int = 7) -> int { a + b + c }\ng(1, 2)",
+        "func g(a: int, b: int = 5) -> int { return a + b }\ng(1)",
+        "func g(a: int, b: int = 5) -> int { return a + b }\ng(1, 2)",
+        "func g(a: int, b: int = 5, c: int = 7) -> int { return a + b + c }\ng(1)",
+        "func g(a: int, b: int = 5, c: int = 7) -> int { return a + b + c }\ng(1, 2)",
     ] {
         assert_same(src);
     }
     assert_eq!(
-        run_src("func g(a: int, b: int = 5) -> int { a + b }\ng(1)").unwrap(),
+        run_src("func g(a: int, b: int = 5) -> int { return a + b }\ng(1)").unwrap(),
         Value::Int(6)
     );
     // Cross-program: `g` is defined in one program, called with an omitted
     // default in another (mirrors multi-file `import m` load order).
-    let dep = parse("func g(a: int, b: int = 5) -> int { a + b }");
+    let dep = parse("func g(a: int, b: int = 5) -> int { return a + b }");
     assert!(dep.errors.is_empty());
     let main = parse("g(1)");
     assert!(main.errors.is_empty());
@@ -1045,7 +1047,7 @@ fn vm_guarded_match_arm_miss_reloads_scrutinee() {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    let src = "func f(o: Option<int>) -> int {\n    limit := 10\n    match o {\n        .some(n) if limit > 5 => n,\n        .some(n) => 0,\n        .none => -1,\n    }\n}\n";
+    let src = "func f(o: Option<int>) -> int {\n    limit := 10\n    return match o {\n        .some(n) if limit > 5 => n,\n        .some(n) => 0,\n        .none => -1,\n    }\n}\n";
     let parsed = parse(src);
     assert!(
         parsed.errors.is_empty(),
@@ -1115,7 +1117,7 @@ fn vm_if_let_result_does_not_alias_later_slots() {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    let src = "func main() -> int {\n    b := .some(42)\n    x := if let .some(v) = b { v } else { 0 }\n    o := .some(7)\n    match o {\n        .some(n) => n,\n        _ => 0,\n    }\n}\n";
+    let src = "func main() -> int {\n    b := .some(42)\n    x := if let .some(v) = b { v } else { 0 }\n    o := .some(7)\n    return match o {\n        .some(n) => n,\n        _ => 0,\n    }\n}\n";
     let parsed = parse(src);
     assert!(
         parsed.errors.is_empty(),
@@ -1228,7 +1230,7 @@ fn vm_tree_agree_on_doc_shapes() {
         "struct D { k: str, a: [str], n: [int] }\nd := D{k: \"\", a: [], n: []}\nd.k = d.k + \"I\"\nd.a = vec.push(d.a, \"s\")\nd.a[0]",
         "struct D { t: [int] }\nd := D{t: [5, 6]}\nd.t[0] = 9\nd.t[0] + d.t[1]",
         "struct D { t: [int] }\nd := D{t: [5]}\nx := d.t[0]\nx",
-        "struct D { k: str }\nfunc cat(d: D, s: str) -> D {\n    d.k = d.k + s\n    d\n}\nd := D{k: \"a\"}\ne := cat(d, \"b\")\nd.k + \"/\" + e.k",
+        "struct D { k: str }\nfunc cat(d: D, s: str) -> D {\n    d.k = d.k + s\n    return d\n}\nd := D{k: \"a\"}\ne := cat(d, \"b\")\nd.k + \"/\" + e.k",
     ] {
         assert_same(src);
     }
@@ -1325,7 +1327,7 @@ fn vm_short_circuit_field_binop_stays_generic() {
     }
     // Side-effect order: the right side runs only when reached.
     assert_same(
-        "struct W { f: bool, n: int }\nfunc bump(w: W) -> bool {\n    w.n = w.n + 1\n    true\n}\ns := W{f: false, n: 0}\ns.f = s.f && bump(s)\ns.n",
+        "struct W { f: bool, n: int }\nfunc bump(w: W) -> bool {\n    w.n = w.n + 1\n    return true\n}\ns := W{f: false, n: 0}\ns.f = s.f && bump(s)\ns.n",
     );
 }
 
@@ -1347,19 +1349,19 @@ fn assert_same_deep(src: &'static str) {
 #[test]
 fn call_resolution_matches_tree_walker() {
     assert_same_deep(
-        "func fib(n: int) -> int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(10)",
+        "func fib(n: int) -> int { return if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(10)",
     );
     for src in [
         // Nested forward calls, result consumed by arithmetic.
-        "func dbl(n: int) -> int { n * 2 }\nfunc quad(n: int) -> int { dbl(dbl(n)) }\nquad(4)",
+        "func dbl(n: int) -> int { return n * 2 }\nfunc quad(n: int) -> int { return dbl(dbl(n)) }\nquad(4)",
         // Fewer arguments than parameters: the default must still be filled.
-        "func greet(name: str, prefix: str = \"Hi\") -> str { \"{prefix}, {name}\" }\ngreet(\"World\")",
+        "func greet(name: str, prefix: str = \"Hi\") -> str { return \"{prefix}, {name}\" }\ngreet(\"World\")",
         // More arguments than parameters: the same arity error, same text.
-        "func one(a: int) -> int { a }\none(1, 2)",
+        "func one(a: int) -> int { return a }\none(1, 2)",
         // A closure with no bytecode still runs through the walker.
         "f := |x: int| x + 1\nf(1)",
         // Same, reached by name from a function body.
-        "g := |x: int| x * 2\nfunc use() -> int { g(3) }\nuse()",
+        "g := |x: int| x * 2\nfunc use() -> int { return g(3) }\nuse()",
         // Undefined callee: the error must still name it.
         "func caller() -> int { missing() }\ncaller()",
     ] {
@@ -1392,6 +1394,8 @@ fn mk_chunked_func(env: &EnvLink, params: usize) -> FuncValue {
         env: env.clone(),
         chunk: Some(chunk),
         chunk_defaults: Vec::new(),
+        // Chunked test closures keep expression-body semantics.
+        tail_value: true,
     }
 }
 
@@ -1592,7 +1596,7 @@ fn range_loop_fast_path_matches_the_tree_walker() {
     // a function: at module scope a closure capturing the loop var is a
     // pre-existing gap, tracked separately.)
     assert_same(
-        "func f() -> int {\n    total := 0\n    for i in 0..3 {\n        g := |x: int| { x + i }\n        total = total + g(1)\n    }\n    total\n}\nf()",
+        "func f() -> int {\n    total := 0\n    for i in 0..3 {\n        g := |x: int| { x + i }\n        total = total + g(1)\n    }\n    return total\n}\nf()",
     );
 }
 
@@ -1733,16 +1737,16 @@ fn vm_variant_method_calls_resolve_statically() {
     // `main` returns its last expression, so `assert_same` compares the
     // unwrapped value, not a discarded statement.
     for src in [
-        "func main() {\n    a := .some(1)\n    a.unwrap_or(0)\n}",
-        "func main() {\n    a := .some(1)\n    a.unwrap()\n}",
-        "func main() {\n    a := .some(4)\n    a.expect(\"boom\")\n}",
-        "func main() {\n    a: Result<int, str> = .ok(2)\n    a.unwrap_or(3)\n}",
-        "func main() {\n    a: Result<int, str> = .err(\"x\")\n    a.unwrap_or(-1)\n}",
-        "func main() {\n    a: Result<int, str> = .ok(6)\n    a.expect(\"boom\")\n}",
+        "func main() {\n    a := .some(1)\n    return a.unwrap_or(0)\n}",
+        "func main() {\n    a := .some(1)\n    return a.unwrap()\n}",
+        "func main() {\n    a := .some(4)\n    return a.expect(\"boom\")\n}",
+        "func main() {\n    a: Result<int, str> = .ok(2)\n    return a.unwrap_or(3)\n}",
+        "func main() {\n    a: Result<int, str> = .err(\"x\")\n    return a.unwrap_or(-1)\n}",
+        "func main() {\n    a: Result<int, str> = .ok(6)\n    return a.expect(\"boom\")\n}",
         // Compound receiver: no slot to type, so the span map supplies it.
-        "func main() {\n    .some(7).unwrap_or(0)\n}",
+        "func main() {\n    return .some(7).unwrap_or(0)\n}",
         // Non-variant receivers keep their own namespaces.
-        "func main() {\n    [3, 1, 2].len()\n}",
+        "func main() {\n    return [3, 1, 2].len()\n}",
     ] {
         assert_same(src);
     }
@@ -1807,7 +1811,7 @@ fn vm_variant_method_op_shape() {
         .code
     }
 
-    let local_body = "func main() {\n    a := .some(1)\n    a.unwrap_or(0)\n}";
+    let local_body = "func main() {\n    a := .some(1)\n    return a.unwrap_or(0)\n}";
     let typed = ops(local_body, true);
     assert!(
         any_op(&typed, &|op| matches!(
@@ -1824,7 +1828,7 @@ fn vm_variant_method_op_shape() {
         "no dynamic method op should survive: {typed:?}"
     );
 
-    let chained = ops("func main() {\n    .some(7).unwrap_or(0)\n}", true);
+    let chained = ops("func main() {\n    return .some(7).unwrap_or(0)\n}", true);
     assert!(
         any_op(&chained, &|op| matches!(
             op,
@@ -1850,7 +1854,7 @@ fn vm_variant_method_op_shape() {
     );
 
     let shadowed = ops(
-        "func unwrap_or(v: Option<int>, d: int) -> int { d }\nfunc main() {\n    a := .some(1)\n    a.unwrap_or(0)\n}",
+        "func unwrap_or(v: Option<int>, d: int) -> int { return d }\nfunc main() {\n    a := .some(1)\n    return a.unwrap_or(0)\n}",
         true,
     );
     assert!(
@@ -1870,7 +1874,7 @@ fn vm_variant_method_op_shape() {
 fn vm_statement_if_in_loop_emits_no_value_dance() {
     use std::collections::{HashMap, HashSet};
 
-    let src = "func f(n: int) -> int {\n    s := 0\n    for i in 0..n {\n        if i < 5 {\n            s = s + 1\n        }\n    }\n    s\n}\nf(3)";
+    let src = "func f(n: int) -> int {\n    s := 0\n    for i in 0..n {\n        if i < 5 {\n            s = s + 1\n        }\n    }\n    return s\n}\nf(3)";
     let parsed = parse(src);
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     let (_res, types) = zz_checker::check_program_typed(
@@ -1942,14 +1946,26 @@ fn statement_if_shapes_match_the_tree_walker() {
         // Early exit inside a dead `if`.
         "n := 0\nfor i in 0..10 {\n    if i == 5 {\n        break\n    }\n    n = n + i\n}\nn",
         // `if` in value position keeps the value-producing shape.
-        "func f(n: int) -> int {\n    if n < 3 { 1 } else { 2 }\n}\nf(1) + f(9)",
+        "func f(n: int) -> int {\n    return if n < 3 { 1 } else { 2 }\n}\nf(1) + f(9)",
         // `if` as the returned tail of a function.
-        "func f(n: int) -> int {\n    if n < 2 {\n        return 1\n    }\n    2\n}\nf(1) + f(5)",
+        "func f(n: int) -> int {\n    if n < 2 {\n        return 1\n    }\n    return 2\n}\nf(1) + f(5)",
         // Dead `if` at module scope.
         "a := 0\nif true {\n    a = a + 1\n    a = a + 2\n}\na",
     ] {
         assert_same(src);
     }
+}
+
+/// A named body ending in a statement-shaped `if` (both arms unit) still
+/// owns its locals: the trailing value is dead, so the block cleanup must
+/// drop them without assuming a result value was pushed. Regression: the
+/// frame fell through with `PopN` one value too deep
+/// ("block cleanup drops 3 values from a 2-deep stack").
+#[test]
+fn named_body_ending_in_if_statement_settles_locals() {
+    assert_same(
+        "func main() {\n    t := true\n    f := false\n    if t {\n        println(1)\n    }\n    if f {\n        println(999)\n    } else {\n        println(2)\n    }\n}",
+    );
 }
 
 /// Module-scope loop variables captured by a closure must bind in the

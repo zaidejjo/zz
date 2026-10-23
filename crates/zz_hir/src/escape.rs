@@ -75,7 +75,7 @@ pub fn analyze(tp: &TypedProgram) -> EscapeResult {
                     func_name: &fname,
                     escaped_names: captured,
                 };
-                analyze_block_impl(body, tp, &mut ctx, &mut result, true);
+                analyze_block_impl(body, tp, &mut ctx, &mut result);
                 // Propagate escaping to initializer expressions of escaped variables.
                 propagate_escaped(body, &ctx.escaped_names, tp, ctx.func_name, &mut result);
             }
@@ -126,42 +126,17 @@ struct FuncCtx<'a> {
     escaped_names: HashSet<String>,
 }
 
-/// Analyze a block's statements. When `is_func_body` is true, the last
-/// expression is treated as an implicit return (tail expression).
+/// Analyze a block's statements. Named functions have no tail value (a
+/// value leaves only through `return`, which `analyze_stmt` handles), so
+/// every statement is analyzed in discard position.
 fn analyze_block_impl(
     block: &crate::Block,
     tp: &TypedProgram,
     ctx: &mut FuncCtx<'_>,
     result: &mut EscapeResult,
-    is_func_body: bool,
 ) {
-    let n = block.stmts.len();
-    for (i, stmt) in block.stmts.iter().enumerate() {
-        let is_tail = is_func_body && i == n - 1;
-        if is_tail {
-            if let Stmt::Expr(e) = stmt {
-                // Tail expression = implicit return.
-                mark_escaping_recursive(e, tp, ctx.func_name, result);
-                match e {
-                    Expr::Ident { name, .. } => {
-                        ctx.escaped_names.insert(name.clone());
-                    }
-                    Expr::Path { parts, .. } => {
-                        if let Some(first) = parts.first() {
-                            ctx.escaped_names.insert(first.clone());
-                        }
-                    }
-                    _ => {}
-                }
-                // Still analyze sub-expressions in the tail.
-                analyze_stmt(stmt, tp, ctx, result);
-            } else {
-                // Non-expression tail (e.g., for loop) — analyze normally.
-                analyze_stmt(stmt, tp, ctx, result);
-            }
-        } else {
-            analyze_stmt(stmt, tp, ctx, result);
-        }
+    for stmt in &block.stmts {
+        analyze_stmt(stmt, tp, ctx, result);
     }
 }
 
@@ -171,7 +146,7 @@ fn analyze_block(
     ctx: &mut FuncCtx<'_>,
     result: &mut EscapeResult,
 ) {
-    analyze_block_impl(block, tp, ctx, result, false);
+    analyze_block_impl(block, tp, ctx, result);
 }
 
 fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut EscapeResult) {
@@ -679,7 +654,7 @@ func main() {
         let src = r#"
 func make() -> array {
     arr := [1, 2, 3]
-    arr
+    return arr
 }
 func main() {
     x := make()

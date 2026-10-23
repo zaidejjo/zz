@@ -659,14 +659,14 @@ func fit(cur_w: int, cur_h: int, want_w: int, want_h: int) -> float {
     if sy < sx {
         s = sy
     }
-    s
+    return s
 }
 func pick(a: int, b: int, cond: bool) -> int {
     x := a
     if cond {
         x = b
     }
-    x
+    return x
 }
 println(fit(640, 480, 320, 240))
 println(fit(640, 480, 200, 200))
@@ -704,10 +704,10 @@ if x > 5 {
 fn native_func_calls_match_vm() {
     let src = r#"
 func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 func double(x: int) -> int {
-    x * 2
+    return x * 2
 }
 println(add(2, 3))
 println(double(add(1, 4)))
@@ -720,7 +720,7 @@ println(double(add(1, 4)))
 fn native_recursion_matches_vm() {
     let src = r#"
 func fib(n: int) -> int {
-    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+    return if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
 }
 println(fib(10))
 "#;
@@ -918,8 +918,8 @@ func main() {
 #[test]
 fn native_used_function_kept_unused_pruned() {
     let src = r#"
-func used(x: int) -> int { x + 1 }
-func unused(x: int) -> int { x * 10 }
+func used(x: int) -> int { return x + 1 }
+func unused(x: int) -> int { return x * 10 }
 println(used(1))
 "#;
     let (pruned, reach) = build_reachable(src);
@@ -1036,7 +1036,7 @@ func make_counter() {
     count := 0
     inc := |d| { count = count + d; count }
     inc(5)
-    inc(3)
+    return inc(3)
 }
 func nested() {
     x := 1
@@ -1045,14 +1045,14 @@ func nested() {
         inner := |b| x + y + b
         inner(10)
     }
-    mid(100)
+    return mid(100)
 }
 func late() {
     a := 10
     add_a := |x| x + a
     r1 := add_a(5)
     a = 100
-    r1 + add_a(5)
+    return r1 + add_a(5)
 }
 println(make_counter())
 println(nested())
@@ -1396,7 +1396,7 @@ func touch(d: db) {
 }
 
 func open_db() -> db {
-    sqlz.open(":memory:")
+    return sqlz.open(":memory:")
 }
 
 func main() {
@@ -1437,7 +1437,7 @@ func main() {
 #[test]
 fn generated_c_contains_arena_in_all_functions() {
     let src = r#"
-func helper(x: int) -> int { x + 1 }
+func helper(x: int) -> int { return x + 1 }
 func main() {
     println(helper(41))
 }
@@ -1565,7 +1565,7 @@ fn native_first_class_func_ref() {
     // behavior by design).
     let src = r#"
 func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 func main() {
     f := add
@@ -1588,10 +1588,10 @@ fn native_indexed_struct_method_receiver() {
 struct Box { v: int }
 impl Box {
     func inc(self, n: int) -> Box {
-        Box{ v: self.v + n }
+        return Box{ v: self.v + n }
     }
     func get(self) -> int {
-        self.v
+        return self.v
     }
 }
 func main() {
@@ -2149,7 +2149,7 @@ func next(r: Rng) -> (int, Rng) {
     return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1, s2: r.s2, s3: r.s3 })
 }
 func mid(r: Rng) -> (int, Rng) {
-    next(r)
+    return next(r)
 }
 func main() {
     r := Rng{ s0: 0, s1: 0, s2: 0, s3: 0 }

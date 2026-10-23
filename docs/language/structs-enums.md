@@ -21,7 +21,7 @@ struct Base { id: int, name: str }
 struct User { Base, age: int }
 
 impl Base {
-    func area(self) -> int { self.id * 2 }
+    func area(self) -> int { return self.id * 2 }
 }
 
 u := User{ id: 1, name: "Ada", age: 36 }
@@ -40,7 +40,7 @@ of one subtree is ambiguous and rejected.
 struct Box<T> { v: T }
 
 impl Box<T> {
-    func get(self) -> T { self.v }
+    func get(self) -> T { return self.v }
 }
 
 b := Box{ v: 42 }  // Box<int>, inferred
@@ -101,9 +101,9 @@ Both forms stay reachable, so a same-named pair can coexist:
 
 ```zz
 struct W { v: int }
-func get(w: W) -> str { "free" }
+func get(w: W) -> str { return "free" }
 impl W {
-    func get(self) -> str { "method" }
+    func get(self) -> str { return "method" }
 }
 
 w := W{ v: 1 }

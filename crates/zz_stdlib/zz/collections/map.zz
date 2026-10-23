@@ -18,7 +18,7 @@ func map.has(d: {str: int}, key: str) -> bool {
             return true
         }
     }
-    false
+    return false
 }
 
 func map.get_or(d: {str: int}, key: str, default: int) -> int {
@@ -27,7 +27,7 @@ func map.get_or(d: {str: int}, key: str, default: int) -> int {
             return v
         }
     }
-    default
+    return default
 }
 
 func map.get_str(d: {str: str}, key: str, default: str) -> str {
@@ -36,7 +36,7 @@ func map.get_str(d: {str: str}, key: str, default: str) -> str {
             return v
         }
     }
-    default
+    return default
 }
 
 // ── Projections ──────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ func map.keys(d: {str: int}) -> [str] {
     for k, v in d {
         out = vec.push(out, k)
     }
-    out
+    return out
 }
 
 func map.keys_str(d: {str: str}) -> [str] {
@@ -54,7 +54,7 @@ func map.keys_str(d: {str: str}) -> [str] {
     for k, v in d {
         out = vec.push(out, k)
     }
-    out
+    return out
 }
 
 func map.values(d: {str: int}) -> [int] {
@@ -62,7 +62,7 @@ func map.values(d: {str: int}) -> [int] {
     for k, v in d {
         out = vec.push(out, v)
     }
-    out
+    return out
 }
 
 func map.values_str(d: {str: str}) -> [str] {
@@ -70,15 +70,15 @@ func map.values_str(d: {str: str}) -> [str] {
     for k, v in d {
         out = vec.push(out, v)
     }
-    out
+    return out
 }
 
 func map.len(d: {str: int}) -> int {
-    len(d)
+    return len(d)
 }
 
 func map.is_empty(d: {str: int}) -> bool {
-    len(d) == 0
+    return len(d) == 0
 }
 
 // ── Transforms ───────────────────────────────────────────────────────────
@@ -88,7 +88,7 @@ func map.merge(a: {str: int}, b: {str: int}) -> {str: int} {
     for k, v in b {
         out[k] = v
     }
-    out
+    return out
 }
 
 func map.merge_str(a: {str: str}, b: {str: str}) -> {str: str} {
@@ -96,7 +96,7 @@ func map.merge_str(a: {str: str}, b: {str: str}) -> {str: str} {
     for k, v in b {
         out[k] = v
     }
-    out
+    return out
 }
 
 func map.remove(d: {str: int}, key: str) -> {str: int} {
@@ -106,5 +106,5 @@ func map.remove(d: {str: int}, key: str) -> {str: int} {
             out[k] = v
         }
     }
-    out
+    return out
 }

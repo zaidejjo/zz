@@ -1864,7 +1864,7 @@ impl Lowerer {
         };
         let val = match &block_body {
             Some(b) => {
-                self.emit_func_block(b, &mut names, &mut body_out);
+                self.emit_func_block(b, &mut names, &mut body_out, true);
                 o.push_str(&body_out);
                 // Defer runner lands before the tail returns below.
                 String::new()
@@ -2910,7 +2910,7 @@ impl Lowerer {
                 // bodies so that __tail is preserved (emit_block truncates it).
                 let mut body_out = String::new();
                 let body_val = if let Expr::Block(b) = body.as_ref() {
-                    self.emit_func_block(b, names, &mut body_out);
+                    self.emit_func_block(b, names, &mut body_out, true);
                     if let Some((tmp, _)) = names.stack.get("__tail").and_then(|s| s.last()) {
                         tmp.clone()
                     } else {

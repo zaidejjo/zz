@@ -57,7 +57,7 @@ func main() -> Result<int, str> {
     println(json.as_str(json.get(data, "name")?))
     println(json.as_int(json.get(data, "age")?))
     println(json.stringify({"name": "Bo", "age": 12})?)
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -89,10 +89,10 @@ Pure ZZ, no engine support. `(seed, index)` pairs replay exactly.
 import std.property
 
 func gen_small(seed: int, i: int) -> int {
-    property.int_in(seed, i, 0, 10)
+    return property.int_in(seed, i, 0, 10)
 }
 
-func small(x: int) -> bool { x < 100 }
+func small(x: int) -> bool { return x < 100 }
 
 property.check(gen_small, property.shrink_int, small, 200, 7)
 property.for_all_int(0, 10, small, 200, 7)

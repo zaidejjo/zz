@@ -12,7 +12,7 @@ zz check src/ | zz fix src/ | zz fmt src/ | zz test | zz bench
 ```zz
 x := 42
 pi: float = 3.14
-func add(a: int, b: int) -> int { a + b }
+func add(a: int, b: int) -> int { return a + b }
 f := |x: int| x * 2
 ```
 
