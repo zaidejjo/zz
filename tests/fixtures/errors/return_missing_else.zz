@@ -1,6 +1,6 @@
 // features: bool-logic, comparison, error-case, func-call, if-else, print, return
-// E2E: a missing `else` means the fall-through path yields unit,
-// which a non-unit function must reject.
+// E2E: named functions need an explicit `return` on every path; a missing
+// `else` falls through with unit, which a non-unit function must reject.
 func f(c: bool) -> int {
     if c {
         return 1

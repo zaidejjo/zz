@@ -1897,6 +1897,8 @@ struct FuncSnapshot {
     chunk: Option<Arc<Chunk>>,
     chunk_defaults: Vec<Option<Arc<Chunk>>>,
     env_snapshot: HashMap<String, Value>,
+    /// Named-function flag carried across threads (see `FuncValue`).
+    tail_value: bool,
 }
 
 impl FuncSnapshot {
@@ -1913,6 +1915,7 @@ impl FuncSnapshot {
             env,
             chunk: self.chunk.clone(),
             chunk_defaults: self.chunk_defaults.clone(),
+            tail_value: self.tail_value,
         }))
     }
 }
@@ -1996,6 +1999,7 @@ fn snapshot_func_scoped(v: &Value, interp: &Interp) -> Option<FuncSnapshot> {
                 chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
                 env_snapshot,
+                tail_value: fv.tail_value,
             })
         }
         _ => None,

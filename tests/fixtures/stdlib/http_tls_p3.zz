@@ -28,5 +28,5 @@ func main() -> Result<int, str> {
     assert(res.text() == "tls-ok")
     println("hsts: {res.headers()["strict-transport-security"]}")
     println("http_tls_p3_ok")
-    .ok(0)
+    return .ok(0)
 }

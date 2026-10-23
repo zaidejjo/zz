@@ -12,7 +12,7 @@ func shadow_apply(shadow_target: func(int) -> int, x: int) -> int {
     g := |y: int| {
         shadow_target(y) + 1
     }
-    g(x)
+    return g(x)
 }
 
 func shadow_loop(n: int) -> int {

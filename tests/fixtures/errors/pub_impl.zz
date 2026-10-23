@@ -3,5 +3,5 @@
 struct Point { x: int, y: int }
 
 pub impl Point {
-    func dist(self) -> int { self.x }
+    func dist(self) -> int { return self.x }
 }

@@ -1131,7 +1131,7 @@ fn e2e_eval_list_comprehension() {
 #[test]
 fn e2e_eval_default_params() {
     let (exit, stdout, _) =
-        run_zz_eval("func greet(name: str, greeting: str = \"Hello\") -> str { \"{greeting}, {name}\" }; greet(\"ZZ\")");
+        run_zz_eval("func greet(name: str, greeting: str = \"Hello\") -> str { return \"{greeting}, {name}\" }; greet(\"ZZ\")");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "Hello, ZZ");
 }
@@ -1614,7 +1614,7 @@ fn write_package_map_project() -> (PathBuf, PathBuf, PathBuf) {
     .unwrap();
     std::fs::write(
         dir.join("src/math.zz"),
-        "pub func add(a: int, b: int) -> int { a + b }\n",
+        "pub func add(a: int, b: int) -> int { return a + b }\n",
     )
     .unwrap();
     let test_file = dir.join("tests/math_test.zz");

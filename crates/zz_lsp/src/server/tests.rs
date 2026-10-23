@@ -634,7 +634,7 @@ async fn goto_dep_path_jumps_to_package_entry() {
     .unwrap();
     std::fs::write(
         dir.join("vendor/tiny/src/tiny.zz"),
-        "pub func shout(name: str) -> str {\n    \"Hey {name}!\"\n}\n",
+        "pub func shout(name: str) -> str {\n    return \"Hey {name}!\"\n}\n",
     )
     .unwrap();
     state.set_root(dir.clone());

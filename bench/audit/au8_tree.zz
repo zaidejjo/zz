@@ -10,7 +10,7 @@ func t(n: int) -> int {
     left := task.spawn(|_| { t(n - 1) })
     right := t(n - 1)
     a: int = task.join(left)
-    a + right
+    return a + right
 }
 
 func main() {

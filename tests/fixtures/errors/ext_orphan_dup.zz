@@ -2,12 +2,12 @@
 // Duplicate extension method for the same type is a compile error (orphan rule).
 impl str {
     func shout(self) -> str {
-        self.to_upper()
+        return self.to_upper()
     }
 }
 
 impl str {
     func shout(self) -> str {
-        self
+        return self
     }
 }

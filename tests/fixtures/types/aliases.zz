@@ -10,7 +10,7 @@ struct Point { x: int, y: int }
 type Points = [Point]
 
 func first<T>(p: Pair<T>) -> T {
-    p[0]
+    return p[0]
 }
 
 func main() {

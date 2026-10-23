@@ -17,7 +17,7 @@ func ordcall_make(n: int) -> OrdR {
 }
 
 func ordcall_depth(v: OrdR) -> int {
-    match v {
+    return match v {
         .Null => 0
         .Int(_) => 0
         .List(xs) => {

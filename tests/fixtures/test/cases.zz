@@ -2,7 +2,7 @@
 // E2E: Parameterized test cases expand into individual tests
 
 func double(x: int) -> int {
-    x + x
+    return x + x
 }
 
 @test(cases = [[1, 2], [2, 4], [3, 6], [10, 20]])
@@ -11,7 +11,7 @@ func test_double(x: int, expected: int) {
 }
 
 func is_positive(n: int) -> bool {
-    n > 0
+    return n > 0
 }
 
 @test(cases = [[1, true], [-1, false], [0, false]])

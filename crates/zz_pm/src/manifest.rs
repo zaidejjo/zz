@@ -854,7 +854,7 @@ impl Manifest {
     pub fn starter_content(template: Option<&str>) -> &'static str {
         match template {
             Some("lib") => {
-                "/// Add one to a number.\npub func add_one(n: int) -> int {\n    n + 1\n}\n"
+                "/// Add one to a number.\npub func add_one(n: int) -> int {\n    return n + 1\n}\n"
             }
             Some("web") => {
                 "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"

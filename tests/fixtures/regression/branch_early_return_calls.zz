@@ -3,10 +3,10 @@
 // must yield call values on both engines (sibling of
 // branch_call_returns, which covers if/else-shaped tails).
 func g(x: int) -> int {
-    x + 1
+    return x + 1
 }
 func h(x: int) -> int {
-    x + 2
+    return x + 2
 }
 func f2(c: bool, x: int) -> int {
     if c {

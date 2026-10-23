@@ -76,5 +76,5 @@ func main() -> Result<int, str> {
     println("rid: {r8.headers()["X-Request-Id"].len()}")
 
     println("http_middleware_p2_ok")
-    .ok(0)
+    return .ok(0)
 }

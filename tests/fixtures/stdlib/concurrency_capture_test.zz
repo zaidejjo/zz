@@ -17,7 +17,7 @@ func work(n: int) -> int {
     })
     r := 0
     r = task.join(h)
-    r
+    return r
 }
 
 func fan(n: int) -> int {
@@ -33,7 +33,7 @@ func fan(n: int) -> int {
         v = std.chan.recv(c)
         sum = sum + v
     }
-    sum
+    return sum
 }
 
 func main() {

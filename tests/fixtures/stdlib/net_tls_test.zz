@@ -19,7 +19,7 @@ import std.time
 // across user-function boundaries on both engines.
 func tls_echo(c: tls, line: str) -> Result<str, str> {
     c.write(line)?
-    c.read_line()
+    return c.read_line()
 }
 
 func main() -> Result<int, str> {
@@ -188,5 +188,5 @@ func main() -> Result<int, str> {
     cc.close()?
     sc.close()?
     println("net_tls_test_ok")
-    .ok(0)
+    return .ok(0)
 }

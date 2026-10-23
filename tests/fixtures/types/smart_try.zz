@@ -1,20 +1,20 @@
 // features: comparison, func-call, int-arith, locals, match, option-result, print, string-literal, try-question
 // E2E: prefix `try` sugar + `?` — same error type (identity conversion).
 func fetch() -> Result<int, str> {
-    .ok(42)
+    return .ok(42)
 }
 
 func load() -> Result<int, str> {
     // prefix form on a full postfix chain
     x := try fetch()
     y := fetch()?
-    .ok(x + y)
+    return .ok(x + y)
 }
 
 func chain() -> Result<int, str> {
     // `try a() + c`: try binds only `a()`, `+ c` runs after unwrap
     v := try fetch() + 8
-    .ok(v)
+    return .ok(v)
 }
 
 r := load()

@@ -17,7 +17,7 @@
 /// assert_eq(double(0), 999)
 /// ```
 func double(n: int) -> int {
-    n * 2
+    return n * 2
 }
 
 /// Always true.
@@ -39,7 +39,7 @@ func double(n: int) -> int {
 /// ```
 
 func truthy() -> bool {
-    true
+    return true
 }
 
 @test

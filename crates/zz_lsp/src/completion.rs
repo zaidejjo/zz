@@ -2357,7 +2357,7 @@ mod workspace_audit_tests {
         std::fs::write(path, content).unwrap();
     }
 
-    const LIB_SRC: &str = "pub pi := 3.14159\npub e := 2.71828\npub func circle(r: float) -> float {\n    pi * r * r\n}\npub func twice<T: Num>(x: T) -> T {\n    x * x\n}\npub struct Point {\n    x: float,\n    y: float,\n}\n";
+    const LIB_SRC: &str = "pub pi := 3.14159\npub e := 2.71828\npub func circle(r: float) -> float {\n    return pi * r * r\n}\npub func twice<T: Num>(x: T) -> T {\n    return x * x\n}\npub struct Point {\n    x: float,\n    y: float,\n}\n";
 
     /// Build <tmp>/proj with main_full.zz, main_sel.zz, math_utils/lib.zz.
     fn ws_project(tag: &str) -> std::path::PathBuf {
@@ -2585,7 +2585,11 @@ mod workspace_audit_tests {
         // A local `mid.zz` and a `mid` dependency share the label: one
         // item, local wins.
         let root = dep_project("dedupe", true);
-        std::fs::write(root.join("src/mid.zz"), "pub func x() -> int { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/mid.zz"),
+            "pub func x() -> int { return 1 }\n",
+        )
+        .unwrap();
         let labels = import_labels(&root, "import mi");
         let count = labels.iter().filter(|(l, _)| l == "mid").count();
         assert_eq!(count, 1, "single mid label: {labels:?}");
@@ -2613,7 +2617,7 @@ mod workspace_audit_tests {
         .unwrap();
         std::fs::write(
             root.join("vendor/tiny/src/tiny.zz"),
-            "pub func shout(name: str) -> str {\n    \"Hey {name}!\"\n}\n",
+            "pub func shout(name: str) -> str {\n    return \"Hey {name}!\"\n}\n",
         )
         .unwrap();
         root
@@ -2891,7 +2895,7 @@ mod workspace_audit_tests {
         );
         write(
             &root.join("vendor/table2/src/table2.zz"),
-            "pub func render(rows: [[str]]) -> str {\n    rows[0][0]\n}\n",
+            "pub func render(rows: [[str]]) -> str {\n    return rows[0][0]\n}\n",
         );
         let main = root.join("main.zz");
         write(

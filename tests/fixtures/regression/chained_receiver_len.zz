@@ -25,7 +25,7 @@ func opt() -> Option<str> {
 }
 
 func from_match(x: Option<str>) -> int {
-    match x {
+    return match x {
         .some(s) => s.len()
         .none => 0
     }

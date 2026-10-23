@@ -11,7 +11,7 @@ func pick(i: int) -> Result<int, str> {
 func build(i: int) -> Result<[int], str> {
     out := [7]
     out = vec.push(out, pick(i)?)
-    .ok(out)
+    return .ok(out)
 }
 
 r := build(1)

@@ -8,11 +8,11 @@ struct User { name: str, age: int }
 
 func bump(p: Pt) -> Pt {
     p.x = p.x + 1
-    p
+    return p
 }
 
 func greet(u: User) -> str {
-    "hi " + u.name
+    return "hi " + u.name
 }
 
 func main() {

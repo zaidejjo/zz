@@ -1615,7 +1615,11 @@ mod tests {
         let d = tmp();
         let dep_dir = d.join("dep_b");
         fs::create_dir_all(&dep_dir).unwrap();
-        fs::write(dep_dir.join("lib.zz"), "pub func hello() -> int { 42 }").unwrap();
+        fs::write(
+            dep_dir.join("lib.zz"),
+            "pub func hello() -> int { return 42 }",
+        )
+        .unwrap();
 
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
@@ -1644,7 +1648,11 @@ mod tests {
         assert!(!path_deps_stale(&manifest, Some(&lock), &d).unwrap());
 
         // Modify the path dep content
-        fs::write(dep_dir.join("lib.zz"), "pub func hello() -> int { 99 }").unwrap();
+        fs::write(
+            dep_dir.join("lib.zz"),
+            "pub func hello() -> int { return 99 }",
+        )
+        .unwrap();
 
         // Content changed → stale
         assert!(path_deps_stale(&manifest, Some(&lock), &d).unwrap());

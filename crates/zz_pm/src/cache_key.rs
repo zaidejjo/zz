@@ -605,7 +605,11 @@ mod tests {
         // Create a path dependency
         let dep_dir = d.join("dep_a");
         fs::create_dir_all(&dep_dir).unwrap();
-        fs::write(dep_dir.join("lib.zz"), "pub func helper() -> int { 42 }").unwrap();
+        fs::write(
+            dep_dir.join("lib.zz"),
+            "pub func helper() -> int { return 42 }",
+        )
+        .unwrap();
 
         // Create zz.toml with path dep
         fs::write(
@@ -639,7 +643,11 @@ dep_a = { path = "dep_a" }
         // Create a path dependency
         let dep_dir = d.join("dep_a");
         fs::create_dir_all(&dep_dir).unwrap();
-        fs::write(dep_dir.join("lib.zz"), "pub func helper() -> int { 42 }").unwrap();
+        fs::write(
+            dep_dir.join("lib.zz"),
+            "pub func helper() -> int { return 42 }",
+        )
+        .unwrap();
 
         // Create zz.toml
         fs::write(
@@ -660,7 +668,11 @@ dep_a = { path = "dep_a" }
         let deps_hash_1 = k1.dep_hashes.get("dep_a").cloned();
 
         // Modify the path dep content WITHOUT running zz install
-        fs::write(dep_dir.join("lib.zz"), "pub func helper() -> int { 99 }").unwrap();
+        fs::write(
+            dep_dir.join("lib.zz"),
+            "pub func helper() -> int { return 99 }",
+        )
+        .unwrap();
 
         // Compute cache key again — must detect the change
         let k2 = CacheKey::compute(&src, &content, 42, None, None).unwrap();
@@ -701,7 +713,11 @@ dep_a = { path = "dep_a" }
             "[package]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        fs::write(leaf.join("lib.zz"), "pub func helper() -> int { 42 }").unwrap();
+        fs::write(
+            leaf.join("lib.zz"),
+            "pub func helper() -> int { return 42 }",
+        )
+        .unwrap();
         fs::write(
             d.join("zz.toml"),
             "[package]\nname = \"test_project\"\nversion = \"0.1.0\"\n\n[dependencies]\nmid = { path = \"mid\" }\n",
@@ -721,7 +737,11 @@ dep_a = { path = "dep_a" }
             k1.dep_hashes.keys().collect::<Vec<_>>()
         );
 
-        fs::write(leaf.join("lib.zz"), "pub func helper() -> int { 99 }").unwrap();
+        fs::write(
+            leaf.join("lib.zz"),
+            "pub func helper() -> int { return 99 }",
+        )
+        .unwrap();
         let k2 = CacheKey::compute(&src, &content, 42, None, None).unwrap();
         assert_ne!(
             k1.dep_hashes.get("leaf"),
@@ -758,7 +778,11 @@ dep_a = { path = "dep_a" }
 
         let dep_dir = d.join("dep_a");
         fs::create_dir_all(&dep_dir).unwrap();
-        fs::write(dep_dir.join("lib.zz"), "pub func helper() -> int { 42 }").unwrap();
+        fs::write(
+            dep_dir.join("lib.zz"),
+            "pub func helper() -> int { return 42 }",
+        )
+        .unwrap();
 
         fs::write(
             d.join("zz.toml"),
@@ -876,9 +900,9 @@ dep_a = { path = "dep_a" }
     fn sibling_zz_edit_busts_key() {
         let d = tmp();
         fs::write(d.join("main.zz"), "func main() {}\n").unwrap();
-        fs::write(d.join("lib.zz"), "pub func a() -> int { 1 }\n").unwrap();
+        fs::write(d.join("lib.zz"), "pub func a() -> int { return 1 }\n").unwrap();
         let before = key_for(&d, "main.zz", "func main() {}\n");
-        fs::write(d.join("lib.zz"), "pub func a() -> int { 2 }\n").unwrap();
+        fs::write(d.join("lib.zz"), "pub func a() -> int { return 2 }\n").unwrap();
         let after = key_for(&d, "main.zz", "func main() {}\n");
         assert_ne!(before, after, "sibling module edit must invalidate");
     }
@@ -890,7 +914,11 @@ dep_a = { path = "dep_a" }
         fs::write(d.join("src").join("main.zz"), "func main() {}\n").unwrap();
         fs::write(d.join("src").join("util.zz"), "pub func u() {}\n").unwrap();
         let before = key_for(&d.join("src"), "main.zz", "func main() {}\n");
-        fs::write(d.join("src").join("util.zz"), "pub func u() -> int { 1 }\n").unwrap();
+        fs::write(
+            d.join("src").join("util.zz"),
+            "pub func u() -> int { return 1 }\n",
+        )
+        .unwrap();
         let after = key_for(&d.join("src"), "main.zz", "func main() {}\n");
         assert_ne!(before, after, "nested sibling edit must invalidate");
     }

@@ -7,7 +7,7 @@ func f3(p4: int) -> int {
     if p4 < 0 {
         return 94
     }
-    p4
+    return p4
 }
 acc5 := 0
 for _i6 in 0..11 {

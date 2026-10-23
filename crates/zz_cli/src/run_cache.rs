@@ -709,7 +709,7 @@ mod tests {
             let proj = write_proj(&[
                 ("zz.toml", "[package]\nname = \"fp\"\nversion = \"0.1.0\"\n"),
                 ("main.zz", "func main() {\n    println(1)\n}\n"),
-                ("lib/help.zz", "pub func aid() -> int { 1 }\n"),
+                ("lib/help.zz", "pub func aid() -> int { return 1 }\n"),
             ]);
             // Backdate mtimes past the granularity guard (fresh files
             // always take the canonical path — that is the safe default).
@@ -743,7 +743,7 @@ mod tests {
             assert_ne!(k1, k3, "edited source must bust the sidecar");
             // New file: must bust (set change invalidates).
             let newf = proj.join("lib").join("extra.zz");
-            std::fs::write(&newf, "pub func e() -> int { 2 }\n").unwrap();
+            std::fs::write(&newf, "pub func e() -> int { return 2 }\n").unwrap();
             let k4 = run_key(&entry, &[], None).unwrap();
             assert_ne!(k3, k4, "added file must bust the sidecar");
         });

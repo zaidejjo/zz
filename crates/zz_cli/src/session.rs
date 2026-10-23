@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn func_defined_in_one_snippet_called_in_next() {
         let mut s = Session::new("<test>");
-        let out = s.eval("func add(a: int, b: int) -> int { a + b }");
+        let out = s.eval("func add(a: int, b: int) -> int { return a + b }");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         let out2 = s.eval("add(2, 3)");
         assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn generic_func_called_across_snippets() {
         let mut s = Session::new("<test>");
-        let out = s.eval("func id<T>(x: T) -> T { x }");
+        let out = s.eval("func id<T>(x: T) -> T { return x }");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         let out2 = s.eval("id(7)");
         assert!(out2.errors.is_none(), "errors: {:?}", out2.errors);
@@ -576,7 +576,7 @@ mod tests {
     #[test]
     fn fstring_function_call() {
         let mut s = Session::new("<test>");
-        let out = s.eval("func dbl(n: int) -> int { n * 2 }\n\"double: {dbl(4)}\"");
+        let out = s.eval("func dbl(n: int) -> int { return n * 2 }\n\"double: {dbl(4)}\"");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "double: 8");
     }
@@ -704,7 +704,8 @@ mod tests {
     fn struct_func_cross_snippet() {
         let mut s = Session::new("<test>");
         s.eval("struct Point { x: int, y: int }");
-        let out = s.eval("func dist(p: Point) -> int { p.x + p.y }\ndist(Point{ x: 3, y: 4 })");
+        let out =
+            s.eval("func dist(p: Point) -> int { return p.x + p.y }\ndist(Point{ x: 3, y: 4 })");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "7");
     }
@@ -786,7 +787,7 @@ mod tests {
     #[test]
     fn pipe_in_session() {
         let mut s = Session::new("<test>");
-        s.eval("func inc(n: int) -> int { n + 1 }");
+        s.eval("func inc(n: int) -> int { return n + 1 }");
         let out = s.eval("5 |> inc");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "6");
@@ -823,7 +824,7 @@ mod tests {
     #[test]
     fn method_call_in_session() {
         let mut s = Session::new("<test>");
-        s.eval("struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }");
+        s.eval("struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { return p.x + p.y }");
         let out = s.eval("p := Point { x: 3, y: 4 }\np.dist()");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, "7");

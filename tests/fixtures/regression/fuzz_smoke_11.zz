@@ -8,7 +8,7 @@ func f5(p6: int) -> int {
     if p6 < 0 {
         return (59 / (((10) % 29) + 30))
     }
-    (-(-20) * (-18 * 43))
+    return (-(-20) * (-18 * 43))
 }
 cl7 := |d8: int| b2 + d8
 println(cl7(1))

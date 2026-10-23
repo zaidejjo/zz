@@ -7,16 +7,16 @@
 struct Pt { x: int, y: int }
 struct Outer { inner: Pt, tag: str }
 
-func origin() -> Pt { Pt{ x: 0, y: 0 } }
+func origin() -> Pt { return Pt{ x: 0, y: 0 } }
 
 func bump(p: Pt) -> Pt {
     p.x = p.x + 1
-    p
+    return p
 }
 
 func bump_by(p: Pt, n: int) -> Pt {
     p.x = p.x + n
-    p
+    return p
 }
 
 func main() {

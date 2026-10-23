@@ -30,11 +30,11 @@ func sum(t: Node) -> int {
     for k in t.kids {
         s = s + sum(k)
     }
-    s
+    return s
 }
 
 func depth(v: R) -> int {
-    match v {
+    return match v {
         .Null => 0
         .Str(_) => 0
         .Int(_) => 0

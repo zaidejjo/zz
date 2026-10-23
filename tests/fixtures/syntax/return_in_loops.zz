@@ -7,7 +7,7 @@ func find_in_for() -> int {
             return i
         }
     }
-    -1
+    return -1
 }
 
 func find_in_while() -> int {
@@ -18,7 +18,7 @@ func find_in_while() -> int {
         }
         x = x + 1
     }
-    -1
+    return -1
 }
 
 println(find_in_for())

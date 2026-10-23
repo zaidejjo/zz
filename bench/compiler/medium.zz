@@ -2,9 +2,9 @@
 struct Point { x: int, y: int }
 
 impl Point {
-    func sum(self) -> int { self.x + self.y }
+    func sum(self) -> int { return self.x + self.y }
     func moved(self, dx: int, dy: int) -> Point {
-        Point{ x: self.x + dx, y: self.y + dy }
+        return Point{ x: self.x + dx, y: self.y + dy }
     }
 }
 

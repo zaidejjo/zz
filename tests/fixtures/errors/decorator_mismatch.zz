@@ -1,10 +1,10 @@
 // features: comparison, decorators, error-case, func-call
 // E2E error: decorator signature incompatible with the decorated function.
 func bad(f: func(int) -> int) -> func(int) -> int {
-    f
+    return f
 }
 
 @bad
 func hello(name: str) -> str {
-    name
+    return name
 }

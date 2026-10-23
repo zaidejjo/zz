@@ -2981,7 +2981,7 @@ mod tests {
     #[test]
     fn check_ok_on_phase4_features() {
         let path = write_temp(
-            "scores := [10, 20, 30]\ny := scores[1]\nz := scores[1:3]\nfunc dbl(a: int, b: int) -> int { a * b }\nw := 5 |> dbl(3)\nt := typeof(w)\n",
+            "scores := [10, 20, 30]\ny := scores[1]\nz := scores[1:3]\nfunc dbl(a: int, b: int) -> int { return a * b }\nw := 5 |> dbl(3)\nt := typeof(w)\n",
         );
         let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_ok(), "expected ok, got {result:?}");

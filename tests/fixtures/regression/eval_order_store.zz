@@ -7,16 +7,16 @@
 log := []
 func rec(n: int) -> int {
     log = vec.push(log, n)
-    n
+    return n
 }
 func mkarr() {
     rec(1)
-    [10, 20, 30]
+    return [10, 20, 30]
 }
 struct P { x: int }
 func mkp() {
     rec(4)
-    P{x: 0}
+    return P{x: 0}
 }
 // plain index store: base(1), index(0), value(9)
 mkarr()[rec(0)] = rec(9)

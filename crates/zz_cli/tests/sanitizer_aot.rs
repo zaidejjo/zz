@@ -90,7 +90,7 @@ fn assert_no_reports(where_: &str, stderr: &str) {
 
 const FIB: &str = r#"
 func fib(n: int) -> int {
-    if n <= 1 {
+    return if n <= 1 {
         n
     } else {
         fib(n - 1) + fib(n - 2)
@@ -145,7 +145,7 @@ func main() {
 
 const TAK: &str = r#"
 func tak(x: int, y: int, z: int) -> int {
-    if y >= x {
+    return if y >= x {
         z
     } else {
         tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y))

@@ -827,7 +827,7 @@ mod tests {
         // Process-global like the outcome memo: unique path per test only
         // needs unique content (keys are content hashes).
         let canon = PathBuf::from(format!("/tmp/zz-unit-parsed-{}", std::process::id()));
-        let src = "pub func answer() -> int {\n 41\n}\n";
+        let src = "pub func answer() -> int {\n return 41\n}\n";
         let hash = source_hash(src);
         assert!(parsed_get(&canon, &hash).is_none(), "cold miss");
         let program = parse_program(src);
@@ -842,10 +842,10 @@ mod tests {
             "/tmp/zz-unit-parsed-sensitive-{}",
             std::process::id()
         ));
-        let program = parse_program("pub func v() -> int {\n 1\n}\n");
-        let h1 = source_hash("pub func v() -> int {\n 1\n}\n");
+        let program = parse_program("pub func v() -> int {\n return 1\n}\n");
+        let h1 = source_hash("pub func v() -> int {\n return 1\n}\n");
         parsed_insert(&canon, &h1, &program, 28);
-        let h2 = source_hash("pub func v() -> int {\n 2\n}\n");
+        let h2 = source_hash("pub func v() -> int {\n return 2\n}\n");
         assert!(
             parsed_get(&canon, &h2).is_none(),
             "edited content must miss"
@@ -888,7 +888,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
             dir.join("src").join("main.zz"),
-            b"pub func f() -> int { 1 }\n",
+            b"pub func f() -> int { return 1 }\n",
         )
         .unwrap();
         let calls = AtomicUsize::new(0);

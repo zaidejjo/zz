@@ -2,13 +2,13 @@
 // Regression: trailing call tails in if/else branches must yield
 // the call values on both engines (sibling of branch_call_returns).
 func g(x: int) -> int {
-    x + 1
+    return x + 1
 }
 func h(x: int) -> int {
-    x + 2
+    return x + 2
 }
 func f(c: bool, x: int) -> int {
-    if c {
+    return if c {
         g(x)
     } else {
         h(x)

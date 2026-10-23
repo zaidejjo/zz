@@ -12,7 +12,7 @@ func build(prefix: str, n: int) -> str {
         chunk := prefix + str(i) + ","
         out = out + chunk
     }
-    out
+    return out
 }
 
 func pick(c: bool, a: str, b: str) -> str {

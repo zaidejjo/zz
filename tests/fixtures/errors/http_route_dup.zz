@@ -7,5 +7,5 @@ func main() -> Result<int, str> {
     s = s.route("GET", "/users/:id", |_req| "ok")
     s = s.route("GET", "/users/:id", |_req| "dup")
     println("unreachable_ok")
-    .ok(0)
+    return .ok(0)
 }

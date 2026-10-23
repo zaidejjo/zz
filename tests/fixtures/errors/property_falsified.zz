@@ -3,7 +3,7 @@
 import std.property
 
 func too_big(x: int) -> bool {
-    x < 5
+    return x < 5
 }
 
 func main() {

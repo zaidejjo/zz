@@ -1,6 +1,6 @@
 // Repro battery: jump-heavy shapes with live array locals.
 func get_pair(ok: bool) -> Result<[int], str> {
-    if ok {
+    return if ok {
         .ok([640, 480])
     } else {
         .err("nope")
@@ -8,7 +8,7 @@ func get_pair(ok: bool) -> Result<[int], str> {
 }
 
 func dims_of(ok: bool) -> [int] {
-    match get_pair(ok) {
+    return match get_pair(ok) {
         .ok(v) => v,
         .err(e) => {
             fail("dims {e}")
@@ -25,7 +25,7 @@ func shape_guard(x: int) -> str {
         _ => 0,
     }
     println("guard {m} {r[1]} {s[1]}")
-    "guard-ok"
+    return "guard-ok"
 }
 
 func shape_nested() -> str {
@@ -41,7 +41,7 @@ func shape_nested() -> str {
         },
     }
     println("nested {m} {r[1]}")
-    "nested-ok"
+    return "nested-ok"
 }
 
 func shape_elvis(ok: bool) -> str {
@@ -52,7 +52,7 @@ func shape_elvis(ok: bool) -> str {
     }
     w := v + r[0]
     println("elvis {w} {r[1]}")
-    "elvis-ok"
+    return "elvis-ok"
 }
 
 func shape_ifexpr(x: int) -> str {
@@ -60,7 +60,7 @@ func shape_ifexpr(x: int) -> str {
     s := dims_of(true)
     v := if x > 0 { r[0] } else { s[0] }
     println("ifexpr {v} {r[1]} {s[1]}")
-    "ifexpr-ok"
+    return "ifexpr-ok"
 }
 
 func shape_while() -> str {
@@ -73,7 +73,7 @@ func shape_while() -> str {
         i = i + 1
     }
     println("while {total} {r[1]} {s[1]}")
-    "while-ok"
+    return "while-ok"
 }
 
 func shape_orchain(a: bool, b: bool) -> str {
@@ -82,7 +82,7 @@ func shape_orchain(a: bool, b: bool) -> str {
     ok := a || b
     assert(ok || r[0] == 640 || s[0] == 640)
     println("or {r[1]} {s[1]}")
-    "or-ok"
+    return "or-ok"
 }
 
 func main() {

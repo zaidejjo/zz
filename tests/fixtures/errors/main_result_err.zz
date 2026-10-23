@@ -2,5 +2,5 @@
 // `func main() -> Result<T, E>` failure path — Err prints to stderr, exit 1
 // (native propagates via zz_main_result_code, like the VM).
 func main() -> Result<int, str> {
-    .err("boom from main")
+    return .err("boom from main")
 }

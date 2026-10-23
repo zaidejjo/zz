@@ -3,7 +3,7 @@
 pub type Tokens = [str]
 
 pub func make() -> Tokens {
-    ["a", "b"]
+    return ["a", "b"]
 }
 
 pub struct Point { x: int, y: int }

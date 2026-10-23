@@ -14,7 +14,7 @@ func f(k: str, n: int) -> Result<int, E> {
             return .err(E{msg: "big"})
         }
     }
-    .ok(cur)
+    return .ok(cur)
 }
 r := f("array", 5)
 match r {

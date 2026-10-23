@@ -6,6 +6,15 @@
 func tail_decl() -> int {
     x := 1
     y := x + 2
+    return y
+}
+
+// Unit functions may still end in a declaration; this keeps the VM's
+// block-cleanup path (a trailing `:=` leaves slot storage) covered.
+
+func tail_decl_unit() {
+    x := 1
+    _y := x + 2
 }
 
 func block_tail() -> int {
@@ -13,7 +22,7 @@ func block_tail() -> int {
         a := 10
         b := a * 2
     }
-    v + 1
+    return v + 1
 }
 
 func loop_tail() -> int {
@@ -22,7 +31,7 @@ func loop_tail() -> int {
         total = total + i
         tmp := total * 10
     }
-    total
+    return total
 }
 
 func while_tail() -> int {
@@ -31,10 +40,11 @@ func while_tail() -> int {
         n = n + 1
         dbl := n * 2
     }
-    n
+    return n
 }
 
 func main() {
+    tail_decl_unit()
     assert_eq(tail_decl(), 3)
     assert_eq(block_tail(), 21)
     assert_eq(loop_tail(), 6)

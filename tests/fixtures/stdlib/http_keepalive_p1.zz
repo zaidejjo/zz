@@ -119,5 +119,5 @@ func main() -> Result<int, str> {
     }
 
     println("http_keepalive_p1_ok")
-    .ok(0)
+    return .ok(0)
 }
