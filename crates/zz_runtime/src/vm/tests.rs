@@ -947,6 +947,90 @@ fn vm_method_call_matches_tree_walker() {
     }
 }
 
+/// A struct receiver whose `impl` was compiled here and whose struct has no
+/// field of that name resolves to the path-call form `Type.method(recv, ...)`,
+/// which `CallPath` enters directly. Everything the compile-time proof cannot
+/// establish must keep the dynamic op — a wrong proof would change which
+/// function runs.
+#[test]
+fn struct_method_call_resolves_at_compile_time() {
+    use std::collections::{HashMap, HashSet};
+    use zz_checker::{StructSig, Type};
+
+    fn structs(fields: Vec<(&str, Type)>) -> HashMap<String, StructSig> {
+        let mut m = HashMap::new();
+        m.insert(
+            "C".to_string(),
+            StructSig {
+                generics: Vec::new(),
+                fields: fields
+                    .into_iter()
+                    .map(|(n, t)| (n.to_string(), t))
+                    .collect(),
+            },
+        );
+        m
+    }
+
+    fn ops_for(src: &str, structs: HashMap<String, StructSig>) -> Vec<Op> {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let (_res, types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        Compiler::compile_program_typed(
+            &parsed.program,
+            Arc::new(types),
+            structs,
+            HashMap::new(),
+            Arc::new(HashSet::new()),
+        )
+        .code
+    }
+
+    // Calls live in the enclosing function's chunk, not the top level.
+    fn resolved(ops: &[Op]) -> bool {
+        ops.iter().any(|op| match op {
+            Op::CallPath { joined, argc, .. } => joined == "C.add" && *argc == 2,
+            Op::MakeFunc { chunk, .. } => resolved(&chunk.code),
+            _ => false,
+        })
+    }
+
+    let src = "struct C { n: int }\nimpl C {\n func add(c: C, x: int) -> C {\n C{ n: c.n + x }\n }\n}\nfunc go() -> int {\n c := C{ n: 0 }\n c = c.add(2)\n c.n\n}\ngo()";
+    assert!(
+        resolved(&ops_for(src, structs(vec![("n", Type::Int)]))),
+        "plain struct receiver must compile to the resolved path call"
+    );
+    // A same-named field wins at run time: keep the dynamic op.
+    assert!(!resolved(&ops_for(
+        src,
+        structs(vec![("n", Type::Int), ("add", Type::Int)])
+    )));
+    // Embedded-shaped field: promotion could shadow the method.
+    assert!(!resolved(&ops_for(
+        src,
+        structs(vec![("n", Type::Int), ("add", Type::Named("add".into()))])
+    )));
+    // `impl` for another type: nothing proves `C.add` exists.
+    let other_impl = src.replace("impl C", "impl D");
+    assert!(!resolved(&ops_for(
+        &other_impl,
+        structs(vec![("n", Type::Int)])
+    )));
+    // Unknown struct (cross-module): no signature, no proof.
+    assert!(!resolved(&ops_for(src, HashMap::new())));
+}
+
 #[test]
 fn vm_tuple_ops_match_tree_walker() {
     for src in [
