@@ -103,6 +103,10 @@ pub struct Compiler {
     /// function bodies can normalize module-global references the same way
     /// the top level does.
     top_globals: std::collections::HashSet<String>,
+    /// `Type.method` names defined by an `impl` block in this compilation
+    /// unit. A struct-typed receiver can then be resolved at compile time
+    /// (see `resolved_method`) instead of through the dynamic call op.
+    impl_methods: std::collections::HashSet<String>,
 }
 
 enum JumpKind {
@@ -159,7 +163,26 @@ impl Compiler {
             in_db_query: false,
             move_take: None,
             top_globals: std::collections::HashSet::new(),
+            impl_methods: std::collections::HashSet::new(),
             type_scope: zz_checker::TOP_SCOPE.to_string(),
+        }
+    }
+
+    /// Record every `impl` method this program defines, before anything is
+    /// compiled: call sites may appear above the `impl` block (forward
+    /// references), and `Stmt::Impl` bodies are compiled in source order.
+    fn collect_impl_methods(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            let Stmt::Impl { name, methods, .. } = stmt else {
+                continue;
+            };
+            let type_name = name.join(".");
+            for method in methods {
+                if let Stmt::Func { name: mname, .. } = method {
+                    self.impl_methods
+                        .insert(format!("{type_name}.{}", mname.join(".")));
+                }
+            }
         }
     }
 
@@ -187,6 +210,7 @@ impl Compiler {
         let mut c = Compiler::new();
         c.is_main = true;
         c.native_names = native_names;
+        c.collect_impl_methods(&program.stmts);
         // Collect top-level declared names (post-rewrite, so namespaced).
         let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &program.stmts {
@@ -335,6 +359,7 @@ impl Compiler {
         c.structs = Some(structs);
         c.enums = Some(enums);
         c.native_names = Some(native_names);
+        c.collect_impl_methods(&program.stmts);
         // Collect top-level declared names (post-rewrite, so namespaced).
         let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &program.stmts {
@@ -687,6 +712,57 @@ impl Compiler {
             .as_ref()
             .filter(|natives| natives.contains(&dotted))
             .map(|_| dotted)
+    }
+
+    /// Statically resolved `Type.method` target for a method call, or `None`
+    /// to keep the dynamic op.
+    ///
+    /// `lookup_method_recv`'s order is: a field of that name, then a field
+    /// promoted from an embedded struct, then `Type.method`. A plain struct
+    /// receiver with neither of the first two — the struct has no field of
+    /// that name and no embedded-shaped field at all — plus an `impl`
+    /// compiled in this unit can therefore only reach `Type.method`. The call
+    /// then compiles as the path call `Type.method(recv, ...)`, which
+    /// `Op::CallPath` enters through `try_enter_direct_call`: no
+    /// `"Type.method"` key allocation, no `Value::Func` boxing, no generic
+    /// dispatch.
+    ///
+    /// Deliberately conservative — a wrong answer would change which function
+    /// runs — so it bails on anything it cannot prove: non-struct types,
+    /// unknown structs (cross-module), any embedded-shaped field, and any
+    /// `impl` that was not compiled in this unit.
+    fn resolved_method(
+        &self,
+        ty: Option<&zz_checker::Type>,
+        method: &str,
+    ) -> Option<(String, String)> {
+        let structs = self.structs.as_ref()?;
+        // A struct instance type is `Struct(name, args)`; the name is the
+        // same one `Op::MakeStruct`/`RegisterStruct` and `impl` blocks use.
+        let zz_checker::Type::Struct(type_name, _) = ty? else {
+            return None;
+        };
+        let sig = structs.get(type_name.as_str())?;
+        let shadowed = sig.fields.iter().any(|(fname, fty)| {
+            fname.as_str() == method
+                || match fty {
+                    // Runtime promotion (`is_embedded_value`) promotes a
+                    // field whose value's type name ends in the field name;
+                    // this is the static twin. Present at all = bail.
+                    zz_checker::Type::Struct(n, _) => {
+                        n.rsplit('.').next().unwrap_or(n.as_str()) == fname
+                    }
+                    _ => false,
+                }
+        });
+        if shadowed {
+            return None;
+        }
+        let joined = format!("{type_name}.{method}");
+        if !self.impl_methods.contains(&joined) {
+            return None;
+        }
+        Some((type_name.clone(), joined))
     }
 
     /// Receiver's checker type, preferring the slot table for named
@@ -3085,6 +3161,7 @@ impl Compiler {
         sub.native_names = self.native_names.clone();
         sub.func_info = self.func_info.clone();
         sub.enums = self.enums.clone();
+        sub.impl_methods = self.impl_methods.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_block_captured(block, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name))
@@ -3424,6 +3501,7 @@ impl Compiler {
         sub.native_names = self.native_names.clone();
         sub.func_info = self.func_info.clone();
         sub.enums = self.enums.clone();
+        sub.impl_methods = self.impl_methods.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_closure_captured(body, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name));
@@ -3890,28 +3968,41 @@ impl Compiler {
                         // take the static native form (see
                         // `variant_method_native`). Paths with field access
                         // (`a.b.unwrap_or(0)`) keep the dynamic op.
-                        let native = if parts.len() == 2
+                        let recv_ty = self.chunk.slot_types.get(slot).and_then(Option::as_ref);
+                        let static_form = parts.len() == 2
                             && named.is_empty()
                             && !is_range
-                            && !has_named_or_defaults
-                        {
-                            self.chunk
-                                .slot_types
-                                .get(slot)
-                                .and_then(Option::as_ref)
+                            && !has_named_or_defaults;
+                        let native = if static_form {
+                            recv_ty
                                 .and_then(Self::variant_ns)
                                 .and_then(|ns| self.variant_method_native(ns, &parts[1]))
                         } else {
                             None
                         };
-                        match native {
-                            Some(native) => self.emit(Op::CallNative {
+                        // Struct receiver + provable `Type.method` target:
+                        // take the path-call frame entry (see
+                        // `resolved_method`).
+                        let resolved = if static_form {
+                            self.resolved_method(recv_ty, &parts[1])
+                        } else {
+                            None
+                        };
+                        match (native, resolved) {
+                            (Some(native), _) => self.emit(Op::CallNative {
                                 name: native,
                                 // Receiver first, then the call's arguments.
                                 argc: (args.len() + 1) as u16,
                                 span: *span,
                             }),
-                            None => self.emit(Op::CallMethod {
+                            (None, Some((type_name, joined))) => self.emit(Op::CallPath {
+                                parts: vec![type_name, parts[1].clone()],
+                                joined,
+                                argc: (args.len() + 1) as u16,
+                                span: *span,
+                                pspan: *pspan,
+                            }),
+                            (None, None) => self.emit(Op::CallMethod {
                                 name: parts.last().unwrap().clone(),
                                 argc: argc as u16,
                                 span: *span,
@@ -4065,15 +4156,32 @@ impl Compiler {
                     } else {
                         None
                     };
-                    match native {
-                        Some(native) => self.emit(Op::CallNative {
+                    // Same compile-time proof as the path form, restricted to
+                    // identifier receivers: their type comes from the slot
+                    // table (or, for a global, its recorded span type), not
+                    // from an inferred compound expression.
+                    let resolved = if named.is_empty() && matches!(obj.as_ref(), Expr::Ident { .. })
+                    {
+                        self.resolved_method(self.receiver_type(obj), name)
+                    } else {
+                        None
+                    };
+                    match (native, resolved) {
+                        (Some(native), _) => self.emit(Op::CallNative {
                             name: native,
                             // Receives the receiver as its first argument;
                             // `CallNative` pops the whole list.
                             argc: (args.len() + 1) as u16,
                             span: *span,
                         }),
-                        None => self.emit(Op::CallMethod {
+                        (None, Some((type_name, joined))) => self.emit(Op::CallPath {
+                            parts: vec![type_name, name.clone()],
+                            joined,
+                            argc: (args.len() + 1) as u16,
+                            span: *span,
+                            pspan: obj.span(),
+                        }),
+                        (None, None) => self.emit(Op::CallMethod {
                             name: name.clone(),
                             argc: (args.len() + named.len()) as u16,
                             span: *span,
