@@ -124,3 +124,77 @@ Works for stdlib too: `"hi".to_upper()`, `[3, 1, 2].sort()`, `server.route(...)`
 - Integer overflow wraps (`9223372036854775807 + 1` is min-int). Division by zero errors.
 
 Deep reference: [syntax.md](../syntax.md) sections Declarations, Functions, Expressions.
+
+## Explicit Return Rules
+
+Named functions (`func`, `@test`, `impl` methods) return a value **only**
+through `return`. The body's trailing expression is discarded — it does
+not propagate as a return value.
+
+### When `return` is required
+
+| Function signature | Body ends with | Result |
+|---|---|---|
+| `func f() -> int { ... }` | `return 1` | ✅ Returns `int` |
+| `func f() -> int { 1 }` | `1` (trailing) | ❌ Error: missing `return` |
+| `func f() -> int { if c { 1 } }` | `if` without `else` | ❌ Error: missing `return` |
+| `func f() -> unit { 1 }` | `1` (trailing) | ✅ Falls through to `unit` |
+| `func f() { 1 }` (unannotated) | `1` (trailing) | ✅ Infers `unit` |
+| `|x| x * 2` (closure) | `x * 2` (trailing) | ✅ Implicit tail |
+
+### Missing-return diagnostic
+
+When a non-`unit` function can fall through without `return`, the checker
+emits an error:
+
+```
+error: function returns `int` but its body can fall through; add `return `
+  --> file.zz:3:5
+   |
+ 3 |     if true { 1 }
+   |     ^^^^^^^^^^^^^
+   |
+   = help: named functions return a value only through `return`; the last expression is discarded
+```
+
+A fixit `"return "` is offered (zero-width insertion at the start of the
+tail expression). Accepting it rewrites:
+
+```zz
+// ERROR: missing return
+// Before:
+func f() -> int {
+    if true { 1 }
+}
+
+// After:
+func g() -> int {
+    return if true { 1 }
+}
+```
+
+### Fixit withheld (message only, no insertion)
+
+The fixit is **not** offered when inserting `return ` would trade one
+error for another:
+
+- **`if` without `else`**: `return if c { 1 }` still yields `unit` on the
+  missing-else arm — the fixit would not resolve the error.
+- **`match` expressions**: arm bodies are checked individually; a blanket
+  `return ` prefix doesn't apply uniformly.
+- **`let` bindings whose name is used later**: the binding may be
+  intentional shadowing, not a fall-through value.
+- **`unit`-typed tails** (e.g. `println(...)`): the value is already
+  `unit`, so `return ` adds nothing.
+
+### Closures and block expressions
+
+Closures and block expressions keep their implicit tail — they are not
+affected by the explicit-return rule:
+
+```zz
+let double = |x: int| x * 2;        // implicit tail: returns int
+let result = { let x = 5; x + 3 };   // block: returns 8
+```
+
+Only `func` / `@test` / `impl` methods require explicit `return`.
