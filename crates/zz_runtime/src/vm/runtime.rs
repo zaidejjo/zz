@@ -2177,6 +2177,36 @@ impl Vm {
                     set_index(&mut ov, &iv, new, *span)?;
                     self.stack.push(ov);
                 }
+                Op::CompoundIndexTake { home, op, span } => {
+                    // Stack layout is [index, rhs] (the base lives in the
+                    // home), so the take window holds no user code.
+                    let rhs = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let Some(mut ov) = Self::take_home(self, interp, home) else {
+                        self.stack.push(iv);
+                        self.stack.push(rhs);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // Any failure before the write leaves the container
+                    // untouched, so restoring it puts back exactly the pre-op
+                    // state; a successful write is restored too.
+                    let cur = get_index(&ov, &iv, *span);
+                    let res = cur.and_then(|cur| {
+                        let new = eval_binary(*op, cur, rhs, *span)?;
+                        set_index(&mut ov, &iv, new, *span)
+                    });
+                    Self::restore_home(self, interp, home, ov);
+                    res?;
+                }
                 Op::SliceOp(span) => {
                     let e = self.stack.pop().unwrap();
                     let s = self.stack.pop().unwrap();

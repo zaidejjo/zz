@@ -139,6 +139,14 @@ pub enum Op {
         home_slot: Option<u16>,
         home_var: Option<StrId>,
     },
+    /// Pop an index and a right-hand side; take the home container out, read
+    /// `home[index]`, apply `op`, write the result back, store the home.
+    /// Fused `a[i] += v`.
+    CompoundIndexTake {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        op: BinOp,
+    },
     /// Pop an index; take the home, clone one element of the field,
     /// restore the home, push the element.
     GetFieldIndex {
@@ -446,6 +454,7 @@ impl Op {
             Op::SetFieldTake { .. } => 75,
             Op::SetFieldIndexTake { .. } => 76,
             Op::StoreIndexTake { .. } => 87,
+            Op::CompoundIndexTake { .. } => 88,
             Op::FieldBinopTake { .. } => 77,
             Op::GetFieldIndex { .. } => 78,
             Op::LenField { .. } => 79,
@@ -540,6 +549,7 @@ impl Op {
             Op::SetFieldTake { .. } => "setfieldtake",
             Op::SetFieldIndexTake { .. } => "setfieldindextake",
             Op::StoreIndexTake { .. } => "storeindextake",
+            Op::CompoundIndexTake { .. } => "compoundindextake",
             Op::FieldBinopTake { .. } => "fieldbinoptake",
             Op::GetFieldIndex { .. } => "getfieldindex",
             Op::LenField { .. } => "lenfield",

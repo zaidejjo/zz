@@ -30,6 +30,7 @@ fn effect(op: &Op) -> i64 {
         Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => -1,
         Op::SetFieldIndexTake { .. } => -2,
         Op::StoreIndexTake { .. } => -2,
+        Op::CompoundIndexTake { .. } => -2,
         Op::GetFieldIndex { .. } => 0,
         Op::LenField { .. } => 1,
         // Fused slot fast paths: pure slot traffic — the arithmetic ones
@@ -195,6 +196,11 @@ fn verify_func(
             Op::StoreIndexTake {
                 home_slot,
                 home_var,
+            }
+            | Op::CompoundIndexTake {
+                home_slot,
+                home_var,
+                ..
             } => {
                 if home_slot.is_some() == home_var.is_some() {
                     return Err(IrError::spanned("take home must be a slot xor a var", span));
@@ -1203,7 +1209,7 @@ fn infer_func(
                 pop(&mut st, pc)?;
                 pop(&mut st, pc)?;
             }
-            Op::StoreIndexTake { .. } => {
+            Op::StoreIndexTake { .. } | Op::CompoundIndexTake { .. } => {
                 pop(&mut st, pc)?;
                 pop(&mut st, pc)?;
             }

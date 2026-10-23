@@ -620,6 +620,58 @@ fn vm_index_store_emits_take() {
     );
 }
 
+/// `a[i] += v` takes the home too ([`Op::CompoundIndexTake`]) — the
+/// counting loop is the sharpest case: without the take the read-modify-write
+/// pair deep-copies the whole container per iteration.
+#[test]
+fn vm_compound_index_store_emits_take() {
+    let chunk = compile_with_push_native("a := [0, 0]\na[1] += 3\na[1]\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::CompoundIndexTake { .. })),
+        "expected CompoundIndexTake, got {:?}",
+        chunk.code
+    );
+    let chunk = compile_with_push_native("d := {\"k\": 1}\nd[\"k\"] += 2\nd[\"k\"]\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::CompoundIndexTake { .. })),
+        "expected CompoundIndexTake for a dict update, got {:?}",
+        chunk.code
+    );
+}
+
+/// A compound store whose rhs reads the base keeps the generic path (the
+/// take would apply the update to the aliased container).
+#[test]
+fn vm_compound_index_store_keeps_generic_when_rhs_reads_base() {
+    let chunk = compile_with_push_native("a := [1, 2]\na[0] += a[1]\na[0]\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::CompoundIndexOp { .. })),
+        "self-reading compound store must stay generic, got {:?}",
+        chunk.code
+    );
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::CompoundIndexTake { .. })),
+        "self-reading compound store must not take the home, got {:?}",
+        chunk.code
+    );
+}
+
+/// Compound stores keep tree-walker semantics: repeated updates, dict
+/// counters, string accumulation, rhs from a variable, and the OOB error.
+#[test]
+fn vm_compound_index_store_take_matches_tree_walker() {
+    for src in [
+        "a := [1, 2]\nfor i in 0..2 { a[i] += 10 }\na[0] + a[1]",
+        "d := {\"a\": 1}\nfor i in 0..3 { d[\"a\"] += i }\nd[\"a\"]",
+        "a := [0, 0]\nk := 4\na[1] += k\na[1]",
+        "parts := [\"x\"]\nparts[0] += \"y\"\nparts[0]",
+        "a := [1]\na[2] += 1",
+        "a := [1, 2]\na[0] += a[1] * 2\na[0]",
+    ] {
+        assert_same(src);
+    }
+}
+
 /// Loop fills (`for i in 0..n { a[i] = i }`) take the home too: the loop
 /// header must not turn the container into an env/captured binding that
 /// defeats the take (that would silently restore the O(n²) copy).

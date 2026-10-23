@@ -468,6 +468,7 @@ impl Compiler {
             | Op::SetFieldTake { span, .. }
             | Op::SetFieldIndexTake { span, .. }
             | Op::StoreIndexTake { span, .. }
+            | Op::CompoundIndexTake { span, .. }
             | Op::FieldBinopTake { span, .. }
             | Op::GetFieldIndex { span, .. }
             | Op::LenField { span, .. } => *span,
@@ -514,6 +515,7 @@ impl Compiler {
             Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => -1,
             Op::SetFieldIndexTake { .. } => -2,
             Op::StoreIndexTake { .. } => -2,
+            Op::CompoundIndexTake { .. } => -2,
             Op::GetFieldIndex { .. } => 0,
             Op::LenField { .. } => 1,
             Op::SlotAddInt { .. } => 0,
@@ -1374,6 +1376,7 @@ impl Compiler {
         index: &Expr,
         value: &Expr,
         span: Span,
+        op: Option<BinOp>,
     ) -> bool {
         let name = match obj {
             Expr::Ident { name, .. } => name.as_str(),
@@ -1391,7 +1394,10 @@ impl Compiler {
         }
         self.compile_expr(index);
         self.compile_expr(value);
-        self.emit(Op::StoreIndexTake { home, span });
+        match op {
+            Some(op) => self.emit(Op::CompoundIndexTake { home, op, span }),
+            None => self.emit(Op::StoreIndexTake { home, span }),
+        }
         true
     }
 
@@ -2508,7 +2514,7 @@ impl Compiler {
                     // Take-restore plain index stores (`a[i] = v`): keeps
                     // the container uniquely owned so the element write
                     // mutates in place instead of deep-copying it.
-                    if self.try_emit_set_index_take(obj, index, value, *span) {
+                    if self.try_emit_set_index_take(obj, index, value, *span, None) {
                         return self.stmt_unit(value_discarded);
                     }
                     // Take-restore indexed field stores (#242): `s.f[i]`
@@ -2650,6 +2656,13 @@ impl Compiler {
                     self.compile_stmt(&synthetic, value_discarded)
                 }
                 Expr::Index { obj, index, .. } => {
+                    // Take-restore compound index stores (`a[i] += v`): same
+                    // win as the plain store, and the sharper case in
+                    // practice (counting loops). The rhs is evaluated before
+                    // the take, so `a[i] += a[j]` still stays generic.
+                    if self.try_emit_set_index_take(obj, index, value, *span, Some(*op)) {
+                        return self.stmt_unit(value_discarded);
+                    }
                     // Receiver first (same order as the tree-walker),
                     // each evaluated exactly once.
                     self.compile_expr(obj);

@@ -123,6 +123,16 @@ fn op_text(module: &Module, op: &Op) -> String {
         } => {
             format!("storeindextake {}", home_text(home_slot, home_var, module))
         }
+        Op::CompoundIndexTake {
+            home_slot,
+            home_var,
+            op,
+        } => {
+            format!(
+                "compoundindextake {} {op:?}",
+                home_text(home_slot, home_var, module)
+            )
+        }
         Op::FieldBinopTake {
             home_slot,
             home_var,

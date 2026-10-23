@@ -346,6 +346,15 @@ impl<'a> Raiser<'a> {
                 home: self.raise_home(home_slot, home_var)?,
                 span: VmSpan::default(),
             }),
+            Op::CompoundIndexTake {
+                home_slot,
+                home_var,
+                op,
+            } => Ok(VmOp::CompoundIndexTake {
+                home: self.raise_home(home_slot, home_var)?,
+                op: Self::raise_binop(*op),
+                span: VmSpan::default(),
+            }),
             Op::FieldBinopTake {
                 home_slot,
                 home_var,

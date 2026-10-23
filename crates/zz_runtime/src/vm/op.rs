@@ -111,6 +111,16 @@ pub enum Op {
     /// Restores the home — mutated or not — on error, like the other
     /// take ops.
     StoreIndexTake { home: TakeHome, span: Span },
+    /// Pop an index and a right-hand side; take the home container out, read
+    /// `home[index]`, apply `op` against the rhs, write the result back, and
+    /// store the container home. Fused `a[i] += v` with the same guarantees
+    /// as [`Op::StoreIndexTake`]: both operands are evaluated before the op,
+    /// the take window is one instruction, and the home is restored on error.
+    CompoundIndexTake {
+        home: TakeHome,
+        op: BinOp,
+        span: Span,
+    },
     /// Pop a right-hand side; take the home, take the field, apply
     /// `field OP rhs` via `eval_binary`, store back. Fused
     /// `s.f = s.f OP v` (#242, e.g. string-concat accumulation).
