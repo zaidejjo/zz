@@ -2140,6 +2140,34 @@ impl Vm {
                     set_index(&mut ov, &iv, value, *span)?;
                     self.stack.push(ov);
                 }
+                Op::StoreIndexTake { home, span } => {
+                    // Stack layout is [index, value]: the base lives in
+                    // the home and only the two operands were evaluated,
+                    // so the take window is this instruction alone.
+                    let value = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let Some(mut ov) = Self::take_home(self, interp, home) else {
+                        self.stack.push(iv);
+                        self.stack.push(value);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // `set_index` mutates in place (refcount 1) and only
+                    // writes on success, so restoring the taken value puts
+                    // back exactly the pre-op container on error and the
+                    // updated one on success.
+                    let res = set_index(&mut ov, &iv, value, *span);
+                    Self::restore_home(self, interp, home, ov);
+                    res?;
+                }
                 Op::CompoundIndexOp { op, span } => {
                     let rhs = self.stack.pop().unwrap();
                     let iv = self.stack.pop().unwrap();

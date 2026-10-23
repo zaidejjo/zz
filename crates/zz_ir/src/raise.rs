@@ -339,6 +339,13 @@ impl<'a> Raiser<'a> {
                 field: self.str(*field)?,
                 span: VmSpan::default(),
             }),
+            Op::StoreIndexTake {
+                home_slot,
+                home_var,
+            } => Ok(VmOp::StoreIndexTake {
+                home: self.raise_home(home_slot, home_var)?,
+                span: VmSpan::default(),
+            }),
             Op::FieldBinopTake {
                 home_slot,
                 home_var,

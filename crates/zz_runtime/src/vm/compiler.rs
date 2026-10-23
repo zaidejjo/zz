@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
 use zz_frontend::move_elide::{
-    classify_self_assign, count_refs, has_closure_or_spawn, has_early_exit, unqualify_expr,
-    MoveKind,
+    classify_self_assign, count_refs, has_call, has_closure_or_spawn, has_early_exit,
+    unqualify_expr, MoveKind,
 };
 use zz_frontend::span::Span;
 
@@ -467,6 +467,7 @@ impl Compiler {
             | Op::VecPushMethod { span, .. }
             | Op::SetFieldTake { span, .. }
             | Op::SetFieldIndexTake { span, .. }
+            | Op::StoreIndexTake { span, .. }
             | Op::FieldBinopTake { span, .. }
             | Op::GetFieldIndex { span, .. }
             | Op::LenField { span, .. } => *span,
@@ -512,6 +513,7 @@ impl Compiler {
             Op::VecPush { .. } | Op::VecPushField { .. } | Op::VecPushMethod { .. } => -1,
             Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => -1,
             Op::SetFieldIndexTake { .. } => -2,
+            Op::StoreIndexTake { .. } => -2,
             Op::GetFieldIndex { .. } => 0,
             Op::LenField { .. } => 1,
             Op::SlotAddInt { .. } => 0,
@@ -1346,6 +1348,50 @@ impl Compiler {
             field: field.to_string(),
             span,
         });
+        true
+    }
+
+    /// Take-restore plain index stores (`a[i] = v`): the base is a direct
+    /// home and neither operand can observe or rebind it, so the write can
+    /// reach a container with refcount 1 and mutate it in place. Without
+    /// this, `set_index` runs `Arc::make_mut` against a value shared with
+    /// the slot on every element write, deep-copying the array/dict
+    /// (O(n²) fills).
+    ///
+    /// The strict `move_window_clean` window is what keeps semantics
+    /// identical to the generic path: a self-referential store
+    /// (`a[0] = a`) must still store a *copy*, which is exactly what the
+    /// shared clone produces.
+    ///
+    /// A frame slot is unreachable from the operands (locals captured by a
+    /// closure live in the env instead, so `move_home_of` reports `Env`
+    /// for them) — no call can rebind it. An env home *can* be rebound by
+    /// a call in the window, and the take happens after both operands
+    /// evaluate, so those stay generic unless the window is call-free.
+    fn try_emit_set_index_take(
+        &mut self,
+        obj: &Expr,
+        index: &Expr,
+        value: &Expr,
+        span: Span,
+    ) -> bool {
+        let name = match obj {
+            Expr::Ident { name, .. } => name.as_str(),
+            _ => return false,
+        };
+        if !self.move_window_clean(index, name) || !self.move_window_clean(value, name) {
+            return false;
+        }
+        let home = match self.move_home_of(name) {
+            Some(home) => home,
+            None => return false,
+        };
+        if !matches!(home, TakeHome::Slot(_)) && (has_call(index) || has_call(value)) {
+            return false;
+        }
+        self.compile_expr(index);
+        self.compile_expr(value);
+        self.emit(Op::StoreIndexTake { home, span });
         true
     }
 
@@ -2459,6 +2505,12 @@ impl Compiler {
                     self.stmt_unit(value_discarded)
                 }
                 Expr::Index { obj, index, span } => {
+                    // Take-restore plain index stores (`a[i] = v`): keeps
+                    // the container uniquely owned so the element write
+                    // mutates in place instead of deep-copying it.
+                    if self.try_emit_set_index_take(obj, index, value, *span) {
+                        return self.stmt_unit(value_discarded);
+                    }
                     // Take-restore indexed field stores (#242): `s.f[i]`
                     // and path-spelled equivalents.
                     let home_field: Option<(&str, &str)> = match obj.as_ref() {

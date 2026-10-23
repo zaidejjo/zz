@@ -117,6 +117,12 @@ fn op_text(module: &Module, op: &Op) -> String {
                 str_text(module, *field)
             )
         }
+        Op::StoreIndexTake {
+            home_slot,
+            home_var,
+        } => {
+            format!("storeindextake {}", home_text(home_slot, home_var, module))
+        }
         Op::FieldBinopTake {
             home_slot,
             home_var,

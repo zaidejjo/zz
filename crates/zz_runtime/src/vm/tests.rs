@@ -600,6 +600,110 @@ fn vm_fused_field_push_emits_vec_push_field() {
     );
 }
 
+/// `a[i] = v` takes the container out of its home so `set_index` sees
+/// refcount 1 and mutates in place ([`Op::StoreIndexTake`]). Without it the
+/// value shared with the slot forces `Arc::make_mut` to deep-copy the
+/// array/dict on every element write — an O(n²) index fill.
+#[test]
+fn vm_index_store_emits_take() {
+    let chunk = compile_with_push_native("a := [0, 0]\na[1] = 5\na[1]\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::StoreIndexTake { .. })),
+        "expected StoreIndexTake, got {:?}",
+        chunk.code
+    );
+    let chunk = compile_with_push_native("d := {\"k\": 0}\nd[\"k\"] = 7\nd[\"k\"]\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::StoreIndexTake { .. })),
+        "expected StoreIndexTake for a dict store, got {:?}",
+        chunk.code
+    );
+}
+
+/// Loop fills (`for i in 0..n { a[i] = i }`) take the home too: the loop
+/// header must not turn the container into an env/captured binding that
+/// defeats the take (that would silently restore the O(n²) copy).
+#[test]
+fn vm_index_store_in_loop_emits_take() {
+    let chunk = compile_with_push_native(
+        "func fill(n: int) -> [int] {\n    a := [0, 0, 0, 0]\n    for i in 0..n {\n        a[i] = i\n    }\n    a\n}\nfill(2)\n",
+    );
+    let body = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::MakeFunc { name, chunk, .. } if name == "fill" => Some(chunk.code.clone()),
+            _ => None,
+        })
+        .expect("function fill chunk");
+    assert!(
+        body.iter()
+            .any(|op| matches!(op, Op::StoreIndexTake { .. })),
+        "expected StoreIndexTake in fill, got {body:?}"
+    );
+    let chunk = compile_with_push_native(
+        "func fill(n: int) -> int {\n    d: {int: int} = {}\n    for i in 0..n {\n        d[i] = i * 3\n    }\n    d[n - 1]\n}\nfill(2)\n",
+    );
+    let body = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::MakeFunc { name, chunk, .. } if name == "fill" => Some(chunk.code.clone()),
+            _ => None,
+        })
+        .expect("function fill chunk");
+    assert!(
+        body.iter()
+            .any(|op| matches!(op, Op::StoreIndexTake { .. })),
+        "expected StoreIndexTake in the dict fill, got {body:?}"
+    );
+}
+
+/// Stores whose index/value read the base keep the generic copy path: the
+/// take would hand the write the aliased container, and a self-store
+/// (`a[0] = a`) must store a copy, exactly like the tree-walker.
+#[test]
+fn vm_index_store_keeps_generic_when_operands_read_base() {
+    let chunk = compile_with_push_native("a := [1, 2]\na[0] = a[1] + 1\na[0]\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::StoreIndexOp(_))),
+        "self-reading store must stay generic, got {:?}",
+        chunk.code
+    );
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::StoreIndexTake { .. })),
+        "self-reading store must not take the home, got {:?}",
+        chunk.code
+    );
+}
+
+/// Taking the home must be invisible: value semantics, in-place updates,
+/// index stores from variables, loop fills, dict growth, nested stores and
+/// the out-of-bounds error all match the tree-walker.
+#[test]
+fn vm_index_store_take_matches_tree_walker() {
+    for src in [
+        // copies stay independent (detach on write)
+        "a := [1, 2]\nb := a\na[0] = 9\nb[0] * 10 + a[0]",
+        "d := {\"k\": 1}\ne := d\nd[\"k\"] = 2\ne[\"k\"] * 10 + d[\"k\"]",
+        // repeated in-place writes with a variable index
+        "a := [0, 0, 0]\ni := 1\na[i] = 7\na[0] + a[1] + a[2]",
+        // self-reading store keeps the generic copy path
+        "a := [1, 2]\na[0] = a[1] + 3\na[0]",
+        "a := [1, 2]\na[0] = a\na[0][1]",
+        // out-of-bounds still errors identically
+        "a := [1]\na[3] = 1",
+        // loop fill by index
+        "a := [0, 0, 0, 0]\nfor i in 0..4 { a[i] = i * i }\na[3]",
+        // dict insert by index store
+        "d := {1: 1}\nd[2] = 2\nd[3] = 3\nd[1] + d[2] + d[3]",
+        // nested element stores
+        "m := [[0], [0]]\nm[1][0] = 5\nm[1][0]",
+    ] {
+        assert_same(src);
+    }
+}
+
 /// `b = f(b, x)` inside a function body takes the single `b` load
 /// ([`Op::TakeSlot`]) instead of cloning it into the call.
 #[test]

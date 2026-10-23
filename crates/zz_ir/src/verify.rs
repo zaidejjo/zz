@@ -29,6 +29,7 @@ fn effect(op: &Op) -> i64 {
         Op::VecPushField { .. } | Op::VecPushMethod { .. } => -1,
         Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => -1,
         Op::SetFieldIndexTake { .. } => -2,
+        Op::StoreIndexTake { .. } => -2,
         Op::GetFieldIndex { .. } => 0,
         Op::LenField { .. } => 1,
         // Fused slot fast paths: pure slot traffic — the arithmetic ones
@@ -189,6 +190,17 @@ fn verify_func(
             Op::LoadPath(parts) | Op::StorePath(parts) => {
                 for id in parts {
                     str(*id, "path component")?;
+                }
+            }
+            Op::StoreIndexTake {
+                home_slot,
+                home_var,
+            } => {
+                if home_slot.is_some() == home_var.is_some() {
+                    return Err(IrError::spanned("take home must be a slot xor a var", span));
+                }
+                if let Some(id) = home_var {
+                    str(*id, "take home")?;
                 }
             }
             Op::VecPushField {
@@ -1188,6 +1200,10 @@ fn infer_func(
                 pop(&mut st, pc)?;
             }
             Op::SetFieldIndexTake { .. } => {
+                pop(&mut st, pc)?;
+                pop(&mut st, pc)?;
+            }
+            Op::StoreIndexTake { .. } => {
                 pop(&mut st, pc)?;
                 pop(&mut st, pc)?;
             }

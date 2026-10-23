@@ -98,6 +98,19 @@ pub enum Op {
         field: String,
         span: Span,
     },
+    /// Pop an index then a value; take the home container out, write
+    /// `home[index] = value` in place, store it back. Fused `a[i] = v`
+    /// when the base is a direct home: the write then reaches a container
+    /// with refcount 1, so `set_index` mutates it instead of
+    /// `Arc::make_mut` deep-copying on every element write (the O(n²)
+    /// index-fill pathology).
+    ///
+    /// Index and value are evaluated **before** the take (the op runs
+    /// after both are on the stack), so the window is a single
+    /// instruction with no safepoint and no user code inside it.
+    /// Restores the home — mutated or not — on error, like the other
+    /// take ops.
+    StoreIndexTake { home: TakeHome, span: Span },
     /// Pop a right-hand side; take the home, take the field, apply
     /// `field OP rhs` via `eval_binary`, store back. Fused
     /// `s.f = s.f OP v` (#242, e.g. string-concat accumulation).
