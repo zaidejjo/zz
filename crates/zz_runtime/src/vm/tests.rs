@@ -667,6 +667,9 @@ fn vm_compound_index_store_take_matches_tree_walker() {
         "parts := [\"x\"]\nparts[0] += \"y\"\nparts[0]",
         "a := [1]\na[2] += 1",
         "a := [1, 2]\na[0] += a[1] * 2\na[0]",
+        // copies stay independent (detach on write)
+        "a := [1, 2]\nb := a\na[0] += 5\nb[0] * 10 + a[0]",
+        "d := {\"k\": 1}\ne := d\nd[\"k\"] += 2\ne[\"k\"] * 10 + d[\"k\"]",
     ] {
         assert_same(src);
     }
