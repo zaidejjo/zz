@@ -2905,11 +2905,10 @@ impl Compiler {
                 self.emit_const(Value::Unit);
             }
             self.emit(Op::SetLoopResult);
-        } else if matches!(body_tail.value, StmtValue::Discard) {
-            // The body left a value of its own that nothing reads: drop it
-            // rather than storing it as the loop result.
-            self.emit(Op::Pop);
         }
+        // Dead bodies (`dead_result`) leave nothing behind: their cleanup
+        // dropped every local and any trailing value, so there is nothing
+        // to pop before the back-edge (and nothing to store as a result).
         self.emit(Op::Jump(header));
         // Exit label: `break` and the falsy test both land here. In the dead
         // form it starts with the `Pop` that drops the result placeholder,
