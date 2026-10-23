@@ -218,11 +218,24 @@ struct zz_array {
 // but skips free(header) since the header stays on the arena.
 #define ZZ_ARRAY_ARENA_MAGIC ((size_t)0xB3B4B5B6B7B8B9B0ULL)
 
+// Dicts switch from a linear scan to a key index once they outgrow this
+// many entries — the VM's `DICT_INDEX_THRESHOLD` (`DictData` in
+// `zz_runtime::value`), so both engines index at the same size.
+#define ZZ_DICT_INDEX_THRESHOLD 8
+
 struct zz_dict {
     size_t refs;     // atomic reference count (ARC)
     size_t len;
     size_t cap;
     zz_dict_entry *entries;
+    // Key index: a pure cache over `entries` (open addressing with linear
+    // probing, slot value = entry index + 1, 0 = empty; `idx_cap` is a
+    // power of two). Only int/bool/str keys are indexed — the VM's
+    // `DictKey` — so `idx == NULL` means "linear scan only", which is both
+    // the small-dict lane and the answer for dicts keyed by other tags.
+    // Entries stay the source of truth for order, length and iteration.
+    size_t *idx;
+    size_t idx_cap;
 };
 
 // Dict keys are full values, not strings: `{int: int}`, `{bool: str}` and
