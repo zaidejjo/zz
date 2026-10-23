@@ -15,13 +15,11 @@ impl Lowerer {
             let val = self.emit_expr(v, names, out);
             return self.unbox_for_return(v, val, names, expected);
         }
-        if let Some(zz_checker::Type::Struct(sname, _)) = self.ty_at(names, v.span()) {
-            if self.is_unboxed_struct(sname) {
-                return self.emit_boxed_value(sname, v, names, out);
-            }
-        }
-        let val = self.emit_expr(v, names, out);
-        box_scalar_operand(v, names, &val)
+        // Same boxing contract as an implicit tail: unboxed struct values
+        // (literals, `self`, fields) must become runtime objects before
+        // crossing a `zz_value` return slot. `ty_at` misses expressions
+        // whose span has no recorded type and would leak a raw C struct.
+        self.emit_tail_value(v, names, out)
     }
 
     /// Root binding of a store target chain (`m` in `m[i][j]`, `s` in
