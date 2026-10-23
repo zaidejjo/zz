@@ -9,7 +9,7 @@ use crate::env::{Bound, Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
     eval_binary, eval_int_binary, eval_unary, fill_default_headers, get_index, normalize_index,
-    object_field, set_index, set_object_field, slice_value,
+    object_field, object_field_opt, set_index, set_object_field, slice_value,
 };
 use crate::runtime::Flow;
 use crate::value::{FuncValue, NativeFunc, RangeValue, Value};
@@ -1353,9 +1353,10 @@ impl Vm {
                         // Named function (`func`): explicit `return` only.
                         tail_value: false,
                     };
-                    interp.funcs.insert(name.clone(), fv.clone());
+                    let fv = std::rc::Rc::new(fv);
+                    interp.funcs.insert(name.clone(), std::rc::Rc::clone(&fv));
                     interp.funcs_version = interp.funcs_version.wrapping_add(1);
-                    interp.env.define(name, Value::Func(std::rc::Rc::new(fv)));
+                    interp.env.define(name, Value::Func(fv));
                     self.stack.push(Value::Unit);
                 }
                 Op::RegisterStruct { name, fields } => {
@@ -2524,12 +2525,12 @@ impl Vm {
                                         let err_c = e.clone();
                                         if fv.chunk.is_some() {
                                             self.frames.last_mut().unwrap().ip = ip;
-                                            let callee = Value::Func(std::rc::Rc::new(fv));
+                                            let callee = Value::Func(std::rc::Rc::clone(&fv));
                                             self.call_value(callee, vec![err_c], span_c, interp)?;
                                             self.try_convert_depths.push(self.frames.len());
                                             re_cache!();
                                         } else {
-                                            let callee = Value::Func(std::rc::Rc::new(fv));
+                                            let callee = Value::Func(std::rc::Rc::clone(&fv));
                                             let converted =
                                                 interp.call(callee, vec![err_c], span_c)?;
                                             match self.unwind_frame(
@@ -2890,9 +2891,12 @@ impl Vm {
                             }
                         }
                     }
-                    match object_field(&recv, name, span) {
-                        Ok(f) => self.call_value(f, args, span, interp)?,
-                        Err(_) => {
+                    // Probe fields without building the miss error: a
+                    // method call is a field miss by definition, so the
+                    // formatted error was pure waste on every call.
+                    match object_field_opt(&recv, name) {
+                        Some(f) => self.call_value(f, args, span, interp)?,
+                        None => {
                             let (f, recv) = interp.lookup_method_recv(&recv, name, span)?;
                             let mut arg_vals = args;
                             arg_vals.insert(0, recv);
@@ -3361,7 +3365,7 @@ impl Vm {
             .get(name)
             .or_else(|| {
                 zz_checker::lookup_std(&interp.funcs, name)
-                    .map(|fv| Value::Func(std::rc::Rc::new(fv.clone())))
+                    .map(|fv| Value::Func(std::rc::Rc::clone(fv)))
             })
             .or_else(|| {
                 zz_checker::lookup_std(&interp.natives, name).map(|entry| {

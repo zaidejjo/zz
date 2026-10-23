@@ -475,7 +475,7 @@ fn spawn_from_parts(
     // tasks (`Send` rests on that construction — see `GreenTask`).
     let mut new_interp = Interp::with_natives_shared_env(natives, Executor::checkout_env());
     new_interp.structs = structs;
-    new_interp.funcs = funcs;
+    new_interp.funcs = zz_runtime::value::shared_funcs(funcs);
     new_interp.task_mode = true;
 
     // Seat one Unit arg per closure param at the stack bottom:

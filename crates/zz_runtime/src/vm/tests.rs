@@ -440,7 +440,9 @@ fn vm_method_call_and_cross_module() {
         // Named function from a chunk: explicit `return` only.
         tail_value: false,
     };
-    interp.funcs.insert("shapes.dist".into(), fv);
+    interp
+        .funcs
+        .insert("shapes.dist".into(), std::rc::Rc::new(fv));
     let v = interp.run(&parsed.program).unwrap();
     assert_eq!(v, Value::Int(7));
 }
@@ -927,6 +929,24 @@ fn vm_method_fallback_struct_copy_matches_tree_walker() {
     assert_eq!(run_vm_native(src2).unwrap(), Value::Int(2));
 }
 
+/// `Op::CallMethod` probes fields with the non-erroring lookup and resolves
+/// the callee from the shared function table, so the observable semantics —
+/// field-before-method order, receiver passing, chained calls — must match
+/// the tree-walker.
+#[test]
+fn vm_method_call_matches_tree_walker() {
+    for src in [
+        // plain receiver method
+        "struct C { n: int }\nimpl C {\n func add(c: C, x: int) -> C {\n C{ n: c.n + x }\n }\n}\nc := C{ n: 0 }\nc = c.add(2)\nc.n",
+        // chained calls through the returned struct
+        "struct C { n: int }\nimpl C {\n func add(c: C, x: int) -> C {\n C{ n: c.n + x }\n }\n func get(c: C) -> int {\n c.n\n }\n}\nc := C{ n: 1 }\nc.add(2).add(3).get()",
+        // a miss in the field table must not change the result
+        "struct C { n: int }\nimpl C {\n func get(c: C) -> int {\n c.n * 2\n }\n}\nc := C{ n: 3 }\nc.get() + c.get()",
+    ] {
+        assert_same(src);
+    }
+}
+
 #[test]
 fn vm_tuple_ops_match_tree_walker() {
     for src in [
@@ -1332,11 +1352,7 @@ fn vm_if_let_result_does_not_alias_later_slots() {
     let _ = v;
     let f = interp.funcs.get("main").cloned().expect("main registered");
     let out = interp
-        .call(
-            Value::Func(std::rc::Rc::new(f)),
-            Vec::new(),
-            Span::new(0, 0),
-        )
+        .call(Value::Func(f), Vec::new(), Span::new(0, 0))
         .expect("call main");
     assert_eq!(out, Value::Int(7));
 }
@@ -1590,9 +1606,10 @@ fn direct_call_enters_frame_for_compiled_function() {
     let mut interp = Interp::new();
     let caller_env = interp.env.clone();
     let def_env = Env::with_parent(&caller_env);
-    interp
-        .funcs
-        .insert("top.fib".to_string(), mk_chunked_func(&def_env, 1));
+    interp.funcs.insert(
+        "top.fib".to_string(),
+        std::rc::Rc::new(mk_chunked_func(&def_env, 1)),
+    );
     let mut vm = Vm::new();
     let entered =
         vm.try_enter_direct_call("top.fib", vec![Value::Int(1)], Span::new(0, 0), &mut interp);
@@ -1613,12 +1630,15 @@ fn direct_call_declines_and_hands_the_arguments_back() {
     let mut interp = Interp::new();
     let caller_env = interp.env.clone();
     let def_env = Env::with_parent(&caller_env);
-    interp
-        .funcs
-        .insert("top.fib".to_string(), mk_chunked_func(&def_env, 1));
+    interp.funcs.insert(
+        "top.fib".to_string(),
+        std::rc::Rc::new(mk_chunked_func(&def_env, 1)),
+    );
     let mut closureless = mk_chunked_func(&def_env, 0);
     closureless.chunk = None;
-    interp.funcs.insert("top.closure".to_string(), closureless);
+    interp
+        .funcs
+        .insert("top.closure".to_string(), std::rc::Rc::new(closureless));
     let span = Span::new(0, 0);
     let mut vm = Vm::new();
 

@@ -111,65 +111,82 @@ const MAX_EMBED_DEPTH: usize = 32;
 /// (anonymous) fields transitively: `u.id` finds `u.Base.id`.
 #[inline(always)]
 pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value, EvalError> {
-    object_field_depth(obj, name, span, 0)
+    match object_field_opt(obj, name) {
+        Some(v) => Ok(v),
+        None => Err(object_field_miss(obj, name, span)),
+    }
 }
 
-fn object_field_depth(
-    obj: &Value,
-    name: &str,
-    span: Span,
-    depth: usize,
-) -> Result<Value, EvalError> {
+/// [`object_field`] without the miss error.
+///
+/// Method dispatch misses by construction — a method is a function-table
+/// entry (`Type.method`), not a struct field — so `CallMethod` probes with
+/// this instead: formatting ``struct `X` has no field `m` `` plus an
+/// `EvalError` on every call, only to drop it, was a sizeable slice of the
+/// per-call cost.
+pub(crate) fn object_field_opt(obj: &Value, name: &str) -> Option<Value> {
+    object_field_depth_opt(obj, name, 0)
+}
+
+fn object_field_depth_opt(obj: &Value, name: &str, depth: usize) -> Option<Value> {
     match obj {
         Value::Object(o) => {
             if let Some((_, v)) = o.fields.iter().find(|(n, _)| n == name) {
-                return Ok(v.clone());
+                return Some(v.clone());
             }
             if depth < MAX_EMBED_DEPTH {
                 for (fname, v) in &o.fields {
                     if is_embedded_value(fname, v) {
-                        if let Ok(promoted) = object_field_depth(v, name, span, depth + 1) {
-                            return Ok(promoted);
+                        if let Some(promoted) = object_field_depth_opt(v, name, depth + 1) {
+                            return Some(promoted);
                         }
                     }
                 }
             }
-            Err(EvalError::new(
-                format!("struct `{}` has no field `{name}`", o.name),
-                span,
-            ))
+            None
         }
         Value::Dict(entries) => entries
             .iter()
             .find(|(k, _)| matches!(k, Value::Str(s) if s.as_str() == name))
-            .map(|(_, v)| v.clone())
-            .ok_or_else(|| EvalError::new(format!("dict has no key `{name}`"), span)),
+            .map(|(_, v)| v.clone()),
         Value::HttpRequest(req) => match name {
-            "method" => Ok(Value::Str(req.method.clone().into())),
-            "path" => Ok(Value::Str(req.path.clone().into())),
-            "body" => Ok(Value::Str(req.body.clone().into())),
+            "method" => Some(Value::Str(req.method.clone().into())),
+            "path" => Some(Value::Str(req.path.clone().into())),
+            "body" => Some(Value::Str(req.body.clone().into())),
             "headers" | "query" | "params" => {
                 let pairs = match name {
                     "headers" => &req.headers,
                     "query" => &req.query,
                     _ => &req.params,
                 };
-                Ok(Value::Dict(std::sync::Arc::new(
+                Some(Value::Dict(std::sync::Arc::new(
                     pairs
                         .iter()
                         .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
                         .collect(),
                 )))
             }
-            _ => Err(EvalError::new(
-                format!("http.request has no field `{name}`"),
-                span,
-            )),
+            _ => None,
         },
-        other => Err(EvalError::new(
+        _ => None,
+    }
+}
+
+/// The miss error for [`object_field`], kept off the probe path: the
+/// message (and its `format!`) is only built when a real field read fails.
+fn object_field_miss(obj: &Value, name: &str, span: Span) -> EvalError {
+    match obj {
+        Value::Object(o) => {
+            EvalError::new(format!("struct `{}` has no field `{name}`", o.name), span)
+        }
+        Value::Dict(_) => EvalError::new(format!("dict has no key `{name}`"), span),
+        Value::HttpRequest(_) => {
+            EvalError::new(format!("http.request has no field `{name}`"), span)
+        }
+        other => EvalError::new(
             format!("cannot access field `{name}` on a value of type `{other}`"),
             span,
-        )),
+        ),
     }
 }
 
@@ -651,5 +668,50 @@ pub(crate) fn eval_unary(op: UnOp, v: Value, span: Span) -> Result<Value, EvalEr
                 span,
             )),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{object_field, object_field_opt};
+    use crate::value::{ObjectValue, Value};
+    use zz_frontend::span::Span;
+
+    /// `CallMethod` probes with [`object_field_opt`] and only the real read
+    /// path formats [`object_field`]'s error, so both must agree on hits and
+    /// the error text must not drift.
+    #[test]
+    fn field_probe_matches_the_error_path() {
+        let span = Span::new(0, 0);
+        let obj = Value::Object(std::sync::Arc::new(ObjectValue {
+            name: "P".into(),
+            fields: vec![("x".into(), Value::Int(1))],
+        }));
+        assert_eq!(object_field_opt(&obj, "x"), Some(Value::Int(1)));
+        assert_eq!(object_field_opt(&obj, "nope"), None);
+        assert_eq!(
+            object_field(&obj, "nope", span).unwrap_err().message,
+            "struct `P` has no field `nope`"
+        );
+
+        let dict = Value::Dict(std::sync::Arc::new(crate::value::DictData::from_entries(
+            vec![(
+                Value::Str(std::sync::Arc::new("k".to_string())),
+                Value::Int(2),
+            )],
+        )));
+        assert_eq!(object_field_opt(&dict, "k"), Some(Value::Int(2)));
+        assert_eq!(object_field_opt(&dict, "missing"), None);
+        assert_eq!(
+            object_field(&dict, "missing", span).unwrap_err().message,
+            "dict has no key `missing`"
+        );
+
+        let int = Value::Int(3);
+        assert_eq!(object_field_opt(&int, "f"), None);
+        assert_eq!(
+            object_field(&int, "f", span).unwrap_err().message,
+            "cannot access field `f` on a value of type `3`"
+        );
     }
 }

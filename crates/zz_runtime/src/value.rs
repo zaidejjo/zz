@@ -407,7 +407,7 @@ pub fn snapshot_env(env: &EnvLink) -> HashMap<String, Value> {
 pub fn snapshot_env_filtered(
     env: &EnvLink,
     keep: &HashSet<String>,
-    funcs: &HashMap<String, FuncValue>,
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
     natives: &std::sync::Arc<HashMap<String, NativeEntry>>,
 ) -> HashMap<String, Value> {
     let flat = env.flatten();
@@ -454,7 +454,7 @@ pub fn snapshot_env_filtered(
 ///   object either way (frozen shares it; the table carries it).
 pub fn snapshot_env_cow(
     env: &EnvLink,
-    funcs: &HashMap<String, FuncValue>,
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
     reachable: &HashSet<String>,
     loads: &HashSet<String>,
     keep_cache: &mut SpawnKeepCache,
@@ -530,7 +530,9 @@ pub fn snapshot_env_cow(
 
 /// Snapshot a function table so it is safe to send across thread boundaries.
 /// Each `FuncValue`'s captured env is flattened into a self-contained copy.
-pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, FuncValue> {
+pub fn snapshot_funcs(
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
+) -> HashMap<String, FuncValue> {
     let mut out = HashMap::new();
     // ONE memo map for the whole table: module scopes share envs, so a
     // fresh map per value re-clones shared graphs exponentially (165
@@ -566,6 +568,19 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
         );
     }
     out
+}
+
+/// Adopt a detached worker snapshot into the interpreter's shared table.
+///
+/// Snapshots are produced as owned `FuncValue`s (`snapshot_funcs`,
+/// `detach_cached_funcs`) because they cross thread boundaries, while
+/// `Interp::funcs` hands out `Rc` shares on every lookup. One `Rc` per
+/// entry, constructed on the worker thread that owns the interpreter.
+pub fn shared_funcs(owned: HashMap<String, FuncValue>) -> HashMap<String, std::rc::Rc<FuncValue>> {
+    owned
+        .into_iter()
+        .map(|(name, fv)| (name, std::rc::Rc::new(fv)))
+        .collect()
 }
 
 /// Clone a cached (already detached) function-table snapshot for one worker.
@@ -620,7 +635,7 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
 ///   method tails (env-first method fallback) and transitive bodies.
 pub fn reachable_refs(
     root: &Arc<Chunk>,
-    funcs: &HashMap<String, FuncValue>,
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
 ) -> (HashSet<String>, HashSet<String>) {
     let mut names: HashSet<String> = HashSet::new();
     let mut loads: HashSet<String> = HashSet::new();
@@ -636,7 +651,7 @@ pub fn reachable_refs(
     // mutably across the scan loop).
     fn admit(
         cand: &str,
-        funcs: &HashMap<String, FuncValue>,
+        funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
         names: &mut HashSet<String>,
         stack: &mut Vec<Arc<Chunk>>,
     ) {
@@ -740,13 +755,13 @@ pub fn reachable_refs(
 /// Used with [`reachable_func_names`] so a spawn carries only the functions
 /// its worker can call instead of the whole table.
 pub fn snapshot_funcs_subset(
-    funcs: &HashMap<String, FuncValue>,
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
     names: &HashSet<String>,
 ) -> HashMap<String, FuncValue> {
-    let filtered: HashMap<String, FuncValue> = funcs
+    let filtered: HashMap<String, std::rc::Rc<FuncValue>> = funcs
         .iter()
         .filter(|(k, _)| names.contains(k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k.clone(), std::rc::Rc::clone(v)))
         .collect();
     snapshot_funcs(&filtered)
 }

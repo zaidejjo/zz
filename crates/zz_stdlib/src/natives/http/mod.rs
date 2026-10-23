@@ -2089,7 +2089,7 @@ impl ServerSnapshot {
         let mut interp = Interp::with_natives_shared(Arc::clone(&self.natives));
         interp.structs = Arc::new(self.structs.clone());
         if let Ok(guard) = self.funcs.lock() {
-            interp.funcs = detach_cached_funcs(&guard);
+            interp.funcs = zz_runtime::value::shared_funcs(detach_cached_funcs(&guard));
         }
         interp
     }

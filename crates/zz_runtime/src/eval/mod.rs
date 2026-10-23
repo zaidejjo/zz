@@ -17,7 +17,11 @@ pub use crate::runtime::{EvalError, NativeEntry, NativeFn, RuntimeState};
 
 pub struct Interp {
     pub env: crate::env::EnvLink,
-    pub funcs: HashMap<String, FuncValue>,
+    /// Named functions, shared not copied: a lookup hands out a refcount
+    /// bump, never a deep `FuncValue` clone (`params` + the whole `Expr`
+    /// body). Method dispatch resolves through this table on every call, so
+    /// cloning here used to cost ~1 µs per `.method()`.
+    pub funcs: HashMap<String, std::rc::Rc<FuncValue>>,
     /// Native registry, reference-counted: registrations happen at load
     /// time, after which the map is effectively frozen and freely shared
     /// with worker threads (`task.spawn` clones the `Arc`, not the 400+
