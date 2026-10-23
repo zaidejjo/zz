@@ -3561,7 +3561,11 @@ impl Checker {
                     }
                 }
             };
-            self.define_at(&p.name.name, ty.clone(), p.name.span);
+            // Closure parameters are dictated by the callee's signature
+            // (`.route(..., |req| ...)`, `map(|x| ...)`): they cannot be
+            // removed, so an unread one is not a mistake worth warning
+            // about. Named-function parameters keep the warning.
+            self.define_binding_at(&p.name.name, ty.clone(), p.name.span, false);
             ptypes.push(ty);
         }
         // Allow `return` inside closures — same semantics as named functions.

@@ -1,0 +1,21 @@
+// Smoke fixture for the published `-builder` / `-runtime` image pair.
+//
+// The `smoke` job in .github/workflows/docker-publish.yml compiles this file
+// inside the freshly published builder image and runs the resulting binary on
+// the matching runtime image. It deliberately links SQLite (`std.sqlz`) so a
+// missing or drifted libsqlite3 in the runtime image fails the publish instead
+// of reaching users.
+//
+// Keep this file dependency-free: no network, no files, no env vars.
+import std.crypto
+import std.sqlz
+
+db := sqlz.open(":memory:")
+db.exec("CREATE TABLE smoke (v INTEGER)")
+db.exec("INSERT INTO smoke VALUES (42)")
+rows := db.query("SELECT v FROM smoke")
+println("smoke-db: {rows}")
+
+digest := crypto.sha256("abc")
+println("smoke-sha256: {digest}")
+println("smoke-ok")

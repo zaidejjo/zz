@@ -53,5 +53,6 @@
 - [Error catalog](guides/errors.md): common errors with fixes
 - [Error index](guides/error-index.md): verbatim messages with fixes
 - [Parity](guides/parity.md): VM vs native guarantees, sweep enforcement
+- [Docker and production AOT](guides/docker.md): builder/runtime images, no app-level Clang
 - [FAQ and glossary](guides/faq-glossary.md): answers + terms
 - [Conventions](CONVENTIONS.md): how to write and verify docs

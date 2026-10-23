@@ -65,7 +65,7 @@ fn resolve_fusable_callee(interp: &Interp, callee: &Expr, span: Span) -> Option<
                 return Some(v);
             }
             if let Some(fv) = zz_checker::lookup_std(&interp.funcs, name) {
-                return Some(Value::Func(Box::new(fv.clone())));
+                return Some(Value::Func(std::rc::Rc::new(fv.clone())));
             }
             if let Some(entry) = zz_checker::lookup_std(&interp.natives, name) {
                 return Some(Value::Native(Box::new(crate::value::NativeFunc {
@@ -88,7 +88,7 @@ fn resolve_fusable_callee(interp: &Interp, callee: &Expr, span: Span) -> Option<
                 return Some(v);
             }
             if let Some(fv) = zz_checker::lookup_std(&interp.funcs, &joined) {
-                return Some(Value::Func(Box::new(fv.clone())));
+                return Some(Value::Func(std::rc::Rc::new(fv.clone())));
             }
             if let Some(entry) = zz_checker::lookup_std(&interp.natives, &joined) {
                 return Some(Value::Native(Box::new(crate::value::NativeFunc {

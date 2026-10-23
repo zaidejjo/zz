@@ -862,6 +862,29 @@ impl Compiler {
         zz_checker::lookup_std(&self.func_info, name).cloned()
     }
 
+    /// True when a bare `name` call must dispatch straight to the stdlib
+    /// native registry via [`Op::CallNative`].
+    ///
+    /// Mirrors [`Compiler::len_native_spelling`]'s guard set — user
+    /// functions (through `func_info`, including the unique `*.name`
+    /// suffix form) and local bindings shadow the native — plus the
+    /// top-level declaration tables the main compiler owns, so a
+    /// promoted or captured top-level binding also keeps the generic
+    /// `LoadVar` + `Call` path. Any shadow means exact name resolution
+    /// must happen at runtime.
+    fn direct_native_call(&self, name: &str) -> bool {
+        if self.func_info.contains_key(name)
+            || self.promoted_slots.contains_key(name)
+            || self.captured_at_top.contains(name)
+            || self.locals.iter().any(|l| l.name == name)
+        {
+            return false;
+        }
+        self.native_names
+            .as_ref()
+            .is_some_and(|n| zz_checker::contains_std(n, name))
+    }
+
     /// Canonical free push callee resolving to the real native (not
     /// shadowed by a user func, registered). Returns the spelling.
     /// (`vec.push` plus the method form `xs.push(x)` is the only spelling —
@@ -2615,6 +2638,13 @@ impl Compiler {
                         self.compile_if_stmt(cond, then, els, *span);
                         return StmtValue::None;
                     }
+                    // A discarded `while` needs no loop-result value: the
+                    // per-iteration `SetLoopResult` and the unit it popped
+                    // only ever fed a caller that read the value.
+                    if let Expr::While { cond, body, span } = e {
+                        self.compile_while(cond, body, *span, true);
+                        return StmtValue::None;
+                    }
                 }
                 // Move-take: fused `x.push(e)` / `x.append(e)` /
                 // `append(x, e)` statements (take, push reusing the owned
@@ -2830,6 +2860,69 @@ impl Compiler {
         debug_assert_eq!(self.stack_height, pre);
     }
 
+    /// Compile a `while` loop.
+    ///
+    /// `dead` means the loop's value is discarded (statement position): then
+    /// no `SetLoopResult` runs per iteration, the body is told its trailing
+    /// value is dead, and the result placeholder — the slot the runtime's
+    /// `stack_base + 1` truncation keeps — is dropped once on exit.
+    ///
+    /// The cooperative yield check lives in `WhileCond` rather than a
+    /// standalone `Safepoint`: the op is reached once per test (entry,
+    /// back-edge and `continue` all land on the condition), so the check
+    /// cannot be skipped, at one dispatch less per iteration.
+    fn compile_while(&mut self, cond: &Expr, body: &Block, span: Span, dead: bool) {
+        let pre = self.stack_height;
+        let setup_pos = self.chunk.code.len();
+        self.emit(Op::WhileSetup { exit: 0, header: 0 });
+        self.emit_const(Value::Unit);
+        let header = self.chunk.code.len();
+        // Fast path: `a < b` / `a < N` on local slots -> single fused
+        // comparison op instead of LoadSlot/LoadSlot/BinOp.
+        if let Some(op) = self.try_slot_compare(cond) {
+            self.emit(op);
+        } else {
+            self.compile_expr(cond);
+        }
+        let j = self.emit_while_cond(span);
+        let body_needs_env = self.scope_declares_captured(body);
+        if body_needs_env {
+            self.emit(Op::EnterScope);
+        }
+        self.scope_depth += 1;
+        // Same shape as the `for` arm: an env-captured body keeps the
+        // value-producing path (its trailing `DefineVar` is the result).
+        let dead_result = dead && !body_needs_env;
+        let body_tail = self.compile_block_body(body, true, dead_result);
+        self.scope_depth -= 1;
+        if body_needs_env {
+            self.emit(Op::ExitScope);
+        }
+        if !dead_result {
+            if body_tail.needs_result_unit {
+                // Trailing slot declaration (see `compile_block_body`):
+                // supply the loop-result value `SetLoopResult` pops.
+                self.emit_const(Value::Unit);
+            }
+            self.emit(Op::SetLoopResult);
+        } else if matches!(body_tail.value, StmtValue::Discard) {
+            // The body left a value of its own that nothing reads: drop it
+            // rather than storing it as the loop result.
+            self.emit(Op::Pop);
+        }
+        self.emit(Op::Jump(header));
+        // Exit label: `break` and the falsy test both land here. In the dead
+        // form it starts with the `Pop` that drops the result placeholder,
+        // so neither path can leave it behind. Patched before that `Pop` is
+        // emitted so the label is its own position, not the next op's.
+        let exit = self.chunk.code.len();
+        self.patch_jump(j);
+        if dead {
+            self.emit(Op::Pop);
+        }
+        self.chunk.code[setup_pos] = Op::WhileSetup { exit, header };
+        self.stack_height = pre + usize::from(!dead);
+    }
     /// Compile a block body, cleaning up its locals.
     ///
     /// `is_loop_body`: loop bodies sit above live loop-var slots, so their
@@ -3967,6 +4060,30 @@ impl Compiler {
                                 .is_some_and(|fi| fi.has_default.iter().any(|&d| d))
                     });
 
+                    // Bare native dispatch (mirrors the dotted `Expr::Path`
+                    // form above): a call to a registered stdlib native
+                    // compiles to one `CallNative` instead of `LoadVar` +
+                    // `Call`. The generic shape materialises a throwaway
+                    // `Value::Native` (name `String` + box) per invocation
+                    // and pays the full dynamic call plumbing — argument
+                    // buffer round-trip, callee match, `call_value` — while
+                    // `CallNative` resolves the registry entry in place.
+                    // Any user shadow keeps the generic path (see
+                    // `direct_native_call`).
+                    let direct_native: Option<String> =
+                        if named.is_empty() && info_key.is_none() && !is_input && !is_range {
+                            match callee.as_ref() {
+                                Expr::Ident { name: cname, .. }
+                                    if self.direct_native_call(cname) =>
+                                {
+                                    Some(cname.clone())
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+
                     let argc = if is_input {
                         1
                     } else if is_range {
@@ -3980,7 +4097,9 @@ impl Compiler {
                         args.len() + named.len()
                     };
 
-                    self.compile_expr(callee);
+                    if direct_native.is_none() {
+                        self.compile_expr(callee);
+                    }
                     if is_range {
                         if args.len() == 1 {
                             self.emit_const(Value::Int(0));
@@ -4005,10 +4124,17 @@ impl Compiler {
                     if is_input {
                         self.emit_const(Value::Str(String::new().into()));
                     }
-                    self.emit(Op::Call {
-                        argc: argc as u16,
-                        span: *span,
-                    });
+                    match direct_native {
+                        Some(name) => self.emit(Op::CallNative {
+                            name,
+                            argc: argc as u16,
+                            span: *span,
+                        }),
+                        None => self.emit(Op::Call {
+                            argc: argc as u16,
+                            span: *span,
+                        }),
+                    }
                 }
             },
             Expr::If {
@@ -4091,42 +4217,7 @@ impl Compiler {
                 self.emit(Op::Concat(n));
             }
             Expr::While { cond, body, span } => {
-                let pre = self.stack_height;
-                let setup_pos = self.chunk.code.len();
-                self.emit(Op::WhileSetup { exit: 0, header: 0 });
-                self.emit_const(Value::Unit);
-                let header = self.chunk.code.len();
-                // Safepoint at the header (not the back-edge) so `continue`
-                // cannot skip the cooperative yield check.
-                self.emit(Op::Safepoint);
-                // Fast path: `a < b` / `a < N` on local slots -> single
-                // fused comparison op instead of LoadSlot/LoadSlot/BinOp.
-                if let Some(op) = self.try_slot_compare(cond) {
-                    self.emit(op);
-                } else {
-                    self.compile_expr(cond);
-                }
-                let j = self.emit_while_cond(*span);
-                let body_needs_env = self.scope_declares_captured(body);
-                if body_needs_env {
-                    self.emit(Op::EnterScope);
-                }
-                self.scope_depth += 1;
-                if self.compile_block_body(body, true, false).needs_result_unit {
-                    // Trailing slot declaration (see `compile_block_body`):
-                    // supply the loop-result value `SetLoopResult` pops.
-                    self.emit_const(Value::Unit);
-                }
-                self.scope_depth -= 1;
-                if body_needs_env {
-                    self.emit(Op::ExitScope);
-                }
-                self.emit(Op::SetLoopResult);
-                self.emit(Op::Jump(header));
-                self.patch_jump(j);
-                let exit = self.chunk.code.len();
-                self.chunk.code[setup_pos] = Op::WhileSetup { exit, header };
-                self.stack_height = pre + 1;
+                self.compile_while(cond, body, *span, false);
             }
             Expr::Array { elems, .. } => {
                 for e in elems {

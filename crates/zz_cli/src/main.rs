@@ -1281,7 +1281,7 @@ pub(crate) fn run_entry_main(
                     .collect(),
             ))]
         };
-        match interp.call(Value::Func(Box::new(fv)), call_args, span) {
+        match interp.call(Value::Func(std::rc::Rc::new(fv)), call_args, span) {
             Ok(v) => {
                 // `func main() -> Result<(), E>`: `Err(e)` prints to stderr
                 // and fails the run (exit 1). `Ok`/`Unit` are success.

@@ -5,7 +5,7 @@
 | Engine | Command | Notes |
 |---|---|---|
 | Tree-walker | `zz run` internals | `Env::get` deep-copies; mirrors take-restore behind `run_tree_walker` |
-| Bytecode VM | `zz run` | `LoadVar`/`LoadSlot` copy; `TakeVar`/`TakeSlot` move self-reassignments; `Op::Safepoint` at loop tops |
+| Bytecode VM | `zz run` | `LoadVar`/`LoadSlot` copy; `TakeVar`/`TakeSlot` move self-reassignments; loop safepoints folded into `ForNext`/`WhileCond` |
 | AOT | `zz build`, `zz run --native` | HIR→C (`lower/`) + chunk→C (`chunk.rs`), Clang driver, PGO, cross |
 
 `zz run` leaves no artifacts. `zz run --native` publishes to the same destination
@@ -44,7 +44,7 @@ Differential runs over fixtures must read identically with all opts on/off.
 Green tasks snapshot captures + transitive fns; channels unbounded
 (lock-free ring + spill + mutex-paired waiter service). AOT uses `zz_value_dup`,
 thread-local arenas, thread-safe refcounts/intern table. Pure-CPU loops yield at
-safepoints (`Op::Safepoint` / `zz_safepoint()`).
+safepoints (folded into `ForNext`/`WhileCond` on the VM, `zz_safepoint()` in AOT).
 
 Specs: [IR draft](../ir-spec-draft.md), [threading](../threading.md),
 [concurrency audit](../concurrency_audit.md), [VM CoW](../design/vm-cow.md).

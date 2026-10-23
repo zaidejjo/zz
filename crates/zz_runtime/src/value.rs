@@ -299,7 +299,7 @@ pub enum Value {
     /// `.ok(v)` / `.err(e)`.
     Result(Box<Result<Value, Value>>),
     /// A closure or named function, with its captured environment.
-    Func(Box<FuncValue>),
+    Func(std::rc::Rc<FuncValue>),
     /// `[v1, v2, ...]`.
     ///
     /// `Arc`-backed: cloning an array bumps the store (O(1)) and every
@@ -812,7 +812,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 chunk_defaults: fv.chunk_defaults.clone(),
                 tail_value: fv.tail_value,
             };
-            let placeholder_val = Value::Func(Box::new(placeholder));
+            let placeholder_val = Value::Func(std::rc::Rc::new(placeholder));
             seen.insert(key, placeholder_val.clone());
 
             // Flatten the captured env and create a self-contained version.
@@ -822,11 +822,11 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 fresh.define(&name, deep_clone_value(val, seen));
             }
             let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
-            let cloned = Value::Func(Box::new(FuncValue {
-                params: fv.params,
-                body: fv.body,
+            let cloned = Value::Func(std::rc::Rc::new(FuncValue {
+                params: fv.params.clone(),
+                body: fv.body.clone(),
                 env: new_env,
-                chunk: fv.chunk,
+                chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
                 tail_value: fv.tail_value,
             }));
@@ -1726,7 +1726,7 @@ mod snapshot_tests {
     }
 
     fn mk_func(env: &EnvLink, body: &str) -> Value {
-        Value::Func(Box::new(FuncValue {
+        Value::Func(std::rc::Rc::new(FuncValue {
             params: vec![],
             body: str_body(body),
             env: env.clone(),

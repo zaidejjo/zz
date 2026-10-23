@@ -1107,6 +1107,18 @@ struct CheckerOutcome {
     span_types: std::collections::HashMap<SpanKey, Type>,
 }
 
+/// One binding recorded for unused-variable warnings.
+///
+/// `warn_unused` is `false` for bindings whose existence is dictated by
+/// an external signature rather than by the author's choice — closure
+/// parameters, which the callee calls positionally and which cannot be
+/// removed without changing the closure's arity.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DefinedBinding {
+    pub(crate) span: zz_frontend::span::Span,
+    pub(crate) warn_unused: bool,
+}
+
 pub(crate) struct Checker {
     pub(crate) unifier: crate::unify::Unifier,
     pub(crate) errors: Vec<zz_frontend::diag::RawDiag>,
@@ -1147,8 +1159,17 @@ pub(crate) struct Checker {
     pub(crate) current_bounds: HashMap<String, Vec<zz_frontend::ast::TraitBound>>,
     /// Nesting depth of `for`/`while` loops (for `break`/`continue`).
     pub(crate) loop_depth: usize,
-    /// Names that were used (looked up) — for unused-variable warnings.
+    /// Names that were used (looked up) — for unused-import warnings and
+    /// module/type usage. Binding-level usage lives in `used_bindings`.
     pub(crate) used_names: std::collections::HashSet<String>,
+    /// Bindings actually read, keyed by `(scope index, name)`.
+    ///
+    /// Name-only tracking was too coarse: an unused `x` in one function was
+    /// silenced whenever any other function read a *different* `x`, and a
+    /// shadowed binding inherited its shadow's reads. The scope index (the
+    /// position in `env`) is stable for a scope's lifetime, so a use marked
+    /// while the scope is live is seen by that scope's `pop_scope`.
+    pub(crate) used_bindings: std::collections::HashSet<(usize, String)>,
     /// Declarations whose initializer is being checked right now, probing
     /// whether it reads the very binding the declaration shadows from an
     /// enclosing scope (#518). Innermost last — see `begin_shadow_probe`.
@@ -1157,7 +1178,7 @@ pub(crate) struct Checker {
     pub(crate) pub_names: std::collections::HashSet<String>,
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
-    pub(crate) defined_names: Vec<HashMap<String, zz_frontend::span::Span>>,
+    pub(crate) defined_names: Vec<HashMap<String, DefinedBinding>>,
     /// Tracks whether the most recent `lookup()` produced an "undefined
     /// variable" error.  Used by `check_call` to suppress the secondary
     /// "cannot call a value of type unit" cascading error.
@@ -1257,6 +1278,7 @@ impl Checker {
             current_bounds: HashMap::new(),
             loop_depth: 0,
             used_names: std::collections::HashSet::new(),
+            used_bindings: std::collections::HashSet::new(),
             shadow_probes: Vec::new(),
             pub_names: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],

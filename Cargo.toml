@@ -28,3 +28,10 @@ rustls-pki-types = "1"
 
 [profile.release]
 debug = true
+# The interpreter is one huge `match` in `zz_runtime` whose hot arms call
+# across crates (`Value` clone/drop lives in the same crate, but the stdlib,
+# checker and CLI sit on other codegen units). Thin LTO + one CGU lets the
+# handler bodies inline and keeps the dispatch loop in one block; measured on
+# the `bench/vm_gate` set before landing.
+lto = "thin"
+codegen-units = 1

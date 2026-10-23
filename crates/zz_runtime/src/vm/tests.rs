@@ -666,6 +666,19 @@ fn len_fake(_interp: &mut Interp, args: &mut Vec<Value>, span: Span) -> Result<V
     }
 }
 
+/// Bare-native stand-in with no VM specialisation, so the fused-dispatch
+/// test can prove the registry entry itself ran.
+#[allow(clippy::ptr_arg)]
+fn tally_fake(_interp: &mut Interp, args: &mut Vec<Value>, span: Span) -> Result<Value, EvalError> {
+    match args.first() {
+        Some(Value::Int(n)) => Ok(Value::Int(n * 2 + 1)),
+        other => Err(EvalError::new(
+            format!("`tally` expects an int, found `{other:?}`"),
+            span,
+        )),
+    }
+}
+
 /// Minimal `vec.push` stand-in (clone + push, like the real native).
 /// The bare test `Interp` ships no natives; registering the real
 /// `zz_stdlib` table would pull a dependency cycle into unit tests.
@@ -713,6 +726,13 @@ fn run_vm_native(src: &str) -> Result<Value, EvalError> {
         crate::runtime::NativeEntry {
             arity: 1,
             f: len_fake,
+        },
+    );
+    natives.insert(
+        "tally".to_string(),
+        crate::runtime::NativeEntry {
+            arity: 1,
+            f: tally_fake,
         },
     );
     let mut interp = Interp::with_natives(natives);
@@ -1153,7 +1173,11 @@ fn vm_if_let_result_does_not_alias_later_slots() {
     let _ = v;
     let f = interp.funcs.get("main").cloned().expect("main registered");
     let out = interp
-        .call(Value::Func(Box::new(f)), Vec::new(), Span::new(0, 0))
+        .call(
+            Value::Func(std::rc::Rc::new(f)),
+            Vec::new(),
+            Span::new(0, 0),
+        )
         .expect("call main");
     assert_eq!(out, Value::Int(7));
 }
@@ -1677,14 +1701,75 @@ fn type_alias_statement_owns_no_value() {
     );
 }
 
-/// `while` is compiled as an expression, where its value cannot be proven
-/// dead, so its standalone header `Safepoint` stays.
+/// `while` used to pay a standalone header `Safepoint`. The check now rides
+/// on `WhileCond` (see `Compiler::compile_while`), which entry, the
+/// back-edge and `continue` all pass through — so the op has to be gone
+/// from the stream, not merely unreachable.
 #[test]
-fn while_loop_keeps_header_safepoint() {
+fn while_loop_folds_its_safepoint_into_the_test() {
     let chunk = compile_with_push_native("i := 0\nwhile i < 10 {\n    i = i + 1\n}\ni");
     assert!(
-        has_op(&chunk, |op| matches!(op, Op::Safepoint)),
-        "while loops keep their standalone header safepoint"
+        !has_op(&chunk, |op| matches!(op, Op::Safepoint)),
+        "while loops fold the safepoint into `WhileCond`: {:#?}",
+        chunk.code
+    );
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::WhileCond { .. })),
+        "expected a WhileCond: {:#?}",
+        chunk.code
+    );
+}
+
+/// The fold must keep the loop cooperative: a CPU-bound `while` loop still
+/// has to reach `Flow::Yield`, or `task.spawn` siblings would starve.
+#[test]
+fn while_loop_still_yields_cooperatively() {
+    let chunk = Arc::new(compile_with_push_native(
+        "i := 0\nwhile i < 200000 {\n    i = i + 1\n}\ni",
+    ));
+    // Safepoints only yield on executor threads (main-thread runs have no
+    // executor to hand the slice to), so run this slice as a green task.
+    let outcome = crate::value::with_executor_task(1, || {
+        let mut vm = Vm::new();
+        let mut interp = Interp::new();
+        vm.run_chunk(&chunk, &mut interp)
+    });
+    match outcome {
+        Ok(crate::runtime::Flow::Yield(crate::value::YieldReason::Timeslice)) => {}
+        other => panic!("while loop must hit a cooperative safepoint, got {other:?}"),
+    }
+}
+
+/// A statement-position `while` writes no loop result: no `SetLoopResult`
+/// per iteration, no unit pushed for it, and the result placeholder is
+/// dropped once on exit.
+#[test]
+fn vm_statement_while_emits_no_result_dance() {
+    let chunk = compile_with_push_native("i := 0\nwhile i < 10 {\n    i = i + 1\n}\ni");
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::SetLoopResult)),
+        "a dead `while` must not store a loop result: {:#?}",
+        chunk.code
+    );
+    let cond = chunk
+        .code
+        .iter()
+        .position(|op| matches!(op, Op::WhileCond { .. }))
+        .expect("expected a WhileCond");
+    let body: Vec<&Op> = chunk.code[cond + 1..]
+        .iter()
+        .take_while(|op| !matches!(op, Op::Jump(_)))
+        .collect();
+    let pushes_unit = body.iter().any(|op| match op {
+        Op::PushConst(i) => matches!(chunk.constants.get(*i as usize), Some(Value::Unit)),
+        _ => false,
+    });
+    assert!(
+        !pushes_unit
+            && !body
+                .iter()
+                .any(|op| matches!(op, Op::Pop | Op::SetLoopResult)),
+        "a dead `while` body must neither push nor drop a value, got {body:?}"
     );
 }
 
@@ -1993,4 +2078,298 @@ fn vm_module_scope_loop_capture() {
     ] {
         assert_same(src);
     }
+}
+
+/// The `while` shapes whose value can be proven dead (6.8) must stay
+/// balanced against the tree-walker: statement position, value position
+/// (the loop is the tail of a function or the program), every body-tail
+/// kind, early exits, nesting and env-captured bodies.
+#[test]
+fn statement_while_shapes_match_the_tree_walker() {
+    for src in [
+        // Dead `while` in a loop body (the hot shape 6.8 elides).
+        "s := 0\nfor i in 0..4 {\n    j := 0\n    while j < 3 {\n        s = s + j\n        j = j + 1\n    }\n}\ns",
+        // `break` and `continue` inside a dead `while`.
+        "i := 0\nwhile true {\n    i = i + 1\n    if i == 3 {\n        break\n    }\n}\ni",
+        "i := 0\nn := 0\nwhile i < 6 {\n    i = i + 1\n    if i < 4 {\n        continue\n    }\n    n = n + i\n}\nn",
+        // Body declaring a local: the block's `PopN` settle.
+        "i := 0\ns := 0\nwhile i < 4 {\n    v := i * 2\n    s = s + v\n    i = i + 1\n}\ns",
+        // Trailing slot declaration as the body's last statement: the
+        // `needs_result_unit` path is skipped in the dead form.
+        "i := 0\nwhile i < 3 {\n    i = i + 1\n    v := i\n}\ni",
+        // Empty body.
+        "i := 0\nwhile i < 3 {\n    i = i + 1\n}\ni",
+        // Nested `while`, both dead.
+        "i := 0\nn := 0\nwhile i < 3 {\n    j := 0\n    while j < 3 {\n        j = j + 1\n        n = n + 1\n    }\n    i = i + 1\n}\nn",
+        // Dead `while` inside a dead `if` arm.
+        "i := 0\nif true {\n    while i < 3 {\n        i = i + 1\n    }\n}\ni",
+        // Env-captured body (the loop var is captured): keeps the
+        // value-producing path, and the placeholder must still be dropped
+        // exactly once.
+        "total := 0\ni := 0\nwhile i < 3 {\n    f := |x: int| { x + i }\n    total = total + f(1)\n    i = i + 1\n}\ntotal",
+        // Value position: the program's own tail and a unit function's tail
+        // keep the value-producing shape.
+        "i := 0\nwhile i < 3 {\n    i = i + 1\n}",
+        "func f() {\n    i := 0\n    while i < 3 {\n        i = i + 1\n    }\n}\nf()",
+        // Loop result read by the caller (`while` value used).
+        "func f() {\n    i := 0\n    r := 0\n    while i < 3 {\n        i = i + 1\n        r = i\n    }\n    r\n}\nf()",
+        // Early `return` out of a dead `while`.
+        "func f(n: int) -> int {\n    i := 0\n    while true {\n        i = i + 1\n        if i >= n {\n            return i\n        }\n    }\n    return 0\n}\nf(4) + f(9)",
+        // 5k iterations: a per-iteration stack imbalance shows up as a
+        // shifted slot rather than passing quietly.
+        "i := 0\ns := 0\nwhile i < 5000 {\n    s = s + i\n    i = i + 1\n}\ns",
+    ] {
+        assert_same(src);
+    }
+}
+
+/// The `while` hot shape (see `bench/vm_gate/while_sum.zz`): one iteration
+/// is exactly the test, the body and the back-edge. The cooperative check
+/// rides inside `WhileCond` and the dead loop result no longer costs a
+/// `PushConst unit` + `SetLoopResult` pair, so nothing may sneak back in.
+#[test]
+fn while_sum_hot_shape_is_test_body_and_backedge() {
+    use std::collections::{HashMap, HashSet};
+
+    let parsed =
+        parse("sum := 0\ni := 0\nwhile i < 1000000 {\n    sum = sum + i\n    i = i + 1\n}\nsum");
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_res, types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let chunk = super::Compiler::compile_program_typed(
+        &parsed.program,
+        Arc::new(types),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(HashSet::new()),
+    );
+    let setup = chunk
+        .code
+        .iter()
+        .position(|op| matches!(op, Op::WhileSetup { .. }))
+        .expect("expected a WhileSetup");
+    let (exit, header) = match &chunk.code[setup] {
+        Op::WhileSetup { exit, header } => (*exit, *header),
+        other => panic!("expected a WhileSetup, got {other:?}"),
+    };
+    assert_eq!(
+        header,
+        setup + 2,
+        "the header follows the setup and its result placeholder: {:#?}",
+        chunk.code
+    );
+    assert!(
+        matches!(chunk.code.get(exit), Some(Op::Pop)),
+        "a dead `while` drops its result placeholder on exit: {:#?}",
+        chunk.code
+    );
+    let body = &chunk.code[header..exit];
+    assert!(
+        matches!(
+            body,
+            [
+                Op::SlotLessIntImm { .. },
+                Op::WhileCond { .. },
+                Op::SlotAddInt { .. },
+                Op::SlotInc { .. },
+                Op::Jump(_),
+            ]
+        ),
+        "unexpected while iteration shape: {body:?}"
+    );
+}
+
+#[test]
+fn for_loop_var_reassignment_drops_the_replaced_value() {
+    // Dynamic (untyped) compilation can put a heap value in a `for`
+    // loop-variable slot, which the `ForNext` fast path rewrites every
+    // iteration. The fast path skips `drop_in_place` when the slot already
+    // holds a scalar; anything else must still be dropped, so this pins the
+    // checked branch (a blanket elision would trip `overwrite_scalar`'s
+    // debug assertion and would leak the string in release).
+    let v = run_vm_native(
+        "func f() {\n    total := 0\n    for i in 0..3 {\n        i = \"heap value\"\n        total = total + 1\n    }\n    total\n}\nf()",
+    )
+    .expect("run");
+    assert_eq!(v, Value::Int(3));
+}
+
+#[test]
+fn int_slot_writes_keep_value_semantics() {
+    // The drop-eliding writes are only safe because the old value is a
+    // scalar; make sure a slot that goes from heap back to int (and back)
+    // keeps the value/ownership semantics of a plain assignment.
+    let v = run_vm_native(
+        "func f() {\n    x := \"s\"\n    x = 1\n    n := 0\n    for i in 0..3 {\n        n = n + 1\n        x = \"t{i}\"\n        x = i\n    }\n    n * 100 + x\n}\nf()",
+    )
+    .expect("run");
+    assert_eq!(v, Value::Int(302));
+}
+
+/// Compile `src` with `natives` registered, as `zz run` does.
+fn compile_with_natives(src: &str, natives: &[&str]) -> super::Chunk {
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let names: Arc<std::collections::HashSet<String>> =
+        Arc::new(natives.iter().map(|n| n.to_string()).collect());
+    Compiler::compile_program_with_natives(&parsed.program, names)
+}
+
+/// Depth-first search through function bodies (`MakeFunc` chunks).
+fn any_op(code: &[Op], pred: &dyn Fn(&Op) -> bool) -> bool {
+    code.iter().any(|op| {
+        pred(op)
+            || match op {
+                Op::MakeFunc { chunk, .. } | Op::MakeClosure { chunk, .. } => {
+                    any_op(&chunk.code, pred)
+                }
+                _ => false,
+            }
+    })
+}
+
+#[test]
+fn bare_native_call_emits_direct_dispatch() {
+    // A registered native must compile to one `CallNative`: the generic
+    // shape builds a throwaway `Value::Native` (box + name `String`) and
+    // pays the dynamic call plumbing on every invocation.
+    let chunk = compile_with_natives("func main() {\n    len(\"abcd\")\n}", &["len"]);
+    assert!(
+        any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::CallNative { name, argc, .. } if name == "len" && *argc == 1)
+        ),
+        "registered native should emit CallNative: {:?}",
+        chunk.code
+    );
+    assert!(
+        !any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::LoadVar(name, _) if name == "len")
+        ),
+        "fused native call must not also load the callee: {:?}",
+        chunk.code
+    );
+}
+
+#[test]
+fn bare_native_dispatch_calls_the_registered_entry() {
+    // Fused dispatch must hit the registered native (arity gate, argument
+    // order, result placement) exactly like the generic path. `tally` has
+    // no VM specialisation, so the result can only come from the registry
+    // entry itself (`len` is specialised inside the handler; see
+    // `len_fast_path_matches_the_native_semantics`).
+    let v = run_vm_native("tally(20)").expect("run");
+    assert_eq!(v, Value::Int(41));
+}
+
+#[test]
+fn len_fast_path_matches_the_native_semantics() {
+    // The handler specialises the bare `len` call ahead of the registry;
+    // both must agree on every sized variant, on non-ASCII char counting,
+    // and on the failure message for unsized values.
+    let cases = [
+        ("len([1, 2, 3])", "3"),
+        ("len((1, 2))", "2"),
+        ("len(\"abc\")", "3"),
+        ("len(\"héllo\")", "5"),
+        ("len(1..4)", "3"),
+    ];
+    for (src, want) in cases {
+        let v = run_vm_native(src).expect("run");
+        assert_eq!(v.to_string(), want, "wrong `len` for {src}");
+    }
+    let d = run_vm_native("d:{str: int} = {\"a\": 1, \"b\": 2}\nlen(d)").expect("run");
+    assert_eq!(d, Value::Int(2));
+
+    let err = run_vm_native("len(5)").expect_err("unsized").message;
+    assert_eq!(
+        err,
+        "len expects array, tuple, bytes, string, dict, or range, found `5`"
+    );
+
+    // Arity still goes through the registry gate, not the fast path.
+    let err = run_vm_native("len()").expect_err("arity").message;
+    assert!(
+        err.contains("expected 1 arguments, found 0"),
+        "unexpected arity error: {err}"
+    );
+}
+
+#[test]
+fn user_function_shadowing_keeps_the_generic_call() {
+    // `func len` must win over the native: the direct-dispatch guard sees
+    // the user signature and keeps `LoadVar` + `Call`.
+    let src = "func len(x: int) -> int {\n    x + 100\n}\nlen(1)";
+    let chunk = compile_with_natives(src, &["len"]);
+    assert!(
+        !any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::CallNative { name, .. } if name == "len")
+        ),
+        "shadowed `len` must not take native dispatch: {:?}",
+        chunk.code
+    );
+    assert!(
+        any_op(&chunk.code, &|op| matches!(op, Op::Call { .. })),
+        "shadowed `len` keeps the generic call: {:?}",
+        chunk.code
+    );
+    let v = run_vm_native(src).expect("run");
+    assert_eq!(v, Value::Int(101));
+}
+
+#[test]
+fn local_binding_shadowing_keeps_the_generic_call() {
+    let src = "func main() {\n    len := |x| x + 100\n    len(1)\n}";
+    let chunk = compile_with_natives(src, &["len"]);
+    assert!(
+        !any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::CallNative { name, .. } if name == "len")
+        ),
+        "local `len` must not take native dispatch: {:?}",
+        chunk.code
+    );
+    assert_same(src);
+}
+
+#[test]
+fn top_level_binding_shadowing_keeps_the_generic_call() {
+    // A promoted top-level declaration is a frame slot, not an env
+    // binding; the guard must still refuse to fuse.
+    let src = "len := |x| x + 100\nlen(1)";
+    let chunk = compile_with_natives(src, &["len"]);
+    assert!(
+        !any_op(
+            &chunk.code,
+            &|op| matches!(op, Op::CallNative { name, .. } if name == "len")
+        ),
+        "top-level `len` must not take native dispatch: {:?}",
+        chunk.code
+    );
+    assert_same(src);
+}
+
+#[test]
+fn native_call_arity_errors_match_the_generic_path() {
+    // Both shapes must reject a wrong-arity native call with the same
+    // message (`CallNative` gates on the registry entry's arity).
+    let fused = run_vm_native("len()").expect_err("arity").message;
+    let generic = run_vm_native("f := len\nf()").expect_err("arity").message;
+    assert_eq!(fused, generic, "arity error text drifted");
 }

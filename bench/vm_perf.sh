@@ -36,7 +36,7 @@ for b in "$NEW_BIN" "$BASE_BIN"; do
 	}
 done
 
-FIXTURES="loop_sum array_sum if_loop fib22 str_index str_slice_len dict_lookup method_push"
+FIXTURES="loop_sum while_sum array_sum if_loop fib22 str_index str_slice_len dict_lookup method_push"
 
 # run_one <bin> <fixture> -> prints "<ms> <result>" (last line parsed).
 run_one() {

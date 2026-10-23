@@ -274,7 +274,11 @@ pub enum Op {
     /// compiler.
     WhileSetup { exit: usize, header: usize },
     /// Pop the condition; error unless it is a bool; exit the loop when
-    /// falsy.
+    /// falsy. Also the loop's cooperative safepoint (folded in from the
+    /// header — see `Compiler::compile_while`): this op is reached once per
+    /// test from every edge, so the yield check cannot be skipped, and it
+    /// runs before the condition is popped so a yield re-executes the op
+    /// whole.
     WhileCond { exit: usize, span: Span },
     /// Exit the innermost loop (restores the loop's environment).
     Break(Span),
@@ -282,11 +286,13 @@ pub enum Op {
     Continue(Span),
     /// Pop a value and store it as the innermost loop's result.
     SetLoopResult,
-    /// Cooperative safepoint at a loop header (emitted by the compiler for
-    /// every `for`/`while`). Stack-neutral: decrements the VM's slice
+    /// Cooperative safepoint (stack-neutral: decrements the VM's slice
     /// budget, and once per budget worth of iterations checks the timeslice
     /// clock — yielding to the executor when the task overruns its quantum
-    /// so CPU-bound loops cannot starve sibling tasks. Header (not
+    /// so CPU-bound loops cannot starve sibling tasks). `for` loops charge
+    /// the check to `ForNext` and `while` loops to `WhileCond`, both of
+    /// which every edge of the loop passes through; this standalone op is
+    /// what a producer that cannot fold it emits, with header (not
     /// back-edge) placement so `continue` cannot skip the check.
     Safepoint,
 
