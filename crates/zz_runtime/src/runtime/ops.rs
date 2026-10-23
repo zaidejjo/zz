@@ -12,6 +12,17 @@ use std::collections::HashMap;
 use super::EvalError;
 use crate::value::{DictData, ObjectValue, Value};
 
+/// Interned one-byte ASCII strings, indexed by the byte value.
+///
+/// `s[i]` on an ASCII string used to build a fresh `String` *and* a fresh
+/// `Arc` per character, which is what `str_scan` (176 k reads) paid for.
+/// The table is filled once per process and a read is then a refcount bump.
+fn ascii_chars() -> &'static [std::sync::Arc<String>; 128] {
+    static TABLE: std::sync::OnceLock<[std::sync::Arc<String>; 128]> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| std::array::from_fn(|b| std::sync::Arc::new((b as u8 as char).to_string())))
+}
+
 // ---------------------------------------------------------------------------
 // Object / field helpers
 // ---------------------------------------------------------------------------
@@ -345,10 +356,12 @@ pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value,
             .ok_or_else(|| EvalError::new(format!("key `{key}` not found in dict"), span)),
         (Value::Str(s), Value::Int(i)) => {
             // ASCII fast path: byte index == char index, no `Vec<char>`
-            // allocation. Non-ASCII keeps the exact char semantics below.
+            // allocation, and the single-character value comes from the
+            // interned table. Non-ASCII keeps the exact char semantics below.
             if s.is_ascii() {
                 let idx = normalize_index(*i, s.len(), span)?;
-                Ok(Value::Str((s.as_bytes()[idx] as char).to_string().into()))
+                let byte = s.as_bytes()[idx] as usize;
+                Ok(Value::Str(std::sync::Arc::clone(&ascii_chars()[byte])))
             } else {
                 let chars: Vec<char> = s.chars().collect();
                 let idx = normalize_index(*i, chars.len(), span)?;
@@ -673,9 +686,34 @@ pub(crate) fn eval_unary(op: UnOp, v: Value, span: Span) -> Result<Value, EvalEr
 
 #[cfg(test)]
 mod tests {
-    use super::{object_field, object_field_opt};
+    use super::{get_index, object_field, object_field_opt};
     use crate::value::{ObjectValue, Value};
     use zz_frontend::span::Span;
+
+    /// `s[i]` on an ASCII string hands out interned one-character values, so
+    /// repeated reads are a refcount bump (the `str_scan` cost). Non-ASCII
+    /// keeps char semantics: byte index != char index there.
+    #[test]
+    fn ascii_char_reads_are_interned() {
+        let span = Span::new(0, 0);
+        let s = Value::Str("ab".to_string().into());
+        let first = get_index(&s, &Value::Int(0), span).unwrap();
+        let again = get_index(&s, &Value::Int(0), span).unwrap();
+        assert_eq!(first, Value::Str("a".to_string().into()));
+        match (first, again) {
+            (Value::Str(a), Value::Str(b)) => assert!(std::sync::Arc::ptr_eq(&a, &b)),
+            _ => panic!("expected string values"),
+        }
+        let unicode = Value::Str("héllo".to_string().into());
+        assert_eq!(
+            get_index(&unicode, &Value::Int(1), span).unwrap(),
+            Value::Str("é".to_string().into())
+        );
+        assert_eq!(
+            get_index(&unicode, &Value::Int(4), span).unwrap(),
+            Value::Str("o".to_string().into())
+        );
+    }
 
     /// `CallMethod` probes with [`object_field_opt`] and only the real read
     /// path formats [`object_field`]'s error, so both must agree on hits and
