@@ -448,6 +448,147 @@ void zz_release_bytes(zz_bytes *b) {
     }
 }
 
+// ---- dict key index ------------------------------------------------------
+// The VM keeps a dict as an insertion-ordered entry list plus a lazy
+// `HashMap<DictKey, usize>` (int/bool/str keys only). The C twin mirrors
+// that shape: `idx` caches entry positions, entries stay authoritative.
+// Keys outside that set are never indexed, so they always take the linear
+// lane — same lookup result, just without the acceleration.
+
+static size_t zz_dict_cap_for(size_t len) {
+    size_t cap = 16;
+    // Load factor <= 3/4 keeps linear probing short.
+    while (cap - (cap >> 2) < len) {
+        cap <<= 1;
+    }
+    return cap;
+}
+
+// 1 when the key can be indexed (VM `DictKey`: int, bool, str), 0 otherwise.
+static int zz_dict_key_hash(zz_value key, size_t *out) {
+    uint64_t h;
+    switch (key.tag) {
+    case ZZ_INT:
+        h = (uint64_t)key.i;
+        break;
+    case ZZ_BOOL:
+        h = (uint64_t)(key.b ? 1 : 0);
+        break;
+    case ZZ_STR: {
+        if (!key.s) return 0;
+        const unsigned char *p = (const unsigned char *)zz_str_cptr(key.s);
+        size_t n = key.s->len;
+        h = 1469598103934665603ULL;  // FNV-1a
+        for (size_t i = 0; i < n; i++) {
+            h ^= p[i];
+            h *= 1099511628211ULL;
+        }
+        break;
+    }
+    default:
+        return 0;
+    }
+    // splitmix64 finalizer: sequential int keys must not collide on the
+    // low bits used for probing.
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebULL;
+    h ^= h >> 31;
+    *out = (size_t)h;
+    return 1;
+}
+
+// Place entry `j` in the index (no-op for a non-indexed key or no index).
+// The first occurrence of a key wins, matching the linear scan's `find`.
+static void zz_dict_idx_place(zz_dict *d, size_t j) {
+    size_t h;
+    if (!d->idx || !zz_dict_key_hash(d->entries[j].key, &h)) return;
+    size_t mask = d->idx_cap - 1;
+    size_t p = h & mask;
+    while (d->idx[p] != 0) {
+        if (zz_key_eq(d->entries[d->idx[p] - 1].key, d->entries[j].key)) return;
+        p = (p + 1) & mask;
+    }
+    d->idx[p] = j + 1;
+}
+
+// Allocate an index of `cap` slots from the arena (dies at reset) or the
+// heap, then index every entry placed so far.
+static void zz_dict_idx_build(zz_dict *d, zz_arena *arena, size_t cap) {
+    if (cap == 0) return;
+    size_t bytes = cap * sizeof(size_t);
+    size_t *slots = arena ? (size_t *)zz_arena_alloc(arena, bytes, 8)
+                          : (size_t *)calloc(1, bytes);
+    if (!slots) return;
+    if (arena) memset(slots, 0, bytes);
+    d->idx = slots;
+    d->idx_cap = cap;
+    for (size_t j = 0; j < d->len; j++) {
+        zz_dict_idx_place(d, j);
+    }
+}
+
+// Keep the cache in step with a freshly appended entry.
+static void zz_dict_idx_insert(zz_dict *d, size_t i) {
+    size_t h;
+    if (!zz_dict_key_hash(d->entries[i].key, &h)) return;  // unindexed key
+    if (!d->idx) {
+        // Linear lane until the dict outgrows the VM's threshold.
+        if (d->len <= ZZ_DICT_INDEX_THRESHOLD) return;
+        zz_dict_idx_build(d, NULL, zz_dict_cap_for(d->len));
+        return;
+    }
+    if (d->len * 4 > d->idx_cap * 3) {
+        // Arena-sized caches are fixed-capacity (bump-allocated): drop the
+        // cache instead of growing it. Entries remain authoritative, so the
+        // dict just falls back to the linear scan.
+        if (d->refs == ZZ_DICT_ARENA_MAGIC) {
+            d->idx = NULL;
+            d->idx_cap = 0;
+            return;
+        }
+        size_t cap = d->idx_cap << 1;
+        size_t *fresh = (size_t *)calloc(1, cap * sizeof(size_t));
+        if (!fresh) return;
+        free(d->idx);
+        d->idx = fresh;
+        d->idx_cap = cap;
+        for (size_t j = 0; j < d->len; j++) {
+            zz_dict_idx_place(d, j);
+        }
+        return;
+    }
+    zz_dict_idx_place(d, i);
+}
+
+// First entry whose key equals `key`. Indexed keys probe the cache, every
+// other key (and every small dict) takes the linear scan — the same result
+// either way, since only int/bool/str keys ever enter the cache.
+static int zz_dict_find(const zz_dict *d, zz_value key, size_t *out) {
+    size_t h;
+    if (d->idx && zz_dict_key_hash(key, &h)) {
+        size_t mask = d->idx_cap - 1;
+        size_t p = h & mask;
+        while (d->idx[p] != 0) {
+            size_t j = d->idx[p] - 1;
+            if (zz_key_eq(d->entries[j].key, key)) {
+                *out = j;
+                return 1;
+            }
+            p = (p + 1) & mask;
+        }
+        return 0;
+    }
+    for (size_t i = 0; i < d->len; i++) {
+        if (zz_key_eq(d->entries[i].key, key)) {
+            *out = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // ---- dicts ---------------------------------------------------------------
 zz_value zz_dict_new(void) {
     zz_dict *d = (zz_dict *)calloc(1, sizeof(zz_dict));
@@ -493,12 +634,22 @@ zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint) {
         } else {
             d->entries = NULL;
         }
+        // The entries buffer is fixed-capacity, so pre-size the key index to
+        // the same hint (both live on the arena and die with it).
+        if (hint > ZZ_DICT_INDEX_THRESHOLD) {
+            zz_dict_idx_build(d, arena, zz_dict_cap_for(hint));
+        }
     } else {
         d = (zz_dict *)calloc(1, sizeof(zz_dict));
         d->refs = 1;
         if (hint > 0) {
             d->cap = hint;
             d->entries = (zz_dict_entry *)malloc(hint * sizeof(zz_dict_entry));
+        }
+        // Literals and dict copies know their size up front: allocate the
+        // index now so the inserts never rebuild it.
+        if (hint > ZZ_DICT_INDEX_THRESHOLD) {
+            zz_dict_idx_build(d, NULL, zz_dict_cap_for(hint));
         }
     }
     zz_value v;
@@ -651,14 +802,12 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
 
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
     if (!d) return;
-    for (size_t i = 0; i < d->len; i++) {
-        zz_dict_entry *e = &d->entries[i];
-        if (zz_key_eq(e->key, key)) {
-            // First occurrence wins on the key, the value is replaced
-            // (mirrors the VM's `DictData::insert`).
-            zz_assign(&e->val, val);
-            return;
-        }
+    size_t pos;
+    if (zz_dict_find(d, key, &pos)) {
+        // First occurrence wins on the key, the value is replaced
+        // (mirrors the VM's `DictData::insert`).
+        zz_assign(&d->entries[pos].val, val);
+        return;
     }
     if (d->len == d->cap) {
         if (d->refs == ZZ_DICT_ARENA_MAGIC) {
@@ -681,6 +830,21 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
     // reset; heap values are adopted as-is (no bump — same as the old
     // `zz_str_heal_arena` passthrough, extended to containers).
     e->val = zz_heal_for_move(val);
+    zz_dict_idx_insert(d, d->len - 1);
+}
+
+zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
+    *err = 0;
+    if (!d) {
+        *err = 1;
+        return zz_unit();
+    }
+    size_t pos;
+    if (zz_dict_find(d, key, &pos)) {
+        return zz_clone(d->entries[pos].val);
+    }
+    *err = 1;
+    return zz_unit();
 }
 
 size_t zz_dict_len(const zz_dict *d) {
@@ -1577,11 +1741,8 @@ zz_value zz_dict_keys(zz_value d, int *err) {
 zz_value zz_dict_has(zz_value d, zz_value key, int *err) {
     (void)err;
     if (d.tag != ZZ_DICT) return (zz_value){ZZ_BOOL, {.b = false}};
-    for (size_t i = 0; i < d.dict->len; i++) {
-        if (zz_key_eq(d.dict->entries[i].key, key))
-            return (zz_value){ZZ_BOOL, {.b = true}};
-    }
-    return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t pos;
+    return (zz_value){ZZ_BOOL, {.b = zz_dict_find(d.dict, key, &pos) != 0}};
 }
 
 // option.expect(opt, msg) — unwrap .some(v) or panic with msg

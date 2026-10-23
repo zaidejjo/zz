@@ -189,11 +189,15 @@ void zz_release_dict(zz_dict *d) {
         if (d->refs != ZZ_DICT_ARENA_MAGIC) {
             free(d->entries);
         }
+        // The key index is heap-built for refs==0 dicts (the arena-sized
+        // constructor uses the magic sentinel and bump-allocates instead).
+        free(d->idx);
         return;
     }
     if (d->refs == ZZ_DICT_ARENA_MAGIC) {
         // Arena-sized dict: entries are arena-allocated, skip individual free.
         // Only release the contained values (keys may be heap strings).
+        // The key index lives on the same arena — nothing to free either.
         for (size_t i = 0; i < d->len; i++) {
             zz_release(&d->entries[i].key);
             zz_release(&d->entries[i].val);
@@ -206,6 +210,7 @@ void zz_release_dict(zz_dict *d) {
             zz_release(&d->entries[i].val);
         }
         free(d->entries);
+        free(d->idx);
         free(d);
     }
 }

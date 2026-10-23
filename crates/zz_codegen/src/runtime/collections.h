@@ -123,22 +123,10 @@ void zz_release_bytes(zz_bytes *b);
 
 // Index expression support (lowered from `obj[idx]`). Dispatch on the
 // object tag at runtime: arrays and dicts. Returns unit + *err=1 on unsupported.
-// Inlined for the same reason as zz_array_get above.
-static inline zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
-    *err = 0;
-    if (!d) {
-        *err = 1;
-        return zz_unit();
-    }
-    for (size_t i = 0; i < d->len; i++) {
-        zz_dict_entry *e = &d->entries[i];
-        if (zz_key_eq(e->key, key)) {
-            return zz_clone(e->val);
-        }
-    }
-    *err = 1;
-    return zz_unit();
-}
+// Out of line: it probes the dict's key index (open addressing over the
+// ordered entries) instead of walking them, so it no longer benefits from
+// inlining over a loop body.
+zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err);
 
 static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
     switch (obj.tag) {
@@ -173,7 +161,6 @@ void zz_index_trap(zz_value obj, zz_value idx, const char *func);
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
 
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val);
-zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err);
 size_t zz_dict_len(const zz_dict *d);
 
 // ---- higher-order iterators --------------------------------------------
