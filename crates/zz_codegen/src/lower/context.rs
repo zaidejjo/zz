@@ -1894,14 +1894,21 @@ impl Lowerer {
             Expr::Unary { op, expr, .. } => {
                 match op {
                     zz_frontend::ast::UnOp::Neg => {
-                        // `-x` for any recognized scalar: produce a negated
-                        // int of the inner scalar.
+                        // `-x` keeps the inner scalar's tag: negating a float
+                        // must stay a float (`[-0.5]` used to become an
+                        // `Int 0` when the payload was written through `.i`).
                         let inner = self.emit_scalar_init(expr, names, _out)?;
-                        let stripped = inner
-                            .strip_prefix("{.tag=ZZ_INT, {.i=")
-                            .or_else(|| inner.strip_prefix("{.tag=ZZ_FLOAT, {.f="))?;
-                        let stripped = stripped.strip_suffix("}}").unwrap_or(stripped);
-                        Some(format!("{{.tag=ZZ_INT, {{.i=-({stripped})}}}}"))
+                        if let Some(rest) = inner.strip_prefix("{.tag=ZZ_INT, {.i=") {
+                            let v = rest.strip_suffix("}}").unwrap_or(rest);
+                            Some(format!("{{.tag=ZZ_INT, {{.i=-({v})}}}}"))
+                        } else if let Some(rest) = inner.strip_prefix("{.tag=ZZ_FLOAT, {.f=") {
+                            let v = rest.strip_suffix("}}").unwrap_or(rest);
+                            Some(format!("{{.tag=ZZ_FLOAT, {{.f=-({v})}}}}"))
+                        } else {
+                            // Not a numeric scalar (e.g. a bool): let the
+                            // generic `zz_neg` path handle it.
+                            None
+                        }
                     }
                     zz_frontend::ast::UnOp::Pos => self.emit_scalar_init(expr, names, _out),
                     zz_frontend::ast::UnOp::Not => {
@@ -1909,10 +1916,10 @@ impl Lowerer {
                         Some(format!("{{.tag=ZZ_BOOL, {{.b=!({inner_b})}}}}"))
                     }
                     zz_frontend::ast::UnOp::BitNot => {
+                        // Bitwise not is an integer operation; a float
+                        // operand is a checker error, so int-only here.
                         let inner = self.emit_scalar_init(expr, names, _out)?;
-                        let stripped = inner
-                            .strip_prefix("{.tag=ZZ_INT, {.i=")
-                            .or_else(|| inner.strip_prefix("{.tag=ZZ_FLOAT, {.f="))?;
+                        let stripped = inner.strip_prefix("{.tag=ZZ_INT, {.i=")?;
                         let stripped = stripped.strip_suffix("}}").unwrap_or(stripped);
                         Some(format!("{{.tag=ZZ_INT, {{.i=~({stripped})}}}}"))
                     }

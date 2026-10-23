@@ -602,6 +602,7 @@ e2e_success_test!(e2e_types_smart_try_convert, "types", "smart_try_convert.zz");
 // Stdlib fixtures
 e2e_success_test!(e2e_stdlib_strings, "stdlib", "strings.zz");
 e2e_success_test!(e2e_stdlib_vectors, "stdlib", "vectors.zz");
+e2e_success_test!(e2e_stdlib_vec_sort, "stdlib", "vec_sort.zz");
 e2e_success_test!(e2e_stdlib_str_utf8_parity, "stdlib", "str_utf8_parity.zz");
 e2e_success_test!(
     e2e_stdlib_str_trim_unicode_test,
