@@ -480,8 +480,9 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) fputs(", ", out);
-                fwrite(zz_str_ptr(v->dict->entries[i].key), 1,
-                       v->dict->entries[i].key->len, out);
+                // Keys are values: a string prints raw (no quotes, matching
+                // the VM's display), every other type prints its own form.
+                zz_print_value_depth(out, &v->dict->entries[i].key, depth + 1);
                 fputs(": ", out);
                 zz_print_value_depth(out, &v->dict->entries[i].val, depth + 1);
             }
@@ -645,8 +646,7 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) fputs(", ", out);
-                fwrite(zz_str_ptr(v->dict->entries[i].key), 1,
-                       v->dict->entries[i].key->len, out);
+                zz_print_value_display_depth(out, &v->dict->entries[i].key, depth + 1);
                 fputs(": ", out);
                 zz_print_value_display_depth(out, &v->dict->entries[i].val, depth + 1);
             }
@@ -870,8 +870,7 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) sb_append_str(sb, ", ");
-                sb_append(sb, zz_str_ptr(v->dict->entries[i].key),
-                          v->dict->entries[i].key->len);
+                zz_value_to_strbuf_depth(sb, &v->dict->entries[i].key, depth + 1);
                 sb_append_str(sb, ": ");
                 zz_value_to_strbuf_depth(sb, &v->dict->entries[i].val, depth + 1);
             }
@@ -1056,8 +1055,7 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) sb_append_str(sb, ", ");
-                sb_append(sb, zz_str_ptr(v->dict->entries[i].key),
-                          v->dict->entries[i].key->len);
+                zz_value_to_display_strbuf_depth(sb, &v->dict->entries[i].key, depth + 1);
                 sb_append_str(sb, ": ");
                 zz_value_to_display_strbuf_depth(sb, &v->dict->entries[i].val, depth + 1);
             }

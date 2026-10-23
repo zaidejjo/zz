@@ -1781,7 +1781,7 @@ impl Lowerer {
                          ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
                          : (({iter_tmp}.tag == ZZ_BYTES)\n\
                          ? (zz_value){{ZZ_INT, {{.i = (int64_t){iter_tmp}.bytes->buf->data[{iter_tmp}.bytes->off + (size_t){idx}]}}}}\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}});\n"
+                         : zz_clone({iter_tmp}.dict->entries[{idx}].key));\n"
                     ));
                 } else {
                     out.push_str(&format!(
@@ -1789,7 +1789,7 @@ impl Lowerer {
                          ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
                          : (({iter_tmp}.tag == ZZ_BYTES)\n\
                          ? (zz_value){{ZZ_INT, {{.i = (int64_t){iter_tmp}.bytes->buf->data[{iter_tmp}.bytes->off + (size_t){idx}]}}}}\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}});\n"
+                         : zz_clone({iter_tmp}.dict->entries[{idx}].key));\n"
                     ));
                 }
                 // Captured iteration variable: per-iteration shared cell.
@@ -1880,7 +1880,7 @@ impl Lowerer {
                     out.push_str(&format!(
                         "        {k_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
                          ? {k_pair}\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{ideref}].key}}}};\n"
+                         : zz_clone({iter_tmp}.dict->entries[{ideref}].key);\n"
                     ));
                     out.push_str(&format!(
                         "        {v_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
@@ -1907,7 +1907,7 @@ impl Lowerer {
                     out.push_str(&format!(
                         "        zz_value {k_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
                          ? {k_pair}\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                         : zz_clone({iter_tmp}.dict->entries[{idx}].key);\n"
                     ));
                     out.push_str(&format!(
                         "        zz_value {v_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\

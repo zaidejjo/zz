@@ -181,12 +181,7 @@ void zz_release_dict(zz_dict *d) {
     // Arena-allocated dicts have refs==0 sentinel — skip atomic decrement.
     if (d->refs == 0) {
         for (size_t i = 0; i < d->len; i++) {
-            if (d->entries[i].key && !d->entries[i].key->interned) {
-                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
-                    zz_str_header_free(d->entries[i].key);
-                }
-            }
+            zz_release(&d->entries[i].key);
             zz_release(&d->entries[i].val);
         }
         // Entries buffer: arena-allocated (ZZ_DICT_ARENA_MAGIC) → skip free.
@@ -200,24 +195,14 @@ void zz_release_dict(zz_dict *d) {
         // Arena-sized dict: entries are arena-allocated, skip individual free.
         // Only release the contained values (keys may be heap strings).
         for (size_t i = 0; i < d->len; i++) {
-            if (d->entries[i].key && !d->entries[i].key->interned) {
-                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
-                    zz_str_header_free(d->entries[i].key);
-                }
-            }
+            zz_release(&d->entries[i].key);
             zz_release(&d->entries[i].val);
         }
         return;
     }
     if (__atomic_sub_fetch(&d->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         for (size_t i = 0; i < d->len; i++) {
-            if (d->entries[i].key && !d->entries[i].key->interned) {
-                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
-                    zz_str_header_free(d->entries[i].key);
-                }
-            }
+            zz_release(&d->entries[i].key);
             zz_release(&d->entries[i].val);
         }
         free(d->entries);

@@ -280,6 +280,9 @@ zz_value zz_json_parse(zz_value s, int *err) {
 
 // ---- compact JSON serializer (matches VM to_json_string) -----------------
 static void json_append_str_sb(SB *sb, const char *s, size_t len);
+// Append a dict key as a JSON object key. String keys take the fast path;
+// other key types are serialized by their display form (see the helper).
+static void json_append_key(SB *sb, zz_value key);
 void json_serialize(SB *sb, zz_value v) {
     v = zz_json_unwrap(v);
     switch (v.tag) {
@@ -335,7 +338,7 @@ void json_serialize(SB *sb, zz_value v) {
             if (i > 0) sb_str(sb, ",", 1);
             zz_dict_entry *e = &v.dict->entries[i];
             sb_str(sb, "\"", 1);
-            json_append_str_sb(sb, zz_str_cptr(e->key), e->key->len);
+            json_append_key(sb, e->key);
             sb_str(sb, "\":", 2);
             json_serialize(sb, e->val);
         }
@@ -375,9 +378,71 @@ static void json_append_str_sb(SB *sb, const char *s, size_t len) {
     }
 }
 
+// A dict key rendered as a JSON object key. String keys are the common case
+// and take the escaping fast path; any other key type is rendered by its
+// display form (`1` → "1"). `std.json.stringify` rejects non-string keys
+// before it gets here (VM parity); the lenient path exists for `json_to_cstr`
+// (HTTP bodies), which has no error channel.
+static void json_append_key(SB *sb, zz_value key) {
+    if (key.tag == ZZ_STR && key.s) {
+        json_append_str_sb(sb, zz_str_cptr(key.s), key.s->len);
+        return;
+    }
+    char *txt = zz_value_to_display_string(&key);
+    if (!txt) return;
+    json_append_str_sb(sb, txt, strlen(txt));
+    free(txt);
+}
+
+// First non-string dict key reachable from `v`. The VM's `stringify` refuses
+// such values ("cannot serialize a non-string key") rather than inventing a
+// spelling, so mirror that before serializing.
+static int json_find_nonstr_key(zz_value v, zz_value *bad, int depth) {
+    if (depth > 64) return 0;
+    v = zz_json_unwrap(v);
+    switch (v.tag) {
+    case ZZ_DICT:
+        if (!v.dict) return 0;
+        for (size_t i = 0; i < v.dict->len; i++) {
+            if (v.dict->entries[i].key.tag != ZZ_STR) {
+                *bad = v.dict->entries[i].key;
+                return 1;
+            }
+            if (json_find_nonstr_key(v.dict->entries[i].val, bad, depth + 1))
+                return 1;
+        }
+        return 0;
+    case ZZ_ARRAY:
+    case ZZ_TUPLE:
+        if (!v.arr) return 0;
+        for (size_t i = 0; i < v.arr->len; i++) {
+            if (json_find_nonstr_key(v.arr->items[i], bad, depth + 1))
+                return 1;
+        }
+        return 0;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        return v.payload ? json_find_nonstr_key(*v.payload, bad, depth + 1) : 0;
+    default:
+        return 0;
+    }
+}
+
 // json.stringify(v) → Result(Ok(compact json str))
 zz_value zz_json_stringify(zz_value v, int *err) {
     (void)err;
+    zz_value bad = zz_unit();
+    if (json_find_nonstr_key(v, &bad, 0)) {
+        char buf[256];
+        char *txt = zz_value_to_display_string(&bad);
+        snprintf(buf, sizeof buf,
+                 "std.json.stringify: cannot serialize a non-string key (`%s`)",
+                 txt ? txt : "?");
+        free(txt);
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, strlen(buf))));
+    }
     SB sb = {0};
     json_serialize(&sb, v);
     zz_value out = zz_str_owned(sb_take(&sb));
@@ -401,7 +466,8 @@ zz_value zz_json_get(zz_value j, zz_value key, int *err) {
     case ZZ_DICT: {
         for (size_t i = 0; i < inner.dict->len; i++) {
             zz_dict_entry *e = &inner.dict->entries[i];
-            if (e->key->len == k->len && memcmp(zz_str_cptr(e->key), zz_str_cptr(k), k->len) == 0) {
+            zz_str *ek = zz_dict_key_str(e);
+            if (ek && ek->len == k->len && memcmp(zz_str_cptr(ek), zz_str_cptr(k), k->len) == 0) {
                 return zz_variant_ok(zz_json_wrap(zz_clone(e->val)));
             }
         }
@@ -531,7 +597,7 @@ zz_value zz_json_keys(zz_value j, int *err) {
     if (v.tag == ZZ_DICT) {
         for (size_t i = 0; i < v.dict->len; i++) {
             zz_dict_entry *e = &v.dict->entries[i];
-            zz_array_push(arr.arr, zz_str_new(zz_str_cptr(e->key), e->key->len));
+            zz_array_push(arr.arr, zz_clone(e->key));
         }
     }
     return arr;
@@ -544,8 +610,7 @@ zz_value zz_json_has(zz_value j, zz_value key, int *err) {
     if (v.tag != ZZ_DICT || key.tag != ZZ_STR) return zz_bool(false);
     for (size_t i = 0; i < v.dict->len; i++) {
         zz_dict_entry *e = &v.dict->entries[i];
-        if (e->key->len == key.s->len &&
-            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
+        if (zz_key_eq(e->key, key)) {
             return zz_bool(true);
         }
     }
@@ -605,7 +670,7 @@ static void json_pretty_print(SB *sb, zz_value v, int indent) {
             zz_dict_entry *e = &v.dict->entries[i];
             for (int k = 0; k < indent + 2; k++) sb_str(sb, " ", 1);
             sb_str(sb, "\"", 1);
-            json_append_str_sb(sb, zz_str_cptr(e->key), e->key->len);
+            json_append_key(sb, e->key);
             sb_str(sb, "\": ", 3);
             json_pretty_print(sb, e->val, indent + 2);
             if (i + 1 < v.dict->len) sb_str(sb, ",", 1);
@@ -641,13 +706,11 @@ zz_value zz_json_merge(zz_value a, zz_value b, int *err) {
     zz_value out = zz_dict_new();
     for (size_t i = 0; i < av.dict->len; i++) {
         zz_dict_entry *e = &av.dict->entries[i];
-        zz_value k = (zz_value){ZZ_STR, {.s = e->key}};
-        zz_dict_set(out.dict, k, zz_clone(e->val));
+        zz_dict_set(out.dict, e->key, zz_clone(e->val));
     }
     for (size_t i = 0; i < bv.dict->len; i++) {
         zz_dict_entry *e = &bv.dict->entries[i];
-        zz_value k = (zz_value){ZZ_STR, {.s = e->key}};
-        zz_dict_set(out.dict, k, zz_clone(e->val));
+        zz_dict_set(out.dict, e->key, zz_clone(e->val));
     }
     return zz_json_wrap(out);
 }
@@ -675,8 +738,9 @@ zz_value zz_json_deep_get(zz_value j, zz_value path, int *err) {
             int found = 0;
             for (size_t i = 0; i < current.dict->len; i++) {
                 zz_dict_entry *e = &current.dict->entries[i];
-                if (e->key->len == seg_len &&
-                    memcmp(zz_str_cptr(e->key), seg_buf, seg_len) == 0) {
+                zz_str *ek = zz_dict_key_str(e);
+                if (ek && ek->len == seg_len &&
+                    memcmp(zz_str_cptr(ek), seg_buf, seg_len) == 0) {
                     current = zz_clone(e->val);
                     found = 1;
                     break;

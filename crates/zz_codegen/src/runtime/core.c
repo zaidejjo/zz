@@ -77,7 +77,7 @@ static int zz_str_bytes_eq(const zz_str *a, const zz_str *b) {
     return memcmp(zz_str_cptr(a), zz_str_cptr(b), a->len) == 0;
 }
 
-static int zz_values_equal(zz_value a, zz_value b) {
+int zz_values_equal(zz_value a, zz_value b) {
     if (a.tag == ZZ_INT && b.tag == ZZ_INT)
         return a.i == b.i;
     if ((a.tag == ZZ_INT || a.tag == ZZ_FLOAT) &&
@@ -129,7 +129,7 @@ static int zz_values_equal(zz_value a, zz_value b) {
             int found = 0;
             for (size_t j = 0; j < db->len; j++) {
                 zz_dict_entry *f = &db->entries[j];
-                if (zz_str_bytes_eq(e->key, f->key)) {
+                if (zz_key_eq(e->key, f->key)) {
                     if (!zz_values_equal(e->val, f->val))
                         return 0;
                     found = 1;
@@ -1528,12 +1528,12 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         zz_value out = zz_dict_new();
         zz_dup_memo_put(m, v.dict, out);
         for (size_t i = 0; i < v.dict->len; i++) {
-            zz_value k = zz_value_dup_inner(
-                (zz_value){ZZ_STR, {.s = v.dict->entries[i].key}}, m);
+            zz_value k = zz_value_dup_inner(v.dict->entries[i].key, m);
             zz_value val = zz_value_dup_inner(v.dict->entries[i].val, m);
-            // Fresh dict: keys unique, always the new-entry path (moves).
-            if (k.tag == ZZ_STR) zz_dict_set(out.dict, k, val);
-            else { zz_release(&k); zz_release(&val); }
+            // `zz_dict_set` retains the key and adopts the value; drop the
+            // key temp so the duplicate owns exactly one share.
+            zz_dict_set(out.dict, k, val);
+            zz_release(&k);
         }
         return out;
     }
@@ -5347,7 +5347,7 @@ static int http_dict_find_str(zz_value dict, const char *key, zz_value *out) {
     if (dict.tag != ZZ_DICT || !dict.dict) return 0;
     size_t n = dict.dict->len;
     for (size_t i = 0; i < n; i++) {
-        zz_str *k = dict.dict->entries[i].key;
+        zz_str *k = zz_dict_key_str(&dict.dict->entries[i]);
         zz_value v = dict.dict->entries[i].val;
         if (k && v.tag == ZZ_STR && v.s
             && strlen(key) == k->len && memcmp(key, zz_str_cptr(k), k->len) == 0) {
@@ -5364,7 +5364,7 @@ static int http_dict_find_ci(zz_value dict, const char *key, zz_value *out) {
     if (dict.tag != ZZ_DICT || !dict.dict) return 0;
     size_t n = dict.dict->len;
     for (size_t i = 0; i < n; i++) {
-        zz_str *k = dict.dict->entries[i].key;
+        zz_str *k = zz_dict_key_str(&dict.dict->entries[i]);
         if (k && strlen(key) == k->len
             && strcasecmp(key, zz_str_cptr(k)) == 0) {
             *out = dict.dict->entries[i].val;
@@ -5600,7 +5600,7 @@ zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *
     zz_value hdrs = zz_dict_new();
     size_t n = headers.dict->len;
     for (size_t i = 0; i < n; i++) {
-        zz_str *k = headers.dict->entries[i].key;
+        zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
         zz_value v = headers.dict->entries[i].val;
         if (k && v.tag == ZZ_STR && v.s) {
             zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = k}}, zz_clone(v));
@@ -5781,7 +5781,8 @@ static http_route_entry *http_match_entry(const char *method, const char *path, 
     }
     if (best) {
         for (size_t k = 0; k < best_params.dict->len; k++) {
-            zz_str *ek = best_params.dict->entries[k].key;
+            zz_str *ek = zz_dict_key_str(&best_params.dict->entries[k]);
+            if (!ek) continue; // typed {str: _} params; skip anything else
             zz_value ev = best_params.dict->entries[k].val;
             zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = ek}}, zz_clone(ev));
         }
@@ -6296,7 +6297,7 @@ static char *http_serialize_response(zz_value *resp, size_t *out_len, int keep_a
     size_t xlen = 0;
     if (h.tag == ZZ_DICT && h.dict) {
         for (size_t i = 0; i < h.dict->len; i++) {
-            zz_str *k = h.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&h.dict->entries[i]);
             zz_value v = h.dict->entries[i].val;
             if (k && v.tag == ZZ_STR && v.s) {
                 xlen += k->len + 2 + v.s->len + 2;
@@ -6323,7 +6324,7 @@ static char *http_serialize_response(zz_value *resp, size_t *out_len, int keep_a
     size_t off = (size_t)hlen;
     if (h.tag == ZZ_DICT && h.dict) {
         for (size_t i = 0; i < h.dict->len; i++) {
-            zz_str *k = h.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&h.dict->entries[i]);
             zz_value v = h.dict->entries[i].val;
             if (k && v.tag == ZZ_STR && v.s) {
                 memcpy(out + off, zz_str_cptr(k), k->len);
@@ -6740,7 +6741,7 @@ static int http_apply_listen_opts(zz_value opts, int *err) {
         return 0;
     }
     for (size_t i = 0; i < opts.dict->len; i++) {
-        zz_str *k = opts.dict->entries[i].key;
+        zz_str *k = zz_dict_key_str(&opts.dict->entries[i]);
         zz_value v = opts.dict->entries[i].val;
         if (!k || v.tag != ZZ_INT || v.i <= 0) {
             *err = 1;
@@ -7637,8 +7638,9 @@ zz_value zz_env_vars(zz_value unused, int *err) {
             for (size_t i = 1; i < n; i++) {
                 size_t j = i;
                 while (j > 0) {
-                    zz_str *a = out.dict->entries[idx[j - 1]].key;
-                    zz_str *b = out.dict->entries[idx[j]].key;
+                    zz_str *a = zz_dict_key_str(&out.dict->entries[idx[j - 1]]);
+                    zz_str *b = zz_dict_key_str(&out.dict->entries[idx[j]]);
+                    if (!a || !b) break; // env maps are {str: str}
                     size_t m = a->len < b->len ? a->len : b->len;
                     int c = memcmp(zz_str_cptr(a), zz_str_cptr(b), m);
                     if (c == 0) c = (a->len < b->len) ? -1 : (a->len > b->len);
@@ -10604,7 +10606,7 @@ static zz_value http_client_perform(const char *method, const char *url, size_t 
     struct curl_slist *header_list = NULL;
     if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
         for (size_t i = 0; i < headers.dict->len; i++) {
-            zz_str *k = headers.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
             zz_value *v = &headers.dict->entries[i].val;
             if (k && v->tag == ZZ_STR) {
                 size_t hlen = k->len + 2 + v->s->len;
@@ -10728,7 +10730,7 @@ zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *e
     zz_value hdrs = zz_dict_new();
     if (headers.tag == ZZ_DICT && headers.dict) {
         for (size_t i = 0; i < headers.dict->len; i++) {
-            zz_str *k = headers.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
             zz_value v = headers.dict->entries[i].val;
             if (k && v.tag == ZZ_STR) {
                 zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = k}}, zz_clone(v));
@@ -10738,7 +10740,7 @@ zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *e
     int has_ct = 0;
     if (hdrs.tag == ZZ_DICT && hdrs.dict) {
         for (size_t i = 0; i < hdrs.dict->len; i++) {
-            zz_str *k = hdrs.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&hdrs.dict->entries[i]);
             if (k && k->len == 12) {
                 char low[12];
                 for (size_t j = 0; j < 12; j++) {
@@ -10802,7 +10804,7 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
     struct curl_slist *header_list = NULL;
     if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
         for (size_t i = 0; i < headers.dict->len; i++) {
-            zz_str *k = headers.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
             zz_value *v = &headers.dict->entries[i].val;
             if (k && v->tag == ZZ_STR) {
                 // NOTE: no trailing CRLF — curl treats a trailing CRLF as an
@@ -10899,7 +10901,7 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
     struct curl_slist *header_list = NULL;
     if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
         for (size_t i = 0; i < headers.dict->len; i++) {
-            zz_str *k = headers.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
             zz_value *v = &headers.dict->entries[i].val;
             if (k && v->tag == ZZ_STR) {
                 // NOTE: no trailing CRLF — curl treats a trailing CRLF as an

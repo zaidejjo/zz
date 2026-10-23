@@ -3893,9 +3893,9 @@ impl<'a> Emitter<'a> {
                 out.push_str("        _done = _i < 0 || _i >= _n;\n");
                 out.push_str("        if (!_done) {\n");
                 out.push_str("          zz_dict_entry *_de = &_it.dict->entries[_i];\n");
-                out.push_str(
-                    "          zz_value _k = zz_clone((zz_value){ZZ_STR, {.s = _de->key}});\n",
-                );
+                // Keys are stored as ordinary values, so clone the entry's
+                // key whatever its type (int/bool/float keys are legal).
+                out.push_str("          zz_value _k = zz_clone(_de->key);\n");
                 out.push_str("          zz_value _v0 = zz_clone(_de->val);\n");
                 out.push_str("          zz_value _nx = zz_int(_i + 1);\n");
                 out.push_str("          zz_release(&_idx);\n");

@@ -126,14 +126,13 @@ void zz_release_bytes(zz_bytes *b);
 // Inlined for the same reason as zz_array_get above.
 static inline zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
     *err = 0;
-    if (key.tag != ZZ_STR) {
+    if (!d) {
         *err = 1;
         return zz_unit();
     }
     for (size_t i = 0; i < d->len; i++) {
         zz_dict_entry *e = &d->entries[i];
-        if (e->key->len == key.s->len &&
-            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
+        if (zz_key_eq(e->key, key)) {
             return zz_clone(e->val);
         }
     }
