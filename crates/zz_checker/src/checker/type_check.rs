@@ -874,6 +874,35 @@ impl Checker {
         }
     }
 
+    /// Whether a loop body can leave through a `break` that targets this
+    /// loop. Nested loops capture their own breaks, so they are not
+    /// descended into.
+    fn block_has_break(block: &Block) -> bool {
+        block.stmts.iter().any(|stmt| match stmt {
+            Stmt::Break { .. } => true,
+            Stmt::Expr(expr) => Self::expr_has_break(expr),
+            _ => false,
+        })
+    }
+
+    fn expr_has_break(expr: &Expr) -> bool {
+        match expr {
+            Expr::Break { .. } => true,
+            Expr::If { then, els, .. } | Expr::IfLet { then, els, .. } => {
+                Self::block_has_break(then)
+                    || els
+                        .as_ref()
+                        .is_some_and(|e| Self::expr_has_break(e.as_ref()))
+            }
+            Expr::Match { arms, .. } => arms.iter().any(|arm| Self::expr_has_break(&arm.body)),
+            Expr::Block(block) => Self::block_has_break(block),
+            // A nested `while` owns its breaks; no other expression can
+            // carry a `break` bound to the enclosing loop.
+            Expr::While { .. } => false,
+            _ => false,
+        }
+    }
+
     pub(crate) fn check_block(&mut self, block: &Block) -> Type {
         self.push_scope();
         let mut result = Type::Unit;
@@ -918,6 +947,10 @@ impl Checker {
                 });
             }
         }
+        self.last_block_tail = block
+            .stmts
+            .last()
+            .map(|s| (s.span(), self.unifier.resolve(&result)));
         self.pop_scope();
         result
     }
@@ -931,11 +964,13 @@ impl Checker {
         t
     }
 
-    /// Check a function/closure body: its tail is the return value even
-    /// when nested inside a discarded block (e.g. a `func` declared in
-    /// a loop body).
-    pub(crate) fn check_fn_body_block(&mut self, block: &Block) -> Type {
-        let prev = std::mem::replace(&mut self.tail_is_value, true);
+    /// Check a named function body: its tail expression is **discarded**.
+    /// A named function yields a value only through `return`; block
+    /// expressions and closures keep their tail-value semantics
+    /// (`check_fn_body_block`'s old behaviour). Discarding the tail also
+    /// gives `Result`/`Option` tails the must-use warning they deserve.
+    pub(crate) fn check_named_fn_body(&mut self, block: &Block) -> Type {
+        let prev = std::mem::replace(&mut self.tail_is_value, false);
         let t = self.check_block(block);
         self.tail_is_value = prev;
         t
@@ -1423,7 +1458,16 @@ impl Checker {
                 self.loop_depth += 1;
                 self.check_block_discarded(body);
                 self.loop_depth -= 1;
-                Type::Unit
+                // `while true` without a `break` never leaves the loop, so
+                // a named function whose body ends in one does not fall
+                // through (e.g. `func serve() -> int { while true { ... return } }`).
+                let diverges = matches!(cond.as_ref(), Expr::Bool { value: true, .. })
+                    && !Self::block_has_break(body);
+                if diverges {
+                    Type::Never
+                } else {
+                    Type::Unit
+                }
             }
             Expr::Match {
                 scrutinee,

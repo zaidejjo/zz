@@ -2,7 +2,7 @@
 // E2E: Pipe |> and Elvis ?? precedence
 // |> binds tighter than ?? — so `a ?? b |> f` = `a ?? (b |> f)`
 func double(n: int) -> int {
-    n * 2
+    return n * 2
 }
 
 // Scenario 1: elvis unwraps, then pipe
@@ -17,14 +17,14 @@ println(r2)
 
 // Scenario 3: Result ?? default (no pipe)
 func ok_val() -> Result<int, str> {
-    .ok(42)
+    return .ok(42)
 }
 r3 := ok_val() ?? -1
 println(r3)
 
 // Scenario 4: Result ?? default when Err
 func fail_val() -> Result<int, str> {
-    .err("boom")
+    return .err("boom")
 }
 r4 := fail_val() ?? 99
 println(r4)

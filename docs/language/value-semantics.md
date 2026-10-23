@@ -8,7 +8,7 @@ struct Counter { n: int }
 
 func bump(c: Counter) -> int {
     c.n += 100  // local copy only
-    c.n
+    return c.n
 }
 
 c := Counter{ n: 10 }

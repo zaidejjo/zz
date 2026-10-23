@@ -10,7 +10,7 @@ func set.has(s: [str], x: str) -> bool {
             return true
         }
     }
-    false
+    return false
 }
 
 func set.has_int(s: [int], x: int) -> bool {
@@ -19,21 +19,21 @@ func set.has_int(s: [int], x: int) -> bool {
             return true
         }
     }
-    false
+    return false
 }
 
 func set.insert(s: [str], x: str) -> [str] {
     if set.has(s, x) {
         return s
     }
-    vec.push(s, x)
+    return vec.push(s, x)
 }
 
 func set.insert_int(s: [int], x: int) -> [int] {
     if set.has_int(s, x) {
         return s
     }
-    vec.push(s, x)
+    return vec.push(s, x)
 }
 
 func set.remove(s: [str], x: str) -> [str] {
@@ -43,7 +43,7 @@ func set.remove(s: [str], x: str) -> [str] {
             out = vec.push(out, v)
         }
     }
-    out
+    return out
 }
 
 func set.remove_int(s: [int], x: int) -> [int] {
@@ -53,7 +53,7 @@ func set.remove_int(s: [int], x: int) -> [int] {
             out = vec.push(out, v)
         }
     }
-    out
+    return out
 }
 
 func set.union(a: [str], b: [str]) -> [str] {
@@ -61,7 +61,7 @@ func set.union(a: [str], b: [str]) -> [str] {
     for v in b {
         out = set.insert(out, v)
     }
-    out
+    return out
 }
 
 func set.union_int(a: [int], b: [int]) -> [int] {
@@ -69,7 +69,7 @@ func set.union_int(a: [int], b: [int]) -> [int] {
     for v in b {
         out = set.insert_int(out, v)
     }
-    out
+    return out
 }
 
 func set.intersect(a: [str], b: [str]) -> [str] {
@@ -79,7 +79,7 @@ func set.intersect(a: [str], b: [str]) -> [str] {
             out = vec.push(out, v)
         }
     }
-    out
+    return out
 }
 
 func set.intersect_int(a: [int], b: [int]) -> [int] {
@@ -89,7 +89,7 @@ func set.intersect_int(a: [int], b: [int]) -> [int] {
             out = vec.push(out, v)
         }
     }
-    out
+    return out
 }
 
 func set.diff(a: [str], b: [str]) -> [str] {
@@ -99,13 +99,13 @@ func set.diff(a: [str], b: [str]) -> [str] {
             out = vec.push(out, v)
         }
     }
-    out
+    return out
 }
 
 func set.len(s: [str]) -> int {
-    vec.len(s)
+    return vec.len(s)
 }
 
 func set.is_empty(s: [str]) -> bool {
-    vec.len(s) == 0
+    return vec.len(s) == 0
 }

@@ -69,7 +69,7 @@ Use for terminal restore, file close, lock release.
 ```zz
 func next_age(s: str) -> Option<int> {
     val := int(s)?      // .none returns early
-    .some(val + 1)
+    return .some(val + 1)
 }
 
 port := int("8080") ?? 80   // fallback on .none

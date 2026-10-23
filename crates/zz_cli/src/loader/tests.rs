@@ -46,7 +46,10 @@ fn diag_texts(result: &LoadResult) -> Vec<String> {
 fn loads_relative_import() {
     let dir = temp_project(&[
         ("main.zz", "import math.utils\nx := utils.double(21)"),
-        ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
+        (
+            "math/utils.zz",
+            "pub func double(n: int) -> int { return n * 2 }",
+        ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -64,7 +67,7 @@ fn impl_method_keeps_its_key_when_a_free_function_shares_its_name() {
     let dir = temp_project(&[(
         "main.zz",
         "struct W { v: int }\n\
-         func get(w: W) -> int { w.v }\n\
+         func get(w: W) -> int { return w.v }\n\
          impl W {\n\
              func get(self) -> str { \"method\" }\n\
          }\n\
@@ -113,7 +116,10 @@ fn imported_bindings_visible() {
 fn import_alias_works() {
     let dir = temp_project(&[
         ("main.zz", "import math.utils as m\nx := m.double(21)"),
-        ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
+        (
+            "math/utils.zz",
+            "pub func double(n: int) -> int { return n * 2 }",
+        ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -127,7 +133,7 @@ fn module_internal_calls_rewritten() {
         ("main.zz", "import math.utils\nx := utils.double(21)"),
         (
             "math/utils.zz",
-            "func twice(n: int) -> int { n * 2 }\npub func double(n: int) -> int { twice(n) }",
+            "func twice(n: int) -> int { return n * 2 }\npub func double(n: int) -> int { return twice(n) }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -142,7 +148,7 @@ fn shadowing_respected() {
         ("main.zz", "import math.utils\nx := utils.double(21)"),
         (
             "math/utils.zz",
-            "n := 100\npub func double(n: int) -> int { n * 2 }",
+            "n := 100\npub func double(n: int) -> int { return n * 2 }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -155,8 +161,8 @@ fn namespace_collision_detected() {
     // Two modules with the same stem claim the same namespace.
     let dir = temp_project(&[
         ("main.zz", "import a.utils\nimport b.utils\n1"),
-        ("a/utils.zz", "func f() -> int { 1 }"),
-        ("b/utils.zz", "func g() -> int { 2 }"),
+        ("a/utils.zz", "func f() -> int { return 1 }"),
+        ("b/utils.zz", "func g() -> int { return 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(
@@ -179,7 +185,7 @@ fn same_file_two_namespaces_compose_via_alias() {
             "main.zz",
             "import utils\nimport utils as u\nx := utils.f()\ny := u.f()",
         ),
-        ("utils.zz", "pub func f() -> int { 1 }"),
+        ("utils.zz", "pub func f() -> int { return 1 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -200,7 +206,7 @@ fn same_file_alias_before_bare_composes() {
             "main.zz",
             "import utils as u\nimport utils\nx := u.f()\ny := utils.f()",
         ),
-        ("utils.zz", "pub func f() -> int { 1 }"),
+        ("utils.zz", "pub func f() -> int { return 1 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -225,13 +231,13 @@ fn dep_submodules_share_stem_across_packages() {
         ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
         (
             "askpkg/src/keys.zz",
-            "pub func up() -> int { 1 }",
+            "pub func up() -> int { return 1 }",
         ),
         ("tuipkg/zz.toml", "[package]\nname = \"tui\"\nversion = \"0.1.0\"\n"),
-        ("tuipkg/src/keys.zz", "pub func up() -> int { 2 }"),
+        ("tuipkg/src/keys.zz", "pub func up() -> int { return 2 }"),
         (
             "tuipkg/src/menu.zz",
-            "import tui.keys\npub func menu_up() -> int { keys.up() }",
+            "import tui.keys\npub func menu_up() -> int { return keys.up() }",
         ),
     ]);
     // Minimal path-dep lockfile (checksum via save, like `zz install`).
@@ -310,7 +316,7 @@ fn diamond_import_is_fine() {
         ("a.zz", "import b\nimport c"),
         ("b.zz", "import d"),
         ("c.zz", "import d"),
-        ("d.zz", "func f() -> int { 1 }"),
+        ("d.zz", "func f() -> int { return 1 }"),
     ]);
     let result = load_program(&dir.join("a.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -376,7 +382,10 @@ fn full_program_runs_with_imports() {
             "main.zz",
             "import std.str\nimport math.utils\nn := utils.double(6)\nstr.length(\"abc\")",
         ),
-        ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
+        (
+            "math/utils.zz",
+            "pub func double(n: int) -> int { return n * 2 }",
+        ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -408,7 +417,7 @@ fn selective_struct_import_resolves_bare() {
         ),
         (
             "models/product.zz",
-            "pub struct Product{\n    id: int,\n}\nimpl Product {\n    pub func get_id(self) -> int {\n        self.id\n    }\n}",
+            "pub struct Product{\n    id: int,\n}\nimpl Product {\n    pub func get_id(self) -> int {\n        return self.id\n    }\n}",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -449,7 +458,7 @@ fn struct_in_module_namespaced() {
         ),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { return p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -470,7 +479,7 @@ fn multi_level_pub_chain_abc() {
         ("a.zz", "pub import b"),
         (
             "b.zz",
-            "pub c_val := 10\npub func c_func(x: int) -> int { x + 1 }",
+            "pub c_val := 10\npub func c_func(x: int) -> int { return x + 1 }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -487,7 +496,10 @@ fn multi_level_pub_chain_runtime() {
     let dir = temp_project(&[
         ("main.zz", "import a\nimport b\nz := b.add(3, 4)"),
         ("a.zz", "pub import b"),
-        ("b.zz", "pub func add(a: int, b: int) -> int { a + b }"),
+        (
+            "b.zz",
+            "pub func add(a: int, b: int) -> int { return a + b }",
+        ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -527,7 +539,7 @@ fn private_func_not_visible_cross_module() {
     // must say the function is private and tell the user to add `pub`.
     let dir = temp_project(&[
         ("main.zz", "import b\nz := b.helper(1)"),
-        ("b.zz", "func helper(x: int) -> int { x }"),
+        ("b.zz", "func helper(x: int) -> int { return x }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     let msgs = diag_texts(&result);
@@ -613,7 +625,7 @@ fn pub_import_reexport_chain() {
     let dir = temp_project(&[
         ("main.zz", "import a\nz := a.math.double(21)"),
         ("a.zz", "pub import math"),
-        ("math.zz", "pub func double(n: int) -> int { n * 2 }"),
+        ("math.zz", "pub func double(n: int) -> int { return n * 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -692,7 +704,7 @@ fn pub_struct_method_cross_module() {
         ),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { return p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -729,7 +741,7 @@ fn mixed_pub_private_items() {
         ("main.zz", "import mod\nz := mod.pub_func()"),
         (
             "mod.zz",
-            "pub func pub_func() -> int { priv_func() }\nfunc priv_func() -> int { 42 }",
+            "pub func pub_func() -> int { return priv_func() }\nfunc priv_func() -> int { return 42 }",
         ),
     ]);
     // This should work: pub_func calls priv_func internally (same module).
@@ -745,7 +757,7 @@ fn func_matching_file_stem_still_namespaced() {
     // Same for a struct whose name equals the file stem.
     let dir = temp_project(&[(
         "main.zz",
-        "struct Main { v: int }\nfunc main() { 1 }\nfunc helper() -> int { 2 }",
+        "struct Main { v: int }\nfunc main() { 1 }\nfunc helper() -> int { return 2 }",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -778,7 +790,7 @@ fn pub_item_unused_no_warning() {
     // pub items must NOT generate unused-variable warnings.
     let dir = temp_project(&[(
         "main.zz",
-        "pub x := 42\npub func f() -> int { 1 }\npub struct S { v: int }\nfunc main() { println(1) }",
+        "pub x := 42\npub func f() -> int { return 1 }\npub struct S { v: int }\nfunc main() { println(1) }",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     // No errors, and specifically no "unused variable" warnings for x, f, S.
@@ -817,7 +829,7 @@ fn import_alias_pub_items_accessible() {
         ),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { return p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -830,7 +842,7 @@ fn import_alias_private_inaccessible() {
     // import ... as alias does NOT expose private items.
     let dir = temp_project(&[
         ("main.zz", "import shapes as s\nz := s.hidden()"),
-        ("shapes.zz", "func hidden() -> int { 42 }"),
+        ("shapes.zz", "func hidden() -> int { return 42 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(
@@ -849,7 +861,7 @@ fn pub_reexport_alias_with_struct() {
     let dir = temp_project(&[
         ("main.zz", "import lib\nz := lib.math.double(10)"),
         ("lib.zz", "pub import math as math"),
-        ("math.zz", "pub func double(n: int) -> int { n * 2 }"),
+        ("math.zz", "pub func double(n: int) -> int { return n * 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -883,7 +895,7 @@ fn pub_func_private_binding_interaction() {
         ("main.zz", "import calc\nz := calc.compute(5)"),
         (
             "calc.zz",
-            "multiplier := 3\npub func compute(x: int) -> int { x * multiplier }",
+            "multiplier := 3\npub func compute(x: int) -> int { return x * multiplier }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -904,7 +916,7 @@ fn entry_file_private_items_accessible_to_self() {
 
     let dir = temp_project(&[(
         "main.zz",
-        "secret := 42\nfunc helper(x: int) -> int { x + secret }\nresult := helper(8)",
+        "secret := 42\nfunc helper(x: int) -> int { return x + secret }\nresult := helper(8)",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -929,7 +941,7 @@ fn pub_struct_field_access_cross_module() {
         ),
         (
             "geo.zz",
-            "pub struct Point { x: int, y: int }\npub func manhattan(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func manhattan(p: Point) -> int { return p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -953,7 +965,7 @@ fn struct_field_access_in_module() {
         ("main.zz", "import shapes\nz := shapes.get_x()"),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\npub p := Point{ x: 42, y: 0 }\npub func get_x() -> int { p.x }",
+            "pub struct Point { x: int, y: int }\npub p := Point{ x: 42, y: 0 }\npub func get_x() -> int { return p.x }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -978,7 +990,7 @@ fn indexing_and_slicing_in_module() {
         ("main.zz", "import stats\nz := stats.first()\nw := stats.mid()"),
         (
             "stats.zz",
-            "pub scores := [10, 20, 30]\npub func first() -> int { scores[0] }\npub func mid() -> [int] { scores[1:3] }",
+            "pub scores := [10, 20, 30]\npub func first() -> int { return scores[0] }\npub func mid() -> [int] { return scores[1:3] }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1006,7 +1018,7 @@ fn pipeline_in_module() {
         ("main.zz", "import math\nz := math.apply()"),
         (
             "math.zz",
-            "func inc(n: int) -> int { n + 1 }\npub func apply() -> int { 5 |> inc }",
+            "func inc(n: int) -> int { return n + 1 }\npub func apply() -> int { return 5 |> inc }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1030,7 +1042,7 @@ fn method_call_in_module() {
         ("main.zz", "import shapes\nz := shapes.apply()"),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }\npub func apply() -> int { p := Point { x: 3, y: 4 }\np.dist() }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { return p.x + p.y }\npub func apply() -> int { p := Point { x: 3, y: 4 }\nreturn p.dist() }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1057,7 +1069,7 @@ fn method_call_cross_module() {
         ),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { return p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1108,7 +1120,7 @@ fn cross_module_dotted_func_def() {
         ),
         (
             "shapes.zz",
-            "pub struct shapes.Point { x: int, y: int }\npub func shapes.mk_point(x: int, y: int) -> shapes.Point { shapes.Point { x: x, y: y } }",
+            "pub struct shapes.Point { x: int, y: int }\npub func shapes.mk_point(x: int, y: int) -> shapes.Point { return shapes.Point { x: x, y: y } }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1134,7 +1146,7 @@ fn impl_method_without_pub_is_private_cross_module() {
         ),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\nimpl Point {\n    func dist(self) -> int { self.x + self.y }\n}",
+            "pub struct Point { x: int, y: int }\nimpl Point {\n    func dist(self) -> int { return self.x + self.y }\n}",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1162,7 +1174,7 @@ fn impl_method_with_pub_is_public_cross_module() {
         ),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\nimpl Point {\n    pub func dist(self) -> int { self.x + self.y }\n}",
+            "pub struct Point { x: int, y: int }\nimpl Point {\n    pub func dist(self) -> int { return self.x + self.y }\n}",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1189,7 +1201,7 @@ fn import_alias_struct() {
         ),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { return p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1212,7 +1224,7 @@ fn func_call_before_for_loop_no_corruption() {
 
     let dir = temp_project(&[(
         "main.zz",
-        "func id(x: int) -> int { x }\nx := id(42)\nfor i in 0..3 { println(i) }\nx",
+        "func id(x: int) -> int { return x }\nx := id(42)\nfor i in 0..3 { println(i) }\nx",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -1233,7 +1245,7 @@ fn struct_method_then_recursion_in_for_loop() {
 
     let dir = temp_project(&[(
         "main.zz",
-        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nfunc fib(n: int) -> int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\np := Point { x: 3, y: 4 }\nd := dist(p)\nfor i in 0..5 { println(fib(i)) }\nd",
+        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { return p.x + p.y }\nfunc fib(n: int) -> int { return if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\np := Point { x: 3, y: 4 }\nd := dist(p)\nfor i in 0..5 { println(fib(i)) }\nd",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -1258,7 +1270,7 @@ fn pub_access_works() {
         ),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { p.x + p.y }",
+            "pub struct Point { x: int, y: int }\npub func dist(p: Point) -> int { return p.x + p.y }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1273,7 +1285,7 @@ fn private_access_error() {
         ("main.zz", "import shapes\nz := shapes.hidden()"),
         (
             "shapes.zz",
-            "pub struct Point { x: int, y: int }\nfunc hidden() -> int { 42 }",
+            "pub struct Point { x: int, y: int }\nfunc hidden() -> int { return 42 }",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1315,7 +1327,7 @@ fn pub_reexport_works() {
     let dir = temp_project(&[
         ("main.zz", "import lib\nz := lib.math.double(21)"),
         ("lib.zz", "pub import math"),
-        ("math.zz", "pub func double(n: int) -> int { n * 2 }"),
+        ("math.zz", "pub func double(n: int) -> int { return n * 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -1328,7 +1340,7 @@ fn import_alias_reexport() {
     let dir = temp_project(&[
         ("main.zz", "import lib\nz := lib.m.double(21)"),
         ("lib.zz", "pub import math as m"),
-        ("math.zz", "pub func double(n: int) -> int { n * 2 }"),
+        ("math.zz", "pub func double(n: int) -> int { return n * 2 }"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
@@ -1411,11 +1423,11 @@ fn method_call_not_rewritten_when_free_fn_collides() {
         ),
         (
             "shapes.zz",
-            "pub struct Box { v: int }\nimpl Box {\n    pub func resize(self, n: int) -> int {\n        self.v + n\n    }\n}\npub func wrap(v: int) -> Box {\n    Box{v: v}\n}\n",
+            "pub struct Box { v: int }\nimpl Box {\n    pub func resize(self, n: int) -> int {\n        return self.v + n\n    }\n}\npub func wrap(v: int) -> Box {\n    return Box{v: v}\n}\n",
         ),
         (
             "ops.zz",
-            "import shapes\npub func resize(a: int, b: int) -> int {\n    a * b\n}\npub func go(b: shapes.Box) -> int {\n    b.resize(2)\n}\n",
+            "import shapes\npub func resize(a: int, b: int) -> int {\n    return a * b\n}\npub func go(b: shapes.Box) -> int {\n    return b.resize(2)\n}\n",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1449,7 +1461,10 @@ fn check_cache_hit_matches_miss() {
         // outcomes must be identical, including bindings and funcs.
         let dir = temp_project(&[
             ("main.zz", "import math.utils\nx := utils.double(21)"),
-            ("math/utils.zz", "pub func double(n: int) -> int { n * 2 }"),
+            (
+                "math/utils.zz",
+                "pub func double(n: int) -> int { return n * 2 }",
+            ),
         ]);
         let main = dir.join("main.zz");
         // Isolated dir starts empty: growth proves the cold load stored.
@@ -1545,7 +1560,7 @@ fn check_cache_rechecks_only_dependents() {
         // Touch the FIRST module: only it + main recheck (2 new entries).
         std::fs::write(
             dir.join("mod00.zz"),
-            "pub func mod00_f0(x: int) -> int { x + 100 }\n",
+            "pub func mod00_f0(x: int) -> int { return x + 100 }\n",
         )
         .unwrap();
         let edited = load_check(&main);
@@ -1581,7 +1596,7 @@ fn check_cache_namespaces_do_not_poison() {
     // spurious `undefined variable` errors.
     super::cache::with_isolated_cache(|| {
         let dir = temp_project(&[
-            ("area.zz", "pub func doc_new(t: str) -> str { t }\n"),
+            ("area.zz", "pub func doc_new(t: str) -> str { return t }\n"),
             ("a.zz", "import area as ar\nx := ar.doc_new(\"hi\")\n"),
             ("b.zz", "import area\ny := area.doc_new(\"hi\")\n"),
         ]);
@@ -1601,7 +1616,7 @@ fn failed_dependency_collapses_cascade() {
     // gets one targeted error instead of N `undefined variable` /
     // `unknown function` follow-ons.
     let dir = temp_project(&[
-        ("cache.zz", "pub func save(root: str) -> int { root + 1 }\n"),
+        ("cache.zz", "pub func save(root: str) -> int { return root + 1 }\n"),
         (
             "main.zz",
             "import cache\nfunc main() {\n    a := cache.save(\"x\")\n    b := cache.save(\"y\")\n    println(a)\n    println(b)\n}\n",
@@ -1721,7 +1736,7 @@ fn package_import_resolves_from_tests_dir() {
         ("zz.toml", manifest.as_str()),
         (
             "src/math.zz",
-            "pub func add(a: int, b: int) -> int { a + b }",
+            "pub func add(a: int, b: int) -> int { return a + b }",
         ),
         ("tests/check.zz", "import app.math\nx := math.add(1, 2)"),
     ]);
@@ -1738,11 +1753,11 @@ fn package_selective_and_alias_imports() {
         ("zz.toml", manifest.as_str()),
         (
             "src/math.zz",
-            "pub func add(a: int, b: int) -> int { a + b }",
+            "pub func add(a: int, b: int) -> int { return a + b }",
         ),
         (
             "src/other.zz",
-            "pub func mul(a: int, b: int) -> int { a * b }",
+            "pub func mul(a: int, b: int) -> int { return a * b }",
         ),
         (
             "tests/sel.zz",
@@ -1762,7 +1777,7 @@ fn package_wildcard_import() {
         ("zz.toml", manifest.as_str()),
         (
             "src/math.zz",
-            "pub func add(a: int, b: int) -> int { a + b }",
+            "pub func add(a: int, b: int) -> int { return a + b }",
         ),
         ("tests/wc.zz", "import app.math(*)\nx := add(1, 2)"),
     ]);
@@ -1792,7 +1807,7 @@ fn package_bare_selective_uses_package_ns() {
     let manifest = pkg_manifest("app");
     let dir = temp_project(&[
         ("zz.toml", manifest.as_str()),
-        ("src/main.zz", "pub func who() -> int { 7 }"),
+        ("src/main.zz", "pub func who() -> int { return 7 }"),
         ("main.zz", "import app(who as w)\nx := w()"),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -1807,7 +1822,7 @@ fn package_missing_file_diagnostic() {
         ("zz.toml", manifest.as_str()),
         (
             "src/math.zz",
-            "pub func add(a: int, b: int) -> int { a + b }",
+            "pub func add(a: int, b: int) -> int { return a + b }",
         ),
         ("tests/bad.zz", "import app.nope\n1"),
     ]);
@@ -1841,7 +1856,7 @@ fn package_hyphen_name_matches_underscore_import() {
         ("zz.toml", manifest.as_str()),
         (
             "src/math.zz",
-            "pub func add(a: int, b: int) -> int { a + b }",
+            "pub func add(a: int, b: int) -> int { return a + b }",
         ),
         ("tests/check.zz", "import my_app.math\nx := math.add(1, 2)"),
     ]);
@@ -1880,8 +1895,14 @@ fn package_cycle_reported_at_import_site() {
     let manifest = pkg_manifest("app");
     let dir = temp_project(&[
         ("zz.toml", manifest.as_str()),
-        ("src/a.zz", "import app.b\npub func fa() -> int { 1 }"),
-        ("src/b.zz", "import app.a\npub func fb() -> int { 2 }"),
+        (
+            "src/a.zz",
+            "import app.b\npub func fa() -> int { return 1 }",
+        ),
+        (
+            "src/b.zz",
+            "import app.a\npub func fb() -> int { return 2 }",
+        ),
         ("tests/e.zz", "import app.a\n1"),
     ]);
     let result = load_program(&dir.join("tests/e.zz")).unwrap();
@@ -1918,10 +1939,10 @@ fn package_import_resolves_from_nested_tests_dir() {
     let manifest = pkg_manifest("app");
     let dir = temp_project(&[
         ("zz.toml", manifest.as_str()),
-        ("src/math.zz", "pub func add(a: int, b: int) -> int { a + b }"),
+        ("src/math.zz", "pub func add(a: int, b: int) -> int { return a + b }"),
         (
             "src/nested/deep.zz",
-            "import app.math\npub func deep_add(a: int, b: int) -> int { math.add(a, b) + 100 }",
+            "import app.math\npub func deep_add(a: int, b: int) -> int { return math.add(a, b) + 100 }",
         ),
         (
             "tests/unit/check.zz",
@@ -1946,7 +1967,7 @@ fn stdlib_import_kinds_recorded_for_scoped_runs() {
         ),
         (
             "dep/help.zz",
-            "import std.vec as v\nimport std.map(*)\npub func run() -> int {\n    v.len([1]) + 0\n}\n",
+            "import std.vec as v\nimport std.map(*)\npub func run() -> int {\n    return v.len([1]) + 0\n}\n",
         ),
     ]);
     let result = load_program(&dir.join("main.zz")).unwrap();
@@ -2033,13 +2054,13 @@ fn dep_style_warnings_collapse_to_one_note() {
         ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
         (
             "askpkg/src/helper.zz",
-            "pub func get() -> int { 1 }",
+            "pub func get() -> int { return 1 }",
         ),
         (
             // `ed` shadows the `ed` import head: the #381 lint fires
             // inside the dep (same shape as ask's `ed := env.get(..)`).
             "askpkg/src/editor.zz",
-            "import ask.helper as ed\npub func edit() -> int {\n    ed := 1\n    ed\n}",
+            "import ask.helper as ed\npub func edit() -> int {\n    ed := 1\n    return ed\n}",
         ),
     ]);
     let mut lock = zz_pm::lock::Lockfile::new();
@@ -2087,11 +2108,11 @@ fn first_party_shadow_warning_still_fires() {
         ),
         (
             "src/main.zz",
-            "import math.utils\nfunc f(utils: str) -> str {\n    utils\n}",
+            "import math.utils\nfunc f(utils: str) -> str {\n    return utils\n}",
         ),
         (
             "src/math/utils.zz",
-            "pub func double(n: int) -> int { n * 2 }",
+            "pub func double(n: int) -> int { return n * 2 }",
         ),
     ]);
     let result = load_program(&dir.join("src/main.zz")).unwrap();
@@ -2184,8 +2205,8 @@ fn transitive_path_import_resolves_when_locked() {
             "leaflib/zz.toml",
             "[package]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
         ),
-        ("midlib/src/main.zz", "import leaf\npub func midval() -> int { leaf.leafval() }"),
-        ("leaflib/src/main.zz", "pub func leafval() -> int { 41 }"),
+        ("midlib/src/main.zz", "import leaf\npub func midval() -> int { return leaf.leafval() }"),
+        ("leaflib/src/main.zz", "pub func leafval() -> int { return 41 }"),
         (
             "src/main.zz",
             "import mid\nimport leaf\nx := mid.midval() + leaf.leafval()",
@@ -2222,8 +2243,8 @@ fn hyphen_package_import_resolves_both_spellings() {
             "mylib/zz.toml",
             "[package]\nname = \"my-lib\"\nversion = \"0.1.0\"\n",
         ),
-        ("mylib/src/main.zz", "pub func pkgval() -> int { 41 }"),
-        ("mylib/src/util.zz", "pub func uval() -> int { 1 }"),
+        ("mylib/src/main.zz", "pub func pkgval() -> int { return 41 }"),
+        ("mylib/src/util.zz", "pub func uval() -> int { return 1 }"),
         (
             "src/main.zz",
             "import my-lib as lib\nimport my_lib.util as u\nx := lib.pkgval() + u.uval()",
@@ -2288,7 +2309,7 @@ fn module_aware_compile_emits_callpath_for_function_calls() {
     // ever emits `Op::Call`, the optimization silently stops applying.
     let dir = temp_project(&[(
         "main.zz",
-        "func fib(n: int) -> int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(3)",
+        "func fib(n: int) -> int { return if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(3)",
     )]);
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);

@@ -40,7 +40,7 @@ fn scaffold() -> PathBuf {
     .expect("write zz.toml");
     std::fs::write(
         dir.join("src").join("main.zz"),
-        "pub func answer() -> int { 42 }\n",
+        "pub func answer() -> int { return 42 }\n",
     )
     .expect("write src/main.zz");
     std::fs::write(

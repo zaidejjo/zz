@@ -388,7 +388,7 @@ func main() {
 fn bh_result_unwrap_chain() {
     let src = r#"
 func parse_int(s: str) -> Result<int, str> {
-    if s == "42" { .ok(42) } else { .err("not 42") }
+    return if s == "42" { .ok(42) } else { .err("not 42") }
 }
 
 func main() {
@@ -469,7 +469,7 @@ fn bh_closure_as_argument() {
     // Language limitation: closure types can't be used as function parameter types.
     let src = r#"
 func apply(f: |int| -> int, x: int) -> int {
-    f(x)
+    return f(x)
 }
 
 func main() {
@@ -555,7 +555,7 @@ func find_first() -> int {
             return i
         }
     }
-    -1
+    return -1
 }
 
 func main() {

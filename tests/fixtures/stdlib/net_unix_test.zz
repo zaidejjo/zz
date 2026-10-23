@@ -83,5 +83,5 @@ func main() -> Result<int, str> {
         .err(_) => println("empty_ok")
     }
     println("net_unix_test_ok")
-    .ok(0)
+    return .ok(0)
 }

@@ -1,7 +1,7 @@
 // features: error-case, generics
 // E2E: `func first[T]` suggests `<T>` with auto-fix
 func first[T](x: T) -> T {
-    x
+    return x
 }
 func main() {
     println(first(1))

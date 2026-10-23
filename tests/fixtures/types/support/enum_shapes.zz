@@ -8,7 +8,7 @@ pub enum Color {
 }
 
 pub func is_red(c: Color) -> bool {
-    match c {
+    return match c {
         .Red => true,
         _ => false,
     }

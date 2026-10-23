@@ -3,7 +3,7 @@
 // Single-file — no imports needed.
 pub PI := 314
 pub func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 
 pub struct Point {
@@ -12,7 +12,7 @@ pub struct Point {
 }
 _secret := 99
 func helper(x: int) -> int {
-    x
+    return x
 }
 
 struct Box {

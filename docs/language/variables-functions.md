@@ -25,11 +25,11 @@ flags |= 4
 
 ```zz
 func add(a: int, b: int) -> int {
-    a + b   // last expression is the return
+    return a + b
 }
 
 func greet(name: str) {
-    println("Hello, {name}")  // no return = unit
+    println("Hello, {name}")  // no `return` = unit
 }
 
 func hello(name: str, greeting: str = "Hello") {
@@ -43,11 +43,22 @@ hello("Ada", greeting: "Hi")
 Named args: `create_user("Ada", age: 30, active: true)`.
 Cannot chain compound assignment (`x += y += z` is an error).
 
+Named functions return a value **only** through `return`: the last
+expression of a `func` body is discarded, and a non-`unit` signature that
+can fall through is an error. Closures keep their implicit tail, so
+`|x| x * 2` still works.
+
+```zz
+func abs(x: int) -> int {
+    return if x < 0 { -x } else { x }
+}
+```
+
 ## Generics
 
 ```zz
 func identity<T>(x: T) -> T {
-    x
+    return x
 }
 
 result := identity(42)  // T = int
@@ -68,7 +79,8 @@ doubled := map(nums, |x| x * 2)
 ```
 
 Closures capture by copy (snapshot). They are values and can be passed to
-`map` / `filter` / `task.spawn`.
+`map` / `filter` / `task.spawn`. A closure body's last expression is its
+return value; closures do not need `return`.
 
 Closure parameters are exempt from `unused variable` warnings: the caller
 dictates the closure's arity (`s.route("GET", "/", |req| "ok")` cannot drop
@@ -81,7 +93,7 @@ still warn.
 
 ```zz
 struct Point { x: int, y: int }
-func dist(p: Point) -> int { p.x + p.y }
+func dist(p: Point) -> int { return p.x + p.y }
 
 p := Point{ x: 3, y: 4 }
 dist(p)  // 7
@@ -93,9 +105,9 @@ function, so `w.get()` reaches `W.get` even when a free `get(w)` exists:
 
 ```zz
 struct W { v: int }
-func get(w: W) -> str { "free" }
+func get(w: W) -> str { return "free" }
 impl W {
-    func get(self) -> str { "method" }
+    func get(self) -> str { return "method" }
 }
 
 w := W{ v: 1 }

@@ -3,7 +3,7 @@
 
 // Function type in parameter declaration
 func apply(f: func(int) -> int, x: int) -> int {
-    f(x)
+    return f(x)
 }
 
 // Function type in variable declaration

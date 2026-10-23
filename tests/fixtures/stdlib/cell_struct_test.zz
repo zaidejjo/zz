@@ -20,5 +20,5 @@ func main() -> Result<int, str> {
     w:int = b.slot.get()?
     println("set:{w}")
     println("cell_struct_ok")
-    .ok(0)
+    return .ok(0)
 }

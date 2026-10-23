@@ -35,5 +35,5 @@ func main() -> Result<int, str> {
     r9 := http.test(s, "GET", "/orders/42", "")
     println("swapped_param: {r9.text()}")
     println("http_router_p1_ok")
-    .ok(0)
+    return .ok(0)
 }

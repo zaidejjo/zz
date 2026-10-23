@@ -7,5 +7,5 @@ func main() -> Result<int, str> {
     s = s.route("GET", "/", |_req| "x")
     http.listen_tls(s, 8145, "tests/fixtures/stdlib/data/p3_tls/nope.pem", "tests/fixtures/stdlib/data/p3_tls/nope-key.pem")
     println("unreachable_ok")
-    .ok(0)
+    return .ok(0)
 }

@@ -6,6 +6,22 @@ use zz_frontend::ast::{Block, Expr, Pattern, Stmt};
 use super::*;
 
 impl Lowerer {
+    /// Lower a `return` value for the current function. Boxed-return
+    /// functions wrap scalar operands, and an unboxed struct value becomes
+    /// a runtime object: an impl method returning `Box{...}` must not hand
+    /// a raw `zz_struct_Box` back to a `zz_value` prototype.
+    fn return_value(&self, v: &Expr, names: &mut NameCtx, out: &mut String) -> String {
+        if let Some(expected) = *self.unboxed_ret.borrow() {
+            let val = self.emit_expr(v, names, out);
+            return self.unbox_for_return(v, val, names, expected);
+        }
+        // Same boxing contract as an implicit tail: unboxed struct values
+        // (literals, `self`, fields) must become runtime objects before
+        // crossing a `zz_value` return slot. `ty_at` misses expressions
+        // whose span has no recorded type and would leak a raw C struct.
+        self.emit_tail_value(v, names, out)
+    }
+
     /// Root binding of a store target chain (`m` in `m[i][j]`, `s` in
     /// `s[i].v`, base of a path). Stores invalidate its SROA forwarding
     /// (plus dependents) — an element write may change any element.
@@ -980,14 +996,8 @@ impl Lowerer {
             }
             Stmt::Return { value, .. } => match value {
                 Some(v) => {
-                    let val = self.emit_expr(v, names, out);
-                    if let Some(expected) = *self.unboxed_ret.borrow() {
-                        let val = self.unbox_for_return(v, val, names, expected);
-                        out.push_str(&format!("    return {val};\n"));
-                    } else {
-                        let val = box_scalar_operand(v, names, &val);
-                        out.push_str(&format!("    return {val};\n"));
-                    }
+                    let val = self.return_value(v, names, out);
+                    out.push_str(&format!("    return {val};\n"));
                 }
                 None => out.push_str(&format!("    return {};\n", self.ret_unit())),
             },
@@ -1947,15 +1957,24 @@ impl Lowerer {
         }
     }
 
-    /// Emit the function body block. Unlike value-position blocks
-    /// (`emit_block_value`, which pops exactly the tail temp this block
-    /// created), this preserves `__tail` entries so `last_stmt_value`
-    /// can use them for implicit returns.
-    pub(super) fn emit_func_block(&self, block: &Block, names: &mut NameCtx, out: &mut String) {
+    /// Emit a function body block. `tail_value` says whether the final
+    /// statement's value is the body's value: `true` for closures (and
+    /// value-position blocks), `false` for named functions, whose body
+    /// falls off with `unit` and yields values only through `return`.
+    /// With `tail_value = true` this preserves `__tail` entries so
+    /// `last_stmt_value` can use them; with `false` the tail is compiled
+    /// in discard position and nothing is left for a value return.
+    pub(super) fn emit_func_block(
+        &self,
+        block: &Block,
+        names: &mut NameCtx,
+        out: &mut String,
+        tail_value: bool,
+    ) {
         names.clear_array_lens();
         let n = block.stmts.len();
         for (i, stmt) in block.stmts.iter().enumerate() {
-            let is_tail = i == n - 1;
+            let is_tail = tail_value && i == n - 1;
             self.emit_stmt(stmt, names, out, is_tail);
         }
     }
@@ -2031,14 +2050,8 @@ impl Lowerer {
             }
             Some(Stmt::Return { value, .. }) => match value {
                 Some(v) => {
-                    let val = self.emit_expr(v, names, out);
-                    if let Some(expected) = *self.unboxed_ret.borrow() {
-                        let val = self.unbox_for_return(v, val, names, expected);
-                        out.push_str(&format!("        return {val};\n"));
-                    } else {
-                        let val = box_scalar_operand(v, names, &val);
-                        out.push_str(&format!("        return {val};\n"));
-                    }
+                    let val = self.return_value(v, names, out);
+                    out.push_str(&format!("        return {val};\n"));
                 }
                 None => out.push_str(&format!("        return {};\n", self.ret_unit())),
             },

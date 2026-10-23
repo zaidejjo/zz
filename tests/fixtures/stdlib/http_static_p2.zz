@@ -41,5 +41,5 @@ func main() -> Result<int, str> {
     println("index: {r7.status()}:{r7.text()}")
 
     println("http_static_p2_ok")
-    .ok(0)
+    return .ok(0)
 }

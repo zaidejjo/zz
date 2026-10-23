@@ -57,5 +57,5 @@ func main() -> Result<int, str> {
         .err(_e) => println("close-done")
     }
     println("net_write_after_close_ok")
-    .ok(0)
+    return .ok(0)
 }

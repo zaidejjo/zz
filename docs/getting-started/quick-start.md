@@ -27,9 +27,9 @@ zz build hello.zz
 x := 42
 pi: float = 3.14
 
-// Functions return their last expression.
+// Named functions return through `return`.
 func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 
 // Pipelines read left to right.

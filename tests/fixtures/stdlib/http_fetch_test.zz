@@ -34,5 +34,5 @@ func main() -> Result<int, str> {
     println("fetch_route_ok: {r.status()}:{r.text()}")
 
     println("http_fetch_test_ok")
-    .ok(0)
+    return .ok(0)
 }

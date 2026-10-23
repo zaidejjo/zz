@@ -3,5 +3,5 @@
 // (ZZ spells `()` as `unit`; `Result<unit, E>` is the `Result<(), E>` shape.)
 func main() -> Result<int, str> {
     println("in main")
-    .ok(0)
+    return .ok(0)
 }

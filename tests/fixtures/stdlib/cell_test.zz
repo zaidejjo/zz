@@ -49,5 +49,5 @@ func main() -> Result<int, str> {
         .err(_) => println("ERROR: arr get should succeed")
     }
     println("cell_test_ok")
-    .ok(0)
+    return .ok(0)
 }

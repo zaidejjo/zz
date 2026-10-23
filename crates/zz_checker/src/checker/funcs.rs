@@ -3,6 +3,8 @@
 use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::ast::{Block, Expr, Stmt};
+use zz_frontend::diag::{error_at, FixIt};
+use zz_frontend::span::Span;
 
 impl Checker {
     pub(crate) fn collect_func(&mut self, stmt: &Stmt) {
@@ -175,7 +177,7 @@ impl Checker {
             &mut self.current_bounds,
             sig.bounds.iter().cloned().collect(),
         );
-        let body_t = self.check_fn_body_block(body);
+        let body_t = self.check_named_fn_body(body);
         self.current_ret = prev_ret;
         self.current_generics = prev_gen;
         self.current_bounds = prev_bounds;
@@ -185,26 +187,73 @@ impl Checker {
         // it sees the final program even when type errors exist.
         super::value_lint::lint_dead_param_mutation(&sig.params, body, &mut self.errors);
         let _ = name;
-        // The body's fall-through type must match the declared return
-        // type. Divergent arms contribute `Never`, which vanishes from
-        // joins, so a body that always returns/diverges checks against
-        // anything — while any value path must produce `sig.ret`. There
-        // is deliberately no `block_has_return` bypass here: skipping the
-        // check whenever a `return` exists masked genuine mismatches
-        // (e.g. an `else { "hi" }` fall-through in a `-> int` function)
-        // and missing-return paths (`if c { return 1 }` with no else,
-        // which falls through with unit).
-        if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
-            // Sherlock: unwrapped Result at the tail value gets a
-            // value-site error with fixes instead of the generic
-            // return-type-span mismatch (#245).
-            let tail_span = body.stmts.last().map(|s| s.span()).unwrap_or(body.span);
-            let resolved_body = self.unifier.resolve(&body_t);
-            let resolved_ret = self.unifier.resolve(&sig.ret);
-            if !self.report_result_return_hint(&resolved_body, &resolved_ret, tail_span) {
-                self.report_mismatch(e, body.span);
-            }
+        // A named function yields a value only through `return`, so its
+        // fall-through type is `unit` unless every path diverges (`Never`,
+        // e.g. ending in `if c { return 1 } else { return 2 }`). The body's
+        // tail expression type is irrelevant here: it was discarded.
+        //
+        // A non-unit signature plus a fall-through is the missing-`return`
+        // error — with an insertion fixit so `zz fix` can migrate the
+        // corpus. An unresolved return (no annotation) is not "non-unit":
+        // unifying it with `unit` is how the signature becomes `unit`.
+        let resolved_body = self.unifier.resolve(&body_t);
+        if matches!(resolved_body, Type::Error) {
+            // The body already reported a type error: don't cascade a
+            // return-type complaint on top of it.
+            let _ = self.unifier.unify(&body_t, &sig.ret);
+            return;
         }
+        let resolved_ret = self.unifier.resolve(&sig.ret);
+        let ret_takes_value = !matches!(
+            resolved_ret,
+            Type::Unit | Type::Void | Type::Error | Type::Var(_)
+        );
+        let diverges = matches!(resolved_body, Type::Never);
+        if ret_takes_value && !diverges {
+            self.report_missing_return(body, &resolved_ret);
+            return;
+        }
+        let fallthrough = if diverges { Type::Never } else { Type::Unit };
+        if let Err(e) = self.unifier.unify(&fallthrough, &sig.ret) {
+            self.report_mismatch(e, body.span);
+        }
+    }
+
+    /// `func f() -> int { 1 }`: the tail expression is discarded now, so
+    /// point at it and offer the insertion `zz fix` applies. Tails that
+    /// cannot take a prefix (`return`, declarations, empty bodies) get the
+    /// message only.
+    fn report_missing_return(&mut self, body: &Block, ret_ty: &Type) {
+        let last = body.stmts.last();
+        let span = last.map(|s| s.span()).unwrap_or(body.span);
+        // A tail that already yields `unit` (e.g. `println(...)`) cannot be
+        // fixed by prefixing `return`: the value would still be unit.
+        let unit_tail = match (last, &self.last_block_tail) {
+            (Some(stmt), Some((tail_span, ty))) if *tail_span == stmt.span() => {
+                matches!(self.unifier.resolve(ty), Type::Unit | Type::Void)
+            }
+            _ => false,
+        };
+        let value_tail = match last {
+            // `return if c { 1 }` would still fall through: an `if` without
+            // an `else` yields unit, so an insertion fixit would trade one
+            // error for another.
+            Some(Stmt::Expr(Expr::If { els: None, .. })) => None,
+            Some(Stmt::Expr(e)) if !unit_tail => {
+                let s = e.span();
+                Some(Span::new(s.start, s.start))
+            }
+            _ => None,
+        };
+        let mut diag = error_at(
+            format!("function returns `{ret_ty}` but its body can fall through; add `return`"),
+            span,
+        )
+        .with_note("named functions return a value only through `return`; the last expression is discarded");
+        if let Some(insert_at) = value_tail {
+            diag = diag.with_fixit(FixIt::safe(insert_at, "return ", "add `return`"));
+        }
+        self.errors.push(diag);
     }
 
     /// Recursively check whether a block contains a `return` statement.

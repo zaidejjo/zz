@@ -151,9 +151,11 @@ impl Lowerer {
     }
 
     /// Emit the shared function-body tail: per-function `defer` state,
-    /// the body block, the LIFO defer runner, and the implicit return.
-    /// `unit_ret` is the implicit tail value when the body yields none
-    /// (`zz_unit()` for boxed functions, scalar zero for `_u` ones).
+    /// the body block, the LIFO defer runner, and the fall-through return.
+    ///
+    /// Named functions fall through with `unit`; a value leaves only via
+    /// `return`. `unit_ret` is that fall-through `unit` (`zz_unit()` for
+    /// boxed functions, scalar zero for `_u` ones).
     pub(super) fn emit_body_tail(
         &self,
         block: &Block,
@@ -164,13 +166,12 @@ impl Lowerer {
         o.push_str("    int __defers[32];\n");
         o.push_str("    int __defer_n = 0;\n");
         let mut body_out = String::new();
-        self.emit_func_block(block, names, &mut body_out);
+        self.emit_func_block(block, names, &mut body_out, false);
         o.push_str(&body_out);
         self.emit_defer_runner(o);
-        // Implicit return: last statement expression is the function value.
-        if self.last_stmt_value(block, names, o).is_none() {
-            o.push_str(&format!("    return {unit_ret};\n"));
-        }
+        // Fall-through return: named functions do not return their tail
+        // expression, so anything not covered by `return` is `unit`.
+        o.push_str(&format!("    return {unit_ret};\n"));
         o.push_str("}\n\n");
     }
 

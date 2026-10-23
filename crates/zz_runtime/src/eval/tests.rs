@@ -173,8 +173,10 @@ fn closure_captures_env() {
 #[test]
 fn named_func_and_recursion() {
     assert_eq!(
-        eval_src("func fact(n: int) -> int { if n <= 1 { 1 } else { n * fact(n - 1) } }\nfact(5)")
-            .unwrap(),
+        eval_src(
+            "func fact(n: int) -> int { return if n <= 1 { 1 } else { n * fact(n - 1) } }\nfact(5)"
+        )
+        .unwrap(),
         Value::Int(120)
     );
 }
@@ -182,7 +184,7 @@ fn named_func_and_recursion() {
 #[test]
 fn return_unwinds() {
     assert_eq!(
-        eval_src("func f() -> int { if true { return 7 }\n 0 }\nf()").unwrap(),
+        eval_src("func f() -> int { if true { return 7 }\n return 0 }\nf()").unwrap(),
         Value::Int(7)
     );
 }
@@ -292,7 +294,7 @@ fn if_let() {
 #[test]
 fn try_unwraps_option() {
     assert_eq!(
-        eval_src("func f() -> Option<int> { x := .some(1)?; .some(x) }\nf()").unwrap(),
+        eval_src("func f() -> Option<int> { x := .some(1)?; return .some(x) }\nf()").unwrap(),
         Value::Option(Some(Box::new(Value::Int(1))))
     );
 }
@@ -300,7 +302,7 @@ fn try_unwraps_option() {
 #[test]
 fn try_propagates_none() {
     assert_eq!(
-        eval_src("func f() -> Option<int> { x := .none?; .some(x) }\nf()").unwrap(),
+        eval_src("func f() -> Option<int> { x := .none?; return .some(x) }\nf()").unwrap(),
         Value::Option(None)
     );
 }
@@ -308,7 +310,8 @@ fn try_propagates_none() {
 #[test]
 fn try_propagates_err() {
     assert_eq!(
-        eval_src("func f() -> Result<int, str> { x := .err(\"boom\")?; .ok(x) }\nf()").unwrap(),
+        eval_src("func f() -> Result<int, str> { x := .err(\"boom\")?; return .ok(x) }\nf()")
+            .unwrap(),
         Value::Result(Box::new(Err(Value::Str("boom".to_string().into()))))
     );
 }
@@ -484,7 +487,7 @@ fn struct_nested_field_access() {
 #[test]
 fn struct_passed_to_func() {
     let v = eval_src(
-            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
+            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { return p.x + p.y }\ndist(Point{ x: 3, y: 4 })",
         )
         .unwrap();
     assert_eq!(v, Value::Int(7));
@@ -785,7 +788,7 @@ fn index_assign_through_field() {
 #[test]
 fn method_call() {
     let v = eval_src(
-            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\np := Point { x: 3, y: 4 }\np.dist()",
+            "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { return p.x + p.y }\np := Point { x: 3, y: 4 }\np.dist()",
         )
         .unwrap();
     assert_eq!(v, Value::Int(7));
@@ -794,7 +797,7 @@ fn method_call() {
 #[test]
 fn method_call_with_args() {
     let v = eval_src(
-            "struct Point { x: int }\nfunc scale(p: Point, f: int) -> int { p.x * f }\np := Point { x: 3 }\np.scale(4)",
+            "struct Point { x: int }\nfunc scale(p: Point, f: int) -> int { return p.x * f }\np := Point { x: 3 }\np.scale(4)",
         )
         .unwrap();
     assert_eq!(v, Value::Int(12));
@@ -813,7 +816,7 @@ fn method_call_undefined_errors() {
 #[test]
 fn method_call_on_field() {
     let v = eval_src(
-            "struct Point { x: int }\nstruct Holder { p: Point }\nfunc dist(p: Point) -> int { p.x }\nh := Holder{ p: Point { x: 9 } }\nh.p.dist()",
+            "struct Point { x: int }\nstruct Holder { p: Point }\nfunc dist(p: Point) -> int { return p.x }\nh := Holder{ p: Point { x: 9 } }\nh.p.dist()",
         )
         .unwrap();
     assert_eq!(v, Value::Int(9));
@@ -828,20 +831,20 @@ fn struct_init_with_space_runtime() {
 
 #[test]
 fn pipe_inserts_lhs_as_first_arg() {
-    let v = eval_src("func dbl(a: int, b: int) -> int { a * b }\n5 |> dbl(3)").unwrap();
+    let v = eval_src("func dbl(a: int, b: int) -> int { return a * b }\n5 |> dbl(3)").unwrap();
     assert_eq!(v, Value::Int(15));
 }
 
 #[test]
 fn pipe_bare_name() {
-    let v = eval_src("func inc(n: int) -> int { n + 1 }\n5 |> inc").unwrap();
+    let v = eval_src("func inc(n: int) -> int { return n + 1 }\n5 |> inc").unwrap();
     assert_eq!(v, Value::Int(6));
 }
 
 #[test]
 fn pipe_chain() {
     let v = eval_src(
-        "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\n5 |> inc |> dbl",
+        "func inc(n: int) -> int { return n + 1 }\nfunc dbl(n: int) -> int { return n * 2 }\n5 |> inc |> dbl",
     )
     .unwrap();
     assert_eq!(v, Value::Int(12));
@@ -888,13 +891,17 @@ fn negative_shift_errors() {
 fn rotl_round_trip() {
     // Xoshiro-style rotate-left building block.
     assert_eq!(
-        eval_src("func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(1, 1)")
-            .unwrap(),
+        eval_src(
+            "func rotl(x: int, k: int) -> int { return (x << k) | (x >> (64 - k)) }\nrotl(1, 1)"
+        )
+        .unwrap(),
         Value::Int(2)
     );
     assert_eq!(
-        eval_src("func rotl(x: int, k: int) -> int { (x << k) | (x >> (64 - k)) }\nrotl(-1, 17)")
-            .unwrap(),
+        eval_src(
+            "func rotl(x: int, k: int) -> int { return (x << k) | (x >> (64 - k)) }\nrotl(-1, 17)"
+        )
+        .unwrap(),
         Value::Int(-1)
     );
 }
@@ -966,7 +973,7 @@ fn compound_assign_single_evaluation() {
     let src = "n := 0
 func bump() -> int {
     n = n + 1
-    n
+    return n
 }
 arr := [10, 20, 30]
 arr[bump()] += bump()
@@ -982,7 +989,7 @@ fn compound_assign_keeps_value_semantics() {
     let src = "struct Rng { s0: int }
 func change(r: Rng) -> int {
     r.s0 += 100
-    r.s0
+    return r.s0
 }
 rng := Rng{ s0: 10 }
 a := change(rng)
@@ -1003,7 +1010,7 @@ a[0] * 100 + b[0]";
 #[test]
 fn generic_struct_value_semantics() {
     // Type arguments erase at runtime; mutation never escapes.
-    let src = "struct Box<T> { v: T }\nfunc change<T>(b: Box<T>) -> T {\n b.v\n}\nb := Box{ v: 10 }\nchange(b) * 1000 + b.v";
+    let src = "struct Box<T> { v: T }\nfunc change<T>(b: Box<T>) -> T {\n return b.v\n}\nb := Box{ v: 10 }\nchange(b) * 1000 + b.v";
     assert_eq!(eval_src(src).unwrap(), Value::Int(10010));
 }
 

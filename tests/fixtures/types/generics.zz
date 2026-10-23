@@ -1,15 +1,15 @@
 // features: arrays, bool-logic, comparison, float-arith, func-call, generics, indexing, locals, print, string-literal
 // E2E: Generics — generic functions with type inference
 func identity<T>(x: T) -> T {
-    x
+    return x
 }
 
 func pair<T, U>(a: T, b: U) -> str {
-    "{a}-{b}"
+    return "{a}-{b}"
 }
 
 func first<T>(arr: [T]) -> T {
-    arr[0]
+    return arr[0]
 }
 
 // generic with int

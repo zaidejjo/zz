@@ -5,7 +5,7 @@
 // Regression for `o := .some(x); a := [o, o]` freeing the shared 16-byte
 // payload box once per element.
 func describe(v: Option<str>) -> str {
-    match v {
+    return match v {
         .some(x) => "some:{x}"
         .none => "none"
     }

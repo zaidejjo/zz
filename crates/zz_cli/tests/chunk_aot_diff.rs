@@ -75,7 +75,7 @@ fn require_native() -> bool {
 
 const FIB: &str = r#"
 func fib(n: int) -> int {
-    if n <= 1 {
+    return if n <= 1 {
         n
     } else {
         fib(n - 1) + fib(n - 2)
@@ -144,7 +144,7 @@ func main() {
 
 const TAK: &str = r#"
 func tak(x: int, y: int, z: int) -> int {
-    if y >= x {
+    return if y >= x {
         z
     } else {
         tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y))
@@ -572,10 +572,10 @@ func main() {
 // chunk backend gives each binding a function-local `zz_value` cell and
 // tests patterns with borrowed reads (no clone on a miss).
 const MATCH_OPTION: &str = r#"func pick(n: int) -> Option<int> {
-    if n > 0 { .some(n) } else { .none }
+    return if n > 0 { .some(n) } else { .none }
 }
 func wrap(n: int) -> Option<Result<int, str>> {
-    if n > 0 { .some(.ok(n)) } else { .some(.err("no")) }
+    return if n > 0 { .some(.ok(n)) } else { .some(.err("no")) }
 }
 func main() {
     a := pick(5)
@@ -602,7 +602,7 @@ func main() {
 "#;
 
 const MATCH_RESULT: &str = r#"func check(n: int) -> Result<int, str> {
-    if n > 0 { .ok(n * 2) } else { .err("neg") }
+    return if n > 0 { .ok(n * 2) } else { .err("neg") }
 }
 func main() {
     a := check(3)
@@ -619,7 +619,7 @@ func main() {
 "#;
 
 const MATCH_GUARD: &str = r#"func grade(o: Option<int>) -> int {
-    match o {
+    return match o {
         .some(x) if x > 10 => 1,
         .some(x) => x * 10,
         .none => 0,
@@ -633,14 +633,14 @@ func main() {
 "#;
 
 const MATCH_LITERALS: &str = r#"func classify(n: int) -> int {
-    match n {
+    return match n {
         0 => 100,
         1 | 2 => 200,
         _ => 300,
     }
 }
 func nested(n: int) -> int {
-    match n {
+    return match n {
         7 => match n {
             7 => 77,
             _ => 0,
@@ -664,7 +664,7 @@ const MATCH_ENUM: &str = r#"enum Shape {
     Empty,
 }
 func area(s: Shape) -> int {
-    match s {
+    return match s {
         .Circle(r) => r * r,
         .Square(w) => w * w,
         .Empty => 0,
@@ -684,7 +684,7 @@ func main() {
 "#;
 
 const MATCH_IFLET: &str = r#"func take(o: Option<int>) -> int {
-    if let .some(x) = o {
+    return if let .some(x) = o {
         x
     } else {
         0 - 1
@@ -708,7 +708,7 @@ func main() {
 // name shadows the enclosing binding (the VM binds each arm in a child
 // environment), and the enclosing value must survive the inner match.
 const MATCH_SHADOW: &str = r#"func nested(o: Option<Option<int>>) -> int {
-    match o {
+    return match o {
         .some(px) => {
             inner := match px {
                 .some(q) => q * 2,
@@ -724,7 +724,7 @@ const MATCH_SHADOW: &str = r#"func nested(o: Option<Option<int>>) -> int {
     }
 }
 func same_name(o: Option<Option<int>>) -> int {
-    match o {
+    return match o {
         .some(inner) => {
             w := match inner {
                 .some(inner) => inner * 3,
@@ -740,7 +740,7 @@ func same_name(o: Option<Option<int>>) -> int {
     }
 }
 func guard(o: Option<int>) -> int {
-    match o {
+    return match o {
         .some(x) if x > 3 => x,
         .some(x) => x * 10,
         .none => 0,

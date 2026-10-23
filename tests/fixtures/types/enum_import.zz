@@ -3,7 +3,7 @@
 import support.enum_shapes as shapes(Color)
 
 func describe(c: shapes.Color) -> str {
-    match c {
+    return match c {
         .Red => "red",
         .Green => "green",
         .Blue => "blue",

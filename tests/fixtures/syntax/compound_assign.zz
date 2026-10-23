@@ -5,11 +5,11 @@ struct Point {
 }
 
 func idx() -> int {
-    1
+    return 1
 }
 
 func rhs() -> int {
-    5
+    return 5
 }
 
 func main() {

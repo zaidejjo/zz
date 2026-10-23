@@ -89,7 +89,7 @@ func main() -> Result<int, str> {
     s := bytehash.sum(b)
     println("sum={s}")
     println("bytehash-ok")
-    .ok(0)
+    return .ok(0)
 }
 "#;
 

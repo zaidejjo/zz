@@ -7,7 +7,7 @@ func first_arg(args: [str], fallback: str) -> str {
             return a
         }
     }
-    fallback
+    return fallback
 }
 
 n := int(first_arg(env.args(), "10000")) ?? 10000

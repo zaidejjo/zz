@@ -12,11 +12,11 @@ struct Slot {
 }
 
 func at(v: [int], idx: int) -> int {
-    v[idx]
+    return v[idx]
 }
 
 func slot_val(s: Slot) -> [int] {
-    s.val
+    return s.val
 }
 
 func main() -> Result<int, str> {
@@ -164,5 +164,5 @@ func main() -> Result<int, str> {
     println("errs={errs}")
     assert(errs == 0)
     println("cell_arena_test_ok")
-    .ok(0)
+    return .ok(0)
 }

@@ -28,14 +28,14 @@ func str.repeat(s: str, n: int) -> str {
         buf = buf + buf
         m = m / 2
     }
-    result
+    return result
 }
 
 
 // ── Queries ──────────────────────────────────────────────────────────────────
 
 func str.is_empty(s: str) -> bool {
-    str.length(s) == 0
+    return str.length(s) == 0
 }
 
 // ── Transform ────────────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ func str.reverse(s: str) -> str {
         result = result + chars[idx]
         idx = idx - 1
     }
-    result
+    return result
 }
 
 func str.pad_left(s: str, len: int, pad: str) -> str {
@@ -70,7 +70,7 @@ func str.pad_left(s: str, len: int, pad: str) -> str {
         buf = buf + buf
         remaining = remaining / 2
     }
-    padding + s
+    return padding + s
 }
 
 func str.pad_right(s: str, len: int, pad: str) -> str {
@@ -89,5 +89,5 @@ func str.pad_right(s: str, len: int, pad: str) -> str {
         buf = buf + buf
         remaining = remaining / 2
     }
-    s + padding
+    return s + padding
 }

@@ -69,7 +69,7 @@ Metadata flags (`@test(...)` named args only):
 /// ```zz,ignore
 /// assert_eq(double(0), 999)
 /// ```
-func double(n: int) -> int { n * 2 }
+func double(n: int) -> int { return n * 2 }
 ```
 
 - Only explicit `zz` fences are extracted; plain ``` fences stay prose.
@@ -268,7 +268,7 @@ func send_all(send: func(str) -> Result<int, str>, msgs: [str]) -> int {
             .err(_) => n = n
         }
     }
-    n
+    return n
 }
 
 func fail_on_b(m: str) -> Result<int, str> {
@@ -277,7 +277,7 @@ func fail_on_b(m: str) -> Result<int, str> {
         "b" => out = .err("boom")
         _ => out = .ok(1)
     }
-    out
+    return out
 }
 
 @test

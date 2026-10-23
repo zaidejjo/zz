@@ -9,15 +9,15 @@ import std.str
 // E2E: Pipeline operator |>
 
 func double(n: int) -> int {
-    n * 2
+    return n * 2
 }
 
 func add_one(n: int) -> int {
-    n + 1
+    return n + 1
 }
 
 func negate(n: int) -> int {
-    -n
+    return -n
 }
 
 // basic pipeline

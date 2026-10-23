@@ -1350,6 +1350,8 @@ impl Vm {
                         env: interp.env.clone(),
                         chunk: Some(Arc::clone(fchunk)),
                         chunk_defaults: defaults.clone(),
+                        // Named function (`func`): explicit `return` only.
+                        tail_value: false,
                     };
                     interp.funcs.insert(name.clone(), fv.clone());
                     interp.funcs_version = interp.funcs_version.wrapping_add(1);
@@ -2358,6 +2360,8 @@ impl Vm {
                         env: interp.env.clone(),
                         chunk: Some(Arc::clone(chunk)),
                         chunk_defaults: defaults.clone(),
+                        // Closure: body tail is the value.
+                        tail_value: true,
                     };
                     self.stack.push(Value::Func(std::rc::Rc::new(fv)));
                 }

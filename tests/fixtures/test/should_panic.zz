@@ -5,7 +5,7 @@ func risky(n: int) -> int {
     if n < 0 {
         fail("negative not allowed")
     }
-    n
+    return n
 }
 
 @test(should_panic = true)

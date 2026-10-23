@@ -24,7 +24,7 @@ import std.json
 struct User { name: str, age: int }
 
 func adult(u: User) -> bool {
-    u.age >= 18
+    return u.age >= 18
 }
 
 func main() {

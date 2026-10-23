@@ -5,7 +5,7 @@
 // branches). Every check prints its value; the harness matches the
 // trailing marker.
 func pair(ok: bool) -> Result<[int], str> {
-    if ok {
+    return if ok {
         .ok([640, 480])
     } else {
         .err("nope")
@@ -13,7 +13,7 @@ func pair(ok: bool) -> Result<[int], str> {
 }
 
 func dims(ok: bool) -> [int] {
-    match pair(ok) {
+    return match pair(ok) {
         .ok(v) => v,
         .err(e) => {
             fail("dims {e}")
@@ -23,7 +23,7 @@ func dims(ok: bool) -> [int] {
 }
 
 func if_block_local(a: bool) -> int {
-    if a {
+    return if a {
         y := 10
         y + 1
     } else {
@@ -33,12 +33,12 @@ func if_block_local(a: bool) -> int {
 
 func or_declare(a: bool, b: bool) -> bool {
     ok := a || b
-    ok
+    return ok
 }
 
 func and_declare(a: bool, b: bool) -> bool {
     ok := a && b
-    ok
+    return ok
 }
 
 func guard_read(x: int) -> int {
@@ -47,7 +47,7 @@ func guard_read(x: int) -> int {
         v if v > 0 => r[0] + v,
         _ => 0,
     }
-    m + r[1]
+    return m + r[1]
 }
 
 func main() {

@@ -413,7 +413,7 @@ fn aot_serve_ns_collision_helper() {
 import std.env
 
 func greet_user(username: str) -> str {
-    "Hello, {username}"
+    return "Hello, {username}"
 }
 
 func main() {

@@ -4,11 +4,11 @@
 import std.property
 
 func is_small(x: int) -> bool {
-    x < 100
+    return x < 100
 }
 
 func gen_small(seed: int, i: int) -> int {
-    property.int_in(seed, i, 0, 10)
+    return property.int_in(seed, i, 0, 10)
 }
 
 func main() {

@@ -93,7 +93,7 @@ func main() -> Result<int, str> {
     println("sum={wsum.sum(b)}")
     println("add={wsum.add(40, 2)}")
     println("wsum-ok")
-    .ok(0)
+    return .ok(0)
 }
 "#;
 

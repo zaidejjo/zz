@@ -404,8 +404,8 @@ func main() {
 #[test]
 fn unused_function_pruned_unused_kept() {
     let src = r#"
-func used(x: int) -> int { x * 2 }
-func unused(x: int) -> int { x * 3 }
+func used(x: int) -> int { return x * 2 }
+func unused(x: int) -> int { return x * 3 }
 func main() {
     println(used(21))
 }
@@ -427,7 +427,7 @@ func main() {
 fn recursive_function_kept() {
     let src = r#"
 func factorial(n: int) -> int {
-    if n <= 1 { 1 } else { n * factorial(n - 1) }
+    return if n <= 1 { 1 } else { n * factorial(n - 1) }
 }
 func main() {
     println(factorial(5))
@@ -446,7 +446,7 @@ func main() {
 #[test]
 fn function_used_as_value_kept() {
     let src = r#"
-func helper(x: int) -> int { x + 1 }
+func helper(x: int) -> int { return x + 1 }
 func main() {
     g := helper
     println(g(1))

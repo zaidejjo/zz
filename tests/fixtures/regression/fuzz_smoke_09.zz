@@ -8,7 +8,7 @@ func f2(p3: int) -> int {
         0 => { return (10 - -8) },
         _ => { _q5 := -19 },
     }
-    v1
+    return v1
 }
 acc6 := 0
 for _i7 in 2..7 {

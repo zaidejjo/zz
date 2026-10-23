@@ -4,13 +4,13 @@
 log := []
 func rec(n: int) -> int {
     log = vec.push(log, n)
-    n
+    return n
 }
 x := rec(1) + rec(2) * rec(3)
 println("log={log}")
 println("x={x}")
 func add(a: int, b: int, c: int) -> int {
-    a + b + c
+    return a + b + c
 }
 println("r={add(rec(1), rec(2), rec(3))}")
 println("log2={log}")

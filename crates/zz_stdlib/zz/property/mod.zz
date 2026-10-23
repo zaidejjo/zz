@@ -13,27 +13,27 @@
 
 func property.norm_state(s: int) -> int {
     m := 2147483646
-    ((s % m) + m) % m + 1
+    return ((s % m) + m) % m + 1
 }
 
 // One LCG step: state in [1, 2147483646].
 
 func property.step(state: int) -> int {
     s := property.norm_state(state)
-    s * 48271 % 2147483647
+    return s * 48271 % 2147483647
 }
 
 // Independent substream for case index i: mix the seed with a hashed
 // stride, then step once. Wrapping is deterministic.
 
 func property.stream(seed: int, i: int) -> int {
-    property.step(seed + i * 2654435761)
+    return property.step(seed + i * 2654435761)
 }
 
 // Canonical seed shape (nonzero LCG state).
 
 func property.seed(n: int) -> int {
-    property.norm_state(n)
+    return property.norm_state(n)
 }
 
 // Uniform int in [lo, hi]. Reversed bounds are swapped (total function).
@@ -46,7 +46,7 @@ func property.int_in(seed: int, i: int, lo: int, hi: int) -> int {
         b = lo
     }
     span := b - a + 1
-    a + property.stream(seed, i) % span
+    return a + property.stream(seed, i) % span
 }
 
 // Uniform int in [0, n). n <= 0 yields 0 (total function).
@@ -55,18 +55,18 @@ func property.pick(seed: int, i: int, n: int) -> int {
     if n <= 0 {
         return 0
     }
-    property.int_in(seed, i, 0, n - 1)
+    return property.int_in(seed, i, 0, n - 1)
 }
 
 func property.boolean(seed: int, i: int) -> bool {
-    property.pick(seed, i, 2) == 1
+    return property.pick(seed, i, 2) == 1
 }
 
 // Lowercase letter from a 26-letter alphabet.
 
 func property.alpha_char(seed: int, i: int) -> str {
     alphabet := "abcdefghijklmnopqrstuvwxyz"
-    alphabet[property.pick(seed, i, 26)]
+    return alphabet[property.pick(seed, i, 26)]
 }
 
 // Lowercase string of exactly len chars (len <= 0 yields "").
@@ -78,7 +78,7 @@ func property.alpha_str(seed: int, i: int, len: int) -> str {
         out = out + property.alpha_char(seed, i * 64 + j)
         j = j + 1
     }
-    out
+    return out
 }
 
 // Simpler candidates toward zero (deduped, never containing v itself).
@@ -110,7 +110,7 @@ func property.shrink_int(v: int) -> [int] {
             out = vec.push(out, step)
         }
     }
-    out
+    return out
 }
 
 // Shorter prefixes, halving (never containing s itself).
@@ -129,7 +129,7 @@ func property.shrink_str(s: str) -> [str] {
         }
         k = k / 2
     }
-    out
+    return out
 }
 
 // Minimize a falsifying value: first falsifying candidate wins each round,
@@ -155,7 +155,7 @@ func property.shrink_value<T>(prop: func(T) -> bool, shrink: func(T) -> [T], v: 
         }
         n = n + 1
     }
-    cur
+    return cur
 }
 
 // Assert prop holds for iters generated cases; on falsification shrink to

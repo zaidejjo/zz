@@ -14,7 +14,7 @@ func main() -> Result<int, str> {
     rows := sqlz.query(db, "SELECT id, name FROM users")
     println(rows)
     sqlz.close(db)
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -40,7 +40,7 @@ func main() -> Result<int, str> {
     rows := pg.query(db, "SELECT * FROM t")
     println(rows)
     pg.close(db)
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -57,7 +57,7 @@ func main() -> Result<int, str> {
     rows := my.query(db, "SELECT * FROM t")
     println(rows)
     my.close(db)
-    .ok(0)
+    return .ok(0)
 }
 ```
 

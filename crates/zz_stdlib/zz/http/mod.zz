@@ -19,7 +19,7 @@
 // ── Middleware registration ──────────────────────────────────────────────────
 
 func http.use(server: http.server, middleware) -> http.server {
-    std.http.pipe(server, middleware)
+    return std.http.pipe(server, middleware)
 }
 
 // NOTE: `http.route` lives in native Rust (validated single-entry routing
@@ -28,19 +28,19 @@ func http.use(server: http.server, middleware) -> http.server {
 // ── Response constructors ────────────────────────────────────────────────────
 
 func http.ok(body: str) -> http.response {
-    std.http.respond(200, body, {})
+    return std.http.respond(200, body, {})
 }
 
 func http.created(body: str) -> http.response {
-    std.http.respond(201, body, {})
+    return std.http.respond(201, body, {})
 }
 
 func http.not_found() -> http.response {
-    std.http.respond(404, "Not Found", {})
+    return std.http.respond(404, "Not Found", {})
 }
 
 func http.redirect(url: str) -> http.response {
-    std.http.respond(302, "", {"Location": url})
+    return std.http.respond(302, "", {"Location": url})
 }
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ func http.cors(server: http.server, origins: [str]) -> http.server {
 // ── Secure headers ───────────────────────────────────────────────────────────
 
 func http.secure_header_dict() -> {str: str} {
-    {
+    return {
         "Content-Security-Policy": "default-src 'self'",
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "strict-origin-when-cross-origin",
@@ -96,7 +96,7 @@ func http.secure_header_dict() -> {str: str} {
 }
 
 func http.secure_headers(server: http.server) -> http.server {
-    std.http.pipe_post(server, |req, res| {
+    return std.http.pipe_post(server, |req, res| {
         std.http.with_headers(res, std.http.secure_header_dict())
     })
 }
@@ -104,17 +104,17 @@ func http.secure_headers(server: http.server) -> http.server {
 // ── CSRF ─────────────────────────────────────────────────────────────────────
 
 func http.csrf_token() -> str {
-    std.crypto.random_bytes(32)
+    return std.crypto.random_bytes(32)
 }
 
 func http.csrf_check(a: str, b: str) -> bool {
-    std.crypto.ct_eq(a, b)
+    return std.crypto.ct_eq(a, b)
 }
 
 // ── Request IDs ──────────────────────────────────────────────────────────────
 
 func http.request_id(server: http.server) -> http.server {
-    std.http.pipe_post(server, |req, res| {
+    return std.http.pipe_post(server, |req, res| {
         std.http.with_headers(res, {"X-Request-Id": std.uuid.v7()})
     })
 }

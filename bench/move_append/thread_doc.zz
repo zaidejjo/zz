@@ -22,7 +22,7 @@ func push_node(doc: Doc11, x: int) -> Doc11 {
     doc.a3 = vec.push(doc.a3, x)
     doc.a4 = vec.push(doc.a4, x)
     doc.a5 = vec.push(doc.a5, x)
-    doc
+    return doc
 }
 
 func first_arg(args: [str], fallback: str) -> str {
@@ -31,7 +31,7 @@ func first_arg(args: [str], fallback: str) -> str {
             return a
         }
     }
-    fallback
+    return fallback
 }
 
 n := int(first_arg(env.args(), "2000")) ?? 2000

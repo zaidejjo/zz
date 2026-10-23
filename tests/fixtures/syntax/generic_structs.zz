@@ -6,7 +6,7 @@ struct Box<T> {
 
 impl Box<T> {
     func get(self) -> T {
-        self.v
+        return self.v
     }
 }
 
@@ -21,7 +21,7 @@ struct Wrap<T> {
 }
 
 func first<T>(b: Box<T>) -> T {
-    b.v
+    return b.v
 }
 
 func main() {

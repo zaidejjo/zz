@@ -235,7 +235,7 @@ func main() -> Result<int, str> {
     println(json.as_int(json.get(data, "age")?))   // 30
     person := {"name": "Bob", "age": 25}
     println(json.stringify(person)?)
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -419,7 +419,7 @@ func main() -> Result<int, str> {
     res := http.get("https://api.example.com/users")?
     body := res.json()?
     println(json.stringify(body) ?? "{}")
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -481,7 +481,7 @@ func main() -> Result<int, str> {
     println("got: {line}")
     client.close()?
     server.close()?
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -898,11 +898,11 @@ shrunk minimal case:
 import std.property
 
 func gen_small(seed: int, i: int) -> int {
-    property.int_in(seed, i, 0, 10)
+    return property.int_in(seed, i, 0, 10)
 }
 
 func small(x: int) -> bool {
-    x < 100
+    return x < 100
 }
 
 property.check(gen_small, property.shrink_int, small, 200, 7)

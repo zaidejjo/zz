@@ -15,7 +15,7 @@ res_err:Result<int, str> = .err("boom")
 println("{res_err.unwrap_or(99)}")
 // Chained through a call result, like `test.temp_dir("x").unwrap()`.
 func maybe_ok() -> Result<str, str> {
-    .ok("chained")
+    return .ok("chained")
 }
 println("{maybe_ok().unwrap()}")
 println("option_result_unwrap_ok")

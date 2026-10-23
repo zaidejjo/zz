@@ -2,7 +2,7 @@
 // Test: pub items should not emit unused variable warnings.
 pub PI := 3.14
 pub func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 
 pub struct Vec2 {x: int, y: int}

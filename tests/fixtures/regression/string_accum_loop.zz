@@ -21,7 +21,7 @@ func table_keys(doc: Doc, id: int) -> [str] {
             out = vec.push(out, doc.t_keys[i])
         }
     }
-    out
+    return out
 }
 
 func table_kid(doc: Doc, id: int, key: str) -> int {
@@ -30,7 +30,7 @@ func table_kid(doc: Doc, id: int, key: str) -> int {
             return doc.t_kids[i]
         }
     }
-    0 - 1
+    return 0 - 1
 }
 
 func emit(doc: Doc, id: int) -> str {
@@ -41,7 +41,7 @@ func emit(doc: Doc, id: int) -> str {
         kid := table_kid(doc, id, key)
         out = out + key + "=" + str(doc.ivals[kid]) + ";"
     }
-    out
+    return out
 }
 
 doc := Doc{

@@ -6,7 +6,7 @@ fn default_param_uses_default() {
     assert_eq!(
         run(r#"
             func greet(name: str, greeting: str = "Hello") -> str {
-                "{greeting}, {name}!"
+                return "{greeting}, {name}!"
             }
             greet("Alice")
         "#)
@@ -20,7 +20,7 @@ fn default_param_override() {
     assert_eq!(
         run(r#"
             func greet(name: str, greeting: str = "Hello") -> str {
-                "{greeting}, {name}!"
+                return "{greeting}, {name}!"
             }
             greet("Bob", "Hi")
         "#)
@@ -34,7 +34,7 @@ fn multiple_defaults_partial_override() {
     assert_eq!(
         run(r#"
             func connect(host: str, port: int = 8080, timeout: int = 30) -> str {
-                "{host}:{port} t={timeout}"
+                return "{host}:{port} t={timeout}"
             }
             connect("db.local", port: 5432)
         "#)
@@ -48,7 +48,7 @@ fn named_args_out_of_order() {
     assert_eq!(
         run(r#"
             func f(a: int, b: int, c: int) -> int {
-                a + b + c
+                return a + b + c
             }
             f(c: 30, a: 1, b: 2)
         "#)
@@ -62,7 +62,7 @@ fn named_args_with_defaults() {
     assert_eq!(
         run(r#"
             func f(x: int, y: int = 10, z: int = 20) -> int {
-                x + y + z
+                return x + y + z
             }
             f(z: 5, x: 1)
         "#)
@@ -75,7 +75,7 @@ fn named_args_with_defaults() {
 fn named_args_all_positional() {
     assert_eq!(
         run(r#"
-            func add(a: int, b: int) -> int { a + b }
+            func add(a: int, b: int) -> int { return a + b }
             add(3, 4)
         "#)
         .unwrap(),

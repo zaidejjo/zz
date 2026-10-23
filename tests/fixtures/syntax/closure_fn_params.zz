@@ -5,7 +5,7 @@
 // captures the outer closure's function parameter.
 func apply2(f: func(int) -> int, x: int) -> int {
     g := |y: int| { f(y) + 1 }
-    g(x)
+    return g(x)
 }
 
 func deco(f: func(int) -> int) -> func(int) -> int {

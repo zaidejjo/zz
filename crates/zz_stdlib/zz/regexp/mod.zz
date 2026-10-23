@@ -16,12 +16,12 @@ struct Regexp {}
 
 impl Regexp {
     func new(pat: str) {
-        regexp.compile(pat)
+        return regexp.compile(pat)
     }
 }
 
 func regexp.is_email(s: str) -> bool {
-    match regexp.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{{2,}}$") {
+    return match regexp.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{{2,}}$") {
         .ok(re) => re.is_match(s),
         .err(_) => false,
     }

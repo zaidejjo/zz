@@ -16,7 +16,7 @@ func netdns_roundtrip(label: str, addr: str) -> Result<int, str> {
     c.write("ping\n")?
     c.close()?
     println("{label}_ok")
-    .ok(0)
+    return .ok(0)
 }
 
 func main() -> Result<int, str> {
@@ -46,5 +46,5 @@ func main() -> Result<int, str> {
         .err(_e) => println("bad_addr_ok")
     }
     println("net_dns_test_ok")
-    .ok(0)
+    return .ok(0)
 }

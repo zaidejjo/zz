@@ -38,5 +38,5 @@ func main() -> Result<int, str> {
 
     // Non-integers are a program error (wrong shape, not a value error).
     println("bytes_finish_test_ok")
-    .ok(0)
+    return .ok(0)
 }
