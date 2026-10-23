@@ -1378,27 +1378,168 @@ zz_value zz_vec_contains(zz_value arr, zz_value item, int *err) {
     return (zz_value){ZZ_BOOL, {.b = false}};
 }
 
+// ---- vec.sort -------------------------------------------------------------
+// Ordering mirrors the VM (`natives/vec_mod::vec_sort`): type name first,
+// then the value within a type, and *stably* (equal elements keep their
+// input order). qsort is not stable, so the generic lane breaks ties on the
+// original index; the scalar lanes need no tie-break because equal scalars
+// are indistinguishable, so any permutation is the same array.
+static const char *zz_sort_type_name(zz_value v) {
+    switch (v.tag) {
+    case ZZ_UNIT: return "unit";
+    case ZZ_INT: return "int";
+    case ZZ_FLOAT: return "float";
+    case ZZ_BOOL: return "bool";
+    case ZZ_STR: return "str";
+    case ZZ_ARRAY: return "array";
+    case ZZ_DICT: return "dict";
+    case ZZ_FUNC: return "func";
+    case ZZ_NATIVE: return "native";
+    case ZZ_OPTION_SOME:
+    case ZZ_OPTION_NONE: return "option";
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR: return "result";
+    case ZZ_RANGE: return "range";
+    case ZZ_JSON: return "json";
+    case ZZ_TCP_STREAM: return "tcp.stream";
+    case ZZ_TCP_LISTENER: return "tcp.listener";
+    case ZZ_BYTES: return "bytes";
+    case ZZ_TUPLE: return "tuple";
+    case ZZ_OBJECT:
+        return (v.obj && v.obj->type_name) ? v.obj->type_name : "object";
+    default: return "unknown";
+    }
+}
+
+typedef struct {
+    zz_value v;
+    size_t idx;
+} zz_sort_pair;
+
+static int zz_sort_cmp_i64(const void *pa, const void *pb) {
+    int64_t a = *(const int64_t *)pa, b = *(const int64_t *)pb;
+    return (a > b) - (a < b);
+}
+
+static int zz_sort_cmp_f64(const void *pa, const void *pb) {
+    // NaN compares equal to everything, like the VM's
+    // `partial_cmp(..).unwrap_or(Ordering::Equal)`.
+    double a = *(const double *)pa, b = *(const double *)pb;
+    return (a > b) - (a < b);
+}
+
+// Lexicographic byte order, then length — `String::cmp` on the VM side.
+static int zz_sort_cmp_str(const void *pa, const void *pb) {
+    zz_str *a = ((const zz_value *)pa)->s;
+    zz_str *b = ((const zz_value *)pb)->s;
+    if (a == b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    size_t m = a->len < b->len ? a->len : b->len;
+    int c = m ? memcmp(zz_str_cptr(a), zz_str_cptr(b), m) : 0;
+    if (c) return c;
+    return (a->len > b->len) - (a->len < b->len);
+}
+
+static int zz_sort_cmp_value(const void *pa, const void *pb) {
+    const zz_sort_pair *a = (const zz_sort_pair *)pa;
+    const zz_sort_pair *b = (const zz_sort_pair *)pb;
+    const char *ta = zz_sort_type_name(a->v);
+    const char *tb = zz_sort_type_name(b->v);
+    int c = ta == tb ? 0 : strcmp(ta, tb);
+    if (c == 0 && a->v.tag == b->v.tag) {
+        switch (a->v.tag) {
+        case ZZ_INT:
+            c = (a->v.i > b->v.i) - (a->v.i < b->v.i);
+            break;
+        case ZZ_FLOAT:
+            c = (a->v.f > b->v.f) - (a->v.f < b->v.f);
+            break;
+        case ZZ_BOOL: {
+            int x = a->v.b ? 1 : 0, y = b->v.b ? 1 : 0;
+            c = (x > y) - (x < y);
+            break;
+        }
+        case ZZ_STR:
+            c = zz_sort_cmp_str(&a->v, &b->v);
+            break;
+        default:
+            // The VM orders other same-type values `Equal`; the index
+            // tie-break below keeps their input order (stability).
+            break;
+        }
+    }
+    if (c == 0) c = (a->idx > b->idx) - (a->idx < b->idx);
+    return c;
+}
+
 // vec.sort(arr) → sorted array (new array, original unchanged)
 zz_value zz_vec_sort(zz_value arr, int *err) {
     (void)err;
     if (arr.tag != ZZ_ARRAY || !arr.arr) return arr;
     size_t n = arr.arr->len;
     if (n <= 1) return zz_clone(arr);
-    // Create a new array with cloned elements.
+    // Fresh array with one share of each element: the caller's array is
+    // untouched (value semantics). `zz_array_push` shares (it stores its own
+    // clone), so the elements stay borrowed here.
     zz_value sorted = zz_array_new();
+    if (sorted.tag != ZZ_ARRAY || !sorted.arr) return zz_unit();
     for (size_t i = 0; i < n; i++) {
-        zz_array_push(sorted.arr, zz_clone(arr.arr->items[i]));
+        zz_array_push(sorted.arr, arr.arr->items[i]);
     }
-    // Simple insertion sort (fine for small arrays; larger ones use qsort).
-    for (size_t i = 1; i < n; i++) {
-        zz_value key = sorted.arr->items[i];
-        size_t j = i;
-        while (j > 0 && zz_truthy(zz_binop(ZZOP_LT, zz_clone(key), zz_clone(sorted.arr->items[j-1])))) {
-            sorted.arr->items[j] = sorted.arr->items[j-1];
-            j--;
+    zz_value *items = sorted.arr->items;
+
+    // Scalar lanes: no pair array and no key boxing. Homogeneity is the
+    // common case (typed arrays) and removes every type check from the
+    // comparator.
+    unsigned char tag = items[0].tag;
+    int homo = tag == ZZ_INT || tag == ZZ_FLOAT || tag == ZZ_BOOL || tag == ZZ_STR;
+    for (size_t i = 1; homo && i < n; i++) {
+        if (items[i].tag != tag) homo = 0;
+    }
+    if (homo && tag == ZZ_INT) {
+        int64_t *keys = (int64_t *)malloc(n * sizeof *keys);
+        if (!keys) return sorted;
+        for (size_t i = 0; i < n; i++) keys[i] = items[i].i;
+        qsort(keys, n, sizeof *keys, zz_sort_cmp_i64);
+        for (size_t i = 0; i < n; i++) items[i].i = keys[i];
+        free(keys);
+        return sorted;
+    }
+    if (homo && tag == ZZ_FLOAT) {
+        double *keys = (double *)malloc(n * sizeof *keys);
+        if (!keys) return sorted;
+        for (size_t i = 0; i < n; i++) keys[i] = items[i].f;
+        qsort(keys, n, sizeof *keys, zz_sort_cmp_f64);
+        for (size_t i = 0; i < n; i++) items[i].f = keys[i];
+        free(keys);
+        return sorted;
+    }
+    if (homo && tag == ZZ_BOOL) {
+        // Only two values: counting beats every comparison sort.
+        size_t falses = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (!items[i].b) falses++;
         }
-        sorted.arr->items[j] = key;
+        for (size_t i = 0; i < n; i++) items[i].b = i >= falses;
+        return sorted;
     }
+    if (homo && tag == ZZ_STR) {
+        qsort(items, n, sizeof *items, zz_sort_cmp_str);
+        return sorted;
+    }
+
+    // Mixed tags (or a single non-scalar tag): decorate with the input
+    // position so ties stay stable, sort, undecorate.
+    zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs) return sorted;
+    for (size_t i = 0; i < n; i++) {
+        pairs[i].v = items[i];
+        pairs[i].idx = i;
+    }
+    qsort(pairs, n, sizeof *pairs, zz_sort_cmp_value);
+    for (size_t i = 0; i < n; i++) items[i] = pairs[i].v;
+    free(pairs);
     return sorted;
 }
 

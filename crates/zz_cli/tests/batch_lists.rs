@@ -120,6 +120,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     // (`chunks(PER_BATCH)`), so inserting in the middle reshuffles every
     // later batch and can surface latent cross-case collisions.
     ("syntax", "dicts_nonstr.zz", true),
+    ("stdlib", "vec_sort.zz", true),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors
