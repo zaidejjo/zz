@@ -78,7 +78,7 @@ impl Interp {
             Stmt::Func {
                 name, params, body, ..
             } => {
-                let fv = FuncValue {
+                let fv = std::rc::Rc::new(FuncValue {
                     params: params.clone(),
                     body: Expr::Block(body.clone()),
                     env: self.env.clone(),
@@ -86,11 +86,10 @@ impl Interp {
                     chunk_defaults: Vec::new(),
                     // Named function: only `return` yields a value.
                     tail_value: false,
-                };
-                self.funcs.insert(name.join("."), fv.clone());
+                });
+                self.funcs.insert(name.join("."), std::rc::Rc::clone(&fv));
                 self.funcs_version = self.funcs_version.wrapping_add(1);
-                self.env
-                    .define(&name.join("."), Value::Func(std::rc::Rc::new(fv)));
+                self.env.define(&name.join("."), Value::Func(fv));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Return { value, .. } => match value {
@@ -139,7 +138,7 @@ impl Interp {
                     } = method
                     {
                         let full_name = format!("{}.{}", type_name, mname.join("."));
-                        let fv = FuncValue {
+                        let fv = std::rc::Rc::new(FuncValue {
                             params: params.clone(),
                             body: Expr::Block(body.clone()),
                             env: self.env.clone(),
@@ -147,11 +146,11 @@ impl Interp {
                             chunk_defaults: Vec::new(),
                             // Impl method: named-function semantics.
                             tail_value: false,
-                        };
-                        self.funcs.insert(full_name.clone(), fv.clone());
+                        });
+                        self.funcs
+                            .insert(full_name.clone(), std::rc::Rc::clone(&fv));
                         self.funcs_version = self.funcs_version.wrapping_add(1);
-                        self.env
-                            .define(&full_name, Value::Func(std::rc::Rc::new(fv)));
+                        self.env.define(&full_name, Value::Func(fv));
                     }
                 }
                 Ok(Flow::Value(Value::Unit))
@@ -825,7 +824,7 @@ impl Interp {
             return Ok(v);
         }
         if let Some(fv) = zz_checker::lookup_std(&self.funcs, &name) {
-            return Ok(Value::Func(std::rc::Rc::new(fv.clone())));
+            return Ok(Value::Func(std::rc::Rc::clone(fv)));
         }
         if let Some(entry) = zz_checker::lookup_std(&self.natives, &name) {
             return Ok(Value::Native(Box::new(NativeFunc {
@@ -870,7 +869,7 @@ impl Interp {
             return Ok(v);
         }
         if let Some(fv) = zz_checker::lookup_std(&self.funcs, name) {
-            return Ok(Value::Func(std::rc::Rc::new(fv.clone())));
+            return Ok(Value::Func(std::rc::Rc::clone(fv)));
         }
         if let Some(entry) = zz_checker::lookup_std(&self.natives, name) {
             return Ok(Value::Native(Box::new(NativeFunc {
@@ -983,7 +982,7 @@ impl Interp {
         // Bare (same-module) keys first, then namespaced cross-module keys.
         for (name, fv) in &self.funcs.clone() {
             if name.starts_with(&prefix) {
-                hits.push((name.clone(), Value::Func(std::rc::Rc::new(fv.clone()))));
+                hits.push((name.clone(), Value::Func(std::rc::Rc::clone(fv))));
             }
         }
         if hits.is_empty() {
@@ -998,7 +997,7 @@ impl Interp {
                         .join(".")
                         .starts_with(&prefix)
                 {
-                    hits.push((name.clone(), Value::Func(std::rc::Rc::new(fv.clone()))));
+                    hits.push((name.clone(), Value::Func(std::rc::Rc::clone(fv))));
                 }
             }
         }
@@ -1085,7 +1084,7 @@ impl Interp {
                     return Ok(Flow::Value(v));
                 }
                 if let Some(fv) = zz_checker::lookup_std(&self.funcs, name) {
-                    return Ok(Flow::Value(Value::Func(std::rc::Rc::new(fv.clone()))));
+                    return Ok(Flow::Value(Value::Func(std::rc::Rc::clone(fv))));
                 }
                 if let Some(entry) = zz_checker::lookup_std(&self.natives, name) {
                     return Ok(Flow::Value(Value::Native(Box::new(NativeFunc {

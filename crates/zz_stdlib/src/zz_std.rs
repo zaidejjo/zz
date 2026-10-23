@@ -296,7 +296,7 @@ pub fn stdlib_program_closure(modules: &[String]) -> Vec<usize> {
 /// Idempotent: re-running skips keys that already exist.
 pub fn define_canonical_purezz_aliases(
     env: &mut zz_runtime::EnvLink,
-    funcs: &mut HashMap<String, zz_runtime::FuncValue>,
+    funcs: &mut HashMap<String, std::rc::Rc<zz_runtime::FuncValue>>,
 ) {
     let sigs = crate::funcs::stdlib_funcs_cached();
     let flat = env.flatten();
@@ -313,7 +313,7 @@ pub fn define_canonical_purezz_aliases(
         }
         env.define(&canon, v.clone());
         if let zz_runtime::Value::Func(fv) = v {
-            funcs.entry(canon).or_insert_with(|| (**fv).clone());
+            funcs.entry(canon).or_insert_with(|| std::rc::Rc::clone(fv));
         }
     }
 }
