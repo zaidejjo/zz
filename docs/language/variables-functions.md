@@ -161,13 +161,14 @@ A fixit `"return "` is offered (zero-width insertion at the start of the
 tail expression). Accepting it rewrites:
 
 ```zz
+// ERROR: missing return
 // Before:
 func f() -> int {
     if true { 1 }
 }
 
 // After:
-func f() -> int {
+func g() -> int {
     return if true { 1 }
 }
 ```
