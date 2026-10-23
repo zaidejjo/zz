@@ -672,6 +672,8 @@ pub fn reachable_refs(
                 | Op::VecPushMethod { home, .. }
                 | Op::SetFieldTake { home, .. }
                 | Op::SetFieldIndexTake { home, .. }
+                | Op::StoreIndexTake { home, .. }
+                | Op::CompoundIndexTake { home, .. }
                 | Op::FieldBinopTake { home, .. }
                 | Op::GetFieldIndex { home, .. }
                 | Op::LenField { home, .. } => {

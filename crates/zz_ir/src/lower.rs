@@ -556,6 +556,21 @@ impl<'a> Lowerer<'a> {
                     field: self.intern(field),
                 }])
             }
+            VmOp::StoreIndexTake { home, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::StoreIndexTake {
+                    home_slot,
+                    home_var,
+                }])
+            }
+            VmOp::CompoundIndexTake { home, op, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::CompoundIndexTake {
+                    home_slot,
+                    home_var,
+                    op: Self::lower_binop(op),
+                }])
+            }
             VmOp::FieldBinopTake {
                 home, field, op, ..
             } => {

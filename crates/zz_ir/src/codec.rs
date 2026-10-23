@@ -395,6 +395,20 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             encode_home(v, home_slot, home_var);
             put_u32(v, field.0);
         }
+        Op::StoreIndexTake {
+            home_slot,
+            home_var,
+        } => {
+            encode_home(v, home_slot, home_var);
+        }
+        Op::CompoundIndexTake {
+            home_slot,
+            home_var,
+            op,
+        } => {
+            encode_home(v, home_slot, home_var);
+            encode_binop(v, *op);
+        }
         Op::FieldBinopTake {
             home_slot,
             home_var,
@@ -1227,6 +1241,22 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
                 home_slot,
                 home_var,
                 field: StrId(r.u32()?),
+            })
+        }
+        87 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            Ok(Op::StoreIndexTake {
+                home_slot,
+                home_var,
+            })
+        }
+        88 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            let op = decode_binop(r)?;
+            Ok(Op::CompoundIndexTake {
+                home_slot,
+                home_var,
+                op,
             })
         }
         77 => {

@@ -111,6 +111,7 @@ pub fn supported(op: &Op) -> bool {
             | Op::ArrayPush
             | Op::IndexOp
             | Op::StoreIndexOp
+            | Op::StoreIndexTake { .. }
             | Op::MakeRange
             | Op::MakeFunc { .. }
             | Op::Call { .. }
@@ -206,6 +207,7 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Op::ArrayPush => (2, 1),
             Op::IndexOp => (2, 1),
             Op::StoreIndexOp => (3, 1),
+            Op::StoreIndexTake { .. } => (2, 0),
             Op::MakeRange => (2, 1),
             Op::MakeFunc { .. } => (0, 1),
             Op::Call { argc } => (*argc as usize + 1, 1),
@@ -859,6 +861,7 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>, HashSet<usize
             Op::ArrayPush => (2, 1),
             Op::IndexOp => (2, 1),
             Op::StoreIndexOp => (3, 1),
+            Op::StoreIndexTake { .. } => (2, 0),
             Op::MakeRange => (2, 1),
             Op::MakeFunc { .. } => (0, 1),
             Op::Call { argc } => (*argc as usize + 1, 1),
@@ -4058,6 +4061,48 @@ impl<'a> Emitter<'a> {
                 out.push_str("      zz_release(&_ix); zz_release(&_v);\n");
                 out.push_str("      if (_e4) ");
                 out.push_str(&format!("{};\n", ctrap("index out of bounds")));
+                out.push_str("    }\n");
+            }
+            Op::StoreIndexTake {
+                home_slot,
+                home_var,
+            } => {
+                // Fused `a[i] = v`: the base is the home itself (frame
+                // slot or env cell), so the write reaches the buffer the
+                // binding owns — in place when it is the sole owner, with
+                // the same dup/heal fallback as the generic path. Stack is
+                // [index, value]; the key is borrowed and the value
+                // retained by both write paths, exactly like the
+                // `StoreIndexOp` arm above.
+                let base = match (home_slot, home_var) {
+                    (Some(s), None) => format!("st[{s}]"),
+                    (None, Some(id)) => {
+                        let name = self.str(*id).to_string();
+                        let cid = self
+                            .env_cell(&name)
+                            .cloned()
+                            .or_else(|| self.globals.get(&name).cloned());
+                        match cid {
+                            Some(cid) => cid,
+                            None => {
+                                return Err(ChunkError::op(&format!(
+                                    "storeindextake to a runtime binding `{name}`"
+                                )))
+                            }
+                        }
+                    }
+                    _ => return Err(ChunkError::op("storeindextake without a home")),
+                };
+                out.push_str("    { zz_value _v = st[--sp]; zz_value _ix = st[--sp];\n");
+                out.push_str("      int _e = 0;\n");
+                out.push_str(&format!(
+                    "      if ({base}.tag == ZZ_ARRAY && {base}.arr && {base}.arr->refs == 1 && _ix.tag == ZZ_INT && _ix.i >= 0 && _ix.i < (int64_t){base}.arr->len) {{\n        zz_assign(&{base}.arr->items[(size_t)_ix.i], _v);\n      }} else {{\n        zz_index_set(&{base}, _ix, _v, &_e);\n      }}\n"
+                ));
+                out.push_str("      zz_release(&_ix); zz_release(&_v);\n");
+                out.push_str(&format!(
+                    "      if (_e) {};\n",
+                    ctrap("index out of bounds")
+                ));
                 out.push_str("    }\n");
             }
             Op::MakeRange => {
