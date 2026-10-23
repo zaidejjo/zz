@@ -219,34 +219,46 @@ impl Checker {
         }
     }
 
-    /// `func f() -> int { 1 }`: the tail expression is discarded now, so
-    /// point at it and offer the insertion `zz fix` applies. Tails that
-    /// cannot take a prefix (`return`, declarations, empty bodies) get the
-    /// message only.
+    /// Report a missing-return diagnostic with improved diagnostics:
+    /// - unit-tail functions (println, match, etc.) get the message only, no fixit.
+    /// - annotated non-unit functions that can fall through get error + fixit.
+    /// - fixit is withheld for `if` without `else`, match arms, and `let`
+    ///   bindings whose name is used later (intentional shadowings).
     fn report_missing_return(&mut self, body: &Block, ret_ty: &Type) {
         let last = body.stmts.last();
         let span = last.map(|s| s.span()).unwrap_or(body.span);
-        // A tail that already yields `unit` (e.g. `println(...)`) cannot be
-        // fixed by prefixing `return`: the value would still be unit.
-        let unit_tail = match (last, &self.last_block_tail) {
-            (Some(stmt), Some((tail_span, ty))) if *tail_span == stmt.span() => {
-                matches!(self.unifier.resolve(ty), Type::Unit | Type::Void)
-            }
-            _ => false,
+        // --- improved unit-tail detection using self.last_block_tail ---
+        let unit_tail = match &self.last_block_tail {
+            Some((_, ty)) => matches!(self.unifier.resolve(ty), Type::Unit | Type::Void),
+            None => false,
         };
-        let value_tail = match last {
-            // `return if c { 1 }` would still fall through: an `if` without
-            // an `else` yields unit, so an insertion fixit would trade one
-            // error for another.
-            Some(Stmt::Expr(Expr::If { els: None, .. })) => None,
-            Some(Stmt::Expr(e)) if !unit_tail => {
-                let s = e.span();
-                Some(Span::new(s.start, s.start))
-            }
-            _ => None,
+        // --- value-tail fixit position ---
+        // withhold fixit for: if without else, match arms, let bindings
+        // whose name is used later (intentional shadowings).
+        let withhold_fixit = unit_tail
+            || match last {
+                Some(Stmt::Expr(Expr::If { els: None, .. })) => true,
+                Some(Stmt::Expr(Expr::Match { .. })) => true,
+                Some(Stmt::Decl { .. }) => {
+                    let outer_names = body
+                        .stmts
+                        .iter()
+                        .take(body.stmts.len() - 1)
+                        .flat_map(Self::extract_names)
+                        .collect::<std::collections::HashSet<_>>();
+                    let let_name = Self::extract_name(last.unwrap());
+                    outer_names.contains(&let_name.unwrap_or_default())
+                }
+                _ => false,
+            };
+        let value_tail = if withhold_fixit {
+            None
+        } else {
+            let s = last.map(|stmt| stmt.span()).unwrap_or(body.span).start;
+            Some(Span::new(s, s))
         };
         let mut diag = error_at(
-            format!("function returns `{ret_ty}` but its body can fall through; add `return`"),
+            format!("function returns `{ret_ty}` but its body can fall through; add `return `"),
             span,
         )
         .with_note("named functions return a value only through `return`; the last expression is discarded");
@@ -256,7 +268,42 @@ impl Checker {
         self.errors.push(diag);
     }
 
-    /// Recursively check whether a block contains a `return` statement.
+    /// Extract an identifier name from a statement or expression for shadow-checking.
+    fn extract_name(stmt: &Stmt) -> Option<String> {
+        match stmt {
+            Stmt::Decl { name, .. } => Some(name.name.clone()),
+            Stmt::Expr(Expr::If { then, .. }) => Self::extract_name_from_block(then),
+            Stmt::Expr(Expr::Match { .. }) => None,
+            Stmt::Return {
+                value: Some(Expr::Ident { name, .. }),
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn extract_name_from_block(block: &Block) -> Option<String> {
+        block.stmts.last().and_then(Self::extract_name)
+    }
+
+    /// Extract all identifier names from a statement (for shadow checking).
+    fn extract_names(stmt: &Stmt) -> Vec<String> {
+        match stmt {
+            Stmt::Decl { name, .. } => vec![name.name.clone()],
+            Stmt::Expr(Expr::If { then, .. }) => Self::extract_names_from_block(then),
+            Stmt::For { body, .. } => Self::extract_names_from_block(body),
+            Stmt::Return {
+                value: Some(Expr::Ident { name, .. }),
+                ..
+            } => vec![name.clone()],
+            _ => vec![],
+        }
+    }
+
+    fn extract_names_from_block(block: &Block) -> Vec<String> {
+        block.stmts.iter().flat_map(Self::extract_names).collect()
+    }
+
     pub(crate) fn block_has_return(block: &Block) -> bool {
         block.stmts.iter().any(Self::stmt_has_return)
     }

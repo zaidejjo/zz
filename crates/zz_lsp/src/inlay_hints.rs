@@ -83,14 +83,49 @@ fn collect_stmt_hints(
     out: &mut Vec<InlayHint>,
 ) {
     match stmt {
-        Stmt::Func { params, body, .. } => {
+        Stmt::Func {
+            name,
+            params,
+            ret: None, // unannotated — show inferred return type
+            body,
+            span,
+            ..
+        } => {
+            // Return-type hint for unannotated functions: show inferred `-> type`.
+            if let Some(cr) = cr {
+                let full_name = name.join(".");
+                if let Some(sig) = cr.funcs.get(&full_name) {
+                    let ty = &sig.ret;
+                    if !matches!(
+                        ty,
+                        zz_checker::type_::Type::Unit | zz_checker::type_::Type::Error
+                    ) {
+                        out.push(InlayHint {
+                            position: offset_to_position_from_span(source, span.end),
+                            label: InlayHintLabel::String(format!(" -> {ty}")),
+                            kind: Some(InlayHintKind::TYPE),
+                            text_edits: None,
+                            tooltip: None,
+                            padding_left: Some(true),
+                            padding_right: None,
+                            data: None,
+                        });
+                    }
+                }
+            }
             for param in params {
                 if param.ty.is_none() {
-                    // No type annotation — try to infer from check result.
-                    // (Params without annotations are rare in ZZ but possible.)
                     let _ = (source, cr);
                 }
             }
+            collect_block_hints(program, body, source, cr, out);
+        }
+        Stmt::Func {
+            params: _,
+            ret: Some(_), // annotated — user already wrote the type
+            body,
+            ..
+        } => {
             collect_block_hints(program, body, source, cr, out);
         }
         Stmt::For {
