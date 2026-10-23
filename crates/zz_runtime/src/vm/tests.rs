@@ -2198,7 +2198,7 @@ fn for_loop_var_reassignment_drops_the_replaced_value() {
     // checked branch (a blanket elision would trip `overwrite_scalar`'s
     // debug assertion and would leak the string in release).
     let v = run_vm_native(
-        "func f() {\n    total := 0\n    for i in 0..3 {\n        i = \"heap value\"\n        total = total + 1\n    }\n    total\n}\nf()",
+        "func f() {\n    total := 0\n    for i in 0..3 {\n        i = \"heap value\"\n        total = total + 1\n    }\n    return total\n}\nf()",
     )
     .expect("run");
     assert_eq!(v, Value::Int(3));
@@ -2210,7 +2210,7 @@ fn int_slot_writes_keep_value_semantics() {
     // scalar; make sure a slot that goes from heap back to int (and back)
     // keeps the value/ownership semantics of a plain assignment.
     let v = run_vm_native(
-        "func f() {\n    x := \"s\"\n    x = 1\n    n := 0\n    for i in 0..3 {\n        n = n + 1\n        x = \"t{i}\"\n        x = i\n    }\n    n * 100 + x\n}\nf()",
+        "func f() {\n    x := \"s\"\n    x = 1\n    n := 0\n    for i in 0..3 {\n        n = n + 1\n        x = \"t{i}\"\n        x = i\n    }\n    return n * 100 + x\n}\nf()",
     )
     .expect("run");
     assert_eq!(v, Value::Int(302));
@@ -2314,7 +2314,7 @@ fn len_fast_path_matches_the_native_semantics() {
 fn user_function_shadowing_keeps_the_generic_call() {
     // `func len` must win over the native: the direct-dispatch guard sees
     // the user signature and keeps `LoadVar` + `Call`.
-    let src = "func len(x: int) -> int {\n    x + 100\n}\nlen(1)";
+    let src = "func len(x: int) -> int {\n    return x + 100\n}\nlen(1)";
     let chunk = compile_with_natives(src, &["len"]);
     assert!(
         !any_op(
