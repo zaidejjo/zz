@@ -4500,7 +4500,10 @@ impl Compiler {
                 }
                 self.emit(Op::MakeStruct {
                     name: name.clone(),
-                    field_names: fields.iter().map(|(n, _)| n.clone()).collect(),
+                    field_names: fields
+                        .iter()
+                        .map(|(n, _)| std::sync::Arc::from(n.as_str()))
+                        .collect(),
                     span: *span,
                 });
             }

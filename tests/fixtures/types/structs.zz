@@ -29,4 +29,13 @@ b := Point{x: 1, y: 2}
 println(a.x == b.x)
 println(a.y == b.y)
 
+// out-of-order literal: fields are matched by name, not by position
+o := Point{y: 2, x: 1}
+println(o.x)
+println(o.y)
+println(o == a)
+r2 := Rect{h: 20, w: 10, origin: Point{y: 2, x: 1}}
+println(r2.origin.y)
+println(r2.w)
+
 println("struct_ok")

@@ -478,8 +478,8 @@ impl<'a> Raiser<'a> {
                 name: self.str(*name)?,
                 field_names: fields
                     .iter()
-                    .map(|f| self.str(*f))
-                    .collect::<Result<_, _>>()?,
+                    .map(|f| Ok(std::sync::Arc::from(self.str(*f)?.as_str())))
+                    .collect::<Result<Vec<_>, _>>()?,
                 span: VmSpan::default(),
             }),
             Op::GetField(id) => Ok(VmOp::GetField(self.str(*id)?, VmSpan::default())),

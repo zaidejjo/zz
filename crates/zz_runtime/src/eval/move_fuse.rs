@@ -234,13 +234,13 @@ impl Interp {
         let direct = matches!(
             &mut taken,
             Value::Object(o)
-                if o.fields.iter().any(|(n, v)| n == field
+                if o.fields.iter().any(|(n, v)| n.as_ref() == field
                     && matches!(v, Value::Array(_)))
         );
         if direct {
             if let Value::Object(o) = &mut taken {
                 let o = std::sync::Arc::make_mut(o);
-                if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == field) {
+                if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n.as_ref() == field) {
                     if let Value::Array(vs) = std::mem::replace(slot, Value::Unit) {
                         let mut vs =
                             std::sync::Arc::try_unwrap(vs).unwrap_or_else(|a| (*a).clone());
@@ -530,7 +530,11 @@ impl Interp {
             }
         };
         let field_val = match &taken {
-            Value::Object(o) => o.fields.iter().find(|(n, _)| n == field).map(|(_, v)| v),
+            Value::Object(o) => o
+                .fields
+                .iter()
+                .find(|(n, _)| n.as_ref() == field)
+                .map(|(_, v)| v),
             _ => None,
         };
         let elem = match (field_val, &idx_val) {
