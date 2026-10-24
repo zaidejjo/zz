@@ -224,9 +224,17 @@ changes fall back to the full pipeline and re-store. Levers:
 ```bash
 ZZ_VERBOSE=1 zz run main.zz     # print hit/miss and stage lines
 ZZ_RUN_CACHE=0 zz run main.zz   # force the tree walker (benchmark this)
+ZZ_VM_STATS=1 zz run main.zz    # op counters + fused share, on stderr
 zz cache clean                  # wipe ~/.zz/cache, run entries included
 zz cache gc                     # collect unused CAS entries only
 ```
+
+`ZZ_VM_STATS=1` counts every dispatched op in the chunk VM and prints a
+per-class summary (`fused`, `int-op`, `stack`, ...) to **stderr** at exit;
+stdout is untouched, so it composes with the benchmark harnesses. The
+static counterpart is `zz dis --vm [--stats] <file.zz>`, which prints the
+loader-path chunk (ops with `line:col` sites) — the only reliable view of
+what the VM is actually handed.
 
 ### `zz run --watch [<file.zz>]`
 
