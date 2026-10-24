@@ -204,6 +204,20 @@ pub enum Op {
         a: u16,
         imm: i64,
     },
+    /// Push `Bool(slot[a] op slot[b])` for any comparison operator; desugars
+    /// to `LoadSlot a; LoadSlot b; BinOp op`.
+    SlotCmpIntSlot {
+        a: u16,
+        b: u16,
+        op: BinOp,
+    },
+    /// Push `Bool(slot[a] op imm)` for any comparison operator; desugars to
+    /// `LoadSlot a; PushConst imm; BinOp op`.
+    SlotCmpIntImm {
+        a: u16,
+        imm: i64,
+        op: BinOp,
+    },
     /// `slot[dst] = Int(slot[lhs] op slot[rhs])`; desugars to
     /// `LoadSlot lhs; LoadSlot rhs; BinOp op; StoreSlot dst`.
     SlotBinaryInt {
@@ -465,6 +479,8 @@ impl Op {
             Op::SlotLessIntImm { .. } => 84,
             Op::SlotBinaryInt { .. } => 85,
             Op::SlotBinaryIntImm { .. } => 86,
+            Op::SlotCmpIntSlot { .. } => 89,
+            Op::SlotCmpIntImm { .. } => 90,
             Op::IntAdd => 14,
             Op::IntSub => 15,
             Op::IntMul => 16,
@@ -560,6 +576,8 @@ impl Op {
             Op::SlotLessIntImm { .. } => "slotlessintimm",
             Op::SlotBinaryInt { .. } => "slotbinint",
             Op::SlotBinaryIntImm { .. } => "slotbinintimm",
+            Op::SlotCmpIntSlot { .. } => "slotcmpintslot",
+            Op::SlotCmpIntImm { .. } => "slotcmpintimm",
             Op::IntAdd => "iadd",
             Op::IntSub => "isub",
             Op::IntMul => "imul",
@@ -644,11 +662,15 @@ impl Op {
     pub fn for_each_slot(&self, mut f: impl FnMut(u16)) {
         match self {
             Op::LoadSlot(s) | Op::StoreSlot(s) | Op::SlotInc { slot: s } => f(*s),
-            Op::SlotAddInt { dst, src } | Op::SlotLessIntSlot { a: dst, b: src } => {
+            Op::SlotAddInt { dst, src }
+            | Op::SlotLessIntSlot { a: dst, b: src }
+            | Op::SlotCmpIntSlot { a: dst, b: src, .. } => {
                 f(*dst);
                 f(*src);
             }
-            Op::SlotAddIntImm { dst, .. } | Op::SlotLessIntImm { a: dst, .. } => f(*dst),
+            Op::SlotAddIntImm { dst, .. }
+            | Op::SlotLessIntImm { a: dst, .. }
+            | Op::SlotCmpIntImm { a: dst, .. } => f(*dst),
             Op::SlotBinaryInt { dst, lhs, rhs, .. } => {
                 f(*dst);
                 f(*lhs);

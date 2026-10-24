@@ -288,6 +288,8 @@ fn fused_slot_ops_survive_the_round_trip() {
                 | SlotAddIntImm { .. }
                 | SlotLessIntSlot { .. }
                 | SlotLessIntImm { .. }
+                | SlotCmpIntSlot { .. }
+                | SlotCmpIntImm { .. }
                 | SlotBinaryInt { .. }
                 | SlotBinaryIntImm { .. }
         )

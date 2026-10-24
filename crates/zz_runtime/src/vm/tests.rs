@@ -2729,3 +2729,122 @@ fn native_call_arity_errors_match_the_generic_path() {
     let generic = run_vm_native("f := len\nf()").expect_err("arity").message;
     assert_eq!(fused, generic, "arity error text drifted");
 }
+
+/// Condition fusion covers **all six** comparisons, not just `<`: an `if`
+/// emits one fused compare that pushes the `Bool` directly instead of
+/// `LoadSlot`/`PushConst` + `IntLt`…`IntNe` through the stack.
+#[test]
+fn vm_compare_conditions_fuse_all_operators() {
+    let code = compile_ops(
+        "n := 10\ni := 0\n\
+         if i < n { i = 1 }\n\
+         if i > n { i = 2 }\n\
+         if i <= n { i = 3 }\n\
+         if i >= n { i = 4 }\n\
+         if i == n { i = 5 }\n\
+         if i != n { i = 6 }\ni",
+    );
+    let fused = code
+        .iter()
+        .filter(|op| matches!(op, Op::SlotLessIntSlot { .. } | Op::SlotCmpIntSlot { .. }))
+        .count();
+    assert_eq!(fused, 6, "expected six fused compares: {code:#?}");
+    assert!(
+        !code.iter().any(|op| matches!(
+            op,
+            Op::IntLt(_) | Op::IntGt(_) | Op::IntLe(_) | Op::IntGe(_) | Op::IntEq(_) | Op::IntNe(_)
+        )),
+        "generic int comparison left in the stream: {code:#?}"
+    );
+}
+
+/// Literal operands fuse too, including the literal-on-the-left shapes that
+/// are normalized by mirroring the operator (`0 < i` == `i > 0`).
+#[test]
+fn vm_compare_conditions_fuse_literals_on_either_side() {
+    let code = compile_ops(
+        "i := 5\n\
+         if i > 0 { i = 1 }\n\
+         if 0 < i { i = 2 }\n\
+         if i >= 1 { i = 3 }\n\
+         if 1 <= i { i = 4 }\n\
+         if i == 5 { i = 5 }\n\
+         if 5 != i { i = 6 }\ni",
+    );
+    let cmps: Vec<(&BinOp, i64)> = code
+        .iter()
+        .filter_map(|op| match op {
+            Op::SlotCmpIntImm { imm, op, .. } => Some((op, *imm)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cmps,
+        vec![
+            (&BinOp::Gt, 0),
+            (&BinOp::Gt, 0),
+            (&BinOp::Ge, 1),
+            (&BinOp::Ge, 1),
+            (&BinOp::Eq, 5),
+            (&BinOp::Ne, 5),
+        ],
+        "{code:#?}"
+    );
+    // Redundant parens do not defeat the peephole.
+    let parens = compile_ops("i := 5\nif (i) > (0) { i = 1 }\nif ((0)) < i { i = 2 }\ni");
+    let n = parens
+        .iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Op::SlotCmpIntImm {
+                    imm: 0,
+                    op: BinOp::Gt,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(n, 2, "{parens:#?}");
+    // `<` keeps the older op, on both sides of the literal.
+    let less = compile_ops("i := 5\nif i < 7 { i = 1 }\nif 7 > i { i = 2 }\ni");
+    let n = less
+        .iter()
+        .filter(|op| matches!(op, Op::SlotLessIntImm { imm: 7, .. }))
+        .count();
+    assert_eq!(n, 2, "{less:#?}");
+}
+
+/// Every fused comparison must agree with the tree-walker, including the
+/// non-`Int` fallbacks (a fused compare against a float keeps generic
+/// comparison semantics) and the boundary values.
+#[test]
+fn vm_fused_compares_match_tree_walker() {
+    for src in [
+        "n := 5\ni := 0\nr := 0\nwhile i < n { i = i + 1 }\nr + i",
+        "i := 0\nr := 0\nwhile i <= 3 { i = i + 1\nr = r + 10 }\nr + i",
+        "i := 0\nr := 7\nwhile i >= 0 { i = i - 1\nr = r + 1 }\nr",
+        "i := 0\nr := 0\nwhile i != 3 { i = i + 1 }\nr + i",
+        "i := 3\nr := 0\nwhile i > 0 { i = i - 1\nr = r + i }\nr",
+        "i := 2\nr := 0\nwhile i == 2 { i = i + 1\nr = 1 }\nr",
+        // Literal on the left of every mirrored operator.
+        "i := 4\nr := 0\nif 2 < i { r = 1 }\nif 2 <= i { r = r + 1 }\nif 9 > i { r = r + 1 }\nif 4 == i { r = r + 1 }\nif 5 != i { r = r + 1 }\nr",
+        // Float on the right of an int-typed left: generic fallback.
+        "i := 2\nf := 1.5\nr := 0\nif i > f { r = 1 }\nif i >= f { r = r + 1 }\nr",
+        // Strings never fuse (left operand is not Int).
+        "a := \"x\"\nb := \"y\"\nr := 0\nif a < b { r = 1 }\nif a != b { r = r + 1 }\nr",
+        // Boundary: comparisons at i64 limits.
+        "a := 9223372036854775807\nb := 0 - 9223372036854775807\nr := 0\nif a > b { r = 1 }\nif b < a { r = r + 1 }\nif a >= a { r = r + 1 }\nif a == a { r = r + 1 }\nr",
+    ] {
+        assert_same(src);
+    }
+    assert_eq!(
+        run_src("i := 3\nr := 0\nwhile i > 0 { i = i - 1\nr = r + i }\nr").unwrap(),
+        Value::Int(3)
+    );
+    // Mixed int/float comparison keeps generic semantics (`2 > 1.5`).
+    assert_eq!(
+        run_src("i := 2\nf := 1.5\nr := 0\nif i > f { r = 1 }\nr").unwrap(),
+        Value::Int(1)
+    );
+}

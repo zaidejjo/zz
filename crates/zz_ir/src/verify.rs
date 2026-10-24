@@ -40,7 +40,10 @@ fn effect(op: &Op) -> i64 {
         | Op::SlotAddIntImm { .. }
         | Op::SlotBinaryInt { .. }
         | Op::SlotBinaryIntImm { .. } => 0,
-        Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
+        Op::SlotLessIntSlot { .. }
+        | Op::SlotLessIntImm { .. }
+        | Op::SlotCmpIntSlot { .. }
+        | Op::SlotCmpIntImm { .. } => 1,
         Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => -1,
         Op::IntNeg => 0,
         Op::BinOp(_) => -1,
@@ -1242,6 +1245,15 @@ fn infer_func(
                 st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
             }
             Op::SlotLessIntImm { a, .. } => {
+                declared(*a)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotCmpIntSlot { a, b, .. } => {
+                declared(*a)?;
+                declared(*b)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotCmpIntImm { a, .. } => {
                 declared(*a)?;
                 st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
             }

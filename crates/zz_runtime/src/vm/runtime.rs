@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use zz_frontend::ast::{Block, Expr};
+use zz_frontend::ast::{BinOp, Block, Expr};
 use zz_frontend::span::Span;
 
 use super::chunk::Chunk;
@@ -51,6 +51,24 @@ unsafe fn overwrite_scalar(slot: &mut Value, v: Value) {
         "overwrite_scalar replaced a heap-owning value"
     );
     unsafe { std::ptr::write(slot, v) };
+}
+
+/// Inlined `i64` comparison for the fused `SlotCmpInt*` ops.
+///
+/// `None` for operators the compiler never emits in a comparison slot (the
+/// handlers fall back to `eval_int_binary`, which also keeps the generic
+/// result type — `Int` for arithmetic).
+#[inline]
+fn int_cmp(op: BinOp, a: i64, b: i64) -> Option<bool> {
+    Some(match op {
+        BinOp::Eq => a == b,
+        BinOp::Ne => a != b,
+        BinOp::Lt => a < b,
+        BinOp::Gt => a > b,
+        BinOp::Le => a <= b,
+        BinOp::Ge => a >= b,
+        _ => return None,
+    })
 }
 
 /// Write `v` into a user-assignable slot, skipping the drop glue when the
@@ -1318,6 +1336,47 @@ impl Vm {
                                 Value::Int(*imm),
                                 span,
                             )?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::SlotCmpIntSlot { a, b, op } => {
+                    let base = cached_base;
+                    let idx_a = base + *a as usize;
+                    let idx_b = base + *b as usize;
+                    match (&self.stack[idx_a], &self.stack[idx_b]) {
+                        (Value::Int(x), Value::Int(y)) => match int_cmp(*op, *x, *y) {
+                            Some(c) => self.stack.push(Value::Bool(c)),
+                            // Not a comparison: the compiler never emits one
+                            // here, but IR payloads can; keep the generic
+                            // result (an `Int` for arithmetic) instead of
+                            // erroring on a valid op.
+                            None => {
+                                let v = eval_int_binary(*op, *x, *y, Span::default())?;
+                                self.stack.push(v);
+                            }
+                        },
+                        _ => {
+                            let (l, r) = (self.stack[idx_a].clone(), self.stack[idx_b].clone());
+                            let v = eval_binary(*op, l, r, Span::default())?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::SlotCmpIntImm { a, imm, op } => {
+                    let base = cached_base;
+                    let idx = base + *a as usize;
+                    match &self.stack[idx] {
+                        Value::Int(x) => match int_cmp(*op, *x, *imm) {
+                            Some(c) => self.stack.push(Value::Bool(c)),
+                            None => {
+                                let v = eval_int_binary(*op, *x, *imm, Span::default())?;
+                                self.stack.push(v);
+                            }
+                        },
+                        _ => {
+                            let l = self.stack[idx].clone();
+                            let v = eval_binary(*op, l, Value::Int(*imm), Span::default())?;
                             self.stack.push(v);
                         }
                     }

@@ -15,7 +15,7 @@ use crate::value::Value;
 
 /// Extract an integer literal from an expression, if it is one.
 fn int_literal(e: &Expr) -> Option<i64> {
-    match e {
+    match unparen(e) {
         Expr::Int { value, .. } => Some(*value),
         _ => None,
     }
@@ -28,6 +28,21 @@ fn unparen(e: &Expr) -> &Expr {
         Expr::Paren { expr, .. } => unparen(expr),
         other => other,
     }
+}
+
+/// Mirror a comparison so its operands can swap sides: `N < x` is `x > N`.
+///
+/// `Eq`/`Ne` are symmetric; `None` for anything that is not a comparison.
+fn flip_compare(op: BinOp) -> Option<BinOp> {
+    Some(match op {
+        BinOp::Lt => BinOp::Gt,
+        BinOp::Gt => BinOp::Lt,
+        BinOp::Le => BinOp::Ge,
+        BinOp::Ge => BinOp::Le,
+        BinOp::Eq => BinOp::Eq,
+        BinOp::Ne => BinOp::Ne,
+        _ => return None,
+    })
 }
 
 /// A compile-time-resolved local variable.
@@ -556,7 +571,10 @@ impl Compiler {
             Op::SlotAddInt { .. } => 0,
             Op::SlotInc { .. } => 0,
             Op::SlotAddIntImm { .. } => 0,
-            Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
+            Op::SlotLessIntSlot { .. }
+            | Op::SlotLessIntImm { .. }
+            | Op::SlotCmpIntSlot { .. }
+            | Op::SlotCmpIntImm { .. } => 1,
             Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. }
             | Op::RegisterStruct { .. }
@@ -2016,9 +2034,14 @@ impl Compiler {
         None
     }
 
-    /// Peephole for `while`-style conditions: `a < b` / `a < N` where both
-    /// sides resolve to local slots (or one is an int literal) and the
-    /// expression is typed Int. Also handles `a > b` by swapping operands.
+    /// Peephole for `if`/`while` conditions: a comparison whose operands
+    /// resolve to local slots (one side may be an int literal) and whose
+    /// left operand is typed Int.
+    ///
+    /// `<` keeps the slightly cheaper `SlotLessInt*` pair; the other five
+    /// operators use the generalized `SlotCmpInt*` pair. Literal-on-the-left
+    /// shapes are normalized by mirroring the operator (`N < x` == `x > N`),
+    /// so `0 < x` fuses as well as `x > 0`.
     fn try_slot_compare(&self, value: &Expr) -> Option<Op> {
         let Expr::Binary {
             op: binop,
@@ -2029,10 +2052,17 @@ impl Compiler {
         else {
             return None;
         };
+        // Fusion looks through redundant parens; spans stay on the AST.
+        let left = unparen(left);
+        let right = unparen(right);
         // Type guard: at least the left operand must be typed Int.
         if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int)) {
             return None;
         }
+        // Comparison guard: `if a + b` / `if a and b` keep the generic path
+        // (the fused ops would push the right value, but `and`/`or` owe
+        // short-circuiting, which a two-operand compare does not express).
+        flip_compare(*binop)?;
         let slot_of = |e: &Expr| match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => Some(slot as u16),
@@ -2044,29 +2074,32 @@ impl Compiler {
             },
             _ => None,
         };
-        let imm_of = |e: &Expr| int_literal(e);
-        match *binop {
-            BinOp::Lt => {
-                if let (Some(a), Some(b)) = (slot_of(left.as_ref()), slot_of(right.as_ref())) {
-                    Some(Op::SlotLessIntSlot { a, b })
-                } else if let (Some(a), Some(imm)) =
-                    (slot_of(left.as_ref()), imm_of(right.as_ref()))
-                {
-                    Some(Op::SlotLessIntImm { a, imm })
-                } else {
-                    None
-                }
-            }
-            // `a > b` is equivalent to `b < a` — swap operands.
-            BinOp::Gt => {
-                if let (Some(b), Some(a)) = (slot_of(left.as_ref()), slot_of(right.as_ref())) {
-                    Some(Op::SlotLessIntSlot { a, b })
-                } else {
-                    None
-                }
-            }
-            _ => None,
+        let imm_of = int_literal;
+
+        // `a op b`, both in slots.
+        if let (Some(a), Some(b)) = (slot_of(left), slot_of(right)) {
+            return Some(match *binop {
+                BinOp::Lt => Op::SlotLessIntSlot { a, b },
+                // `a > b` is equivalent to `b < a`.
+                BinOp::Gt => Op::SlotLessIntSlot { a: b, b: a },
+                op => Op::SlotCmpIntSlot { a, b, op },
+            });
         }
+        // `a op N`, literal on the right.
+        if let (Some(a), Some(imm)) = (slot_of(left), imm_of(right)) {
+            return Some(match *binop {
+                BinOp::Lt => Op::SlotLessIntImm { a, imm },
+                op => Op::SlotCmpIntImm { a, imm, op },
+            });
+        }
+        // `N op a`, literal on the left: mirror into `a flipped(op) N`.
+        if let (Some(imm), Some(a)) = (imm_of(left), slot_of(right)) {
+            return match flip_compare(*binop)? {
+                BinOp::Lt => Some(Op::SlotLessIntImm { a, imm }),
+                op => Some(Op::SlotCmpIntImm { a, imm, op }),
+            };
+        }
+        None
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
