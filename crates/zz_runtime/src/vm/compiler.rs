@@ -21,6 +21,15 @@ fn int_literal(e: &Expr) -> Option<i64> {
     }
 }
 
+/// Strip redundant `(...)` wrappers. The parser keeps them so spans stay
+/// attached; fusion analyses look through them.
+fn unparen(e: &Expr) -> &Expr {
+    match e {
+        Expr::Paren { expr, .. } => unparen(expr),
+        other => other,
+    }
+}
+
 /// A compile-time-resolved local variable.
 struct Local {
     name: String,
@@ -1842,6 +1851,89 @@ impl Compiler {
         None
     }
 
+    /// Fused chain for a nested **left spine**: `x = ((x op a) op b) op c`.
+    ///
+    /// [`Compiler::try_slot_binop`] fuses one level only: every operand must
+    /// resolve directly to a slot or literal, so `s = (s + i) % 7` falls back
+    /// to six generic ops (`LoadSlot LoadSlot IntAdd PushConst IntRem
+    /// StoreSlot`). A scratch slot would cover the general case; this covers
+    /// the common one without it: when the target is read exactly once (the
+    /// innermost step) the half-built value can live **in the target slot
+    /// itself**, because every fused op reads both operands before writing
+    /// `dst`. If a later step could read the target — `x = (x + i) + x` —
+    /// `count_refs` is 2 and the chain is rejected, since that read must see
+    /// the *old* value.
+    ///
+    /// Returns the ops to emit in order, or `None` to fall back to the
+    /// generic expression path (nothing is emitted speculatively).
+    fn try_slot_binop_chain(&self, target: &str, value: &Expr) -> Option<Vec<Op>> {
+        // Flatten the left spine: `(((x op a) op b) op c)` -> [c, b, a] steps.
+        let mut spine: Vec<(BinOp, &Expr, Span)> = Vec::new();
+        let mut cur = unparen(value);
+        while let Expr::Binary {
+            op,
+            left,
+            right,
+            span,
+            ..
+        } = cur
+        {
+            spine.push((*op, unparen(right), *span));
+            cur = unparen(left);
+        }
+        if spine.len() < 2 {
+            return None;
+        }
+        // The innermost left operand must be the target itself.
+        let Expr::Ident { name, .. } = cur else {
+            return None;
+        };
+        if name != target {
+            return None;
+        }
+        // The target must be read exactly once across the whole RHS: every
+        // later read would observe the half-built value.
+        if count_refs(value, target) != 1 {
+            return None;
+        }
+        let dst = match self.resolve(target) {
+            Resolved::Slot(slot) => slot as u16,
+            Resolved::Env => return None,
+        };
+        // Innermost first: op 1 consumes the old target, each later op
+        // consumes the value the previous one left in `dst`.
+        spine.reverse();
+        let mut ops = Vec::with_capacity(spine.len());
+        for (op, right, span) in spine {
+            // Same demand as the flat peephole: the step must be statically
+            // Int, or the int fast path would be a guess.
+            if !matches!(self.type_of(span), Some(zz_checker::Type::Int)) {
+                return None;
+            }
+            if let Some(rhs) = self.resolve_expr_slot(right) {
+                ops.push(Op::SlotBinaryInt {
+                    dst,
+                    lhs: dst,
+                    rhs,
+                    op,
+                });
+                continue;
+            }
+            let imm = int_literal(right)?;
+            if op == BinOp::Add && imm == 1 {
+                ops.push(Op::SlotInc { slot: dst });
+            } else {
+                ops.push(Op::SlotBinaryIntImm {
+                    dst,
+                    lhs: dst,
+                    imm,
+                    op,
+                });
+            }
+        }
+        Some(ops)
+    }
+
     fn resolve_expr_slot(&self, e: &Expr) -> Option<u16> {
         match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
@@ -2518,7 +2610,14 @@ impl Compiler {
                 Expr::Ident { name, span } => {
                     // Fast path: `x = x + y` / `x = x + 1` / `x = x + N` with
                     // operands resolving to local slots -> single fused op.
-                    if let Some(op) = self.try_slot_binop(name, value) {
+                    // Nested left spines (`x = (x + y) % 7`) fuse into a short
+                    // chain that reuses the target slot as scratch.
+                    if let Some(ops) = self.try_slot_binop_chain(name, value) {
+                        for op in ops {
+                            self.emit(op);
+                        }
+                        self.stmt_unit(value_discarded)
+                    } else if let Some(op) = self.try_slot_binop(name, value) {
                         self.emit(op);
                         self.stmt_unit(value_discarded)
                     } else if self.try_emit_move_push_ident(name, *span, value) {
