@@ -278,6 +278,11 @@ e2e_success_test!(
     "neg_after_loop.zz"
 );
 e2e_success_test!(
+    e2e_regression_block_local_no_clobber,
+    "regression",
+    "block_local_no_clobber.zz"
+);
+e2e_success_test!(
     e2e_regression_branch_call_returns,
     "regression",
     "branch_call_returns.zz"

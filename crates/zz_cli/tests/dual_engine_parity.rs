@@ -919,6 +919,12 @@ parity_strict!(
     "regression",
     "neg_after_loop.zz"
 );
+// #581: a block-local `:=` must not clobber an enclosing binding.
+parity_strict!(
+    parity_regression_block_local_no_clobber,
+    "regression",
+    "block_local_no_clobber.zz"
+);
 // M0 edge corpus: strict-parity probes (both engines agree).
 parity_strict!(
     parity_regression_edge_shift_mask,

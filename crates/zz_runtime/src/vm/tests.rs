@@ -2409,6 +2409,60 @@ fn named_body_ending_in_if_statement_settles_locals() {
     );
 }
 
+/// A `:=` inside a block binds a fresh slot above every enclosing local.
+/// Leaving the block must drop exactly that slot and leave the outer
+/// bindings untouched (#581). The old dead-block cleanup reused `PopN`'s
+/// "keep the top value" result slot for a body that has no result, so the
+/// inner value survived and the binding below it was discarded: a nested
+/// `parts := ...` clobbered an unrelated `neg` from the enclosing scope.
+#[test]
+fn block_local_declarations_do_not_clobber_enclosing_slots() {
+    // Minimal shape: the local is not the block's trailing statement (a
+    // trailing declaration takes the `trailing_slot_decl` path instead).
+    let minimal = "neg := \"\"\nif true {\n    neg = \"!\"\n    parts := \"keep\"\n    neg = neg\n}\n\"{neg}\"";
+    assert_eq!(
+        run_src(minimal).unwrap(),
+        Value::Str("!".to_string().into())
+    );
+
+    for src in [
+        minimal,
+        // Several outer bindings below the inner local: the cleanup must
+        // drop one value, not the whole scope prefix.
+        "a := \"A\"\nb := \"B\"\nc := \"C\"\nif true {\n    local := \"inner\"\n    a = \"a\"\n    c = c + local\n}\n\"{a}|{b}|{c}\"",
+        // Nested blocks, each declaring its own local: every level settles
+        // exactly its own slot.
+        "a := \"A\"\nb := \"B\"\n{\n    c := \"C\"\n    {\n        d := \"D\"\n        a = c + d\n    }\n    b = c\n}\n\"{a}|{b}\"",
+        // Shadowing: the inner `parts` is visible only in the block, the
+        // outer one must be intact afterwards.
+        "parts := \"outer\"\nseen := \"\"\nif true {\n    parts := \"inner\"\n    seen = parts\n}\n\"{seen}|{parts}\"",
+        // Else-arm locals take the same cleanup path.
+        "neg := \"\"\nif false {\n    neg = \"then\"\n} else {\n    neg = \"else\"\n    parts := \"kept\"\n    neg = neg + parts\n}\n\"{neg}\"",
+        // A loop body is its own scope: its locals must not shift the loop
+        // frame or the bindings below it.
+        "acc := \"\"\ni := 0\nwhile i < 2 {\n    local := \"x\"\n    acc = acc + local\n    i = i + 1\n}\n\"{acc}|{i}\"",
+        "acc := \"\"\nfor i in 0..2 {\n    local := \"y\"\n    acc = acc + local\n}\nacc",
+        // Value-position block: the inner local is dropped while the
+        // block's trailing value becomes the result.
+        "outer := \"o\"\nx := if true {\n    inner := \"i\"\n    inner + outer\n} else {\n    \"z\"\n}\n\"{outer}|{x}\"",
+        // Function-body shape from the report: the inner `if` is the
+        // enclosing block's trailing statement, so the cleanup must drop
+        // the local without consuming `neg` below it.
+        "func f() -> str {\n    pat := \"!keep\"\n    neg := \"\"\n    if true {\n        neg = \"!\"\n        parts := \"keep\"\n        if true {\n            pat = parts\n        } else {\n            pat = \"\"\n        }\n    }\n    return \"{neg}|{pat}\"\n}\nf()",
+        // Captured block locals take the environment path; settling the
+        // slot-homed closure must still leave the outer binding intact.
+        "outer := \"O\"\nif true {\n    local := \"L\"\n    f := |_x: int| { local }\n    outer = f(0)\n}\n\"{outer}\"",
+    ] {
+        assert_same(src);
+    }
+
+    let reported_shape = "func f() -> str {\n    pat := \"!keep\"\n    neg := \"\"\n    if true {\n        neg = \"!\"\n        parts := \"keep\"\n        if true {\n            pat = parts\n        } else {\n            pat = \"\"\n        }\n    }\n    return \"{neg}|{pat}\"\n}\nf()";
+    assert_eq!(
+        run_src(reported_shape).unwrap(),
+        Value::Str("!|keep".to_string().into())
+    );
+}
+
 /// Module-scope loop variables captured by a closure must bind in the
 /// environment, exactly like a function-local captured loop var: the
 /// closure body runs in its own frame and can only read env bindings, so a
