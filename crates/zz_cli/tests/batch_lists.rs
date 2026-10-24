@@ -121,6 +121,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     // later batch and can surface latent cross-case collisions.
     ("syntax", "dicts_nonstr.zz", true),
     ("stdlib", "vec_sort.zz", true),
+    ("regression", "block_local_no_clobber.zz", false),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors

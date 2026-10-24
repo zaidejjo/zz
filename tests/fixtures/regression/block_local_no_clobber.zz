@@ -1,0 +1,77 @@
+// features: arrays, comparison, for-loop, func-call, if-else, indexing, locals, print, ranges, return, std-str, string-literal, string-ops, while-loop
+// Regression #581: a `:=` declaration inside a block must bind a fresh
+// slot above its enclosing scope. The VM's dead-block cleanup used to
+// `PopN` one value too deep, keeping the inner local and dropping the
+// outer binding that lived below it.
+func match_one(raw: str) -> str {
+    pat := raw
+    neg := ""
+    if str.starts_with(pat, "!") {
+        neg = "!"
+        parts := str.split(pat, "!")
+        if len(parts) > 1 {
+            pat = parts[1]
+        } else {
+            pat = ""
+        }
+    }
+    return "{neg}|{pat}"
+}
+
+func branch_locals() -> str {
+    base := "base"
+    pre := "pre"
+    post := "post"
+    if true {
+        neg := "inner"
+        parts := str.split("a!b", "!")
+        base = parts[0]
+        post = neg
+    }
+    return "{base}|{pre}|{post}"
+}
+
+func shadowed_local() -> str {
+    parts := "outer"
+    if true {
+        parts := str.split("x!y", "!")
+        println("shadowed_len={len(parts)}")
+    }
+    return parts
+}
+
+func nested_blocks() -> str {
+    a := "A"
+    b := "B"
+    {
+        c := str.split("q!r", "!")
+        {
+            d := [1, 2, 3]
+            a = "{c[0]}{len(d)}"
+        }
+        b = "{c[1]}"
+    }
+    return "{a}|{b}"
+}
+
+func loop_locals() -> str {
+    acc := "L"
+    i := 0
+    while i < 2 {
+        parts := str.split("x!y", "!")
+        acc = acc + parts[0]
+        i = i + 1
+    }
+    for _j in 0..2 {
+        kv := str.split("m!n", "!")
+        acc = acc + kv[1]
+    }
+    return acc
+}
+
+println(match_one("!keep.log"))
+println(branch_locals())
+println(shadowed_local())
+println(nested_blocks())
+println(loop_locals())
+println("block_local_no_clobber_ok")
