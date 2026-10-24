@@ -166,6 +166,25 @@ pub enum Op {
     SlotLessIntSlot { a: u16, b: u16 },
     /// Compare a slot against an immediate integer, push `Bool(a < imm)`.
     SlotLessIntImm { a: u16, imm: i64 },
+    /// Compare two slots as integers with any comparison operator, push
+    /// `Bool(slot[a] op slot[b])`.
+    ///
+    /// `SlotLessIntSlot` covers `<` (the loop-condition shape); this carries
+    /// the other five, so `if i > 0` stops materialising `LoadSlot PushConst
+    /// IntGt` before the jump. Falls back to `eval_binary` when either slot
+    /// is not an `Int` (same semantics as the generic comparison).
+    SlotCmpIntSlot {
+        a: u16,
+        b: u16,
+        op: zz_frontend::ast::BinOp,
+    },
+    /// Compare a slot against an immediate integer with any comparison
+    /// operator, push `Bool(slot[a] op imm)`.
+    SlotCmpIntImm {
+        a: u16,
+        imm: i64,
+        op: zz_frontend::ast::BinOp,
+    },
     /// 3-address integer binary op: `slot[dst] = Int(slot[lhs] op slot[rhs])`.
     ///
     /// Fused fast path for `x = y op z` where all three resolve to local
@@ -595,6 +614,8 @@ impl Op {
             Op::SlotAddIntImm { .. } => "SlotAddIntImm",
             Op::SlotLessIntSlot { .. } => "SlotLessIntSlot",
             Op::SlotLessIntImm { .. } => "SlotLessIntImm",
+            Op::SlotCmpIntSlot { .. } => "SlotCmpIntSlot",
+            Op::SlotCmpIntImm { .. } => "SlotCmpIntImm",
             Op::SlotBinaryInt { .. } => "SlotBinaryInt",
             Op::SlotBinaryIntImm { .. } => "SlotBinaryIntImm",
             Op::MakeFunc { .. } => "MakeFunc",
@@ -687,6 +708,8 @@ impl Op {
             | Op::SlotAddIntImm { .. }
             | Op::SlotLessIntSlot { .. }
             | Op::SlotLessIntImm { .. }
+            | Op::SlotCmpIntSlot { .. }
+            | Op::SlotCmpIntImm { .. }
             | Op::SlotBinaryInt { .. }
             | Op::SlotBinaryIntImm { .. } => OpClass::Fused,
 

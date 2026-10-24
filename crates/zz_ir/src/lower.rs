@@ -614,6 +614,16 @@ impl<'a> Lowerer<'a> {
             }]),
             VmOp::SlotLessIntSlot { a, b } => Ok(vec![Op::SlotLessIntSlot { a: *a, b: *b }]),
             VmOp::SlotLessIntImm { a, imm } => Ok(vec![Op::SlotLessIntImm { a: *a, imm: *imm }]),
+            VmOp::SlotCmpIntSlot { a, b, op } => Ok(vec![Op::SlotCmpIntSlot {
+                a: *a,
+                b: *b,
+                op: Self::lower_binop(op),
+            }]),
+            VmOp::SlotCmpIntImm { a, imm, op } => Ok(vec![Op::SlotCmpIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::lower_binop(op),
+            }]),
             VmOp::SlotBinaryInt { dst, lhs, rhs, op } => Ok(vec![Op::SlotBinaryInt {
                 dst: *dst,
                 lhs: *lhs,
@@ -966,6 +976,8 @@ fn is_fused_slot_op(op: &Op) -> bool {
             | Op::SlotAddIntImm { .. }
             | Op::SlotLessIntSlot { .. }
             | Op::SlotLessIntImm { .. }
+            | Op::SlotCmpIntSlot { .. }
+            | Op::SlotCmpIntImm { .. }
             | Op::SlotBinaryInt { .. }
             | Op::SlotBinaryIntImm { .. }
     )
@@ -1196,6 +1208,13 @@ pub fn expand_fused(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrE
                 Op::SlotLessIntImm { a, imm } => {
                     let c = intern_int(&mut out.consts, *imm);
                     vec![Op::LoadSlot(*a), Op::PushConst(c), Op::BinOp(IrBinOp::Lt)]
+                }
+                Op::SlotCmpIntSlot { a, b, op } => {
+                    vec![Op::LoadSlot(*a), Op::LoadSlot(*b), Op::BinOp(*op)]
+                }
+                Op::SlotCmpIntImm { a, imm, op } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![Op::LoadSlot(*a), Op::PushConst(c), Op::BinOp(*op)]
                 }
                 Op::SlotBinaryInt { dst, lhs, rhs, op } => vec![
                     Op::LoadSlot(*lhs),

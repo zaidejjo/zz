@@ -227,7 +227,10 @@ its own number rendering on both engines; float→int saturation is §5.
   The v2 decoder rejects v1 files (re-emit with `zz build --emit-ir`).
 - v3 carries the VM's fused slot fast paths as ops — `SlotAddInt`,
   `SlotInc`, `SlotAddIntImm`, `SlotLessIntSlot`, `SlotLessIntImm`,
-  `SlotBinaryInt`, `SlotBinaryIntImm` — instead of desugaring them.
+  `SlotBinaryInt`, `SlotBinaryIntImm` (and, appended since, the
+  generalized condition compares `SlotCmpIntSlot` / `SlotCmpIntImm`,
+  which carry the operator so `if i > 0` fuses like `if i < n`) —
+  instead of desugaring them.
   They are pure sugar: each op's doc names the exact core sequence it
   stands for, `raise` maps it one to one, and the interpreter takes the
   native fast path (with the generic fallback the op already carries, so

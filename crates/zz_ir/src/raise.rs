@@ -400,6 +400,16 @@ impl<'a> Raiser<'a> {
             }),
             Op::SlotLessIntSlot { a, b } => Ok(VmOp::SlotLessIntSlot { a: *a, b: *b }),
             Op::SlotLessIntImm { a, imm } => Ok(VmOp::SlotLessIntImm { a: *a, imm: *imm }),
+            Op::SlotCmpIntSlot { a, b, op } => Ok(VmOp::SlotCmpIntSlot {
+                a: *a,
+                b: *b,
+                op: Self::raise_binop(*op),
+            }),
+            Op::SlotCmpIntImm { a, imm, op } => Ok(VmOp::SlotCmpIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::raise_binop(*op),
+            }),
             Op::SlotBinaryInt { dst, lhs, rhs, op } => Ok(VmOp::SlotBinaryInt {
                 dst: *dst,
                 lhs: *lhs,

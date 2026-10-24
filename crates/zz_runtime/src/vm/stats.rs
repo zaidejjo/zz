@@ -131,8 +131,18 @@ mod tests {
     use super::*;
     use crate::Span;
 
+    /// The counters are process-global statics, and libtest runs tests in
+    /// parallel: without this guard one test's `reset` wipes another's
+    /// records mid-assertion (flaky `snapshot_counts_ops_and_classes`).
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serialized() -> std::sync::MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn snapshot_counts_ops_and_classes() {
+        let _guard = serialized();
         reset();
         record(&Op::Pop);
         record(&Op::SlotInc { slot: 0 });
@@ -155,6 +165,7 @@ mod tests {
 
     #[test]
     fn empty_snapshot_has_no_fast_share() {
+        let _guard = serialized();
         reset();
         assert_eq!(snapshot().fast_share(), 0.0);
     }
