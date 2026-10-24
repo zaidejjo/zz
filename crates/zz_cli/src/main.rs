@@ -23,6 +23,7 @@ mod test_runner;
 mod toolchain;
 mod ui;
 mod upgrade;
+mod vm_disasm;
 mod watch;
 
 use zz_frontend::diag::{error_at, render_to_string, Files};
@@ -64,6 +65,7 @@ USAGE:
     zz run --bytecode [<file>]    run via .zzc bytecode (compiles .zz, or
                                   loads .zzc directly with no frontend)
     zz dis [<file.zzc|file.zz>]   disassemble bytecode to stable text
+    zz dis --vm [--stats] [file]  print the VM chunk (ops, or per-class mix)
     zz test <file.zz | dir>       run @test-annotated functions
     zz bench <file.zz | dir>      run @bench-annotated functions and report timings
     zz cover [<file.zz>]          run a program and report line coverage
@@ -330,7 +332,9 @@ fn main() -> ExitCode {
                     }
                 }
             } else if bytecode {
-                match run_bytecode(file, &script_args, embed) {
+                let result = run_bytecode(file, &script_args, embed);
+                zz_runtime::vm::stats::dump_if_enabled();
+                match result {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -338,7 +342,9 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                match run_file(file, &script_args, embed) {
+                let result = run_file(file, &script_args, embed);
+                zz_runtime::vm::stats::dump_if_enabled();
+                match result {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -348,8 +354,10 @@ fn main() -> ExitCode {
             }
         }
         Some("dis") => {
+            let summary = rest.iter().any(|a| a == "--stats");
+            let vm = summary || rest.iter().any(|a| a == "--vm");
             let file = rest.iter().find(|a| !a.starts_with('-'));
-            match dis_file(file) {
+            match dis_file(file, vm, summary) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -1431,15 +1439,28 @@ fn run_bytecode_file(path: &str, script_args: &[String]) -> Result<(), String> {
 
 /// `zz dis <file>`: disassemble `.zzc` bytes (or a `.zz` program lowered
 /// in memory) to stable text.
-fn dis_file(path: Option<&String>) -> Result<(), String> {
+fn dis_file(path: Option<&String>, vm: bool, summary: bool) -> Result<(), String> {
+    let usage = if vm {
+        "zz dis --vm [--stats] [<file.zzc|file.zz>]"
+    } else {
+        "zz dis [<file.zzc|file.zz>]"
+    };
     let path = resolve_run_entry(
         path,
-        "zz dis [<file.zzc|file.zz>]",
+        usage,
         "provide a .zzc file or a .zz file to disassemble",
     )?;
+    let show_ops = !summary;
     if path.ends_with(".zzc") {
         let bytes = std::fs::read(&path).map_err(|e| format!("zz: cannot read {path}: {e}"))?;
         let module = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
+        if vm {
+            // Raised chunks carry no source map; ops print without sites.
+            let chunk = zz_ir::raise::raise(&module)
+                .map_err(|e| format!("zz: bytecode raise failed: {e}"))?;
+            print!("{}", vm_disasm::render_module(&path, "", &chunk, show_ops));
+            return Ok(());
+        }
         print!("{}", zz_ir::dis::disassemble(&module));
         return Ok(());
     }
@@ -1454,13 +1475,25 @@ fn dis_file(path: Option<&String>) -> Result<(), String> {
             prep.enums.clone(),
             native_names,
         );
-        let module = zz_ir::lower::lower_typed(&chunk, &prep.funcs)
-            .map_err(|e| format!("zz: ir lower failed: {e}"))?;
         let name = prep
             .files
             .get(i)
             .map(|(n, _)| n.clone())
             .unwrap_or_default();
+        if vm {
+            let source = prep
+                .files
+                .get(i)
+                .map(|(_, s)| s.as_str())
+                .unwrap_or_default();
+            print!(
+                "{}",
+                vm_disasm::render_module(&name, source, &chunk, show_ops)
+            );
+            continue;
+        }
+        let module = zz_ir::lower::lower_typed(&chunk, &prep.funcs)
+            .map_err(|e| format!("zz: ir lower failed: {e}"))?;
         println!("; module {name}");
         print!("{}", zz_ir::dis::disassemble(&module));
     }

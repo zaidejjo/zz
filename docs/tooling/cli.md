@@ -79,6 +79,7 @@ zz setup          # PATH + completions once
 zz toolchain install [--version 0.17.0]
 zz toolchain status / use / uninstall
 zz dis [file]     # disassemble bytecode/chunk
+zz dis --vm [file]  # VM bytecode with source sites (--stats: class mix)
 zz profile [file] # PGO profile flow
 ```
 

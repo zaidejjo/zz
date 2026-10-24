@@ -476,7 +476,20 @@ impl Vm {
     }
 
     /// The interpreter loop shared by fresh and resumed execution.
+    ///
+    /// Split on a const-generic `STATS` flag so the `ZZ_VM_STATS` counters
+    /// cost exactly nothing when off: the counter branch is compiled out of
+    /// the `STATS = false` instantiation instead of being tested per op.
+    /// Exactly one instantiation runs per process.
     fn run_loop(&mut self, interp: &mut Interp) -> Result<Flow, EvalError> {
+        if super::stats::enabled() {
+            self.run_loop_impl::<true>(interp)
+        } else {
+            self.run_loop_impl::<false>(interp)
+        }
+    }
+
+    fn run_loop_impl<const STATS: bool>(&mut self, interp: &mut Interp) -> Result<Flow, EvalError> {
         // Cache chunk pointers locally to avoid re-fetching from frames on
         // every instruction. `ip` stays in a register; we only sync it back
         // to the Frame struct at frame-change points (Call/Return/defer).
@@ -708,6 +721,9 @@ impl Vm {
 
             let op = &code[ip];
             ip += 1;
+            if STATS {
+                super::stats::record(op);
+            }
             // NO frame.ip write-back here — ip lives in a register.
             // Instrumentation: one flag test in the steady state (no
             // coverage, no debugger). Coverage then costs one integer

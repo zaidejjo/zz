@@ -15,6 +15,7 @@ zz run --native -o <name> [<file.zz>]   # name the published binary
 zz run --watch [<file.zz>] [--clear] [--debounce <ms>] [--watch-ignore <glob>]...
 zz eval "<src>"                 # eval string, print result
 zz dis [<file.zzc|file.zz>]     # disassemble bytecode/chunk
+zz dis --vm [--stats] [<file>]  # VM chunk ops (or per-class mix) + source sites
 zz profile [<file.zz>] [-- args]# PGO profile flow (llvm-profdata merge)
 ```
 
@@ -24,6 +25,11 @@ zz profile [<file.zz>] [-- args]# PGO profile flow (llvm-profdata merge)
 tree walker (+ store). `ZZ_RUN_CACHE=0` forces the walker, `ZZ_VERBOSE=1`
 prints hit/miss and stage lines; entries live in `<build-cache>/run-v2`
 (LRU, 256), cleared by `zz cache clean`. `zz run --help` lists the flags.
+
+`ZZ_VM_STATS=1 zz run f.zz` counts dispatched ops and prints a per-class
+summary (fused/int-op/stack/arith/control/call/access/alloc) to **stderr**
+at exit; program stdout is untouched. `zz dis --vm` shows the same chunks
+statically, `zz dis --vm --stats` the class mix and top opcodes.
 
 ## Build
 
