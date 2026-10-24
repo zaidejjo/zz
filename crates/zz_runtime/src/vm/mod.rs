@@ -20,11 +20,12 @@ pub mod chunk;
 pub mod compiler;
 pub mod op;
 pub mod runtime;
+pub mod stats;
 
 #[cfg(test)]
 mod tests;
 
 pub use chunk::Chunk;
 pub use compiler::Compiler;
-pub use op::{Op, TakeHome};
+pub use op::{Op, OpClass, TakeHome};
 pub use runtime::Vm;

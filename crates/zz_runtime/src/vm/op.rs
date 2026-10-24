@@ -495,3 +495,285 @@ pub enum Op {
     /// frame's defer stack. Executed LIFO on scope exit.
     DeferRecord,
 }
+
+/// Coarse class of an opcode, used by `zz dis --vm` and `ZZ_VM_STATS`.
+///
+/// The split answers one question: how much of the executed stream runs
+/// through a fused or specialized fast path (`Fused`, `IntOp`) instead of
+/// generic dispatch?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpClass {
+    /// Ops that remove stack traffic or a generic call (`Slot*`, `Take*`,
+    /// `VecPush*`, fused field/index writes).
+    Fused,
+    /// Typed i64 arithmetic and comparison fast paths (`IntAdd`…`IntNe`).
+    IntOp,
+    /// Stack, slot, scope, and environment movement.
+    Stack,
+    /// Generic operators (`BinOp`, `UnOp`, `Concat`, formatting).
+    Arith,
+    /// Jumps, loops, branches, returns, and match/trap control.
+    Control,
+    /// Function and native invocation, plus function construction.
+    Call,
+    /// Field, index, slice, and tuple access.
+    Access,
+    /// Container and aggregate construction.
+    Alloc,
+    /// Everything else.
+    Other,
+}
+
+impl OpClass {
+    pub const ALL: [OpClass; 9] = [
+        OpClass::Fused,
+        OpClass::IntOp,
+        OpClass::Stack,
+        OpClass::Arith,
+        OpClass::Control,
+        OpClass::Call,
+        OpClass::Access,
+        OpClass::Alloc,
+        OpClass::Other,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            OpClass::Fused => "fused",
+            OpClass::IntOp => "int-op",
+            OpClass::Stack => "stack",
+            OpClass::Arith => "arith",
+            OpClass::Control => "control",
+            OpClass::Call => "call",
+            OpClass::Access => "access",
+            OpClass::Alloc => "alloc",
+            OpClass::Other => "other",
+        }
+    }
+
+    /// Dense index into counter arrays (`0..ALL.len()`).
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// `true` for the fast paths that fusion work is measured against.
+    pub fn is_fast(self) -> bool {
+        matches!(self, OpClass::Fused | OpClass::IntOp)
+    }
+}
+
+impl Op {
+    /// Variant name without its payload — stable enough for disassembly,
+    /// histogram keys, and PR evidence.
+    pub fn mnemonic(&self) -> &'static str {
+        match self {
+            Op::PushConst(..) => "PushConst",
+            Op::Pop => "Pop",
+            Op::Swap => "Swap",
+            Op::Truthy => "Truthy",
+            Op::LoadVar(..) => "LoadVar",
+            Op::LoadPath(..) => "LoadPath",
+            Op::DefineVar(..) => "DefineVar",
+            Op::StoreVar(..) => "StoreVar",
+            Op::StorePath(..) => "StorePath",
+            Op::LoadSlot(..) => "LoadSlot",
+            Op::StoreSlot(..) => "StoreSlot",
+            Op::TakeSlot(..) => "TakeSlot",
+            Op::TakeVar(..) => "TakeVar",
+            Op::VecPush { .. } => "VecPush",
+            Op::VecPushField { .. } => "VecPushField",
+            Op::VecPushMethod { .. } => "VecPushMethod",
+            Op::SetFieldTake { .. } => "SetFieldTake",
+            Op::SetFieldIndexTake { .. } => "SetFieldIndexTake",
+            Op::StoreIndexTake { .. } => "StoreIndexTake",
+            Op::CompoundIndexTake { .. } => "CompoundIndexTake",
+            Op::FieldBinopTake { .. } => "FieldBinopTake",
+            Op::GetFieldIndex { .. } => "GetFieldIndex",
+            Op::LenField { .. } => "LenField",
+            Op::SlotAddInt { .. } => "SlotAddInt",
+            Op::SlotInc { .. } => "SlotInc",
+            Op::SlotAddIntImm { .. } => "SlotAddIntImm",
+            Op::SlotLessIntSlot { .. } => "SlotLessIntSlot",
+            Op::SlotLessIntImm { .. } => "SlotLessIntImm",
+            Op::SlotBinaryInt { .. } => "SlotBinaryInt",
+            Op::SlotBinaryIntImm { .. } => "SlotBinaryIntImm",
+            Op::MakeFunc { .. } => "MakeFunc",
+            Op::RegisterStruct { .. } => "RegisterStruct",
+            Op::RegisterEnum { .. } => "RegisterEnum",
+            Op::MakeEnum { .. } => "MakeEnum",
+            Op::IntAdd(..) => "IntAdd",
+            Op::IntSub(..) => "IntSub",
+            Op::IntMul(..) => "IntMul",
+            Op::IntDiv(..) => "IntDiv",
+            Op::IntRem(..) => "IntRem",
+            Op::IntNeg(..) => "IntNeg",
+            Op::IntLt(..) => "IntLt",
+            Op::IntGt(..) => "IntGt",
+            Op::IntLe(..) => "IntLe",
+            Op::IntGe(..) => "IntGe",
+            Op::IntEq(..) => "IntEq",
+            Op::IntNe(..) => "IntNe",
+            Op::BinOp(..) => "BinOp",
+            Op::UnOp(..) => "UnOp",
+            Op::Jump(..) => "Jump",
+            Op::JumpIfFalse(..) => "JumpIfFalse",
+            Op::JumpIfTrue(..) => "JumpIfTrue",
+            Op::JumpIfFalseBool(..) => "JumpIfFalseBool",
+            Op::Return => "Return",
+            Op::ForSetup { .. } => "ForSetup",
+            Op::ForNext { .. } => "ForNext",
+            Op::WhileSetup { .. } => "WhileSetup",
+            Op::WhileCond { .. } => "WhileCond",
+            Op::Break(..) => "Break",
+            Op::Continue(..) => "Continue",
+            Op::SetLoopResult => "SetLoopResult",
+            Op::Safepoint => "Safepoint",
+            Op::MakeArray(..) => "MakeArray",
+            Op::UnpackTuple(..) => "UnpackTuple",
+            Op::ArrayPush(..) => "ArrayPush",
+            Op::MakeDict(..) => "MakeDict",
+            Op::IndexOp(..) => "IndexOp",
+            Op::StoreIndexOp(..) => "StoreIndexOp",
+            Op::CompoundIndexOp { .. } => "CompoundIndexOp",
+            Op::SliceOp(..) => "SliceOp",
+            Op::MakeRange(..) => "MakeRange",
+            Op::MakeStruct { .. } => "MakeStruct",
+            Op::GetField(..) => "GetField",
+            Op::GetFieldIdx(..) => "GetFieldIdx",
+            Op::SetField(..) => "SetField",
+            Op::CompoundFieldOp { .. } => "CompoundFieldOp",
+            Op::SetFieldIdx(..) => "SetFieldIdx",
+            Op::MakeClosure { .. } => "MakeClosure",
+            Op::SpawnClosure { .. } => "SpawnClosure",
+            Op::MakeVariant { .. } => "MakeVariant",
+            Op::MatchArm { .. } => "MatchArm",
+            Op::MatchGuard { .. } => "MatchGuard",
+            Op::MatchError(..) => "MatchError",
+            Op::IfLetMatch { .. } => "IfLetMatch",
+            Op::TryOp(..) => "TryOp",
+            Op::Elvis(..) => "Elvis",
+            Op::ElvisResult => "ElvisResult",
+            Op::Call { .. } => "Call",
+            Op::CallPath { .. } => "CallPath",
+            Op::CallMethod { .. } => "CallMethod",
+            Op::CallNative { .. } => "CallNative",
+            Op::Concat(..) => "Concat",
+            Op::FormatValue(..) => "FormatValue",
+            Op::DbQuery { .. } => "DbQuery",
+            Op::EnterScope => "EnterScope",
+            Op::ExitScope => "ExitScope",
+            Op::PopN { .. } => "PopN",
+            Op::DeferRecord => "DeferRecord",
+        }
+    }
+
+    /// Coarse class (see [`OpClass`]).
+    pub fn class(&self) -> OpClass {
+        match self {
+            Op::TakeSlot(..)
+            | Op::TakeVar(..)
+            | Op::VecPush { .. }
+            | Op::VecPushField { .. }
+            | Op::VecPushMethod { .. }
+            | Op::SetFieldTake { .. }
+            | Op::SetFieldIndexTake { .. }
+            | Op::StoreIndexTake { .. }
+            | Op::CompoundIndexTake { .. }
+            | Op::FieldBinopTake { .. }
+            | Op::GetFieldIndex { .. }
+            | Op::LenField { .. }
+            | Op::SlotAddInt { .. }
+            | Op::SlotInc { .. }
+            | Op::SlotAddIntImm { .. }
+            | Op::SlotLessIntSlot { .. }
+            | Op::SlotLessIntImm { .. }
+            | Op::SlotBinaryInt { .. }
+            | Op::SlotBinaryIntImm { .. } => OpClass::Fused,
+
+            Op::IntAdd(..)
+            | Op::IntSub(..)
+            | Op::IntMul(..)
+            | Op::IntDiv(..)
+            | Op::IntRem(..)
+            | Op::IntNeg(..)
+            | Op::IntLt(..)
+            | Op::IntGt(..)
+            | Op::IntLe(..)
+            | Op::IntGe(..)
+            | Op::IntEq(..)
+            | Op::IntNe(..) => OpClass::IntOp,
+
+            Op::PushConst(..)
+            | Op::Pop
+            | Op::PopN { .. }
+            | Op::Swap
+            | Op::Truthy
+            | Op::LoadSlot(..)
+            | Op::StoreSlot(..)
+            | Op::LoadVar(..)
+            | Op::LoadPath(..)
+            | Op::StoreVar(..)
+            | Op::StorePath(..)
+            | Op::DefineVar(..)
+            | Op::EnterScope
+            | Op::ExitScope => OpClass::Stack,
+
+            Op::BinOp(..)
+            | Op::UnOp(..)
+            | Op::Concat(..)
+            | Op::FormatValue(..)
+            | Op::Elvis(..)
+            | Op::ElvisResult => OpClass::Arith,
+
+            Op::Jump(..)
+            | Op::JumpIfFalse(..)
+            | Op::JumpIfTrue(..)
+            | Op::JumpIfFalseBool(..)
+            | Op::Return
+            | Op::ForSetup { .. }
+            | Op::ForNext { .. }
+            | Op::WhileSetup { .. }
+            | Op::WhileCond { .. }
+            | Op::Break(..)
+            | Op::Continue(..)
+            | Op::SetLoopResult
+            | Op::Safepoint
+            | Op::MatchArm { .. }
+            | Op::MatchGuard { .. }
+            | Op::MatchError(..)
+            | Op::IfLetMatch { .. }
+            | Op::TryOp(..)
+            | Op::DeferRecord => OpClass::Control,
+
+            Op::Call { .. }
+            | Op::CallPath { .. }
+            | Op::CallMethod { .. }
+            | Op::CallNative { .. }
+            | Op::MakeFunc { .. }
+            | Op::MakeClosure { .. }
+            | Op::SpawnClosure { .. } => OpClass::Call,
+
+            Op::GetField(..)
+            | Op::GetFieldIdx(..)
+            | Op::SetField(..)
+            | Op::SetFieldIdx(..)
+            | Op::CompoundFieldOp { .. }
+            | Op::IndexOp(..)
+            | Op::StoreIndexOp(..)
+            | Op::CompoundIndexOp { .. }
+            | Op::SliceOp(..)
+            | Op::ArrayPush(..)
+            | Op::UnpackTuple(..) => OpClass::Access,
+
+            Op::MakeArray(..)
+            | Op::MakeDict(..)
+            | Op::MakeRange(..)
+            | Op::MakeStruct { .. }
+            | Op::MakeEnum { .. }
+            | Op::MakeVariant { .. }
+            | Op::RegisterStruct { .. }
+            | Op::RegisterEnum { .. }
+            | Op::DbQuery { .. } => OpClass::Alloc,
+        }
+    }
+}
