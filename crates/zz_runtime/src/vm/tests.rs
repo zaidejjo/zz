@@ -1154,6 +1154,99 @@ fn vm_compound_assign_fuses_like_plain_assign() {
     );
 }
 
+fn compile_ops(src: &str) -> Vec<Op> {
+    use std::collections::{HashMap, HashSet};
+
+    let parsed = parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_res, types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let chunk = Compiler::compile_program_typed(
+        &parsed.program,
+        Arc::new(types),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(HashSet::new()),
+    );
+    chunk.code.clone()
+}
+
+/// A nested left spine (`s = (s + i) % k`) fuses into a short chain that
+/// keeps the half-built value **in the target slot**: no scratch slot, no
+/// stack round-trip. `dst == lhs` is safe because every fused op reads its
+/// operands before writing `dst`, and the target is read exactly once.
+#[test]
+fn vm_nested_arith_chain_reuses_target_slot() {
+    let code = compile_ops("s := 0\nfor i in 0..10 { s = (s + i) % 1000003 }\ns");
+    let fused: Vec<&Op> = code
+        .iter()
+        .filter(|op| matches!(op, Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. }))
+        .collect();
+    assert_eq!(fused.len(), 2, "expected a two-op chain: {code:#?}");
+    let (
+        Op::SlotBinaryInt {
+            dst: d0,
+            lhs: l0,
+            rhs,
+            op: BinOp::Add,
+        },
+        Op::SlotBinaryIntImm {
+            dst: d1,
+            lhs: l1,
+            imm: 1000003,
+            op: BinOp::Rem,
+        },
+    ) = (fused[0], fused[1])
+    else {
+        panic!("unexpected chain shape: {fused:#?}");
+    };
+    assert_eq!((d0, l0), (d1, l1), "chain must stay in one slot");
+    assert_ne!(*rhs, *d0, "operand must read a different slot");
+    // Nothing of the generic RHS survives: no stack traffic at all.
+    assert!(
+        !code
+            .iter()
+            .any(|op| matches!(op, Op::IntAdd(_) | Op::IntRem(_) | Op::BinOp(..))),
+        "generic arithmetic left in the body: {code:#?}"
+    );
+}
+
+/// Deep chains keep working, and a chain that would read the target twice
+/// must bail instead of observing the half-built value.
+#[test]
+fn vm_nested_arith_chain_matches_tree_walker() {
+    for src in [
+        "s := 0\nfor i in 0..100 { s = (s + i) % 7 }\ns",
+        "x := 3\nx = ((x + 5) * 2 - 1) / 3\nx",
+        "x := 3\nx = (x + 1) * 2\nx",
+        "x := 9223372036854775807\nx = (x + 1) - 1\nx",
+        "func f(x: int) -> int { x = (x * 2 + 3) % 11\nreturn x }\nf(7) + f(9)",
+        // The target is read twice: the chain must stay generic.
+        "x := 5\nx = (x + 1) + x\nx",
+        "x := 5\nx = (x + 1) * (x + 2)\nx",
+        // Division by zero keeps the generic error text.
+        "x := 1\ny := 0\nx = (x + 1) / y\nx",
+    ] {
+        assert_same(src);
+    }
+    // ...and the twice-read shape really did fall back.
+    let code = compile_ops("x := 5\nx = (x + 1) + x\nx");
+    assert!(
+        code.iter().any(|op| matches!(op, Op::IntAdd(_))),
+        "twice-read target must not fuse: {code:#?}"
+    );
+}
+
 /// Typed int comparisons (#364) compile to the unboxed fast-path ops
 /// instead of generic `BinOp` — mirroring the `IntAdd` precedent.
 /// Mixed-type operands keep generic dispatch.
