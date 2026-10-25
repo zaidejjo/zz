@@ -598,6 +598,25 @@ impl<'a> Lowerer<'a> {
                     field: self.intern(field),
                 }])
             }
+            VmOp::GetFieldSlotIdx { home, idx, dst, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::GetFieldSlotIdx {
+                    home_slot,
+                    home_var,
+                    idx: *idx,
+                    dst: *dst,
+                }])
+            }
+            VmOp::IndexIntSlot { arr, idx, dst, .. } => Ok(vec![Op::IndexIntSlot {
+                arr: *arr,
+                idx: *idx,
+                dst: *dst,
+            }]),
+            VmOp::IndexDictInt { dict, key, dst, .. } => Ok(vec![Op::IndexDictInt {
+                dict: *dict,
+                key: *key,
+                dst: *dst,
+            }]),
             // Fused slot fast paths travel as ops (v3): the interpreter
             // runs them natively, and the desugared form cost it 3 extra
             // stack ops per loop iteration on cached runs. The expansion

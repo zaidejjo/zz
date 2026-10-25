@@ -1212,6 +1212,50 @@ impl Vm {
                         }
                     }
                 }
+                Op::GetFieldSlotIdx {
+                    home,
+                    idx,
+                    dst,
+                    span,
+                } => {
+                    let Some(taken) = Self::take_home(self, interp, home) else {
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // Copy the field straight into dst — no container clone,
+                    // no stack traffic, fused with the assignment destination.
+                    let elem = match &taken {
+                        Value::Object(o) => {
+                            if (*idx as usize) < o.fields.len() {
+                                o.fields[*idx as usize].1.clone()
+                            } else {
+                                return Err(EvalError::new(
+                                    format!(
+                                        "struct `{}` field index {} out of bounds",
+                                        o.name, idx
+                                    ),
+                                    *span,
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(EvalError::new(
+                                "expected struct for indexed field access".to_string(),
+                                *span,
+                            ));
+                        }
+                    };
+                    Self::restore_home(self, interp, home, taken);
+                    self.stack[*dst as usize] = elem;
+                }
                 Op::LenField { home, field, span } => {
                     let Some(taken) = Self::take_home(self, interp, home) else {
                         return Err(self.error(
@@ -2334,6 +2378,96 @@ impl Vm {
                     let ov = self.stack.pop().unwrap();
                     let v = get_index(&ov, &iv, *span)?;
                     self.stack.push(v);
+                }
+                /// Read `array[idx]` where both are stack slots: single bounds
+                /// check, no `normalize_index` call, no `Value` tag loop.
+                Op::IndexIntSlot {
+                    arr,
+                    idx,
+                    dst,
+                    span,
+                } => {
+                    let ov = self.stack[*arr as usize].clone();
+                    let iv = self.stack[*idx as usize].clone();
+                    let v = match (&ov, &iv) {
+                        (Value::Array(items), Value::Int(i)) => {
+                            match normalize_index(*i, items.len(), *span) {
+                                Ok(ix) => items[ix].clone(),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        (Value::Tuple(items), Value::Int(i)) => {
+                            match normalize_index(*i, items.len(), *span) {
+                                Ok(ix) => items[ix].clone(),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        (Value::Str(s), Value::Int(i)) => {
+                            if s.is_ascii() {
+                                match normalize_index(*i, s.len(), *span) {
+                                    Ok(ix) => Value::Str(std::sync::Arc::clone(
+                                        &crate::runtime::ops::ascii_chars()
+                                            [s.as_bytes()[ix] as usize],
+                                    )),
+                                    Err(e) => return Err(e),
+                                }
+                            } else {
+                                let chars: Vec<char> = s.chars().collect();
+                                match normalize_index(*i, chars.len(), *span) {
+                                    Ok(ix) => Value::Str(chars[ix].to_string().into()),
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        }
+                        (Value::Bytes(b), Value::Int(i)) => {
+                            match normalize_index(*i, b.len(), *span) {
+                                Ok(ix) => Value::Int(b.as_slice()[ix] as i64),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        (Value::Dict(dict), key) => match dict.get_cloned(key) {
+                            Some(v) => v,
+                            None => {
+                                return Err(
+                                    self.error(format!("key `{key}` not found in dict"), *span)
+                                );
+                            }
+                        },
+                        _ => {
+                            return Err(self.error(
+                                "expected array/tuple/string for indexed access".to_string(),
+                                *span,
+                            ));
+                        }
+                    };
+                    self.stack[*dst as usize] = v;
+                }
+                /// Read `dict[key]` where key is an int: probe DictData with
+                /// a precomputed hash + open-addressed table.
+                Op::IndexDictInt {
+                    dict,
+                    key,
+                    dst,
+                    span,
+                } => {
+                    let ov = self.stack[*dict as usize].clone();
+                    let iv = self.stack[*key as usize].clone();
+                    let v = match (&ov, &iv) {
+                        (Value::Dict(dict), key) => match dict.get_cloned(key) {
+                            Some(v) => v,
+                            None => {
+                                return Err(
+                                    self.error(format!("key `{key}` not found in dict"), *span)
+                                );
+                            }
+                        },
+                        _ => {
+                            return Err(
+                                self.error("expected dict for indexed access".to_string(), *span)
+                            );
+                        }
+                    };
+                    self.stack[*dst as usize] = v;
                 }
                 Op::StoreIndexOp(span) => {
                     // Stack layout is evaluation order: [object, index,

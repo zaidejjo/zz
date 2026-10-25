@@ -583,6 +583,7 @@ impl Compiler {
             Op::StoreIndexTake { .. } => -2,
             Op::CompoundIndexTake { .. } => -2,
             Op::GetFieldIndex { .. } => 0,
+            Op::GetFieldSlotIdx { .. } => 0,
             Op::LenField { .. } => 1,
             Op::SlotAddInt { .. } => 0,
             Op::SlotInc { .. } => 0,
@@ -631,6 +632,8 @@ impl Compiler {
             Op::ArrayPush(_) => -1,
             Op::MakeDict(n) => 1 - 2 * *n as i64,
             Op::IndexOp(_) => -1,
+            Op::IndexIntSlot { .. } => 0,
+            Op::IndexDictInt { .. } => 0,
             Op::StoreIndexOp(_) => -2,
             Op::CompoundIndexOp { .. } => -2,
             Op::SliceOp(_) => -2,
@@ -1626,6 +1629,104 @@ impl Compiler {
             span,
         });
         true
+    }
+
+    /// `dst = home.field` where home resolves to a slot/env and the field
+    /// index is known at compile time: copies the field straight into dst
+    /// with no container clone and no stack traffic.
+    /// Returns the op to emit, or None to fall back to the generic path.
+    fn try_emit_get_field_slot_idx(
+        &mut self,
+        obj: &Expr,
+        field_name: &str,
+        dst_slot: u16,
+        span: Span,
+    ) -> Option<Op> {
+        let home_name = match obj {
+            Expr::Ident { name, .. } => name.as_str(),
+            _ => return None,
+        };
+        let home = match self.move_home_of(home_name) {
+            Some(h) => h,
+            None => return None,
+        };
+        // Resolve field index from the struct signature.
+        let struct_name = match self.type_of(obj.span()) {
+            Some(zz_checker::Type::Struct(name, _)) => name.clone(),
+            _ => return None,
+        };
+        let Some(sig) = self.structs.as_ref().and_then(|s| s.get(&struct_name)) else {
+            return None;
+        };
+        let field_idx = match sig.fields.iter().position(|(n, _)| n == field_name) {
+            Some(i) => i as u16,
+            None => return None,
+        };
+        Some(Op::GetFieldSlotIdx {
+            home,
+            idx: field_idx,
+            dst: dst_slot,
+            span,
+        })
+    }
+
+    /// `dst = arr[idx]` where both operands resolve to slots: single bounds
+    /// check, no `normalize_index` call, no `Value` tag loop.
+    /// Returns the op to emit, or None to fall back to the generic path.
+    fn try_emit_index_int_slot(
+        &mut self,
+        arr: &Expr,
+        idx: &Expr,
+        dst_slot: u16,
+        span: Span,
+    ) -> Option<Op> {
+        let arr_slot = match self.resolve_expr_slot(arr) {
+            Some(s) => s,
+            None => return None,
+        };
+        let idx_slot = match self.resolve_expr_slot(idx) {
+            Some(s) => s,
+            None => return None,
+        };
+        Some(Op::IndexIntSlot {
+            arr: arr_slot,
+            idx: idx_slot,
+            dst: dst_slot,
+            span,
+        })
+    }
+
+    /// `dst = dict[key]` where key is an int slot: probes DictData with a
+    /// precomputed hash + open-addressed table.
+    /// Returns the op to emit, or None to fall back to the generic path.
+    fn try_emit_index_dict_int(
+        &mut self,
+        dict: &Expr,
+        key: &Expr,
+        dst_slot: u16,
+        span: Span,
+    ) -> Option<Op> {
+        let dict_slot = match self.resolve_expr_slot(dict) {
+            Some(s) => s,
+            None => return None,
+        };
+        let key_slot = match self.resolve_expr_slot(key) {
+            Some(s) => s,
+            None => return None,
+        };
+        // Only fuse for int-keyed dicts.
+        let Some(zz_checker::Type::Dict(kt, _)) = self.type_of(dict.span()) else {
+            return None;
+        };
+        if !matches!(kt.as_ref(), zz_checker::Type::Int) {
+            return None;
+        }
+        Some(Op::IndexDictInt {
+            dict: dict_slot,
+            key: key_slot,
+            dst: dst_slot,
+            span,
+        })
     }
 
     /// Fused push statement (`x.push(e)`): take the home, push reusing the
@@ -2865,6 +2966,43 @@ impl Compiler {
                         self.emit(op);
                         self.stmt_unit(value_discarded)
                     } else if self.try_emit_move_push_ident(name, *span, value) {
+                        self.stmt_unit(value_discarded)
+                    } else if let Resolved::Slot(dst_slot) = self.resolve(name) {
+                        // `x = s.f` -> GetFieldSlotIdx: copy field straight
+                        // into dst slot, no container clone, no stack traffic.
+                        if let Expr::Field {
+                            obj, name: field, ..
+                        } = value
+                        {
+                            if let Some(op) =
+                                self.try_emit_get_field_slot_idx(obj, field, dst_slot as u16, *span)
+                            {
+                                self.emit(op);
+                                return self.stmt_unit(value_discarded);
+                            }
+                        }
+                        // `x = arr[i]` -> IndexIntSlot: single bounds check,
+                        // no tag loop.
+                        if let Expr::Index { obj, index, .. } = value {
+                            if let Some(op) =
+                                self.try_emit_index_int_slot(obj, index, dst_slot as u16, *span)
+                            {
+                                self.emit(op);
+                                return self.stmt_unit(value_discarded);
+                            }
+                            // `x = dict[key]` -> IndexDictInt: int-keyed dict
+                            // fast path.
+                            if let Some(op) =
+                                self.try_emit_index_dict_int(obj, index, dst_slot as u16, *span)
+                            {
+                                self.emit(op);
+                                return self.stmt_unit(value_discarded);
+                            }
+                        }
+                        // Fall through to generic store below.
+                        self.compile_expr(value);
+                        self.move_take = None;
+                        self.emit(Op::StoreSlot(dst_slot as u16));
                         self.stmt_unit(value_discarded)
                     } else {
                         // Move-take for `x = f(x, ...)`: the flag makes the

@@ -160,6 +160,28 @@ pub enum Op {
         home_var: Option<StrId>,
         field: StrId,
     },
+    /// Copy a struct field straight into slot `dst`: `dst = home.field`,
+    /// no container clone, no stack traffic.
+    GetFieldSlotIdx {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        idx: u16,
+        dst: u16,
+    },
+    /// Read `array[idx]` where both operands are slots: single bounds
+    /// check, no tag loop. Result written to `dst`.
+    IndexIntSlot {
+        arr: u16,
+        idx: u16,
+        dst: u16,
+    },
+    /// Read `dict[key]` where key is an int slot: probes DictData.
+    /// Result written to `dst`.
+    IndexDictInt {
+        dict: u16,
+        key: u16,
+        dst: u16,
+    },
 
     // ---- fused slot fast paths (carried from the VM compiler) ----
     //
@@ -510,6 +532,9 @@ impl Op {
             Op::FieldBinopTake { .. } => 77,
             Op::GetFieldIndex { .. } => 78,
             Op::LenField { .. } => 79,
+            Op::GetFieldSlotIdx { .. } => 95,
+            Op::IndexIntSlot { .. } => 96,
+            Op::IndexDictInt { .. } => 97,
             Op::SlotAddInt { .. } => 80,
             Op::SlotInc { .. } => 81,
             Op::SlotAddIntImm { .. } => 82,
@@ -611,6 +636,9 @@ impl Op {
             Op::FieldBinopTake { .. } => "fieldbinoptake",
             Op::GetFieldIndex { .. } => "getfieldindex",
             Op::LenField { .. } => "lenfield",
+            Op::GetFieldSlotIdx { .. } => "getfieldslotidx",
+            Op::IndexIntSlot { .. } => "indexintslot",
+            Op::IndexDictInt { .. } => "indexdictint",
             Op::SlotAddInt { .. } => "slotaddint",
             Op::SlotInc { .. } => "slotinc",
             Op::SlotAddIntImm { .. } => "slotaddintimm",

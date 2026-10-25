@@ -435,6 +435,26 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             encode_home(v, home_slot, home_var);
             put_u32(v, field.0);
         }
+        Op::GetFieldSlotIdx {
+            home_slot,
+            home_var,
+            idx,
+            dst,
+        } => {
+            encode_home(v, home_slot, home_var);
+            put_u16(v, *idx);
+            put_u16(v, *dst);
+        }
+        Op::IndexIntSlot { arr, idx, dst } => {
+            put_u16(v, *arr);
+            put_u16(v, *idx);
+            put_u16(v, *dst);
+        }
+        Op::IndexDictInt { dict, key, dst } => {
+            put_u16(v, *dict);
+            put_u16(v, *key);
+            put_u16(v, *dst);
+        }
         Op::BinOp(op) => encode_binop(v, *op),
         Op::UnOp(op) => encode_unop(v, *op),
         Op::SlotAddInt { dst, src } => {
@@ -1317,6 +1337,25 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
                 field: StrId(r.u32()?),
             })
         }
+        95 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            Ok(Op::GetFieldSlotIdx {
+                home_slot,
+                home_var,
+                idx: r.u16()?,
+                dst: r.u16()?,
+            })
+        }
+        96 => Ok(Op::IndexIntSlot {
+            arr: r.u16()?,
+            idx: r.u16()?,
+            dst: r.u16()?,
+        }),
+        97 => Ok(Op::IndexDictInt {
+            dict: r.u16()?,
+            key: r.u16()?,
+            dst: r.u16()?,
+        }),
         80 => Ok(Op::SlotAddInt {
             dst: r.u16()?,
             src: r.u16()?,

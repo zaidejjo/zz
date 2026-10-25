@@ -33,6 +33,9 @@ fn effect(op: &Op) -> i64 {
         Op::CompoundIndexTake { .. } => -2,
         Op::GetFieldIndex { .. } => 0,
         Op::LenField { .. } => 1,
+        Op::GetFieldSlotIdx { .. } => 0,
+        Op::IndexIntSlot { .. } => 0,
+        Op::IndexDictInt { .. } => 0,
         // Fused slot fast paths: pure slot traffic — the arithmetic ones
         // touch slots only (net 0), the comparisons push their Bool.
         Op::SlotAddInt { .. }
@@ -268,6 +271,18 @@ fn verify_func(
                     str(*id, "push home")?;
                 }
                 str(*field, "push field/method")?;
+            }
+            Op::GetFieldSlotIdx {
+                home_slot,
+                home_var,
+                ..
+            } => {
+                if home_slot.is_some() == home_var.is_some() {
+                    return Err(IrError::spanned("push home must be a slot xor a var", span));
+                }
+                if let Some(id) = home_var {
+                    str(*id, "push home")?;
+                }
             }
             Op::MakeStruct { name, fields } => {
                 str(*name, "struct name")?;
@@ -1229,6 +1244,15 @@ fn infer_func(
             }
             Op::LenField { .. } => {
                 st.push(TV::U);
+            }
+            Op::GetFieldSlotIdx { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::IndexIntSlot { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::IndexDictInt { dst, .. } => {
+                declared(*dst)?;
             }
             // Fused slot fast paths. Guards, not types: a non-`Int` slot
             // runs the generic op on the same operands, so what lands in
