@@ -380,6 +380,13 @@ fn main() -> ExitCode {
             }
         },
         Some("check") => {
+            // `--help` must short-circuit every subcommand (#586): `check`
+            // scans a whole tree, `fix` rewrites files and `fmt` rewrites
+            // files — none of them may run when the user asked for usage.
+            if wants_help(rest) {
+                print_subcommand_help("check");
+                return ExitCode::SUCCESS;
+            }
             // Strip the two-token `--format <value>` form before path
             // parsing (the bare value would otherwise parse as the path);
             // `--format=<value>` is already a single flag token.
@@ -450,6 +457,13 @@ fn main() -> ExitCode {
             }
         }
         Some("fix") => {
+            // `--help` prints usage and exits without touching a single
+            // file (#586): the old behavior parsed `--help` as a flag,
+            // defaulted the path to `.` and rewrote the whole project.
+            if wants_help(rest) {
+                print_subcommand_help("fix");
+                return ExitCode::SUCCESS;
+            }
             let (path, flags) = parse_path_and_flags(rest);
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
@@ -463,6 +477,12 @@ fn main() -> ExitCode {
             }
         }
         Some("fmt") => {
+            // `--help` prints usage and exits without reformatting the
+            // tree (#586) — `fmt` rewrites files in place.
+            if wants_help(rest) {
+                print_subcommand_help("fmt");
+                return ExitCode::SUCCESS;
+            }
             let (path, flags) = parse_path_and_flags(rest);
             let check_only =
                 flags.contains(&"--check".to_string()) || flags.contains(&"-c".to_string());
@@ -694,6 +714,96 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
         }
     }
     (path, flags)
+}
+
+/// True when the argument list asks for usage instead of an action.
+///
+/// `--help`/`-h` must be handled *before* path resolution: `check`, `fix`
+/// and `fmt` all default their path to `.`, so an unhandled `--help` used
+/// to scan or rewrite the whole project instead of printing usage (#586).
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--help" || a == "-h")
+}
+
+/// Print the usage text of a subcommand on stdout.
+///
+/// Each subcommand gets its own block (flags differ per command); unknown
+/// commands fall back to the top-level usage.
+fn print_subcommand_help(cmd: &str) {
+    let text = match cmd {
+        "check" => {
+            "\
+usage: zz check [FLAGS] [PATH]
+
+Scan ZZ sources for errors and warnings. Nothing is written unless --fix is
+given.
+
+FLAGS:
+  --fix, -f          apply safe auto-fixes while checking
+  --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
+  --interactive, -i  with --fix, prompt for ambiguous fixes interactively
+  --stats            print per-file check statistics
+  --format json      machine-readable diagnostics on stdout
+  -h, --help         show this help
+
+PATH can be a single .zz file or a directory (recursively scans all .zz files).
+Defaults to `.` (current directory) if omitted.
+"
+        }
+        "fix" => {
+            "\
+usage: zz fix [FLAGS] [PATH]
+
+Apply auto-fixes (shortcut for `zz check --fix`).
+
+FLAGS:
+  --hard             apply ALL fixes including ambiguous ones (no prompts)
+  --interactive, -i  prompt for ambiguous fixes interactively
+  -h, --help         show this help
+
+PATH can be a single .zz file or a directory (recursively fixes all .zz files).
+Defaults to `.` (current directory) if omitted.
+
+FIX SAFETY:
+  Safe fixes (single unambiguous match) are applied automatically.
+  Ambiguous fixes (multiple candidates) require --hard or --interactive (-i).
+"
+        }
+        "fmt" => {
+            "\
+usage: zz fmt [FLAGS] [PATH]
+
+Format ZZ source files in place.
+
+FLAGS:
+  --check, -c        check formatting without writing (exit 1 if changed)
+  --stdin            read source from stdin and write formatted to stdout
+  -h, --help         show this help
+
+PATH can be a single .zz file or a directory (recursively formats all .zz files).
+Defaults to `.` (current directory) if omitted.
+"
+        }
+        _ => USAGE,
+    };
+    print!("{text}");
+}
+
+/// Convert a byte offset into a 1-based `(line, column)` pair.
+///
+/// The fix report used to print the raw byte offset where a line number was
+/// expected (`two.zz:56` for an 8-line file), which is misleading when
+/// reviewing what a fix changed (#586).
+fn line_col(source: &str, offset: usize) -> (usize, usize) {
+    let clamped = offset.min(source.len());
+    let before = &source[..clamped];
+    let line = before.matches('\n').count() + 1;
+    let col = before
+        .rsplit('\n')
+        .next()
+        .map(|last| last.chars().count() + 1)
+        .unwrap_or(1);
+    (line, col)
 }
 
 /// Load plugin shared libraries for VM-based native dispatch.
@@ -2882,9 +2992,10 @@ fn check_or_fix_path(
                     } else {
                         "fixed (force)"
                     };
+                    let (line, col) = line_col(&source, start);
                     eprintln!(
-                        "  {label}: `{original}` → `{}` at {path_str}:{}",
-                        fixit.replacement, fixit.span.start,
+                        "  {label}: `{original}` → `{}` at {path_str}:{line}:{col}",
+                        fixit.replacement,
                     );
                 }
             }
