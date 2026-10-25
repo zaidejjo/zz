@@ -798,10 +798,9 @@ fn walk_sorted(root: &str) -> Result<Vec<String>, std::io::Error> {
             let is_dir = entry.file_type()?.is_dir();
             entries.push((s, if is_dir { "d" } else { "f" }.to_string()));
         }
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        // Push dirs in reverse so the pop order stays sorted; record every
-        // path (files and dirs) in sorted order.
-        for (s, kind) in entries.iter().rev() {
+        // Push dirs so traversal continues; final out.sort() below orders
+        // everything globally, so per-directory ordering is unnecessary.
+        for (s, kind) in entries.iter() {
             if kind == "d" {
                 stack.push(s.clone());
             }
@@ -810,6 +809,7 @@ fn walk_sorted(root: &str) -> Result<Vec<String>, std::io::Error> {
             out.push(s);
         }
     }
+    // Single global sort: O(n log n) instead of per-dir sorts + final sort.
     out.sort();
     Ok(out)
 }

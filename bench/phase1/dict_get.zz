@@ -1,0 +1,17 @@
+// bench/phase1/dict_get.zz — time dict.get over 6000 entries (index already O(1)).
+import std.time
+
+func main() -> int {
+    d:{str: int} = {}
+    for i in 0..6000 {
+        d["k{i}"] = i
+    }
+    t0 := time.now_ms()
+    total := 0
+    for i in 0..6000 {
+        total = total + d["k{i}"]
+    }
+    t1 := time.now_ms()
+    println("dict_get n=6000 total={total} ms={t1 - t0}")
+    return 0
+}

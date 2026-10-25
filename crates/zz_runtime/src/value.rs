@@ -328,7 +328,10 @@ pub enum Value {
     /// A native (Rust-backed) function from the standard library.
     Native(Box<NativeFunc>),
     /// A parsed JSON value (opaque to the type system).
-    Json(Box<JsonValue>),
+    ///
+    /// `Arc`-backed: clones bump the reference count instead of deep-cloning
+    /// the whole document; read-only natives borrow, mutations copy once.
+    Json(std::sync::Arc<JsonValue>),
     /// An HTTP server handle with its registered routes.
     HttpServer(Box<HttpServer>),
     /// A TCP stream (opaque, wrapped in Arc<Mutex> for clone safety).
@@ -1552,7 +1555,7 @@ impl fmt::Display for Value {
                 write!(f, "}}")
             }
             Value::Native(nf) => write!(f, "<native {}>", nf.name),
-            Value::Json(j) => write!(f, "{j}"),
+            Value::Json(j) => write!(f, "{}", j.as_ref()),
             Value::HttpServer(_) => write!(f, "<http server>"),
             Value::TcpStream(_) => write!(f, "<tcp stream>"),
             Value::TcpListener(_) => write!(f, "<tcp listener>"),

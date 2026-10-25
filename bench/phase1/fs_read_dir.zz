@@ -1,0 +1,26 @@
+// bench/phase1/fs_read_dir.zz — time fs.read_dir on a 20k-entry directory.
+// Usage: zz run bench/phase1/fs_read_dir.zz [DIR]
+import std.env
+import std.fs
+import std.time
+
+func main() -> int {
+    dir := env.args()
+    path := if len(dir) > 1 {
+        dir[1]
+    } else {
+        "/home/zaid/Projects/.zz-targets/bench-read-dir-20k"
+    }
+    t0 := time.now_ms()
+    match fs.read_dir(path) {
+        .ok(entries) => {
+            t1 := time.now_ms()
+            println("read_dir n={len(entries)} ms={t1 - t0}")
+            return 0
+        }
+        .err(e) => {
+            println("read_dir err={e}")
+            return 1
+        }
+    }
+}

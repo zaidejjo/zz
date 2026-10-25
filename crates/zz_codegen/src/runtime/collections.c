@@ -565,7 +565,7 @@ static void zz_dict_idx_insert(zz_dict *d, size_t i) {
 // First entry whose key equals `key`. Indexed keys probe the cache, every
 // other key (and every small dict) takes the linear scan — the same result
 // either way, since only int/bool/str keys ever enter the cache.
-static int zz_dict_find(const zz_dict *d, zz_value key, size_t *out) {
+int zz_dict_find(const zz_dict *d, zz_value key, size_t *out) {
     size_t h;
     if (d->idx && zz_dict_key_hash(key, &h)) {
         size_t mask = d->idx_cap - 1;

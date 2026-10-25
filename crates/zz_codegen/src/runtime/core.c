@@ -9266,6 +9266,10 @@ zz_value zz_fs_mkdir_all(zz_value path, int *err) {
     return zz_variant_ok(zz_unit());
 }
 
+// Comparator shared by fs.read_dir, fs.walk_dir, and zz_vfs_read_dir_at:
+// bytewise strcmp order, matching the VM's dict/object ordering.
+static int zz_vfs_str_cmp(const void *a, const void *b);
+
 // Collect sorted entry names (no `.`/`..`). Returns NULL on error with
 // errno preserved; `*n_out` holds the count.
 static char **zz_fs_list_names(const char *p, size_t *n_out) {
@@ -9315,16 +9319,9 @@ static char **zz_fs_list_names(const char *p, size_t *n_out) {
     }
     closedir(d);
 #endif
-    // Insertion sort (directories are small; avoids qsort fn-pointer casts).
-    for (size_t i = 1; i < n; i++) {
-        char *t = names[i];
-        size_t j = i;
-        while (j > 0 && strcmp(names[j - 1], t) > 0) {
-            names[j] = names[j - 1];
-            j--;
-        }
-        names[j] = t;
-    }
+    // qsort (O(n log n) instead of insertion sort O(n²)); paths are
+    // unique so instability is fine. strcmp order matches the VM.
+    qsort(names, n, sizeof(char *), zz_vfs_str_cmp);
     *n_out = n;
     return names;
 }
@@ -9506,16 +9503,9 @@ zz_value zz_fs_walk_dir(zz_value path, int *err) {
         free(paths);
         return zz_fs_err1("walk_dir", p, rc);
     }
-    // Final global sort so VM and AOT agree byte-for-byte.
-    for (size_t i = 1; i < len; i++) {
-        char *t = paths[i];
-        size_t j = i;
-        while (j > 0 && strcmp(paths[j - 1], t) > 0) {
-            paths[j] = paths[j - 1];
-            j--;
-        }
-        paths[j] = t;
-    }
+    // Final global sort so VM and AOT agree byte-for-byte. qsort (O(n log n)
+    // instead of insertion sort O(n²)); paths are unique so instability is fine.
+    qsort(paths, len, sizeof(char *), zz_vfs_str_cmp);
     zz_value out = zz_array_new();
     for (size_t i = 0; i < len; i++) {
         zz_array_push(out.arr, zz_str_new(paths[i], strlen(paths[i])));

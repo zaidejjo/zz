@@ -65,7 +65,7 @@ fn jsonify_value(v: &Value) -> JsonValue {
                     }
                 })
                 .collect();
-            JsonValue::Obj(obj)
+            JsonValue::from(obj)
         }
         Value::Json(j) => (**j).clone(),
         _ => JsonValue::Null,
@@ -753,7 +753,7 @@ pub(crate) fn http_response_json(
         // Always a `Result`: `.ok(json)` on success so `res.json()?`
         // propagates parse failures like every other fallible API.
         Value::Response(r) => match parse_json(&r.body) {
-            Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
+            Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Arc::new(j)))))),
             Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
                 format!("JSON parse error: {e}").into(),
             ))))),
@@ -1463,7 +1463,7 @@ pub(crate) fn http_body_json(
     let body = request_body(args, 0, "std.http.body_json", span)?;
     match parse_json(&body) {
         // Always a `Result` (see `http_response_json`).
-        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
+        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Arc::new(j)))))),
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
             format!("JSON parse error: {e}").into(),
         ))))),

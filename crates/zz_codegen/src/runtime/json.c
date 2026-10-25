@@ -464,12 +464,9 @@ zz_value zz_json_get(zz_value j, zz_value key, int *err) {
     const zz_str *k = key.s;
     switch (inner.tag) {
     case ZZ_DICT: {
-        for (size_t i = 0; i < inner.dict->len; i++) {
-            zz_dict_entry *e = &inner.dict->entries[i];
-            zz_str *ek = zz_dict_key_str(e);
-            if (ek && ek->len == k->len && memcmp(zz_str_cptr(ek), zz_str_cptr(k), k->len) == 0) {
-                return zz_variant_ok(zz_json_wrap(zz_clone(e->val)));
-            }
+        size_t pos;
+        if (zz_dict_find(inner.dict, key, &pos)) {
+            return zz_variant_ok(zz_json_wrap(zz_clone(inner.dict->entries[pos].val)));
         }
         char buf[160];
         int n = snprintf(buf, sizeof buf, "key `%s` not found", zz_str_cptr(k));
@@ -608,13 +605,8 @@ zz_value zz_json_has(zz_value j, zz_value key, int *err) {
     (void)err;
     zz_value v = zz_json_unwrap(j);
     if (v.tag != ZZ_DICT || key.tag != ZZ_STR) return zz_bool(false);
-    for (size_t i = 0; i < v.dict->len; i++) {
-        zz_dict_entry *e = &v.dict->entries[i];
-        if (zz_key_eq(e->key, key)) {
-            return zz_bool(true);
-        }
-    }
-    return zz_bool(false);
+    size_t pos;
+    return zz_bool(zz_dict_find(v.dict, key, &pos));
 }
 
 // Pretty-print a JSON value with 2-space indentation (matches the VM's
@@ -721,6 +713,7 @@ zz_value zz_json_deep_get(zz_value j, zz_value path, int *err) {
     (void)err;
     if (path.tag != ZZ_STR) return zz_variant_err(zz_str_static("expected a string path"));
     zz_value current = zz_json_unwrap(j);
+    int current_owned = 0;
     const char *p = zz_str_cptr(path.s);
     size_t plen = path.s->len;
     size_t start = 0;
@@ -735,22 +728,19 @@ zz_value zz_json_deep_get(zz_value j, zz_value path, int *err) {
         seg_buf[seg_len] = '\0';
         switch (current.tag) {
         case ZZ_DICT: {
-            int found = 0;
-            for (size_t i = 0; i < current.dict->len; i++) {
-                zz_dict_entry *e = &current.dict->entries[i];
-                zz_str *ek = zz_dict_key_str(e);
-                if (ek && ek->len == seg_len &&
-                    memcmp(zz_str_cptr(ek), seg_buf, seg_len) == 0) {
-                    current = zz_clone(e->val);
-                    found = 1;
-                    break;
-                }
-            }
-            if (!found) {
+            zz_value seg_key = zz_str_new(seg_buf, seg_len);
+            size_t pos;
+            if (zz_dict_find(current.dict, seg_key, &pos)) {
+                if (current_owned) zz_release(&current);
+                current = zz_clone(current.dict->entries[pos].val);
+                current_owned = 1;
+            } else {
+                zz_release(&seg_key);
                 char buf[192];
                 int n = snprintf(buf, sizeof buf, "key `%s` not found in path", seg_buf);
                 return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
             }
+            zz_release(&seg_key);
             break;
         }
         case ZZ_ARRAY: {
@@ -768,6 +758,7 @@ zz_value zz_json_deep_get(zz_value j, zz_value path, int *err) {
                 return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
             }
             current = zz_clone(current.arr->items[(size_t)idx]);
+            current_owned = 1;
             break;
         }
         default: {
