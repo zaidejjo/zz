@@ -5839,7 +5839,7 @@ impl Lowerer {
         let mut flat_pats: Vec<FlatPat> = Vec::with_capacity(flat.len());
         for arm in flat.iter() {
             match &arm.pat {
-                Pattern::Variant { .. } => {
+                Pattern::Variant { .. } | Pattern::Tuple { .. } => {
                     let mut conds = Vec::new();
                     let mut binds = Vec::new();
                     let ok = self.flatten_match_pat(
@@ -5863,9 +5863,11 @@ impl Lowerer {
             let is_last_arm = i == flat.len() - 1;
             let arm_needs_else_prefix = i > 0;
             let arm_closes_block = match &arm.pat {
-                Pattern::Binding { .. } | Pattern::Wildcard { .. } | Pattern::Variant { .. } => {
-                    arm.guard.is_none() && is_last_arm
-                }
+                Pattern::Binding { .. }
+                | Pattern::Wildcard { .. }
+                | Pattern::Variant { .. }
+                | Pattern::Literal { .. }
+                | Pattern::Tuple { .. } => arm.guard.is_none() && is_last_arm,
                 _ => false,
             };
 
@@ -6086,7 +6088,45 @@ impl Lowerer {
                     }
                 }
                 Pattern::Tuple { .. } => {
-                    out.push_str("    // unsupported match pattern (tuple)\n");
+                    // Tuple pattern: tag+len condition + element bindings
+                    // were flattened in the pre-loop pass (element temps
+                    // pre-emitted there). Bind each name over its temp,
+                    // emit the arm body, then close the block if this is
+                    // the terminal arm.
+                    names.push_scope();
+                    let fp = &flat_pats[i];
+                    if fp.skip {
+                        names.pop_scope();
+                        continue;
+                    }
+                    let cond = fp.conds.join(" && ");
+                    let full_cond = if let Some(guard_expr) = &arm.guard {
+                        let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                        format!("{cond} && ({guard_c})")
+                    } else {
+                        cond
+                    };
+                    if arm_needs_else_prefix {
+                        out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
+                    } else {
+                        out.push_str(&format!("    if ({full_cond}) {{\n"));
+                    }
+                    for (bname, pexpr) in &fp.binds {
+                        if self.green_active() {
+                            let (ptr, deref, n) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!("        {deref} = {pexpr};\n"));
+                            names.enter_cell(bname, &ptr, &deref, "zz_value", n);
+                        } else {
+                            let cid = names.enter(bname);
+                            out.push_str(&format!("        zz_value {cid} = {pexpr};\n"));
+                        }
+                    }
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
+                    out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                    names.pop_scope();
+                    if arm_closes_block {
+                        out.push_str("    }\n");
+                    }
                 }
                 Pattern::Or { .. } => {
                     // Unreachable: or-patterns are expanded into separate

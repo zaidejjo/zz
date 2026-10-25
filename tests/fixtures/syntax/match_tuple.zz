@@ -1,0 +1,10 @@
+// features: int-arith, locals, match, print, tuple
+// E2E: Tuple pattern match lowers correctly in HIR→C (issue #562 Bug 1)
+func main() {
+    t := (3, 4)
+    v := match t {
+        (a, b) => a * b
+    }
+    println(v)
+    println("tuple_match_ok")
+}
