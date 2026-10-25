@@ -58,6 +58,26 @@ impl FrozenScope {
     }
 }
 
+/// Process-wide environment generation.
+///
+/// Bumped on every binding create/replace (and on freeze, which *removes*
+/// function bindings from the frozen view). The VM memoizes direct-call
+/// resolution per op site, and shadowing in ZZ is dynamic (`f := 5` after
+/// `func f()` wins), so a memo entry is only valid while this counter is
+/// unchanged — one relaxed load per call.
+pub(crate) static ENV_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current generation (see [`ENV_GEN`]).
+#[inline]
+pub(crate) fn env_gen() -> u64 {
+    ENV_GEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+fn bump_env_gen() {
+    ENV_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A binding projected without cloning its value, for callers that only
 /// need to dispatch on what a name is bound to.
 ///
@@ -121,6 +141,7 @@ impl Env {
     pub fn define(&mut self, name: &str, value: Value) {
         self.vars.insert(name.to_string(), value);
         self.bump();
+        bump_env_gen();
     }
 
     /// Bump the mutation version (new or replaced binding).
@@ -232,6 +253,7 @@ impl Env {
         if self.vars.contains_key(name) {
             self.vars.insert(name.to_string(), value);
             self.bump();
+            bump_env_gen();
             return true;
         }
         // Recurse through the parent link without holding any borrow
@@ -741,6 +763,9 @@ impl EnvLink {
 
     /// [`frozen_scope`](Self::frozen_scope) as a link (for chain slots).
     pub fn frozen_view(link: &EnvLink) -> EnvLink {
+        // Freezing drops `Value::Func` bindings, so a memoized direct call
+        // must not survive it.
+        bump_env_gen();
         EnvLink::Frozen(Self::frozen_scope(link))
     }
 

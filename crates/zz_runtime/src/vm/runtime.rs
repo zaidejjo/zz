@@ -199,7 +199,28 @@ pub struct Vm {
     /// rules) update live while parked. `None` (the default) disables
     /// the per-op check to a single `Option` discriminant test.
     pub debug: Option<std::sync::Arc<std::sync::Mutex<crate::debug::DebugSession>>>,
+    /// Memoized `CallPath` resolution, indexed by `(chunk, ip)` — see
+    /// [`Vm::direct_call_hit`].
+    call_cache: Vec<Option<CachedDirect>>,
 }
+
+/// One memoized `CallPath` resolution.
+///
+/// `gen` pins the environment + function-table state the entry was resolved
+/// against; any define/assign/freeze/insert invalidates every entry at once
+/// (shadowing is dynamic, see [`crate::env::ENV_GEN`]).
+struct CachedDirect {
+    chunk_id: u64,
+    ip: usize,
+    argc: u16,
+    gen: u64,
+    callee: Arc<Chunk>,
+    env: crate::env::EnvLink,
+}
+
+/// Power-of-two size of [`Vm::call_cache`] (direct-mapped: a collision just
+/// costs one extra resolution).
+const CALL_CACHE_LEN: usize = 256;
 
 /// State saved during defer-before-return execution.
 struct DeferReturn {
@@ -233,6 +254,7 @@ impl Vm {
             slice_budget: SAFEPOINT_BUDGET,
             slice_start: None,
             debug: None,
+            call_cache: (0..CALL_CACHE_LEN).map(|_| None).collect(),
         }
     }
 
@@ -2802,7 +2824,25 @@ impl Vm {
                     // equivalent — a shadowing binding, a native, defaults to
                     // fill, a wrong arity — falls through unchanged.
                     self.frames.last_mut().unwrap().ip = ip;
-                    match self.try_enter_direct_call(joined, args, span, interp) {
+                    // Memoized resolution: this site calls the same function
+                    // until the environment or the function table changes, so
+                    // the two name probes (`env.bound` + `funcs.get`, ~120 ns
+                    // together) only run once per generation.
+                    let caller = self.frames.last().map(|f| f.chunk.id).unwrap_or(0);
+                    let gen = crate::env::env_gen() ^ interp.funcs_version;
+                    if let Some((chunk, env)) = self.direct_call_hit(caller, ip, argc, gen) {
+                        self.enter_call_frame(chunk, env, args, span, interp);
+                        re_cache!();
+                        yield_check!();
+                        continue;
+                    }
+                    match self.try_enter_direct_call(
+                        joined,
+                        args,
+                        span,
+                        interp,
+                        Some((caller, ip, gen)),
+                    ) {
                         None => {
                             re_cache!();
                             yield_check!();
@@ -3307,35 +3347,86 @@ impl Vm {
         args: Vec<Value>,
         span: Span,
         interp: &mut Interp,
+        site: Option<(u64, usize, u64)>,
     ) -> Option<Vec<Value>> {
+        match self.resolve_direct(name, args.len(), interp) {
+            Some((chunk, env)) => {
+                if let Some((chunk_id, ip, gen)) = site {
+                    self.fill_direct_call(chunk_id, ip, args.len() as u16, gen, &chunk, &env);
+                }
+                self.enter_call_frame(chunk, env, args, span, interp);
+                None
+            }
+            None => Some(args),
+        }
+    }
+
+    /// Resolve a call name to a compiled function the direct path can enter
+    /// without materialising a `Value`.
+    ///
+    /// `None` means "take the general path": a shadowing non-function
+    /// binding, a native, a canonical `std.*` alias, defaults to fill, a
+    /// chunk-less closure, or an arity mismatch.
+    fn resolve_direct(
+        &self,
+        name: &str,
+        argc: usize,
+        interp: &Interp,
+    ) -> Option<(Arc<Chunk>, crate::env::EnvLink)> {
         // Bindings win over the function table (mirrors
         // `resolve_path_value`'s environment-first order).
         match interp.env.bound(name) {
-            Some(Bound::Compiled { chunk, env, params }) if args.len() == params => {
-                self.enter_call_frame(chunk, env, args, span, interp);
-                return None;
+            Some(Bound::Compiled { chunk, env, params }) if argc == params => {
+                return Some((chunk, env));
             }
-            Some(_) => return Some(args),
+            Some(_) => return None,
             None => {}
         }
         // Unbound: a direct hit in the function table is the same value
         // the general path resolves next. Canonical `std.*` aliases are
         // left to it (rare, and they carry no local binding to shadow).
-        let Some(fv) = interp.funcs.get(name) else {
-            return Some(args);
-        };
-        // Trailing defaults (and arity errors) need `params` themselves,
-        // so they take the general path even though it costs the clone.
-        if args.len() != fv.params.len() {
-            return Some(args);
+        let fv = interp.funcs.get(name)?;
+        if argc != fv.params.len() {
+            return None;
         }
-        let Some(chunk) = fv.chunk.as_ref() else {
-            return Some(args);
-        };
-        let chunk = Arc::clone(chunk);
-        let env = fv.env.clone();
-        self.enter_call_frame(chunk, env, args, span, interp);
-        None
+        let chunk = fv.chunk.as_ref()?;
+        Some((Arc::clone(chunk), fv.env.clone()))
+    }
+
+    /// Memoized [`Vm::resolve_direct`] for a `CallPath` site.
+    fn direct_call_hit(
+        &self,
+        chunk_id: u64,
+        ip: usize,
+        argc: u16,
+        gen: u64,
+    ) -> Option<(Arc<Chunk>, crate::env::EnvLink)> {
+        let e = self.call_cache[(chunk_id as usize ^ ip) & (CALL_CACHE_LEN - 1)].as_ref()?;
+        if e.chunk_id == chunk_id && e.ip == ip && e.argc == argc && e.gen == gen {
+            Some((Arc::clone(&e.callee), e.env.clone()))
+        } else {
+            None
+        }
+    }
+
+    fn fill_direct_call(
+        &mut self,
+        chunk_id: u64,
+        ip: usize,
+        argc: u16,
+        gen: u64,
+        callee: &Arc<Chunk>,
+        env: &crate::env::EnvLink,
+    ) {
+        let i = (chunk_id as usize ^ ip) & (CALL_CACHE_LEN - 1);
+        self.call_cache[i] = Some(CachedDirect {
+            chunk_id,
+            ip,
+            argc,
+            gen,
+            callee: Arc::clone(callee),
+            env: env.clone(),
+        });
     }
 
     fn call_value(
