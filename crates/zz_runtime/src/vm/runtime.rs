@@ -2807,14 +2807,6 @@ impl Vm {
                     let argc = *argc;
                     let span = *span;
                     let pspan = *pspan;
-                    let mut args = take_scratch_args();
-                    args.reserve(argc as usize);
-                    for _ in 0..argc {
-                        args.push(self.stack.pop().unwrap());
-                    }
-                    if args.len() > 1 {
-                        args.reverse();
-                    }
                     // Direct script-function call: `fib(n)` and module paths
                     // like `lib.fib(n)` resolve to a compiled function bound
                     // under the precomputed `joined` key. Entering its frame
@@ -2831,10 +2823,25 @@ impl Vm {
                     let caller = self.frames.last().map(|f| f.chunk.id).unwrap_or(0);
                     let gen = crate::env::env_gen() ^ interp.funcs_version;
                     if let Some((chunk, env)) = self.direct_call_hit(caller, ip, argc, gen) {
-                        self.enter_call_frame(chunk, env, args, span, interp);
+                        // Arguments are already contiguous at the top of the
+                        // stack, in parameter order: no scratch buffer, no
+                        // pop/push round trip.
+                        let base = self.stack.len() - argc as usize;
+                        self.open_frame(base, chunk, env, span, interp);
                         re_cache!();
                         yield_check!();
                         continue;
+                    }
+                    // Miss: the fallbacks below want the arguments off the
+                    // stack (they may be reversed, reordered, or handed to a
+                    // native), so pay the scratch buffer once.
+                    let mut args = take_scratch_args();
+                    args.reserve(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.stack.pop().unwrap());
+                    }
+                    if args.len() > 1 {
+                        args.reverse();
                     }
                     match self.try_enter_direct_call(
                         joined,
@@ -3313,6 +3320,23 @@ impl Vm {
         // slot below — steady-state calls never allocate.
         self.stack.append(&mut args);
         return_scratch_args(args);
+        self.open_frame(stack_base, chunk, env, span, interp);
+    }
+
+    /// Push a call frame whose arguments already occupy the top of the
+    /// value stack (`stack_base = stack.len() - argc`).
+    ///
+    /// The direct-call site memo resolves the callee *before* touching the
+    /// stack, so a hit copies nothing: the arguments are already in
+    /// parameter order where the callee expects them.
+    fn open_frame(
+        &mut self,
+        stack_base: usize,
+        chunk: Arc<Chunk>,
+        env: EnvLink,
+        span: Span,
+        interp: &mut Interp,
+    ) {
         let prev_env = std::mem::replace(&mut interp.env, env);
         let saved_defers = std::mem::take(&mut self.defer_stack);
         self.frames.push(Frame {
