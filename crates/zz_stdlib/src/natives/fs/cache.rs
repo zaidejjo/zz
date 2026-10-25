@@ -413,6 +413,14 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// The cache is process-wide; serialize these tests so one test's
+    /// invalidation/eviction cannot make another's invariants flaky.
+    static TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn temp_path(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("zz_fs_cache_{}_{}", std::process::id(), name));
         std::fs::create_dir_all(&dir).unwrap();
@@ -421,6 +429,7 @@ mod tests {
 
     #[test]
     fn hit_returns_shared_bytes() {
+        let _guard = guard();
         let p = temp_path("hit");
         std::fs::write(&p, b"hello").unwrap();
         let a = read(p.to_str().unwrap()).unwrap();
@@ -436,6 +445,7 @@ mod tests {
 
     #[test]
     fn external_rewrite_is_observed() {
+        let _guard = guard();
         let p = temp_path("rewrite");
         std::fs::write(&p, b"aaaa").unwrap();
         let _ = read(p.to_str().unwrap()).unwrap();
@@ -449,6 +459,7 @@ mod tests {
 
     #[test]
     fn invalidate_forces_reread() {
+        let _guard = guard();
         let p = temp_path("invalidate");
         std::fs::write(&p, b"one").unwrap();
         assert_eq!(
@@ -470,6 +481,7 @@ mod tests {
 
     #[test]
     fn prefix_invalidation_drops_children() {
+        let _guard = guard();
         let dir = std::env::temp_dir().join(format!("zz_fs_cache_prefix_{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let p = dir.join("sub").join("f.txt");
@@ -485,6 +497,7 @@ mod tests {
 
     #[test]
     fn non_utf8_is_negative_cached() {
+        let _guard = guard();
         let p = temp_path("non_utf8");
         std::fs::write(&p, [0xff, 0xfe, 0x00]).unwrap();
         let a = read(p.to_str().unwrap()).unwrap();
@@ -498,6 +511,7 @@ mod tests {
 
     #[test]
     fn empty_files_are_not_cached() {
+        let _guard = guard();
         let p = temp_path("empty");
         std::fs::write(&p, b"").unwrap();
         let a = read(p.to_str().unwrap()).unwrap();
@@ -508,6 +522,7 @@ mod tests {
 
     #[test]
     fn replacement_churn_keeps_order_bounded() {
+        let _guard = guard();
         let p = temp_path("churn");
         let path = p.to_str().unwrap();
         for i in 0..1_000u32 {
