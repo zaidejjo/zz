@@ -4,6 +4,7 @@ use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::ast::Ty;
 use zz_frontend::diag::error_at;
+use zz_frontend::levenshtein::suggest;
 use zz_frontend::span::Span;
 
 impl Checker {
@@ -324,13 +325,79 @@ impl Checker {
                         // matches, so user types always win.
                         Type::Opaque(tag.to_string())
                     } else {
-                        self.errors
-                            .push(error_at(format!("unknown type `{name}`"), ty.span));
+                        let msg = if let Some(sugg) = self.suggest_type_name(name) {
+                            format!("unknown type `{name}` — did you mean `{sugg}`?")
+                        } else {
+                            format!("unknown type `{name}`")
+                        };
+                        self.errors.push(error_at(msg, ty.span));
                         Type::Unit
                     }
                 }
             }
         }
+    }
+
+    /// Suggest the closest known type name for an unknown type, or a
+    /// builtin synonym (`string` → `str`) that falls outside the
+    /// Levenshtein threshold. Returns `None` when there is nothing close
+    /// enough to suggest, in which case the plain "unknown type" message
+    /// stands alone.
+    fn suggest_type_name(&self, name: &str) -> Option<String> {
+        // Common synonym that Levenshtein can't reach (`string` vs `str`
+        // differ by more than the allowed edit distance).
+        if name == "string" {
+            return Some("str".to_string());
+        }
+        let mut candidates: Vec<&str> = Vec::new();
+        // Builtin type names.
+        candidates.extend([
+            "int",
+            "float",
+            "bool",
+            "str",
+            "unit",
+            "void",
+            "json",
+            "bytes",
+            "db",
+            "sqlz",
+            "chan",
+            "task.join",
+            "http.server",
+            "tcp.stream",
+            "tcp.listener",
+            "http.response",
+            "http.request",
+        ]);
+        // Opaque handle tags users can name in type position.
+        candidates.extend([
+            "tls",
+            "tls_listener",
+            "unix",
+            "unix_listener",
+            "cell",
+            "file",
+            "zzfs",
+            "regexp",
+            "span",
+            "args",
+            "process",
+        ]);
+        // User-defined structs, enums, and aliases (canonical + bare).
+        for s in self.structs.keys() {
+            candidates.push(s.as_str());
+        }
+        for e in self.enums.keys() {
+            candidates.push(e.as_str());
+        }
+        for a in self.aliases.keys() {
+            candidates.push(a.as_str());
+        }
+        for a in self.alias_asts.keys() {
+            candidates.push(a.as_str());
+        }
+        suggest(name, &candidates).map(|(s, _)| s.to_string())
     }
 }
 

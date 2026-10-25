@@ -444,6 +444,45 @@ fn struct_unknown_type_errors() {
 }
 
 #[test]
+fn unknown_type_suggests_str_for_string() {
+    // `string` is not a ZZ type; the diagnostic must suggest `str`.
+    let r = check_src("func f() -> string { return \"x\" }");
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("unknown type `string` — did you mean `str`?")),
+        "expected `string` → `str` suggestion, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unknown_type_levenshtein_suggests_str() {
+    // A near-miss typo of `str` should suggest `str` via Levenshtein.
+    let r = check_src("func f() -> strng { return 1 }");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("did you mean `str`?")),
+        "expected `str` suggestion for `strng`, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unknown_type_no_suggestion_when_far() {
+    // A genuinely unrelated name should get the plain message, no hint.
+    let r = check_src("func f() -> qwerty { return 1 }");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message == "unknown type `qwerty`"),
+        "expected plain `unknown type` message, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn struct_self_reference_resolves() {
     // Recursive fields (behind arrays/options) resolve: the type name is
     // pre-registered before fields are collected.
