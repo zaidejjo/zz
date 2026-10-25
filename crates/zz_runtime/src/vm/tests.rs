@@ -1813,8 +1813,13 @@ fn direct_call_enters_frame_for_compiled_function() {
         std::rc::Rc::new(mk_chunked_func(&def_env, 1)),
     );
     let mut vm = Vm::new();
-    let entered =
-        vm.try_enter_direct_call("top.fib", vec![Value::Int(1)], Span::new(0, 0), &mut interp);
+    let entered = vm.try_enter_direct_call(
+        "top.fib",
+        vec![Value::Int(1)],
+        Span::new(0, 0),
+        &mut interp,
+        None,
+    );
     assert!(entered.is_none(), "matching arity must enter the frame");
     assert!(
         EnvLink::ptr_eq(&interp.env, &def_env),
@@ -1846,26 +1851,26 @@ fn direct_call_declines_and_hands_the_arguments_back() {
 
     // Arity mismatch: defaults and arity errors belong to the general path.
     let back = vm
-        .try_enter_direct_call("top.fib", Vec::new(), span, &mut interp)
+        .try_enter_direct_call("top.fib", Vec::new(), span, &mut interp, None)
         .expect("declined calls return their arguments");
     assert!(back.is_empty());
 
     // Unknown name.
     let back = vm
-        .try_enter_direct_call("top.missing", vec![Value::Int(1)], span, &mut interp)
+        .try_enter_direct_call("top.missing", vec![Value::Int(1)], span, &mut interp, None)
         .expect("declined calls return their arguments");
     assert_eq!(back, vec![Value::Int(1)]);
 
     // Registered but without bytecode (an AST-only closure).
     let back = vm
-        .try_enter_direct_call("top.closure", Vec::new(), span, &mut interp)
+        .try_enter_direct_call("top.closure", Vec::new(), span, &mut interp, None)
         .expect("declined calls return their arguments");
     assert!(back.is_empty());
 
     // A shadowing non-function binding wins over the function table.
     interp.env.define("top.fib", Value::Int(9));
     let back = vm
-        .try_enter_direct_call("top.fib", vec![Value::Int(1)], span, &mut interp)
+        .try_enter_direct_call("top.fib", vec![Value::Int(1)], span, &mut interp, None)
         .expect("declined calls return their arguments");
     assert_eq!(back, vec![Value::Int(1)]);
 
@@ -3003,5 +3008,73 @@ fn vm_const_compares_match_tree_walker() {
     assert_eq!(
         run_src("c := \"a\"\nn := 0\nif c == \"a\" { n = 1 }\nn").unwrap(),
         Value::Int(1)
+    );
+}
+
+#[test]
+fn cache_shadow_after_call() {
+    assert_same(
+        "func f() -> int { return 7 }\n\
+         func g() -> int { return f() }\n\
+         n := 0\n\
+         n = n + g()\n\
+         f := 5\n\
+         n = n + g()\n\
+         n",
+    );
+}
+
+#[test]
+fn cache_shadow_from_start() {
+    assert_same(
+        "func f() -> int { return 7 }\n\
+         func g() -> int { return f() }\n\
+         f := 5\n\
+         g()",
+    );
+}
+
+#[test]
+fn cache_recursive_small_vm() {
+    assert_eq!(
+        run_src("func fib(n: int) -> int { return if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\nfib(6)")
+            .ok(),
+        Some(Value::Int(8))
+    );
+}
+
+/// A hot recursive site (`fib`) keeps hitting the memo and stays correct.
+///
+/// The tree-walker runs out of native stack on recursive programs in this
+/// test binary (see `bench_fib_vm_vs_tree`), so this one is VM-only;
+/// differential recursion coverage lives in `vm_fib_...`.
+#[test]
+fn cache_recursive_hot() {
+    assert_eq!(
+        run_src(
+            "func fib(n: int) -> int {\n\
+             if n < 2 { return n }\n\
+             return fib(n - 1) + fib(n - 2)\n\
+             }\n\
+             fib(15)"
+        )
+        .ok(),
+        Some(Value::Int(610))
+    );
+}
+
+#[test]
+fn cache_rebind_global() {
+    assert_eq!(
+        run_src(
+            "func a() -> int { return 1 }\n\
+             func b() -> int { return 2 }\n\
+             func call() -> int { return a() }\n\
+             n := call()\n\
+             a = b\n\
+             n + call()"
+        )
+        .ok(),
+        Some(Value::Int(3))
     );
 }
