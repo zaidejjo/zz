@@ -1678,6 +1678,28 @@ impl Compiler {
     ) -> Option<Op> {
         let arr_slot = self.resolve_expr_slot(arr)?;
         let idx_slot = self.resolve_expr_slot(idx)?;
+        // Only fuse for indexable types: Array, Tuple, Str, Bytes, Dict.
+        // Other types (Int, Float, Bool, Unit, etc.) fall back to IndexOp
+        // which gives the proper runtime type error.
+        let ty = self.type_of(arr.span())?;
+        if !matches!(
+            ty,
+            zz_checker::Type::Array(_)
+                | zz_checker::Type::Tuple(_)
+                | zz_checker::Type::Str
+                | zz_checker::Type::Bytes
+                | zz_checker::Type::Dict(_, _)
+        ) {
+            return None;
+        }
+        // Array/tuple/str/bytes need an Int index (matches get_index).
+        // Dicts accept any key type.
+        if !matches!(ty, zz_checker::Type::Dict(_, _)) {
+            let idx_ty = self.type_of(idx.span())?;
+            if !matches!(idx_ty, zz_checker::Type::Int) {
+                return None;
+            }
+        }
         Some(Op::IndexIntSlot {
             arr: arr_slot,
             idx: idx_slot,
