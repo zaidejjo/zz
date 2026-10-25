@@ -3913,6 +3913,56 @@ fn unannotated_fallthrough_stays_unit() {
 }
 
 #[test]
+fn implicit_return_type_warns_on_value_tail() {
+    // No `->` annotation but the body yields a value: should warn that it is discarded.
+    let r = check_src("func greet(name: str) { \"Hello, {name}\" }");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        warns
+            .iter()
+            .any(|m| m.contains("no `->` return type") && m.contains("discarded")),
+        "expected implicit-return warning, got: {warns:?}"
+    );
+}
+
+#[test]
+fn implicit_return_type_no_warn_on_unit_tail() {
+    // No `->` annotation and body yields unit: no warning.
+    let r = check_src("func greet(name: str) { println(\"Hello, {name}\") }");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("no `->` return type")),
+        "should not warn on unit tail: {warns:?}"
+    );
+}
+
+#[test]
+fn explicit_return_type_no_implicit_warning() {
+    // With `-> int` annotation and value tail: error (missing return), not the implicit warning.
+    let r = check_src("func greet(name: str) -> int { \"Hello, {name}\" }");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("no `->` return type")),
+        "should not warn when return type is explicit: {warns:?}"
+    );
+}
+
+#[test]
 fn return_if_expression_checks() {
     let r = check_src("func f(c: bool) -> int {\n    return if c { 1 } else { 2 }\n}");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
