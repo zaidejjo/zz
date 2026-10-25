@@ -1464,6 +1464,63 @@ impl Vm {
                         }
                     }
                 }
+                Op::JumpIfFalseSlotCmpIntImm {
+                    a,
+                    imm,
+                    op,
+                    target,
+                    span,
+                } => {
+                    let idx = cached_base + *a as usize;
+                    let cond = match &self.stack[idx] {
+                        Value::Int(x) => match int_cmp(*op, *x, *imm) {
+                            Some(c) => Value::Bool(c),
+                            None => eval_int_binary(*op, *x, *imm, *span)?,
+                        },
+                        _ => {
+                            let l = self.stack[idx].clone();
+                            eval_binary(*op, l, Value::Int(*imm), *span)?
+                        }
+                    };
+                    let jumped = match cond {
+                        Value::Bool(b) => !b,
+                        // Same contract as `JumpIfFalseBool`, which this op
+                        // replaces.
+                        _ => return Err(self.error("`if` condition must be a bool", *span)),
+                    };
+                    record_branch!(jumped);
+                    if jumped {
+                        ip = *target;
+                    }
+                }
+                Op::JumpIfFalseSlotCmpIntSlot {
+                    a,
+                    b,
+                    op,
+                    target,
+                    span,
+                } => {
+                    let idx_a = cached_base + *a as usize;
+                    let idx_b = cached_base + *b as usize;
+                    let cond = match (&self.stack[idx_a], &self.stack[idx_b]) {
+                        (Value::Int(x), Value::Int(y)) => match int_cmp(*op, *x, *y) {
+                            Some(c) => Value::Bool(c),
+                            None => eval_int_binary(*op, *x, *y, *span)?,
+                        },
+                        _ => {
+                            let (l, r) = (self.stack[idx_a].clone(), self.stack[idx_b].clone());
+                            eval_binary(*op, l, r, *span)?
+                        }
+                    };
+                    let jumped = match cond {
+                        Value::Bool(b) => !b,
+                        _ => return Err(self.error("`if` condition must be a bool", *span)),
+                    };
+                    record_branch!(jumped);
+                    if jumped {
+                        ip = *target;
+                    }
+                }
                 Op::PushSlotIntImm { a, imm, op, span } => {
                     let idx = cached_base + *a as usize;
                     let v = match &self.stack[idx] {

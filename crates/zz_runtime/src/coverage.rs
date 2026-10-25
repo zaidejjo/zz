@@ -63,7 +63,8 @@ pub struct CoverageState {
     pub branch_of: HashMap<(usize, u32), usize>,
 }
 
-/// One conditional jump: `JumpIfFalse/True/FalseBool` (if/match guards),
+/// One conditional jump: `JumpIfFalse/True/FalseBool` (if/match guards), the
+/// fused slot-compare branches,
 /// `WhileCond` and `ForNext` (loop exits).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchSite {
@@ -304,6 +305,10 @@ fn branch_target(op: &Op) -> Option<usize> {
     match op {
         Op::JumpIfFalse(t) | Op::JumpIfTrue(t) => Some(*t),
         Op::JumpIfFalseBool(t, _) => Some(*t),
+        // Fused `if` guards: one op, still one branch site (the compare and
+        // the branch it absorbed used to be registered as a pair).
+        Op::JumpIfFalseSlotCmpIntImm { target, .. }
+        | Op::JumpIfFalseSlotCmpIntSlot { target, .. } => Some(*target),
         Op::WhileCond { exit, .. } => Some(*exit),
         Op::ForNext { exit, .. } => Some(*exit),
         _ => None,

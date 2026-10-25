@@ -252,6 +252,26 @@ pub enum Op {
         imm: i64,
         op: BinOp,
     },
+    /// Jump to `target` unless `Bool(slot[a] op imm)` holds; desugars to
+    /// `LoadSlot a; PushConst imm; BinOp op; JumpIfFalse`.
+    ///
+    /// The fused form of an `if` guard (`if i < n`): the compare's `Bool`
+    /// never reaches the stack. `while` tests keep the two-op shape, because
+    /// `WhileCond` carries the back-edge and `break` bookkeeping.
+    JumpIfFalseSlotCmpIntImm {
+        a: u16,
+        imm: i64,
+        op: BinOp,
+        target: u32,
+    },
+    /// Jump to `target` unless `Bool(slot[a] op slot[b])` holds; desugars to
+    /// `LoadSlot a; LoadSlot b; BinOp op; JumpIfFalse`.
+    JumpIfFalseSlotCmpIntSlot {
+        a: u16,
+        b: u16,
+        op: BinOp,
+        target: u32,
+    },
 
     // ---- typed integer arithmetic (wrap; trap MIN/-1, MIN%-1, div0) ----
     IntAdd,
@@ -501,6 +521,8 @@ impl Op {
             Op::SlotCmpIntImm { .. } => 90,
             Op::SlotCmpConst { .. } => 91,
             Op::PushSlotIntImm { .. } => 92,
+            Op::JumpIfFalseSlotCmpIntImm { .. } => 93,
+            Op::JumpIfFalseSlotCmpIntSlot { .. } => 94,
             Op::IntAdd => 14,
             Op::IntSub => 15,
             Op::IntMul => 16,
@@ -600,6 +622,8 @@ impl Op {
             Op::SlotCmpIntImm { .. } => "slotcmpintimm",
             Op::SlotCmpConst { .. } => "slotcmpconst",
             Op::PushSlotIntImm { .. } => "pushslotintimm",
+            Op::JumpIfFalseSlotCmpIntImm { .. } => "jumpiffalseslotcmpintimm",
+            Op::JumpIfFalseSlotCmpIntSlot { .. } => "jumpiffalseslotcmpintslot",
             Op::IntAdd => "iadd",
             Op::IntSub => "isub",
             Op::IntMul => "imul",
@@ -686,7 +710,8 @@ impl Op {
             Op::LoadSlot(s) | Op::StoreSlot(s) | Op::SlotInc { slot: s } => f(*s),
             Op::SlotAddInt { dst, src }
             | Op::SlotLessIntSlot { a: dst, b: src }
-            | Op::SlotCmpIntSlot { a: dst, b: src, .. } => {
+            | Op::SlotCmpIntSlot { a: dst, b: src, .. }
+            | Op::JumpIfFalseSlotCmpIntSlot { a: dst, b: src, .. } => {
                 f(*dst);
                 f(*src);
             }
@@ -694,6 +719,7 @@ impl Op {
             | Op::SlotLessIntImm { a: dst, .. }
             | Op::SlotCmpIntImm { a: dst, .. }
             | Op::PushSlotIntImm { a: dst, .. }
+            | Op::JumpIfFalseSlotCmpIntImm { a: dst, .. }
             | Op::SlotCmpConst { a: dst, .. } => f(*dst),
             Op::SlotBinaryInt { dst, lhs, rhs, .. } => {
                 f(*dst);

@@ -223,6 +223,32 @@ pub enum Op {
         op: zz_frontend::ast::BinOp,
         span: Span,
     },
+    /// Jump to `target` unless `Int(slot[a]) op imm` holds.
+    ///
+    /// The fused `SlotCmpIntImm` + `JumpIfFalseBool` pair an `if` condition
+    /// emits: a loop guard written `if i < n` cost two dispatches per
+    /// iteration plus the `Bool` on the stack. `while` tests keep the two-op
+    /// shape because `WhileCond` carries the loop bookkeeping (back-edge,
+    /// `break` target, yield check).
+    ///
+    /// Falls back to `eval_binary` when the slot is not an `Int`, and keeps
+    /// the `if`-condition-must-be-a-bool error of the op it replaces.
+    JumpIfFalseSlotCmpIntImm {
+        a: u16,
+        imm: i64,
+        op: zz_frontend::ast::BinOp,
+        target: usize,
+        span: Span,
+    },
+    /// Jump to `target` unless `Int(slot[a]) op Int(slot[b])` holds; the
+    /// fused `SlotCmpIntSlot` + `JumpIfFalseBool` pair.
+    JumpIfFalseSlotCmpIntSlot {
+        a: u16,
+        b: u16,
+        op: zz_frontend::ast::BinOp,
+        target: usize,
+        span: Span,
+    },
     /// Compare a slot against a constant-pool entry, push `Bool(a op c)`.
     ///
     /// `SlotCmpIntImm` inlines `i64` literals; every other literal (string,
@@ -653,6 +679,8 @@ impl Op {
             Op::SlotBinaryInt { .. } => "SlotBinaryInt",
             Op::SlotBinaryIntImm { .. } => "SlotBinaryIntImm",
             Op::PushSlotIntImm { .. } => "PushSlotIntImm",
+            Op::JumpIfFalseSlotCmpIntImm { .. } => "JumpIfFalseSlotCmpIntImm",
+            Op::JumpIfFalseSlotCmpIntSlot { .. } => "JumpIfFalseSlotCmpIntSlot",
             Op::MakeFunc { .. } => "MakeFunc",
             Op::RegisterStruct { .. } => "RegisterStruct",
             Op::RegisterEnum { .. } => "RegisterEnum",
@@ -748,7 +776,9 @@ impl Op {
             | Op::SlotCmpConst { .. }
             | Op::SlotBinaryInt { .. }
             | Op::SlotBinaryIntImm { .. }
-            | Op::PushSlotIntImm { .. } => OpClass::Fused,
+            | Op::PushSlotIntImm { .. }
+            | Op::JumpIfFalseSlotCmpIntImm { .. }
+            | Op::JumpIfFalseSlotCmpIntSlot { .. } => OpClass::Fused,
 
             Op::IntAdd(..)
             | Op::IntSub(..)

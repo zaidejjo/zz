@@ -432,6 +432,24 @@ impl<'a> Raiser<'a> {
                 imm: *imm,
                 op: Self::raise_binop(*op),
             }),
+            Op::JumpIfFalseSlotCmpIntImm { a, imm, op, target } => {
+                Ok(VmOp::JumpIfFalseSlotCmpIntImm {
+                    a: *a,
+                    imm: *imm,
+                    op: Self::raise_binop(*op),
+                    target: *target as usize,
+                    span: VmSpan::default(),
+                })
+            }
+            Op::JumpIfFalseSlotCmpIntSlot { a, b, op, target } => {
+                Ok(VmOp::JumpIfFalseSlotCmpIntSlot {
+                    a: *a,
+                    b: *b,
+                    op: Self::raise_binop(*op),
+                    target: *target as usize,
+                    span: VmSpan::default(),
+                })
+            }
             Op::PushSlotIntImm { a, imm, op } => Ok(VmOp::PushSlotIntImm {
                 a: *a,
                 imm: *imm,
