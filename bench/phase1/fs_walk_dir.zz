@@ -6,8 +6,8 @@ import std.time
 
 func main() -> int {
     dir := env.args()
-    path := if len(dir) > 1 {
-        dir[1]
+    path := if len(dir) > 0 {
+        dir[0]
     } else {
         "/home/zaid/Projects/.zz-targets/bench-read-dir-20k"
     }

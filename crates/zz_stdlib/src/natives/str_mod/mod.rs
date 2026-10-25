@@ -23,10 +23,11 @@ pub(crate) fn str_split(
 ) -> Result<Value, EvalError> {
     let s = expect_str(args, 0, "std.str.split")?;
     let sep = expect_str(args, 1, "std.str.split")?;
-    let parts: Vec<Value> = s
-        .split(&sep)
-        .map(|p| Value::Str(p.to_string().into()))
-        .collect();
+    // Pre-size: worst case one part per byte (single-char separator).
+    let mut parts: Vec<Value> = Vec::with_capacity(s.len().max(1));
+    for p in s.split(&sep) {
+        parts.push(Value::Str(p.to_string().into()));
+    }
     Ok(Value::Array(std::sync::Arc::new(parts)))
 }
 
@@ -933,15 +934,27 @@ pub(crate) fn str_join(
         }
     };
     let sep = expect_str(args, 1, "str.join")?;
-    let strs: Vec<String> = items
-        .iter()
-        .map(|v| match v {
-            Value::Str(s) => (**s).clone(),
-            // Display semantics so Options unwrap instead of leaking wrappers.
-            other => other.to_display_string(),
-        })
-        .collect();
-    Ok(Value::Str(strs.join(&sep).into()))
+    // Pre-size output: sum of item string lengths + separators between items.
+    let mut total = sep.len() * items.len().saturating_sub(1);
+    for v in &*items {
+        match v {
+            Value::Str(s) => total += s.len(),
+            other => total += other.to_display_string().len(),
+        }
+    }
+    let mut out = String::with_capacity(total);
+    let mut first = true;
+    for v in &*items {
+        if !first {
+            out.push_str(&sep);
+        }
+        first = false;
+        match v {
+            Value::Str(s) => out.push_str(s),
+            other => out.push_str(&other.to_display_string()),
+        }
+    }
+    Ok(Value::Str(out.into()))
 }
 
 pub(crate) fn str_trim_start(

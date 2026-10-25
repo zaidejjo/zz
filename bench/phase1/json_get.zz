@@ -1,6 +1,6 @@
 // bench/phase1/json_get.zz — time json.get over all keys of a big object.
 // Usage: zz run bench/phase1/json_get.zz [DATA_DIR]
-//   reads <DATA_DIR>/bench-big.json (6040 keys) and gets every key.
+//   reads <DATA_DIR>/bench-big.json and gets every key.
 import std.env
 import std.fs
 import std.json
@@ -8,8 +8,8 @@ import std.time
 
 func main() -> int {
     args := env.args()
-    data_dir := if len(args) > 1 {
-        args[1]
+    data_dir := if len(args) > 0 {
+        args[0]
     } else {
         "/home/zaid/Projects/.zz-targets"
     }
