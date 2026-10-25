@@ -34,6 +34,24 @@ zz fmt -c src/    # dry run, exit 1 if changed
 zz fmt src/
 ```
 
+The formatter never drops a comment. A comment inside a literal, a field
+list, an argument list, a tuple, a match arm or an enum variant keeps
+its place:
+
+```zz
+xs := [
+    1, // first
+    2, // second
+]
+```
+
+A list that carries a comment is written one item per line; a comment
+that sat on the item's line stays there, a comment that sat on a line of
+its own keeps that line. A comment in a position the formatter cannot
+model (an `if` condition, for example) keeps the surrounding statement
+as it was written. Formatting is idempotent: formatting a formatted file
+changes nothing.
+
 ## Diagnostics shape
 
 ```

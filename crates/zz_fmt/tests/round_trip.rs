@@ -260,6 +260,111 @@ fn inline_block_comment_preserved() {
     assert!(out.contains("/* hi */"));
 }
 
+/// `#587`: a comment inside a literal, a field list or an argument list
+/// must survive formatting.
+///
+/// The emitter only walked trivia at statement boundaries, so every
+/// comment between the elements of a list was dropped — and the
+/// post-format verification then rejected the whole file ("comment
+/// dropped"), which made the file impossible to format at all.
+#[test]
+fn comments_inside_nested_lists_are_preserved() {
+    let config = zz_fmt::FmtConfig::default();
+    let cases: &[(&str, &str)] = &[
+        // Array literal.
+        (
+            "func main() {\n    xs := [\n        1, // first\n        2, // second\n    ]\n    println(xs)\n}\n",
+            "// first",
+        ),
+        // Dict literal.
+        (
+            "func main() {\n    d := {\n        \"a\": 1, // only\n    }\n    println(d)\n}\n",
+            "// only",
+        ),
+        // Struct literal.
+        (
+            "struct S {\n    a: int,\n    b: str,\n}\n\nfunc main() {\n    s := S{\n        a: 1, // why one\n        b: \"x\", // why two\n    }\n    println(s.a)\n}\n",
+            "// why one",
+        ),
+        // Struct field list.
+        (
+            "struct S {\n    a: int, // trailing field comment\n    b: str,\n}\n\nfunc main() {\n    println(1)\n}\n",
+            "// trailing field comment",
+        ),
+        // Call arguments.
+        (
+            "func main() {\n    println(f(\n        1, // arg\n        2,\n    ))\n}\n\nfunc f(a: int, b: int) -> int {\n    return a + b\n}\n",
+            "// arg",
+        ),
+        // Tuple.
+        (
+            "func main() {\n    t := (\n        1, // tuple\n        2,\n    )\n    println(t)\n}\n",
+            "// tuple",
+        ),
+        // Match arm.
+        (
+            "func main() {\n    match 1 {\n        1 => 2, // arm\n        _ => 3,\n    }\n}\n",
+            "// arm",
+        ),
+        // Enum variant.
+        (
+            "enum E {\n    A, // variant\n    B,\n}\n\nfunc main() {\n    println(E.A)\n}\n",
+            "// variant",
+        ),
+        // A comment on its own line before an item.
+        (
+            "func main() {\n    xs := [\n        // leading note\n        1,\n    ]\n    println(xs)\n}\n",
+            "// leading note",
+        ),
+        // A comment on its own line after the last item.
+        (
+            "func main() {\n    xs := [\n        1,\n        // trailing note\n    ]\n    println(xs)\n}\n",
+            "// trailing note",
+        ),
+    ];
+    for (src, comment) in cases {
+        let out = zz_fmt::format_source(src, &config)
+            .unwrap_or_else(|e| panic!("format failed for {src:?}: {e}"));
+        assert!(
+            out.contains(comment),
+            "comment {comment:?} was dropped for {src:?}\nformatted: {out:?}"
+        );
+        // Idempotence: formatting the output again must not change it.
+        let again = zz_fmt::format_source(&out, &config)
+            .unwrap_or_else(|e| panic!("reformat failed for {src:?}: {e}"));
+        assert_eq!(out, again, "formatting is not idempotent for {src:?}");
+    }
+}
+
+/// `#587`: the formatter must not drop a comment it cannot place.
+///
+/// A comment in a position the structural emitter does not model (an
+/// `if` condition, a binary operand) is kept by re-emitting the
+/// statement verbatim instead of losing it.
+#[test]
+fn comments_in_unmodelled_positions_are_kept() {
+    let config = zz_fmt::FmtConfig::default();
+    for (src, comment) in [
+        (
+            "func main() {\n    x := 1 /* block */ + 2\n    println(x)\n}\n",
+            "/* block */",
+        ),
+        (
+            "func main() {\n    if true /* cond */ {\n        println(1)\n    }\n}\n",
+            "/* cond */",
+        ),
+    ] {
+        let out = zz_fmt::format_source(src, &config)
+            .unwrap_or_else(|e| panic!("format failed for {src:?}: {e}"));
+        assert!(
+            out.contains(comment),
+            "comment {comment:?} was dropped for {src:?}\nformatted: {out:?}"
+        );
+        let again = zz_fmt::format_source(&out, &config).unwrap();
+        assert_eq!(out, again, "formatting is not idempotent for {src:?}");
+    }
+}
+
 #[test]
 fn inline_import_alias_with_items_round_trips() {
     // Regression: the IR emitter printed `import path(items) as alias`
