@@ -198,6 +198,9 @@ zz_value zz_vec_remove(zz_value arr, zz_value idx, int *err);
 zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err);
 zz_value zz_vec_contains(zz_value arr, zz_value item, int *err);
 zz_value zz_vec_sort(zz_value arr, int *err);
+zz_value zz_vec_sort_by(zz_value arr, zz_value cmp, int *err);
+zz_value zz_vec_sort_by_desc(zz_value arr, zz_value cmp, int *err);
+zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err);
 zz_value zz_vec_reverse(zz_value arr, int *err);
 
 // ---- dict natives ------------------------------------------------------

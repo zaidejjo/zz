@@ -1,4 +1,4 @@
-use crate::natives::{expect_array, expect_int, expect_str};
+use crate::natives::{expect_array, expect_func, expect_int, expect_str};
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 pub(crate) fn vec_len(
@@ -188,6 +188,105 @@ pub(crate) fn vec_sort(
         })
     });
     Ok(Value::Array(std::sync::Arc::new(vs)))
+}
+
+/// Compare two values by natural order (int < float < str < bool by tag,
+/// then within-tag comparison). Used by `sort_key`.
+fn cmp_value(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        // Different tags: order by tag name for determinism.
+        _ => a.type_name().cmp(&b.type_name()),
+    }
+}
+
+/// Interpret a comparator's return value as an ordering: negative -> Less,
+/// zero -> Equal, positive -> Greater. Accepts int, float, bool.
+fn cmp_result(v: &Value) -> std::cmp::Ordering {
+    match v {
+        Value::Int(n) => n.cmp(&0),
+        Value::Float(n) => n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal),
+        Value::Bool(true) => std::cmp::Ordering::Greater,
+        Value::Bool(false) => std::cmp::Ordering::Less,
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+pub(crate) fn vec_sort_by(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let mut vs = take_array_arg(args, 0, "vec.sort_by")?;
+    let cmp = expect_func(args, 1, "vec.sort_by")?;
+    let err = std::cell::Cell::new(None as Option<EvalError>);
+    vs.sort_by(
+        |a, b| match interp.call(cmp.clone(), vec![a.clone(), b.clone()], span) {
+            Ok(v) => cmp_result(&v),
+            Err(e) => {
+                err.set(Some(e));
+                std::cmp::Ordering::Equal
+            }
+        },
+    );
+    if let Some(e) = err.take() {
+        return Err(e);
+    }
+    Ok(Value::Array(std::sync::Arc::new(vs)))
+}
+
+pub(crate) fn vec_sort_by_desc(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let mut vs = take_array_arg(args, 0, "vec.sort_by_desc")?;
+    let cmp = expect_func(args, 1, "vec.sort_by_desc")?;
+    let err = std::cell::Cell::new(None as Option<EvalError>);
+    vs.sort_by(
+        |a, b| match interp.call(cmp.clone(), vec![a.clone(), b.clone()], span) {
+            Ok(v) => cmp_result(&v).reverse(),
+            Err(e) => {
+                err.set(Some(e));
+                std::cmp::Ordering::Equal
+            }
+        },
+    );
+    if let Some(e) = err.take() {
+        return Err(e);
+    }
+    Ok(Value::Array(std::sync::Arc::new(vs)))
+}
+
+pub(crate) fn vec_sort_key(
+    interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let vs = take_array_arg(args, 0, "vec.sort_key")?;
+    let key = expect_func(args, 1, "vec.sort_key")?;
+    let err = std::cell::Cell::new(None as Option<EvalError>);
+    // Decorate: compute key for each element once (stable, O(n) key calls).
+    let mut decorated: Vec<(Value, Value)> = Vec::with_capacity(vs.len());
+    for item in vs.iter() {
+        match interp.call(key.clone(), vec![item.clone()], span) {
+            Ok(k) => decorated.push((item.clone(), k)),
+            Err(e) => {
+                err.set(Some(e));
+                break;
+            }
+        }
+    }
+    if let Some(e) = err.take() {
+        return Err(e);
+    }
+    // Sort by key (stable), then undecorate.
+    decorated.sort_by(|a, b| cmp_value(&a.1, &b.1));
+    let sorted: Vec<Value> = decorated.into_iter().map(|(item, _)| item).collect();
+    Ok(Value::Array(std::sync::Arc::new(sorted)))
 }
 
 pub(crate) fn vec_insert(

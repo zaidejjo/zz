@@ -727,6 +727,38 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Array(Box::new(t.clone())),
         ),
     );
+    // sort_by / sort_key / sort_by_desc — comparator / key-based ordering.
+    // `cmp: |T, T| -> int` must return -1/0/1 (or any negative/zero/positive).
+    // `key: |T| -> K` where K: int|str|float (natural-order comparable).
+    let cmp_t = Type::Func(vec![t.clone(), t.clone()], Box::new(Type::Int));
+    m.insert(
+        "std.vec.sort_by".into(),
+        sig_t(
+            vec![
+                ("v", Type::Array(Box::new(t.clone()))),
+                ("cmp", cmp_t.clone()),
+            ],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "std.vec.sort_by_desc".into(),
+        sig_t(
+            vec![
+                ("v", Type::Array(Box::new(t.clone()))),
+                ("cmp", cmp_t.clone()),
+            ],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
+    let key_t = Type::Func(vec![t.clone()], Box::new(Type::Named("U".to_string())));
+    m.insert(
+        "std.vec.sort_key".into(),
+        sig_tu(
+            vec![("v", Type::Array(Box::new(t.clone()))), ("key", key_t)],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
     m.insert(
         "std.vec.insert".into(),
         sig_t(
@@ -4107,7 +4139,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 680);
+        assert_eq!(funcs.len(), 683);
     }
 
     #[test]
