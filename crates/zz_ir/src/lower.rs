@@ -624,6 +624,16 @@ impl<'a> Lowerer<'a> {
                 imm: *imm,
                 op: Self::lower_binop(op),
             }]),
+            VmOp::SlotCmpConst { a, k, op } => {
+                let value = consts
+                    .get(*k as usize)
+                    .ok_or_else(|| IrError::new("SlotCmpConst index out of range"))?;
+                Ok(vec![Op::SlotCmpConst {
+                    a: *a,
+                    k: self.lower_value(value)?,
+                    op: Self::lower_binop(op),
+                }])
+            }
             VmOp::SlotBinaryInt { dst, lhs, rhs, op } => Ok(vec![Op::SlotBinaryInt {
                 dst: *dst,
                 lhs: *lhs,
@@ -978,6 +988,7 @@ fn is_fused_slot_op(op: &Op) -> bool {
             | Op::SlotLessIntImm { .. }
             | Op::SlotCmpIntSlot { .. }
             | Op::SlotCmpIntImm { .. }
+            | Op::SlotCmpConst { .. }
             | Op::SlotBinaryInt { .. }
             | Op::SlotBinaryIntImm { .. }
     )
@@ -1215,6 +1226,9 @@ pub fn expand_fused(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrE
                 Op::SlotCmpIntImm { a, imm, op } => {
                     let c = intern_int(&mut out.consts, *imm);
                     vec![Op::LoadSlot(*a), Op::PushConst(c), Op::BinOp(*op)]
+                }
+                Op::SlotCmpConst { a, k, op } => {
+                    vec![Op::LoadSlot(*a), Op::PushConst(*k), Op::BinOp(*op)]
                 }
                 Op::SlotBinaryInt { dst, lhs, rhs, op } => vec![
                     Op::LoadSlot(*lhs),

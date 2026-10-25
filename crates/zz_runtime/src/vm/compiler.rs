@@ -21,6 +21,19 @@ fn int_literal(e: &Expr) -> Option<i64> {
     }
 }
 
+/// Non-`Int` literal as a runtime value, for the constant-pool fusion.
+///
+/// `Int` literals go through [`int_literal`] (inline immediate) and `None`
+/// literals (`nil`/`none`) through the generic path.
+fn const_literal(e: &Expr) -> Option<Value> {
+    match unparen(e) {
+        Expr::Str { value, .. } => Some(Value::Str(value.clone().into())),
+        Expr::Float { value, .. } => Some(Value::Float(*value)),
+        Expr::Bool { value, .. } => Some(Value::Bool(*value)),
+        _ => None,
+    }
+}
+
 /// Strip redundant `(...)` wrappers. The parser keeps them so spans stay
 /// attached; fusion analyses look through them.
 fn unparen(e: &Expr) -> &Expr {
@@ -574,7 +587,8 @@ impl Compiler {
             Op::SlotLessIntSlot { .. }
             | Op::SlotLessIntImm { .. }
             | Op::SlotCmpIntSlot { .. }
-            | Op::SlotCmpIntImm { .. } => 1,
+            | Op::SlotCmpIntImm { .. }
+            | Op::SlotCmpConst { .. } => 1,
             Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. }
             | Op::RegisterStruct { .. }
@@ -2042,7 +2056,7 @@ impl Compiler {
     /// operators use the generalized `SlotCmpInt*` pair. Literal-on-the-left
     /// shapes are normalized by mirroring the operator (`N < x` == `x > N`),
     /// so `0 < x` fuses as well as `x > 0`.
-    fn try_slot_compare(&self, value: &Expr) -> Option<Op> {
+    fn try_slot_compare(&mut self, value: &Expr) -> Option<Op> {
         let Expr::Binary {
             op: binop,
             left,
@@ -2055,14 +2069,16 @@ impl Compiler {
         // Fusion looks through redundant parens; spans stay on the AST.
         let left = unparen(left);
         let right = unparen(right);
-        // Type guard: at least the left operand must be typed Int.
-        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int)) {
-            return None;
-        }
         // Comparison guard: `if a + b` / `if a and b` keep the generic path
         // (the fused ops would push the right value, but `and`/`or` owe
         // short-circuiting, which a two-operand compare does not express).
-        flip_compare(*binop)?;
+        let flipped = flip_compare(*binop)?;
+        // Any slot-vs-slot / slot-vs-`Int` shape stays behind the `Int` type
+        // guard (the fused ops are integer fast paths). The constant-pool
+        // form below is also what string/float literals use, so it doubles
+        // as the `Eq`/`Ne` fusion for non-`Int` slots — those two are total,
+        // so the generic fallback can never fail on them.
+        let left_int = matches!(self.type_of(left.span()), Some(zz_checker::Type::Int));
         let slot_of = |e: &Expr| match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => Some(slot as u16),
@@ -2077,29 +2093,46 @@ impl Compiler {
         let imm_of = int_literal;
 
         // `a op b`, both in slots.
-        if let (Some(a), Some(b)) = (slot_of(left), slot_of(right)) {
-            return Some(match *binop {
-                BinOp::Lt => Op::SlotLessIntSlot { a, b },
-                // `a > b` is equivalent to `b < a`.
-                BinOp::Gt => Op::SlotLessIntSlot { a: b, b: a },
-                op => Op::SlotCmpIntSlot { a, b, op },
-            });
+        if left_int {
+            if let (Some(a), Some(b)) = (slot_of(left), slot_of(right)) {
+                return Some(match *binop {
+                    BinOp::Lt => Op::SlotLessIntSlot { a, b },
+                    // `a > b` is equivalent to `b < a`.
+                    BinOp::Gt => Op::SlotLessIntSlot { a: b, b: a },
+                    op => Op::SlotCmpIntSlot { a, b, op },
+                });
+            }
+            // `a op N`, literal on the right.
+            if let (Some(a), Some(imm)) = (slot_of(left), imm_of(right)) {
+                return Some(match *binop {
+                    BinOp::Lt => Op::SlotLessIntImm { a, imm },
+                    op => Op::SlotCmpIntImm { a, imm, op },
+                });
+            }
+            // `N op a`, literal on the left: mirror into `a flipped(op) N`.
+            if let (Some(imm), Some(a)) = (imm_of(left), slot_of(right)) {
+                return Some(match flipped {
+                    BinOp::Lt => Op::SlotLessIntImm { a, imm },
+                    op => Op::SlotCmpIntImm { a, imm, op },
+                });
+            }
         }
-        // `a op N`, literal on the right.
-        if let (Some(a), Some(imm)) = (slot_of(left), imm_of(right)) {
-            return Some(match *binop {
-                BinOp::Lt => Op::SlotLessIntImm { a, imm },
-                op => Op::SlotCmpIntImm { a, imm, op },
-            });
+        // `a op c` / `c op a` with a non-`Int` literal (string, float,
+        // bool): the value lives in the constant pool, so the comparison can
+        // still be one op instead of `LoadSlot PushConst BinOp`.
+        let total = matches!(binop, BinOp::Eq | BinOp::Ne);
+        if !left_int && !total && !self.comparable_pair(left, right) {
+            return None;
         }
-        // `N op a`, literal on the left: mirror into `a flipped(op) N`.
-        if let (Some(imm), Some(a)) = (imm_of(left), slot_of(right)) {
-            return match flip_compare(*binop)? {
-                BinOp::Lt => Some(Op::SlotLessIntImm { a, imm }),
-                op => Some(Op::SlotCmpIntImm { a, imm, op }),
-            };
-        }
-        None
+        let (a, lit, op) = match (slot_of(left), const_literal(right)) {
+            (Some(a), Some(lit)) => (a, lit, *binop),
+            _ => match (const_literal(left), slot_of(right)) {
+                (Some(lit), Some(a)) => (a, lit, flipped),
+                _ => return None,
+            },
+        };
+        let k = self.push_const(lit);
+        Some(Op::SlotCmpConst { a, k, op })
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
@@ -2172,6 +2205,32 @@ impl Compiler {
             Stmt::Destructure { pat, .. } => pattern_binds(pat),
             _ => false,
         })
+    }
+
+    /// Are both operands of a *non-total* comparison statically ordered?
+    ///
+    /// `Eq`/`Ne` are total, so the const-pool fusion needs no evidence. `Lt`
+    /// and friends can raise (mixed or opaque operands) and the fused op
+    /// falls back with `Span::default()`, so only pairs whose types the
+    /// checker can order (`int`/`float`/`str` — the same set the generic
+    /// path compares) take the fused form.
+    fn comparable_pair(&self, left: &Expr, right: &Expr) -> bool {
+        use zz_checker::Type::*;
+        matches!(
+            (self.type_of(left.span()), self.type_of(right.span())),
+            (Some(Int), Some(Int | Float))
+                | (Some(Float), Some(Int | Float))
+                | (Some(Str), Some(Str))
+        )
+    }
+
+    /// Is `e` statically `Bool`? Used to skip the `Truthy` coercion when the
+    /// value already is the branch condition.
+    fn is_bool(&self, e: &Expr) -> bool {
+        matches!(
+            self.type_of(unparen(e).span()),
+            Some(zz_checker::Type::Bool)
+        )
     }
 
     fn push_const(&mut self, v: Value) -> u32 {
@@ -3764,7 +3823,12 @@ impl Compiler {
                     self.compile_expr(left);
                     let j = self.emit_jump(JumpKind::IfFalse);
                     self.compile_expr(right);
-                    self.emit(Op::Truthy);
+                    // A statically `Bool` operand already is the branch
+                    // value: `Truthy` is pure dispatch tax (one per `&&`/
+                    // `||` operand in every comparison chain).
+                    if !self.is_bool(right) {
+                        self.emit(Op::Truthy);
+                    }
                     let j2 = self.emit_jump(JumpKind::Always);
                     self.patch_jump(j);
                     self.stack_height = pre;
@@ -3777,7 +3841,9 @@ impl Compiler {
                     self.compile_expr(left);
                     let j = self.emit_jump(JumpKind::IfTrue);
                     self.compile_expr(right);
-                    self.emit(Op::Truthy);
+                    if !self.is_bool(right) {
+                        self.emit(Op::Truthy);
+                    }
                     let j2 = self.emit_jump(JumpKind::Always);
                     self.patch_jump(j);
                     self.stack_height = pre;
@@ -3791,6 +3857,16 @@ impl Compiler {
                     self.emit(Op::ElvisResult);
                 }
                 _ => {
+                    // Comparisons fuse in value position too: a disjunct of
+                    // `c == "a" || c == "e" || ...` reaches here through the
+                    // generic walk (only the whole condition goes through
+                    // `try_slot_compare`), and the fused ops push the same
+                    // `Bool` — one dispatch instead of `LoadSlot PushConst
+                    // BinOp` per operand.
+                    if let Some(fused) = self.try_slot_compare(expr) {
+                        self.emit(fused);
+                        return;
+                    }
                     // Type-driven fast path: if both operands are Int,
                     // emit unboxed integer ops that skip generic dispatch.
                     if matches!(self.type_of(left.span()), Some(zz_checker::Type::Int))

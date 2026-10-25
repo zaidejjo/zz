@@ -218,6 +218,14 @@ pub enum Op {
         imm: i64,
         op: BinOp,
     },
+    /// Push `Bool(slot[a] op const c)`; desugars to
+    /// `LoadSlot a; PushConst c; BinOp op`. Used for non-`Int` literals,
+    /// which have no immediate form.
+    SlotCmpConst {
+        a: u16,
+        k: ConstId,
+        op: BinOp,
+    },
     /// `slot[dst] = Int(slot[lhs] op slot[rhs])`; desugars to
     /// `LoadSlot lhs; LoadSlot rhs; BinOp op; StoreSlot dst`.
     SlotBinaryInt {
@@ -481,6 +489,7 @@ impl Op {
             Op::SlotBinaryIntImm { .. } => 86,
             Op::SlotCmpIntSlot { .. } => 89,
             Op::SlotCmpIntImm { .. } => 90,
+            Op::SlotCmpConst { .. } => 91,
             Op::IntAdd => 14,
             Op::IntSub => 15,
             Op::IntMul => 16,
@@ -578,6 +587,7 @@ impl Op {
             Op::SlotBinaryIntImm { .. } => "slotbinintimm",
             Op::SlotCmpIntSlot { .. } => "slotcmpintslot",
             Op::SlotCmpIntImm { .. } => "slotcmpintimm",
+            Op::SlotCmpConst { .. } => "slotcmpconst",
             Op::IntAdd => "iadd",
             Op::IntSub => "isub",
             Op::IntMul => "imul",
@@ -670,7 +680,8 @@ impl Op {
             }
             Op::SlotAddIntImm { dst, .. }
             | Op::SlotLessIntImm { a: dst, .. }
-            | Op::SlotCmpIntImm { a: dst, .. } => f(*dst),
+            | Op::SlotCmpIntImm { a: dst, .. }
+            | Op::SlotCmpConst { a: dst, .. } => f(*dst),
             Op::SlotBinaryInt { dst, lhs, rhs, .. } => {
                 f(*dst);
                 f(*lhs);

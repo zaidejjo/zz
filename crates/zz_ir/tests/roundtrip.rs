@@ -290,6 +290,7 @@ fn fused_slot_ops_survive_the_round_trip() {
                 | SlotLessIntImm { .. }
                 | SlotCmpIntSlot { .. }
                 | SlotCmpIntImm { .. }
+                | SlotCmpConst { .. }
                 | SlotBinaryInt { .. }
                 | SlotBinaryIntImm { .. }
         )
@@ -1150,5 +1151,74 @@ fn verify_rejects_locals_longer_than_needed() {
         err.message.contains("locals length mismatch"),
         "unexpected error: {}",
         err.message
+    );
+}
+
+/// `SlotCmpConst` names a constant, so raising must rebuild it in the new
+/// per-chunk pool order. (It only remapped `PushConst` before, which left
+/// the fused compare reading a different value after a cache load.)
+#[test]
+fn slot_cmp_const_keeps_its_constant_across_raise() {
+    let src = "c := \"a\"\nn := 0\nif c == \"a\" {\n n = 1\n}\nif c != \"o\" {\n n = n + 1\n}\nn";
+    let module = lower_typed_spanmap(src, &std::collections::HashMap::new());
+    let dis = zz_ir::dis::disassemble(&module);
+    assert!(
+        dis.contains("slotcmpconst"),
+        "fusion lost in lowering:\n{dis}"
+    );
+
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    verify::verify(&loaded).expect("verify failed");
+    assert_eq!(codec::encode(&loaded), bytes, "re-encode differs");
+
+    let raised = raise::raise(&loaded).expect("raise failed");
+    let mut interp = Interp::new();
+    interp.run_loaded_chunk(&raised).expect("loaded run failed");
+    assert_eq!(
+        interp.env.get("n"),
+        Some(Value::Int(2)),
+        "the fused compare lost its constant in raise:\n{dis}"
+    );
+
+    // Raising rebuilds the pool in *use* order, so a module whose pool
+    // starts with an unused entry must still read the right values: both
+    // const-carrying ops need the re-index, not just `PushConst`.
+    let mut shifted = loaded.clone();
+    shifted.consts.insert(0, zz_ir::Const::Unit);
+    for f in shifted.funcs.iter_mut() {
+        for op in f.code.iter_mut() {
+            match op {
+                zz_ir::Op::PushConst(c) => c.0 += 1,
+                zz_ir::Op::SlotCmpConst { k, .. } => k.0 += 1,
+                _ => {}
+            }
+        }
+    }
+    verify::verify(&shifted).expect("shifted must verify");
+    let shifted_raised = raise::raise(&shifted).expect("raise failed");
+    let mut interp3 = Interp::new();
+    interp3
+        .run_loaded_chunk(&shifted_raised)
+        .expect("shifted run failed");
+    assert_eq!(
+        interp3.env.get("n"),
+        Some(Value::Int(2)),
+        "const pool re-index lost a comparison operand"
+    );
+
+    // The chunk→C stream: desugared back to `LoadSlot; PushConst; BinOp`,
+    // and it must still agree.
+    let expanded = lower::expand_fused(&loaded).expect("expand failed");
+    verify::verify(&expanded).expect("expanded must verify");
+    let reexpanded = raise::raise(&expanded).expect("raise failed");
+    let mut interp2 = Interp::new();
+    interp2
+        .run_loaded_chunk(&reexpanded)
+        .expect("expanded run failed");
+    assert_eq!(
+        interp2.env.get("n"),
+        Some(Value::Int(2)),
+        "desugared compare differs"
     );
 }

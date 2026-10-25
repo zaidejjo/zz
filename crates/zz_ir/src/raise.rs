@@ -195,6 +195,19 @@ impl<'a> Raiser<'a> {
         }
     }
 
+    /// The constant an op reads from the module pool, if any.
+    ///
+    /// Raising rebuilds each chunk's constant pool in first-use order, so
+    /// every op that names a constant must be remapped — keep them here
+    /// rather than in two places.
+    fn op_const(op: &Op) -> Option<ConstId> {
+        match op {
+            Op::PushConst(cid) => Some(*cid),
+            Op::SlotCmpConst { k, .. } => Some(*k),
+            _ => None,
+        }
+    }
+
     /// Raise one tabled function to a runtime chunk, recursively.
     fn raise_func(&self, id: FuncId, seen: &mut Vec<FuncId>) -> Result<Arc<VmChunk>, IrError> {
         if seen.contains(&id) {
@@ -211,13 +224,13 @@ impl<'a> Raiser<'a> {
         // across the serialization boundary — only the values do.
         let mut order: Vec<ConstId> = Vec::new();
         for op in &func.code {
-            if let Op::PushConst(cid) = op {
-                if !order.contains(cid) {
+            if let Some(cid) = Self::op_const(op) {
+                if !order.contains(&cid) {
                     if (cid.0 as usize) >= self.module.consts.len() {
                         seen.pop();
                         return Err(IrError::new("raise: const id out of range"));
                     }
-                    order.push(*cid);
+                    order.push(cid);
                 }
             }
         }
@@ -229,12 +242,21 @@ impl<'a> Raiser<'a> {
         let mut code = Vec::with_capacity(func.code.len());
         for op in &func.code {
             let mut raised = self.raise_op(op, seen)?;
-            if let VmOp::PushConst(_) = raised {
-                let Op::PushConst(cid) = op else {
-                    unreachable!()
+            // Every const-carrying op has to be re-indexed into the fresh
+            // per-chunk pool built above (`order`); `PushConst` did this
+            // alone before, so an op that names a constant any other way
+            // (`SlotCmpConst`) would silently read the wrong value.
+            if let Some(cid) = Self::op_const(op) {
+                let idx = order
+                    .iter()
+                    .position(|x| x == &cid)
+                    .ok_or_else(|| IrError::new("raise: const missing from pool order"))?
+                    as u32;
+                raised = match raised {
+                    VmOp::PushConst(_) => VmOp::PushConst(idx),
+                    VmOp::SlotCmpConst { a, op, .. } => VmOp::SlotCmpConst { a, k: idx, op },
+                    other => other,
                 };
-                let idx = order.iter().position(|x| x == cid).expect("pool order") as u32;
-                raised = VmOp::PushConst(idx);
             }
             code.push(raised);
         }
@@ -408,6 +430,11 @@ impl<'a> Raiser<'a> {
             Op::SlotCmpIntImm { a, imm, op } => Ok(VmOp::SlotCmpIntImm {
                 a: *a,
                 imm: *imm,
+                op: Self::raise_binop(*op),
+            }),
+            Op::SlotCmpConst { a, k, op } => Ok(VmOp::SlotCmpConst {
+                a: *a,
+                k: k.0,
                 op: Self::raise_binop(*op),
             }),
             Op::SlotBinaryInt { dst, lhs, rhs, op } => Ok(VmOp::SlotBinaryInt {

@@ -174,6 +174,7 @@ fn op_text(module: &Module, op: &Op) -> String {
         Op::SlotLessIntImm { a, imm } => format!("slotlessintimm {a} {imm}"),
         Op::SlotCmpIntSlot { a, b, op } => format!("slotcmpintslot {a} {b} {op:?}"),
         Op::SlotCmpIntImm { a, imm, op } => format!("slotcmpintimm {a} {imm} {op:?}"),
+        Op::SlotCmpConst { a, k, op } => format!("slotcmpconst {a} c{} {op:?}", k.0),
         Op::SlotBinaryInt { dst, lhs, rhs, op } => format!("slotbinint {dst} {lhs} {rhs} {op:?}"),
         Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
             format!("slotbinintimm {dst} {lhs} {imm} {op:?}")
