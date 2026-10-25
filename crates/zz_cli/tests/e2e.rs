@@ -2030,3 +2030,122 @@ fn e2e_test_doctest_no_doctests_flag() {
         "missing @test in --no-doctests output:\n{stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #586: `--help` must print usage, never run the command.
+//
+// `zz fix --help` used to parse `--help` as a flag, fall back to the
+// default path `.` and rewrite every `.zz` file in the project. `zz fmt
+// --help` had the same hole (it rewrites files in place) and `zz check
+// --help` scanned the tree instead of printing usage.
+// ---------------------------------------------------------------------------
+
+/// A file the fixer has something to fix: the trailing `1` / `2` in each
+/// function body is a missing `return` (the fixit inserts `return `).
+const FIXABLE_SRC: &str = "func alpha() -> int {\n    1\n}\n\nfunc beta() -> int {\n    2\n}\n";
+
+/// Temp project with one fixable file. Returns (dir, file).
+fn make_help_project(tag: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("zz-e2e-help-{tag}-{}", unique_tmp_stem(tag)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("two.zz");
+    std::fs::write(&file, FIXABLE_SRC).unwrap();
+    (dir, file)
+}
+
+/// Run `zz <args...>` with the working directory set to `dir`.
+fn run_zz_in_dir(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz {}`: {e}", args.join(" ")));
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (exit_code, stdout, stderr)
+}
+
+#[test]
+fn e2e_fix_help_prints_usage_and_rewrites_nothing() {
+    let (dir, file) = make_help_project("fix");
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["fix", "--help"]);
+    assert_eq!(exit, 0, "`zz fix --help` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("usage: zz fix"),
+        "missing usage text in stdout:\n{stdout}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, FIXABLE_SRC, "`zz fix --help` must not rewrite files");
+}
+
+#[test]
+fn e2e_fix_short_help_prints_usage_and_rewrites_nothing() {
+    let (dir, file) = make_help_project("fix-short");
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["fix", "-h"]);
+    assert_eq!(exit, 0, "`zz fix -h` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("usage: zz fix"),
+        "missing usage text in stdout:\n{stdout}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, FIXABLE_SRC, "`zz fix -h` must not rewrite files");
+}
+
+#[test]
+fn e2e_check_help_prints_usage() {
+    let (dir, file) = make_help_project("check");
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["check", "--help"]);
+    assert_eq!(
+        exit, 0,
+        "`zz check --help` should exit 0.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("usage: zz check"),
+        "missing usage text in stdout:\n{stdout}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, FIXABLE_SRC, "`zz check --help` must not touch files");
+}
+
+#[test]
+fn e2e_fmt_help_prints_usage_and_rewrites_nothing() {
+    let (dir, file) = make_help_project("fmt");
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["fmt", "--help"]);
+    assert_eq!(exit, 0, "`zz fmt --help` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("usage: zz fmt"),
+        "missing usage text in stdout:\n{stdout}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, FIXABLE_SRC, "`zz fmt --help` must not rewrite files");
+}
+
+#[test]
+fn e2e_fix_report_uses_real_line_numbers() {
+    // The fix report used to print the byte offset where a line number was
+    // expected (`two.zz:56` for an 8-line file) — misleading when reviewing
+    // what a fix changed.
+    let (dir, _file) = make_help_project("fix-lines");
+    let (exit, _stdout, stderr) = run_zz_in_dir(&dir, &["fix", "two.zz"]);
+    assert_eq!(exit, 0, "`zz fix two.zz` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("at two.zz:"),
+        "missing fix location in stderr:\n{stderr}"
+    );
+    let line_count = FIXABLE_SRC.lines().count();
+    for line in stderr.lines().filter(|l| l.contains("at two.zz:")) {
+        let pos = line.split("at two.zz:").nth(1).unwrap().trim();
+        let num: usize = pos
+            .split(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|_| panic!("position `{pos}` is not `line[:col]` in:\n{line}"));
+        assert!(
+            (1..=line_count).contains(&num),
+            "reported line {num} is outside the file's {line_count} lines:\n{line}"
+        );
+    }
+}
