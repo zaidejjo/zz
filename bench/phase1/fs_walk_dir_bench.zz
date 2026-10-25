@@ -1,0 +1,11 @@
+// bench/phase1/fs_walk_dir_bench.zz — walk_dir on 100 subdirs x 100 files
+import std.fs
+import std.time
+
+func main() -> int {
+    t0 := time.now_ms()
+    p := fs.walk_dir("/home/zaid/Projects/.zz-targets/bench-fs-walk") ?? []
+    t1 := time.now_ms()
+    println("walk_dir n={len(p)} ms={t1 - t0}")
+    return 0
+}

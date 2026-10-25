@@ -1,0 +1,11 @@
+// bench/phase1/fs_read_dir_bench.zz — read_dir on 1000-entry directory
+import std.fs
+import std.time
+
+func main() -> int {
+    t0 := time.now_ms()
+    d := fs.read_dir("/home/zaid/Projects/.zz-targets/bench-fs-small") ?? []
+    t1 := time.now_ms()
+    println("read_dir n={len(d)} ms={t1 - t0}")
+    return 0
+}

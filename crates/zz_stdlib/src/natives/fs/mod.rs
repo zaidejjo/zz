@@ -36,6 +36,7 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 use crate::natives::expect_str;
 
 mod cache;
+mod dir_cache;
 pub(crate) mod path;
 pub mod vfs;
 
@@ -336,36 +337,49 @@ fn file_value(id: u64) -> Value {
 // ── Basic operations ───────────────────────────────────────────────────────
 
 pub(crate) fn fs_read_file(
-    interp: &mut Interp,
+    _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.read_file")?;
     // Hot path: unchanged file already in the content cache. One stat +
-    // Arc bump instead of open/read/validate, on the caller's thread (no
-    // I/O-pool hop even for a green task).
+    // Arc bump instead of open/read/validate, on the caller's thread.
     if let Some(file) = probe_cached(&path) {
         return Ok(text_result_for(&file, &path));
     }
-    run_fs(interp, span, move || match cache::read_uncached(&path) {
-        Ok(file) => text_result_for(&file, &path),
-        Err(e) => fs_err("read", &path, &e),
-    })
+    // Inline read: avoids I/O-pool hop + channel round-trip (~10-50µs
+    // saved per file). Local FS reads complete in microseconds; blocking
+    // an executor thread briefly is far cheaper than the pool hop.
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(match String::from_utf8(bytes) {
+            Ok(text) => ok_str(text),
+            Err(_) => err_str(format!("fs:read:invalid_input: {path}")),
+        }),
+        Err(e) => Ok(fs_err("read", &path, &e)),
+    }
 }
 
 pub(crate) fn fs_read_bytes(
-    interp: &mut Interp,
+    _interp: &mut Interp,
     args: &mut Vec<Value>,
-    span: Span,
+    _span: Span,
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.read_bytes")?;
     if let Some(file) = probe_cached(&path) {
         return Ok(bytes_result(&file));
     }
-    run_fs(interp, span, move || match cache::read_uncached(&path) {
-        Ok(file) => bytes_result(&file),
-        Err(e) => fs_err("read_bytes", &path, &e),
-    })
+    // Inline read: avoids I/O-pool hop + channel round-trip.
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(bytes_result_bytes(&bytes)),
+        Err(e) => Ok(fs_err("read_bytes", &path, &e)),
+    }
+}
+
+/// Build a bytes result from raw bytes without cache lookup.
+fn bytes_result_bytes(bytes: &[u8]) -> Value {
+    ok_value(Value::Bytes(Box::new(zz_runtime::BytesData::from_shared(
+        Arc::new(bytes.to_vec()),
+    ))))
 }
 
 // std.fs.scan_counts(path, markers, bstart, bend, nested, whole) —
@@ -614,6 +628,7 @@ pub(crate) fn fs_write_file(
     let path = expect_str(args, 0, "std.fs.write_file")?;
     let contents = expect_str(args, 1, "std.fs.write_file")?;
     cache::invalidate(&path);
+    dir_cache::invalidate(&path);
     run_fs(interp, span, move || {
         match std::fs::write(&path, contents) {
             Ok(()) => ok_unit(),
@@ -630,6 +645,7 @@ pub(crate) fn fs_append(
     let path = expect_str(args, 0, "std.fs.append")?;
     let contents = expect_str(args, 1, "std.fs.append")?;
     cache::invalidate(&path);
+    dir_cache::invalidate(&path);
     run_fs(interp, span, move || {
         let res = std::fs::OpenOptions::new()
             .create(true)
@@ -651,6 +667,8 @@ pub(crate) fn fs_copy(
     let src = expect_str(args, 0, "std.fs.copy")?;
     let dst = expect_str(args, 1, "std.fs.copy")?;
     cache::invalidate(&dst);
+    dir_cache::invalidate(&dst);
+    dir_cache::invalidate(&src);
     run_fs(interp, span, move || match std::fs::copy(&src, &dst) {
         Ok(_) => ok_unit(),
         Err(e) => fs_err2("copy", &src, &dst, &e),
@@ -666,6 +684,8 @@ pub(crate) fn fs_move(
     let dst = expect_str(args, 1, "std.fs.move")?;
     cache::invalidate(&src);
     cache::invalidate(&dst);
+    dir_cache::invalidate(&src);
+    dir_cache::invalidate(&dst);
     run_fs(interp, span, move || match std::fs::rename(&src, &dst) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err2("move", &src, &dst, &e),
@@ -711,6 +731,7 @@ pub(crate) fn fs_remove_file(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.remove_file")?;
     cache::invalidate(&path);
+    dir_cache::invalidate(&path);
     run_fs(interp, span, move || match std::fs::remove_file(&path) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err("remove_file", &path, &e),
@@ -726,6 +747,7 @@ pub(crate) fn fs_mkdir(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.mkdir")?;
     cache::invalidate(&path);
+    dir_cache::invalidate(&path);
     run_fs(interp, span, move || match std::fs::create_dir(&path) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err("mkdir", &path, &e),
@@ -739,6 +761,7 @@ pub(crate) fn fs_mkdir_all(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.mkdir_all")?;
     cache::invalidate(&path);
+    dir_cache::invalidate(&path);
     run_fs(interp, span, move || match std::fs::create_dir_all(&path) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err("mkdir_all", &path, &e),
@@ -746,13 +769,25 @@ pub(crate) fn fs_mkdir_all(
 }
 
 fn sorted_dir_entries(path: &str) -> Result<Vec<String>, std::io::Error> {
-    let mut out: Vec<String> = Vec::new();
+    // Cache hit: one stat + clone instead of read_dir + per-entry stat + sort.
+    if let Some(cached) = dir_cache::probe(path) {
+        return Ok(cached.entries.iter().map(|(n, _)| n.clone()).collect());
+    }
+    let mut entries: Vec<(String, bool)> = Vec::new();
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        out.push(name);
+        let is_dir = entry.file_type()?.is_dir();
+        entries.push((name, is_dir));
     }
-    out.sort();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let out: Vec<String> = entries.iter().map(|(n, _)| n.clone()).collect();
+    // Populate cache for repeat listings.
+    if let Ok(meta) = std::fs::metadata(path) {
+        if let Some(fp) = dir_cache::fingerprint(&meta) {
+            let _ = dir_cache::insert(path, fp, entries);
+        }
+    }
     Ok(out)
 }
 
@@ -780,6 +815,7 @@ pub(crate) fn fs_remove_dir_all(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.remove_dir_all")?;
     cache::invalidate_prefix(&path);
+    dir_cache::invalidate_prefix(&path);
     run_fs(interp, span, move || match std::fs::remove_dir_all(&path) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err("remove_dir_all", &path, &e),
@@ -790,18 +826,35 @@ fn walk_sorted(root: &str) -> Result<Vec<String>, std::io::Error> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_string()];
     while let Some(dir) = stack.pop() {
-        let mut entries: Vec<(String, String)> = Vec::new();
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let p = entry.path();
-            let s = p.to_string_lossy().into_owned();
-            let is_dir = entry.file_type()?.is_dir();
-            entries.push((s, if is_dir { "d" } else { "f" }.to_string()));
-        }
+        let entries: Vec<(String, bool)> = if let Some(cached) = dir_cache::probe(&dir) {
+            // Cache stores basenames; construct full paths for traversal.
+            cached
+                .entries
+                .iter()
+                .map(|(name, is_dir)| (format!("{dir}/{name}"), *is_dir))
+                .collect()
+        } else {
+            let mut entries: Vec<(String, bool)> = Vec::new();
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let p = entry.path();
+                let s = p.to_string_lossy().into_owned();
+                let is_dir = entry.file_type()?.is_dir();
+                entries.push((s, is_dir));
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            // Populate cache for repeat walk_dir scans.
+            if let Ok(meta) = std::fs::metadata(&dir) {
+                if let Some(fp) = dir_cache::fingerprint(&meta) {
+                    let _ = dir_cache::insert(&dir, fp, entries.clone());
+                }
+            }
+            entries
+        };
         // Push dirs so traversal continues; final out.sort() below orders
         // everything globally, so per-directory ordering is unnecessary.
-        for (s, kind) in entries.iter() {
-            if kind == "d" {
+        for (s, is_dir) in entries.iter() {
+            if *is_dir {
                 stack.push(s.clone());
             }
         }

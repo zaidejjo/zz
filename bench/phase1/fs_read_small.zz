@@ -1,0 +1,16 @@
+// bench/phase1/fs_read_small.zz — read 1000 small files (1KB each)
+import std.fs
+import std.time
+
+func main() -> int {
+    t0 := time.now_ms()
+    total := 0
+    for i in 0..1000 {
+        p := "/home/zaid/Projects/.zz-targets/bench-fs-small/f" + str(i) + ".txt"
+        s := fs.read(p) ?? ""
+        total = total + len(s)
+    }
+    t1 := time.now_ms()
+    println("read_small n=1000 total={total} ms={t1 - t0}")
+    return 0
+}
