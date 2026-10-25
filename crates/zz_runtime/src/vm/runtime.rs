@@ -2398,18 +2398,6 @@ impl Vm {
                             let ix = normalize_index(*i, items.len(), *span)?;
                             items[ix].clone()
                         }
-                        (Value::Str(s), Value::Int(i)) => {
-                            if s.is_ascii() {
-                                let ix = normalize_index(*i, s.len(), *span)?;
-                                Value::Str(std::sync::Arc::clone(
-                                    &crate::runtime::ops::ascii_chars()[s.as_bytes()[ix] as usize],
-                                ))
-                            } else {
-                                let chars: Vec<char> = s.chars().collect();
-                                let ix = normalize_index(*i, chars.len(), *span)?;
-                                Value::Str(chars[ix].to_string().into())
-                            }
-                        }
                         (Value::Bytes(b), Value::Int(i)) => {
                             let ix = normalize_index(*i, b.len(), *span)?;
                             Value::Int(b.as_slice()[ix] as i64)
@@ -2422,9 +2410,21 @@ impl Vm {
                                 );
                             }
                         },
+                        (Value::Str(s), Value::Int(i)) => {
+                            if s.is_ascii() {
+                                let ix = normalize_index(*i, s.len(), *span)?;
+                                Value::Str(std::sync::Arc::clone(
+                                    &crate::runtime::ops::ascii_chars()[s.as_bytes()[ix] as usize],
+                                ))
+                            } else {
+                                let chars: Vec<char> = s.chars().collect();
+                                let ix = normalize_index(*i, chars.len(), *span)?;
+                                Value::Str(chars[ix].to_string().into())
+                            }
+                        }
                         _ => {
                             return Err(self.error(
-                                "expected array/tuple/string for indexed access".to_string(),
+                                format!("cannot index a value of type `{}`", ov.type_name()),
                                 *span,
                             ));
                         }
