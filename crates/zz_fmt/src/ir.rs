@@ -65,6 +65,22 @@ fn token_index_at_or_after(toks: &[Annotated], byte: u32) -> usize {
     lo.min(toks.len())
 }
 
+/// Every comment in the source, in source order.
+///
+/// A comment lives in the *leading* trivia of the token that follows it,
+/// so walking the tokens in order collects every comment exactly once.
+fn collect_comments(toks: &[Annotated]) -> Vec<ClassifiedTrivia> {
+    let mut out = Vec::new();
+    for t in toks {
+        for c in &t.leading {
+            if c.is_comment() {
+                out.push(c.clone());
+            }
+        }
+    }
+    out
+}
+
 pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, Eol) {
     let toks = annotate(source);
     let eol = detect_eol(source);
@@ -88,6 +104,7 @@ pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, 
         pipe_starts,
         bang_starts,
         emitted_comments: std::collections::HashSet::new(),
+        comments: collect_comments(&toks),
     };
 
     // Imports are hoisted to the top of the file, sorted with the
@@ -204,6 +221,16 @@ struct Ctx<'src, 'a> {
     /// header gap already emitted — the set keeps each comment exactly
     /// once (idempotence + no duplication).
     emitted_comments: std::collections::HashSet<(u32, u32)>,
+    /// Every comment in the source, sorted by start offset.
+    ///
+    /// The structural emitter only walks trivia at statement boundaries,
+    /// so a comment inside a literal (`[1, // one\n 2]`) or a field list
+    /// used to be dropped — the file then failed the post-format
+    /// verification ("comment dropped") and could not be formatted at all
+    /// (#587). This index lets the emitter find those comments and place
+    /// them, and lets the statement-level safety net notice a comment it
+    /// could not place.
+    comments: Vec<ClassifiedTrivia>,
 }
 
 impl<'src, 'a> Ctx<'src, 'a> {
@@ -336,6 +363,300 @@ impl<'src, 'a> Ctx<'src, 'a> {
         true
     }
 
+    /// The comments whose text starts in `(start, end)`.
+    ///
+    /// A comment between two list items lives in the leading trivia of the
+    /// token that follows it, so the *text* position (not the token
+    /// position) decides which gap it belongs to.
+    fn comments_between(&self, start: u32, end: u32) -> Vec<ClassifiedTrivia> {
+        if end <= start {
+            return Vec::new();
+        }
+        let lo = self.comments.partition_point(|c| c.start <= start);
+        let hi = self.comments.partition_point(|c| c.start < end);
+        self.comments[lo..hi].to_vec()
+    }
+
+    /// Does this comment continue the line of the item that precedes it?
+    ///
+    /// A comment is "trailing" when nothing between the previous item and
+    /// the comment breaks the line; otherwise it sits on its own line.
+    fn comment_is_trailing(&self, prev_end: u32, c: &ClassifiedTrivia) -> bool {
+        let from = (prev_end as usize).min(self.source.len());
+        let to = (c.start as usize).min(self.source.len());
+        if to < from {
+            return false;
+        }
+        !self.source[from..to].contains('\n')
+    }
+
+    /// Emit a comment on a line of its own.
+    fn emit_comment_own_line(&mut self, c: &ClassifiedTrivia) {
+        self.out.push(Doc::hard_line());
+        self.consecutive_nls = 1;
+        self.emit_comment_once(c);
+        self.out.push(Doc::hard_line());
+        self.consecutive_nls = 1;
+    }
+
+    /// Emit a comment at the end of the current line.
+    fn emit_comment_trailing(&mut self, c: &ClassifiedTrivia) {
+        self.emit_comment_once(c);
+    }
+
+    /// Emit a comment's raw text — no spacing around it — and mark it as
+    /// emitted.
+    ///
+    /// Used where the caller controls the line break (a stacked list
+    /// item, a match arm): the comment must start exactly at the line's
+    /// indentation.
+    fn emit_comment_text(&mut self, c: &ClassifiedTrivia) {
+        if self.emitted(c) {
+            return;
+        }
+        self.emitted_comments.insert((c.start, c.end));
+        let s = c.start as usize;
+        let e = (c.end as usize).min(self.source.len());
+        if e > s {
+            self.out
+                .push(Doc::text_owned(Cow::Owned(self.source[s..e].to_string())));
+            self.consecutive_nls = 0;
+        }
+    }
+
+    /// Is there a comment inside `span` that was not emitted yet?
+    fn has_unemitted_comment(&self, span: Span) -> bool {
+        self.comments
+            .iter()
+            .any(|c| c.start >= span.start && c.end <= span.end && !self.emitted(c))
+    }
+
+    /// Mark every comment inside `span` as emitted.
+    fn mark_comments_emitted(&mut self, span: Span) {
+        for c in &self.comments {
+            if c.start >= span.start && c.end <= span.end {
+                self.emitted_comments.insert((c.start, c.end));
+            }
+        }
+    }
+
+    fn emitted(&self, c: &ClassifiedTrivia) -> bool {
+        self.emitted_comments.contains(&(c.start, c.end))
+    }
+
+    /// End offset of the `(`/`[`/`{` token that opens the construct the
+    /// item at `byte` belongs to — the nearest opening delimiter before
+    /// the item.
+    fn open_delim_end_before(&self, byte: u32) -> Option<u32> {
+        let mut idx = token_index_at_or_after(self.toks, byte);
+        while idx > 0 {
+            idx -= 1;
+            let t = &self.toks[idx];
+            if t.start >= byte {
+                continue;
+            }
+            if matches!(
+                t.kind,
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
+            ) {
+                return Some(t.end);
+            }
+        }
+        None
+    }
+
+    /// Start offset of the `)`/`]`/`}` token that closes the construct the
+    /// item ending at `byte` belongs to — the nearest closing delimiter
+    /// after the item.
+    fn close_delim_start_after(&self, byte: u32) -> Option<u32> {
+        let mut idx = token_index_at_or_after(self.toks, byte);
+        while idx < self.toks.len() {
+            let t = &self.toks[idx];
+            if t.start < byte {
+                idx += 1;
+                continue;
+            }
+            if matches!(
+                t.kind,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+            ) {
+                return Some(t.start);
+            }
+            // A different token kind: keep looking, but stop at the
+            // statement end so a stray `}` from an enclosing block is not
+            // mistaken for this construct's closer.
+            if t.kind == TokenKind::StmtEnd {
+                return None;
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    /// Does a comma follow the last item before the closing delimiter?
+    fn has_trailing_comma(&self, item_end: u32, close_start: u32) -> bool {
+        let mut idx = token_index_at_or_after(self.toks, item_end);
+        while idx < self.toks.len() {
+            let t = &self.toks[idx];
+            if t.start >= close_start {
+                break;
+            }
+            if t.kind == TokenKind::Comma {
+                return true;
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    /// Split the comments of one gap into the ones that continue the
+    /// previous item's line and the ones that sit on their own line.
+    fn split_gap_comments(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> (Vec<ClassifiedTrivia>, Vec<ClassifiedTrivia>) {
+        let mut trailing = Vec::new();
+        let mut own_line = Vec::new();
+        for c in self.comments_between(start, end) {
+            if self.comment_is_trailing(start, &c) {
+                trailing.push(c);
+            } else {
+                own_line.push(c);
+            }
+        }
+        (trailing, own_line)
+    }
+
+    /// Classify the comments of every gap of a list.
+    ///
+    /// `gaps[i]` holds the gap *before* item `i` (the first gap is the
+    /// one after the opening delimiter); `gaps[items.len()]` holds the gap
+    /// after the last item. Each gap is split into the comments that
+    /// continue the previous line and the comments that sit on a line of
+    /// their own.
+    fn gap_comments(
+        &self,
+        items: &[Span],
+        open_end: u32,
+        close_start: u32,
+    ) -> Vec<(Vec<ClassifiedTrivia>, Vec<ClassifiedTrivia>)> {
+        let mut gaps = Vec::with_capacity(items.len() + 1);
+        let mut prev_end = open_end;
+        for item in items {
+            gaps.push(self.split_gap_comments(prev_end, item.start));
+            prev_end = item.end;
+        }
+        gaps.push(self.split_gap_comments(prev_end, close_start));
+        gaps
+    }
+
+    /// Emit the items of an inline list-like construct: an array literal,
+    /// a dict literal, a struct literal, call arguments or a tuple.
+    ///
+    /// Without comments the list keeps the canonical one-line layout. A
+    /// comment between two items switches the list to the expanded
+    /// layout: one item per line, the trailing comment of an item stays
+    /// on the item's line, and a comment that sat on its own line keeps
+    /// its own line (#587).
+    fn emit_inline_list<F>(&mut self, items: &[Span], mut emit_item: F)
+    where
+        F: FnMut(&mut Ctx, usize),
+    {
+        if items.is_empty() {
+            return;
+        }
+        let open_end = self
+            .open_delim_end_before(items[0].start)
+            .unwrap_or(items[0].start);
+        let last_end = items[items.len() - 1].end;
+        let close_start = self.close_delim_start_after(last_end).unwrap_or(last_end);
+
+        // Classify the comments of every gap: `gaps[i]` holds the gap
+        // before item `i` (the first one is the gap after the opening
+        // delimiter), `gaps[items.len()]` the gap after the last item.
+        let gaps = self.gap_comments(items, open_end, close_start);
+        let trailing: Vec<Vec<ClassifiedTrivia>> = gaps.iter().map(|g| g.0.clone()).collect();
+        let own_line: Vec<Vec<ClassifiedTrivia>> = gaps.iter().map(|g| g.1.clone()).collect();
+
+        if trailing.iter().all(|v| v.is_empty()) && own_line.iter().all(|v| v.is_empty()) {
+            // Canonical layout: the whole list on one line.
+            for i in 0..items.len() {
+                if i > 0 {
+                    self.text(", ");
+                }
+                emit_item(&mut *self, i);
+            }
+            return;
+        }
+
+        // Expanded layout. A comment right after the opening delimiter
+        // stays on the delimiter's line (`f( // c`).
+        for c in &trailing[0] {
+            self.emit_comment_trailing(c);
+        }
+        let trailing_comma = self.has_trailing_comma(last_end, close_start);
+        let saved = std::mem::take(&mut self.out);
+        for i in 0..items.len() {
+            if own_line[i].is_empty() {
+                self.out.push(Doc::hard_line());
+                self.consecutive_nls = 1;
+            }
+            for c in &own_line[i] {
+                self.emit_comment_own_line(c);
+            }
+            emit_item(&mut *self, i);
+            if i + 1 < items.len() || trailing_comma {
+                self.text(",");
+            }
+            for c in &trailing[i + 1] {
+                self.emit_comment_trailing(c);
+            }
+        }
+        // Own-line comments between the last item and the closing
+        // delimiter. The hard line that precedes the delimiter ends the
+        // last comment's line, so no extra break is emitted here.
+        for c in &own_line[items.len()] {
+            self.out.push(Doc::hard_line());
+            self.emit_comment_text(c);
+        }
+        let body = std::mem::replace(&mut self.out, saved);
+        self.out.push(Doc::Indent {
+            contents: Box::new(Doc::Concat(body)),
+        });
+        self.out.push(Doc::hard_line());
+        self.consecutive_nls = 1;
+    }
+
+    /// Start of the label that introduces the value at `value_start`
+    /// (`S{a: 1}` → the `a`; `f(x = 1)` → the `x`).
+    ///
+    /// Named items carry their label in the AST only as a name, so the
+    /// label's source position is recovered from the token stream.
+    fn label_start_before(&self, value_start: u32) -> u32 {
+        let idx = token_index_at_or_after(self.toks, value_start);
+        if idx == 0 {
+            return value_start;
+        }
+        let prev = &self.toks[idx - 1];
+        if prev.end > value_start {
+            return value_start;
+        }
+        match prev.kind {
+            TokenKind::Ident => prev.start,
+            TokenKind::Colon | TokenKind::Assign => {
+                if idx >= 2 {
+                    let label = &self.toks[idx - 2];
+                    if label.kind == TokenKind::Ident {
+                        return label.start;
+                    }
+                }
+                value_start
+            }
+            _ => value_start,
+        }
+    }
+
     /// Does `span` cover any `|>` pipeline operator? Pipeline chains are
     /// desugared by the parser into nested `Call` nodes; re-emitting them
     /// structurally would lose the `|>` token, so the emitter renders
@@ -365,6 +686,23 @@ impl<'src, 'a> Ctx<'src, 'a> {
     /// here we just emit tokens verbatim and rely on the verify
     /// check to reject any drift.
     fn emit_stmt(&mut self, stmt: &Stmt) {
+        let span = stmt.span();
+        let mark = self.out.len();
+        self.emit_stmt_inner(stmt);
+        // Safety net: a comment inside the statement that the structural
+        // emitter could not place would be dropped, and the post-format
+        // verification would then reject the whole file ("comment
+        // dropped"), leaving it unformattable (#587). Re-emit the
+        // statement verbatim instead: the comment survives and the file
+        // stays formattable.
+        if self.has_unemitted_comment(span) {
+            self.out.truncate(mark);
+            self.mark_comments_emitted(span);
+            self.emit_raw(span);
+        }
+    }
+
+    fn emit_stmt_inner(&mut self, stmt: &Stmt) {
         let span = stmt.span();
         match stmt {
             Stmt::Decl {
@@ -609,10 +947,31 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     //     name: str,
                     // }
                     self.text("{");
+                    let field_spans: Vec<Span> = fields
+                        .iter()
+                        .map(|(n, t)| Span::new(n.span.start, t.span.end))
+                        .collect();
+                    let open_end = self
+                        .open_delim_end_before(field_spans[0].start)
+                        .unwrap_or(field_spans[0].start);
+                    let last_end = field_spans[field_spans.len() - 1].end;
+                    let close_start = self.close_delim_start_after(last_end).unwrap_or(last_end);
+                    let gaps = self.gap_comments(&field_spans, open_end, close_start);
                     let saved = std::mem::take(&mut self.out);
-                    for (n, t) in fields.iter() {
-                        self.out.push(Doc::hard_line());
-                        self.consecutive_nls = 1;
+                    for (i, (n, t)) in fields.iter().enumerate() {
+                        // A comment before the field keeps its own line.
+                        let leading = &gaps[i].1;
+                        if leading.is_empty() {
+                            self.out.push(Doc::hard_line());
+                            self.consecutive_nls = 1;
+                        } else {
+                            for c in leading {
+                                self.out.push(Doc::hard_line());
+                                self.emit_comment_text(c);
+                            }
+                            self.out.push(Doc::hard_line());
+                            self.consecutive_nls = 1;
+                        }
                         // Embedded (anonymous) fields print in short form.
                         let embedded = matches!(&t.kind, TyKind::Named(full, args)
                             if args.is_empty()
@@ -625,6 +984,15 @@ impl<'src, 'a> Ctx<'src, 'a> {
                             self.emit_ty(t);
                         }
                         self.text(",");
+                        // A comment after the field stays on the field's line.
+                        for c in &gaps[i + 1].0 {
+                            self.emit_comment_trailing(c);
+                        }
+                    }
+                    // Comments before the closing brace keep their own line.
+                    for c in &gaps[fields.len()].1 {
+                        self.out.push(Doc::hard_line());
+                        self.emit_comment_text(c);
                     }
                     let body = std::mem::replace(&mut self.out, saved);
                     self.out.push(Doc::Indent {
@@ -698,10 +1066,33 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 }
                 self.space();
                 self.text("{");
+                let variant_spans: Vec<Span> = variants
+                    .iter()
+                    .map(|(v, payload)| match payload {
+                        Some(pty) => Span::new(v.span.start, pty.span.end),
+                        None => v.span,
+                    })
+                    .collect();
+                let open_end = self
+                    .open_delim_end_before(variant_spans[0].start)
+                    .unwrap_or(variant_spans[0].start);
+                let last_end = variant_spans[variant_spans.len() - 1].end;
+                let close_start = self.close_delim_start_after(last_end).unwrap_or(last_end);
+                let gaps = self.gap_comments(&variant_spans, open_end, close_start);
                 let saved = std::mem::take(&mut self.out);
-                for (vname, payload) in variants.iter() {
-                    self.out.push(Doc::hard_line());
-                    self.consecutive_nls = 1;
+                for (i, (vname, payload)) in variants.iter().enumerate() {
+                    let leading = &gaps[i].1;
+                    if leading.is_empty() {
+                        self.out.push(Doc::hard_line());
+                        self.consecutive_nls = 1;
+                    } else {
+                        for c in leading {
+                            self.out.push(Doc::hard_line());
+                            self.emit_comment_text(c);
+                        }
+                        self.out.push(Doc::hard_line());
+                        self.consecutive_nls = 1;
+                    }
                     self.text(vname.name.clone());
                     if let Some(pty) = payload {
                         self.text("(");
@@ -709,6 +1100,13 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         self.text(")");
                     }
                     self.text(",");
+                    for c in &gaps[i + 1].0 {
+                        self.emit_comment_trailing(c);
+                    }
+                }
+                for c in &gaps[variants.len()].1 {
+                    self.out.push(Doc::hard_line());
+                    self.emit_comment_text(c);
                 }
                 let body = std::mem::replace(&mut self.out, saved);
                 self.out.push(Doc::Indent {
@@ -1200,12 +1598,8 @@ impl<'src, 'a> Ctx<'src, 'a> {
             }
             Expr::Tuple { items, .. } => {
                 self.text("(");
-                for (i, it) in items.iter().enumerate() {
-                    if i > 0 {
-                        self.text(", ");
-                    }
-                    self.emit_expr(it);
-                }
+                let spans: Vec<Span> = items.iter().map(|e| e.span()).collect();
+                self.emit_inline_list(&spans, |ctx, i| ctx.emit_expr(&items[i]));
                 self.text(")");
             }
             Expr::Unary { op, expr, .. } => {
@@ -1261,23 +1655,28 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 }
                 self.emit_expr(callee);
                 self.text("(");
-                let mut first = true;
-                for a in args {
-                    if !first {
-                        self.text(", ");
+                // Positional and named arguments form one list: a comment
+                // between them must not split the argument list.
+                let n_pos = args.len();
+                let spans: Vec<Span> = args
+                    .iter()
+                    .map(|a| a.span())
+                    .chain(
+                        named
+                            .iter()
+                            .map(|(n, v)| Span::new(n.span.start, v.span().end)),
+                    )
+                    .collect();
+                self.emit_inline_list(&spans, |ctx, i| {
+                    if i < n_pos {
+                        ctx.emit_expr(&args[i]);
+                    } else {
+                        let (n, v) = &named[i - n_pos];
+                        ctx.text(n.name.clone());
+                        ctx.text(": ");
+                        ctx.emit_expr(v);
                     }
-                    self.emit_expr(a);
-                    first = false;
-                }
-                for (n, v) in named {
-                    if !first {
-                        self.text(", ");
-                    }
-                    self.text(n.name.clone());
-                    self.text(": ");
-                    self.emit_expr(v);
-                    first = false;
-                }
+                });
                 self.text(")");
             }
             Expr::Closure {
@@ -1341,8 +1740,26 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.emit_expr(scrutinee);
                 self.space();
                 self.text("{");
-                for arm in arms {
+                let arm_spans: Vec<Span> = arms.iter().map(|a| a.span).collect();
+                let gaps = if arm_spans.is_empty() {
+                    Vec::new()
+                } else {
+                    let open_end = self
+                        .open_delim_end_before(arm_spans[0].start)
+                        .unwrap_or(arm_spans[0].start);
+                    let last_end = arm_spans[arm_spans.len() - 1].end;
+                    let close_start = self.close_delim_start_after(last_end).unwrap_or(last_end);
+                    self.gap_comments(&arm_spans, open_end, close_start)
+                };
+                for (i, arm) in arms.iter().enumerate() {
                     let saved = std::mem::take(&mut self.out);
+                    // A comment before the arm keeps its own line, inside
+                    // the arm's indentation.
+                    for c in &gaps[i].1 {
+                        self.emit_comment_text(c);
+                        self.out.push(Doc::hard_line());
+                        self.consecutive_nls = 1;
+                    }
                     self.emit_pattern(&arm.pat);
                     if let Some(g) = &arm.guard {
                         self.space();
@@ -1373,6 +1790,10 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         }
                         body => self.emit_expr(body),
                     };
+                    // A comment after the arm stays on the arm's line.
+                    for c in &gaps[i + 1].0 {
+                        self.emit_comment_trailing(c);
+                    }
                     let scratch = std::mem::replace(&mut self.out, saved);
                     let arm_doc = Doc::Indent {
                         contents: Box::new(Doc::Concat(vec![
@@ -1381,6 +1802,12 @@ impl<'src, 'a> Ctx<'src, 'a> {
                         ])),
                     };
                     self.out.push(arm_doc);
+                }
+                // Comments before the closing brace keep their own line.
+                for c in &gaps[arms.len()].1 {
+                    self.emit_comment_text(c);
+                    self.out.push(Doc::hard_line());
+                    self.consecutive_nls = 1;
                 }
                 self.out.push(Doc::hard_line());
                 self.consecutive_nls = 1;
@@ -1447,24 +1874,22 @@ impl<'src, 'a> Ctx<'src, 'a> {
             Expr::Continue { .. } => self.text("continue"),
             Expr::Array { elems, .. } => {
                 self.text("[");
-                for (i, e) in elems.iter().enumerate() {
-                    if i > 0 {
-                        self.text(", ");
-                    }
-                    self.emit_expr(e);
-                }
+                let spans: Vec<Span> = elems.iter().map(|e| e.span()).collect();
+                self.emit_inline_list(&spans, |ctx, i| ctx.emit_expr(&elems[i]));
                 self.text("]");
             }
             Expr::Dict { entries, .. } => {
                 self.text("{");
-                for (i, (k, v)) in entries.iter().enumerate() {
-                    if i > 0 {
-                        self.text(", ");
-                    }
-                    self.emit_expr(k);
-                    self.text(": ");
-                    self.emit_expr(v);
-                }
+                let spans: Vec<Span> = entries
+                    .iter()
+                    .map(|(k, v)| Span::new(k.span().start, v.span().end))
+                    .collect();
+                self.emit_inline_list(&spans, |ctx, i| {
+                    let (k, v) = &entries[i];
+                    ctx.emit_expr(k);
+                    ctx.text(": ");
+                    ctx.emit_expr(v);
+                });
                 self.text("}");
             }
             Expr::Field { obj, name, .. } => {
@@ -1480,21 +1905,28 @@ impl<'src, 'a> Ctx<'src, 'a> {
             Expr::StructInit { name, fields, .. } => {
                 self.text(name.clone());
                 self.text("{");
-                for (i, (n, v)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        self.text(", ");
-                    }
+                // A named field's label is not part of the AST node, so
+                // the item span starts at the label in the source.
+                let spans: Vec<Span> = fields
+                    .iter()
+                    .map(|(_, v)| {
+                        let label = self.label_start_before(v.span().start);
+                        Span::new(label, v.span().end)
+                    })
+                    .collect();
+                self.emit_inline_list(&spans, |ctx, i| {
+                    let (n, v) = &fields[i];
                     // Embedded shorthand: `Base{...}` instead of
                     // `Base: Base{...}` when the value constructs the
                     // embedded type itself.
                     let shorthand = matches!(v, Expr::StructInit { name: inner, .. }
                         if inner.rsplit('.').next().unwrap_or(inner.as_str()) == n.as_str());
                     if !shorthand {
-                        self.text(n);
-                        self.text(": ");
+                        ctx.text(n);
+                        ctx.text(": ");
                     }
-                    self.emit_expr(v);
-                }
+                    ctx.emit_expr(v);
+                });
                 self.text("}");
             }
             Expr::Index { obj, index, .. } => {
