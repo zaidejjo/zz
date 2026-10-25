@@ -1362,6 +1362,12 @@ parity_strict_error!(parity_err_int_float_cmp, "int_float_cmp.zz");
 // --- Match and return_in_loops: fixed by box_scalar_operand + __tail scoping ---
 parity_strict!(parity_syntax_match, "syntax", "match.zz");
 parity_strict!(parity_syntax_match_assign, "syntax", "match_assign.zz");
+parity_strict!(parity_syntax_match_tuple, "syntax", "match_tuple.zz");
+parity_strict!(
+    parity_syntax_match_bool_literal,
+    "syntax",
+    "match_bool_literal.zz"
+);
 parity_strict!(
     parity_syntax_return_in_loops,
     "syntax",

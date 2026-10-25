@@ -58,6 +58,8 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "fs_is_generated_test.zz", false),
     ("syntax", "match.zz", false),
     ("syntax", "match_assign.zz", true),
+    ("syntax", "match_tuple.zz", true),
+    ("syntax", "match_bool_literal.zz", true),
     ("syntax", "return_in_loops.zz", false),
     ("syntax", "control_flow.zz", false),
     ("types", "structs.zz", false),
