@@ -2379,8 +2379,8 @@ impl Vm {
                     let v = get_index(&ov, &iv, *span)?;
                     self.stack.push(v);
                 }
-                /// Read `array[idx]` where both are stack slots: single bounds
-                /// check, no `normalize_index` call, no `Value` tag loop.
+                // Read `array[idx]` where both are stack slots: single bounds
+                // check, no `normalize_index` call, no `Value` tag loop.
                 Op::IndexIntSlot {
                     arr,
                     idx,
@@ -2431,8 +2431,8 @@ impl Vm {
                     };
                     self.stack[*dst as usize] = v;
                 }
-                /// Read `dict[key]` where key is an int: probe DictData with
-                /// a precomputed hash + open-addressed table.
+                // Read `dict[key]` where key is an int: probe DictData with
+                // a precomputed hash + open-addressed table.
                 Op::IndexDictInt {
                     dict,
                     key,
