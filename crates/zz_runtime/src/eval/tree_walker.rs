@@ -326,6 +326,15 @@ impl Interp {
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Assign { target, value, .. } => {
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // There is no storage for `_`, so just evaluate the RHS.
+                if let Expr::Ident { name, .. } = target {
+                    if name == "_" {
+                        let _v = self.eval(value)?.into_value()?;
+                        return Ok(Flow::Value(Value::Unit));
+                    }
+                }
+
                 // Source order for stores (spec §7): the base/index
                 // evaluate BEFORE the value. Plain names and paths have
                 // no user code in the base, so they keep the shared

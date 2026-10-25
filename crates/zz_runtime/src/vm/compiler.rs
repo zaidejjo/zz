@@ -2844,6 +2844,13 @@ impl Compiler {
                 StmtValue::None
             }
             Stmt::Assign { target, value, .. } => match target {
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // There is no storage for `_`, so just compile the RHS and
+                // let the caller discard the result.
+                Expr::Ident { name, .. } if name == "_" => {
+                    self.compile_expr(value);
+                    StmtValue::Discard
+                }
                 Expr::Ident { name, span } => {
                     // Fast path: `x = x + y` / `x = x + 1` / `x = x + N` with
                     // operands resolving to local slots -> single fused op.
