@@ -697,8 +697,26 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Int => {
                 self.advance();
-                let cleaned = tok.text.replace('_', "");
-                match cleaned.parse::<i64>() {
+                let text = tok.text.as_ref();
+                // Detect a base prefix: `0x`/`0X` hex, `0b`/`0B` binary,
+                // `0o`/`0O` octal. Plain decimals use radix 10.
+                let (radix, digits) = if let Some(rest) =
+                    text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                {
+                    (16, rest)
+                } else if let Some(rest) =
+                    text.strip_prefix("0b").or_else(|| text.strip_prefix("0B"))
+                {
+                    (2, rest)
+                } else if let Some(rest) =
+                    text.strip_prefix("0o").or_else(|| text.strip_prefix("0O"))
+                {
+                    (8, rest)
+                } else {
+                    (10, text)
+                };
+                let cleaned = digits.replace('_', "");
+                match i64::from_str_radix(&cleaned, radix) {
                     Ok(value) => Expr::Int {
                         value,
                         span: tok.span,
