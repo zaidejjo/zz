@@ -128,6 +128,11 @@ void zz_release_bytes(zz_bytes *b);
 // inlining over a loop body.
 zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err);
 
+// Probe the dict's key index (open addressing over ordered entries) and
+// return the entry position via *out; 1 = found, 0 = not found. Falls back
+// to a linear scan when the index is not built. No value is cloned.
+int zz_dict_find(const zz_dict *d, zz_value key, size_t *out);
+
 static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
     switch (obj.tag) {
     case ZZ_ARRAY:
