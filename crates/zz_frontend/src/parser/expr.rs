@@ -1207,6 +1207,36 @@ impl<'a> Parser<'a> {
                 span,
             };
         }
+        // Detect the wrong comprehension order: `[for x in iter: body]`.
+        // ZZ writes the body first: `[body for x in iter]`. Name the
+        // supported form and recover by skipping to the closing `]` so a
+        // single clear diagnostic is emitted instead of a cascade.
+        if self.at(TokenKind::For) {
+            let for_tok = self.peek();
+            self.errors.push(error_at(
+                "expected expression before `for` — list comprehension body comes first: \
+                 `[expr for x in iter]`",
+                for_tok.span,
+            ));
+            while !self.at(TokenKind::RBracket)
+                && !self.at(TokenKind::Eof)
+                && !self.at(TokenKind::StmtEnd)
+            {
+                self.advance();
+            }
+            let end = if self.eat(TokenKind::RBracket) {
+                let rbracket = self.previous().span;
+                self.pop_delim(TokenKind::RBracket, rbracket);
+                rbracket
+            } else {
+                self.pop_delim(TokenKind::RBracket, lbracket.span);
+                lbracket.span
+            };
+            return Expr::Array {
+                elems: Vec::new(),
+                span: lbracket.span.join(end),
+            };
+        }
         // Parse first expression — could be a comprehension body or array element.
         let first = self.parse_expr();
         // List comprehension: `[expr for x in iter]` / `[expr for x in iter if cond]`.

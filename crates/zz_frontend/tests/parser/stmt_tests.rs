@@ -247,6 +247,30 @@ fn parses_pub_const_decl() {
 }
 
 #[test]
+fn const_decl_uses_equals_not_colon_eq() {
+    // `const N := 4` — const takes `=`, not `:=`. The diagnostic must name
+    // the supported form and offer a `:=` → `=` replacement.
+    let parsed = zz_frontend::parse("const N := 4");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`const` uses `=`, not `:=`")),
+        "expected const-form error naming `=`, got {:?}",
+        parsed.errors
+    );
+    assert!(
+        parsed.errors.iter().any(|e| {
+            e.fixits
+                .iter()
+                .any(|f| f.message == "replace `:=` with `=`")
+        }),
+        "expected fixit naming the replacement, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
 fn plain_decl_is_mutable() {
     let p = parse_ok("x := 10");
     match &p.stmts[0] {

@@ -767,7 +767,27 @@ impl<'a> Parser<'a> {
             None
         };
         if !self.eat(TokenKind::Assign) {
-            self.error_here("expected `=` after const declaration");
+            let span = self.peek().span;
+            if self.at(TokenKind::ColonEq) {
+                // `const x := 4` — const takes `=`, not `:=`. Report a
+                // targeted message naming the supported form and offer a
+                // one-token replacement, then consume `:=` so the value
+                // still parses instead of cascading.
+                self.errors.push(
+                    error_at(
+                        "expected `=` after `const` name — `const` uses `=`, not `:=`",
+                        span,
+                    )
+                    .with_fixit(FixIt::safe(
+                        span,
+                        "=",
+                        "replace `:=` with `=`",
+                    )),
+                );
+                self.advance(); // consume `:=`
+            } else {
+                self.error_here("expected `=` after const declaration");
+            }
         }
         let value = self.parse_expr();
         let span = const_tok.span.join(value.span());
