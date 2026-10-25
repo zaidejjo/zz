@@ -44,7 +44,8 @@ fn effect(op: &Op) -> i64 {
         | Op::SlotLessIntImm { .. }
         | Op::SlotCmpIntSlot { .. }
         | Op::SlotCmpIntImm { .. }
-        | Op::SlotCmpConst { .. } => 1,
+        | Op::SlotCmpConst { .. }
+        | Op::PushSlotIntImm { .. } => 1,
         Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => -1,
         Op::IntNeg => 0,
         Op::BinOp(_) => -1,
@@ -1273,6 +1274,13 @@ fn infer_func(
             Op::SlotBinaryIntImm { dst, lhs, .. } => {
                 declared(*dst)?;
                 declared(*lhs)?;
+            }
+            Op::PushSlotIntImm { a, .. } => {
+                declared(*a)?;
+                // Emitted only under the compiler's `Int` type guard; the
+                // non-`Int` fallback is not modelled (same as the other
+                // fused arithmetic ops).
+                st.push(prims.int.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
             }
             Op::IntAdd => {
                 let r = pop(&mut st, pc)?;

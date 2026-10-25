@@ -231,7 +231,8 @@ its own number rendering on both engines; float→int saturation is §5.
   generalized condition compares `SlotCmpIntSlot` / `SlotCmpIntImm`,
   which carry the operator so `if i > 0` fuses like `if i < n`, plus
   `SlotCmpConst` for non-`int` literals, which live in the constant
-  pool) —
+  pool, and `PushSlotIntImm` for value-position arithmetic such as the
+  `n - 1` argument of `fib`, which has no destination slot to fuse into) —
   instead of desugaring them.
   They are pure sugar: each op's doc names the exact core sequence it
   stands for, `raise` maps it one to one, and the interpreter takes the

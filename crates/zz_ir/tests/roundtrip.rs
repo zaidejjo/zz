@@ -293,6 +293,7 @@ fn fused_slot_ops_survive_the_round_trip() {
                 | SlotCmpConst { .. }
                 | SlotBinaryInt { .. }
                 | SlotBinaryIntImm { .. }
+                | PushSlotIntImm { .. }
         )
     }
     // Typed compile: the fusion sits behind the compiler's `Int` type
@@ -457,6 +458,61 @@ fn int_sig(params: usize) -> zz_checker::FuncSig {
         is_extern: false,
         extern_c_symbol: None,
     }
+}
+
+/// `PushSlotIntImm`: value-position arithmetic with a literal RHS.
+///
+/// `SlotBinaryIntImm` needs a destination slot, so `fib(n - 1)` in argument
+/// position used to pay `LoadSlot PushConst IntSub` per argument. The fused
+/// push must survive the codec, come back on raise, and desugar to that
+/// sequence for the chunk→C backend — computing the same value either way.
+#[test]
+fn value_position_int_arith_survives_the_round_trip() {
+    let module = lower_typed_spanmap(
+        "func dec(n: int) -> int {\n return n - 1\n}\nr := dec(41)\nr",
+        &std::collections::HashMap::new(),
+    );
+    let dis = zz_ir::dis::disassemble(&module);
+    assert!(
+        dis.contains("pushslotintimm"),
+        "fusion lost in lowering:\n{dis}"
+    );
+    // The bytes keep it and the decoder hands the same module back.
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    verify::verify(&loaded).expect("verify failed");
+    assert_eq!(codec::encode(&loaded), bytes, "re-encode differs");
+    // Raising restores the VM op itself, and the loaded run agrees.
+    let raised = raise::raise(&loaded).expect("raise failed");
+    fn has_push(chunk: &zz_runtime::vm::Chunk) -> bool {
+        chunk.code.iter().any(|op| match op {
+            zz_runtime::vm::Op::PushSlotIntImm { .. } => true,
+            zz_runtime::vm::Op::MakeFunc { chunk, .. } => has_push(chunk),
+            _ => false,
+        })
+    }
+    assert!(has_push(&raised), "raise must restore the fused push");
+    let mut interp = Interp::new();
+    interp.run_loaded_chunk(&raised).expect("loaded run failed");
+    assert_eq!(interp.env.get("r"), Some(Value::Int(40)));
+    // The chunk→C stream is the pre-v3 sequence, and still computes 40.
+    let expanded = lower::expand_fused(&loaded).expect("expand failed");
+    verify::verify(&expanded).expect("expanded must verify");
+    let expanded_dis = zz_ir::dis::disassemble(&expanded);
+    assert!(
+        !expanded_dis.contains("pushslotintimm"),
+        "expansion left the fused push behind:\n{expanded_dis}"
+    );
+    let reexpanded = raise::raise(&expanded).expect("raise failed");
+    let mut interp2 = Interp::new();
+    interp2
+        .run_loaded_chunk(&reexpanded)
+        .expect("expanded run failed");
+    assert_eq!(
+        interp2.env.get("r"),
+        Some(Value::Int(40)),
+        "desugared push differs"
+    );
 }
 
 fn lower_typed_spanmap(

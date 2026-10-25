@@ -469,6 +469,11 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             put_u32(v, k.0);
             encode_binop(v, *op);
         }
+        Op::PushSlotIntImm { a, imm, op } => {
+            put_u16(v, *a);
+            put_i64(v, *imm);
+            encode_binop(v, *op);
+        }
         Op::SlotBinaryInt { dst, lhs, rhs, op } => {
             put_u16(v, *dst);
             put_u16(v, *lhs);
@@ -1330,6 +1335,11 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
         91 => Ok(Op::SlotCmpConst {
             a: r.u16()?,
             k: ConstId(r.u32()?),
+            op: decode_binop(r)?,
+        }),
+        92 => Ok(Op::PushSlotIntImm {
+            a: r.u16()?,
+            imm: r.i64()?,
             op: decode_binop(r)?,
         }),
         85 => Ok(Op::SlotBinaryInt {

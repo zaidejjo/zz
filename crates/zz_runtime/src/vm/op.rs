@@ -205,6 +205,24 @@ pub enum Op {
         imm: i64,
         op: zz_frontend::ast::BinOp,
     },
+    /// Push `Int(slot[a] op imm)`.
+    ///
+    /// [`SlotBinaryIntImm`](Self::SlotBinaryIntImm) needs a destination
+    /// slot, so it only fits assignment shapes; value-position arithmetic
+    /// (`fib(n - 1)` as an argument, `x := n + 1`, `return i * 2`) otherwise
+    /// pays `LoadSlot PushConst IntOp` — three dispatches. Falls back to
+    /// `eval_binary` when the slot is not an `Int`.
+    ///
+    /// Unlike the older fused slot ops this one carries its expression span,
+    /// so coverage attributes the line (a `Span::default()` op drops the
+    /// source line from the report) and a trapping `Div`/`Rem` keeps its
+    /// error location.
+    PushSlotIntImm {
+        a: u16,
+        imm: i64,
+        op: zz_frontend::ast::BinOp,
+        span: Span,
+    },
     /// Compare a slot against a constant-pool entry, push `Bool(a op c)`.
     ///
     /// `SlotCmpIntImm` inlines `i64` literals; every other literal (string,
@@ -634,6 +652,7 @@ impl Op {
             Op::SlotCmpConst { .. } => "SlotCmpConst",
             Op::SlotBinaryInt { .. } => "SlotBinaryInt",
             Op::SlotBinaryIntImm { .. } => "SlotBinaryIntImm",
+            Op::PushSlotIntImm { .. } => "PushSlotIntImm",
             Op::MakeFunc { .. } => "MakeFunc",
             Op::RegisterStruct { .. } => "RegisterStruct",
             Op::RegisterEnum { .. } => "RegisterEnum",
@@ -728,7 +747,8 @@ impl Op {
             | Op::SlotCmpIntImm { .. }
             | Op::SlotCmpConst { .. }
             | Op::SlotBinaryInt { .. }
-            | Op::SlotBinaryIntImm { .. } => OpClass::Fused,
+            | Op::SlotBinaryIntImm { .. }
+            | Op::PushSlotIntImm { .. } => OpClass::Fused,
 
             Op::IntAdd(..)
             | Op::IntSub(..)
