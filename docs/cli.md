@@ -331,10 +331,14 @@ zz check src/
 | `--interactive` / `-i` | Prompt for ambiguous fixes |
 | `--stats` | Print per-file and total check stats (modules, cache hits/misses, seed size, wall time) |
 | `--format json` | Emit machine-readable diagnostics (`{"files": [{"file", "diagnostics"}]}` on stdout); exit codes unchanged; cannot combine with `--fix` |
+| `-h`, `--help` | Print usage and exit — never checks, never writes |
 
 > Note: `--check` / `-c` is a `zz fmt` flag only. `zz check --check`
 > is rejected — `zz check` already checks without writing; use
 > `zz fmt --check` for a formatting dry-run.
+
+> Note: `--help` is read-only. `zz check --fix --help` prints usage and
+> exits 0 without applying a single fix.
 
 #### Check Performance Budget
 
@@ -362,7 +366,14 @@ zz fix src/
 
 # Apply all fixes without prompting
 zz fix --hard src/
+
+# Usage only — prints help, changes nothing
+zz fix --help
 ```
+
+`zz fix --help` (and `-h`) prints the command usage and exits 0 **without
+touching a single file** — asking for documentation never rewrites the
+project.
 
 ### `zz fmt [FLAGS] [PATH]`
 
@@ -380,7 +391,13 @@ zz fmt -c src/
 
 # Format directory recursively
 zz fmt src/
+
+# Usage only — prints help, changes nothing
+zz fmt --help
 ```
+
+`zz fmt --help` (and `-h`) prints the command usage and exits 0 **without
+reformatting any file**.
 
 ## Flags
 
