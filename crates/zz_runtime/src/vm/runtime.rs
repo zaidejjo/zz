@@ -136,8 +136,6 @@ struct Frame {
     /// Deferred closures accumulated in this frame. Saved/restored across
     /// nested calls so each frame only drains its own defers.
     defer_stack: Vec<Value>,
-    /// Function name for backtraces (empty string for top-level).
-    func_name: String,
     /// Source span of the function definition for backtraces.
     func_span: Span,
 }
@@ -282,7 +280,7 @@ impl Vm {
             .map(|f| {
                 let span = f.chunk.spans.get(f.ip).copied().unwrap_or_default();
                 (
-                    f.func_name.clone(),
+                    String::new(),
                     f.chunk.source.as_deref().map(|s| s.to_string()),
                     span,
                 )
@@ -438,7 +436,6 @@ impl Vm {
                     prev_env,
                     stack_base,
                     defer_stack: saved_defers,
-                    func_name: String::new(),
                     func_span: Span::default(),
                 });
             }
@@ -472,7 +469,6 @@ impl Vm {
             prev_env: interp.env.clone(),
             stack_base,
             defer_stack: Vec::new(),
-            func_name: String::new(),
             func_span: Span::default(),
         });
 
@@ -632,10 +628,18 @@ impl Vm {
         // The executor guard first: `request_yield` fires only on executor
         // threads, so off-executor (plain `zz run`) this is one thread-local
         // cell read instead of a RefCell borrow plus take on every call.
+        //
+        // `take_yield` itself lives behind a #[cold] boundary so the hot
+        // per-op path stays small and I-cache friendly; the inline
+        // `on_executor()` check is one thread-local load.
+        #[cold]
+        fn take_yield_slow() -> Option<crate::value::YieldReason> {
+            crate::value::take_yield()
+        }
         macro_rules! yield_check {
             () => {{
                 if crate::value::on_executor() {
-                    if let Some(reason) = crate::value::take_yield() {
+                    if let Some(reason) = take_yield_slow() {
                         return Ok(Flow::Yield(reason));
                     }
                 }
@@ -3410,7 +3414,6 @@ impl Vm {
             prev_env,
             stack_base,
             defer_stack: saved_defers,
-            func_name: String::new(),
             func_span: span,
         });
     }
@@ -3649,14 +3652,20 @@ impl Vm {
     }
 
     fn unwind_frame(&mut self, flow: Flow, interp: &mut Interp) -> Unwind {
-        // Move (never clone) the return payload out: the frame is
-        // discarded below, so this is its last use. Cloning here costs
-        // a full deep copy per call return — O(n) per key for threaded
-        // accumulators like `doc = push_node(doc, x)`.
-        let (payload, brk, ctn) = match flow {
-            Flow::Return(v) => (Some(v), None, None),
-            Flow::Break(s) => (None, Some(s), None),
-            Flow::Continue(s) => (None, None, Some(s)),
+        // Keep the return payload in a register (plain `Value` + bool) instead
+        // of wrapping it in `Option<Value>` — avoids a tag check on every
+        // return and keeps the value live across `truncate`.
+        let mut payload = Value::Unit;
+        let mut has_payload = false;
+        let mut brk: Option<Span> = None;
+        let mut ctn: Option<Span> = None;
+        match flow {
+            Flow::Return(v) => {
+                payload = v;
+                has_payload = true;
+            }
+            Flow::Break(s) => brk = Some(s),
+            Flow::Continue(s) => ctn = Some(s),
             Flow::Value(_) => unreachable!("unwind_frame on a plain value"),
             Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
@@ -3671,7 +3680,11 @@ impl Vm {
             if let Some(span) = ctn {
                 return Unwind::Escaped(Flow::Continue(span));
             }
-            return Unwind::Escaped(Flow::Return(payload.unwrap_or(Value::Unit)));
+            return Unwind::Escaped(Flow::Return(if has_payload {
+                payload
+            } else {
+                Value::Unit
+            }));
         }
         if let Some(span) = brk {
             return Unwind::Error(self.error("`break` outside of a loop", span));
@@ -3679,7 +3692,8 @@ impl Vm {
         if let Some(span) = ctn {
             return Unwind::Error(self.error("`continue` outside of a loop", span));
         }
-        self.stack.push(payload.unwrap_or(Value::Unit));
+        self.stack
+            .push(if has_payload { payload } else { Value::Unit });
         Unwind::Continue
     }
 
@@ -3687,7 +3701,7 @@ impl Vm {
     pub(crate) fn backtrace(&self) -> Vec<(String, Span)> {
         self.frames
             .iter()
-            .map(|f| (f.func_name.clone(), f.func_span))
+            .map(|f| (String::new(), f.func_span))
             .collect()
     }
 
