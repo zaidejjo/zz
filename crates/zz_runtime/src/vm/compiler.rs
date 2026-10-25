@@ -1646,22 +1646,18 @@ impl Compiler {
             Expr::Ident { name, .. } => name.as_str(),
             _ => return None,
         };
-        let home = match self.move_home_of(home_name) {
-            Some(h) => h,
-            None => return None,
-        };
+        let home = self.move_home_of(home_name)?;
         // Resolve field index from the struct signature.
         let struct_name = match self.type_of(obj.span()) {
             Some(zz_checker::Type::Struct(name, _)) => name.clone(),
             _ => return None,
         };
-        let Some(sig) = self.structs.as_ref().and_then(|s| s.get(&struct_name)) else {
-            return None;
-        };
-        let field_idx = match sig.fields.iter().position(|(n, _)| n == field_name) {
-            Some(i) => i as u16,
-            None => return None,
-        };
+        let sig = self.structs.as_ref().and_then(|s| s.get(&struct_name))?;
+        let field_idx = sig
+            .fields
+            .iter()
+            .position(|(n, _)| n == field_name)
+            .map(|i| i as u16)?;
         Some(Op::GetFieldSlotIdx {
             home,
             idx: field_idx,
@@ -1680,14 +1676,8 @@ impl Compiler {
         dst_slot: u16,
         span: Span,
     ) -> Option<Op> {
-        let arr_slot = match self.resolve_expr_slot(arr) {
-            Some(s) => s,
-            None => return None,
-        };
-        let idx_slot = match self.resolve_expr_slot(idx) {
-            Some(s) => s,
-            None => return None,
-        };
+        let arr_slot = self.resolve_expr_slot(arr)?;
+        let idx_slot = self.resolve_expr_slot(idx)?;
         Some(Op::IndexIntSlot {
             arr: arr_slot,
             idx: idx_slot,
@@ -1706,14 +1696,8 @@ impl Compiler {
         dst_slot: u16,
         span: Span,
     ) -> Option<Op> {
-        let dict_slot = match self.resolve_expr_slot(dict) {
-            Some(s) => s,
-            None => return None,
-        };
-        let key_slot = match self.resolve_expr_slot(key) {
-            Some(s) => s,
-            None => return None,
-        };
+        let dict_slot = self.resolve_expr_slot(dict)?;
+        let key_slot = self.resolve_expr_slot(key)?;
         // Only fuse for int-keyed dicts.
         let Some(zz_checker::Type::Dict(kt, _)) = self.type_of(dict.span()) else {
             return None;

@@ -2391,39 +2391,28 @@ impl Vm {
                     let iv = self.stack[*idx as usize].clone();
                     let v = match (&ov, &iv) {
                         (Value::Array(items), Value::Int(i)) => {
-                            match normalize_index(*i, items.len(), *span) {
-                                Ok(ix) => items[ix].clone(),
-                                Err(e) => return Err(e),
-                            }
+                            let ix = normalize_index(*i, items.len(), *span)?;
+                            items[ix].clone()
                         }
                         (Value::Tuple(items), Value::Int(i)) => {
-                            match normalize_index(*i, items.len(), *span) {
-                                Ok(ix) => items[ix].clone(),
-                                Err(e) => return Err(e),
-                            }
+                            let ix = normalize_index(*i, items.len(), *span)?;
+                            items[ix].clone()
                         }
                         (Value::Str(s), Value::Int(i)) => {
                             if s.is_ascii() {
-                                match normalize_index(*i, s.len(), *span) {
-                                    Ok(ix) => Value::Str(std::sync::Arc::clone(
-                                        &crate::runtime::ops::ascii_chars()
-                                            [s.as_bytes()[ix] as usize],
-                                    )),
-                                    Err(e) => return Err(e),
-                                }
+                                let ix = normalize_index(*i, s.len(), *span)?;
+                                Value::Str(std::sync::Arc::clone(
+                                    &crate::runtime::ops::ascii_chars()[s.as_bytes()[ix] as usize],
+                                ))
                             } else {
                                 let chars: Vec<char> = s.chars().collect();
-                                match normalize_index(*i, chars.len(), *span) {
-                                    Ok(ix) => Value::Str(chars[ix].to_string().into()),
-                                    Err(e) => return Err(e),
-                                }
+                                let ix = normalize_index(*i, chars.len(), *span)?;
+                                Value::Str(chars[ix].to_string().into())
                             }
                         }
                         (Value::Bytes(b), Value::Int(i)) => {
-                            match normalize_index(*i, b.len(), *span) {
-                                Ok(ix) => Value::Int(b.as_slice()[ix] as i64),
-                                Err(e) => return Err(e),
-                            }
+                            let ix = normalize_index(*i, b.len(), *span)?;
+                            Value::Int(b.as_slice()[ix] as i64)
                         }
                         (Value::Dict(dict), key) => match dict.get_cloned(key) {
                             Some(v) => v,
