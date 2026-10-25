@@ -528,6 +528,16 @@ All fallible ops return `Result<_, str>` with unified
 `read_chunk` is text-oriented (lossy on arbitrary bytes by construction);
 use `read_chunk_bytes` for binary streaming.
 
+Reads share a process-wide, stat-validated content cache: repeating
+`fs.read`, `fs.read_bytes`, `fs.scan_counts`, or `fs.is_generated` on an
+unchanged regular file costs one `stat` plus a refcount bump instead of a
+fresh `open`/`read`/allocation, and NUL/UTF-8 checks are memoized. Writes and
+removals through `std.fs` invalidate eagerly; outside writes are detected by
+`len`/`mtime` (plus `ctime`/`ino`/`dev` on Unix). Empty and non-regular files
+are never cached, entries cap at 8 MiB, and the default budget is 96 MiB
+of raw buffers (a lazily built text/bytes view can add one more copy per
+entry; `ZZ_FS_CACHE=0` disables, `ZZ_FS_CACHE_MB=<n>` resizes).
+
 ### `bytes` — contiguous byte buffers
 
 `fs.read_bytes`, `fs.read_chunk_bytes`, and `fs.read_bytes_at` return

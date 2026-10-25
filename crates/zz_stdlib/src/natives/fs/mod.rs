@@ -11,7 +11,9 @@
 //! executor parks the task and resumes it when the I/O thread hands the
 //! result back through a one-shot channel. Main-thread calls and nested
 //! interpreter calls run the syscall inline (topping up the executor when
-//! nested so scheduler throughput never collapses).
+//! nested so scheduler throughput never collapses). A content-cache hit on
+//! a green task also stays inline: it is one `stat` plus an `Arc` bump, and
+//! spawning a replacement worker for that would cost more than the probe.
 //!
 //! # Errors
 //!
@@ -33,6 +35,7 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 
 use crate::natives::expect_str;
 
+mod cache;
 pub(crate) mod path;
 pub mod vfs;
 
@@ -87,6 +90,24 @@ fn err_str(msg: String) -> Value {
 
 fn ok_value(v: Value) -> Value {
     Value::Result(Box::new(Ok(v)))
+}
+
+fn ok_str_arc(s: Arc<String>) -> Value {
+    Value::Result(Box::new(Ok(Value::Str(s))))
+}
+
+/// `fs.read` result from a cached file (shared text on hit).
+fn text_result_for(file: &cache::CachedFile, path: &str) -> Value {
+    match file.text() {
+        Some(s) => ok_str_arc(s),
+        None => err_str(format!("fs:read:invalid_input: {path}")),
+    }
+}
+
+fn bytes_result(file: &cache::CachedFile) -> Value {
+    ok_value(Value::Bytes(Box::new(zz_runtime::BytesData::from_shared(
+        Arc::clone(file.bytes()),
+    ))))
 }
 
 // ── I/O worker pool ────────────────────────────────────────────────────────
@@ -179,6 +200,23 @@ fn chan_send_from_io(state: &Arc<zz_runtime::value::ChanState>, v: Value) {
     super::concurrency::service_chan_waiters(state, guard, Span::new(0, 0));
 }
 
+/// Content-cache probe for a read fast path.
+///
+/// The probe is one `stat`. A green task runs it inline (spawning a
+/// replacement worker per cache hit would cost more than the stat); a
+/// nested executor call tops up exactly like `run_fs` does before it
+/// blocks inline. Main-thread calls (the common compiler path) do
+/// neither.
+pub(super) fn probe_cached(path: &str) -> Option<Arc<cache::CachedFile>> {
+    if !cache::enabled() {
+        return None;
+    }
+    if !is_green_task() && zz_runtime::value::on_executor() {
+        super::concurrency::executor::Executor::top_up();
+    }
+    cache::probe(path)
+}
+
 /// Run `op` to a `Value` without blocking the scheduler.
 ///
 /// - Green task: submit to the I/O pool, then `chan.recv` the one-shot
@@ -224,6 +262,9 @@ pub(crate) const FILE_TAG: &str = "file";
 pub(crate) struct FsFile {
     file: Mutex<Option<std::fs::File>>,
     path: String,
+    /// Only writable handles can change the file, so only they need to
+    /// invalidate the content cache on flush/close.
+    writable: bool,
 }
 
 static FILE_POOL: OnceLock<Mutex<HashMap<u64, Arc<FsFile>>>> = OnceLock::new();
@@ -233,7 +274,7 @@ fn file_pool() -> &'static Mutex<HashMap<u64, Arc<FsFile>>> {
     FILE_POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn file_alloc(file: std::fs::File, path: String) -> u64 {
+fn file_alloc(file: std::fs::File, path: String, writable: bool) -> u64 {
     let id = NEXT_FILE_ID.fetch_add(1, Ordering::SeqCst);
     assert!(id != 0, "fs file id counter exhausted");
     file_pool().lock().unwrap().insert(
@@ -241,6 +282,7 @@ fn file_alloc(file: std::fs::File, path: String) -> u64 {
         Arc::new(FsFile {
             file: Mutex::new(Some(file)),
             path,
+            writable,
         }),
     );
     id
@@ -299,8 +341,14 @@ pub(crate) fn fs_read_file(
     span: Span,
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.read_file")?;
-    run_fs(interp, span, move || match std::fs::read_to_string(&path) {
-        Ok(contents) => ok_str(contents),
+    // Hot path: unchanged file already in the content cache. One stat +
+    // Arc bump instead of open/read/validate, on the caller's thread (no
+    // I/O-pool hop even for a green task).
+    if let Some(file) = probe_cached(&path) {
+        return Ok(text_result_for(&file, &path));
+    }
+    run_fs(interp, span, move || match cache::read_uncached(&path) {
+        Ok(file) => text_result_for(&file, &path),
         Err(e) => fs_err("read", &path, &e),
     })
 }
@@ -311,10 +359,11 @@ pub(crate) fn fs_read_bytes(
     span: Span,
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.read_bytes")?;
-    run_fs(interp, span, move || match std::fs::read(&path) {
-        Ok(bytes) => ok_value(Value::Bytes(Box::new(zz_runtime::BytesData::from_vec(
-            bytes,
-        )))),
+    if let Some(file) = probe_cached(&path) {
+        return Ok(bytes_result(&file));
+    }
+    run_fs(interp, span, move || match cache::read_uncached(&path) {
+        Ok(file) => bytes_result(&file),
         Err(e) => fs_err("read_bytes", &path, &e),
     })
 }
@@ -375,43 +424,63 @@ pub(crate) fn fs_scan_counts(
         }
     };
     let markers: Vec<String> = parse_markers(&raw_markers, OP)?;
-    run_fs(interp, span, move || {
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => return fs_err("scan_counts", &path, &e),
-        };
-        // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
-        if bytes.contains(&0) {
-            return ok_value(Value::Array(std::sync::Arc::new(vec![
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(1),
-            ])));
-        }
-        // Strict UTF-8 like `read_to_string`: non-UTF8 is unreadable.
-        let text = match std::str::from_utf8(&bytes) {
-            Ok(t) => t,
-            Err(_) => return err_str(format!("fs:scan_counts:invalid_input: {path}")),
-        };
-        let marker_refs: Vec<&[u8]> = markers.iter().map(|m| m.as_bytes()).collect();
-        let (lines, code, comments, blanks) = super::str_mod::classify_bytes(
-            text.as_bytes(),
-            &marker_refs,
-            bstart.as_bytes(),
-            bend.as_bytes(),
-            nested,
-            whole,
-        );
-        ok_value(Value::Array(std::sync::Arc::new(vec![
-            Value::Int(lines),
-            Value::Int(code),
-            Value::Int(comments),
-            Value::Int(blanks),
-            Value::Int(0),
-        ])))
+    // Cache hit: the classify pass is pure CPU, so run it on the caller's
+    // thread instead of paying an I/O-pool round-trip for no I/O.
+    if let Some(file) = probe_cached(&path) {
+        return Ok(scan_counts_from(
+            &file, &path, &markers, &bstart, &bend, nested, whole,
+        ));
+    }
+    run_fs(interp, span, move || match cache::read_uncached(&path) {
+        Ok(file) => scan_counts_from(&file, &path, &markers, &bstart, &bend, nested, whole),
+        Err(e) => fs_err("scan_counts", &path, &e),
     })
+}
+
+/// Classify one cached file. Shared by the synchronous cache-hit path and
+/// the I/O-pool miss path so both produce byte-identical results.
+fn scan_counts_from(
+    file: &cache::CachedFile,
+    path: &str,
+    markers: &[String],
+    bstart: &str,
+    bend: &str,
+    nested: bool,
+    whole: bool,
+) -> Value {
+    // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
+    // Both checks are memoized in the cache entry.
+    if file.has_nul() {
+        return ok_value(Value::Array(std::sync::Arc::new(vec![
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+        ])));
+    }
+    // Strict UTF-8 like `read_to_string`: non-UTF8 is unreadable.
+    if !file.is_utf8() {
+        return err_str(format!("fs:scan_counts:invalid_input: {path}"));
+    }
+    let bytes = file.bytes();
+    let marker_refs: Vec<&[u8]> = markers.iter().map(|m| m.as_bytes()).collect();
+    // `is_utf8` already validated this exact immutable buffer.
+    let (lines, code, comments, blanks) = super::str_mod::classify_bytes(
+        bytes,
+        &marker_refs,
+        bstart.as_bytes(),
+        bend.as_bytes(),
+        nested,
+        whole,
+    );
+    ok_value(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(lines),
+        Value::Int(code),
+        Value::Int(comments),
+        Value::Int(blanks),
+        Value::Int(0),
+    ])))
 }
 
 // Thresholds for the generated-content heuristic (mirror zcc's
@@ -458,77 +527,83 @@ pub(crate) fn fs_is_generated(
     let path = crate::natives::expect_str(args, 0, OP)?;
     let raw_markers = crate::natives::expect_array(args, 1, OP)?;
     let markers: Vec<String> = parse_markers(&raw_markers, OP)?;
-    run_fs(interp, span, move || {
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => return fs_err("is_generated", &path, &e),
-        };
-        if bytes.contains(&0) {
-            return ok_value(Value::Bool(false));
-        }
-        if std::str::from_utf8(&bytes).is_err() {
-            return ok_value(Value::Bool(false));
-        }
-        if bytes.is_empty() {
-            return ok_value(Value::Bool(false));
-        }
-        // Line ends walked once (head gate needs at most GEN_HEAD_LINES).
-        let mut eols: Vec<usize> = Vec::new();
-        let mut pos = 0;
-        while eols.len() < GEN_HEAD_LINES {
-            match memchr::memmem::find(&bytes[pos..], b"\n") {
-                Some(rel) => {
-                    pos += rel + 1;
-                    eols.push(pos - 1);
-                    if pos >= bytes.len() {
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-        // Total lines with artifact-drop: trailing newline adds no line.
-        // Fewer than GEN_HEAD_LINES newlines means the tail was seen, so
-        // the count is exact; 5 found guarantees more than tiny either way.
-        let mut tiny = false;
-        let mut n = 0usize;
-        if eols.len() < GEN_HEAD_LINES {
-            n = if bytes.ends_with(b"\n") {
-                eols.len()
-            } else {
-                eols.len() + 1
-            };
-            tiny = true;
-        }
-        if tiny && n <= GEN_TINY_LINES {
-            // Longest line in chars (ZZ `len()` counts chars, and bytes
-            // overcount multibyte text).
-            let mut longest = 0usize;
-            let mut prev = 0usize;
-            for &e in &eols {
-                longest = longest.max(utf8_char_count(&bytes[prev..e]));
-                prev = e + 1;
-            }
-            longest = longest.max(utf8_char_count(&bytes[prev..]));
-            if longest > GEN_MIN_LINE_LEN {
-                return ok_value(Value::Bool(true));
-            }
-            // Tiny file: the head below covers all of its lines.
-        }
-        let head_end = if eols.len() == GEN_HEAD_LINES {
-            eols[GEN_HEAD_LINES - 1] + 1
-        } else {
-            bytes.len()
-        };
-        let low: Vec<u8> = bytes[..head_end]
-            .iter()
-            .map(|b| ascii_lower_byte(*b))
-            .collect();
-        let hit = markers
-            .iter()
-            .any(|m| !m.is_empty() && memchr::memmem::find(&low, m.as_bytes()).is_some());
-        ok_value(Value::Bool(hit))
+    // Cache hit after `scan_counts` is pure CPU (checks memoized): stay on
+    // the caller's thread instead of round-tripping through the I/O pool.
+    if let Some(file) = probe_cached(&path) {
+        return Ok(is_generated_from(&file, &markers));
+    }
+    run_fs(interp, span, move || match cache::read_uncached(&path) {
+        Ok(file) => is_generated_from(&file, &markers),
+        Err(e) => fs_err("is_generated", &path, &e),
     })
+}
+
+/// Whole-file heuristic on an immutable cached buffer. Shared by the
+/// synchronous cache-hit path and the I/O-pool miss path.
+fn is_generated_from(file: &cache::CachedFile, markers: &[String]) -> Value {
+    // NUL / invalid UTF-8 / empty all report false. Checks are memoized,
+    // so a repeat call after `scan_counts` does no I/O and no re-scan of
+    // the buffer. `bytes` stays alive for the whole heuristic.
+    let bytes = file.bytes();
+    if file.has_nul() || !file.is_utf8() || bytes.is_empty() {
+        return ok_value(Value::Bool(false));
+    }
+    // Line ends walked once (head gate needs at most GEN_HEAD_LINES).
+    let mut eols: Vec<usize> = Vec::new();
+    let mut pos = 0;
+    while eols.len() < GEN_HEAD_LINES {
+        match memchr::memmem::find(&bytes[pos..], b"\n") {
+            Some(rel) => {
+                pos += rel + 1;
+                eols.push(pos - 1);
+                if pos >= bytes.len() {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    // Total lines with artifact-drop: trailing newline adds no line.
+    // Fewer than GEN_HEAD_LINES newlines means the tail was seen, so
+    // the count is exact; 5 found guarantees more than tiny either way.
+    let mut tiny = false;
+    let mut n = 0usize;
+    if eols.len() < GEN_HEAD_LINES {
+        n = if bytes.ends_with(b"\n") {
+            eols.len()
+        } else {
+            eols.len() + 1
+        };
+        tiny = true;
+    }
+    if tiny && n <= GEN_TINY_LINES {
+        // Longest line in chars (ZZ `len()` counts chars, and bytes
+        // overcount multibyte text).
+        let mut longest = 0usize;
+        let mut prev = 0usize;
+        for &e in &eols {
+            longest = longest.max(utf8_char_count(&bytes[prev..e]));
+            prev = e + 1;
+        }
+        longest = longest.max(utf8_char_count(&bytes[prev..]));
+        if longest > GEN_MIN_LINE_LEN {
+            return ok_value(Value::Bool(true));
+        }
+        // Tiny file: the head below covers all of its lines.
+    }
+    let head_end = if eols.len() == GEN_HEAD_LINES {
+        eols[GEN_HEAD_LINES - 1] + 1
+    } else {
+        bytes.len()
+    };
+    let low: Vec<u8> = bytes[..head_end]
+        .iter()
+        .map(|b| ascii_lower_byte(*b))
+        .collect();
+    let hit = markers
+        .iter()
+        .any(|m| !m.is_empty() && memchr::memmem::find(&low, m.as_bytes()).is_some());
+    ok_value(Value::Bool(hit))
 }
 
 pub(crate) fn fs_write_file(
@@ -538,6 +613,7 @@ pub(crate) fn fs_write_file(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.write_file")?;
     let contents = expect_str(args, 1, "std.fs.write_file")?;
+    cache::invalidate(&path);
     run_fs(interp, span, move || {
         match std::fs::write(&path, contents) {
             Ok(()) => ok_unit(),
@@ -553,6 +629,7 @@ pub(crate) fn fs_append(
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.append")?;
     let contents = expect_str(args, 1, "std.fs.append")?;
+    cache::invalidate(&path);
     run_fs(interp, span, move || {
         let res = std::fs::OpenOptions::new()
             .create(true)
@@ -573,6 +650,7 @@ pub(crate) fn fs_copy(
 ) -> Result<Value, EvalError> {
     let src = expect_str(args, 0, "std.fs.copy")?;
     let dst = expect_str(args, 1, "std.fs.copy")?;
+    cache::invalidate(&dst);
     run_fs(interp, span, move || match std::fs::copy(&src, &dst) {
         Ok(_) => ok_unit(),
         Err(e) => fs_err2("copy", &src, &dst, &e),
@@ -586,6 +664,8 @@ pub(crate) fn fs_move(
 ) -> Result<Value, EvalError> {
     let src = expect_str(args, 0, "std.fs.move")?;
     let dst = expect_str(args, 1, "std.fs.move")?;
+    cache::invalidate(&src);
+    cache::invalidate(&dst);
     run_fs(interp, span, move || match std::fs::rename(&src, &dst) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err2("move", &src, &dst, &e),
@@ -630,6 +710,7 @@ pub(crate) fn fs_remove_file(
     span: Span,
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.remove_file")?;
+    cache::invalidate(&path);
     run_fs(interp, span, move || match std::fs::remove_file(&path) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err("remove_file", &path, &e),
@@ -644,6 +725,7 @@ pub(crate) fn fs_mkdir(
     span: Span,
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.mkdir")?;
+    cache::invalidate(&path);
     run_fs(interp, span, move || match std::fs::create_dir(&path) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err("mkdir", &path, &e),
@@ -656,6 +738,7 @@ pub(crate) fn fs_mkdir_all(
     span: Span,
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.mkdir_all")?;
+    cache::invalidate(&path);
     run_fs(interp, span, move || match std::fs::create_dir_all(&path) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err("mkdir_all", &path, &e),
@@ -696,6 +779,7 @@ pub(crate) fn fs_remove_dir_all(
     span: Span,
 ) -> Result<Value, EvalError> {
     let path = expect_str(args, 0, "std.fs.remove_dir_all")?;
+    cache::invalidate_prefix(&path);
     run_fs(interp, span, move || match std::fs::remove_dir_all(&path) {
         Ok(()) => ok_unit(),
         Err(e) => fs_err("remove_dir_all", &path, &e),
@@ -819,6 +903,9 @@ pub(crate) fn fs_open(
             "fs:open:invalid_input: {path} (mode must be one of r, w, a)"
         )));
     }
+    if mode != "r" {
+        cache::invalidate(&path);
+    }
     run_fs(interp, span, move || {
         let opened = match mode.as_str() {
             "r" => std::fs::File::open(&path),
@@ -828,8 +915,9 @@ pub(crate) fn fs_open(
                 .append(true)
                 .open(&path),
         };
+        let writable = mode != "r";
         match opened {
-            Ok(f) => file_value(file_alloc(f, path)),
+            Ok(f) => file_value(file_alloc(f, path, writable)),
             Err(e) => fs_err("open", &path, &e),
         }
     })
@@ -891,6 +979,9 @@ pub(crate) fn file_write_chunk(
     };
     let data = expect_str(args, 1, "file.write_chunk")?;
     let path = handle.path.clone();
+    if handle.writable {
+        cache::invalidate(&path);
+    }
     run_fs(interp, span, move || {
         let Some(f) = file_lookup(id) else {
             return err_str("fs:write_chunk:closed".to_string());
@@ -956,6 +1047,9 @@ pub(crate) fn file_flush(
         Err(closed) => return Ok(closed),
     };
     let path = handle.path.clone();
+    if handle.writable {
+        cache::invalidate(&path);
+    }
     run_fs(interp, span, move || {
         let Some(f) = file_lookup(id) else {
             return err_str("fs:flush:closed".to_string());
@@ -981,6 +1075,9 @@ pub(crate) fn file_close(
     let Ok((id, handle)) = expect_file(args, 0, "close", "file.close")? else {
         return Ok(ok_unit());
     };
+    if handle.writable {
+        cache::invalidate(&handle.path);
+    }
     // Flush best-effort, take the OS handle (dropping closes the fd), and
     // remove the pool entry.
     if let Ok(mut guard) = handle.file.lock() {

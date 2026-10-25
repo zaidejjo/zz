@@ -79,9 +79,18 @@ fn reopen(path: &str) -> Option<std::io::BufReader<std::fs::File>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Tests run in parallel; a fixed `/tmp/zz_tls_key.pem` lets one test
+    /// truncate the key while another is parsing it. Every write gets its
+    /// own name (pid separates concurrent test binaries, the counter
+    /// separates tests in this binary).
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
     fn write_temp(name: &str, contents: &str) -> String {
-        let path = std::env::temp_dir().join(format!("zz_tls_{name}.pem"));
+        let n = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("zz_tls_{}_{n}_{name}.pem", std::process::id()));
         std::fs::write(&path, contents).unwrap();
         path.to_string_lossy().into_owned()
     }

@@ -122,6 +122,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "dicts_nonstr.zz", true),
     ("stdlib", "vec_sort.zz", true),
     ("regression", "block_local_no_clobber.zz", false),
+    ("stdlib", "fs_cache_test.zz", true),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors
