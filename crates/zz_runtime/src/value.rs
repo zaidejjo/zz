@@ -1122,6 +1122,17 @@ impl BytesData {
         Self::new(data)
     }
 
+    /// Share an existing `Arc` buffer (used by the `std.fs` content cache:
+    /// repeated `read_bytes`/`read_bytes_at` calls are an `Arc` bump).
+    pub fn from_shared(data: std::sync::Arc<Vec<u8>>) -> Self {
+        let len = data.len();
+        BytesData {
+            data,
+            start: 0,
+            len,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }

@@ -42,6 +42,16 @@ zz test --slow-threshold 200
 - AOT readonly-param borrows skip retains for proven read-only params.
 - Builders (`str.builder`/`bytes.builder`) turn O(n²) loops into one join.
 - `fs.scan_counts` fuses read+NUL-sniff+classify; `str.find*` are O(1) byte ops.
+- `std.fs` reads share one stat-validated content cache (`read`, `read_bytes`,
+  `scan_counts`, `is_generated`, and the `*_at` OS provider paths). A repeated
+  read of an unchanged regular file is one `stat` plus a refcount bump, and
+  NUL/UTF-8 checks are memoized. Writes/removals through `std.fs` invalidate
+  eagerly, while outside writes are caught by `len`/`mtime` (`ctime`/`ino`/`dev`
+  on Unix) on every hit. Knobs: `ZZ_FS_CACHE=0` disables;
+  `ZZ_FS_CACHE_MB=<n>` sets the raw-buffer budget (default 96 MiB; entries up
+  to 8 MiB; empty/non-regular files are never cached; an alternate text/bytes
+  view adds at most one lazy copy per entry). Both the VM and the AOT C
+  runtime implement the same policy.
 
 History: [perf/baseline.md](../perf/baseline.md),
 [perf/append-elision-report.md](../perf/append-elision-report.md).

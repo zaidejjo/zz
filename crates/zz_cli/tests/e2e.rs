@@ -645,6 +645,7 @@ e2e_success_test!(
     "stdlib",
     "fs_is_generated_test.zz"
 );
+e2e_success_test!(e2e_stdlib_fs_cache_test, "stdlib", "fs_cache_test.zz");
 e2e_success_test!(
     e2e_stdlib_fs_read_invalid_utf8_test,
     "stdlib",

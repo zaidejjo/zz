@@ -8245,16 +8245,6 @@ static const char *zz_fs_code(int e) {
     }
 }
 
-// Directories can never be read as text: `ftell` on a directory stream
-// reports garbage sizes on some libcs, so the sized `str_alloc` below
-// would abort the process with out-of-memory. The VM's `IsADirectory`
-// kind falls through to `io_error`, so reject up front with the same
-// code on both engines (EIO maps to `io_error`, byte-identical).
-static int zz_fs_is_dir_path(const char *p) {
-    struct stat st;
-    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 // `fs:<op>:<code>: <path>` as an `.err(str)`.
 static zz_value zz_fs_err1(const char *op, const char *path, int e) {
     const char *code = zz_fs_code(e);
@@ -8288,36 +8278,506 @@ static const char *zz_fs_cstr(zz_value v) {
     return zz_str_cptr(v.s);
 }
 
+// ── Content cache (AOT twin of the VM's `fs/cache.rs`) ────────────────
+//
+// Compiler-shaped workloads read each file several times per run
+// (`scan_counts`, then `is_generated`, sometimes `read`). A stat-validated
+// cache turns every repeat into one `stat` + a refcount bump instead of
+// open/read/allocate. Entries are keyed by path and validated by
+// size+mtime+ctime+ino+dev; `std.fs` mutators invalidate eagerly.
+//
+// Sharded chained hash, FIFO eviction per shard, 96 MiB default budget,
+// 8 MiB max entry. `ZZ_FS_CACHE=0` / `ZZ_FS_CACHE_MB=<n>` configure it.
+
+#define ZZ_FS_CACHE_SHARDS 32
+#define ZZ_FS_CACHE_DEFAULT_MB 96
+#define ZZ_FS_CACHE_MAX_ENTRY ((size_t)8 * 1024 * 1024)
+#define ZZ_FS_CACHE_MAX_PER_SHARD 512
+
+typedef struct zz_fs_cache_ent {
+    struct zz_fs_cache_ent *prev;
+    struct zz_fs_cache_ent *next;
+    char *path;
+    size_t path_len;
+    long long size;
+    long long mtime_ns;
+    long long ctime_ns;
+    unsigned long long dev;
+    unsigned long long ino;
+    zz_str *str;       // owned reference, or NULL
+    zz_bytes *bytes;   // owned reference, or NULL
+    int nul_known;
+    int nul;
+    int utf8_known;
+    int utf8;
+} zz_fs_cache_ent;
+
+typedef struct {
+    zz_fs_cache_ent *head;
+    zz_fs_cache_ent *tail;
+    size_t count;
+    size_t bytes;
+} zz_fs_cache_shard;
+
+static zz_fs_cache_shard zz_fs_cache_shards[ZZ_FS_CACHE_SHARDS];
+static pthread_mutex_t zz_fs_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t zz_fs_cache_once = PTHREAD_ONCE_INIT;
+static int zz_fs_cache_state = 0;
+static size_t zz_fs_cache_shard_budget =
+    ((size_t)ZZ_FS_CACHE_DEFAULT_MB * 1024 * 1024) / ZZ_FS_CACHE_SHARDS;
+static size_t zz_fs_cache_max_entry = ZZ_FS_CACHE_MAX_ENTRY;
+
+static void zz_fs_cache_init(void) {
+    const char *v = getenv("ZZ_FS_CACHE");
+    int on = !(v != NULL && strcmp(v, "0") == 0);
+    const char *mb = getenv("ZZ_FS_CACHE_MB");
+    long n = ZZ_FS_CACHE_DEFAULT_MB;
+    if (mb != NULL) {
+        char *end = NULL;
+        long v = strtol(mb, &end, 10);
+        // Match the VM's `parse`: only a whole valid integer changes the
+        // budget; garbage keeps the default.
+        if (end != mb && *end == '\0') n = v;
+    }
+    if (n <= 0) { on = 0; n = 0; }
+    if (n > 1048576) n = 1048576; // 1 TiB ceiling: keep the byte math in range
+    size_t budget = (size_t)n * 1024u * 1024u;
+    size_t shard = budget / ZZ_FS_CACHE_SHARDS;
+    if (shard < 65536) shard = 65536;
+    zz_fs_cache_shard_budget = shard;
+    zz_fs_cache_max_entry =
+        ZZ_FS_CACHE_MAX_ENTRY < budget ? ZZ_FS_CACHE_MAX_ENTRY : (budget ? budget : 1);
+    zz_fs_cache_state = on ? 1 : 0;
+}
+
+static int zz_fs_cache_on(void) {
+    pthread_once(&zz_fs_cache_once, zz_fs_cache_init);
+    return zz_fs_cache_state == 1;
+}
+
+static size_t zz_fs_cache_bucket(const char *p, size_t n) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < n; i++) {
+        h ^= (unsigned char)p[i];
+        h *= 0x100000001b3ULL;
+    }
+    return (size_t)(h & (ZZ_FS_CACHE_SHARDS - 1));
+}
+
+#if defined(ZZ_OS_WINDOWS)
+static long long zz_fs_mtime_ns(const struct stat *st) {
+    return (long long)st->st_mtime * 1000000000LL;
+}
+static long long zz_fs_ctime_ns(const struct stat *st) {
+    return (long long)st->st_ctime * 1000000000LL;
+}
+static int zz_fs_is_regular(const struct stat *st) {
+    return (st->st_mode & _S_IFMT) == _S_IFREG;
+}
+#else
+static long long zz_fs_mtime_ns(const struct stat *st) {
+#ifdef __APPLE__
+    return (long long)st->st_mtimespec.tv_sec * 1000000000LL + st->st_mtimespec.tv_nsec;
+#else
+    return (long long)st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
+#endif
+}
+static long long zz_fs_ctime_ns(const struct stat *st) {
+#ifdef __APPLE__
+    return (long long)st->st_ctimespec.tv_sec * 1000000000LL + st->st_ctimespec.tv_nsec;
+#else
+    return (long long)st->st_ctim.tv_sec * 1000000000LL + st->st_ctim.tv_nsec;
+#endif
+}
+static int zz_fs_is_regular(const struct stat *st) {
+    return S_ISREG(st->st_mode);
+}
+#endif
+
+static int zz_fs_fp_match(const zz_fs_cache_ent *e, const struct stat *st) {
+    return e->size == (long long)st->st_size
+        && e->mtime_ns == zz_fs_mtime_ns(st)
+        && e->ctime_ns == zz_fs_ctime_ns(st)
+        && e->dev == (unsigned long long)st->st_dev
+        && e->ino == (unsigned long long)st->st_ino;
+}
+
+static int zz_fs_fp_same(const struct stat *a, const struct stat *b) {
+    return a->st_size == b->st_size
+        && zz_fs_mtime_ns(a) == zz_fs_mtime_ns(b)
+        && zz_fs_ctime_ns(a) == zz_fs_ctime_ns(b)
+        && (unsigned long long)a->st_dev == (unsigned long long)b->st_dev
+        && (unsigned long long)a->st_ino == (unsigned long long)b->st_ino;
+}
+
+static void zz_fs_cache_put(const char *p, size_t n, const struct stat *st,
+                            zz_str *s, zz_bytes *b);
+static int zz_fs_cacheable(const char *p, size_t n, const struct stat *st);
+
+static void zz_fs_cache_store_bytes(const char *p, size_t plen,
+                                    const struct stat *before, zz_bytes *b) {
+    if (b == NULL || !zz_fs_cacheable(p, plen, before)) return;
+    // Whole-snapshot only: virtual files (sysfs/procfs) report a size that
+    // differs from the bytes they yield, and a raced read lands here too.
+    if (b->len != (size_t)before->st_size) return;
+    struct stat after;
+    if (stat(p, &after) != 0 || !zz_fs_fp_same(before, &after)) return;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_put(p, plen, before, NULL, b);
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+// Cacheable: regular, non-empty, bounded, and no embedded NUL in the path.
+static int zz_fs_cacheable(const char *p, size_t n, const struct stat *st) {
+    if (!zz_fs_cache_on()) return 0;
+    if (strlen(p) != n) return 0;
+    if (!zz_fs_is_regular(st)) return 0;
+    if (st->st_size <= 0) return 0;
+    if ((unsigned long long)st->st_size > zz_fs_cache_max_entry) return 0;
+    return 1;
+}
+
+static void zz_fs_cache_free_ent(zz_fs_cache_ent *e) {
+    if (e->str != NULL) {
+        zz_value v = (zz_value){ZZ_STR, {.s = e->str}};
+        zz_release(&v);
+    }
+    if (e->bytes != NULL) zz_release_bytes(e->bytes);
+    free(e->path);
+    free(e);
+}
+
+// Lock held.
+static void zz_fs_cache_unlink(zz_fs_cache_shard *sh, zz_fs_cache_ent *e) {
+    if (e->prev) e->prev->next = e->next;
+    else sh->head = e->next;
+    if (e->next) e->next->prev = e->prev;
+    else sh->tail = e->prev;
+    sh->count--;
+    size_t used = e->str != NULL ? e->str->len : (e->bytes != NULL ? e->bytes->len : 0);
+    if (sh->bytes >= used) sh->bytes -= used;
+    else sh->bytes = 0;
+    zz_fs_cache_free_ent(e);
+}
+
+// Lock held. Returns the entry for `p` or NULL.
+static zz_fs_cache_ent *zz_fs_cache_find(const char *p, size_t n) {
+    zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
+    for (zz_fs_cache_ent *e = sh->head; e != NULL; e = e->next) {
+        if (e->path_len == n && memcmp(e->path, p, n) == 0) return e;
+    }
+    return NULL;
+}
+
+// Lock held. Drop the oldest entries until the shard is inside budget.
+static void zz_fs_cache_evict(zz_fs_cache_shard *sh) {
+    while (sh->bytes > zz_fs_cache_shard_budget
+           || sh->count > ZZ_FS_CACHE_MAX_PER_SHARD) {
+        if (sh->tail == NULL) break;
+        zz_fs_cache_unlink(sh, sh->tail);
+    }
+}
+
+// Try a cache hit for `p`; `st` is the caller's fresh stat. On hit returns
+// a retained `zz_str` (caller owns one reference) and check flags.
+static zz_str *zz_fs_cache_take_str(const char *p, size_t n, const struct stat *st,
+                                    int *nul_known, int *nul,
+                                    int *utf8_known, int *utf8) {
+    *nul_known = 0;
+    *utf8_known = 0;
+    if (!zz_fs_cacheable(p, n, st)) return NULL;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
+    if (e == NULL || !zz_fs_fp_match(e, st)) {
+        if (e != NULL) {
+            zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
+            zz_fs_cache_unlink(sh, e);
+        }
+        pthread_mutex_unlock(&zz_fs_cache_mu);
+        return NULL;
+    }
+    if (e->str == NULL && e->bytes != NULL) {
+        size_t len = e->bytes->len;
+        zz_str *s = str_alloc(len);
+        if (len > 0) {
+            memcpy(zz_str_ptr(s), e->bytes->buf->data + e->bytes->off, len);
+        }
+        zz_str_ptr(s)[len] = '\0';
+        s->len = len;
+        e->str = s; // cache owns the initial reference
+    }
+    zz_str *out = e->str;
+    if (out != NULL) __atomic_add_fetch(&out->refs, 1, __ATOMIC_RELAXED);
+    if (e->nul_known) { *nul_known = 1; *nul = e->nul; }
+    if (e->utf8_known) { *utf8_known = 1; *utf8 = e->utf8; }
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+    return out;
+}
+
+static zz_bytes *zz_fs_cache_take_bytes(const char *p, size_t n, const struct stat *st) {
+    if (!zz_fs_cacheable(p, n, st)) return NULL;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
+    if (e == NULL || !zz_fs_fp_match(e, st)) {
+        if (e != NULL) {
+            zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
+            zz_fs_cache_unlink(sh, e);
+        }
+        pthread_mutex_unlock(&zz_fs_cache_mu);
+        return NULL;
+    }
+    if (e->bytes == NULL && e->str != NULL) {
+        zz_value v = zz_bytes_new((const unsigned char *)zz_str_ptr(e->str), e->str->len);
+        if (v.tag != ZZ_BYTES) {
+            pthread_mutex_unlock(&zz_fs_cache_mu);
+            return NULL;
+        }
+        e->bytes = v.bytes; // cache owns the initial reference
+    }
+    zz_bytes *out = e->bytes;
+    if (out != NULL) zz_retain_bytes(out);
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+    return out;
+}
+
+// Lock held. Insert a new entry at the head, replacing any same-path entry.
+static void zz_fs_cache_put(const char *p, size_t n, const struct stat *st,
+                            zz_str *s, zz_bytes *b) {
+    if (s == NULL && b == NULL) return;
+    zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
+    zz_fs_cache_ent *old = NULL;
+    for (zz_fs_cache_ent *e = sh->head; e != NULL; e = e->next) {
+        if (e->path_len == n && memcmp(e->path, p, n) == 0) { old = e; break; }
+    }
+    if (old != NULL) zz_fs_cache_unlink(sh, old);
+    zz_fs_cache_ent *e = (zz_fs_cache_ent *)calloc(1, sizeof(zz_fs_cache_ent));
+    if (e == NULL) return;
+    e->path = (char *)malloc(n + 1);
+    if (e->path == NULL) { free(e); return; }
+    memcpy(e->path, p, n);
+    e->path[n] = '\0';
+    e->path_len = n;
+    e->size = (long long)st->st_size;
+    e->mtime_ns = zz_fs_mtime_ns(st);
+    e->ctime_ns = zz_fs_ctime_ns(st);
+    e->dev = (unsigned long long)st->st_dev;
+    e->ino = (unsigned long long)st->st_ino;
+    e->str = s;
+    e->bytes = b;
+    if (s != NULL) __atomic_add_fetch(&s->refs, 1, __ATOMIC_RELAXED);
+    if (b != NULL) zz_retain_bytes(b);
+    e->next = sh->head;
+    if (sh->head) sh->head->prev = e;
+    sh->head = e;
+    if (sh->tail == NULL) sh->tail = e;
+    sh->count++;
+    sh->bytes += s != NULL ? s->len : (b != NULL ? b->len : 0);
+    zz_fs_cache_evict(sh);
+}
+
+// Lock held. Memoize NUL/UTF-8 checks for an existing entry.
+static void zz_fs_cache_note_locked(const char *p, size_t n,
+                                    int nul_known, int nul,
+                                    int utf8_known, int utf8) {
+    zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
+    if (e == NULL) return;
+    if (nul_known && !e->nul_known) { e->nul_known = 1; e->nul = nul; }
+    if (utf8_known && !e->utf8_known) { e->utf8_known = 1; e->utf8 = utf8; }
+}
+
+static void zz_fs_cache_note(const char *p, size_t n,
+                             int nul_known, int nul,
+                             int utf8_known, int utf8) {
+    if (!zz_fs_cache_on() || strlen(p) != n) return;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_note_locked(p, n, nul_known, nul, utf8_known, utf8);
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+static void zz_fs_cache_remove_n(const char *p, size_t n) {
+    if (!zz_fs_cache_on() || p == NULL) return;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
+    if (e != NULL) {
+        zz_fs_cache_unlink(&zz_fs_cache_shards[zz_fs_cache_bucket(p, n)], e);
+    }
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+static void zz_fs_cache_invalidate_n(const char *p, size_t n) {
+    if (!zz_fs_cache_on() || p == NULL) return;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    for (size_t i = 0; i < ZZ_FS_CACHE_SHARDS; i++) {
+        zz_fs_cache_ent *e = zz_fs_cache_shards[i].head;
+        while (e != NULL) {
+            zz_fs_cache_ent *next = e->next;
+            if (e->path_len == n && memcmp(e->path, p, n) == 0) {
+                zz_fs_cache_unlink(&zz_fs_cache_shards[i], e);
+            }
+            e = next;
+        }
+    }
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+static void zz_fs_cache_invalidate(const char *p) {
+    if (p != NULL) zz_fs_cache_invalidate_n(p, strlen(p));
+}
+
+static void zz_fs_cache_invalidate_value(zz_value path) {
+    if (path.tag == ZZ_STR && path.s != NULL) {
+        zz_fs_cache_invalidate_n(zz_str_ptr(path.s), path.s->len);
+    }
+}
+
+static void zz_fs_cache_invalidate_prefix(const char *p) {
+    if (!zz_fs_cache_on() || p == NULL) return;
+    size_t n = strlen(p);
+    if (n == 0) return;
+    while (n > 1 && (p[n - 1] == '/' || p[n - 1] == '\\')) n--;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    for (size_t i = 0; i < ZZ_FS_CACHE_SHARDS; i++) {
+        zz_fs_cache_ent *e = zz_fs_cache_shards[i].head;
+        while (e != NULL) {
+            zz_fs_cache_ent *next = e->next;
+            int match = e->path_len == n && memcmp(e->path, p, n) == 0;
+            if (!match && n == 1 && p[0] == '/') match = 1;
+            if (!match && e->path_len > n && memcmp(e->path, p, n) == 0
+                && (e->path[n] == '/' || e->path[n] == '\\')) {
+                match = 1;
+            }
+            if (match) zz_fs_cache_unlink(&zz_fs_cache_shards[i], e);
+            e = next;
+        }
+    }
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+// Read a file into a `zz_str`, using the cache when possible. `*e_out` is
+// set on failure (0 = success). Check flags describe which NUL/UTF-8
+// answers are already memoized; callers compute and memoize the rest.
+static zz_str *zz_fs_load_str(const char *p, size_t plen, int *e_out,
+                              int *nul_known, int *nul,
+                              int *utf8_known, int *utf8) {
+    *e_out = 0;
+    *nul_known = 0;
+    *nul = 0;
+    *utf8_known = 0;
+    *utf8 = 0;
+    // An embedded NUL can never name the file the caller asked for; Rust's
+    // `File::open` rejects it, so do not read the truncated prefix.
+    if (strlen(p) != plen) { *e_out = EINVAL; return NULL; }
+
+    // Probe first: a cache hit is a single `stat`, so do not spawn a
+    // replacement worker for it. Only the miss path below does real I/O.
+    struct stat before;
+    if (stat(p, &before) != 0) {
+        zz_fs_cache_remove_n(p, plen);
+        *e_out = errno;
+        return NULL;
+    }
+    if (S_ISDIR(before.st_mode)) {
+        zz_fs_cache_remove_n(p, plen);
+        *e_out = EIO;
+        return NULL;
+    }
+    // A file that stopped being cacheable (truncated to empty, replaced by
+    // a pipe, grown past the cap) must not leave an old entry behind.
+    if (!zz_fs_cacheable(p, plen, &before)) zz_fs_cache_remove_n(p, plen);
+
+    zz_str *hit = zz_fs_cache_take_str(p, plen, &before,
+                                       nul_known, nul, utf8_known, utf8);
+    if (hit != NULL) return hit;
+
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) { *e_out = errno; return NULL; }
+    long sz = 0;
+    if (fseek(f, 0, SEEK_END) == 0) sz = ftell(f);
+    if (sz < 0) sz = 0;
+    fseek(f, 0, SEEK_SET);
+    zz_str *out;
+    size_t n;
+    if (sz > 0) {
+        out = str_alloc((size_t)sz);
+        n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            zz_value leak = (zz_value){ZZ_STR, {.s = out}};
+            zz_release(&leak);
+            *e_out = e ? e : EIO;
+            return NULL;
+        }
+    } else {
+        // Pipes / procfs / sysfs / empty files: grow to EOF.
+        size_t cap = 65536;
+        unsigned char *buf = (unsigned char *)malloc(cap);
+        if (!buf) { fclose(f); *e_out = ENOMEM; return NULL; }
+        n = 0;
+        size_t got;
+        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                size_t ncap = cap * 2;
+                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
+                if (nbuf == NULL) {
+                    free(buf);
+                    fclose(f);
+                    *e_out = ENOMEM;
+                    return NULL;
+                }
+                buf = nbuf;
+                cap = ncap;
+            }
+        }
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            *e_out = e ? e : EIO;
+            return NULL;
+        }
+        out = str_alloc(n);
+        if (n > 0) memcpy(zz_str_ptr(out), buf, n);
+        free(buf);
+    }
+    zz_str_ptr(out)[n] = '\0';
+    out->len = n;
+
+    // Cache only a whole snapshot whose metadata is unchanged across the
+    // read (skip torn reads and virtual files with a fake st_size).
+    if (n == (size_t)before.st_size && zz_fs_cacheable(p, plen, &before)) {
+        struct stat after;
+        if (stat(p, &after) == 0 && zz_fs_fp_same(&before, &after)) {
+            pthread_mutex_lock(&zz_fs_cache_mu);
+            zz_fs_cache_put(p, plen, &before, out, NULL);
+            pthread_mutex_unlock(&zz_fs_cache_mu);
+        }
+    }
+    return out;
+}
+
 // fs.read_to_string(path) → Result<str>
 zz_value zz_fs_read(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
-    if (zz_fs_is_dir_path(p)) {
-        return zz_fs_err1("read", p, EIO);
-    }
-    zz_fs_top_up();
-    FILE *f = fopen(p, "rb");
-    if (!f) return zz_fs_err1("read", p, errno);
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) sz = 0;
-    zz_str *out = str_alloc((size_t)sz);
-    size_t n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
-    int ferr = ferror(f);
-    fclose(f);
-    if (ferr) {
-        zz_value leak = (zz_value){ZZ_STR, {.s = out}};
-        zz_release(&leak);
-        return zz_fs_err1("read", p, EIO);
-    }
-    zz_str_ptr(out)[n] = '\0';
-    out->len = n;
+    size_t plen = path.s != NULL ? path.s->len : strlen(p);
+    int e = 0, nul_known = 0, nul = 0, utf8_known = 0, utf8 = 0;
+    zz_str *out = zz_fs_load_str(p, plen, &e, &nul_known, &nul,
+                                 &utf8_known, &utf8);
+    if (out == NULL) return zz_fs_err1("read", p, e ? e : EIO);
     // Strict UTF-8 like the VM (`std::fs::read_to_string` rejects invalid
     // UTF-8; programs branch on read success for binary detection, #277).
     // EINVAL maps to `invalid_input`, matching the VM's InvalidData.
-    if (!zz_utf8_valid((const unsigned char *)zz_str_ptr(out), n)) {
+    if (!utf8_known) {
+        utf8 = zz_utf8_valid((const unsigned char *)zz_str_ptr(out), out->len);
+        zz_fs_cache_note(p, plen, 0, 0, 1, utf8);
+    }
+    if (!utf8) {
         zz_value gone = (zz_value){ZZ_STR, {.s = out}};
         zz_release(&gone);
         return zz_fs_err1("read", p, EINVAL);
@@ -8351,81 +8811,23 @@ zz_value zz_fs_scan_counts(
     if (path.s && strlen(p) != path.s->len) {
         return zz_fs_err1("scan_counts", p, EINVAL);
     }
-    // Directories are rejected before any read (see zz_fs_is_dir_path):
-    // `ftell` on a directory stream reports garbage sizes on some libcs,
-    // which used to abort the process in `str_alloc`.
-    if (zz_fs_is_dir_path(p)) {
-        return zz_fs_err1("scan_counts", p, EIO);
-    }
-    zz_fs_top_up();
-    FILE *f = fopen(p, "rb");
-    if (!f) return zz_fs_err1("scan_counts", p, errno);
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) sz = 0;
-    zz_str *out;
-    size_t n;
-    if (sz > 0) {
-        // Regular files: one sized allocation, one read (same shape as
-        // `zz_fs_read`, so steady-state throughput is identical).
-        out = str_alloc((size_t)sz);
-        n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
-        int ferr = ferror(f);
-        int e = errno;
-        fclose(f);
-        if (ferr) {
-            zz_value leak = (zz_value){ZZ_STR, {.s = out}};
-            zz_release(&leak);
-            // Reading a directory fails here (Linux: EISDIR). The VM's
-            // `IsADirectory` kind falls through to `io_error`, so
-            // translate rather than reporting `invalid_input`.
-            if (e == EISDIR) e = EIO;
-            return zz_fs_err1("scan_counts", p, e ? e : EIO);
-        }
-    } else {
-        // Pipes / procfs / sysfs / empty files report size 0: grow to EOF
-        // (same shape as `zz_fs_read_bytes`), then land in one `zz_str`.
-        size_t cap = 65536;
-        unsigned char *buf = (unsigned char *)malloc(cap > 0 ? cap : 1);
-        if (!buf) {
-            fclose(f);
-            return zz_fs_err1("scan_counts", p, ENOMEM);
-        }
-        n = 0;
-        size_t got;
-        int ferr = 0;
-        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
-            n += got;
-            if (n == cap) {
-                size_t ncap = cap * 2;
-                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
-                if (!nbuf) {
-                    free(buf);
-                    fclose(f);
-                    return zz_fs_err1("scan_counts", p, ENOMEM);
-                }
-                buf = nbuf;
-                cap = ncap;
-            }
-        }
-        ferr = ferror(f);
-        int e = errno;
-        fclose(f);
-        if (ferr) {
-            free(buf);
-            if (e == EISDIR) e = EIO;
-            return zz_fs_err1("scan_counts", p, e ? e : EIO);
-        }
-        out = str_alloc(n);
-        if (n > 0) memcpy(zz_str_ptr(out), buf, n);
-        free(buf);
-    }
-    zz_str_ptr(out)[n] = '\0';
-    out->len = n;
+    // Directories are rejected by the loader before any read (`ftell` on a
+    // directory stream reports garbage sizes on some libcs).
+    int e = 0, nul_known = 0, nul = 0, utf8_known = 0, utf8 = 0;
+    zz_str *out = zz_fs_load_str(p, path.s != NULL ? path.s->len : strlen(p),
+                                 &e, &nul_known, &nul, &utf8_known, &utf8);
+    if (out == NULL) return zz_fs_err1("scan_counts", p, e ? e : EIO);
+    size_t n = out->len;
     const unsigned char *d = (const unsigned char *)zz_str_ptr(out);
-    // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
-    if (memchr(d, 0, n) != NULL) {
+    // NUL is valid UTF-8 but marks binary (same skip as `has_nul`). Both
+    // checks are memoized in the content cache, so the second call after
+    // `read`/`is_generated` is O(1) in file size.
+    if (!nul_known) {
+        nul = memchr(d, 0, n) != NULL;
+        zz_fs_cache_note(p, path.s != NULL ? path.s->len : strlen(p),
+                         1, nul, 0, 0);
+    }
+    if (nul) {
         zz_value gone = (zz_value){ZZ_STR, {.s = out}};
         zz_release(&gone);
         int sub_err = 0;
@@ -8439,7 +8841,12 @@ zz_value zz_fs_scan_counts(
     }
     // Strict UTF-8 like `read_to_string`: non-UTF8 is unreadable
     // (EINVAL maps to `invalid_input`, matching the VM's InvalidData).
-    if (!zz_utf8_valid(d, n)) {
+    if (!utf8_known) {
+        utf8 = zz_utf8_valid(d, n);
+        zz_fs_cache_note(p, path.s != NULL ? path.s->len : strlen(p),
+                         0, 0, 1, utf8);
+    }
+    if (!utf8) {
         zz_value gone = (zz_value){ZZ_STR, {.s = out}};
         zz_release(&gone);
         return zz_fs_err1("scan_counts", p, EINVAL);
@@ -8490,69 +8897,30 @@ zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err) {
     if (path.s && strlen(p) != path.s->len) {
         return zz_fs_err1("is_generated", p, EINVAL);
     }
-    if (zz_fs_is_dir_path(p)) {
-        return zz_fs_err1("is_generated", p, EIO);
+    size_t plen = path.s != NULL ? path.s->len : strlen(p);
+    int e = 0, nul_known = 0, nul = 0, utf8_known = 0, utf8 = 0;
+    zz_str *out = zz_fs_load_str(p, plen, &e, &nul_known, &nul,
+                                 &utf8_known, &utf8);
+    if (out == NULL) return zz_fs_err1("is_generated", p, e ? e : EIO);
+    size_t n = out->len;
+    const unsigned char *buf = (const unsigned char *)zz_str_ptr(out);
+    if (!nul_known) {
+        nul = memchr(buf, 0, n) != NULL;
+        zz_fs_cache_note(p, plen, 1, nul, 0, 0);
     }
-    zz_fs_top_up();
-    FILE *f = fopen(p, "rb");
-    if (!f) return zz_fs_err1("is_generated", p, errno);
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) sz = 0;
-    unsigned char *buf = NULL;
-    size_t n = 0;
-    if (sz > 0) {
-        buf = (unsigned char *)malloc((size_t)sz);
-        if (!buf) {
-            fclose(f);
-            return zz_fs_err1("is_generated", p, ENOMEM);
-        }
-        n = fread(buf, 1, (size_t)sz, f);
-        int ferr = ferror(f);
-        int e = errno;
-        fclose(f);
-        if (ferr) {
-            free(buf);
-            if (e == EISDIR) e = EIO;
-            return zz_fs_err1("is_generated", p, e ? e : EIO);
+    // NUL / invalid UTF-8 / empty all report false (see above). Skip the
+    // UTF-8 scan for binary files: the original short-circuited on NUL,
+    // and validating a large binary here would only burn CPU.
+    int generated = 0;
+    if (n > 0 && !nul) {
+        if (!utf8_known) {
+            utf8 = zz_utf8_valid(buf, n);
+            zz_fs_cache_note(p, plen, 0, 0, 1, utf8);
         }
     } else {
-        size_t cap = 65536;
-        buf = (unsigned char *)malloc(cap);
-        if (!buf) {
-            fclose(f);
-            return zz_fs_err1("is_generated", p, ENOMEM);
-        }
-        n = 0;
-        size_t got;
-        int ferr = 0;
-        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
-            n += got;
-            if (n == cap) {
-                size_t ncap = cap * 2;
-                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
-                if (!nbuf) {
-                    free(buf);
-                    fclose(f);
-                    return zz_fs_err1("is_generated", p, ENOMEM);
-                }
-                buf = nbuf;
-                cap = ncap;
-            }
-        }
-        ferr = ferror(f);
-        int e = errno;
-        fclose(f);
-        if (ferr) {
-            free(buf);
-            if (e == EISDIR) e = EIO;
-            return zz_fs_err1("is_generated", p, e ? e : EIO);
-        }
+        utf8 = 0;
     }
-    // NUL / invalid UTF-8 / empty all report false (see above).
-    int generated = 0;
-    if (n > 0 && memchr(buf, 0, n) == NULL && zz_utf8_valid(buf, n)) {
+    if (utf8) {
         // Line ends walked once (head gate needs at most 5).
         size_t eols[ZZ_GEN_HEAD_LINES];
         size_t neols = 0;
@@ -8587,28 +8955,34 @@ zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err) {
         }
         if (!generated) {
             size_t head_end = (neols == ZZ_GEN_HEAD_LINES) ? eols[ZZ_GEN_HEAD_LINES - 1] + 1 : n;
-            // Lowercase the head in place (owned buffer, freed below).
-            for (size_t i = 0; i < head_end; i++) buf[i] = gen_lower_byte(buf[i]);
-            size_t nm = 0;
-            const char *mbuf[32];
-            size_t mlen[32];
-            if (markers.tag == ZZ_ARRAY) {
-                for (size_t i = 0; i < markers.arr->len && nm < 32; i++) {
-                    zz_value v = markers.arr->items[i];
-                    if (v.tag == ZZ_STR) {
-                        mbuf[nm] = zz_str_ptr(v.s);
-                        mlen[nm] = v.s->len;
-                        nm++;
+            // Lowercase a private copy: the buffer is shared with the
+            // content cache and must stay immutable.
+            unsigned char *low = (unsigned char *)malloc(head_end ? head_end : 1);
+            if (low != NULL) {
+                for (size_t i = 0; i < head_end; i++) low[i] = gen_lower_byte(buf[i]);
+                size_t nm = 0;
+                const char *mbuf[32];
+                size_t mlen[32];
+                if (markers.tag == ZZ_ARRAY) {
+                    for (size_t i = 0; i < markers.arr->len && nm < 32; i++) {
+                        zz_value v = markers.arr->items[i];
+                        if (v.tag == ZZ_STR) {
+                            mbuf[nm] = zz_str_ptr(v.s);
+                            mlen[nm] = v.s->len;
+                            nm++;
+                        }
                     }
                 }
-            }
-            for (size_t k = 0; k < nm && !generated; k++) {
-                if (mlen[k] == 0) continue;
-                if (memmem(buf, head_end, mbuf[k], mlen[k]) != NULL) generated = 1;
+                for (size_t k = 0; k < nm && !generated; k++) {
+                    if (mlen[k] == 0) continue;
+                    if (memmem(low, head_end, mbuf[k], mlen[k]) != NULL) generated = 1;
+                }
+                free(low);
             }
         }
     }
-    free(buf);
+    zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+    zz_release(&gone);
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = generated != 0}});
 }
 
@@ -8617,6 +8991,23 @@ zz_value zz_fs_read_bytes(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    size_t plen = path.s != NULL ? path.s->len : strlen(p);
+    if (strlen(p) != plen) return zz_fs_err1("read_bytes", p, EINVAL);
+    // One stat feeds both the directory rejection (a directory stream's
+    // `ftell` reports garbage sizes on some libcs) and the cache probe.
+    // A hit stays on the caller's thread; only a miss parks a replacement
+    // before the blocking open/read below.
+    struct stat before;
+    int have_stat = stat(p, &before) == 0;
+    if (have_stat && S_ISDIR(before.st_mode)) {
+        zz_fs_cache_remove_n(p, plen);
+        return zz_fs_err1("read_bytes", p, EIO);
+    }
+    if (!have_stat || !zz_fs_cacheable(p, plen, &before)) {
+        zz_fs_cache_remove_n(p, plen);
+    }
+    zz_bytes *hit = have_stat ? zz_fs_cache_take_bytes(p, plen, &before) : NULL;
+    if (hit != NULL) return zz_variant_ok((zz_value){ZZ_BYTES, {.bytes = hit}});
     zz_fs_top_up();
     FILE *f = fopen(p, "rb");
     if (!f) return zz_fs_err1("read_bytes", p, errno);
@@ -8640,7 +9031,11 @@ zz_value zz_fs_read_bytes(zz_value path, int *err) {
             return zz_fs_err1("read_bytes", p, EIO);
         }
         // Short reads (races/truncation) shrink the window, not the store.
-        return zz_variant_ok(zz_bytes_wrap(store, 0, n));
+        zz_value out = zz_bytes_wrap(store, 0, n);
+        if (have_stat && out.tag == ZZ_BYTES) {
+            zz_fs_cache_store_bytes(p, plen, &before, out.bytes);
+        }
+        return zz_variant_ok(out);
     } else {
         // Pipes / procfs / sysfs report size 0: grow to EOF (same shape
         // as the old chunked reader, then one shrink).
@@ -8677,7 +9072,11 @@ zz_value zz_fs_read_bytes(zz_value path, int *err) {
             if (__atomic_sub_fetch(&store->refs, 1, __ATOMIC_ACQ_REL) == 0) free(store);
             return zz_fs_err1("read_bytes", p, EIO);
         }
-        return zz_variant_ok(zz_bytes_wrap(store, 0, n));
+        zz_value out = zz_bytes_wrap(store, 0, n);
+        if (have_stat && out.tag == ZZ_BYTES) {
+            zz_fs_cache_store_bytes(p, plen, &before, out.bytes);
+        }
+        return zz_variant_ok(out);
     }
 }
 
@@ -8687,6 +9086,7 @@ zz_value zz_fs_write(zz_value path, zz_value data, int *err) {
     const char *p = zz_fs_cstr(path);
     const char *d = zz_fs_cstr(data);
     if (!p || data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     FILE *f = fopen(p, "wb");
     if (!f) return zz_fs_err1("write", p, errno);
@@ -8702,6 +9102,7 @@ zz_value zz_fs_append(zz_value path, zz_value data, int *err) {
     const char *p = zz_fs_cstr(path);
     const char *d = zz_fs_cstr(data);
     if (!p || data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     FILE *f = fopen(p, "ab");
     if (!f) return zz_fs_err1("append", p, errno);
@@ -8717,6 +9118,7 @@ zz_value zz_fs_copy(zz_value src, zz_value dst, int *err) {
     const char *s = zz_fs_cstr(src);
     const char *d = zz_fs_cstr(dst);
     if (!s || !d) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(dst);
     zz_fs_top_up();
     FILE *in = fopen(s, "rb");
     if (!in) return zz_fs_err2("copy", s, d, errno);
@@ -8745,6 +9147,8 @@ zz_value zz_fs_move(zz_value src, zz_value dst, int *err) {
     const char *s = zz_fs_cstr(src);
     const char *d = zz_fs_cstr(dst);
     if (!s || !d) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(src);
+    zz_fs_cache_invalidate_value(dst);
     zz_fs_top_up();
     if (rename(s, d) != 0) return zz_fs_err2("move", s, d, errno);
     return zz_variant_ok(zz_unit());
@@ -8792,6 +9196,7 @@ zz_value zz_fs_remove(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     if (remove(p) != 0) return zz_fs_err1("remove_file", p, errno);
     return zz_variant_ok(zz_unit());
@@ -8802,6 +9207,7 @@ zz_value zz_fs_mkdir(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
 #ifdef ZZ_OS_WINDOWS
     int r = _mkdir(p);
@@ -8817,6 +9223,7 @@ zz_value zz_fs_mkdir_all(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     // Walk components, creating each level. Absolute + relative paths.
     size_t len = strlen(p);
@@ -9021,6 +9428,7 @@ zz_value zz_fs_remove_dir_all(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_prefix(p);
     zz_fs_top_up();
     int rc = zz_fs_rm_recursive(p);
     if (rc != 0) return zz_fs_err1("remove_dir_all", p, rc);
@@ -9175,14 +9583,16 @@ struct zz_file {
     FILE *fp;
     char *path;   // owned copy for diagnostics
     int closed;
+    int writable;
 };
 
-static struct zz_file *zz_file_alloc(FILE *fp, const char *path) {
+static struct zz_file *zz_file_alloc(FILE *fp, const char *path, int writable) {
     struct zz_file *f = (struct zz_file *)malloc(sizeof(struct zz_file));
     if (!f) return NULL;
     f->fp = fp;
     f->path = copy_cstr(path, strlen(path));
     f->closed = 0;
+    f->writable = writable;
     return f;
 }
 
@@ -9212,10 +9622,11 @@ zz_value zz_fs_open(zz_value path, zz_value mode, int *err) {
         snprintf(msg, n, "fs:open:invalid_input: %s (mode must be one of r, w, a)", p);
         return zz_variant_err(zz_str_owned(msg));
     }
+    if (fmode[0] != 'r') zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     FILE *fp = fopen(p, fmode);
     if (!fp) return zz_fs_err1("open", p, errno);
-    struct zz_file *f = zz_file_alloc(fp, p);
+    struct zz_file *f = zz_file_alloc(fp, p, fmode[0] != 'r');
     if (!f) {
         fclose(fp);
         return zz_variant_err(zz_str_static("fs:open:io_error"));
@@ -9254,6 +9665,7 @@ zz_value zz_fs_write_chunk(zz_value f, zz_value data, int *err) {
         return zz_file_closed_err("write_chunk");
     }
     if (data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    if (f.file->path != NULL && f.file->writable) zz_fs_cache_invalidate(f.file->path);
     zz_fs_top_up();
     size_t w = fwrite(zz_str_cptr(data.s), 1, data.s->len, f.file->fp);
     if (w != data.s->len) {
@@ -9283,6 +9695,7 @@ zz_value zz_fs_flush(zz_value f, int *err) {
     if (f.tag != ZZ_FILE || !f.file || f.file->closed || !f.file->fp) {
         return zz_file_closed_err("flush");
     }
+    if (f.file->path != NULL && f.file->writable) zz_fs_cache_invalidate(f.file->path);
     zz_fs_top_up();
     if (fflush(f.file->fp) != 0) {
         return zz_fs_err1("flush", f.file->path ? f.file->path : "?", errno);
@@ -9295,6 +9708,7 @@ zz_value zz_fs_close(zz_value f, int *err) {
     (void)err;
     if (f.tag != ZZ_FILE || !f.file) return zz_variant_ok(zz_unit());
     if (!f.file->closed && f.file->fp) {
+        if (f.file->path != NULL && f.file->writable) zz_fs_cache_invalidate(f.file->path);
         fflush(f.file->fp);
         fclose(f.file->fp);
         f.file->fp = NULL;
