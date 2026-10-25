@@ -4095,3 +4095,67 @@ fn named_fn_tail_result_warns_unused_and_missing_return() {
         "discarded tail must be a missing return: {msgs:?}"
     );
 }
+
+#[test]
+fn discard_assign_checks_cleanly() {
+    // `_ = compute()` — discard the result of a function call.
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "compute".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Int,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    let r = check_src_with_funcs(
+        "func f() -> int {\n    _ = compute()\n    return 2\n}",
+        funcs,
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn discard_assign_type_is_unit() {
+    // A bare `_ = expr` statement is a discard statement.
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "compute".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Str,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    let r = check_src_with_funcs("_ = compute()", funcs);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn discard_assign_discards_result_type() {
+    // `_ = compute()` discards even a Result value without a must-use
+    // warning — the discard is explicit.
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "compute".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    let r = check_src_with_funcs("_ = compute()", funcs);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}

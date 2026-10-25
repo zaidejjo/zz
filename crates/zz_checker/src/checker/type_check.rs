@@ -611,6 +611,17 @@ impl Checker {
                 value,
                 span,
             } => {
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // `_` is never a real binding, so there is nothing to assign
+                // to: type-check the RHS and return unit without const-checking
+                // or unifying against a target type.
+                if let Expr::Ident { name, .. } = target {
+                    if name == "_" {
+                        let _ = self.check_expr(value);
+                        return Type::Unit;
+                    }
+                }
+
                 // Reject assignment to immutable (`const`) variables. The target is an
                 // `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
                 // the loader namespaces top-level bindings.

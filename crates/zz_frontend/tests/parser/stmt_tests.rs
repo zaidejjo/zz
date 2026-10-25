@@ -726,3 +726,81 @@ fn digit_braces_interpolate_without_warning() {
         parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn discard_assign_is_accepted() {
+    // `_ = expr` evaluates `expr` for effect and drops the value.
+    let p = parse_ok("func f() -> int {\n    _ = compute()\n    return 2\n}");
+    assert_eq!(p.stmts.len(), 1);
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => {
+            assert_eq!(body.stmts.len(), 2);
+            match &body.stmts[0] {
+                zz_frontend::ast::Stmt::Assign { target, value, .. } => {
+                    assert!(
+                        matches!(target, E::Ident { name, .. } if name == "_"),
+                        "expected discard target `_`, got {target:?}"
+                    );
+                    assert!(
+                        matches!(value, E::Call { .. }),
+                        "expected call value, got {value:?}"
+                    );
+                }
+                other => panic!("expected discard assign, got {other:?}"),
+            }
+            assert!(matches!(
+                body.stmts[1],
+                zz_frontend::ast::Stmt::Return { .. }
+            ));
+        }
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn discard_assign_with_call_result_dropped() {
+    // A bare `_ = expr` statement at the top level parses cleanly.
+    let p = parse_ok("_ = compute()");
+    assert_eq!(p.stmts.len(), 1);
+    assert!(
+        matches!(&p.stmts[0], zz_frontend::ast::Stmt::Assign { target, .. }
+            if matches!(target, E::Ident { name, .. } if name == "_"))
+    );
+}
+
+#[test]
+fn bare_discard_wildcard_still_errors() {
+    // `_` used outside of an assignment target is still rejected.
+    let parsed = parse("_");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`_` is only valid in patterns")),
+        "expected '_ is only valid in patterns', got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn discard_assign_only_plain_assign() {
+    // `_ += expr` and `_ == expr` are not discard assignments.
+    let parsed = parse("_ += 1");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`_` is only valid in patterns")),
+        "expected '_ is only valid in patterns' for `_ += 1`, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    let parsed = parse("_ == 1");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`_` is only valid in patterns")),
+        "expected '_ is only valid in patterns' for `_ == 1`, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}

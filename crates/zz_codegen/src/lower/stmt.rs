@@ -335,6 +335,18 @@ impl Lowerer {
                 }
             }
             Stmt::Assign { target, value, .. } => {
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // There is no storage for `_`, so emit the RHS in void
+                // context (its result is discarded) and store nothing.
+                if let Expr::Ident { name, .. } = target {
+                    if name == "_" {
+                        *self.void_context.borrow_mut() = true;
+                        self.emit_expr(value, names, out);
+                        *self.void_context.borrow_mut() = false;
+                        return;
+                    }
+                }
+
                 // Fast-path: `s = s + <rhs>` where `s` is a string
                 // (zz_value). Emit in-place append shims instead of
                 // clone+binop+assign so the capacity-aware path in

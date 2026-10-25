@@ -766,10 +766,20 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Ident if tok.text == "_" => {
-                self.errors
-                    .push(error_at("`_` is only valid in patterns", tok.span));
                 self.advance();
-                dummy_expr(tok.span)
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // `_` is never a real binding, so the checker treats it as a
+                // discard target and never resolves it as a variable.
+                if self.at(TokenKind::Assign) {
+                    Expr::Ident {
+                        name: "_".to_string(),
+                        span: tok.span,
+                    }
+                } else {
+                    self.errors
+                        .push(error_at("`_` is only valid in patterns", tok.span));
+                    dummy_expr(tok.span)
+                }
             }
             TokenKind::Ident => {
                 self.advance();
