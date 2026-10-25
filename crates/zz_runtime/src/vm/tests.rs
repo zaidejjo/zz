@@ -3011,6 +3011,71 @@ fn vm_const_compares_match_tree_walker() {
     );
 }
 
+/// Value-position integer arithmetic with a literal RHS fuses into one
+/// `PushSlotIntImm` per argument (arguments, initialisers, `return`)
+/// instead of `LoadSlot PushConst IntOp`, and still computes the same value.
+#[test]
+fn vm_push_slot_int_imm_fuses_value_position_arith() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    let parsed = parse("func dec(n: int) -> int {\n return n - 1\n}\nr := dec(41)\nr");
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_res, types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let chunk = Compiler::compile_program_typed(
+        &parsed.program,
+        Arc::new(types),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(HashSet::new()),
+    );
+    let body = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::MakeFunc { chunk, .. } => Some(chunk),
+            _ => None,
+        })
+        .expect("function body chunk missing");
+    let fused = body
+        .code
+        .iter()
+        .find(|op| matches!(op, Op::PushSlotIntImm { .. }))
+        .unwrap_or_else(|| panic!("fused push missing from the body: {:?}", body.code));
+    assert!(matches!(
+        fused,
+        Op::PushSlotIntImm {
+            imm: 1,
+            op: zz_frontend::ast::BinOp::Sub,
+            ..
+        }
+    ));
+    // The three-dispatch sequence it replaced is gone (`SlotBinaryIntImm`
+    // needs a destination slot, which `return` has none of, so the old
+    // shape was `LoadSlot PushConst IntSub`).
+    assert!(
+        !body.code.iter().any(|op| matches!(op, Op::IntSub(_))),
+        "generic stack arithmetic survived: {:?}",
+        body.code
+    );
+    let mut interp = Interp::new();
+    interp
+        .run_loaded_chunk(&Arc::new(chunk))
+        .expect("typed run failed");
+    assert_eq!(interp.env.get("r"), Some(Value::Int(40)));
+}
+
 #[test]
 fn cache_shadow_after_call() {
     assert_same(

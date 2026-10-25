@@ -624,6 +624,11 @@ impl<'a> Lowerer<'a> {
                 imm: *imm,
                 op: Self::lower_binop(op),
             }]),
+            VmOp::PushSlotIntImm { a, imm, op, .. } => Ok(vec![Op::PushSlotIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::lower_binop(op),
+            }]),
             VmOp::SlotCmpConst { a, k, op } => {
                 let value = consts
                     .get(*k as usize)
@@ -991,6 +996,7 @@ fn is_fused_slot_op(op: &Op) -> bool {
             | Op::SlotCmpConst { .. }
             | Op::SlotBinaryInt { .. }
             | Op::SlotBinaryIntImm { .. }
+            | Op::PushSlotIntImm { .. }
     )
 }
 
@@ -1244,6 +1250,10 @@ pub fn expand_fused(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrE
                         Op::BinOp(*op),
                         Op::StoreSlot(*dst),
                     ]
+                }
+                Op::PushSlotIntImm { a, imm, op } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![Op::LoadSlot(*a), Op::PushConst(c), Op::BinOp(*op)]
                 }
                 other => vec![other.clone()],
             };

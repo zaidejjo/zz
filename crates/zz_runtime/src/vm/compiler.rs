@@ -524,6 +524,7 @@ impl Compiler {
             | Op::BinOp(_, span)
             | Op::UnOp(_, span) => *span,
             Op::LoadVar(_, span) | Op::StoreVar(_, span) => *span,
+            Op::PushSlotIntImm { span, .. } => *span,
             Op::TakeVar(_, span)
             | Op::VecPush { span, .. }
             | Op::VecPushField { span, .. }
@@ -588,7 +589,8 @@ impl Compiler {
             | Op::SlotLessIntImm { .. }
             | Op::SlotCmpIntSlot { .. }
             | Op::SlotCmpIntImm { .. }
-            | Op::SlotCmpConst { .. } => 1,
+            | Op::SlotCmpConst { .. }
+            | Op::PushSlotIntImm { .. } => 1,
             Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. }
             | Op::RegisterStruct { .. }
@@ -2133,6 +2135,56 @@ impl Compiler {
         };
         let k = self.push_const(lit);
         Some(Op::SlotCmpConst { a, k, op })
+    }
+
+    /// Peephole for integer arithmetic in *value* position: `slot op Int`
+    /// pushes the result in one dispatch instead of `LoadSlot PushConst
+    /// IntOp`.
+    ///
+    /// [`SlotBinaryIntImm`](Op::SlotBinaryIntImm) covers assignments (it
+    /// needs a destination slot); arguments, initialisers and `return`
+    /// discard the destination, so before this every argument of
+    /// `fib(n - 1)` cost three ops.
+    fn try_push_slot_int(&mut self, value: &Expr) -> Option<Op> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        if !matches!(
+            binop,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+        ) {
+            return None;
+        }
+        let left = unparen(left);
+        let right = unparen(right);
+        // Same `Int` guard as the other fused ops: the fast path is only
+        // sound when the checker typed the operand.
+        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int)) {
+            return None;
+        }
+        let a = match left {
+            Expr::Ident { name, .. } => match self.resolve(name) {
+                Resolved::Slot(slot) => slot as u16,
+                Resolved::Env => return None,
+            },
+            Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
+                Resolved::Slot(slot) => slot as u16,
+                Resolved::Env => return None,
+            },
+            _ => return None,
+        };
+        Some(Op::PushSlotIntImm {
+            a,
+            imm: int_literal(right)?,
+            op: *binop,
+            span: value.span(),
+        })
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
@@ -3864,6 +3916,12 @@ impl Compiler {
                     // `Bool` — one dispatch instead of `LoadSlot PushConst
                     // BinOp` per operand.
                     if let Some(fused) = self.try_slot_compare(expr) {
+                        self.emit(fused);
+                        return;
+                    }
+                    // Integer arithmetic with a literal RHS (`fib(n - 1)`,
+                    // `x := n + 1`) is one fused push.
+                    if let Some(fused) = self.try_push_slot_int(expr) {
                         self.emit(fused);
                         return;
                     }

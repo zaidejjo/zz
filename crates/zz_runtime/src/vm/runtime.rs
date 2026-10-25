@@ -1464,6 +1464,14 @@ impl Vm {
                         }
                     }
                 }
+                Op::PushSlotIntImm { a, imm, op, span } => {
+                    let idx = cached_base + *a as usize;
+                    let v = match &self.stack[idx] {
+                        Value::Int(l) => eval_int_binary(*op, *l, *imm, *span)?,
+                        other => eval_binary(*op, other.clone(), Value::Int(*imm), *span)?,
+                    };
+                    self.stack.push(v);
+                }
                 Op::MakeFunc {
                     name,
                     params,

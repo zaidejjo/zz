@@ -242,6 +242,16 @@ pub enum Op {
         imm: i64,
         op: BinOp,
     },
+    /// Push `Int(slot[a] op imm)`; desugars to
+    /// `LoadSlot a; PushConst imm; BinOp op`.
+    ///
+    /// Value-position arithmetic: `SlotBinaryIntImm` needs a destination
+    /// slot, so it cannot express `fib(n - 1)` in argument position.
+    PushSlotIntImm {
+        a: u16,
+        imm: i64,
+        op: BinOp,
+    },
 
     // ---- typed integer arithmetic (wrap; trap MIN/-1, MIN%-1, div0) ----
     IntAdd,
@@ -490,6 +500,7 @@ impl Op {
             Op::SlotCmpIntSlot { .. } => 89,
             Op::SlotCmpIntImm { .. } => 90,
             Op::SlotCmpConst { .. } => 91,
+            Op::PushSlotIntImm { .. } => 92,
             Op::IntAdd => 14,
             Op::IntSub => 15,
             Op::IntMul => 16,
@@ -588,6 +599,7 @@ impl Op {
             Op::SlotCmpIntSlot { .. } => "slotcmpintslot",
             Op::SlotCmpIntImm { .. } => "slotcmpintimm",
             Op::SlotCmpConst { .. } => "slotcmpconst",
+            Op::PushSlotIntImm { .. } => "pushslotintimm",
             Op::IntAdd => "iadd",
             Op::IntSub => "isub",
             Op::IntMul => "imul",
@@ -681,6 +693,7 @@ impl Op {
             Op::SlotAddIntImm { dst, .. }
             | Op::SlotLessIntImm { a: dst, .. }
             | Op::SlotCmpIntImm { a: dst, .. }
+            | Op::PushSlotIntImm { a: dst, .. }
             | Op::SlotCmpConst { a: dst, .. } => f(*dst),
             Op::SlotBinaryInt { dst, lhs, rhs, .. } => {
                 f(*dst);

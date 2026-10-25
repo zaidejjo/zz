@@ -432,6 +432,14 @@ impl<'a> Raiser<'a> {
                 imm: *imm,
                 op: Self::raise_binop(*op),
             }),
+            Op::PushSlotIntImm { a, imm, op } => Ok(VmOp::PushSlotIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::raise_binop(*op),
+                // Spans travel in the parallel array (like every other op
+                // raised from bytes), not in the op.
+                span: VmSpan::default(),
+            }),
             Op::SlotCmpConst { a, k, op } => Ok(VmOp::SlotCmpConst {
                 a: *a,
                 k: k.0,
