@@ -548,6 +548,27 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
+        "std.vec.sort_by".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_mod::vec_sort_by,
+        },
+    );
+    m.insert(
+        "std.vec.sort_by_desc".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_mod::vec_sort_by_desc,
+        },
+    );
+    m.insert(
+        "std.vec.sort_key".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_mod::vec_sort_key,
+        },
+    );
+    m.insert(
         "std.vec.insert".into(),
         NativeEntry {
             arity: 3,

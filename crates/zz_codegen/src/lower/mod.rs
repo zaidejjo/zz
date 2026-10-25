@@ -939,6 +939,9 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "vec.join" | "std.vec.join" => Some("zz_str_join"), // join is a str function called on arrays
         "vec.contains" | "std.vec.contains" => Some("zz_vec_contains"),
         "vec.sort" | "std.vec.sort" => Some("zz_vec_sort"),
+        "vec.sort_by" | "std.vec.sort_by" => Some("zz_vec_sort_by"),
+        "vec.sort_by_desc" | "std.vec.sort_by_desc" => Some("zz_vec_sort_by_desc"),
+        "vec.sort_key" | "std.vec.sort_key" => Some("zz_vec_sort_key"),
         "vec.reverse" | "std.vec.reverse" => Some("zz_vec_reverse"),
         // str
         "str.length" | "std.str.length" => Some("zz_str_length"),

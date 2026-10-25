@@ -1577,6 +1577,7 @@ static const char *zz_sort_type_name(zz_value v) {
 
 typedef struct {
     zz_value v;
+    zz_value k;   // sort key (sort_key only; unset for sort_by)
     size_t idx;
 } zz_sort_pair;
 
@@ -1705,6 +1706,200 @@ zz_value zz_vec_sort(zz_value arr, int *err) {
     for (size_t i = 0; i < n; i++) items[i] = pairs[i].v;
     free(pairs);
     return sorted;
+}
+
+// vec.sort_by(arr, cmp) — sort array using a |T, T| -> int comparator.
+// Insertion sort (stable) with a closure comparator called via the C ABI.
+// negative/zero/positive from the comparator maps to Less/Equal/Greater.
+typedef struct {
+    zz_dispatch_fn fn;
+    void **env;
+    size_t nenv;
+} sort_by_ctx;
+
+static int sort_by_cmp(void *thunk, const zz_sort_pair *a, const zz_sort_pair *b) {
+    sort_by_ctx *ctx = (sort_by_ctx *)thunk;
+    zz_value argv[] = { a->v, b->v };
+    zz_value r = ctx->fn(argv, 2, ctx->env, ctx->nenv);
+    int ord;
+    if (r.tag == ZZ_INT) ord = (r.i > 0) - (r.i < 0);
+    else if (r.tag == ZZ_FLOAT) ord = (r.f > 0.0) - (r.f < 0.0);
+    else if (r.tag == ZZ_BOOL) ord = r.b ? 1 : -1;
+    else ord = 0;
+    zz_release(&r);
+    return ord;
+}
+
+// Insertion sort over zz_sort_pair using a comparator with context.
+// Stable by construction (only swaps when strictly greater).
+static void insertion_sort_ctx(zz_sort_pair *pairs, size_t n,
+                               int (*cmp)(void *, const zz_sort_pair *, const zz_sort_pair *),
+                               void *thunk) {
+    for (size_t i = 1; i < n; i++) {
+        zz_sort_pair key = pairs[i];
+        size_t j = i;
+        while (j > 0 && cmp(thunk, &pairs[j - 1], &key) > 0) {
+            pairs[j] = pairs[j - 1];
+            j--;
+        }
+        pairs[j] = key;
+    }
+}
+
+zz_value zz_vec_sort_by(zz_value arr, zz_value cmp, int *err) {
+    *err = 0;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return zz_clone(arr);
+    size_t n = arr.arr->len;
+    if (n <= 1) return zz_clone(arr);
+    zz_dispatch_fn fn = zz_closure_target(cmp);
+    size_t nenv = 0;
+    void **env = zz_closure_env(cmp, &nenv);
+    if (!fn) return zz_clone(arr);
+    zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs) return zz_clone(arr);
+    for (size_t i = 0; i < n; i++) {
+        pairs[i].v = zz_clone(arr.arr->items[i]);
+        pairs[i].k = (zz_value){ZZ_UNIT, {0}};
+        pairs[i].idx = i;
+    }
+    // Sync-call hygiene: closures run outside the trampoline.
+    zz_task_frame *saved_fr = zz_green_frame();
+    zz_green_frame_set(NULL);
+    sort_by_ctx ctx = { fn, env, nenv };
+    insertion_sort_ctx(pairs, n, sort_by_cmp, &ctx);
+    zz_green_frame_set(saved_fr);
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < n; i++) {
+        zz_array_push(out.arr, pairs[i].v);
+        zz_release(&pairs[i].v);
+        zz_release(&pairs[i].k);
+    }
+    free(pairs);
+    return out;
+}
+
+// vec.sort_by_desc(arr, cmp) — like sort_by but reverses the comparator.
+typedef struct {
+    zz_dispatch_fn fn;
+    void **env;
+    size_t nenv;
+} sort_by_desc_ctx;
+
+static int sort_by_desc_cmp(void *thunk, const zz_sort_pair *a, const zz_sort_pair *b) {
+    sort_by_desc_ctx *ctx = (sort_by_desc_ctx *)thunk;
+    zz_value argv[] = { a->v, b->v };
+    zz_value r = ctx->fn(argv, 2, ctx->env, ctx->nenv);
+    int ord;
+    if (r.tag == ZZ_INT) ord = (r.i > 0) - (r.i < 0);
+    else if (r.tag == ZZ_FLOAT) ord = (r.f > 0.0) - (r.f < 0.0);
+    else if (r.tag == ZZ_BOOL) ord = r.b ? 1 : -1;
+    else ord = 0;
+    zz_release(&r);
+    return -ord;
+}
+
+zz_value zz_vec_sort_by_desc(zz_value arr, zz_value cmp, int *err) {
+    *err = 0;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return zz_clone(arr);
+    size_t n = arr.arr->len;
+    if (n <= 1) return zz_clone(arr);
+    zz_dispatch_fn fn = zz_closure_target(cmp);
+    size_t nenv = 0;
+    void **env = zz_closure_env(cmp, &nenv);
+    if (!fn) return zz_clone(arr);
+    zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs) return zz_clone(arr);
+    for (size_t i = 0; i < n; i++) {
+        pairs[i].v = zz_clone(arr.arr->items[i]);
+        pairs[i].k = (zz_value){ZZ_UNIT, {0}};
+        pairs[i].idx = i;
+    }
+    zz_task_frame *saved_fr = zz_green_frame();
+    zz_green_frame_set(NULL);
+    sort_by_desc_ctx ctx = { fn, env, nenv };
+    insertion_sort_ctx(pairs, n, sort_by_desc_cmp, &ctx);
+    zz_green_frame_set(saved_fr);
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < n; i++) {
+        zz_array_push(out.arr, pairs[i].v);
+        zz_release(&pairs[i].v);
+        zz_release(&pairs[i].k);
+    }
+    free(pairs);
+    return out;
+}
+
+// vec.sort_key(arr, key) — sort array by |T| -> K key (stable, O(n) key calls).
+typedef struct {
+    zz_dispatch_fn fn;
+    void **env;
+    size_t nenv;
+} sort_key_ctx;
+
+// Key comparison (no context needed — keys are precomputed in pairs[i].k).
+static int sort_key_cmp(const zz_sort_pair *a, const zz_sort_pair *b) {
+    // Compare keys by tag then value.
+    int ord;
+    if (a->k.tag == ZZ_INT && b->k.tag == ZZ_INT) {
+        ord = (a->k.i > b->k.i) - (a->k.i < b->k.i);
+    } else if (a->k.tag == ZZ_FLOAT && b->k.tag == ZZ_FLOAT) {
+        ord = (a->k.f > b->k.f) - (a->k.f < b->k.f);
+    } else if (a->k.tag == ZZ_STR && b->k.tag == ZZ_STR) {
+        ord = strcmp(zz_str_cptr(a->k.s), zz_str_cptr(b->k.s));
+    } else if (a->k.tag == ZZ_BOOL && b->k.tag == ZZ_BOOL) {
+        ord = a->k.b - b->k.b;
+    } else {
+        ord = (int)(a->k.tag - b->k.tag);
+    }
+    if (ord == 0) ord = (a->idx > b->idx) - (a->idx < b->idx);
+    return ord;
+}
+
+// Insertion sort using sort_key_cmp (no context).
+static void insertion_sort_key(zz_sort_pair *pairs, size_t n) {
+    for (size_t i = 1; i < n; i++) {
+        zz_sort_pair key = pairs[i];
+        size_t j = i;
+        while (j > 0 && sort_key_cmp(&pairs[j - 1], &key) > 0) {
+            pairs[j] = pairs[j - 1];
+            j--;
+        }
+        pairs[j] = key;
+    }
+}
+
+zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err) {
+    *err = 0;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return zz_clone(arr);
+    size_t n = arr.arr->len;
+    if (n <= 1) return zz_clone(arr);
+    zz_dispatch_fn fn = zz_closure_target(key);
+    size_t nenv = 0;
+    void **env = zz_closure_env(key, &nenv);
+    if (!fn) return zz_clone(arr);
+    zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs) return zz_clone(arr);
+    // Decorate: compute key for each element once.
+    for (size_t i = 0; i < n; i++) {
+        pairs[i].v = zz_clone(arr.arr->items[i]);
+        pairs[i].idx = i;
+        zz_value argv[] = { pairs[i].v };
+        zz_value k = fn(argv, 1, env, nenv);
+        pairs[i].k = zz_clone(k);
+        zz_release(&k);
+    }
+    zz_task_frame *saved_fr = zz_green_frame();
+    zz_green_frame_set(NULL);
+    insertion_sort_key(pairs, n);
+    zz_green_frame_set(saved_fr);
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < n; i++) {
+        zz_array_push(out.arr, pairs[i].v);
+        zz_release(&pairs[i].v);
+        zz_release(&pairs[i].k);
+    }
+    free(pairs);
+    return out;
 }
 
 // vec.reverse(arr) → reversed array (new array, original unchanged)

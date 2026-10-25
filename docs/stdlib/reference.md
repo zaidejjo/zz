@@ -1,6 +1,6 @@
 # Stdlib reference — generated
 
-Exhaustive signature index: **691 entries across 42 groups**.
+Exhaustive signature index: **694 entries across 42 groups**.
 Generated from compiled `FuncSig` data (`crates/zz_stdlib/src/funcs.rs`
 via `dump_sigs`) — do not hand-edit. Regenerate with
 `python3 scripts/gen-stdlib-ref.py`. Semantics: per-module guides linked below.
@@ -882,7 +882,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.uuid.v4` | `v4() -> str` |
 | `std.uuid.v7` | `v7() -> str` |
 
-## `vec` — 21 entries ([guide](str-vec.md))
+## `vec` — 24 entries ([guide](str-vec.md))
 
 | Function | Signature |
 |---|---|
@@ -905,6 +905,9 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.vec.remove` | `remove<T>(v: [T], idx: int) -> [T]` |
 | `std.vec.reverse` | `reverse<T>(v: [T]) -> [T]` |
 | `std.vec.sort` | `sort<T>(v: [T]) -> [T]` |
+| `std.vec.sort_by` | `sort_by<T>(v: [T], cmp: func(T, T) -> int) -> [T]` |
+| `std.vec.sort_by_desc` | `sort_by_desc<T>(v: [T], cmp: func(T, T) -> int) -> [T]` |
+| `std.vec.sort_key` | `sort_key<T,U>(v: [T], key: func(T) -> U) -> [T]` |
 | `std.vec.sum` | `sum(arr: [int]) -> int` |
 | `std.vec.sum_f` | `sum_f(arr: [float]) -> float` |
 
