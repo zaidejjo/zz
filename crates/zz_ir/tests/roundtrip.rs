@@ -294,6 +294,8 @@ fn fused_slot_ops_survive_the_round_trip() {
                 | SlotBinaryInt { .. }
                 | SlotBinaryIntImm { .. }
                 | PushSlotIntImm { .. }
+                | JumpIfFalseSlotCmpIntImm { .. }
+                | JumpIfFalseSlotCmpIntSlot { .. }
         )
     }
     // Typed compile: the fusion sits behind the compiler's `Int` type
@@ -512,6 +514,63 @@ fn value_position_int_arith_survives_the_round_trip() {
         interp2.env.get("r"),
         Some(Value::Int(40)),
         "desugared push differs"
+    );
+}
+
+/// `JumpIfFalseSlotCmpIntImm`: an `if` guard's compare rides in the branch.
+///
+/// The op survives the codec and comes back through `raise`, and
+/// `expand_fused` restores `SlotCmpIntImm; JumpIfFalse` with the *remapped*
+/// target — the expansion grows the stream, so a stale target would skip or
+/// repeat loop iterations. Both forms must count the same guards.
+#[test]
+fn fused_conditional_jump_survives_the_round_trip() {
+    let module = lower_typed_spanmap(
+        "func f(n: int) -> int {\n s := 0\n for i in 0..n {\n if i < 10 {\n s = s + 1\n }\n }\n return s\n}\nr := f(20)\nr",
+        &std::collections::HashMap::new(),
+    );
+    let dis = zz_ir::dis::disassemble(&module);
+    assert!(
+        dis.contains("jfslotcmpi 5 10 Lt"),
+        "fusion lost in lowering:\n{dis}"
+    );
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    verify::verify(&loaded).expect("verify failed");
+    assert_eq!(codec::encode(&loaded), bytes, "re-encode differs");
+    fn has_fused_jump(chunk: &zz_runtime::vm::Chunk) -> bool {
+        chunk.code.iter().any(|op| match op {
+            zz_runtime::vm::Op::JumpIfFalseSlotCmpIntImm { .. }
+            | zz_runtime::vm::Op::JumpIfFalseSlotCmpIntSlot { .. } => true,
+            zz_runtime::vm::Op::MakeFunc { chunk, .. } => has_fused_jump(chunk),
+            _ => false,
+        })
+    }
+    let raised = raise::raise(&loaded).expect("raise failed");
+    assert!(
+        has_fused_jump(&raised),
+        "raise must restore the fused branch"
+    );
+    let mut interp = Interp::new();
+    interp.run_loaded_chunk(&raised).expect("loaded run failed");
+    assert_eq!(interp.env.get("r"), Some(Value::Int(10)));
+    // Chunk→C gets `SlotCmpIntImm` + `JumpIfFalse`, still counting 10.
+    let expanded = lower::expand_fused(&loaded).expect("expand failed");
+    verify::verify(&expanded).expect("expanded must verify");
+    let expanded_dis = zz_ir::dis::disassemble(&expanded);
+    assert!(
+        !expanded_dis.contains("jfslotcmp") && !expanded_dis.contains("slotcmpint"),
+        "expansion left a fused op behind:\n{expanded_dis}"
+    );
+    let reexpanded = raise::raise(&expanded).expect("raise failed");
+    let mut interp2 = Interp::new();
+    interp2
+        .run_loaded_chunk(&reexpanded)
+        .expect("expanded run failed");
+    assert_eq!(
+        interp2.env.get("r"),
+        Some(Value::Int(10)),
+        "desugared branch differs"
     );
 }
 

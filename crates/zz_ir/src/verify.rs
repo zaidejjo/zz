@@ -40,6 +40,9 @@ fn effect(op: &Op) -> i64 {
         | Op::SlotAddIntImm { .. }
         | Op::SlotBinaryInt { .. }
         | Op::SlotBinaryIntImm { .. } => 0,
+        // The fused conditional jumps read slots and branch: same net effect
+        // as the compare plus the jump they replace.
+        Op::JumpIfFalseSlotCmpIntImm { .. } | Op::JumpIfFalseSlotCmpIntSlot { .. } => 0,
         Op::SlotLessIntSlot { .. }
         | Op::SlotLessIntImm { .. }
         | Op::SlotCmpIntSlot { .. }
@@ -111,6 +114,8 @@ fn jump_targets(op: &Op) -> Vec<u32> {
         Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfFalseBool(t) => {
             vec![*t]
         }
+        Op::JumpIfFalseSlotCmpIntImm { target, .. }
+        | Op::JumpIfFalseSlotCmpIntSlot { target, .. } => vec![*target],
         Op::ForNext { exit, body, .. } => vec![*exit, *body],
         Op::WhileCond { exit } => vec![*exit],
         Op::MatchArm { next, .. } => vec![*next],
@@ -1274,6 +1279,13 @@ fn infer_func(
             Op::SlotBinaryIntImm { dst, lhs, .. } => {
                 declared(*dst)?;
                 declared(*lhs)?;
+            }
+            Op::JumpIfFalseSlotCmpIntImm { a, .. } => {
+                declared(*a)?;
+            }
+            Op::JumpIfFalseSlotCmpIntSlot { a, b, .. } => {
+                declared(*a)?;
+                declared(*b)?;
             }
             Op::PushSlotIntImm { a, .. } => {
                 declared(*a)?;

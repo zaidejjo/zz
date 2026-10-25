@@ -176,6 +176,12 @@ fn op_text(module: &Module, op: &Op) -> String {
         Op::SlotCmpIntImm { a, imm, op } => format!("slotcmpintimm {a} {imm} {op:?}"),
         Op::SlotCmpConst { a, k, op } => format!("slotcmpconst {a} c{} {op:?}", k.0),
         Op::PushSlotIntImm { a, imm, op } => format!("pushslotintimm {a} {imm} {op:?}"),
+        Op::JumpIfFalseSlotCmpIntImm { a, imm, op, target } => {
+            format!("jfslotcmpi {a} {imm} {op:?} -> {target}")
+        }
+        Op::JumpIfFalseSlotCmpIntSlot { a, b, op, target } => {
+            format!("jfslotcmps {a} {b} {op:?} -> {target}")
+        }
         Op::SlotBinaryInt { dst, lhs, rhs, op } => format!("slotbinint {dst} {lhs} {rhs} {op:?}"),
         Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
             format!("slotbinintimm {dst} {lhs} {imm} {op:?}")

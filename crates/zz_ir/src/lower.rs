@@ -624,6 +624,22 @@ impl<'a> Lowerer<'a> {
                 imm: *imm,
                 op: Self::lower_binop(op),
             }]),
+            VmOp::JumpIfFalseSlotCmpIntImm {
+                a, imm, op, target, ..
+            } => Ok(vec![Op::JumpIfFalseSlotCmpIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::lower_binop(op),
+                target: *target as u32,
+            }]),
+            VmOp::JumpIfFalseSlotCmpIntSlot {
+                a, b, op, target, ..
+            } => Ok(vec![Op::JumpIfFalseSlotCmpIntSlot {
+                a: *a,
+                b: *b,
+                op: Self::lower_binop(op),
+                target: *target as u32,
+            }]),
             VmOp::PushSlotIntImm { a, imm, op, .. } => Ok(vec![Op::PushSlotIntImm {
                 a: *a,
                 imm: *imm,
@@ -872,6 +888,8 @@ fn remap_and_flatten(
                 Op::ForSetup { exit, .. } => Some(vec![*exit]),
                 Op::ForNext { exit, body, .. } => Some(vec![*exit, *body]),
                 Op::WhileSetup { exit, .. } => Some(vec![*exit]),
+                Op::JumpIfFalseSlotCmpIntImm { target, .. }
+                | Op::JumpIfFalseSlotCmpIntSlot { target, .. } => Some(vec![*target]),
                 Op::WhileCond { exit } => Some(vec![*exit]),
                 Op::MatchArm { next, .. } => Some(vec![*next]),
                 Op::MatchGuard { next, .. } => Some(vec![*next]),
@@ -920,6 +938,22 @@ fn remap_and_flatten(
                             .copied()
                             .ok_or_else(|| IrError::new("loop header out of range"))?,
                     },
+                    Op::JumpIfFalseSlotCmpIntImm { a, imm, op, .. } => {
+                        Op::JumpIfFalseSlotCmpIntImm {
+                            a,
+                            imm,
+                            op,
+                            target: nt[0],
+                        }
+                    }
+                    Op::JumpIfFalseSlotCmpIntSlot { a, b, op, .. } => {
+                        Op::JumpIfFalseSlotCmpIntSlot {
+                            a,
+                            b,
+                            op,
+                            target: nt[0],
+                        }
+                    }
                     Op::WhileCond { .. } => Op::WhileCond { exit: nt[0] },
                     Op::MatchArm {
                         pat,
@@ -997,6 +1031,8 @@ fn is_fused_slot_op(op: &Op) -> bool {
             | Op::SlotBinaryInt { .. }
             | Op::SlotBinaryIntImm { .. }
             | Op::PushSlotIntImm { .. }
+            | Op::JumpIfFalseSlotCmpIntImm { .. }
+            | Op::JumpIfFalseSlotCmpIntSlot { .. }
     )
 }
 
@@ -1158,6 +1194,8 @@ fn retarget_in_place(map: &[u32], op: &mut Op) -> Result<(), IrError> {
             at(exit)?;
             at(header)?;
         }
+        Op::JumpIfFalseSlotCmpIntImm { target, .. }
+        | Op::JumpIfFalseSlotCmpIntSlot { target, .. } => at(target)?,
         Op::WhileCond { exit } => at(exit)?,
         Op::MatchArm { next, .. } => at(next)?,
         Op::MatchGuard { next, .. } => at(next)?,
@@ -1255,6 +1293,24 @@ pub fn expand_fused(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrE
                     let c = intern_int(&mut out.consts, *imm);
                     vec![Op::LoadSlot(*a), Op::PushConst(c), Op::BinOp(*op)]
                 }
+                // The expansion is the final core sequence: this pass runs
+                // once over the stream, so a fused compare left here would
+                // never be picked up by a second round.
+                Op::JumpIfFalseSlotCmpIntImm { a, imm, op, target } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![
+                        Op::LoadSlot(*a),
+                        Op::PushConst(c),
+                        Op::BinOp(*op),
+                        Op::JumpIfFalse(*target),
+                    ]
+                }
+                Op::JumpIfFalseSlotCmpIntSlot { a, b, op, target } => vec![
+                    Op::LoadSlot(*a),
+                    Op::LoadSlot(*b),
+                    Op::BinOp(*op),
+                    Op::JumpIfFalse(*target),
+                ],
                 other => vec![other.clone()],
             };
             groups.push(group);

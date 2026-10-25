@@ -232,7 +232,10 @@ its own number rendering on both engines; float→int saturation is §5.
   which carry the operator so `if i > 0` fuses like `if i < n`, plus
   `SlotCmpConst` for non-`int` literals, which live in the constant
   pool, and `PushSlotIntImm` for value-position arithmetic such as the
-  `n - 1` argument of `fib`, which has no destination slot to fuse into) —
+  `n - 1` argument of `fib`, which has no destination slot to fuse into,
+  plus the fused conditional jumps `JumpIfFalseSlotCmpIntImm` /
+  `JumpIfFalseSlotCmpIntSlot`, which absorb the compare into an `if`
+  guard's branch) —
   instead of desugaring them.
   They are pure sugar: each op's doc names the exact core sequence it
   stands for, `raise` maps it one to one, and the interpreter takes the

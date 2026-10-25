@@ -525,6 +525,8 @@ impl Compiler {
             | Op::UnOp(_, span) => *span,
             Op::LoadVar(_, span) | Op::StoreVar(_, span) => *span,
             Op::PushSlotIntImm { span, .. } => *span,
+            Op::JumpIfFalseSlotCmpIntImm { span, .. }
+            | Op::JumpIfFalseSlotCmpIntSlot { span, .. } => *span,
             Op::TakeVar(_, span)
             | Op::VecPush { span, .. }
             | Op::VecPushField { span, .. }
@@ -591,6 +593,9 @@ impl Compiler {
             | Op::SlotCmpIntImm { .. }
             | Op::SlotCmpConst { .. }
             | Op::PushSlotIntImm { .. } => 1,
+            // The fused conditional jumps read slots and branch: net 0, the
+            // same as the compare (+1) plus `jfb` (-1) they replace.
+            Op::JumpIfFalseSlotCmpIntImm { .. } | Op::JumpIfFalseSlotCmpIntSlot { .. } => 0,
             Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. }
             | Op::RegisterStruct { .. }
@@ -2059,6 +2064,16 @@ impl Compiler {
     /// shapes are normalized by mirroring the operator (`N < x` == `x > N`),
     /// so `0 < x` fuses as well as `x > 0`.
     fn try_slot_compare(&mut self, value: &Expr) -> Option<Op> {
+        self.slot_compare(value, true)
+    }
+
+    /// Shared body of [`try_slot_compare`](Self::try_slot_compare).
+    ///
+    /// `allow_const` gates the constant-pool form (`SlotCmpConst`), which
+    /// pushes a constant as a side effect. A caller that may discard the
+    /// result — the branch fusion, for non-`Int` literals — passes `false`
+    /// so it does not leave an unreferenced entry in the pool.
+    fn slot_compare(&mut self, value: &Expr, allow_const: bool) -> Option<Op> {
         let Expr::Binary {
             op: binop,
             left,
@@ -2122,6 +2137,9 @@ impl Compiler {
         // `a op c` / `c op a` with a non-`Int` literal (string, float,
         // bool): the value lives in the constant pool, so the comparison can
         // still be one op instead of `LoadSlot PushConst BinOp`.
+        if !allow_const {
+            return None;
+        }
         let total = matches!(binop, BinOp::Eq | BinOp::Ne);
         if !left_int && !total && !self.comparable_pair(left, right) {
             return None;
@@ -2135,6 +2153,65 @@ impl Compiler {
         };
         let k = self.push_const(lit);
         Some(Op::SlotCmpConst { a, k, op })
+    }
+
+    /// Jump form of [`try_slot_compare`](Self::try_slot_compare): the same
+    /// resolution, emitted as a single conditional branch.
+    ///
+    /// `SlotLessInt*` are the `<` specialisations of the general compares, so
+    /// they fold into the same ops with `op: Lt`. Non-`Int` literals
+    /// (`SlotCmpConst`) keep the two-op shape: their constant would have to
+    /// ride along in the jump.
+    fn try_slot_compare_jump(&mut self, cond: &Expr, span: Span) -> Option<Op> {
+        let int_op = |a: u16, imm: i64, op: BinOp| Op::JumpIfFalseSlotCmpIntImm {
+            a,
+            imm,
+            op,
+            target: 0,
+            span,
+        };
+        match self.slot_compare(cond, false)? {
+            Op::SlotCmpIntImm { a, imm, op } => Some(int_op(a, imm, op)),
+            Op::SlotCmpIntSlot { a, b, op } => Some(Op::JumpIfFalseSlotCmpIntSlot {
+                a,
+                b,
+                op,
+                target: 0,
+                span,
+            }),
+            Op::SlotLessIntImm { a, imm } => Some(int_op(a, imm, BinOp::Lt)),
+            Op::SlotLessIntSlot { a, b } => Some(Op::JumpIfFalseSlotCmpIntSlot {
+                a,
+                b,
+                op: BinOp::Lt,
+                target: 0,
+                span,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Compile a condition that branches when it is false, returning the
+    /// jump's pc for [`patch_jump`](Self::patch_jump).
+    ///
+    /// A slot comparison fuses into the branch when the shape allows it
+    /// (`if i < n` in a hot loop); everything else keeps the
+    /// compare-then-`jfb` shape.
+    fn emit_cond_jump(&mut self, cond: &Expr, span: Span) -> usize {
+        if let Some(op) = self.try_slot_compare_jump(cond, span) {
+            let pos = self.chunk.code.len();
+            // Net 0: the fused branch reads its slots directly, replacing
+            // the compare (+1) and the `jfb` (-1) it stands for.
+            self.chunk.spans.push(span);
+            self.chunk.code.push(op);
+            return pos;
+        }
+        if let Some(op) = self.try_slot_compare(cond) {
+            self.emit(op);
+        } else {
+            self.compile_expr(cond);
+        }
+        self.emit_jump(JumpKind::IfFalseBool(span))
     }
 
     /// Peephole for integer arithmetic in *value* position: `slot op Int`
@@ -2363,6 +2440,22 @@ impl Compiler {
                 span,
             },
             Op::WhileCond { span, .. } => Op::WhileCond { exit: target, span },
+            Op::JumpIfFalseSlotCmpIntImm {
+                a, imm, op, span, ..
+            } => Op::JumpIfFalseSlotCmpIntImm {
+                a,
+                imm,
+                op,
+                target,
+                span,
+            },
+            Op::JumpIfFalseSlotCmpIntSlot { a, b, op, span, .. } => Op::JumpIfFalseSlotCmpIntSlot {
+                a,
+                b,
+                op,
+                target,
+                span,
+            },
             other => panic!("patch_jump on non-jump op: {other:?}"),
         };
     }
@@ -3206,12 +3299,7 @@ impl Compiler {
     /// pops the condition, each arm is compiled with its trailing value dead.
     fn compile_if_stmt(&mut self, cond: &Expr, then: &Block, els: &Option<Box<Expr>>, span: Span) {
         let pre = self.stack_height;
-        if let Some(op) = self.try_slot_compare(cond) {
-            self.emit(op);
-        } else {
-            self.compile_expr(cond);
-        }
-        let j = self.emit_jump(JumpKind::IfFalseBool(span));
+        let j = self.emit_cond_jump(cond, span);
         self.compile_block_stmt(then);
         match els.as_deref() {
             // `else if` chains recurse so no arm materializes a value.
@@ -4586,12 +4674,7 @@ impl Compiler {
                 // comparison instead of LoadSlot/LoadSlot/BinOp — the same
                 // peephole `while` conditions get. `if` is the shape hot
                 // loop guards are written in (`if i < n { ... }`).
-                if let Some(op) = self.try_slot_compare(cond) {
-                    self.emit(op);
-                } else {
-                    self.compile_expr(cond);
-                }
-                let j = self.emit_jump(JumpKind::IfFalseBool(*span));
+                let j = self.emit_cond_jump(cond, *span);
                 self.compile_block(then);
                 let j2 = self.emit_jump(JumpKind::Always);
                 self.patch_jump(j);

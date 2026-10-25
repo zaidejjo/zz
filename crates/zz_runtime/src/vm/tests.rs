@@ -2387,8 +2387,7 @@ fn vm_statement_if_in_loop_emits_no_value_dance() {
         matches!(
             body_ops,
             [
-                Op::SlotLessIntImm { imm: 5, .. },
-                Op::JumpIfFalseBool(target, _),
+                Op::JumpIfFalseSlotCmpIntImm { imm: 5, target, .. },
                 Op::SlotInc { .. },
             ] if *target == header
         ),
@@ -2815,8 +2814,8 @@ fn native_call_arity_errors_match_the_generic_path() {
 }
 
 /// Condition fusion covers **all six** comparisons, not just `<`: an `if`
-/// emits one fused compare that pushes the `Bool` directly instead of
-/// `LoadSlot`/`PushConst` + `IntLt`…`IntNe` through the stack.
+/// emits one fused conditional branch instead of `LoadSlot`/`LoadSlot` +
+/// `IntLt`…`IntNe` and a `Bool` through the stack.
 #[test]
 fn vm_compare_conditions_fuse_all_operators() {
     let code = compile_ops(
@@ -2828,17 +2827,40 @@ fn vm_compare_conditions_fuse_all_operators() {
          if i == n { i = 5 }\n\
          if i != n { i = 6 }\ni",
     );
-    let fused = code
+    let ops: Vec<BinOp> = code
         .iter()
-        .filter(|op| matches!(op, Op::SlotLessIntSlot { .. } | Op::SlotCmpIntSlot { .. }))
-        .count();
-    assert_eq!(fused, 6, "expected six fused compares: {code:#?}");
+        .filter_map(|op| match op {
+            Op::JumpIfFalseSlotCmpIntSlot { op, .. } => Some(*op),
+            _ => None,
+        })
+        .collect();
+    // `i > n` normalises to `n < i` with the slots swapped, exactly like the
+    // value-position compare; the rest keep their operator.
+    assert_eq!(
+        ops,
+        vec![
+            BinOp::Lt,
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Ge,
+            BinOp::Eq,
+            BinOp::Ne
+        ],
+        "{code:#?}"
+    );
     assert!(
         !code.iter().any(|op| matches!(
             op,
-            Op::IntLt(_) | Op::IntGt(_) | Op::IntLe(_) | Op::IntGe(_) | Op::IntEq(_) | Op::IntNe(_)
+            Op::SlotLessIntSlot { .. }
+                | Op::SlotCmpIntSlot { .. }
+                | Op::IntLt(_)
+                | Op::IntGt(_)
+                | Op::IntLe(_)
+                | Op::IntGe(_)
+                | Op::IntEq(_)
+                | Op::IntNe(_)
         )),
-        "generic int comparison left in the stream: {code:#?}"
+        "unfused comparison left in the stream: {code:#?}"
     );
 }
 
@@ -2858,7 +2880,7 @@ fn vm_compare_conditions_fuse_literals_on_either_side() {
     let cmps: Vec<(&BinOp, i64)> = code
         .iter()
         .filter_map(|op| match op {
-            Op::SlotCmpIntImm { imm, op, .. } => Some((op, *imm)),
+            Op::JumpIfFalseSlotCmpIntImm { imm, op, .. } => Some((op, *imm)),
             _ => None,
         })
         .collect();
@@ -2881,7 +2903,7 @@ fn vm_compare_conditions_fuse_literals_on_either_side() {
         .filter(|op| {
             matches!(
                 op,
-                Op::SlotCmpIntImm {
+                Op::JumpIfFalseSlotCmpIntImm {
                     imm: 0,
                     op: BinOp::Gt,
                     ..
@@ -2890,11 +2912,20 @@ fn vm_compare_conditions_fuse_literals_on_either_side() {
         })
         .count();
     assert_eq!(n, 2, "{parens:#?}");
-    // `<` keeps the older op, on both sides of the literal.
+    // `<` folds into the same fused branch, on both sides of the literal.
     let less = compile_ops("i := 5\nif i < 7 { i = 1 }\nif 7 > i { i = 2 }\ni");
     let n = less
         .iter()
-        .filter(|op| matches!(op, Op::SlotLessIntImm { imm: 7, .. }))
+        .filter(|op| {
+            matches!(
+                op,
+                Op::JumpIfFalseSlotCmpIntImm {
+                    imm: 7,
+                    op: BinOp::Lt,
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(n, 2, "{less:#?}");
 }
@@ -3074,6 +3105,88 @@ fn vm_push_slot_int_imm_fuses_value_position_arith() {
         .run_loaded_chunk(&Arc::new(chunk))
         .expect("typed run failed");
     assert_eq!(interp.env.get("r"), Some(Value::Int(40)));
+}
+
+/// `if i < 10` in a typed function compiles to one fused conditional jump
+/// (`JumpIfFalseSlotCmpIntImm`) instead of `SlotLessIntImm` + `jfb`, and the
+/// guard still counts what it should.
+#[test]
+fn vm_jump_if_false_slot_cmp_fuses_if_guards() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    let parsed = parse(
+        "func f(n: int) -> int {\n\
+         s := 0\n\
+         for i in 0..n {\n\
+         if i < 10 {\n\
+         s = s + 1\n\
+         }\n\
+         }\n\
+         return s\n\
+         }\n\
+         r := f(20)\nr",
+    );
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_res, types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let chunk = Compiler::compile_program_typed(
+        &parsed.program,
+        Arc::new(types),
+        HashMap::new(),
+        HashMap::new(),
+        Arc::new(HashSet::new()),
+    );
+    let body = chunk
+        .code
+        .iter()
+        .find_map(|op| match op {
+            Op::MakeFunc { chunk, .. } => Some(chunk),
+            _ => None,
+        })
+        .expect("function body chunk missing");
+    let fused: Vec<&Op> = body
+        .code
+        .iter()
+        .filter(|op| matches!(op, Op::JumpIfFalseSlotCmpIntImm { .. }))
+        .collect();
+    assert_eq!(fused.len(), 1, "expected one fused guard: {:?}", body.code);
+    assert!(
+        matches!(
+            fused[0],
+            Op::JumpIfFalseSlotCmpIntImm {
+                imm: 10,
+                op: zz_frontend::ast::BinOp::Lt,
+                ..
+            }
+        ),
+        "unexpected guard shape: {:?}",
+        fused[0]
+    );
+    // Neither half of the pair it replaced survives.
+    assert!(
+        !body
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::SlotLessIntImm { .. } | Op::JumpIfFalseBool(..))),
+        "unfused guard survived: {:?}",
+        body.code
+    );
+    let mut interp = Interp::new();
+    interp
+        .run_loaded_chunk(&Arc::new(chunk))
+        .expect("typed run failed");
+    assert_eq!(interp.env.get("r"), Some(Value::Int(10)));
 }
 
 #[test]
