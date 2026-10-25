@@ -659,15 +659,41 @@ impl<'a> Lexer<'a> {
 
     fn lex_number(&mut self) {
         let start = self.pos;
+        // Detect a base prefix: `0x`/`0X` hex, `0b`/`0B` binary, `0o`/`0O`
+        // octal. The entry point only fires on an ascii digit, so a prefixed
+        // literal always begins with `0` here.
+        let mut base = 10u32;
+        let c0 = self.peek_char();
+        let is_prefixed = matches!(c0, Some('0'))
+            && matches!(
+                self.peek_char_at(1),
+                Some('x') | Some('X') | Some('b') | Some('B') | Some('o') | Some('O')
+            );
+        if is_prefixed {
+            let prefix = self.src[self.pos + 1..self.pos + 2].to_ascii_lowercase();
+            base = match prefix.as_str() {
+                "x" => 16,
+                "b" => 2,
+                "o" => 8,
+                _ => unreachable!(),
+            };
+            // Consume `0` and the prefix letter.
+            self.bump_char();
+            self.bump_char();
+        }
+        // Consume digits valid for the base (plus `_` separators).
         while let Some(c) = self.peek_char() {
-            if c.is_ascii_digit() || c == '_' {
+            if Self::is_digit_for_base(c, base) || c == '_' {
                 self.bump_char();
             } else {
                 break;
             }
         }
         let mut is_float = false;
-        if self.peek_char() == Some('.') && self.peek_char_at(1).is_some_and(|c| c.is_ascii_digit())
+        // Floats are decimal-only; hex/binary/octal literals are integers.
+        if base == 10
+            && self.peek_char() == Some('.')
+            && self.peek_char_at(1).is_some_and(|c| c.is_ascii_digit())
         {
             is_float = true;
             self.bump_char(); // '.'
@@ -678,14 +704,14 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
-        } else if self.peek_char() == Some('.') && self.peek_char_at(1) != Some('.') {
+        } else if base == 10 && self.peek_char() == Some('.') && self.peek_char_at(1) != Some('.') {
             // `1.` — a dot with no digits after it is not a float (and not a
             // range start, which would be `1..`).
             let span = Span::new(start as u32, (self.pos + '.'.len_utf8()) as u32);
             self.errors
                 .push(error_at("expected digit after decimal point", span));
         }
-        // `123abc` is a single invalid token, not two.
+        // `123abc` / `0xFFabc` is a single invalid token, not two.
         // Exception: inside interpolation `{val:.2f}`, allow number+ident
         // sequences so format specs like `.2f` lex as separate tokens.
         if self.peek_char().is_some_and(is_ident_continue)
@@ -714,6 +740,17 @@ impl<'a> Lexer<'a> {
             TokenKind::Int
         };
         self.push_token(kind, span, text);
+    }
+
+    /// Returns `true` when `c` is a digit valid in the given base.
+    /// `_` separators are handled by the caller.
+    fn is_digit_for_base(c: char, base: u32) -> bool {
+        match base {
+            16 => c.is_ascii_hexdigit(),
+            8 => matches!(c, '0'..='7'),
+            2 => matches!(c, '0' | '1'),
+            _ => c.is_ascii_digit(),
+        }
     }
 
     /// Begin a fresh string literal: consume the opening quote(s) and enter
