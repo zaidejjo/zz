@@ -1,0 +1,13 @@
+// bench/phase1/encoding_hex_decode.zz — benchmark hex decode
+import std.encoding
+import std.fs
+import std.time
+
+func main() -> int {
+    hex := fs.read("/home/zaid/Projects/.zz-targets/bench-hex-str.txt") ?? ""
+    t0 := time.now_ms()
+    d := encoding.hex_decode(hex) ?? ""
+    t1 := time.now_ms()
+    println("hex_decode n={len(hex)} ms={t1 - t0} out_len={len(d)}")
+    return 0
+}
