@@ -3,7 +3,7 @@
 use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::ast::{Block, Expr, Stmt};
-use zz_frontend::diag::{error_at, FixIt};
+use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::span::Span;
 
 impl Checker {
@@ -204,6 +204,29 @@ impl Checker {
             return;
         }
         let resolved_ret = self.unifier.resolve(&sig.ret);
+        // Implicit return type (no `->` annotation): warn when the body's
+        // tail expression has a non-unit type, since it is silently
+        // discarded and the function effectively returns `unit`.
+        if matches!(resolved_ret, Type::Var(_))
+            && !matches!(
+                resolved_body,
+                Type::Unit | Type::Void | Type::Never | Type::Error
+            )
+        {
+            let last = body.stmts.last();
+            let span = last.map(|s| s.span()).unwrap_or(body.span);
+            let body_ty = self.unifier.resolve(&body_t);
+            let diag = warning_at(
+                format!(
+                    "function has no `->` return type but its body yields `{body_ty}`; the last expression is discarded",
+                ),
+                span,
+            )
+            .with_note(
+                "add an explicit `->` return type, or end the body with `return` / `()` to silence this warning",
+            );
+            self.errors.push(diag);
+        }
         let ret_takes_value = !matches!(
             resolved_ret,
             Type::Unit | Type::Void | Type::Error | Type::Var(_)
