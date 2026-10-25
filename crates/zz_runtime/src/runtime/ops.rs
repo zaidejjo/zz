@@ -626,6 +626,19 @@ pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<V
                 span,
             )),
         },
+        // Array concat: `[T] + [T] -> [T]`. Value semantics: both inputs are
+        // cloned into a fresh independent buffer, so neither alias the result.
+        (Value::Array(a), Value::Array(b)) => match op {
+            BinOp::Add => {
+                let mut out = (*a).clone();
+                out.extend(b.iter().cloned());
+                Ok(Value::Array(std::sync::Arc::new(out)))
+            }
+            _ => Err(EvalError::new(
+                format!("operator `{}` is not supported for arrays", op.symbol()),
+                span,
+            )),
+        },
         (l, r) => {
             if let (Some(a), Some(b)) = (l.to_float(), r.to_float()) {
                 return match op {

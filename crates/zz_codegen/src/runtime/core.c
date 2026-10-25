@@ -339,6 +339,17 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
             break;
         }
     }
+    // array concat: [T] + [T] -> [T]. Elements are cloned into a fresh
+    // independent buffer so neither input aliases the result (value
+    // semantics — mutating one side never affects the other).
+    if (a.tag == ZZ_ARRAY && b.tag == ZZ_ARRAY && op == ZZOP_ADD) {
+        zz_value out = zz_array_new();
+        for (size_t i = 0; i < a.arr->len; i++)
+            zz_array_push(out.arr, zz_clone(a.arr->items[i]));
+        for (size_t i = 0; i < b.arr->len; i++)
+            zz_array_push(out.arr, zz_clone(b.arr->items[i]));
+        return out;
+    }
     // bool AND/OR handled by control flow in generated code; comparison
     // fallback:
     if (a.tag == ZZ_BOOL && b.tag == ZZ_BOOL) {

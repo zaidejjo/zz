@@ -1921,6 +1921,38 @@ impl Checker {
                 Type::Int
             }
             (Type::Str, Type::Str) if op == BinOp::Add => Type::Str,
+            // Array concat: `[T] + [T] -> [T]`. Element types must match
+            // exactly ([int] + [str] is a hard error; cast one side first).
+            // An inference-var element (`[]`) unifies with the concrete side.
+            (Type::Array(a), Type::Array(b)) if op == BinOp::Add => {
+                let ea = self.unifier.resolve(a);
+                let eb = self.unifier.resolve(b);
+                match (&ea, &eb) {
+                    (Type::Var(_), Type::Var(_)) => {
+                        // Both sides unknown — can't pin element type yet.
+                        Type::Array(Box::new(self.unifier.fresh_var()))
+                    }
+                    (Type::Var(_), concrete) => {
+                        self.unifier.bind_var(a, concrete.clone());
+                        Type::Array(Box::new(concrete.clone()))
+                    }
+                    (concrete, Type::Var(_)) => {
+                        self.unifier.bind_var(b, concrete.clone());
+                        Type::Array(Box::new(concrete.clone()))
+                    }
+                    (_, _) if ea == eb => Type::Array(Box::new(ea)),
+                    (a2, b2) => {
+                        self.errors.push(error_at(
+                            format!(
+                                "cannot apply `+` to `[{a2}]` and `[{b2}]`: element types differ\n\
+                                 hint: cast one side so both arrays share an element type",
+                            ),
+                            span,
+                        ));
+                        Type::Error
+                    }
+                }
+            }
             (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
                 Type::Float
             }
