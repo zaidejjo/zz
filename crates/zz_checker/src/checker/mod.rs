@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_frontend::ast::{Program, Stmt, Ty};
-use zz_frontend::diag::RawDiag;
+use zz_frontend::diag::{warning_at, RawDiag};
 use zz_frontend::span::Span;
 
 use crate::type_::Type;
@@ -323,13 +323,33 @@ fn check_program_impl(
         checker.shadow_roots.insert(module_ns.to_string());
     }
     for stmt in &program.stmts {
-        if let Stmt::Import { path, alias, .. } = stmt {
+        if let Stmt::Import {
+            path, alias, span, ..
+        } = stmt
+        {
             let head = alias
                 .clone()
                 .or_else(|| path.last().cloned())
                 .unwrap_or_default();
             if !head.is_empty() {
-                checker.shadow_roots.insert(head);
+                checker.shadow_roots.insert(head.clone());
+                // Warn when importing a module whose head name collides with
+                // a std module head. At runtime `std.<head>` wins over an
+                // explicit `import <pkg>.<head>`, so `zz check` would pass
+                // while `zz run` fails — warn at the import site instead.
+                // Only enforced for loader-checked user modules (which always
+                // know their owner namespace); stdlib internals, the REPL, and
+                // merged HIR programs pass an empty owner and skip it.
+                if !module_ns.is_empty() && crate::checker::is_std_module_head(&head) {
+                    let diag = warning_at(
+                        format!(
+                            "importing `{head}` shadows the std module `{head}` — qualified calls through it may fail at runtime; consider aliasing it",
+                        ),
+                        *span,
+                    )
+                    .with_note("use `import <pkg>.<head> as <name>` to avoid the collision".to_string());
+                    checker.errors.push(diag);
+                }
             }
         }
     }
