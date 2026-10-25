@@ -1692,6 +1692,14 @@ impl Compiler {
         ) {
             return None;
         }
+        // Array/tuple/str/bytes need an Int index (matches get_index).
+        // Dicts accept any key type.
+        if !matches!(ty, zz_checker::Type::Dict(_, _)) {
+            let idx_ty = self.type_of(idx.span())?;
+            if !matches!(idx_ty, zz_checker::Type::Int) {
+                return None;
+            }
+        }
         Some(Op::IndexIntSlot {
             arr: arr_slot,
             idx: idx_slot,
