@@ -1381,6 +1381,32 @@ impl Vm {
                         }
                     }
                 }
+                Op::SlotCmpConst { a, k, op } => {
+                    let base = cached_base;
+                    let idx = base + *a as usize;
+                    let rhs = &constants[*k as usize];
+                    // `==`/`!=` are the whole point of this op (the string
+                    // chain in a `str_scan`-shaped loop): compare the
+                    // `Arc<String>` in place instead of cloning both sides
+                    // through `eval_binary`.
+                    let fast = match (&self.stack[idx], rhs) {
+                        (Value::Str(x), Value::Str(y)) => match op {
+                            BinOp::Eq => Some(x == y),
+                            BinOp::Ne => Some(x != y),
+                            _ => None,
+                        },
+                        (Value::Int(x), Value::Int(y)) => int_cmp(*op, *x, *y),
+                        _ => None,
+                    };
+                    match fast {
+                        Some(c) => self.stack.push(Value::Bool(c)),
+                        None => {
+                            let l = self.stack[idx].clone();
+                            let v = eval_binary(*op, l, rhs.clone(), Span::default())?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
                 Op::SlotBinaryInt { dst, lhs, rhs, op } => {
                     let base = cached_base;
                     let idx_d = base + *dst as usize;

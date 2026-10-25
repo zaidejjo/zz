@@ -205,6 +205,21 @@ pub enum Op {
         imm: i64,
         op: zz_frontend::ast::BinOp,
     },
+    /// Compare a slot against a constant-pool entry, push `Bool(a op c)`.
+    ///
+    /// `SlotCmpIntImm` inlines `i64` literals; every other literal (string,
+    /// float, bool) lived in the pool but still cost `LoadSlot PushConst
+    /// BinOp` — three dispatches for one comparison. `k` indexes
+    /// [`Chunk::constants`](super::Chunk::constants), like `PushConst`.
+    ///
+    /// Strings compare in place (`Arc<String>` equality, no clone) for
+    /// `==`/`!=`; everything else falls back to `eval_binary`, so mixed
+    /// types keep the generic semantics.
+    SlotCmpConst {
+        a: u16,
+        k: u32,
+        op: zz_frontend::ast::BinOp,
+    },
 
     // ---- functions & structs ----
     /// Create a named function value from a pre-compiled body chunk, register
@@ -616,6 +631,7 @@ impl Op {
             Op::SlotLessIntImm { .. } => "SlotLessIntImm",
             Op::SlotCmpIntSlot { .. } => "SlotCmpIntSlot",
             Op::SlotCmpIntImm { .. } => "SlotCmpIntImm",
+            Op::SlotCmpConst { .. } => "SlotCmpConst",
             Op::SlotBinaryInt { .. } => "SlotBinaryInt",
             Op::SlotBinaryIntImm { .. } => "SlotBinaryIntImm",
             Op::MakeFunc { .. } => "MakeFunc",
@@ -710,6 +726,7 @@ impl Op {
             | Op::SlotLessIntImm { .. }
             | Op::SlotCmpIntSlot { .. }
             | Op::SlotCmpIntImm { .. }
+            | Op::SlotCmpConst { .. }
             | Op::SlotBinaryInt { .. }
             | Op::SlotBinaryIntImm { .. } => OpClass::Fused,
 

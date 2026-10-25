@@ -43,7 +43,8 @@ fn effect(op: &Op) -> i64 {
         Op::SlotLessIntSlot { .. }
         | Op::SlotLessIntImm { .. }
         | Op::SlotCmpIntSlot { .. }
-        | Op::SlotCmpIntImm { .. } => 1,
+        | Op::SlotCmpIntImm { .. }
+        | Op::SlotCmpConst { .. } => 1,
         Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => -1,
         Op::IntNeg => 0,
         Op::BinOp(_) => -1,
@@ -1255,6 +1256,13 @@ fn infer_func(
             }
             Op::SlotCmpIntImm { a, .. } => {
                 declared(*a)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotCmpConst { a, k, .. } => {
+                declared(*a)?;
+                if (k.0 as usize) >= module.consts.len() {
+                    return Err(IrError::spanned("const id out of range", span));
+                }
                 st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
             }
             Op::SlotBinaryInt { dst, lhs, rhs, .. } => {

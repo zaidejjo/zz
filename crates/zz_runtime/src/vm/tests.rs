@@ -1247,9 +1247,11 @@ fn vm_nested_arith_chain_matches_tree_walker() {
     );
 }
 
-/// Typed int comparisons (#364) compile to the unboxed fast-path ops
-/// instead of generic `BinOp` — mirroring the `IntAdd` precedent.
-/// Mixed-type operands keep generic dispatch.
+/// Typed int comparisons (#364) never take generic `BinOp`: in condition
+/// position they fuse into `SlotLessInt*`/`SlotCmpInt*` (#584) and, since
+/// the value-position peephole landed, so do `c1 := a < b` shapes.
+/// Mixed-type operands fuse too — the fused ops fall back to the generic
+/// comparison — but must never use the int-only stack ops.
 #[test]
 fn vm_typed_int_comparisons_emit_fast_ops() {
     use std::collections::{HashMap, HashSet};
@@ -1286,6 +1288,9 @@ fn vm_typed_int_comparisons_emit_fast_ops() {
                 Op::IntGe(_) => "IntGe",
                 Op::IntEq(_) => "IntEq",
                 Op::IntNe(_) => "IntNe",
+                Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => "SlotLessInt",
+                Op::SlotCmpIntSlot { .. } | Op::SlotCmpIntImm { .. } => "SlotCmpInt",
+                Op::SlotCmpConst { .. } => "SlotCmpConst",
                 Op::BinOp(..) => "BinOp",
                 _ => "other",
             })
@@ -1302,22 +1307,42 @@ fn vm_typed_int_comparisons_emit_fast_ops() {
          c5 := a == b\n\
          c6 := a != b",
     );
-    for want in ["IntLt", "IntGt", "IntLe", "IntGe", "IntEq", "IntNe"] {
-        assert!(ops.contains(&want), "{want} missing: {ops:?}");
-    }
+    // `a < b` / `a > b` take the `SlotLessInt` family; the other four the
+    // generalized `SlotCmpInt`.
+    assert_eq!(
+        ops.iter().filter(|o| **o == "SlotLessInt").count(),
+        2,
+        "`<`/`>` must fuse in value position: {ops:?}"
+    );
+    assert_eq!(
+        ops.iter().filter(|o| **o == "SlotCmpInt").count(),
+        4,
+        "`<=`/`>=`/`==`/`!=` must fuse in value position: {ops:?}"
+    );
     assert!(
         !ops.contains(&"BinOp"),
         "int comparisons must not use generic BinOp: {ops:?}"
     );
-    // Mixed int/float operands keep generic dispatch.
+    assert!(
+        !ops.iter().any(|o| matches!(
+            *o,
+            "IntLt" | "IntGt" | "IntLe" | "IntGe" | "IntEq" | "IntNe"
+        )),
+        "stack-driven int compare left in the stream: {ops:?}"
+    );
+    // Mixed int/float operands fuse through the same op (generic fallback
+    // inside the handler) but keep off the int-only stack ops.
     let mixed = opcodes("a: int = 3\nb: float = 1.5\nc := a < b");
     assert!(
-        mixed.contains(&"BinOp"),
-        "mixed-type comparison must stay generic: {mixed:?}"
+        mixed.contains(&"SlotLessInt"),
+        "mixed-type comparison must fuse: {mixed:?}"
     );
     assert!(
-        !mixed.iter().any(|o| *o != "BinOp" && *o != "other"),
-        "no int fast-path for mixed types: {mixed:?}"
+        !mixed.iter().any(|o| matches!(
+            *o,
+            "IntLt" | "IntGt" | "IntLe" | "IntGe" | "IntEq" | "IntNe"
+        )),
+        "no int-only fast path for mixed types: {mixed:?}"
     );
 }
 
@@ -2899,6 +2924,84 @@ fn vm_fused_compares_match_tree_walker() {
     // Mixed int/float comparison keeps generic semantics (`2 > 1.5`).
     assert_eq!(
         run_src("i := 2\nf := 1.5\nr := 0\nif i > f { r = 1 }\nr").unwrap(),
+        Value::Int(1)
+    );
+}
+
+/// Non-`Int` literals fuse too: a string/float/bool comparison against a
+/// literal is one op (`SlotCmpConst`) instead of `LoadSlot PushConst BinOp`.
+#[test]
+fn vm_const_conditions_fuse_slot_against_pool() {
+    let code = compile_ops(
+        "c := \"a\"\nf := 1.5\nb := true\nn := 0\n\
+         if c == \"a\" { n = 1 }\n\
+         if c != \"e\" { n = 2 }\n\
+         if f > 0.5 { n = 3 }\n\
+         if b == true { n = 4 }\nn",
+    );
+    let consts: Vec<&BinOp> = code
+        .iter()
+        .filter_map(|op| match op {
+            Op::SlotCmpConst { op, .. } => Some(op),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        consts,
+        vec![&BinOp::Eq, &BinOp::Ne, &BinOp::Gt, &BinOp::Eq],
+        "{code:#?}"
+    );
+    assert!(
+        !code.iter().any(|op| matches!(op, Op::BinOp(..))),
+        "generic compare left in the stream: {code:#?}"
+    );
+    // Literal on the left mirrors the operator into the same op.
+    let mirrored = compile_ops("c := \"a\"\nn := 0\nif \"a\" == c { n = 1 }\nn");
+    assert!(
+        mirrored
+            .iter()
+            .any(|op| matches!(op, Op::SlotCmpConst { op: BinOp::Eq, .. })),
+        "{mirrored:#?}"
+    );
+}
+
+/// `&&`/`||` on a statically `Bool` operand drop the `Truthy` coercion —
+/// one dispatch per operand in every comparison chain.
+#[test]
+fn vm_bool_operands_skip_truthy() {
+    let code = compile_ops(
+        "a := 1\nb := 2\nn := 0\n\
+         if a < b || b < a || a == b { n = 1 }\n\
+         if a > 0 && b > 0 { n = 2 }\nn",
+    );
+    assert!(
+        !code.iter().any(|op| matches!(op, Op::Truthy)),
+        "Truthy survived on Bool operands: {code:#?}"
+    );
+}
+
+/// Every const-pool comparison must agree with the tree-walker.
+#[test]
+fn vm_const_compares_match_tree_walker() {
+    for src in [
+        "c := \"a\"\nn := 0\nif c == \"a\" { n = 1 }\nif c != \"e\" { n = n + 1 }\nn",
+        "s := \"the quick brown fox\"\nv := 0\nfor i in 0..len(s) {\n c := s[i]\n if c == \"a\" || c == \"e\" || c == \"i\" || c == \"o\" || c == \"u\" { v = v + 1 }\n}\nv",
+        "f := 1.5\nn := 0\nif f > 0.5 { n = 1 }\nif 2.5 >= f { n = n + 1 }\nif f < 0.5 { n = 100 }\nn",
+        "b := true\nn := 0\nif b == true { n = 1 }\nif b != false { n = n + 1 }\nn",
+        // Literal on the left of a non-`Int` comparison.
+        "c := \"x\"\nn := 0\nif \"x\" == c { n = 1 }\nif 0.5 < 1.5 { n = n + 1 }\nn",
+        // Mixed numeric operands fuse too; the handler falls back and the
+        // result must match the tree-walker exactly.
+        "a: int = 3\nb: float = 1.5\nc := a < b\nd := b >= a\ne := a == b\nc || d || e",
+        // Mixed types in `==`/`!=` are total and keep the generic result.
+        "c := \"1\"\nn := 0\nif c != 1 { n = 1 }\nif c == 1 { n = 100 }\nn",
+        // Bool chains still short-circuit around the same comparisons.
+        "n := 0\nfor i in 0..20 {\n if i % 2 == 0 && i % 3 != 0 { n = n + 1 }\n}\nn",
+    ] {
+        assert_same(src);
+    }
+    assert_eq!(
+        run_src("c := \"a\"\nn := 0\nif c == \"a\" { n = 1 }\nn").unwrap(),
         Value::Int(1)
     );
 }
