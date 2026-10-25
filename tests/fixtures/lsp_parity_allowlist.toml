@@ -10,3 +10,30 @@ reason = "intentional recovery difference: the server checks partial programs so
 [[allow]]
 file = "assign_in_condition.zz"
 reason = "intentional recovery difference (same as parse_error.zz): the `=`-in-condition parse error suppresses the follow-on condition type error under `zz check`, but the server checks the partial program and reports both"
+[[allow]]
+file = "chan_send_non_chan.zz"
+reason = "intentional divergence: `zz check` emits a std-module-shadow warning for `import chan` that the LSP does not (no module_ns context); see #588"
+[[allow]]
+file = "http_hijack_arity.zz"
+reason = "intentional divergence: `zz check` emits a std-module-shadow warning for `import http` that the LSP does not (no module_ns context); see #588"
+[[allow]]
+file = "http_route_dup.zz"
+reason = "intentional divergence: `zz check` emits a std-module-shadow warning for `import http` that the LSP does not (no module_ns context); see #588"
+[[allow]]
+file = "http_route_method.zz"
+reason = "intentional divergence: `zz check` emits a std-module-shadow warning for `import http` that the LSP does not (no module_ns context); see #588"
+[[allow]]
+file = "http_route_path.zz"
+reason = "intentional divergence: `zz check` emits a std-module-shadow warning for `import http` that the LSP does not (no module_ns context); see #588"
+[[allow]]
+file = "http_tls_cert.zz"
+reason = "intentional divergence: `zz check` emits a std-module-shadow warning for `import http` that the LSP does not (no module_ns context); see #588"
+[[allow]]
+file = "property_falsified.zz"
+reason = "intentional divergence: `zz check` emits a std-module-shadow warning for `import property` that the LSP does not (no module_ns context); see #588"
+[[allow]]
+file = "spawn_non_closure.zz"
+reason = "intentional divergence: `zz check` emits a std-module-shadow warning for `import task` that the LSP does not (no module_ns context); see #588"
+[[allow]]
+file = "top_level_prelude.zz"
+reason = "intentional divergence: `zz check` emits std-module-shadow warnings for `import math`/`import str` that the LSP does not (no module_ns context); see #588"
