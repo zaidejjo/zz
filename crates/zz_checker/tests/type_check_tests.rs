@@ -2717,8 +2717,10 @@ fn unused_warnings_emit_in_source_order() {
     // Unused-variable warnings must be source-ordered, not HashMap
     // order: the dual-engine parity harness diffs stderr across two
     // separate `zz` processes (different hash seeds). Names are chosen
-    // so alphabetical order disagrees with source order.
-    let r = check_src("func f() {\n    zzz := 1\n    aaa := 2\n}");
+    // so alphabetical order disagrees with source order. End with
+    // `println` so the tail is unit and doesn't trigger the
+    // implicit-return warning (#606).
+    let r = check_src("func f() {\n    zzz := 1\n    aaa := 2\n    println(\"x\")\n}");
     let warns: Vec<&str> = r
         .errors
         .iter()
@@ -3959,6 +3961,71 @@ fn explicit_return_type_no_implicit_warning() {
     assert!(
         !warns.iter().any(|m| m.contains("no `->` return type")),
         "should not warn when return type is explicit: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_module_head_shadows_warns() {
+    // Importing a module whose head collides with a std module head
+    // should warn at the import site when a module namespace is set.
+    let r = check_src_with_module_ns("import args", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        warns.iter().any(|m| m.contains("shadows the std module")),
+        "expected std-module shadow warning, got: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_module_head_with_alias_no_warn() {
+    // Aliasing the import avoids the shadow warning.
+    let r = check_src_with_module_ns("import args as myargs", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("shadows the std module")),
+        "aliased import should not warn: {warns:?}"
+    );
+}
+
+#[test]
+fn import_non_std_module_head_no_warn() {
+    // Importing a module whose head is not a std module should not warn.
+    let r = check_src_with_module_ns("import mycustommod", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("shadows the std module")),
+        "non-std module import should not warn: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_head_no_module_ns_no_warn() {
+    // Without a module namespace (e.g. stdlib internals), no shadow warning.
+    let r = check_src("import args");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("shadows the std module")),
+        "no module_ns should not warn: {warns:?}"
     );
 }
 
