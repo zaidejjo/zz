@@ -33,7 +33,6 @@
 //! `[features]` is optional too. A manifest without it behaves exactly
 //! as before: every dependency is active and no module is gated.
 
-use std::collections::{BTreeMap, HashMap};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -418,6 +417,8 @@ pub fn is_identifier(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// One `[features]` entry. Two shapes are accepted:
 ///
 /// ```toml
