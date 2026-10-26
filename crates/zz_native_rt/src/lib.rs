@@ -118,6 +118,14 @@ fn lock_pool() -> std::sync::MutexGuard<'static, HashMap<u64, Entry>> {
 /// The caller must hand the returned [`Handle`] to ZZ code; the payload is
 /// retrieved later with [`payload`] and released with [`drop_handle`].
 pub fn alloc(tag: &str, payload: ArcPayload) -> Handle {
+    let mut pool = lock_pool();
+    if pool.len() >= MAX_POOL_ENTRIES {
+        // Evict an arbitrary entry to keep RSS bounded (HashSet has no order).
+        if let Some(first) = pool.keys().next().copied() {
+            pool.remove(&first);
+        }
+    }
+    drop(pool);
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     // On counter wrap (practically impossible: 2^64 ids) reuse would collide
     // with live entries; abort loudly instead of aliasing two objects.
@@ -178,6 +186,17 @@ pub fn live_count() -> u64 {
 /// different version than the linked static library must be rebuilt.
 pub const FFI_VERSION: u64 = 1;
 
+/// Maximum number of live pool entries before eviction starts.
+pub const MAX_POOL_ENTRIES: usize = 10_000;
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        if self.id != 0 {
+            drop_handle(self.id);
+        }
+    }
+}
+
 // --- extern "C" surface (linked by AOT binaries) -----------------------------
 
 /// Read a `(ptr, len)` byte string from C. Null/empty/invalid input yields
@@ -206,7 +225,16 @@ pub extern "C" fn zz_rt_handle_alloc(tag_ptr: *const u8, tag_len: usize) -> u64 
     let Some(tag) = read_tag(tag_ptr, tag_len) else {
         return 0;
     };
-    alloc(&tag, std::sync::Arc::new(())).id
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    assert!(id != 0, "opaque handle id counter exhausted");
+    lock_pool().insert(
+        id,
+        Entry {
+            tag: tag.to_string(),
+            payload: std::sync::Arc::new(()),
+        },
+    );
+    id
 }
 
 /// Release the entry for `id`. Idempotent: unknown ids return false.

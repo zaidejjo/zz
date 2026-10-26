@@ -283,21 +283,30 @@ pub fn load_plugin(
             })?
     };
 
-    // Set up context and call registration.
+    // Set up context and call registration. Move natives into REGISTER_CTX
+    // (not clone) so the plugin can register into it directly. A scope guard
+    // guarantees the map is taken back even if register_fn panics.
+    struct RegisterCtxGuard<'a> {
+        natives: &'a mut HashMap<String, NativeEntry>,
+    }
+    impl<'a> Drop for RegisterCtxGuard<'a> {
+        fn drop(&mut self) {
+            REGISTER_CTX.with(|ctx| {
+                if let Some(updated) = ctx.borrow_mut().take() {
+                    *self.natives = updated;
+                }
+            });
+        }
+    }
+
     REGISTER_CTX.with(|ctx| {
-        *ctx.borrow_mut() = Some(natives.clone());
+        *ctx.borrow_mut() = Some(std::mem::take(natives));
     });
+    let _guard = RegisterCtxGuard { natives };
 
     unsafe {
         register_fn(register_callback);
     }
-
-    // Extract updated natives.
-    REGISTER_CTX.with(|ctx| {
-        if let Some(updated) = ctx.borrow_mut().take() {
-            *natives = updated;
-        }
-    });
 
     Ok(PluginLib { _lib: lib })
 }

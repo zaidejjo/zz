@@ -81,9 +81,10 @@ pub struct CSig {
 /// Current C-plugin ABI version (the `ZZ_C_PLUGIN_ABI_VERSION` symbol).
 pub const C_ABI_VERSION: u32 = 1;
 
-struct CEntry {
-    ptr: *mut c_void,
-    sig: CSig,
+/// A registered C plugin function.
+pub struct CEntry {
+    pub ptr: *mut c_void,
+    pub sig: CSig,
 }
 
 // Raw fn pointers are safe to share: the loader keeps the dlopen handle
@@ -618,6 +619,20 @@ pub fn register(name: &str, ptr: *mut c_void, sig: CSig) -> Result<(), String> {
         Some(arity)
     );
     Ok(())
+}
+
+/// Unregister a C plugin function by name. Returns the removed entry, if any.
+/// Used for test cleanup and plugin unload.
+pub fn unregister(name: &str) -> Option<CEntry> {
+    registry()
+        .write()
+        .expect("C plugin registry lock")
+        .remove(name)
+}
+
+/// Clear all registered C plugin functions. Used for test cleanup.
+pub fn clear_registry() {
+    registry().write().expect("C plugin registry lock").clear();
 }
 
 /// Arity of a registered C function, if present.
