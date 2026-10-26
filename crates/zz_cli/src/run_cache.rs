@@ -148,7 +148,7 @@ pub fn run_key(
 
 /// One file's stat signature: seconds + nanos + size. Unknown (unstatable)
 /// never validates — the caller falls back to the full hash.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileStat {
     secs: u64,
     nanos: u32,
@@ -171,6 +171,10 @@ struct ProjectFp {
     sources: ScopeFp,
     deps: HashMap<String, ScopeFp>,
     dep_dirs: HashMap<String, String>,
+    /// `zz.toml` stat at store time. The manifest feeds `[collect.*]`
+    /// synthesis (and dependency config), so an edit must force `compute`.
+    #[serde(default)]
+    manifest: Option<FileStat>,
 }
 
 fn fp_path(root: &Path) -> PathBuf {
@@ -272,6 +276,9 @@ fn fp_lookup(
         return Ok(None);
     };
     let saved: ProjectFp = serde_json::from_slice(&bytes).ok().unwrap_or_default();
+    if saved.manifest != stat_now(&root.join("zz.toml")) {
+        return Ok(None);
+    }
     // An empty sidecar (fresh default) never validates: the sources scope
     // always crawls ≥1 file (the entry itself).
     let files = crawl_zz(&root);
@@ -337,6 +344,7 @@ fn fp_store(entry: &Path, key: &zz_pm::cache_key::CacheKey) {
         sources,
         deps: HashMap::new(),
         dep_dirs: HashMap::new(),
+        manifest: stat_now(&root.join("zz.toml")),
     };
     if let Ok(deps) = zz_pm::cache_key::path_dep_dirs(&root) {
         for (name, dir) in &deps {
