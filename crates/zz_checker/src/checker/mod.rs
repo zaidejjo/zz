@@ -422,37 +422,12 @@ fn check_program_impl(
         }
     }
 
-    // Pass 1: register struct definitions (fields are resolved against the
-    // struct registry, so structs may reference earlier structs). Structs
-    // must be registered before functions so `func f(p: Point)` resolves.
-    let mut seen_structs = HashMap::new();
-    for stmt in &program.stmts {
-        if let Stmt::Struct {
-            name, span, pub_, ..
-        } = stmt
-        {
-            let full_name = name.join(".");
-            if let Some(prev) = seen_structs.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
-                    format!("duplicate definition of struct `{}`", full_name),
-                    *span,
-                ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
-            }
-            checker.collect_struct(stmt);
-            if *pub_ {
-                pub_structs_set.insert(full_name);
-            }
-        }
-    }
-
     // Pass 1a: register type aliases. Raw targets are recorded first so
     // aliases may reference structs regardless of order; conversion to
     // resolved types happens after (nested aliases expand recursively
-    // with cycle detection in `convert_alias`).
+    // with cycle detection in `convert_alias`). Registered before struct
+    // collection so struct fields can reference aliases (e.g. `run: F`
+    // where `type F = func(int) -> int`).
     let mut seen_aliases = HashMap::new();
     for stmt in &program.stmts {
         if let Stmt::TypeAlias {
@@ -504,6 +479,35 @@ fn check_program_impl(
                 .insert(full_name.clone(), (gen_names, target.clone()));
             if *pub_ {
                 pub_aliases_set.insert(full_name);
+            }
+        }
+    }
+
+    // Pass 1: register struct definitions (fields are resolved against the
+    // struct registry, so structs may reference earlier structs). Structs
+    // must be registered before functions so `func f(p: Point)` resolves.
+    // Aliases are already registered (Pass 1a) so struct fields may
+    // reference alias types.
+    let mut seen_structs = HashMap::new();
+    for stmt in &program.stmts {
+        if let Stmt::Struct {
+            name, span, pub_, ..
+        } = stmt
+        {
+            let full_name = name.join(".");
+            if let Some(prev) = seen_structs.insert(full_name.clone(), *span) {
+                checker.errors.push(zz_frontend::diag::error_at(
+                    format!("duplicate definition of struct `{}`", full_name),
+                    *span,
+                ));
+                checker.errors.push(zz_frontend::diag::error_at(
+                    "previous definition here",
+                    prev,
+                ));
+            }
+            checker.collect_struct(stmt);
+            if *pub_ {
+                pub_structs_set.insert(full_name);
             }
         }
     }

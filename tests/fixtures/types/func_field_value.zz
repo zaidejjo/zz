@@ -22,6 +22,19 @@ func fnfield_double(x: int) -> int {
     return x * 2
 }
 
+// Type alias naming a function type, used as a struct field type.
+
+type FnFieldFunc = func([str]) -> int
+
+struct FnFieldAliasEntry {
+    name: str,
+    run: FnFieldFunc,
+}
+
+func fnfield_alias_greet(args: [str]) -> int {
+    return args.len()
+}
+
 func main() {
     e := FnFieldEntry{name: "greet", run: fnfield_greet}
     two := ["a", "b"]
@@ -34,5 +47,9 @@ func main() {
     f := FnFieldEntry{name: "wrap", run: w}
     three := ["a", "b", "c"]
     println("fnfield_closure={f.run(three)}")
+    // Alias-named function type as a struct field.
+    ae := FnFieldAliasEntry{name: "greet", run: fnfield_alias_greet}
+    four := ["a", "b", "c", "d"]
+    println("fnfield_alias={ae.run(four)}")
     println("fnfield_ok")
 }
