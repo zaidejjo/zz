@@ -82,6 +82,10 @@ fn fixture_checks_and_runs_in_vm() {
 
 #[test]
 fn fixture_runs_identically_in_aot() {
+    if std::env::var("ZZ_SKIP_NATIVE").is_ok() {
+        eprintln!("skip: native backend unsupported (ZZ_SKIP_NATIVE=1)");
+        return;
+    }
     let root = fixture_root();
     let out_dir = unique_dir("native");
     let out = out_dir.join("collections_demo");
