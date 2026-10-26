@@ -588,6 +588,8 @@ impl Compiler {
             Op::SlotAddInt { .. } => 0,
             Op::SlotInc { .. } => 0,
             Op::SlotAddIntImm { .. } => 0,
+            Op::SlotSubIntImm { .. } => 0,
+            Op::SlotMulIntImm { .. } => 0,
             Op::SlotLessIntSlot { .. }
             | Op::SlotLessIntImm { .. }
             | Op::SlotCmpIntSlot { .. }
@@ -1930,6 +1932,37 @@ impl Compiler {
             };
             if let Some(imm) = imm {
                 return Some(Op::SlotAddIntImm { dst, imm });
+            }
+        }
+        // `x = x - 1` -> SlotSubIntImm(1)
+        if *binop == zz_frontend::ast::BinOp::Sub {
+            let (l, r) = (left.as_ref(), right.as_ref());
+            let is_one = |e: &Expr| matches!(e, Expr::Int { value: 1, .. });
+            if (matches!(l, Expr::Ident { name, .. } if name == target) && is_one(r))
+                || (matches!(r, Expr::Ident { name, .. } if name == target) && is_one(l))
+            {
+                return Some(Op::SlotSubIntImm { dst, imm: 1 });
+            }
+            // `x = x - N` -> SlotSubIntImm
+            let imm = match (l, r) {
+                (Expr::Ident { name, .. }, e) if name == target => int_literal(e),
+                (e, Expr::Ident { name, .. }) if name == target => int_literal(e),
+                _ => None,
+            };
+            if let Some(imm) = imm {
+                return Some(Op::SlotSubIntImm { dst, imm });
+            }
+        }
+        // `x = x * N` -> SlotMulIntImm
+        if *binop == zz_frontend::ast::BinOp::Mul {
+            let (l, r) = (left.as_ref(), right.as_ref());
+            let imm = match (l, r) {
+                (Expr::Ident { name, .. }, e) if name == target => int_literal(e),
+                (e, Expr::Ident { name, .. }) if name == target => int_literal(e),
+                _ => None,
+            };
+            if let Some(imm) = imm {
+                return Some(Op::SlotMulIntImm { dst, imm });
             }
         }
         // `x = x + y` -> SlotAddInt (existing)

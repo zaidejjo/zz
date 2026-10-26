@@ -466,6 +466,14 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             put_u16(v, *dst);
             put_i64(v, *imm);
         }
+        Op::SlotSubIntImm { dst, imm } => {
+            put_u16(v, *dst);
+            put_i64(v, *imm);
+        }
+        Op::SlotMulIntImm { dst, imm } => {
+            put_u16(v, *dst);
+            put_i64(v, *imm);
+        }
         Op::SlotLessIntSlot { a, b } => {
             put_u16(v, *a);
             put_u16(v, *b);
@@ -1362,6 +1370,14 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
         }),
         81 => Ok(Op::SlotInc { slot: r.u16()? }),
         82 => Ok(Op::SlotAddIntImm {
+            dst: r.u16()?,
+            imm: r.i64()?,
+        }),
+        99 => Ok(Op::SlotSubIntImm {
+            dst: r.u16()?,
+            imm: r.i64()?,
+        }),
+        100 => Ok(Op::SlotMulIntImm {
             dst: r.u16()?,
             imm: r.i64()?,
         }),

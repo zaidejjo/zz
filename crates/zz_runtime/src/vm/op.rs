@@ -192,6 +192,14 @@ pub enum Op {
     ///
     /// Fused fast path for `x = x + N` with a literal `N`.
     SlotAddIntImm { dst: u16, imm: i64 },
+    /// In-place integer subtract of an immediate: `slot[dst] = Int(slot[dst] - imm)`.
+    ///
+    /// Fused fast path for `x = x - N` with a literal `N`.
+    SlotSubIntImm { dst: u16, imm: i64 },
+    /// In-place integer multiply by an immediate: `slot[dst] = Int(slot[dst] * imm)`.
+    ///
+    /// Fused fast path for `x = x * N` with a literal `N`.
+    SlotMulIntImm { dst: u16, imm: i64 },
     /// Compare two slots as integers, push `Bool(a < b)`.
     SlotLessIntSlot { a: u16, b: u16 },
     /// Compare a slot against an immediate integer, push `Bool(a < imm)`.
@@ -704,6 +712,8 @@ impl Op {
             Op::SlotAddInt { .. } => "SlotAddInt",
             Op::SlotInc { .. } => "SlotInc",
             Op::SlotAddIntImm { .. } => "SlotAddIntImm",
+            Op::SlotSubIntImm { .. } => "SlotSubIntImm",
+            Op::SlotMulIntImm { .. } => "SlotMulIntImm",
             Op::SlotLessIntSlot { .. } => "SlotLessIntSlot",
             Op::SlotLessIntImm { .. } => "SlotLessIntImm",
             Op::SlotCmpIntSlot { .. } => "SlotCmpIntSlot",
@@ -803,6 +813,8 @@ impl Op {
             | Op::SlotAddInt { .. }
             | Op::SlotInc { .. }
             | Op::SlotAddIntImm { .. }
+            | Op::SlotSubIntImm { .. }
+            | Op::SlotMulIntImm { .. }
             | Op::SlotLessIntSlot { .. }
             | Op::SlotLessIntImm { .. }
             | Op::SlotCmpIntSlot { .. }

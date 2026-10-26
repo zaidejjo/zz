@@ -214,6 +214,18 @@ pub enum Op {
         dst: u16,
         imm: i64,
     },
+    /// `slot[dst] = Int(slot[dst] - imm)`; desugars to
+    /// `LoadSlot dst; PushConst imm; BinOp Sub; StoreSlot dst`.
+    SlotSubIntImm {
+        dst: u16,
+        imm: i64,
+    },
+    /// `slot[dst] = Int(slot[dst] * imm)`; desugars to
+    /// `LoadSlot dst; PushConst imm; BinOp Mul; StoreSlot dst`.
+    SlotMulIntImm {
+        dst: u16,
+        imm: i64,
+    },
     /// Push `Bool(slot[a] < slot[b])`; desugars to
     /// `LoadSlot a; LoadSlot b; BinOp Lt`.
     SlotLessIntSlot {
@@ -538,6 +550,8 @@ impl Op {
             Op::SlotAddInt { .. } => 80,
             Op::SlotInc { .. } => 81,
             Op::SlotAddIntImm { .. } => 82,
+            Op::SlotSubIntImm { .. } => 99,
+            Op::SlotMulIntImm { .. } => 100,
             Op::SlotLessIntSlot { .. } => 83,
             Op::SlotLessIntImm { .. } => 84,
             Op::SlotBinaryInt { .. } => 85,
@@ -642,6 +656,8 @@ impl Op {
             Op::SlotAddInt { .. } => "slotaddint",
             Op::SlotInc { .. } => "slotinc",
             Op::SlotAddIntImm { .. } => "slotaddintimm",
+            Op::SlotSubIntImm { .. } => "slotsubintimm",
+            Op::SlotMulIntImm { .. } => "slotmulintimm",
             Op::SlotLessIntSlot { .. } => "slotlessintslot",
             Op::SlotLessIntImm { .. } => "slotlessintimm",
             Op::SlotBinaryInt { .. } => "slotbinint",
@@ -744,6 +760,8 @@ impl Op {
                 f(*src);
             }
             Op::SlotAddIntImm { dst, .. }
+            | Op::SlotSubIntImm { dst, .. }
+            | Op::SlotMulIntImm { dst, .. }
             | Op::SlotLessIntImm { a: dst, .. }
             | Op::SlotCmpIntImm { a: dst, .. }
             | Op::PushSlotIntImm { a: dst, .. }

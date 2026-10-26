@@ -41,6 +41,8 @@ fn effect(op: &Op) -> i64 {
         Op::SlotAddInt { .. }
         | Op::SlotInc { .. }
         | Op::SlotAddIntImm { .. }
+        | Op::SlotSubIntImm { .. }
+        | Op::SlotMulIntImm { .. }
         | Op::SlotBinaryInt { .. }
         | Op::SlotBinaryIntImm { .. } => 0,
         // The fused conditional jumps read slots and branch: same net effect
@@ -1268,6 +1270,12 @@ fn infer_func(
                 declared(*slot)?;
             }
             Op::SlotAddIntImm { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::SlotSubIntImm { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::SlotMulIntImm { dst, .. } => {
                 declared(*dst)?;
             }
             Op::SlotLessIntSlot { a, b } => {

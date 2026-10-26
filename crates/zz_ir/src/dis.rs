@@ -187,6 +187,8 @@ fn op_text(module: &Module, op: &Op) -> String {
         Op::SlotAddInt { dst, src } => format!("slotaddint {dst} {src}"),
         Op::SlotInc { slot } => format!("slotinc {slot}"),
         Op::SlotAddIntImm { dst, imm } => format!("slotaddintimm {dst} {imm}"),
+        Op::SlotSubIntImm { dst, imm } => format!("slotsubintimm {dst} {imm}"),
+        Op::SlotMulIntImm { dst, imm } => format!("slotmulintimm {dst} {imm}"),
         Op::SlotLessIntSlot { a, b } => format!("slotlessintslot {a} {b}"),
         Op::SlotLessIntImm { a, imm } => format!("slotlessintimm {a} {imm}"),
         Op::SlotCmpIntSlot { a, b, op } => format!("slotcmpintslot {a} {b} {op:?}"),

@@ -443,6 +443,14 @@ impl<'a> Raiser<'a> {
                 dst: *dst,
                 imm: *imm,
             }),
+            Op::SlotSubIntImm { dst, imm } => Ok(VmOp::SlotSubIntImm {
+                dst: *dst,
+                imm: *imm,
+            }),
+            Op::SlotMulIntImm { dst, imm } => Ok(VmOp::SlotMulIntImm {
+                dst: *dst,
+                imm: *imm,
+            }),
             Op::SlotLessIntSlot { a, b } => Ok(VmOp::SlotLessIntSlot { a: *a, b: *b }),
             Op::SlotLessIntImm { a, imm } => Ok(VmOp::SlotLessIntImm { a: *a, imm: *imm }),
             Op::SlotCmpIntSlot { a, b, op } => Ok(VmOp::SlotCmpIntSlot {

@@ -631,6 +631,14 @@ impl<'a> Lowerer<'a> {
                 dst: *dst,
                 imm: *imm,
             }]),
+            VmOp::SlotSubIntImm { dst, imm } => Ok(vec![Op::SlotSubIntImm {
+                dst: *dst,
+                imm: *imm,
+            }]),
+            VmOp::SlotMulIntImm { dst, imm } => Ok(vec![Op::SlotMulIntImm {
+                dst: *dst,
+                imm: *imm,
+            }]),
             VmOp::SlotLessIntSlot { a, b } => Ok(vec![Op::SlotLessIntSlot { a: *a, b: *b }]),
             VmOp::SlotLessIntImm { a, imm } => Ok(vec![Op::SlotLessIntImm { a: *a, imm: *imm }]),
             VmOp::SlotCmpIntSlot { a, b, op } => Ok(vec![Op::SlotCmpIntSlot {
@@ -1042,6 +1050,8 @@ fn is_fused_slot_op(op: &Op) -> bool {
         Op::SlotAddInt { .. }
             | Op::SlotInc { .. }
             | Op::SlotAddIntImm { .. }
+            | Op::SlotSubIntImm { .. }
+            | Op::SlotMulIntImm { .. }
             | Op::SlotLessIntSlot { .. }
             | Op::SlotLessIntImm { .. }
             | Op::SlotCmpIntSlot { .. }
@@ -1273,6 +1283,24 @@ pub fn expand_fused(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrE
                         Op::LoadSlot(*dst),
                         Op::PushConst(c),
                         Op::BinOp(IrBinOp::Add),
+                        Op::StoreSlot(*dst),
+                    ]
+                }
+                Op::SlotSubIntImm { dst, imm } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![
+                        Op::LoadSlot(*dst),
+                        Op::PushConst(c),
+                        Op::BinOp(IrBinOp::Sub),
+                        Op::StoreSlot(*dst),
+                    ]
+                }
+                Op::SlotMulIntImm { dst, imm } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![
+                        Op::LoadSlot(*dst),
+                        Op::PushConst(c),
+                        Op::BinOp(IrBinOp::Mul),
                         Op::StoreSlot(*dst),
                     ]
                 }

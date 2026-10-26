@@ -1376,6 +1376,50 @@ impl Vm {
                         }
                     }
                 }
+                Op::SlotSubIntImm { dst, imm } => {
+                    let base = cached_base;
+                    let idx = base + *dst as usize;
+                    match &self.stack[idx] {
+                        Value::Int(a) => {
+                            let v = Value::Int(a.wrapping_sub(*imm));
+                            // SAFETY: `idx` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx], v) };
+                        }
+                        _ => {
+                            let v = self.stack[idx].clone();
+                            let span = Span::default();
+                            let r = eval_binary(
+                                zz_frontend::ast::BinOp::Sub,
+                                v,
+                                Value::Int(*imm),
+                                span,
+                            )?;
+                            self.stack[idx] = r;
+                        }
+                    }
+                }
+                Op::SlotMulIntImm { dst, imm } => {
+                    let base = cached_base;
+                    let idx = base + *dst as usize;
+                    match &self.stack[idx] {
+                        Value::Int(a) => {
+                            let v = Value::Int(a.wrapping_mul(*imm));
+                            // SAFETY: `idx` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx], v) };
+                        }
+                        _ => {
+                            let v = self.stack[idx].clone();
+                            let span = Span::default();
+                            let r = eval_binary(
+                                zz_frontend::ast::BinOp::Mul,
+                                v,
+                                Value::Int(*imm),
+                                span,
+                            )?;
+                            self.stack[idx] = r;
+                        }
+                    }
+                }
                 Op::SlotLessIntSlot { a, b } => {
                     let base = cached_base;
                     let idx_a = base + *a as usize;
