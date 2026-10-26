@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_frontend::ast::{Program, Stmt, Ty};
-use zz_frontend::diag::{warning_at, RawDiag};
+use zz_frontend::diag::{warning_at, FixIt, RawDiag};
 use zz_frontend::span::Span;
 
 use crate::type_::Type;
@@ -324,7 +324,11 @@ fn check_program_impl(
     }
     for stmt in &program.stmts {
         if let Stmt::Import {
-            path, alias, span, ..
+            path,
+            alias,
+            items,
+            span,
+            ..
         } = stmt
         {
             let head = alias
@@ -333,21 +337,30 @@ fn check_program_impl(
                 .unwrap_or_default();
             if !head.is_empty() {
                 checker.shadow_roots.insert(head.clone());
-                // Warn when importing a module whose head name collides with
-                // a std module head. At runtime `std.<head>` wins over an
-                // explicit `import <pkg>.<head>`, so `zz check` would pass
-                // while `zz run` fails — warn at the import site instead.
-                // Only enforced for loader-checked user modules (which always
-                // know their owner namespace); stdlib internals, the REPL, and
-                // merged HIR programs pass an empty owner and skip it.
-                if !module_ns.is_empty() && crate::checker::is_std_module_head(&head) {
+                // Warn only when the import actually binds the std module head
+                // name. A full module import (`import std.str`) binds `head`;
+                // a selective import (`import std.str(split)`) binds only the
+                // named items, so no namespace collision exists and the warning
+                // would be a false positive (#630). Only enforced for
+                // loader-checked user modules (non-empty owner); stdlib
+                // internals, the REPL, and merged HIR programs pass an empty
+                // owner and skip it.
+                if items.is_empty()
+                    && !module_ns.is_empty()
+                    && crate::checker::is_std_module_head(&head)
+                {
                     let diag = warning_at(
                         format!(
-                            "importing `{head}` shadows the std module `{head}` — qualified calls through it may fail at runtime; consider aliasing it",
+                            "import binds `{head}`, shadowing the std module `{head}` — `std.{head}.*` will resolve to your binding at runtime",
                         ),
                         *span,
                     )
-                    .with_note("use `import <pkg>.<head> as <name>` to avoid the collision".to_string());
+                    .with_note("alias it: `import <pkg>.<head> as <name>`".to_string())
+                    .with_fixit(FixIt::safe(
+                        *span,
+                        format!("import {} as {}_mod", path.join("."), head),
+                        "alias the import to avoid the collision",
+                    ));
                     checker.errors.push(diag);
                 }
             }
