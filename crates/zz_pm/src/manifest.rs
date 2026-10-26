@@ -142,14 +142,51 @@ pub struct InitOptions {
 ///   behind `--allow-hooks` for direct deps / error for transitive deps).
 /// - `Cc`: declarative C build performed by `zz` itself
 ///   (`[native.build-cc]`), no shell, no script, no network.
+/// - `Rust`: hermetic `cargo build --offline --locked` from a vendored
+///   closure (`[native.build-rust]`), no package scripts.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NativeBackend {
     /// Declarative C build (default when `[native.build-cc]` is present).
     Cc,
+    /// Hermetic Rust crate build (default when `[native.build-rust]` is present).
+    Rust,
     /// Legacy shell hook (default when `build = "..."` is present).
     #[default]
     Hook,
+}
+
+/// Default rustc compatibility range for `[native.build-rust]`.
+///
+/// A range (not an exact pin) is sound for the C-ABI plugin contract:
+/// the link-time `ZZ_*_ABI_VERSION` stamp — not the rustc patch level —
+/// is what refuses incompatible plugins. Authors with a genuine ABI
+/// requirement can narrow it explicitly.
+pub const DEFAULT_RUSTC_RANGE: &str = ">=1.75, <2";
+
+/// Cargo profile accepted by `[native.build-rust]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustProfile {
+    Release,
+    Debug,
+}
+
+impl RustProfile {
+    /// Cargo `--profile` directory name.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            RustProfile::Release => "release",
+            RustProfile::Debug => "debug",
+        }
+    }
+
+    /// Cargo profile flag (`--release` for release, `--profile dev` for debug).
+    pub fn cargo_args(self) -> &'static [&'static str] {
+        match self {
+            RustProfile::Release => &["--release"],
+            RustProfile::Debug => &["--profile", "dev"],
+        }
+    }
 }
 
 /// Native build configuration for packages that provide C extensions.
@@ -197,6 +234,13 @@ pub struct NativeSpec {
     /// Declarative C build spec (`[native.build-cc]`).
     #[serde(default, rename = "build-cc", skip_serializing_if = "Option::is_none")]
     pub build_cc: Option<BuildCcSpec>,
+    /// Hermetic Rust crate build spec (`[native.build-rust]`).
+    #[serde(
+        default,
+        rename = "build-rust",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub build_rust: Option<BuildRustSpec>,
     /// Per-platform prebuilt artifacts (`[native.prebuilt]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prebuilt: Option<PrebuiltSpec>,
@@ -238,6 +282,54 @@ pub struct BuildCcSpec {
     pub targets: Vec<String>,
 }
 
+/// Declarative Rust crate build spec (`[native.build-rust]`).
+///
+/// `zz` vendors the locked crate closure into CAS, then drives
+/// `cargo build --offline --locked` itself under a hermetic environment.
+/// The consumed package has no `build.sh` and no `build.rs`; cargo is a
+/// build tool `zz` drives, never a script the package runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuildRustSpec {
+    /// Crate directory, relative to the package root (e.g. `"native/"`).
+    /// Must contain `Cargo.toml` and a committed `Cargo.lock`.
+    #[serde(rename = "crate")]
+    pub crate_path: String,
+    /// Cargo features to enable (`--features a,b`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cargo_features: Vec<String>,
+    /// Explicit Rust target triple override. Absent derives the triple
+    /// from the platform tag (`native_platform_tag()` mapping).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// rustc compatibility range (semver requirement). Default
+    /// [`DEFAULT_RUSTC_RANGE`] — never an exact pin unless the author
+    /// deliberately narrows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rustc_range: Option<String>,
+    /// Cargo profile: `release` (default) or `debug`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+impl BuildRustSpec {
+    /// Effective rustc requirement (default compatibility range).
+    pub fn rustc_req(&self) -> &str {
+        self.rustc_range.as_deref().unwrap_or(DEFAULT_RUSTC_RANGE)
+    }
+
+    /// Effective cargo profile (`release` default).
+    pub fn rust_profile(&self) -> Result<RustProfile, String> {
+        match self.profile.as_deref().unwrap_or("release") {
+            "release" => Ok(RustProfile::Release),
+            "debug" | "dev" => Ok(RustProfile::Debug),
+            other => Err(format!(
+                "invalid [native.build-rust] profile `{other}`\n\
+                 hint: use \"release\" (default) or \"debug\""
+            )),
+        }
+    }
+}
+
 /// Per-platform prebuilt artifacts: `target.<tag> = { url, sha256 }`.
 /// v1: `https:` URLs only (GitHub releases convention); the `registry:`
 /// scheme is deferred to v2.
@@ -269,6 +361,9 @@ impl NativeSpec {
         if let Some(b) = self.backend {
             return b;
         }
+        if self.build_rust.is_some() {
+            return NativeBackend::Rust;
+        }
         if self.build_cc.is_some() {
             return NativeBackend::Cc;
         }
@@ -278,28 +373,39 @@ impl NativeSpec {
     /// Validate all declarative fields against `pkg_root`.
     ///
     /// Checks: mixed-form rejection, backend/shape agreement, path
-    /// containment (hook, manifest, sources, include_dirs), explicit
-    /// cflag allowlist + rejected classes, `libs` shape, platform tags,
-    /// prebuilt URL/sha shape, legacy/new `pkg_config` exclusivity.
+    /// containment (hook, manifest, crate, sources, include_dirs),
+    /// explicit cflag allowlist + rejected classes, `libs` shape, platform
+    /// tags, prebuilt URL/sha shape, legacy/new `pkg_config` exclusivity,
+    /// and for `[native.build-rust]`: committed Cargo.lock, both
+    /// `crate-type`s, no package `build.rs`, pinned lockfile closure.
     /// Returns `Ok(())` for a legacy hook-only spec (nothing to check
     /// beyond containment of the hook path).
     pub fn validate(&self, pkg_root: &Path) -> Result<(), String> {
         // Mixed form is always an error.
-        if self.build.is_some() && self.build_cc.is_some() {
+        let declarative = [
+            self.build.is_some(),
+            self.build_cc.is_some(),
+            self.build_rust.is_some(),
+        ]
+        .iter()
+        .filter(|present| **present)
+        .count();
+        if declarative > 1 {
             return Err(
-                "invalid [native]: `build` (hook) and `[native.build-cc]` are mutually exclusive\n\
-                 hint: remove `build = \"build.sh\"` to use the declarative backend"
+                "invalid [native]: `build` (hook), `[native.build-cc]`, and `[native.build-rust]` are mutually exclusive\n\
+                 hint: keep exactly one backend; remove `build = \"build.sh\"` when using a declarative table"
                     .to_string(),
             );
         }
-        if self.pkg_config.is_some()
-            && self
-                .build_cc
-                .as_ref()
-                .is_some_and(|b| !b.pkg_config.is_empty())
-        {
-            return Err("invalid [native]: legacy `pkg_config` (string) and `[native.build-cc] pkg_config` (list) are mutually exclusive\n\
-                 hint: keep only the `[native.build-cc]` list form"
+        let legacy_pkg_config_conflicts = self.pkg_config.is_some()
+            && (self.build_rust.is_some()
+                || self
+                    .build_cc
+                    .as_ref()
+                    .is_some_and(|b| !b.pkg_config.is_empty()));
+        if legacy_pkg_config_conflicts {
+            return Err("invalid [native]: legacy `pkg_config` (string) is mutually exclusive with declarative backends\n\
+                 hint: remove the legacy `pkg_config` string; use `[native.build-cc] pkg_config` (list) or `[native.build-rust]`"
                 .to_string());
         }
         // Explicit backend must agree with the shape present.
@@ -312,10 +418,17 @@ impl NativeSpec {
                             .to_string(),
                     );
                 }
+                NativeBackend::Rust if self.build_rust.is_none() => {
+                    return Err(
+                        "invalid [native]: `backend = \"rust\"` requires `[native.build-rust]`\n\
+                         hint: add a `[native.build-rust]` table (crate = \"native/\") or drop the backend tag"
+                            .to_string(),
+                    );
+                }
                 NativeBackend::Hook if self.build.is_none() => {
                     return Err(
                         "invalid [native]: `backend = \"hook\"` requires `build = \"...\"`\n\
-                         hint: add `build = \"build.sh\"` or switch to `backend = \"cc\"`"
+                         hint: add `build = \"build.sh\"` or switch to `backend = \"cc\"`/`\"rust\"`"
                             .to_string(),
                     );
                 }
@@ -328,6 +441,9 @@ impl NativeSpec {
         }
         if let Some(m) = &self.manifest {
             check_contained(pkg_root, m, "manifest")?;
+        }
+        if let Some(rust) = &self.build_rust {
+            return validate_rust_spec(pkg_root, rust);
         }
         let Some(cc) = &self.build_cc else {
             return Ok(());
@@ -394,6 +510,60 @@ impl NativeSpec {
         }
         Ok(())
     }
+}
+
+/// Validate a `[native.build-rust]` spec against the package root.
+///
+/// Structural checks happen here (paths, ranges, features, target triple,
+/// crate types, committed lock, banned scripts, pinned closure). Network
+/// and cargo probing stay in the build/install path.
+fn validate_rust_spec(pkg_root: &Path, spec: &BuildRustSpec) -> Result<(), String> {
+    check_contained(pkg_root, &spec.crate_path, "build-rust.crate")?;
+    let crate_dir = crate::rust_lock::crate_dir_for(pkg_root, &spec.crate_path)?;
+    if !crate_dir.is_dir() {
+        return Err(format!(
+            "invalid [native.build-rust]: crate `{}` is not a directory\n\
+             hint: crate = \"native/\" relative to the package root",
+            spec.crate_path
+        ));
+    }
+
+    // Profile + rustc range are manifest-level contracts.
+    spec.rust_profile()?;
+    semver::VersionReq::parse(spec.rustc_req()).map_err(|e| {
+        format!(
+            "invalid [native.build-rust] rustc_range `{}`: {e}\n\
+             hint: use a semver range, e.g. \">=1.75, <2\"",
+            spec.rustc_req()
+        )
+    })?;
+    for feat in &spec.cargo_features {
+        if feat.is_empty()
+            || feat.starts_with('-')
+            || feat.contains(|c: char| c.is_whitespace() || c == ',')
+        {
+            return Err(format!(
+                "invalid [native.build-rust] cargo_features entry `{feat}`\n\
+                 hint: bare feature names only (no commas/spaces/leading dashes)"
+            ));
+        }
+    }
+    if let Some(target) = &spec.target {
+        if target.is_empty()
+            || !target
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(format!(
+                "invalid [native.build-rust] target `{target}`: must be a Rust target triple\n\
+                 hint: e.g. x86_64-unknown-linux-gnu"
+            ));
+        }
+    }
+
+    let manifest = crate::rust_lock::validate_crate(&crate_dir)?;
+    crate::rust_lock::read_closure(&crate_dir, &manifest)?;
+    Ok(())
 }
 
 /// Reject paths escaping the package root (`..`, absolute, empty).
@@ -1326,6 +1496,7 @@ foo = "^1.0"
             manifest: None,
             build: None,
             build_cc: Some(spec.clone()),
+            build_rust: None,
             prebuilt: None,
             pkg_config: None,
         }
@@ -1364,6 +1535,142 @@ foo = "^1.0"
         assert!(err.contains("mutually exclusive"), "{err}");
     }
 
+    fn rust_pkg(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "zz_manifest_rust_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("native/src")).unwrap();
+        fs::write(
+            d.join("native/Cargo.toml"),
+            "[package]\nname=\"rplug\"\nversion=\"0.1.0\"\nlicense=\"MIT\"\n\n[lib]\ncrate-type=[\"cdylib\",\"staticlib\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            d.join("native/Cargo.lock"),
+            "version = 3\n[[package]]\nname=\"rplug\"\nversion=\"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(d.join("native/src/lib.rs"), "").unwrap();
+        d
+    }
+
+    fn rust_native(spec_extra: &str) -> NativeSpec {
+        cc_manifest(&format!(
+            "[native]\n[native.build-rust]\ncrate = \"native\"\n{spec_extra}"
+        ))
+        .native
+        .expect("native present")
+    }
+
+    #[test]
+    fn rust_shape_resolves_rust_and_default_range() {
+        let n = rust_native("");
+        assert_eq!(n.resolved_backend(), NativeBackend::Rust);
+        let spec = n.build_rust.as_ref().unwrap();
+        assert_eq!(spec.rustc_req(), DEFAULT_RUSTC_RANGE);
+        assert_eq!(spec.rust_profile().unwrap(), RustProfile::Release);
+    }
+
+    #[test]
+    fn mixed_rust_and_cc_rejected() {
+        let m = cc_manifest(
+            "[native]\n[native.build-cc]\nsources = [\"csrc/wrapper.c\"]\n[native.build-rust]\ncrate = \"native\"\n",
+        );
+        let err = m
+            .native
+            .expect("native present")
+            .validate(Path::new("/pkg"))
+            .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn rust_backend_without_table_rejected() {
+        let n = cc_manifest("[native]\nbackend = \"rust\"\n")
+            .native
+            .expect("native present");
+        let err = n.validate(Path::new("/pkg")).unwrap_err();
+        assert!(err.contains("requires `[native.build-rust]`"), "{err}");
+    }
+
+    #[test]
+    fn rust_crate_validates_lock_and_crate_types() {
+        let d = rust_pkg("ok");
+        let n = rust_native("");
+        assert!(n.validate(&d).is_ok());
+
+        // Missing committed lock.
+        fs::remove_file(d.join("native/Cargo.lock")).unwrap();
+        let err = n.validate(&d).unwrap_err();
+        assert!(err.contains("Cargo.lock"), "{err}");
+        assert!(err.contains("commit"), "{err}");
+        fs::write(
+            d.join("native/Cargo.lock"),
+            "version = 3\n[[package]]\nname=\"rplug\"\nversion=\"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // Missing staticlib.
+        fs::write(
+            d.join("native/Cargo.toml"),
+            "[package]\nname=\"rplug\"\nversion=\"0.1.0\"\n\n[lib]\ncrate-type=[\"cdylib\"]\n",
+        )
+        .unwrap();
+        let err = n.validate(&d).unwrap_err();
+        assert!(err.contains("staticlib"), "{err}");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rust_build_rs_rejected() {
+        let d = rust_pkg("buildrs");
+        fs::write(d.join("native/build.rs"), "fn main() {}\n").unwrap();
+        let err = rust_native("").validate(&d).unwrap_err();
+        assert!(err.contains("build.rs"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rust_path_escape_rejected() {
+        let d = rust_pkg("escape");
+        let n = cc_manifest("[native]\n[native.build-rust]\ncrate = \"../outside\"\n")
+            .native
+            .expect("native present");
+        let err = n.validate(&d).unwrap_err();
+        assert!(
+            err.contains("must be relative and stay inside the package"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rust_bad_profile_range_features_and_target_rejected() {
+        let d = rust_pkg("bad_fields");
+        for extra in [
+            "profile = \"fast\"\n",
+            "rustc_range = \"not-a-range\"\n",
+            "cargo_features = [\"a,b\"]\n",
+            "target = \"../x86\"\n",
+        ] {
+            // Re-parse so the table body exercises serde + validation.
+            let parsed = cc_manifest(&format!(
+                "[native]\n[native.build-rust]\ncrate = \"native\"\n{extra}"
+            ))
+            .native
+            .expect("native present");
+            assert!(parsed.validate(&d).is_err(), "`{extra}` must be rejected");
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn backend_shape_mismatch_rejected() {
         // backend=cc without the table.
@@ -1393,6 +1700,7 @@ foo = "^1.0"
             manifest: None,
             build: None,
             build_cc: Some(spec),
+            build_rust: None,
             prebuilt: None,
             pkg_config: Some("vips".to_string()),
         };
@@ -1638,6 +1946,7 @@ version = "0.1.0"
             manifest: None,
             build: None,
             build_cc: Some(spec),
+            build_rust: None,
             prebuilt: Some(PrebuiltSpec { target: targets }),
             pkg_config: None,
         };
