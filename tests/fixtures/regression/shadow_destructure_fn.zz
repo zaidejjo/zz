@@ -7,7 +7,7 @@ func f() -> int {
         (a, _c) := (10, 20)
         println(a)
     }
-    a
+    return a
 }
 println(f())
 println("shadow_destructure_fn_ok")

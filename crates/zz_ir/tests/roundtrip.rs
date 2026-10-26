@@ -50,11 +50,11 @@ fn round_trip_locals_and_loop() {
 fn round_trip_default_args() {
     // Default bodies travel as tabled chunks (no AST on the load path).
     assert_eq!(
-        round_trip_value("func f(a = 41) {\n a + 1\n}\nf()"),
+        round_trip_value("func f(a = 41) -> int {\n return a + 1\n}\nf()"),
         Value::Int(42)
     );
     assert_eq!(
-        round_trip_value("func f(a = 41) {\n a + 1\n}\nf(10)"),
+        round_trip_value("func f(a = 41) -> int {\n return a + 1\n}\nf(10)"),
         Value::Int(11)
     );
 }
@@ -62,7 +62,7 @@ fn round_trip_default_args() {
 #[test]
 fn round_trip_closure_capture() {
     assert_eq!(
-        round_trip_value("func mk() {\n n := 10\n |x| { n + x }\n}\nf := mk()\nf(5)"),
+        round_trip_value("func mk() {\n n := 10\n return |x| { n + x }\n}\nf := mk()\nf(5)"),
         Value::Int(15)
     );
 }
@@ -89,7 +89,7 @@ fn round_trip_index_store_order() {
     // Source order: base(1), index(0), value(9). Needs the `vec` native,
     // so this test seeds stdlib natives on both interpreters.
     let parsed = zz_frontend::parse(
-        "log := []\nfunc rec(n: int) -> int {\n log = vec.push(log, n)\n n\n}\nfunc mkarr() {\n rec(1)\n [10, 20, 30]\n}\nmkarr()[rec(0)] = rec(9)\nlog",
+        "log := []\nfunc rec(n: int) -> int {\n log = vec.push(log, n)\n return n\n}\nfunc mkarr() -> [int] {\n rec(1)\n return [10, 20, 30]\n}\nmkarr()[rec(0)] = rec(9)\nlog",
     );
     assert!(parsed.errors.is_empty());
     let natives = zz_stdlib::stdlib_natives();
@@ -129,6 +129,61 @@ fn verify_rejects_bad_jump() {
     module.funcs[0].spans.push(zz_ir::Span::new(0, 0));
     let err = verify::verify(&module).expect_err("bad jump accepted");
     assert!(err.message.contains("jump target"), "wrong error: {err}");
+}
+
+#[test]
+fn verify_matcherror_is_terminal() {
+    // Tail match with a dead non-exhaustive trap + slot cleanup (#253):
+    // `MatchError` aborts at runtime, so the verifier must not feed its
+    // restored-scrutinee state into the join — nor check the epilogue
+    // against it. Before the fix this failed with a spurious falloff
+    // return mismatch (the trap's `Result` outliving the arms' `Str`).
+    use zz_ir::{FuncDef, FuncSig, Module, Op, Pattern, Span};
+    let module = Module {
+        types: vec![
+            zz_ir::IrType::Unknown,
+            zz_ir::IrType::Str,
+            zz_ir::IrType::Result(zz_ir::TypeId(1), zz_ir::TypeId(1)),
+        ],
+        strings: vec!["f".to_string(), "x".to_string()],
+        consts: vec![
+            zz_ir::Const::Str(zz_ir::StrId(1)),
+            zz_ir::Const::Str(zz_ir::StrId(1)),
+        ],
+        funcs: vec![FuncDef {
+            name: zz_ir::StrId(0),
+            arity: 0,
+            params: vec![],
+            sig: FuncSig {
+                params: vec![],
+                ret: zz_ir::TypeId(1),
+            },
+            toplevel_slots: vec![],
+            vartab: vec![],
+            locals: vec![zz_ir::TypeId(1), zz_ir::TypeId(2)],
+            // base, scrutinee (declared Result), arm to trap terminator,
+            // keep-top cleanup: the trap edge is dead, the arm value
+            // (Str) is what the epilogue returns.
+            code: vec![
+                Op::PushConst(zz_ir::ConstId(0)),
+                Op::LoadSlot(1),
+                Op::MatchArm {
+                    pat: Pattern::Wildcard,
+                    next: 5,
+                    has_env: false,
+                    restore: true,
+                },
+                Op::PushConst(zz_ir::ConstId(1)),
+                Op::Jump(6),
+                Op::MatchError,
+                Op::PopN(1),
+            ],
+            spans: vec![Span::new(0, 0); 7],
+            max_stack: 2,
+        }],
+        entry: zz_ir::FuncId(0),
+    };
+    verify::verify(&module).expect("matcherror trap edge must be dead");
 }
 
 #[test]
@@ -217,6 +272,103 @@ fn dis_is_stable() {
     assert!(a.contains("binop Add"), "missing add op:\n{a}");
 }
 
+/// v3 carries the compiler's fused slot fast paths through the format.
+/// The interpreter must get the op back on the load path (the desugared
+/// form paid three extra stack ops per loop iteration; that is the whole
+/// reason the format changed), while the chunk→C backend must still see
+/// the desugared stream it is tuned for.
+#[test]
+fn fused_slot_ops_survive_the_round_trip() {
+    fn is_fused(op: &zz_ir::Op) -> bool {
+        use zz_ir::Op::*;
+        matches!(
+            op,
+            SlotAddInt { .. }
+                | SlotInc { .. }
+                | SlotAddIntImm { .. }
+                | SlotLessIntSlot { .. }
+                | SlotLessIntImm { .. }
+                | SlotCmpIntSlot { .. }
+                | SlotCmpIntImm { .. }
+                | SlotCmpConst { .. }
+                | SlotBinaryInt { .. }
+                | SlotBinaryIntImm { .. }
+                | PushSlotIntImm { .. }
+                | JumpIfFalseSlotCmpIntImm { .. }
+                | JumpIfFalseSlotCmpIntSlot { .. }
+        )
+    }
+    // Typed compile: the fusion sits behind the compiler's `Int` type
+    // guard, which is exactly what a real `zz run` supplies.
+    let module = lower_typed_spanmap(
+        "s := 0\nfor _i in 0..10 {\n s = s + 1\n}\ns",
+        &std::collections::HashMap::new(),
+    );
+    let dis = zz_ir::dis::disassemble(&module);
+    let count = |m: &zz_ir::Module| -> usize {
+        m.funcs
+            .iter()
+            .flat_map(|f| f.code.iter())
+            .filter(|o| is_fused(o))
+            .count()
+    };
+    assert!(count(&module) > 0, "fusion lost in lowering:\n{dis}");
+    assert!(dis.contains("slotinc"), "dis must show SlotInc:\n{dis}");
+    // The bytes keep them, and the decoder hands the same module back.
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    verify::verify(&loaded).expect("verify failed");
+    assert_eq!(codec::encode(&loaded), bytes, "re-encode differs");
+    assert_eq!(count(&loaded), count(&module), "fused ops lost in codec");
+    // Raising restores the VM op itself, not its expansion — and the
+    // loaded run still produces the program's value.
+    fn has_slot_inc(chunk: &zz_runtime::vm::Chunk) -> bool {
+        chunk.code.iter().any(|op| match op {
+            zz_runtime::vm::Op::SlotInc { .. } => true,
+            zz_runtime::vm::Op::MakeFunc { chunk, .. } => has_slot_inc(chunk),
+            _ => false,
+        })
+    }
+    let raised = raise::raise(&loaded).expect("raise failed");
+    assert!(
+        has_slot_inc(&raised),
+        "raise must restore the fused op, got {:?}",
+        raised.code
+    );
+    // Both forms must run the loop: the typed entry compiles top-level
+    // statements as statements, so the effect is read back from the
+    // promoted top-level slot (`s`) rather than the program value.
+    let mut interp = Interp::new();
+    let got = interp.run_loaded_chunk(&raised).expect("loaded run failed");
+    assert_eq!(
+        interp.env.get("s"),
+        Some(Value::Int(10)),
+        "fused-op loop did not run (program value {got:?})"
+    );
+    // The chunk→C entry stream: expanded back to the pre-v3 core ops, one
+    // extra value-producing op per fused op, same behavior.
+    let expanded = lower::expand_fused(&loaded).expect("expand failed");
+    verify::verify(&expanded).expect("expanded must verify");
+    assert_eq!(count(&expanded), 0, "expansion left fused ops behind");
+    let n_fused_ops: usize = loaded.funcs.iter().map(|f| f.code.len()).sum();
+    let n_expanded_ops: usize = expanded.funcs.iter().map(|f| f.code.len()).sum();
+    assert!(
+        n_expanded_ops > n_fused_ops,
+        "expansion must re-add the stack traffic ({n_expanded_ops} vs {n_fused_ops})"
+    );
+    let reexpanded = raise::raise(&expanded).expect("raise failed");
+    let mut interp2 = Interp::new();
+    let got2 = interp2
+        .run_loaded_chunk(&reexpanded)
+        .expect("expanded run failed");
+    assert_eq!(
+        interp2.env.get("s"),
+        Some(Value::Int(10)),
+        "expanded loop did not run"
+    );
+    assert_eq!(got2, got, "expanded run differs from fused run");
+}
+
 #[test]
 fn typed_signatures_populate() {
     use std::collections::HashMap;
@@ -236,7 +388,8 @@ fn typed_signatures_populate() {
     };
     let mut sigs = HashMap::new();
     sigs.insert("add".to_string(), sig);
-    let parsed = zz_frontend::parse("func add(a: int, b: int) -> int {\n a + b\n}\nadd(40, 2)");
+    let parsed =
+        zz_frontend::parse("func add(a: int, b: int) -> int {\n return a + b\n}\nadd(40, 2)");
     assert!(parsed.errors.is_empty());
     let chunk = Compiler::compile_program(&parsed.program);
     let module = lower::lower_typed(&chunk, &sigs).expect("lower_typed failed");
@@ -309,6 +462,118 @@ fn int_sig(params: usize) -> zz_checker::FuncSig {
     }
 }
 
+/// `PushSlotIntImm`: value-position arithmetic with a literal RHS.
+///
+/// `SlotBinaryIntImm` needs a destination slot, so `fib(n - 1)` in argument
+/// position used to pay `LoadSlot PushConst IntSub` per argument. The fused
+/// push must survive the codec, come back on raise, and desugar to that
+/// sequence for the chunk→C backend — computing the same value either way.
+#[test]
+fn value_position_int_arith_survives_the_round_trip() {
+    let module = lower_typed_spanmap(
+        "func dec(n: int) -> int {\n return n - 1\n}\nr := dec(41)\nr",
+        &std::collections::HashMap::new(),
+    );
+    let dis = zz_ir::dis::disassemble(&module);
+    assert!(
+        dis.contains("pushslotintimm"),
+        "fusion lost in lowering:\n{dis}"
+    );
+    // The bytes keep it and the decoder hands the same module back.
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    verify::verify(&loaded).expect("verify failed");
+    assert_eq!(codec::encode(&loaded), bytes, "re-encode differs");
+    // Raising restores the VM op itself, and the loaded run agrees.
+    let raised = raise::raise(&loaded).expect("raise failed");
+    fn has_push(chunk: &zz_runtime::vm::Chunk) -> bool {
+        chunk.code.iter().any(|op| match op {
+            zz_runtime::vm::Op::PushSlotIntImm { .. } => true,
+            zz_runtime::vm::Op::MakeFunc { chunk, .. } => has_push(chunk),
+            _ => false,
+        })
+    }
+    assert!(has_push(&raised), "raise must restore the fused push");
+    let mut interp = Interp::new();
+    interp.run_loaded_chunk(&raised).expect("loaded run failed");
+    assert_eq!(interp.env.get("r"), Some(Value::Int(40)));
+    // The chunk→C stream is the pre-v3 sequence, and still computes 40.
+    let expanded = lower::expand_fused(&loaded).expect("expand failed");
+    verify::verify(&expanded).expect("expanded must verify");
+    let expanded_dis = zz_ir::dis::disassemble(&expanded);
+    assert!(
+        !expanded_dis.contains("pushslotintimm"),
+        "expansion left the fused push behind:\n{expanded_dis}"
+    );
+    let reexpanded = raise::raise(&expanded).expect("raise failed");
+    let mut interp2 = Interp::new();
+    interp2
+        .run_loaded_chunk(&reexpanded)
+        .expect("expanded run failed");
+    assert_eq!(
+        interp2.env.get("r"),
+        Some(Value::Int(40)),
+        "desugared push differs"
+    );
+}
+
+/// `JumpIfFalseSlotCmpIntImm`: an `if` guard's compare rides in the branch.
+///
+/// The op survives the codec and comes back through `raise`, and
+/// `expand_fused` restores `SlotCmpIntImm; JumpIfFalse` with the *remapped*
+/// target — the expansion grows the stream, so a stale target would skip or
+/// repeat loop iterations. Both forms must count the same guards.
+#[test]
+fn fused_conditional_jump_survives_the_round_trip() {
+    let module = lower_typed_spanmap(
+        "func f(n: int) -> int {\n s := 0\n for i in 0..n {\n if i < 10 {\n s = s + 1\n }\n }\n return s\n}\nr := f(20)\nr",
+        &std::collections::HashMap::new(),
+    );
+    let dis = zz_ir::dis::disassemble(&module);
+    assert!(
+        dis.contains("jfslotcmpi 5 10 Lt"),
+        "fusion lost in lowering:\n{dis}"
+    );
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    verify::verify(&loaded).expect("verify failed");
+    assert_eq!(codec::encode(&loaded), bytes, "re-encode differs");
+    fn has_fused_jump(chunk: &zz_runtime::vm::Chunk) -> bool {
+        chunk.code.iter().any(|op| match op {
+            zz_runtime::vm::Op::JumpIfFalseSlotCmpIntImm { .. }
+            | zz_runtime::vm::Op::JumpIfFalseSlotCmpIntSlot { .. } => true,
+            zz_runtime::vm::Op::MakeFunc { chunk, .. } => has_fused_jump(chunk),
+            _ => false,
+        })
+    }
+    let raised = raise::raise(&loaded).expect("raise failed");
+    assert!(
+        has_fused_jump(&raised),
+        "raise must restore the fused branch"
+    );
+    let mut interp = Interp::new();
+    interp.run_loaded_chunk(&raised).expect("loaded run failed");
+    assert_eq!(interp.env.get("r"), Some(Value::Int(10)));
+    // Chunk→C gets `SlotCmpIntImm` + `JumpIfFalse`, still counting 10.
+    let expanded = lower::expand_fused(&loaded).expect("expand failed");
+    verify::verify(&expanded).expect("expanded must verify");
+    let expanded_dis = zz_ir::dis::disassemble(&expanded);
+    assert!(
+        !expanded_dis.contains("jfslotcmp") && !expanded_dis.contains("slotcmpint"),
+        "expansion left a fused op behind:\n{expanded_dis}"
+    );
+    let reexpanded = raise::raise(&expanded).expect("raise failed");
+    let mut interp2 = Interp::new();
+    interp2
+        .run_loaded_chunk(&reexpanded)
+        .expect("expanded run failed");
+    assert_eq!(
+        interp2.env.get("r"),
+        Some(Value::Int(10)),
+        "desugared branch differs"
+    );
+}
+
 fn lower_typed_spanmap(
     src: &str,
     sigs: &std::collections::HashMap<String, zz_checker::FuncSig>,
@@ -356,7 +621,7 @@ fn locals_declare_int_slots() {
     let mut sigs = HashMap::new();
     sigs.insert("f".to_string(), int_sig(1));
     let module = lower_typed_spanmap(
-        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n s\n}\nf(1)",
+        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n return s\n}\nf(1)",
         &sigs,
     );
     // Slot 0 = param n (Int from sig), slot 1 = s (Int recorded).
@@ -369,7 +634,7 @@ fn locals_declare_loop_and_array_slots() {
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     let module = lower_typed_spanmap(
-        "func m() {\n a := [1, 2]\n a[0] = 3\n s := 0\n for v in a {\n s = s + v\n }\n s\n}\nm()",
+        "func m() {\n a := [1, 2]\n a[0] = 3\n s := 0\n for v in a {\n s = s + v\n }\n return s\n}\nm()",
         &sigs,
     );
     let locals = local_types(&module, "m");
@@ -584,27 +849,187 @@ fn annot_section_is_removable() {
 }
 
 #[test]
-fn dis_shows_locals_and_v2() {
+fn dis_shows_locals_and_format_version() {
     use std::collections::HashMap;
     let mut sigs = HashMap::new();
     sigs.insert("f".to_string(), int_sig(1));
     let module = lower_typed_spanmap(
-        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n s\n}\nf(1)",
+        "func f(n: int) -> int {\n s := n + 1\n s = s + n\n return s\n}\nf(1)",
         &sigs,
     );
     let text = zz_ir::dis::disassemble(&module);
-    assert!(text.contains("; zzcz v2"), "missing v2 header:\n{text}");
+    assert!(text.contains("; zzcz v4"), "missing v4 header:\n{text}");
     assert!(text.contains("locals=[int"), "missing locals:\n{text}");
+}
+
+#[test]
+fn derotate_loops_restores_the_historical_layout() {
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    sigs.insert("m".to_string(), int_sig(0));
+    let module = lower_typed_spanmap(
+        "func m() -> int {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n return s\n}\nm()",
+        &sigs,
+    );
+    let fi = module
+        .funcs
+        .iter()
+        .position(|f| module.strings.get(f.name.0 as usize).map(String::as_str) == Some("m"))
+        .expect("func m");
+    let f = &module.funcs[fi];
+    let (test_pc, body) = f
+        .code
+        .iter()
+        .enumerate()
+        .find_map(|(pc, op)| match op {
+            zz_ir::Op::ForNext { body, .. } => Some((pc, *body as usize)),
+            _ => None,
+        })
+        .expect("expected a for loop");
+    // Rotated: the body runs up to the test, which the entry jump targets.
+    assert_eq!(body + 1, test_pc, "rotated layout puts the test last");
+    assert!(
+        matches!(f.code[body - 1], zz_ir::Op::Jump(t) if t as usize == test_pc),
+        "rotated loop must enter at the test, got {:?}",
+        f.code[body - 1]
+    );
+    let derotated = lower::derotate_loops(&module).expect("derotate");
+    let f = &derotated.funcs[fi];
+    // Historical: `ForNext` header, body after it, `Jump` back-edge.
+    assert!(
+        matches!(f.code[body - 1], zz_ir::Op::ForNext { body: b, .. } if b as usize == body),
+        "derotated loop must start with its test, got {:?}",
+        f.code[body - 1]
+    );
+    assert!(
+        matches!(f.code[test_pc], zz_ir::Op::Jump(t) if t as usize == body - 1),
+        "derotated loop must end with the back-edge, got {:?}",
+        f.code[test_pc]
+    );
+    assert!(
+        matches!(f.code[body - 2], zz_ir::Op::ForSetup { header, .. } if header as usize == body - 1),
+        "ForSetup must name the moved header, got {:?}",
+        f.code[body - 2]
+    );
+    verify::verify(&derotated).expect("derotated module verifies");
+    // Already-historical input is borrowed untouched.
+    match lower::derotate_loops(&derotated).expect("idempotent") {
+        std::borrow::Cow::Borrowed(_) => {}
+        std::borrow::Cow::Owned(_) => panic!("derotate rewrote an unrotated module"),
+    }
+}
+
+#[test]
+fn derotate_keeps_vartab_aligned_with_nested_loops() {
+    use std::collections::HashMap;
+    let mut sigs = HashMap::new();
+    sigs.insert("m".to_string(), int_sig(0));
+    let module = lower_typed_spanmap(
+        "func m() -> int {\n s := 0\n for _i in 0..2 {\n  for j in 0..3 {\n   s = s + j\n  }\n }\n return s\n}\nm()",
+        &sigs,
+    );
+    let fi = module
+        .funcs
+        .iter()
+        .position(|f| module.strings.get(f.name.0 as usize).map(String::as_str) == Some("m"))
+        .expect("func m");
+    let f = &module.funcs[fi];
+    assert_eq!(f.vartab.len(), 2, "two loops");
+    let fornexts = f
+        .code
+        .iter()
+        .filter(|op| matches!(op, zz_ir::Op::ForNext { .. }))
+        .count();
+    assert_eq!(fornexts, 2);
+    // Rotated: the inner test is emitted first, so vartab starts with the
+    // inner (higher) slot.
+    assert!(
+        f.vartab[0][0] > f.vartab[1][0],
+        "rotated vartab must follow chunk order: {:?}",
+        f.vartab
+    );
+    let derotated = lower::derotate_loops(&module).expect("derotate");
+    let f = &derotated.funcs[fi];
+    // Derotated the outer header comes first, and the slots table follows
+    // so the kth `ForNext` still owns its own entry.
+    assert!(
+        f.vartab[0][0] < f.vartab[1][0],
+        "derotated vartab must follow the moved headers: {:?}",
+        f.vartab
+    );
+    verify::verify(&derotated).expect("derotated module verifies");
+}
+
+#[test]
+fn derotate_handles_an_empty_loop_body() {
+    // A body with no ops puts the test at the body entry itself
+    // (`ForNext.body == pc`). Today's compiler always emits something in
+    // the body, so build the shape by hand: the swap must still find the
+    // entry jump and produce the historical `ForNext; Jump(test)` pair.
+    use zz_ir::{
+        Const, ConstId, FuncDef, FuncId, FuncSig, IrType, Module, Op, Span, StrId, TypeId,
+    };
+    let module = Module {
+        types: vec![IrType::Unknown],
+        strings: vec!["m".to_string()],
+        consts: vec![Const::Unit],
+        funcs: vec![FuncDef {
+            name: StrId(0),
+            arity: 0,
+            params: vec![],
+            sig: FuncSig {
+                params: vec![],
+                ret: TypeId(0),
+            },
+            toplevel_slots: vec![],
+            vartab: vec![vec![]],
+            locals: vec![TypeId(0)],
+            // [placeholder, iterable, setup, entry jump, test (body ==
+            // test), exit pop].
+            code: vec![
+                Op::PushConst(ConstId(0)),
+                Op::LoadSlot(0),
+                Op::ForSetup {
+                    exit: 6,
+                    header: 4,
+                    num_vars: 0,
+                },
+                Op::Jump(4),
+                Op::ForNext {
+                    vars: vec![],
+                    exit: 6,
+                    body: 4,
+                    in_env: false,
+                },
+                Op::Pop,
+            ],
+            spans: vec![Span::new(0, 0); 6],
+            max_stack: 3,
+        }],
+        entry: FuncId(0),
+    };
+    let derotated = lower::derotate_loops(&module).expect("derotate");
+    let code = &derotated.funcs[0].code;
+    assert!(
+        matches!(code[3], Op::ForNext { body: 4, .. }),
+        "empty loop must start with its test, got {:?}",
+        code[3]
+    );
+    assert!(
+        matches!(code[4], Op::Jump(3)),
+        "empty loop must end with the back-edge, got {:?}",
+        code[4]
+    );
+    verify::verify(&derotated).expect("derotated module verifies");
 }
 
 #[test]
 fn vartab_records_loop_var_slots() {
     use std::collections::HashMap;
-    use zz_ir::Op;
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     let module = lower_typed_spanmap(
-        "func m() {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n s\n}\nm()",
+        "func m() -> int {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n return s\n}\nm()",
         &sigs,
     );
     verify::verify(&module).expect("verify failed");
@@ -617,18 +1042,19 @@ fn vartab_records_loop_var_slots() {
         .map(|(_, f)| f)
         .expect("m lifted");
     // Exactly one for-loop with one var; the recorded slot must agree
-    // with the slot the loop body loads (the disassembly shows the
-    // body's `loadslot`).
+    // with the slot the loop body reads (the body's `s = s + v` fuses
+    // into a slot-referencing op, so ask the op rather than the
+    // disassembly, which shows the fused form).
     assert_eq!(f.vartab.len(), 1, "one loop expected: {:?}", f.vartab);
     assert_eq!(f.vartab[0].len(), 1, "one var expected");
     let vslot = f.vartab[0][0];
     assert_ne!(vslot, u16::MAX, "loop var must be slot-bound");
-    assert!(
-        f.code
-            .iter()
-            .any(|op| matches!(op, Op::LoadSlot(s) if *s == vslot)),
-        "body never loads vartab slot {vslot}"
-    );
+    let referenced = f.code.iter().any(|op| {
+        let mut hit = false;
+        op.for_each_slot(|s| hit |= s == vslot);
+        hit
+    });
+    assert!(referenced, "body never reads vartab slot {vslot}");
     // A vartab/ForNext count mismatch must fail closed.
     let mut bad = module.clone();
     let mf = bad
@@ -654,11 +1080,11 @@ fn nested_for_loops_verify() {
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     for src in [
-        "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n s = s + i + j\n }\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n j := 0\n while j < 3 {\n for k in 0..3 {\n s = s + j + k\n }\n j = j + 1\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n i := 0\n while i < 3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n i = i + 1\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n for i in 0..3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n for k in 0..3 {\n s = s + i + j + k\n }\n }\n }\n s\n}\nm()",
+        "func m() -> int {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n s = s + i + j\n }\n }\n return s\n}\nm()",
+        "func m() -> int {\n s := 0\n j := 0\n while j < 3 {\n for k in 0..3 {\n s = s + j + k\n }\n j = j + 1\n }\n return s\n}\nm()",
+        "func m() -> int {\n s := 0\n i := 0\n while i < 3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n i = i + 1\n }\n return s\n}\nm()",
+        "func m() -> int {\n s := 0\n for i in 0..3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n }\n return s\n}\nm()",
+        "func m() -> int {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n for k in 0..3 {\n s = s + i + j + k\n }\n }\n }\n return s\n}\nm()",
     ] {
         let module = lower_typed_spanmap(src, &sigs);
         // lower_typed runs max_stack_for + full verify internally, so a
@@ -712,6 +1138,7 @@ fn verify_accepts_error_declared_iterable() {
                 Op::ForNext {
                     vars: vec![],
                     exit: 6,
+                    body: 5,
                     in_env: false,
                 },
                 Op::Jump(4),
@@ -761,5 +1188,152 @@ fn verify_short_locals_fails_closed() {
         err.message.contains("fewer slots"),
         "unexpected error: {}",
         err.message
+    );
+}
+
+#[test]
+fn round_trip_unread_parameters() {
+    // Regression (#512): a parameter the body never reads emits no
+    // `LoadSlot`/`StoreSlot`, so sizing the locals table from referenced
+    // slots alone left it shorter than the signature arity and lowering
+    // died in verification with "locals: fewer slots than signature
+    // params". `b` is never read; `a` is.
+    assert_eq!(
+        round_trip_value("func f(a: int, b: int) -> int {\n return a\n}\nf(7, 9)"),
+        Value::Int(7)
+    );
+    // No parameter read at all.
+    assert_eq!(
+        round_trip_value("func g(n: int) -> int {\n return 5\n}\ng(1)"),
+        Value::Int(5)
+    );
+    // Same shape for a closure: its lifted chunk carries the lambda's
+    // arity, and an unused tail parameter must not shrink the table.
+    assert_eq!(
+        round_trip_value("f := |a: int, b: int| a\nf(3, 4)"),
+        Value::Int(3)
+    );
+}
+
+/// Minimal one-function module for verifier-shape tests: `arity` params,
+/// `locals_len` frame slots, and the given code.
+fn shape_module(arity: usize, locals_len: usize, code: Vec<zz_ir::Op>) -> zz_ir::Module {
+    use zz_ir::{FuncDef, FuncId, FuncSig, IrType, Module, Param, StrId, TypeId};
+    let params: Vec<Param> = (0..arity)
+        .map(|_| Param {
+            name: StrId(0),
+            default: None,
+        })
+        .collect();
+    Module {
+        types: vec![IrType::Unknown],
+        strings: vec!["f".to_string()],
+        consts: vec![],
+        funcs: vec![FuncDef {
+            name: StrId(0),
+            arity: arity as u32,
+            params,
+            sig: FuncSig {
+                params: vec![TypeId(0); arity],
+                ret: TypeId(0),
+            },
+            locals: vec![TypeId(0); locals_len],
+            vartab: vec![],
+            toplevel_slots: vec![],
+            code,
+            spans: vec![],
+            max_stack: 0,
+        }],
+        entry: FuncId(0),
+    }
+}
+
+#[test]
+fn verify_accepts_locals_floored_at_arity() {
+    // #512: an unread parameter still owns a frame slot, so a table sized to
+    // the parameter list with no slot references at all is canonical.
+    let module = shape_module(2, 2, vec![]);
+    verify::verify(&module).expect("param-floored locals must verify");
+}
+
+#[test]
+fn verify_rejects_locals_longer_than_needed() {
+    // The canonical size is `max(referenced slots, arity)`: slack beyond
+    // that is still corruption, not a roomier table.
+    let module = shape_module(2, 3, vec![]);
+    let err = verify::verify(&module).expect_err("over-long locals must fail closed");
+    assert!(
+        err.message.contains("locals length mismatch"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+/// `SlotCmpConst` names a constant, so raising must rebuild it in the new
+/// per-chunk pool order. (It only remapped `PushConst` before, which left
+/// the fused compare reading a different value after a cache load.)
+#[test]
+fn slot_cmp_const_keeps_its_constant_across_raise() {
+    let src = "c := \"a\"\nn := 0\nif c == \"a\" {\n n = 1\n}\nif c != \"o\" {\n n = n + 1\n}\nn";
+    let module = lower_typed_spanmap(src, &std::collections::HashMap::new());
+    let dis = zz_ir::dis::disassemble(&module);
+    assert!(
+        dis.contains("slotcmpconst"),
+        "fusion lost in lowering:\n{dis}"
+    );
+
+    let bytes = codec::encode(&module);
+    let loaded = codec::decode(&bytes).expect("decode failed");
+    verify::verify(&loaded).expect("verify failed");
+    assert_eq!(codec::encode(&loaded), bytes, "re-encode differs");
+
+    let raised = raise::raise(&loaded).expect("raise failed");
+    let mut interp = Interp::new();
+    interp.run_loaded_chunk(&raised).expect("loaded run failed");
+    assert_eq!(
+        interp.env.get("n"),
+        Some(Value::Int(2)),
+        "the fused compare lost its constant in raise:\n{dis}"
+    );
+
+    // Raising rebuilds the pool in *use* order, so a module whose pool
+    // starts with an unused entry must still read the right values: both
+    // const-carrying ops need the re-index, not just `PushConst`.
+    let mut shifted = loaded.clone();
+    shifted.consts.insert(0, zz_ir::Const::Unit);
+    for f in shifted.funcs.iter_mut() {
+        for op in f.code.iter_mut() {
+            match op {
+                zz_ir::Op::PushConst(c) => c.0 += 1,
+                zz_ir::Op::SlotCmpConst { k, .. } => k.0 += 1,
+                _ => {}
+            }
+        }
+    }
+    verify::verify(&shifted).expect("shifted must verify");
+    let shifted_raised = raise::raise(&shifted).expect("raise failed");
+    let mut interp3 = Interp::new();
+    interp3
+        .run_loaded_chunk(&shifted_raised)
+        .expect("shifted run failed");
+    assert_eq!(
+        interp3.env.get("n"),
+        Some(Value::Int(2)),
+        "const pool re-index lost a comparison operand"
+    );
+
+    // The chunk→C stream: desugared back to `LoadSlot; PushConst; BinOp`,
+    // and it must still agree.
+    let expanded = lower::expand_fused(&loaded).expect("expand failed");
+    verify::verify(&expanded).expect("expanded must verify");
+    let reexpanded = raise::raise(&expanded).expect("raise failed");
+    let mut interp2 = Interp::new();
+    interp2
+        .run_loaded_chunk(&reexpanded)
+        .expect("expanded run failed");
+    assert_eq!(
+        interp2.env.get("n"),
+        Some(Value::Int(2)),
+        "desugared compare differs"
     );
 }

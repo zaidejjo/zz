@@ -66,24 +66,21 @@ pub struct CachedModule<'a> {
 /// Bumped automatically with the CLI version; extend if the checker gains
 /// flags or the stdlib versions independently.
 ///
-/// The git commit disambiguates same-version binaries (dev-loop rebuilds
-/// share a version string but not semantics — issue #221). Resolved once
-/// per process from the build tree; absent outside git checkouts
-/// (tarballs fall back to version-only, as before).
+/// The build identity disambiguates same-version binaries, dirty working
+/// trees included (issue #221): a rebuild that changed the checker but not
+/// `HEAD` used to share a namespace with the previous binary's outcomes.
 ///
-/// The stdlib seed fingerprint disambiguates same-version binaries with
-/// different baked stdlibs (release vs dev, or uncommitted stdlib work —
-/// issue #371): the cache key covers source + deps + genesis, but the
-/// live git HEAD resolves the *checkout*, not the binary, so two
-/// toolchains with different seeds shared a namespace whenever the HEAD
-/// matched. Any seed change now invalidates via the genesis.
+/// The stdlib seed fingerprint stays as an independent signal that same
+/// binary re-emits carry different seeds (issue #371: release vs dev
+/// stdlibs, or generated seeds) — a seed change invalidates via the
+/// genesis even when the binary is byte-identical.
 fn genesis(plugin_names: &[String]) -> String {
     let mut names = plugin_names.to_vec();
     names.sort();
     format!(
-        "zz-check-cache-v6|cli={}|git={}|plugins={}|seed={}",
+        "zz-check-cache-v7|cli={}|build={}|plugins={}|seed={}",
         env!("CARGO_PKG_VERSION"),
-        git_hash().as_deref().unwrap_or("nogit"),
+        zz_ir::build_stamp(),
         names.join(","),
         seed_fingerprint(),
     )
@@ -109,38 +106,6 @@ fn seed_fingerprint() -> String {
             hex_of(h)
         })
         .clone()
-}
-
-/// Commit hash of the tree this binary was built from (dev-loop cache
-/// correctness). `None` outside a git checkout.
-fn git_hash() -> Option<String> {
-    static HASH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        let mut dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        loop {
-            if dir.join(".git").exists() {
-                let out = std::process::Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(dir)
-                    .output();
-                match out {
-                    Ok(o) if o.status.success() => {
-                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if s.is_empty() {
-                            return None;
-                        }
-                        return Some(s);
-                    }
-                    _ => return None,
-                }
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => return None,
-            }
-        }
-    })
-    .clone()
 }
 
 /// Dependency-aware key for one module:
@@ -410,6 +375,45 @@ pub(crate) fn ancestor_roots_memo(
         memo_capped_insert(&mut m, MAX_FS_ENTRIES, canon_path.to_path_buf(), v.clone());
     }
     v
+}
+
+/// Reverse dependency edges for import resolution (#420): canonical
+/// package dir → project roots that loaded it as a dependency. A path
+/// dependency (sibling dir, not under `vendor/`) has no ancestor link to
+/// its consumer, so bare imports *inside* the dep (`import leaf` in
+/// `mid/`) would otherwise never try the consumer's lock. Entries are
+/// recorded as each dep entry resolves (parents always load before their
+/// imports are processed), keyed by canonical dir so parallel tests on
+/// unique temp dirs never cross-talk.
+static DEP_CONSUMERS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Vec<PathBuf>>>> =
+    std::sync::OnceLock::new();
+
+/// Record that `root` loaded the package at `pkg_dir` as a dependency.
+pub(crate) fn record_dep_consumer(pkg_dir: &std::path::Path, root: &std::path::Path) {
+    let pkg = canon(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
+    let root = canon(root).unwrap_or_else(|_| root.to_path_buf());
+    if pkg == root {
+        return;
+    }
+    if let Ok(mut m) = DEP_CONSUMERS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        let entry = m.entry(pkg).or_default();
+        if !entry.contains(&root) {
+            entry.push(root);
+        }
+    }
+}
+
+/// Consumer roots recorded for a package dir (empty when unknown).
+pub(crate) fn dep_consumers(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
+    let pkg = canon(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
+    DEP_CONSUMERS
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|m| m.get(&pkg).cloned())
+        .unwrap_or_default()
 }
 
 /// Memoized manifest+lock loads per project root, validated by both
@@ -823,7 +827,7 @@ mod tests {
         // Process-global like the outcome memo: unique path per test only
         // needs unique content (keys are content hashes).
         let canon = PathBuf::from(format!("/tmp/zz-unit-parsed-{}", std::process::id()));
-        let src = "pub func answer() -> int {\n 41\n}\n";
+        let src = "pub func answer() -> int {\n return 41\n}\n";
         let hash = source_hash(src);
         assert!(parsed_get(&canon, &hash).is_none(), "cold miss");
         let program = parse_program(src);
@@ -838,10 +842,10 @@ mod tests {
             "/tmp/zz-unit-parsed-sensitive-{}",
             std::process::id()
         ));
-        let program = parse_program("pub func v() -> int {\n 1\n}\n");
-        let h1 = source_hash("pub func v() -> int {\n 1\n}\n");
+        let program = parse_program("pub func v() -> int {\n return 1\n}\n");
+        let h1 = source_hash("pub func v() -> int {\n return 1\n}\n");
         parsed_insert(&canon, &h1, &program, 28);
-        let h2 = source_hash("pub func v() -> int {\n 2\n}\n");
+        let h2 = source_hash("pub func v() -> int {\n return 2\n}\n");
         assert!(
             parsed_get(&canon, &h2).is_none(),
             "edited content must miss"
@@ -884,7 +888,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
             dir.join("src").join("main.zz"),
-            b"pub func f() -> int { 1 }\n",
+            b"pub func f() -> int { return 1 }\n",
         )
         .unwrap();
         let calls = AtomicUsize::new(0);

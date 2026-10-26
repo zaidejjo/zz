@@ -4,11 +4,11 @@
 // (`length`) calls must all lower to their canonical natives.
 // The scratch path is per-process so parallel test runners (per-file
 // parity tests + the discover sweep) never share it.
-import std.math(sin)
-import std.fs(read_to_string as rts)
+import std.fs(read as rts)
 import std.fs as f
-import std.str(length)
+import std.math(sin)
 import std.process(pid)
+import std.str(length)
 
 func main() {
     println(sin(0.0))
@@ -17,6 +17,6 @@ func main() {
     println(rts(p))
     println(f.exists(p))
     println(length("hello"))
-    f.remove_file(p)
+    f.remove(p)
     println("import_alias_ok")
 }

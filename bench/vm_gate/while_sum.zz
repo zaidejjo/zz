@@ -1,0 +1,15 @@
+// Gate: the statement-position `while` shape — dead loop result (6.8a) and
+// the safepoint folded into the test (6.8b). Same 1e6 iterations as
+// `loop_sum`/`if_loop`, so the rows compare per-iteration handler cost
+// against the `for` range loop directly.
+import std.time
+
+t0 := time.now_ms()
+sum := 0
+i := 0
+while i < 1000000 {
+    sum = sum + i
+    i = i + 1
+}
+t1 := time.now_ms()
+println("while_sum: {t1 - t0}ms result={sum}")

@@ -77,7 +77,7 @@ static int zz_str_bytes_eq(const zz_str *a, const zz_str *b) {
     return memcmp(zz_str_cptr(a), zz_str_cptr(b), a->len) == 0;
 }
 
-static int zz_values_equal(zz_value a, zz_value b) {
+int zz_values_equal(zz_value a, zz_value b) {
     if (a.tag == ZZ_INT && b.tag == ZZ_INT)
         return a.i == b.i;
     if ((a.tag == ZZ_INT || a.tag == ZZ_FLOAT) &&
@@ -129,7 +129,7 @@ static int zz_values_equal(zz_value a, zz_value b) {
             int found = 0;
             for (size_t j = 0; j < db->len; j++) {
                 zz_dict_entry *f = &db->entries[j];
-                if (zz_str_bytes_eq(e->key, f->key)) {
+                if (zz_key_eq(e->key, f->key)) {
                     if (!zz_values_equal(e->val, f->val))
                         return 0;
                     found = 1;
@@ -175,8 +175,14 @@ static int zz_values_equal(zz_value a, zz_value b) {
             return a.payload == b.payload;
         return zz_values_equal(*a.payload, *b.payload);
     }
-    case ZZ_RANGE:
-        return a.i == b.i;
+    case ZZ_RANGE: {
+        // Structural equality on (start, end, step), mirroring the VM.
+        // A missing payload degrades to the old start-marker comparison
+        // so partially-initialized values still compare sanely.
+        const zz_range *ra = a.range, *rb = b.range;
+        if (!ra || !rb) return a.i == b.i;
+        return ra->start == rb->start && ra->end == rb->end && ra->step == rb->step;
+    }
     default:
         return 0;
     }
@@ -332,6 +338,17 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
         default:
             break;
         }
+    }
+    // array concat: [T] + [T] -> [T]. Elements are cloned into a fresh
+    // independent buffer so neither input aliases the result (value
+    // semantics — mutating one side never affects the other).
+    if (a.tag == ZZ_ARRAY && b.tag == ZZ_ARRAY && op == ZZOP_ADD) {
+        zz_value out = zz_array_new();
+        for (size_t i = 0; i < a.arr->len; i++)
+            zz_array_push(out.arr, zz_clone(a.arr->items[i]));
+        for (size_t i = 0; i < b.arr->len; i++)
+            zz_array_push(out.arr, zz_clone(b.arr->items[i]));
+        return out;
     }
     // bool AND/OR handled by control flow in generated code; comparison
     // fallback:
@@ -920,6 +937,222 @@ zz_value zz_fail(zz_value v, int *err) {
     exit(1);
 }
 
+// ---- std.test pro assertions (P1) --------------------------------------
+// Byte-identical semantics + messages to `natives/assert`. All failures
+// print `error:` prefix + exit 1 (VM raises EvalError rendered the same).
+// `s->len` is bytes; contains/starts/ends use byte comparison matching
+// Rust `str::contains/starts_with/ends_with`. Length uses char count via
+// `zz_str_char_len` matching `str.length` / VM `chars().count()`.
+
+zz_value zz_assert_contains(zz_value hay, zz_value needle, int *err) {
+    (void)err;
+    if (hay.tag != ZZ_STR || needle.tag != ZZ_STR || !hay.s || !needle.s) {
+        char *hs = zz_value_to_string(&hay);
+        char *ns = zz_value_to_string(&needle);
+        fprintf(stderr, "error: `assert_contains` expects `str` (haystack, needle), got (%s, %s)\n", hs, ns);
+        free(hs);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    const char *h = zz_str_cptr(hay.s);
+    size_t hlen = hay.s->len;
+    const char *n = zz_str_cptr(needle.s);
+    size_t nlen = needle.s->len;
+    int found = 0;
+    if (nlen == 0) {
+        found = 1;
+    } else if (nlen <= hlen) {
+        for (size_t i = 0; i + nlen <= hlen; i++) {
+            if (memcmp(h + i, n, nlen) == 0) { found = 1; break; }
+        }
+    }
+    if (found) return zz_unit();
+    char *hs = zz_value_to_string(&hay);
+    char *ns = zz_value_to_string(&needle);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to contain \"%s\"\n", hs, ns);
+    free(hs);
+    free(ns);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_starts_with(zz_value s, zz_value prefix, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || prefix.tag != ZZ_STR || !s.s || !prefix.s) {
+        char *ss = zz_value_to_string(&s);
+        char *ps = zz_value_to_string(&prefix);
+        fprintf(stderr, "error: `assert_starts_with` expects `str` (s, prefix), got (%s, %s)\n", ss, ps);
+        free(ss);
+        free(ps);
+        fflush(stderr);
+        exit(1);
+    }
+    int ok = prefix.s->len <= s.s->len &&
+        memcmp(zz_str_cptr(s.s), zz_str_cptr(prefix.s), prefix.s->len) == 0;
+    if (ok) return zz_unit();
+    char *ss = zz_value_to_string(&s);
+    char *ps = zz_value_to_string(&prefix);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to start with \"%s\"\n", ss, ps);
+    free(ss);
+    free(ps);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_ends_with(zz_value s, zz_value suffix, int *err) {
+    (void)err;
+    if (s.tag != ZZ_STR || suffix.tag != ZZ_STR || !s.s || !suffix.s) {
+        char *ss = zz_value_to_string(&s);
+        char *xs = zz_value_to_string(&suffix);
+        fprintf(stderr, "error: `assert_ends_with` expects `str` (s, suffix), got (%s, %s)\n", ss, xs);
+        free(ss);
+        free(xs);
+        fflush(stderr);
+        exit(1);
+    }
+    int ok = suffix.s->len <= s.s->len &&
+        memcmp(zz_str_cptr(s.s) + s.s->len - suffix.s->len, zz_str_cptr(suffix.s), suffix.s->len) == 0;
+    if (ok) return zz_unit();
+    char *ss = zz_value_to_string(&s);
+    char *xs = zz_value_to_string(&suffix);
+    fprintf(stderr, "error: Assertion Failed: Expected \"%s\" to end with \"%s\"\n", ss, xs);
+    free(ss);
+    free(xs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_len(zz_value v, zz_value n, int *err) {
+    (void)err;
+    if (n.tag != ZZ_INT) {
+        char *ns = zz_value_to_string(&n);
+        fprintf(stderr, "error: `assert_len` expects `int` for n, got %s\n", ns);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    if (n.i < 0) {
+        fprintf(stderr, "error: `assert_len` expects n >= 0\n");
+        fflush(stderr);
+        exit(1);
+    }
+    int64_t got = -1;
+    if (v.tag == ZZ_ARRAY && v.arr) got = (int64_t)v.arr->len;
+    else if (v.tag == ZZ_STR && v.s) got = (int64_t)zz_str_char_len(v.s);
+    else if (v.tag == ZZ_DICT && v.dict) got = (int64_t)v.dict->len;
+    else if (v.tag == ZZ_BYTES) got = (int64_t)(v.bytes ? v.bytes->len : 0);
+    if (got < 0) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: `assert_len` expects array/str/dict/bytes, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    if (got == n.i) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected length %lld, got %lld\n", (long long)n.i, (long long)got);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_gt(zz_value a, zz_value b, int *err) {
+    (void)err;
+    int bad = 0;
+    double x = zz_assert_num(a, &bad);
+    double y = zz_assert_num(b, &bad);
+    if (bad) {
+        fprintf(stderr, "error: `assert_gt` expects numeric (left, right)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    if (x > y) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected %g > %g\n", x, y);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_lt(zz_value a, zz_value b, int *err) {
+    (void)err;
+    int bad = 0;
+    double x = zz_assert_num(a, &bad);
+    double y = zz_assert_num(b, &bad);
+    if (bad) {
+        fprintf(stderr, "error: `assert_lt` expects numeric (left, right)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    if (x < y) return zz_unit();
+    fprintf(stderr, "error: Assertion Failed: Expected %g < %g\n", x, y);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_some(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_OPTION_SOME) return zz_unit();
+    if (v.tag == ZZ_OPTION_NONE) {
+        fprintf(stderr, "error: Assertion Failed: Expected Some, got none\n");
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_some` expects `option`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_none(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_OPTION_NONE) return zz_unit();
+    if (v.tag == ZZ_OPTION_SOME) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected none, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_none` expects `option`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_ok(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_RESULT_OK) return zz_unit();
+    if (v.tag == ZZ_RESULT_ERR) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected ok, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_ok` expects `result`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
+zz_value zz_assert_is_err(zz_value v, int *err) {
+    (void)err;
+    if (v.tag == ZZ_RESULT_ERR) return zz_unit();
+    if (v.tag == ZZ_RESULT_OK) {
+        char *vs = zz_value_to_string(&v);
+        fprintf(stderr, "error: Assertion Failed: Expected err, got %s\n", vs);
+        free(vs);
+        fflush(stderr);
+        exit(1);
+    }
+    char *vs = zz_value_to_string(&v);
+    fprintf(stderr, "error: `assert_is_err` expects `result`, got %s\n", vs);
+    free(vs);
+    fflush(stderr);
+    exit(1);
+}
+
 zz_value zz_io_print(zz_value v, int *err) {
     (void)err;
     for (;;) {
@@ -1283,6 +1516,22 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         zz_retain_bytes(v.bytes);
         return v;
     }
+    case ZZ_RANGE: {
+        // Ranges are immutable and tiny: deep-copy the triple so the
+        // worker owns its box outright (no cross-thread refcount
+        // traffic, no aliasing of the spawner's box).
+        if (!v.range) return v;
+        zz_range *r = (zz_range *)malloc(sizeof(zz_range));
+        if (!r) return v;
+        r->refs = 1;
+        r->start = v.range->start;
+        r->end = v.range->end;
+        r->step = v.range->step;
+        zz_value out;
+        out.tag = ZZ_RANGE;
+        out.range = r;
+        return out;
+    }
     case ZZ_DICT: {
         if (!v.dict) return v;
         zz_value hit;
@@ -1290,23 +1539,31 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         zz_value out = zz_dict_new();
         zz_dup_memo_put(m, v.dict, out);
         for (size_t i = 0; i < v.dict->len; i++) {
-            zz_value k = zz_value_dup_inner(
-                (zz_value){ZZ_STR, {.s = v.dict->entries[i].key}}, m);
+            zz_value k = zz_value_dup_inner(v.dict->entries[i].key, m);
             zz_value val = zz_value_dup_inner(v.dict->entries[i].val, m);
-            // Fresh dict: keys unique, always the new-entry path (moves).
-            if (k.tag == ZZ_STR) zz_dict_set(out.dict, k, val);
-            else { zz_release(&k); zz_release(&val); }
+            // `zz_dict_set` retains the key and adopts the value; drop the
+            // key temp so the duplicate owns exactly one share.
+            zz_dict_set(out.dict, k, val);
+            zz_release(&k);
         }
         return out;
     }
-    case ZZ_TUPLE:
+    case ZZ_TUPLE: {
+        if (!v.payload) return v;
+        // Tuple boxes keep their plain allocation: `ZZ_TUPLE` has no
+        // clone/release arms, so there is no shared-ownership to track.
+        zz_value *p = (zz_value *)malloc(sizeof(zz_value));
+        *p = zz_value_dup_inner(*v.payload, m);
+        zz_value out = v;
+        out.payload = p;
+        return out;
+    }
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON: {
         if (!v.payload) return v;
-        zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-        *p = zz_value_dup_inner(*v.payload, m);
+        zz_value *p = zz_vbox_new(zz_value_dup_inner(*v.payload, m));
         zz_value out = v;
         out.payload = p;
         return out;
@@ -2993,6 +3250,7 @@ void zz_safepoint(void) {
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <poll.h>
+#include <netdb.h>
 #ifdef __linux__
 #include <malloc.h>
 #endif
@@ -3008,6 +3266,18 @@ void zz_net_init(void) {
         WSADATA wsa;
         if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) zz_net_started = 1;
     }
+}
+#endif
+
+// Ignore SIGPIPE process-wide (#424): writes to peer-closed sockets
+// (client `send`, server `write`) must surface EPIPE as `Result`
+// errors, not kill the process with exit 141. Matches Go/Rust runtime
+// behavior; the VM side never delivers SIGPIPE either. POSIX-only
+// (Windows has no SIGPIPE). Constructor runs before main, so no
+// per-send-site auditing is needed — including future socket paths.
+#ifndef ZZ_OS_WINDOWS
+__attribute__((constructor)) static void zz_init_sigpipe(void) {
+    signal(SIGPIPE, SIG_IGN);
 }
 #endif
 
@@ -3074,43 +3344,90 @@ zz_value zz_tcp_listen(zz_value addr, int *err) {
 zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err) {
     (void)err;
     if (addr.tag != ZZ_STR) return zz_variant_err(zz_str_static("tcp_connect: expected a string"));
-    struct sockaddr_in sa;
-    if (tcp_resolve(zz_str_cptr(addr.s), &sa) != 0) {
+    const char *hostport = zz_str_cptr(addr.s);
+    const char *colon = strrchr(hostport, ':');
+    if (!colon || colon == hostport || !colon[1]) {
         char buf[192];
-        int n = snprintf(buf, sizeof buf, "invalid address: `%s`", zz_str_cptr(addr.s));
+        int n = snprintf(buf, sizeof buf, "invalid address: `%s`", hostport);
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return zz_variant_err(zz_str_static("tcp_connect failed: socket"));
+    char host[256];
+    size_t hl = (size_t)(colon - hostport);
+    if (hl >= sizeof host) {
+        char buf[192];
+        int n = snprintf(buf, sizeof buf, "invalid address: `%s`", hostport);
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+    }
+    memcpy(host, hostport, hl);
+    host[hl] = '\0';
+    const char *port = colon + 1;
     long toms = timeout_ms.tag == ZZ_INT ? (long)timeout_ms.i : 5000;
-    // Non-blocking connect so the timeout is honored.
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    int rc = connect(fd, (struct sockaddr *)&sa, sizeof sa);
-    if (rc != 0 && errno != EINPROGRESS) {
-        char buf[192];
-        int n = snprintf(buf, sizeof buf, "tcp_connect failed: %s", strerror(errno));
-        close(fd);
+    // System resolution (#426): getaddrinfo handles IP literals,
+    // "localhost" (hosts file) and DNS names. Every returned address
+    // is tried in order so IPv6-first "localhost" still reaches an
+    // IPv4 listener and vice versa (#425). First success wins.
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *list = NULL;
+    int gai = getaddrinfo(host, port, &hints, &list);
+    if (gai != 0 || !list) {
+        if (list) freeaddrinfo(list);
+        char buf[256];
+        int n = snprintf(buf, sizeof buf, "invalid address: `%s` (%s)", hostport, gai_strerror(gai));
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
-    if (rc != 0) {
-        struct pollfd pfd = { fd, POLLOUT, 0 };
-        int pr = poll(&pfd, 1, (int)toms);
-        if (pr <= 0) {
-            close(fd);
-            return zz_variant_err(zz_str_static("tcp_connect failed: timed out"));
+    char last_err[192];
+    snprintf(last_err, sizeof last_err, "tcp_connect failed: connection refused");
+    int any = 0;
+    int fd = -1;
+    for (struct addrinfo *ai = list; ai; ai = ai->ai_next) {
+        any = 1;
+        int cfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (cfd < 0) {
+            snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
+            continue;
         }
-        int soerr = 0;
-        socklen_t slen = sizeof soerr;
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
-        if (soerr != 0) {
-            char buf[192];
-            int n = snprintf(buf, sizeof buf, "tcp_connect failed: %s", strerror(soerr));
-            close(fd);
-            return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+        // Non-blocking connect so the timeout is honored.
+        int flags = fcntl(cfd, F_GETFL, 0);
+        fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+        int ok = 0;
+        int rc = connect(cfd, ai->ai_addr, ai->ai_addrlen);
+        if (rc == 0) {
+            ok = 1;
+        } else if (errno == EINPROGRESS) {
+            struct pollfd pfd = { cfd, POLLOUT, 0 };
+            int pr = poll(&pfd, 1, (int)toms);
+            if (pr > 0) {
+                int soerr = 0;
+                socklen_t slen = sizeof soerr;
+                getsockopt(cfd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
+                if (soerr == 0) {
+                    ok = 1;
+                } else {
+                    snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(soerr));
+                }
+            } else if (pr == 0) {
+                snprintf(last_err, sizeof last_err, "tcp_connect failed: timed out");
+            } else {
+                snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
+            }
+        } else {
+            snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
         }
+        if (ok) {
+            fd = cfd;
+            fcntl(fd, F_SETFL, flags);
+            break;
+        }
+        close(cfd);
     }
-    fcntl(fd, F_SETFL, flags);
+    freeaddrinfo(list);
+    if (fd < 0) {
+        if (!any) return zz_variant_err(zz_str_static("tcp_connect failed: no addresses found"));
+        return zz_variant_err(zz_str_owned(copy_cstr(last_err, strlen(last_err))));
+    }
     return zz_variant_ok((zz_value){ZZ_TCP_STREAM, {.net = tcp_alloc(fd)}});
 }
 
@@ -3195,16 +3512,6 @@ zz_value zz_tcp_readline(zz_value stream, int *err) {
         sb_str(&sb, &b, 1);
     }
     return zz_variant_ok(zz_str_owned(sb_take(&sb)));
-}
-
-// net.tcp_close(stream) → Result<Ok(true), Err(msg)> (idempotent)
-zz_value zz_tcp_close(zz_value stream, int *err) {
-    (void)err;
-    if ((stream.tag == ZZ_TCP_STREAM || stream.tag == ZZ_TCP_LISTENER) && stream.net && !stream.net->closed) {
-        close(stream.net->fd);
-        stream.net->closed = 1;
-    }
-    return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
 }
 
 // net.tcp_read_bytes(stream, max_bytes) → Result<Ok(bytes), Err(msg)>
@@ -3348,14 +3655,52 @@ static zz_cell_slot *zz_cell_find(uint64_t id) {
 
 // cell.new(v) → cell id (plain int; AOT Opaque("cell") lowers to ids,
 // mirroring the int-id convention of the staticlib FFI handles).
+//
+// Retaining-store contract (matches `zz_assign`, `zz_array_push`,
+// `zz_dict_set`, `zz_object_set_field`): the argument may alias the
+// per-iteration loop arena (e.g. `tmp := [..]; cell.new(tmp)` — the Decl
+// site is NonEscaping/arena while the call marks only the Ident use as
+// escaping). A bare `zz_clone` would store that alias: arena strings
+// (refs==0), LIT/ARENA_MAGIC arrays and arena dicts are never retained,
+// so the next `zz_arena_reset` reuses the memory and the pool dangles
+// (garbage reads; garbage `len` → wild `free(): invalid pointer` on
+// release — issue #410). `zz_clone_for_store` is the share convention:
+// heap values arrive with exactly one extra share for the pool, arena
+// values arrive as fresh heap copies.
+//
+// Ids are process-unique and never reused within a process (mirroring
+// the VM's monotonic `NEXT_ID`): slot storage is recycled, but every
+// allocation mints a fresh id. Reusing a dead slot's old id would alias
+// a stale copied handle (e.g. a `TT` struct passed by value through
+// search recursion) onto an unrelated new cell.
+static uint64_t zz_cell_fresh_id(void) {
+    uint64_t id = zz_cell_next++;
+    if (id == 0) id = zz_cell_next++;
+    // 0 is the invalid sentinel and ZZ_INT ids must be positive: the
+    // pool contract rejects `id.i <= 0`, so never mint those. Exhaustion
+    // (2^63 ids) is practically impossible; abort loudly like `alloc`
+    // instead of aliasing two live cells.
+    if (id == 0 || (int64_t)id <= 0) {
+        fprintf(stderr, "zz: cell id space exhausted\n");
+        abort();
+    }
+    return id;
+}
 zz_value zz_cell_new(zz_value v, int *err) {
     (void)err;
+    // Heal before taking the lock: the copy may malloc (no pool state
+    // touched), keeping the critical section to the slot insert.
+    // Share convention (`zz_clone_for_store`): the caller keeps its own
+    // share; the pool takes exactly one of its own (heap bump, or a fresh
+    // heap copy for arena-owned values — see issue #410).
+    zz_value stored = zz_clone_for_store(v);
     pthread_mutex_lock(&zz_cell_mu);
     if (zz_cell_n == zz_cell_cap) {
         size_t nc = zz_cell_cap == 0 ? 16 : zz_cell_cap * 2;
         zz_cell_slot *ns = (zz_cell_slot *)realloc(zz_cells, nc * sizeof(zz_cell_slot));
         if (!ns) {
             pthread_mutex_unlock(&zz_cell_mu);
+            zz_release(&stored);
             return zz_variant_err(zz_str_static("cell.new: out of memory"));
         }
         zz_cells = ns;
@@ -3364,17 +3709,17 @@ zz_value zz_cell_new(zz_value v, int *err) {
     for (size_t i = 0; i < zz_cell_n; i++) {
         if (!zz_cells[i].live) {
             zz_cells[i].live = 1;
-            zz_cells[i].val = zz_clone(v);
-            uint64_t id = zz_cells[i].id;
+            zz_cells[i].val = stored;
+            uint64_t id = zz_cell_fresh_id();
+            zz_cells[i].id = id;
             pthread_mutex_unlock(&zz_cell_mu);
             return (zz_value){ZZ_INT, {.i = (int64_t)id}};
         }
     }
-    uint64_t id = zz_cell_next++;
-    if (id == 0) id = zz_cell_next++;
+    uint64_t id = zz_cell_fresh_id();
     zz_cells[zz_cell_n].id = id;
     zz_cells[zz_cell_n].live = 1;
-    zz_cells[zz_cell_n].val = zz_clone(v);
+    zz_cells[zz_cell_n].val = stored;
     zz_cell_n++;
     pthread_mutex_unlock(&zz_cell_mu);
     return (zz_value){ZZ_INT, {.i = (int64_t)id}};
@@ -3403,14 +3748,19 @@ zz_value zz_cell_set(zz_value id, zz_value v, int *err) {
     if (id.tag != ZZ_INT || id.i <= 0) {
         return zz_variant_err(zz_str_static("cell.set: not a cell"));
     }
+    // Same retaining-store contract as `zz_cell_new`: heal the incoming
+    // value to heap ownership before publishing it into the pool, so a
+    // loop-arena alias can never dangle past the iteration reset.
+    zz_value stored = zz_clone_for_store(v);
     pthread_mutex_lock(&zz_cell_mu);
     zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
     if (!s) {
         pthread_mutex_unlock(&zz_cell_mu);
+        zz_release(&stored);
         return zz_variant_err(zz_str_static("cell.set: cell was dropped"));
     }
     zz_release(&s->val);
-    s->val = zz_clone(v);
+    s->val = stored;
     pthread_mutex_unlock(&zz_cell_mu);
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
 }
@@ -3431,6 +3781,7 @@ zz_value zz_cell_drop(zz_value id, int *err) {
         return (zz_value){ZZ_BOOL, {.b = false}};
     }
     zz_release(&s->val);
+    s->val = zz_unit();
     s->live = 0;
     pthread_mutex_unlock(&zz_cell_mu);
     return (zz_value){ZZ_BOOL, {.b = true}};
@@ -3499,9 +3850,16 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 //    - `zz_db_query(db, sql, binds, n)` → array of row dicts
 //      (positional c0..cN keys; struct mapping happens at the ZZ
 //      layer via field order).
-//    - `zz_db_close(db)` → unit (also closed at process exit).
+//    - `zz_db_close(db)` → unit (or closed when the last reference drops).
 #ifdef ZZ_HAS_SQLITE3
 #include <sqlite3.h>
+// Non-DB programs still carry the inline ARC DB hook, which resolves to
+// `zz_db_backend_close`; keep its only SQLite reference weak so binaries
+// that never open a SQLite handle do not need to link libsqlite3. A
+// SQLite handle can only exist when the compiler linked the library.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma weak sqlite3_close
+#endif
 #endif
 
 // ---- SQL backends (sqlite embedded, postgres via staticlib) ----
@@ -3513,6 +3871,7 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 // native is reachable (see `needs_native_rt`).
 typedef enum { ZZDB_CLOSED = -1, ZZDB_SQLITE = 0, ZZDB_PG = 1 } zz_db_backend;
 typedef struct {
+    size_t refs;        // atomic: last release closes the backend
     int backend;
     union {
         void *sqlite;   // sqlite3* (ZZDB_SQLITE)
@@ -3535,6 +3894,38 @@ uint64_t zz_pg_connect_raw(const char *info, size_t len) ZZ_WEAK_IMPORT;
 int64_t zz_pg_exec_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 zz_value zz_pg_query_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 void zz_pg_close_raw(uint64_t id) ZZ_WEAK_IMPORT;
+
+// Close the backend once and leave the shell as a tombstone. Idempotent:
+// a closed handle stays closed, and stale ZZ values read empty results.
+static void zz_db_backend_close(zz_db_handle *h) {
+    if (!h) return;
+    if (h->backend == ZZDB_PG) {
+        zz_pg_close_raw(h->pg_id);
+    }
+#ifdef ZZ_HAS_SQLITE3
+    else if (h->backend == ZZDB_SQLITE) {
+        sqlite3_close((sqlite3 *)h->sqlite);
+    }
+#endif
+    h->backend = ZZDB_CLOSED;
+    h->sqlite = NULL;
+}
+
+void zz_db_retain_handle(void *db) {
+    if (!db) return;
+    __atomic_add_fetch(&((zz_db_handle *)db)->refs, 1, __ATOMIC_RELAXED);
+}
+
+// Last ZZ reference: close the connection and free the shell, matching
+// the VM's Arc-drop lifetime. Explicit sqlz.close still tombstones the
+// handle early; this only reclaims it after every alias is gone.
+void zz_db_release_handle(void *db) {
+    if (!db) return;
+    zz_db_handle *h = (zz_db_handle *)db;
+    if (__atomic_sub_fetch(&h->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    zz_db_backend_close(h);
+    free(h);
+}
 
 // `pg.connect(conninfo)` — URL or keyword form (the driver parses both).
 // Connection failures trap (VM parity: `pg.connect failed`), never a
@@ -3561,6 +3952,7 @@ zz_value zz_pg_connect(zz_value info, int *err) {
         fprintf(stderr, "zz: out of memory (pg handle)\n");
         exit(1);
     }
+    h->refs = 1;
     h->backend = ZZDB_PG;
     h->pg_id = id;
     return (zz_value){ZZ_DB, {.db = h}};
@@ -3588,6 +3980,7 @@ zz_value zz_db_open(zz_value path, int *err) {
             fprintf(stderr, "zz: out of memory (pg handle)\n");
             exit(1);
         }
+        h->refs = 1;
         h->backend = ZZDB_PG;
         h->pg_id = id;
         return (zz_value){ZZ_DB, {.db = h}};
@@ -3611,6 +4004,7 @@ zz_value zz_db_open(zz_value path, int *err) {
         sqlite3_close(conn);
         return (zz_value){ZZ_DB, {.db = NULL}};
     }
+    h->refs = 1;
     h->backend = ZZDB_SQLITE;
     h->sqlite = conn;
     return (zz_value){ZZ_DB, {.db = h}};
@@ -3803,22 +4197,11 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
 zz_value zz_db_close(zz_value db, int *err) {
     (void)err;
     if (db.tag == ZZ_DB && db.db) {
-        zz_db_handle *h = (zz_db_handle *)db.db;
-        if (h->backend == ZZDB_PG) {
-            zz_pg_close_raw(h->pg_id);
-        }
-#ifdef ZZ_HAS_SQLITE3
-        else if (h->backend == ZZDB_SQLITE) {
-            sqlite3_close((sqlite3 *)h->sqlite);
-        }
-#else
-        (void)0;
-#endif
         // Tombstone, don't free: the ZZ value still points here and a
         // use-after-close must degrade to empty results (like the VM's
-        // error), never a dangling read. One 16-byte shell per close.
-        h->backend = ZZDB_CLOSED;
-        h->sqlite = NULL;
+        // error), never a dangling read. The shell is freed when the
+        // last ZZ reference is released (zz_db_release_handle).
+        zz_db_backend_close((zz_db_handle *)db.db);
     }
     return zz_unit();
 }
@@ -3893,9 +4276,40 @@ typedef enum {
 // anything larger is rejected before buffering).
 #define HTTP_MAX_HEAD_BYTES (64 * 1024)
 #define HTTP_MAX_BODY_BYTES (50 * 1024 * 1024)
+// Listen defaults, matching `ServerLimits::default()` in the VM.
+#define HTTP_DEFAULT_READ_MS 30000ULL
+#define HTTP_DEFAULT_MAX_REQS_CONN 1000ULL
+#define HTTP_DEFAULT_SHUTDOWN_MS 5000ULL
 // Responses larger than this after a big request return heap to the OS
 // (same 8 MB tripwire the VM uses after large publishes).
 #define HTTP_TRIM_AFTER_BYTES (8 * 1024 * 1024)
+
+typedef struct {
+    uint64_t read_ms;
+    uint64_t max_reqs_conn;
+    uint64_t max_body_bytes;
+    uint64_t shutdown_ms;
+} http_limits;
+
+static http_limits g_http_limits = {
+    HTTP_DEFAULT_READ_MS,
+    HTTP_DEFAULT_MAX_REQS_CONN,
+    HTTP_MAX_BODY_BYTES,
+    HTTP_DEFAULT_SHUTDOWN_MS,
+};
+
+static void http_limits_default(void) {
+    g_http_limits.read_ms = HTTP_DEFAULT_READ_MS;
+    g_http_limits.max_reqs_conn = HTTP_DEFAULT_MAX_REQS_CONN;
+    g_http_limits.max_body_bytes = HTTP_MAX_BODY_BYTES;
+    g_http_limits.shutdown_ms = HTTP_DEFAULT_SHUTDOWN_MS;
+}
+
+static int64_t http_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 typedef struct {
     int     fd;
@@ -3928,6 +4342,12 @@ typedef struct {
     char    req_method[16];
     size_t  req_tgt_off;
     size_t  req_tgt_len;
+    // Rate-limit key (peer address text; "unknown" if inet_ntop fails).
+    char    peer[46];
+    // Listen limits: per-read deadline (monotonic ms) and keep-alive
+    // request count for this connection.
+    int64_t  read_deadline_ms;
+    uint64_t reqs_served;
 } Connection;
 
 // Per-thread connection pool: calloc'd once per worker thread; the
@@ -3946,6 +4366,10 @@ static int find_free_slot(void) {
         if (t_conns[i].fd == -1) return i;
     }
     return -1;
+}
+
+static void http_note_read(Connection *c) {
+    c->read_deadline_ms = http_monotonic_ms() + (int64_t)g_http_limits.read_ms;
 }
 
 static Connection* alloc_connection(int fd) {
@@ -3971,6 +4395,9 @@ static Connection* alloc_connection(int fd) {
     c->head_too_large = 0;
     c->body_truncated = 0;
     c->req_consumed = 0;
+    c->peer[0] = '\0';
+    c->reqs_served = 0;
+    http_note_read(c);
     return c;
 }
 
@@ -4027,7 +4454,7 @@ static void set_nonblock(int fd) {
 // The static read_buf serves heads up to 8 KB on the fast path; larger
 // header blocks grow a dynamic buffer up to HTTP_MAX_HEAD_BYTES (431
 // beyond, mirroring the VM). Bodies buffer exactly Content-Length bytes
-// up to HTTP_MAX_BODY_BYTES (413 beyond). Truncated bodies (EOF first)
+// up to max_body_bytes (413 beyond). Truncated bodies (EOF first)
 // reply 400. Request parsing + ZZ dispatch live after the http natives
 // below (they need the route table); the entry points are fwd-declared.
 static void http_on_head(Connection *c);
@@ -4184,6 +4611,7 @@ static int read_from_socket(Connection *c) {
         ssize_t n = read(c->fd, c->body_buf + c->body_len, room);
         if (n > 0) {
             c->body_len += (size_t)n;
+            http_note_read(c);
             return 1;
         }
         if (n == 0) {
@@ -4200,6 +4628,7 @@ static int read_from_socket(Connection *c) {
     ssize_t n = read(c->fd, tmp, sizeof tmp);
     if (n > 0) {
         int rc = http_head_append(c, tmp, (size_t)n);
+        http_note_read(c);
         if (rc < 0) return 1; // cap exceeded; process_connection replies 431
         return 1;
     }
@@ -4296,6 +4725,30 @@ static int get_cpu_count(void) {
     return (n > 0) ? (int)n : 4;
 }
 
+// ---- Graceful shutdown (SIGINT/SIGTERM) ----
+// First signal starts a drain bounded by listen_cfg.shutdown_ms; a second
+// signal force-exits so a wedged keep-alive client cannot trap Ctrl+C.
+// POSIX-only: the AOT HTTP server itself is Linux-only, but the runtime
+// still has to compile on Windows/macOS.
+#ifndef ZZ_OS_WINDOWS
+#include <signal.h>
+static volatile sig_atomic_t g_http_shutdown_requested = 0;
+static volatile sig_atomic_t g_http_shutdown_signals = 0;
+
+static void http_shutdown_handler(int sig) {
+    (void)sig;
+    g_http_shutdown_requested = 1;
+    if (++g_http_shutdown_signals >= 2) _exit(130);
+}
+#endif
+
+static void http_install_shutdown_handlers(void) {
+#ifndef ZZ_OS_WINDOWS
+    signal(SIGINT, http_shutdown_handler);
+    signal(SIGTERM, http_shutdown_handler);
+#endif
+}
+
 // ---- Epoll worker loop (runs in each pthread) ----
 // Linux-only: epoll exists nowhere else. Other targets (macOS, Windows)
 // get a clear runtime error instead of a compile wall — the AOT HTTP
@@ -4306,6 +4759,13 @@ static int get_cpu_count(void) {
 // thread-local. No worker touches another's pool.
 #ifdef __linux__
 typedef struct { int listen_fd; int worker_id; } http_worker_arg;
+
+static int http_worker_has_active(void) {
+    for (int i = 0; i < t_nconns; i++) {
+        if (t_conns[i].fd >= 0) return 1;
+    }
+    return 0;
+}
 
 static void *worker_loop(void *arg) {
     int listen_fd = ((http_worker_arg *)arg)->listen_fd;
@@ -4338,11 +4798,39 @@ static void *worker_loop(void *arg) {
     }
 
     struct epoll_event events[MAX_EVENTS];
+    int64_t shutdown_deadline = 0;
+    int shutdown_started = 0;
 
     while (g_http_server_running) {
+        int64_t now = http_monotonic_ms();
+        // Enforce read_ms on idle/partial requests. This is checked on
+        // the 500 ms tick as well as after events, so a client that
+        // sends nothing is reaped without pinning a worker slot.
+        for (int s = 0; s < t_nconns; s++) {
+            Connection *sc = &t_conns[s];
+            if (sc->fd < 0) continue;
+            if (sc->state != CONN_READING && sc->state != CONN_READING_BODY
+                && sc->state != CONN_KEEP_ALIVE) continue;
+            if (now < sc->read_deadline_ms) continue;
+            int dead_fd = sc->fd;
+            connection_to_closed(sc);
+            epoll_ctl(epfd, EPOLL_CTL_DEL, dead_fd, NULL);
+        }
+
+        if (g_http_shutdown_requested) {
+            if (!shutdown_started) {
+                shutdown_started = 1;
+                shutdown_deadline = http_monotonic_ms() + (int64_t)g_http_limits.shutdown_ms;
+            }
+            if (!http_worker_has_active() || http_monotonic_ms() >= shutdown_deadline) break;
+        }
+
         // 500 ms timeout (not -1): lets a shutdown flag change drain
-        // promptly; the wakeup cost is one syscall per thread per 500 ms.
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, 500);
+        // promptly; shorter when read_ms itself is tighter.
+        int poll_ms = 500;
+        if (g_http_limits.read_ms < (uint64_t)poll_ms) poll_ms = (int)g_http_limits.read_ms;
+        if (poll_ms < 1) poll_ms = 1;
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, poll_ms);
         if (nfds < 0) {
             if (errno == EINTR) continue;
             break;
@@ -4353,6 +4841,9 @@ static void *worker_loop(void *arg) {
             uint32_t revents = events[i].events;
 
             if (ptr == NULL) {
+                // Stop accepting once shutdown starts; existing
+                // connections keep draining.
+                if (g_http_shutdown_requested) continue;
                 // Accept all pending connections
                 while (1) {
                     struct sockaddr_in client_addr;
@@ -4369,6 +4860,9 @@ static void *worker_loop(void *arg) {
                     if (!c) {
                         close(client_fd);
                         continue;
+                    }
+                    if (!inet_ntop(AF_INET, &client_addr.sin_addr, c->peer, sizeof c->peer)) {
+                        snprintf(c->peer, sizeof c->peer, "%s", "unknown");
                     }
 
                     set_nonblock(client_fd);
@@ -4519,6 +5013,7 @@ static void *worker_loop(void *arg) {
                             } else {
                                 c->state = CONN_KEEP_ALIVE;
                             }
+                            http_note_read(c);
                             struct epoll_event cev;
                             cev.events = EPOLLIN | EPOLLET;
                             cev.data.ptr = c;
@@ -4616,6 +5111,81 @@ static zz_value g_http_middlewares[HTTP_MAX_MIDDLEWARE];
 static int g_http_middleware_count = 0;
 // Access-log flag for the socket serve path (http.log).
 static int g_http_log_enabled = 0;
+
+// Rate limiter (http.rate_limit) — one token bucket per client key.
+// Bounded like the VM (RATE_LIMIT_MAX_KEYS = 4096); a key flood resets
+// the table rather than growing without bound, and lock failure fails
+// open (a limiter must never turn into a 500).
+#define HTTP_RATE_MAX_KEYS 4096
+typedef struct {
+    char key[46];       // IPv4/IPv6 text or "http.test"
+    double tokens;
+    int64_t last_ms;
+    int used;
+} http_rate_bucket;
+static int g_http_rate_enabled = 0;
+static uint64_t g_http_rate_max_requests = 0;
+static uint64_t g_http_rate_window_ms = 0;
+static http_rate_bucket g_http_rate_buckets[HTTP_RATE_MAX_KEYS];
+static size_t g_http_rate_count = 0;
+static pthread_mutex_t g_http_rate_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Returns 1 when the request is limited (and stores a Retry-After in
+// seconds), 0 when admitted. Mirrors the VM bucket_take/check_rate_limit
+// arithmetic exactly: lazy refill, one token per request, fail open.
+static int http_rate_check(const char *key, uint64_t *retry_after) {
+    if (!g_http_rate_enabled) return 0;
+    if (!key) key = "";
+    if (pthread_mutex_lock(&g_http_rate_lock) != 0) return 0;
+
+    int64_t now = http_monotonic_ms();
+    size_t slot = HTTP_RATE_MAX_KEYS;
+    for (size_t i = 0; i < g_http_rate_count; i++) {
+        if (g_http_rate_buckets[i].used &&
+            strncmp(g_http_rate_buckets[i].key, key, sizeof g_http_rate_buckets[i].key) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == HTTP_RATE_MAX_KEYS) {
+        if (g_http_rate_count >= HTTP_RATE_MAX_KEYS) {
+            memset(g_http_rate_buckets, 0, sizeof g_http_rate_buckets);
+            g_http_rate_count = 0;
+        }
+        slot = g_http_rate_count++;
+        http_rate_bucket *nb = &g_http_rate_buckets[slot];
+        snprintf(nb->key, sizeof nb->key, "%s", key);
+        nb->tokens = (double)g_http_rate_max_requests;
+        nb->last_ms = now;
+        nb->used = 1;
+    }
+
+    http_rate_bucket *b = &g_http_rate_buckets[slot];
+    int64_t elapsed = now - b->last_ms;
+    if (elapsed > 0) {
+        b->tokens = fmin(
+            (double)g_http_rate_max_requests,
+            b->tokens + (double)elapsed * (double)g_http_rate_max_requests /
+                            (double)g_http_rate_window_ms);
+        b->last_ms = now;
+    }
+    if (b->tokens >= 1.0) {
+        b->tokens -= 1.0;
+        pthread_mutex_unlock(&g_http_rate_lock);
+        return 0;
+    }
+    uint64_t wait_ms = (uint64_t)ceil(
+        (1.0 - b->tokens) * (double)g_http_rate_window_ms /
+        (double)g_http_rate_max_requests);
+    // Match the VM's `wait_ms.div_ceil(1000).max(1)`: Retry-After must
+    // round up, or a client retrying at the advertised second still
+    // lands inside the exhausted window.
+    uint64_t retry = wait_ms / 1000 + (wait_ms % 1000 != 0);
+    if (retry == 0) retry = 1;
+    *retry_after = retry;
+    pthread_mutex_unlock(&g_http_rate_lock);
+    return 1;
+}
 
 // zz_http_server(unused, err) — creates an HTTP server handle (int 0;
 // routes live in the global table above).
@@ -4788,7 +5358,7 @@ static int http_dict_find_str(zz_value dict, const char *key, zz_value *out) {
     if (dict.tag != ZZ_DICT || !dict.dict) return 0;
     size_t n = dict.dict->len;
     for (size_t i = 0; i < n; i++) {
-        zz_str *k = dict.dict->entries[i].key;
+        zz_str *k = zz_dict_key_str(&dict.dict->entries[i]);
         zz_value v = dict.dict->entries[i].val;
         if (k && v.tag == ZZ_STR && v.s
             && strlen(key) == k->len && memcmp(key, zz_str_cptr(k), k->len) == 0) {
@@ -4805,7 +5375,7 @@ static int http_dict_find_ci(zz_value dict, const char *key, zz_value *out) {
     if (dict.tag != ZZ_DICT || !dict.dict) return 0;
     size_t n = dict.dict->len;
     for (size_t i = 0; i < n; i++) {
-        zz_str *k = dict.dict->entries[i].key;
+        zz_str *k = zz_dict_key_str(&dict.dict->entries[i]);
         if (k && strlen(key) == k->len
             && strcasecmp(key, zz_str_cptr(k)) == 0) {
             *out = dict.dict->entries[i].val;
@@ -4977,14 +5547,11 @@ static zz_value http_errf(const char *fmt, const char *arg) {
     return zz_variant_err(zz_str_new(buf, n));
 }
 
-// Move the inner value out of a Result/Option variant: frees the variant
-// box only; ownership of the inner's refs transfers to the caller.
-// (zz_clone + zz_release is WRONG here — the clone shares the variant
-// box and the release frees it, leaving a dangling payload pointer.)
+// Move the inner value out of a Result/Option variant: drops the box and
+// transfers ownership of the inner's references to the caller (a shared
+// box yields a clone instead — see `zz_vbox_take`).
 static zz_value http_variant_take(zz_value r) {
-    zz_value out = *r.payload;
-    free(r.payload);
-    return out;
+    return zz_vbox_take(r.payload);
 }
 
 // Parse a body string the way the VM's response/body json accessors do:
@@ -5044,7 +5611,7 @@ zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *
     zz_value hdrs = zz_dict_new();
     size_t n = headers.dict->len;
     for (size_t i = 0; i < n; i++) {
-        zz_str *k = headers.dict->entries[i].key;
+        zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
         zz_value v = headers.dict->entries[i].val;
         if (k && v.tag == ZZ_STR && v.s) {
             zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = k}}, zz_clone(v));
@@ -5225,7 +5792,8 @@ static http_route_entry *http_match_entry(const char *method, const char *path, 
     }
     if (best) {
         for (size_t k = 0; k < best_params.dict->len; k++) {
-            zz_str *ek = best_params.dict->entries[k].key;
+            zz_str *ek = zz_dict_key_str(&best_params.dict->entries[k]);
+            if (!ek) continue; // typed {str: _} params; skip anything else
             zz_value ev = best_params.dict->entries[k].val;
             zz_dict_set(params.dict, (zz_value){ZZ_STR, {.s = ek}}, zz_clone(ev));
         }
@@ -5430,14 +5998,49 @@ static zz_value http_405(const char *allow) {
     return r;
 }
 
+// 429 response for a tripped rate limiter. Mirrors the VM's
+// dispatch_with_request short-circuit: plain-text body + Retry-After.
+static zz_value http_rate_limited(uint64_t retry_after) {
+    static const char msg[] = "Too Many Requests";
+    zz_str *b = str_alloc(sizeof msg - 1);
+    memcpy(zz_str_ptr(b), msg, sizeof msg - 1);
+    zz_str_ptr(b)[sizeof msg - 1] = '\0';
+    b->len = sizeof msg - 1;
+    zz_value hdrs = zz_dict_new();
+    zz_value ct = zz_str_new("text/plain; charset=utf-8", 25);
+    zz_dict_set(hdrs.dict, zz_str_static("Content-Type"), ct);
+    char retry_buf[32];
+    int retry_len = snprintf(retry_buf, sizeof retry_buf, "%llu",
+                             (unsigned long long)retry_after);
+    if (retry_len > 0) {
+        zz_value ra = zz_str_new(retry_buf, (size_t)retry_len);
+        zz_dict_set(hdrs.dict, zz_str_static("Retry-After"), ra);
+    }
+    zz_value resp = http_response_new(429, b, hdrs);
+    zz_release(&hdrs);
+    zz_value owned = {ZZ_STR, {.s = b}};
+    zz_release(&owned);
+    return resp;
+}
+
 // Shared dispatch core: match, middleware chain, handler call. Returns an
 // http.response object in all cases (VM http.test semantics). Sets
 // *failed when the 500 came from the dispatcher itself (no route,
 // middleware violation) as opposed to the handler — http.handle maps the
 // former to .err and the latter to .ok, exactly like the VM.
+// `peer` is the rate-limit key: the socket peer for live requests,
+// "http.test" for in-process dispatch (same key the VM uses).
 static zz_value http_dispatch(const char *method, const char *path, size_t pathlen,
-                              zz_value body, zz_value headers, int *failed) {
+                              zz_value body, zz_value headers, const char *peer,
+                              int *failed) {
     *failed = 0;
+    // Rate limit first, before route/middleware work (VM parity).
+    if (g_http_rate_enabled) {
+        uint64_t retry_after = 0;
+        if (http_rate_check(peer, &retry_after)) {
+            return http_rate_limited(retry_after);
+        }
+    }
     // Split off '?query' (first '?' wins, like the VM's split_once).
     const char *qm = memchr(path, '?', pathlen);
     size_t plen = qm ? (size_t)(qm - path) : pathlen;
@@ -5705,7 +6308,7 @@ static char *http_serialize_response(zz_value *resp, size_t *out_len, int keep_a
     size_t xlen = 0;
     if (h.tag == ZZ_DICT && h.dict) {
         for (size_t i = 0; i < h.dict->len; i++) {
-            zz_str *k = h.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&h.dict->entries[i]);
             zz_value v = h.dict->entries[i].val;
             if (k && v.tag == ZZ_STR && v.s) {
                 xlen += k->len + 2 + v.s->len + 2;
@@ -5732,7 +6335,7 @@ static char *http_serialize_response(zz_value *resp, size_t *out_len, int keep_a
     size_t off = (size_t)hlen;
     if (h.tag == ZZ_DICT && h.dict) {
         for (size_t i = 0; i < h.dict->len; i++) {
-            zz_str *k = h.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&h.dict->entries[i]);
             zz_value v = h.dict->entries[i].val;
             if (k && v.tag == ZZ_STR && v.s) {
                 memcpy(out + off, zz_str_cptr(k), k->len);
@@ -5818,7 +6421,7 @@ static void http_on_head(Connection *c) {
     int ka = 0;
     http_scan_head(head, c->head_end, &cl, &expect, &ka);
     c->keep_alive = ka;
-    if (cl > HTTP_MAX_BODY_BYTES) {
+    if ((uint64_t)cl > g_http_limits.max_body_bytes) {
         http_reply(c, 413, "payload too large", 17);
         return;
     }
@@ -5871,7 +6474,11 @@ static void http_run_handler(Connection *c) {
     const char *tg = head + c->req_tgt_off;
     size_t tl = c->req_tgt_len;
     // Persistence stashed at head time by the fused scan (no rescan).
+    // Enforce max_reqs_conn on the response that reaches the cap so the
+    // final reply advertises close and the slot is reclaimed.
+    c->reqs_served++;
     int keep_alive = c->keep_alive;
+    if (c->reqs_served >= g_http_limits.max_reqs_conn) keep_alive = 0;
     // ── FAST PATH (socket only) ──
     // No middleware, matched entry provably ignores its request: skip
     // request-dict construction AND (for string results) the
@@ -5885,7 +6492,7 @@ static void http_run_handler(Connection *c) {
     // Zero-alloc probe: exact routes hit without touching the heap.
     // Param patterns (":id", "*") fall back to the allocating matcher
     // only when the exact probe misses.
-    if (g_http_middleware_count == 0) {
+    if (g_http_middleware_count == 0 && !g_http_rate_enabled) {
         const char *qm0 = memchr(tg, '?', tl);
         size_t plen0 = qm0 ? (size_t)(qm0 - tg) : tl;
         http_route_entry *fe = http_match_exact(method, tg, plen0);
@@ -5983,7 +6590,7 @@ static void http_run_handler(Connection *c) {
         }
         zz_value bodyval = {ZZ_STR, {.s = bs}};
         int failed = 0;
-        zz_value resp = http_dispatch(method, tg, tl, bodyval, headers, &failed);
+        zz_value resp = http_dispatch(method, tg, tl, bodyval, headers, c->peer, &failed);
         zz_release(&bodyval);
         // The response owns its copies now — drop request bytes before
         // serializing so peak stays at one body, not two.
@@ -6068,7 +6675,7 @@ zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value 
         return zz_variant_err(zz_str_static("std.http.test: expected (server, method, path, body) strings"));
     }
     int failed = 0;
-    zz_value out = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), &failed);
+    zz_value out = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), "http.test", &failed);
     *err = 0;
     return out;
 }
@@ -6084,7 +6691,7 @@ zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_valu
         return zz_variant_err(zz_str_static("std.http.handle: expected (server, method, path, body) strings"));
     }
     int failed = 0;
-    zz_value resp = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), &failed);
+    zz_value resp = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, zz_dict_new(), "http.test", &failed);
     *err = 0;
     zz_value text = zz_object_get_field(&resp, "text");
     zz_value out;
@@ -6116,16 +6723,75 @@ zz_value zz_http_log(zz_value server, zz_value enabled, int *err) {
     return server;
 }
 
-// zz_http_listen(server, port, err) — starts HTTP server, blocks forever
-zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
-    (void)server;
+// zz_http_rate_limit(server, max_requests, window_ms, err) — arms the
+// per-peer token bucket. Validates like the VM (positive ints).
+zz_value zz_http_rate_limit(zz_value server, zz_value max_requests,
+                            zz_value window_ms, int *err) {
+    *err = 0;
+    if (max_requests.tag != ZZ_INT || max_requests.i <= 0 ||
+        window_ms.tag != ZZ_INT || window_ms.i <= 0) {
+        *err = 1;
+        return server;
+    }
+    if (pthread_mutex_lock(&g_http_rate_lock) == 0) {
+        memset(g_http_rate_buckets, 0, sizeof g_http_rate_buckets);
+        g_http_rate_count = 0;
+        pthread_mutex_unlock(&g_http_rate_lock);
+    }
+    g_http_rate_max_requests = (uint64_t)max_requests.i;
+    g_http_rate_window_ms = (uint64_t)window_ms.i;
+    g_http_rate_enabled = 1;
+    return server;
+}
+
+// Parse `http.listen_cfg` options. Unknown keys and non-positive
+// values are rejected like the VM's EvalError path.
+static int http_apply_listen_opts(zz_value opts, int *err) {
+    if (opts.tag != ZZ_DICT || !opts.dict) {
+        *err = 1;
+        return 0;
+    }
+    for (size_t i = 0; i < opts.dict->len; i++) {
+        zz_str *k = zz_dict_key_str(&opts.dict->entries[i]);
+        zz_value v = opts.dict->entries[i].val;
+        if (!k || v.tag != ZZ_INT || v.i <= 0) {
+            *err = 1;
+            return 0;
+        }
+        const char *key = zz_str_cptr(k);
+        size_t kl = k->len;
+        uint64_t n = (uint64_t)v.i;
+        if (kl == 7 && memcmp(key, "read_ms", 7) == 0) {
+            g_http_limits.read_ms = n;
+        } else if (kl == 13 && memcmp(key, "max_reqs_conn", 13) == 0) {
+            g_http_limits.max_reqs_conn = n;
+        } else if (kl == 14 && memcmp(key, "max_body_bytes", 14) == 0) {
+            g_http_limits.max_body_bytes = n;
+        } else if (kl == 11 && memcmp(key, "shutdown_ms", 11) == 0) {
+            g_http_limits.shutdown_ms = n;
+        } else {
+            *err = 1;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// Shared blocking server loop. Limits are set by the public wrappers
+// before this runs.
+static zz_value http_listen_impl(zz_value port, int *err) {
     *err = 0;
 
     int p = (port.tag == ZZ_INT) ? (int)port.i : 8080;
     if (p <= 0 || p > 65535) p = 8080;
 
-    // Ignore SIGPIPE to avoid crash on closed connections
+    // Ignore SIGPIPE to avoid crash on closed connections.
     signal(SIGPIPE, SIG_IGN);
+#ifndef ZZ_OS_WINDOWS
+    g_http_shutdown_requested = 0;
+    g_http_shutdown_signals = 0;
+#endif
+    http_install_shutdown_handlers();
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
@@ -6211,6 +6877,25 @@ zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
     g_http_server_running = 0;
     close(listen_fd);
     return zz_unit();
+}
+
+// zz_http_listen(server, port, err) — starts HTTP server with defaults,
+// blocks forever (or until SIGINT/SIGTERM drains).
+zz_value zz_http_listen(zz_value server, zz_value port, int *err) {
+    (void)server;
+    http_limits_default();
+    return http_listen_impl(port, err);
+}
+
+// zz_http_listen_cfg(server, port, opts, err) — starts HTTP server with
+// per-server limits from `opts`: read_ms, max_reqs_conn, max_body_bytes,
+// shutdown_ms.
+zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *err) {
+    (void)server;
+    *err = 0;
+    http_limits_default();
+    if (!http_apply_listen_opts(opts, err)) return zz_unit();
+    return http_listen_impl(port, err);
 }
 
 // ---- entry --------------------------------------------------------------
@@ -6338,6 +7023,15 @@ zz_value zz_typeof(zz_value v, int *err) {
         default: name = "unknown"; break;
     }
     return zz_str_static(name);
+}
+
+// clone(v) — deep copy returning a fully independent value (#267).
+// Reads/binds share backing stores, so this is the explicit way to pin
+// a snapshot regardless of ownership analysis. Cycle-safe via the
+// dup memo (same helper as thread crossings).
+zz_value zz_clone_deep(zz_value v, int *err) {
+    (void)err;
+    return zz_value_dup(v);
 }
 
 // int(v) — parse to Option[int] (mirrors the VM `conv_int`).
@@ -6955,8 +7649,9 @@ zz_value zz_env_vars(zz_value unused, int *err) {
             for (size_t i = 1; i < n; i++) {
                 size_t j = i;
                 while (j > 0) {
-                    zz_str *a = out.dict->entries[idx[j - 1]].key;
-                    zz_str *b = out.dict->entries[idx[j]].key;
+                    zz_str *a = zz_dict_key_str(&out.dict->entries[idx[j - 1]]);
+                    zz_str *b = zz_dict_key_str(&out.dict->entries[idx[j]]);
+                    if (!a || !b) break; // env maps are {str: str}
                     size_t m = a->len < b->len ? a->len : b->len;
                     int c = memcmp(zz_str_cptr(a), zz_str_cptr(b), m);
                     if (c == 0) c = (a->len < b->len) ? -1 : (a->len > b->len);
@@ -7085,6 +7780,288 @@ zz_value zz_env_temp_dir(zz_value unused, int *err) {
     if (v && *v) return zz_str_new(v, strlen(v));
     return zz_str_static("/tmp");
 #endif
+}
+
+// ---- std.test pro helpers (P2) -----------------------------------------
+// Value convention (NOT abort): success → `.ok(v)`, failure → `.err(msg)`
+// mirroring `zz_fs_*`. Sanitization mirrors `natives/test_helpers`.
+
+static unsigned long long zz_test_counter = 0;
+
+zz_value zz_test_temp_dir(zz_value prefix, int *err) {
+    (void)err;
+    const char *pre = "";
+    size_t pre_len = 0;
+    if (prefix.tag == ZZ_STR && prefix.s) {
+        pre = zz_str_cptr(prefix.s);
+        pre_len = prefix.s->len;
+    } else if (prefix.tag != ZZ_STR) {
+        *err = 1;
+        return zz_unit();
+    }
+    // Sanitize into single component (max 64): separators/NUL → `_`.
+    char clean[65];
+    size_t cn = 0;
+    if (pre_len == 0) {
+        memcpy(clean, "zz-test", 7);
+        cn = 7;
+    } else {
+        for (size_t i = 0; i < pre_len && cn < 64; i++) {
+            char c = pre[i];
+            clean[cn++] = (c == '/' || c == '\\' || c == '\0') ? '_' : c;
+        }
+    }
+    clean[cn] = '\0';
+    // Collapse `..` runs (bounded passes: length only shrinks).
+    for (int pass = 0; pass < 4; pass++) {
+        char *dot = strstr(clean, "..");
+        if (!dot) break;
+        dot[0] = '_';
+        dot[1] = '_';
+    }
+    // Base dir (same rule as zz_env_temp_dir).
+#ifdef ZZ_OS_WINDOWS
+    char wbase[32768];
+    DWORD wn = GetTempPathA((DWORD)sizeof wbase, wbase);
+    const char *base;
+    char basebuf[32768];
+    if (wn == 0 || wn >= sizeof wbase) {
+        base = "C:\\Windows\\Temp";
+    } else {
+        while (wn > 1 && (wbase[wn - 1] == '\\' || wbase[wn - 1] == '/')) wbase[--wn] = '\0';
+        memcpy(basebuf, wbase, wn + 1);
+        base = basebuf;
+    }
+#else
+    const char *tmpd = getenv("TMPDIR");
+    const char *base = (tmpd && *tmpd) ? tmpd : "/tmp";
+#endif
+    unsigned long long seq = __atomic_fetch_add(&zz_test_counter, 1ULL, __ATOMIC_RELAXED);
+#ifdef ZZ_OS_WINDOWS
+    unsigned long long pid = (unsigned long long)GetCurrentProcessId();
+#else
+    unsigned long long pid = (unsigned long long)getpid();
+#endif
+#ifdef ZZ_OS_WINDOWS
+    unsigned long long nano = (unsigned long long)GetTickCount64() * 1000000ULL + seq;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    unsigned long long nano = (unsigned long long)ts.tv_nsec + seq;
+#endif
+    char path[4096];
+    int n = snprintf(path, sizeof path, "%s/%s-%llu-%llu-%llu", base, clean, pid, seq, nano);
+    if (n <= 0 || (size_t)n >= sizeof path) {
+        return zz_variant_err(zz_str_static("test.temp_dir:path_too_long"));
+    }
+#ifdef ZZ_OS_WINDOWS
+    int r = _mkdir(path);
+#else
+    int r = mkdir(path, 0700);
+#endif
+    if (r != 0) {
+        char buf[4128];
+        int m = snprintf(buf, sizeof buf, "test.temp_dir:io_error: %s (%s)", path, strerror(errno));
+        if (m < 0) return zz_variant_err(zz_str_static("test.temp_dir:io_error"));
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)m)));
+    }
+    return zz_variant_ok(zz_str_new(path, (size_t)n));
+}
+
+zz_value zz_test_free_port(zz_value unused, int *err) {
+    (void)unused;
+    (void)err;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return zz_variant_err(zz_str_static("test.free_port:socket"));
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        char buf[192];
+        int n = snprintf(buf, sizeof buf, "test.free_port:bind: %s", strerror(errno));
+        close(fd);
+        if (n < 0) return zz_variant_err(zz_str_static("test.free_port:bind"));
+        return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
+    }
+    socklen_t sl = sizeof sa;
+    if (getsockname(fd, (struct sockaddr *)&sa, &sl) != 0) {
+        close(fd);
+        return zz_variant_err(zz_str_static("test.free_port:addr"));
+    }
+    int port = ntohs(sa.sin_port);
+    close(fd);
+    if (port <= 0 || port > 65535) {
+        return zz_variant_err(zz_str_static("test.free_port:addr"));
+    }
+    return zz_variant_ok(zz_int((int64_t)port));
+}
+
+// ---- snapshot assertion (P3) -------------------------------------------
+// Mirrors `natives/assert::assert_snapshot_fn`: dir from $ZZ_SNAPSHOTS_DIR
+// (else `./snapshots`), update on $ZZ_UPDATE_SNAPSHOTS=1, same name rules,
+// same first-line messages. Mismatch body is a simple Left/Right pair
+// (matching the C twin convention of zz_assert_eq, not the VM Myers diff);
+// success paths are byte-identical and failure paths share the `error:`
+// prefix + exit code.
+
+static int zz_snap_name_valid(const char *s, size_t n) {
+    if (n == 0 || n > 128) return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\0' || s[i] == '/' || s[i] == '\\') return 0;
+    }
+    // Reject `.`, `..`, and anything containing `..` (keeps both engines
+    // trivially identical; legit `v1..v2` names are out of scope).
+    if ((n == 1 && s[0] == '.') || (n == 2 && s[0] == '.' && s[1] == '.')) return 0;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (s[i] == '.' && s[i + 1] == '.') return 0;
+    }
+    return 1;
+}
+
+// mkdir -p (bounded depth; tolerates EEXIST races).
+static int zz_snap_mkdir_p(const char *path) {
+    char tmp[4096];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof tmp) return -1;
+    memcpy(tmp, path, len + 1);
+    for (size_t i = 1; i <= len; i++) {
+        if (tmp[i] == '/' || tmp[i] == '\\' || tmp[i] == '\0') {
+            char save = tmp[i];
+            tmp[i] = '\0';
+            if (strlen(tmp) > 0) {
+#ifdef ZZ_OS_WINDOWS
+                _mkdir(tmp);
+#else
+                if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+#endif
+            }
+            tmp[i] = save;
+        }
+    }
+    return 0;
+}
+
+zz_value zz_assert_snapshot(zz_value actual, zz_value name, int *err) {
+    (void)err;
+    if (actual.tag != ZZ_STR || !actual.s || name.tag != ZZ_STR || !name.s) {
+        char *as = zz_value_to_string(&actual);
+        char *ns = zz_value_to_string(&name);
+        fprintf(stderr, "error: `assert_snapshot` expects `str` (actual, name), got (%s, %s)\n", as, ns);
+        free(as);
+        free(ns);
+        fflush(stderr);
+        exit(1);
+    }
+    const char *nptr = zz_str_cptr(name.s);
+    size_t nlen = name.s->len;
+    if (!zz_snap_name_valid(nptr, nlen)) {
+        fprintf(stderr, "error: `assert_snapshot` expects a snapshot name without path separators (`/`, `\\`, `..`)\n");
+        fflush(stderr);
+        exit(1);
+    }
+    char namebuf[129];
+    memcpy(namebuf, nptr, nlen);
+    namebuf[nlen] = '\0';
+    const char *dir = getenv("ZZ_SNAPSHOTS_DIR");
+    if (!dir || !*dir) dir = "snapshots";
+    char path[4352];
+    int pn = snprintf(path, sizeof path, "%s/%s.snap", dir, namebuf);
+    if (pn <= 0 || (size_t)pn >= sizeof path) {
+        fprintf(stderr, "error: test.snapshot: snapshot path too long\n");
+        fflush(stderr);
+        exit(1);
+    }
+    const char *upd = getenv("ZZ_UPDATE_SNAPSHOTS");
+    const char *abuf = zz_str_cptr(actual.s);
+    size_t alen = actual.s->len;
+    if (upd && strcmp(upd, "1") == 0) {
+        // Split dir for mkdir (path is "<dir>/<name>.snap").
+        char dbuf[4224];
+        size_t dn = (size_t)pn - (nlen + 6);
+        if (dn >= sizeof dbuf) {
+            fprintf(stderr, "error: test.snapshot: snapshot path too long\n");
+            fflush(stderr);
+            exit(1);
+        }
+        memcpy(dbuf, path, dn);
+        dbuf[dn] = '\0';
+        if (zz_snap_mkdir_p(dbuf) != 0) {
+            fprintf(stderr, "error: test.snapshot: cannot create snapshots dir\n");
+            fflush(stderr);
+            exit(1);
+        }
+        FILE *f = fopen(path, "wb");
+        if (!f) {
+            fprintf(stderr, "error: test.snapshot: cannot write snapshot \"%s\"\n", namebuf);
+            fflush(stderr);
+            exit(1);
+        }
+        if (alen > 0 && fwrite(abuf, 1, alen, f) != alen) {
+            fclose(f);
+            fprintf(stderr, "error: test.snapshot: cannot write snapshot \"%s\"\n", namebuf);
+            fflush(stderr);
+            exit(1);
+        }
+        fclose(f);
+        return zz_unit();
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: Snapshot missing: \"%s\" (run with --update-snapshots to create)\n", namebuf);
+        fflush(stderr);
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    char *exp = (char *)malloc((size_t)sz + 1);
+    if (!exp) {
+        fclose(f);
+        fprintf(stderr, "error: test.snapshot: out of memory\n");
+        fflush(stderr);
+        exit(1);
+    }
+    size_t got = fread(exp, 1, (size_t)sz, f);
+    fclose(f);
+    int same = (got == alen) && (alen == 0 || memcmp(exp, abuf, alen) == 0);
+    if (same) {
+        free(exp);
+        return zz_unit();
+    }
+    // Binary-safe body: lengths + raw bytes (VM renders a Myers diff here;
+    // the C twin keeps the same first line, `error:` prefix, and exit code,
+    // matching the zz_assert_eq twin convention).
+    fprintf(stderr, "error: Assertion Failed: Snapshot mismatch for \"%s\"\n", namebuf);
+    fprintf(stderr, "- Stored (%zu bytes):\n", got);
+    if (got > 0) fwrite(exp, 1, got, stderr);
+    fprintf(stderr, "\n+ Actual (%zu bytes):\n", alen);
+    if (alen > 0) fwrite(abuf, 1, alen, stderr);
+    fprintf(stderr, "\n");
+    free(exp);
+    fflush(stderr);
+    exit(1);
+}
+
+// ---- std.test pro helpers: black_box -----------------------------------
+// Optimization barrier for benchmarks (mirrors `test.black_box`): the
+// identity function the C compiler cannot see through. The volatile store
+// of the value's address forces clang to materialize `v` (it cannot prove
+// the address doesn't escape), and the memory clobber stops load/store
+// motion across the call — the standard DoNotOptimize shape. Without this,
+// clang eliminates side-effect-free bench bodies and AOT timings measure
+// nothing while the VM measures the real work.
+static zz_value const * volatile zz_black_box_ptr;
+
+zz_value zz_black_box(zz_value v, int *err) {
+    (void)err;
+    zz_black_box_ptr = &v;
+#if !defined(ZZ_OS_WINDOWS)
+    __asm__ volatile("" : : "r"(&v) : "memory");
+#endif
+    return zz_clone(v);
 }
 
 // env.user() → Option<str>
@@ -7279,16 +8256,6 @@ static const char *zz_fs_code(int e) {
     }
 }
 
-// Directories can never be read as text: `ftell` on a directory stream
-// reports garbage sizes on some libcs, so the sized `str_alloc` below
-// would abort the process with out-of-memory. The VM's `IsADirectory`
-// kind falls through to `io_error`, so reject up front with the same
-// code on both engines (EIO maps to `io_error`, byte-identical).
-static int zz_fs_is_dir_path(const char *p) {
-    struct stat st;
-    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 // `fs:<op>:<code>: <path>` as an `.err(str)`.
 static zz_value zz_fs_err1(const char *op, const char *path, int e) {
     const char *code = zz_fs_code(e);
@@ -7322,36 +8289,506 @@ static const char *zz_fs_cstr(zz_value v) {
     return zz_str_cptr(v.s);
 }
 
+// ── Content cache (AOT twin of the VM's `fs/cache.rs`) ────────────────
+//
+// Compiler-shaped workloads read each file several times per run
+// (`scan_counts`, then `is_generated`, sometimes `read`). A stat-validated
+// cache turns every repeat into one `stat` + a refcount bump instead of
+// open/read/allocate. Entries are keyed by path and validated by
+// size+mtime+ctime+ino+dev; `std.fs` mutators invalidate eagerly.
+//
+// Sharded chained hash, FIFO eviction per shard, 96 MiB default budget,
+// 8 MiB max entry. `ZZ_FS_CACHE=0` / `ZZ_FS_CACHE_MB=<n>` configure it.
+
+#define ZZ_FS_CACHE_SHARDS 32
+#define ZZ_FS_CACHE_DEFAULT_MB 96
+#define ZZ_FS_CACHE_MAX_ENTRY ((size_t)8 * 1024 * 1024)
+#define ZZ_FS_CACHE_MAX_PER_SHARD 512
+
+typedef struct zz_fs_cache_ent {
+    struct zz_fs_cache_ent *prev;
+    struct zz_fs_cache_ent *next;
+    char *path;
+    size_t path_len;
+    long long size;
+    long long mtime_ns;
+    long long ctime_ns;
+    unsigned long long dev;
+    unsigned long long ino;
+    zz_str *str;       // owned reference, or NULL
+    zz_bytes *bytes;   // owned reference, or NULL
+    int nul_known;
+    int nul;
+    int utf8_known;
+    int utf8;
+} zz_fs_cache_ent;
+
+typedef struct {
+    zz_fs_cache_ent *head;
+    zz_fs_cache_ent *tail;
+    size_t count;
+    size_t bytes;
+} zz_fs_cache_shard;
+
+static zz_fs_cache_shard zz_fs_cache_shards[ZZ_FS_CACHE_SHARDS];
+static pthread_mutex_t zz_fs_cache_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t zz_fs_cache_once = PTHREAD_ONCE_INIT;
+static int zz_fs_cache_state = 0;
+static size_t zz_fs_cache_shard_budget =
+    ((size_t)ZZ_FS_CACHE_DEFAULT_MB * 1024 * 1024) / ZZ_FS_CACHE_SHARDS;
+static size_t zz_fs_cache_max_entry = ZZ_FS_CACHE_MAX_ENTRY;
+
+static void zz_fs_cache_init(void) {
+    const char *v = getenv("ZZ_FS_CACHE");
+    int on = !(v != NULL && strcmp(v, "0") == 0);
+    const char *mb = getenv("ZZ_FS_CACHE_MB");
+    long n = ZZ_FS_CACHE_DEFAULT_MB;
+    if (mb != NULL) {
+        char *end = NULL;
+        long v = strtol(mb, &end, 10);
+        // Match the VM's `parse`: only a whole valid integer changes the
+        // budget; garbage keeps the default.
+        if (end != mb && *end == '\0') n = v;
+    }
+    if (n <= 0) { on = 0; n = 0; }
+    if (n > 1048576) n = 1048576; // 1 TiB ceiling: keep the byte math in range
+    size_t budget = (size_t)n * 1024u * 1024u;
+    size_t shard = budget / ZZ_FS_CACHE_SHARDS;
+    if (shard < 65536) shard = 65536;
+    zz_fs_cache_shard_budget = shard;
+    zz_fs_cache_max_entry =
+        ZZ_FS_CACHE_MAX_ENTRY < budget ? ZZ_FS_CACHE_MAX_ENTRY : (budget ? budget : 1);
+    zz_fs_cache_state = on ? 1 : 0;
+}
+
+static int zz_fs_cache_on(void) {
+    pthread_once(&zz_fs_cache_once, zz_fs_cache_init);
+    return zz_fs_cache_state == 1;
+}
+
+static size_t zz_fs_cache_bucket(const char *p, size_t n) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < n; i++) {
+        h ^= (unsigned char)p[i];
+        h *= 0x100000001b3ULL;
+    }
+    return (size_t)(h & (ZZ_FS_CACHE_SHARDS - 1));
+}
+
+#if defined(ZZ_OS_WINDOWS)
+static long long zz_fs_mtime_ns(const struct stat *st) {
+    return (long long)st->st_mtime * 1000000000LL;
+}
+static long long zz_fs_ctime_ns(const struct stat *st) {
+    return (long long)st->st_ctime * 1000000000LL;
+}
+static int zz_fs_is_regular(const struct stat *st) {
+    return (st->st_mode & _S_IFMT) == _S_IFREG;
+}
+#else
+static long long zz_fs_mtime_ns(const struct stat *st) {
+#ifdef __APPLE__
+    return (long long)st->st_mtimespec.tv_sec * 1000000000LL + st->st_mtimespec.tv_nsec;
+#else
+    return (long long)st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
+#endif
+}
+static long long zz_fs_ctime_ns(const struct stat *st) {
+#ifdef __APPLE__
+    return (long long)st->st_ctimespec.tv_sec * 1000000000LL + st->st_ctimespec.tv_nsec;
+#else
+    return (long long)st->st_ctim.tv_sec * 1000000000LL + st->st_ctim.tv_nsec;
+#endif
+}
+static int zz_fs_is_regular(const struct stat *st) {
+    return S_ISREG(st->st_mode);
+}
+#endif
+
+static int zz_fs_fp_match(const zz_fs_cache_ent *e, const struct stat *st) {
+    return e->size == (long long)st->st_size
+        && e->mtime_ns == zz_fs_mtime_ns(st)
+        && e->ctime_ns == zz_fs_ctime_ns(st)
+        && e->dev == (unsigned long long)st->st_dev
+        && e->ino == (unsigned long long)st->st_ino;
+}
+
+static int zz_fs_fp_same(const struct stat *a, const struct stat *b) {
+    return a->st_size == b->st_size
+        && zz_fs_mtime_ns(a) == zz_fs_mtime_ns(b)
+        && zz_fs_ctime_ns(a) == zz_fs_ctime_ns(b)
+        && (unsigned long long)a->st_dev == (unsigned long long)b->st_dev
+        && (unsigned long long)a->st_ino == (unsigned long long)b->st_ino;
+}
+
+static void zz_fs_cache_put(const char *p, size_t n, const struct stat *st,
+                            zz_str *s, zz_bytes *b);
+static int zz_fs_cacheable(const char *p, size_t n, const struct stat *st);
+
+static void zz_fs_cache_store_bytes(const char *p, size_t plen,
+                                    const struct stat *before, zz_bytes *b) {
+    if (b == NULL || !zz_fs_cacheable(p, plen, before)) return;
+    // Whole-snapshot only: virtual files (sysfs/procfs) report a size that
+    // differs from the bytes they yield, and a raced read lands here too.
+    if (b->len != (size_t)before->st_size) return;
+    struct stat after;
+    if (stat(p, &after) != 0 || !zz_fs_fp_same(before, &after)) return;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_put(p, plen, before, NULL, b);
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+// Cacheable: regular, non-empty, bounded, and no embedded NUL in the path.
+static int zz_fs_cacheable(const char *p, size_t n, const struct stat *st) {
+    if (!zz_fs_cache_on()) return 0;
+    if (strlen(p) != n) return 0;
+    if (!zz_fs_is_regular(st)) return 0;
+    if (st->st_size <= 0) return 0;
+    if ((unsigned long long)st->st_size > zz_fs_cache_max_entry) return 0;
+    return 1;
+}
+
+static void zz_fs_cache_free_ent(zz_fs_cache_ent *e) {
+    if (e->str != NULL) {
+        zz_value v = (zz_value){ZZ_STR, {.s = e->str}};
+        zz_release(&v);
+    }
+    if (e->bytes != NULL) zz_release_bytes(e->bytes);
+    free(e->path);
+    free(e);
+}
+
+// Lock held.
+static void zz_fs_cache_unlink(zz_fs_cache_shard *sh, zz_fs_cache_ent *e) {
+    if (e->prev) e->prev->next = e->next;
+    else sh->head = e->next;
+    if (e->next) e->next->prev = e->prev;
+    else sh->tail = e->prev;
+    sh->count--;
+    size_t used = e->str != NULL ? e->str->len : (e->bytes != NULL ? e->bytes->len : 0);
+    if (sh->bytes >= used) sh->bytes -= used;
+    else sh->bytes = 0;
+    zz_fs_cache_free_ent(e);
+}
+
+// Lock held. Returns the entry for `p` or NULL.
+static zz_fs_cache_ent *zz_fs_cache_find(const char *p, size_t n) {
+    zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
+    for (zz_fs_cache_ent *e = sh->head; e != NULL; e = e->next) {
+        if (e->path_len == n && memcmp(e->path, p, n) == 0) return e;
+    }
+    return NULL;
+}
+
+// Lock held. Drop the oldest entries until the shard is inside budget.
+static void zz_fs_cache_evict(zz_fs_cache_shard *sh) {
+    while (sh->bytes > zz_fs_cache_shard_budget
+           || sh->count > ZZ_FS_CACHE_MAX_PER_SHARD) {
+        if (sh->tail == NULL) break;
+        zz_fs_cache_unlink(sh, sh->tail);
+    }
+}
+
+// Try a cache hit for `p`; `st` is the caller's fresh stat. On hit returns
+// a retained `zz_str` (caller owns one reference) and check flags.
+static zz_str *zz_fs_cache_take_str(const char *p, size_t n, const struct stat *st,
+                                    int *nul_known, int *nul,
+                                    int *utf8_known, int *utf8) {
+    *nul_known = 0;
+    *utf8_known = 0;
+    if (!zz_fs_cacheable(p, n, st)) return NULL;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
+    if (e == NULL || !zz_fs_fp_match(e, st)) {
+        if (e != NULL) {
+            zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
+            zz_fs_cache_unlink(sh, e);
+        }
+        pthread_mutex_unlock(&zz_fs_cache_mu);
+        return NULL;
+    }
+    if (e->str == NULL && e->bytes != NULL) {
+        size_t len = e->bytes->len;
+        zz_str *s = str_alloc(len);
+        if (len > 0) {
+            memcpy(zz_str_ptr(s), e->bytes->buf->data + e->bytes->off, len);
+        }
+        zz_str_ptr(s)[len] = '\0';
+        s->len = len;
+        e->str = s; // cache owns the initial reference
+    }
+    zz_str *out = e->str;
+    if (out != NULL) __atomic_add_fetch(&out->refs, 1, __ATOMIC_RELAXED);
+    if (e->nul_known) { *nul_known = 1; *nul = e->nul; }
+    if (e->utf8_known) { *utf8_known = 1; *utf8 = e->utf8; }
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+    return out;
+}
+
+static zz_bytes *zz_fs_cache_take_bytes(const char *p, size_t n, const struct stat *st) {
+    if (!zz_fs_cacheable(p, n, st)) return NULL;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
+    if (e == NULL || !zz_fs_fp_match(e, st)) {
+        if (e != NULL) {
+            zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
+            zz_fs_cache_unlink(sh, e);
+        }
+        pthread_mutex_unlock(&zz_fs_cache_mu);
+        return NULL;
+    }
+    if (e->bytes == NULL && e->str != NULL) {
+        zz_value v = zz_bytes_new((const unsigned char *)zz_str_ptr(e->str), e->str->len);
+        if (v.tag != ZZ_BYTES) {
+            pthread_mutex_unlock(&zz_fs_cache_mu);
+            return NULL;
+        }
+        e->bytes = v.bytes; // cache owns the initial reference
+    }
+    zz_bytes *out = e->bytes;
+    if (out != NULL) zz_retain_bytes(out);
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+    return out;
+}
+
+// Lock held. Insert a new entry at the head, replacing any same-path entry.
+static void zz_fs_cache_put(const char *p, size_t n, const struct stat *st,
+                            zz_str *s, zz_bytes *b) {
+    if (s == NULL && b == NULL) return;
+    zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
+    zz_fs_cache_ent *old = NULL;
+    for (zz_fs_cache_ent *e = sh->head; e != NULL; e = e->next) {
+        if (e->path_len == n && memcmp(e->path, p, n) == 0) { old = e; break; }
+    }
+    if (old != NULL) zz_fs_cache_unlink(sh, old);
+    zz_fs_cache_ent *e = (zz_fs_cache_ent *)calloc(1, sizeof(zz_fs_cache_ent));
+    if (e == NULL) return;
+    e->path = (char *)malloc(n + 1);
+    if (e->path == NULL) { free(e); return; }
+    memcpy(e->path, p, n);
+    e->path[n] = '\0';
+    e->path_len = n;
+    e->size = (long long)st->st_size;
+    e->mtime_ns = zz_fs_mtime_ns(st);
+    e->ctime_ns = zz_fs_ctime_ns(st);
+    e->dev = (unsigned long long)st->st_dev;
+    e->ino = (unsigned long long)st->st_ino;
+    e->str = s;
+    e->bytes = b;
+    if (s != NULL) __atomic_add_fetch(&s->refs, 1, __ATOMIC_RELAXED);
+    if (b != NULL) zz_retain_bytes(b);
+    e->next = sh->head;
+    if (sh->head) sh->head->prev = e;
+    sh->head = e;
+    if (sh->tail == NULL) sh->tail = e;
+    sh->count++;
+    sh->bytes += s != NULL ? s->len : (b != NULL ? b->len : 0);
+    zz_fs_cache_evict(sh);
+}
+
+// Lock held. Memoize NUL/UTF-8 checks for an existing entry.
+static void zz_fs_cache_note_locked(const char *p, size_t n,
+                                    int nul_known, int nul,
+                                    int utf8_known, int utf8) {
+    zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
+    if (e == NULL) return;
+    if (nul_known && !e->nul_known) { e->nul_known = 1; e->nul = nul; }
+    if (utf8_known && !e->utf8_known) { e->utf8_known = 1; e->utf8 = utf8; }
+}
+
+static void zz_fs_cache_note(const char *p, size_t n,
+                             int nul_known, int nul,
+                             int utf8_known, int utf8) {
+    if (!zz_fs_cache_on() || strlen(p) != n) return;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_note_locked(p, n, nul_known, nul, utf8_known, utf8);
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+static void zz_fs_cache_remove_n(const char *p, size_t n) {
+    if (!zz_fs_cache_on() || p == NULL) return;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
+    if (e != NULL) {
+        zz_fs_cache_unlink(&zz_fs_cache_shards[zz_fs_cache_bucket(p, n)], e);
+    }
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+static void zz_fs_cache_invalidate_n(const char *p, size_t n) {
+    if (!zz_fs_cache_on() || p == NULL) return;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    for (size_t i = 0; i < ZZ_FS_CACHE_SHARDS; i++) {
+        zz_fs_cache_ent *e = zz_fs_cache_shards[i].head;
+        while (e != NULL) {
+            zz_fs_cache_ent *next = e->next;
+            if (e->path_len == n && memcmp(e->path, p, n) == 0) {
+                zz_fs_cache_unlink(&zz_fs_cache_shards[i], e);
+            }
+            e = next;
+        }
+    }
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+static void zz_fs_cache_invalidate(const char *p) {
+    if (p != NULL) zz_fs_cache_invalidate_n(p, strlen(p));
+}
+
+static void zz_fs_cache_invalidate_value(zz_value path) {
+    if (path.tag == ZZ_STR && path.s != NULL) {
+        zz_fs_cache_invalidate_n(zz_str_ptr(path.s), path.s->len);
+    }
+}
+
+static void zz_fs_cache_invalidate_prefix(const char *p) {
+    if (!zz_fs_cache_on() || p == NULL) return;
+    size_t n = strlen(p);
+    if (n == 0) return;
+    while (n > 1 && (p[n - 1] == '/' || p[n - 1] == '\\')) n--;
+    pthread_mutex_lock(&zz_fs_cache_mu);
+    for (size_t i = 0; i < ZZ_FS_CACHE_SHARDS; i++) {
+        zz_fs_cache_ent *e = zz_fs_cache_shards[i].head;
+        while (e != NULL) {
+            zz_fs_cache_ent *next = e->next;
+            int match = e->path_len == n && memcmp(e->path, p, n) == 0;
+            if (!match && n == 1 && p[0] == '/') match = 1;
+            if (!match && e->path_len > n && memcmp(e->path, p, n) == 0
+                && (e->path[n] == '/' || e->path[n] == '\\')) {
+                match = 1;
+            }
+            if (match) zz_fs_cache_unlink(&zz_fs_cache_shards[i], e);
+            e = next;
+        }
+    }
+    pthread_mutex_unlock(&zz_fs_cache_mu);
+}
+
+// Read a file into a `zz_str`, using the cache when possible. `*e_out` is
+// set on failure (0 = success). Check flags describe which NUL/UTF-8
+// answers are already memoized; callers compute and memoize the rest.
+static zz_str *zz_fs_load_str(const char *p, size_t plen, int *e_out,
+                              int *nul_known, int *nul,
+                              int *utf8_known, int *utf8) {
+    *e_out = 0;
+    *nul_known = 0;
+    *nul = 0;
+    *utf8_known = 0;
+    *utf8 = 0;
+    // An embedded NUL can never name the file the caller asked for; Rust's
+    // `File::open` rejects it, so do not read the truncated prefix.
+    if (strlen(p) != plen) { *e_out = EINVAL; return NULL; }
+
+    // Probe first: a cache hit is a single `stat`, so do not spawn a
+    // replacement worker for it. Only the miss path below does real I/O.
+    struct stat before;
+    if (stat(p, &before) != 0) {
+        zz_fs_cache_remove_n(p, plen);
+        *e_out = errno;
+        return NULL;
+    }
+    if (S_ISDIR(before.st_mode)) {
+        zz_fs_cache_remove_n(p, plen);
+        *e_out = EIO;
+        return NULL;
+    }
+    // A file that stopped being cacheable (truncated to empty, replaced by
+    // a pipe, grown past the cap) must not leave an old entry behind.
+    if (!zz_fs_cacheable(p, plen, &before)) zz_fs_cache_remove_n(p, plen);
+
+    zz_str *hit = zz_fs_cache_take_str(p, plen, &before,
+                                       nul_known, nul, utf8_known, utf8);
+    if (hit != NULL) return hit;
+
+    zz_fs_top_up();
+    FILE *f = fopen(p, "rb");
+    if (!f) { *e_out = errno; return NULL; }
+    long sz = 0;
+    if (fseek(f, 0, SEEK_END) == 0) sz = ftell(f);
+    if (sz < 0) sz = 0;
+    fseek(f, 0, SEEK_SET);
+    zz_str *out;
+    size_t n;
+    if (sz > 0) {
+        out = str_alloc((size_t)sz);
+        n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            zz_value leak = (zz_value){ZZ_STR, {.s = out}};
+            zz_release(&leak);
+            *e_out = e ? e : EIO;
+            return NULL;
+        }
+    } else {
+        // Pipes / procfs / sysfs / empty files: grow to EOF.
+        size_t cap = 65536;
+        unsigned char *buf = (unsigned char *)malloc(cap);
+        if (!buf) { fclose(f); *e_out = ENOMEM; return NULL; }
+        n = 0;
+        size_t got;
+        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
+            n += got;
+            if (n == cap) {
+                size_t ncap = cap * 2;
+                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
+                if (nbuf == NULL) {
+                    free(buf);
+                    fclose(f);
+                    *e_out = ENOMEM;
+                    return NULL;
+                }
+                buf = nbuf;
+                cap = ncap;
+            }
+        }
+        int ferr = ferror(f);
+        int e = errno;
+        fclose(f);
+        if (ferr) {
+            free(buf);
+            *e_out = e ? e : EIO;
+            return NULL;
+        }
+        out = str_alloc(n);
+        if (n > 0) memcpy(zz_str_ptr(out), buf, n);
+        free(buf);
+    }
+    zz_str_ptr(out)[n] = '\0';
+    out->len = n;
+
+    // Cache only a whole snapshot whose metadata is unchanged across the
+    // read (skip torn reads and virtual files with a fake st_size).
+    if (n == (size_t)before.st_size && zz_fs_cacheable(p, plen, &before)) {
+        struct stat after;
+        if (stat(p, &after) == 0 && zz_fs_fp_same(&before, &after)) {
+            pthread_mutex_lock(&zz_fs_cache_mu);
+            zz_fs_cache_put(p, plen, &before, out, NULL);
+            pthread_mutex_unlock(&zz_fs_cache_mu);
+        }
+    }
+    return out;
+}
+
 // fs.read_to_string(path) → Result<str>
 zz_value zz_fs_read(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
-    if (zz_fs_is_dir_path(p)) {
-        return zz_fs_err1("read", p, EIO);
-    }
-    zz_fs_top_up();
-    FILE *f = fopen(p, "rb");
-    if (!f) return zz_fs_err1("read", p, errno);
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) sz = 0;
-    zz_str *out = str_alloc((size_t)sz);
-    size_t n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
-    int ferr = ferror(f);
-    fclose(f);
-    if (ferr) {
-        zz_value leak = (zz_value){ZZ_STR, {.s = out}};
-        zz_release(&leak);
-        return zz_fs_err1("read", p, EIO);
-    }
-    zz_str_ptr(out)[n] = '\0';
-    out->len = n;
+    size_t plen = path.s != NULL ? path.s->len : strlen(p);
+    int e = 0, nul_known = 0, nul = 0, utf8_known = 0, utf8 = 0;
+    zz_str *out = zz_fs_load_str(p, plen, &e, &nul_known, &nul,
+                                 &utf8_known, &utf8);
+    if (out == NULL) return zz_fs_err1("read", p, e ? e : EIO);
     // Strict UTF-8 like the VM (`std::fs::read_to_string` rejects invalid
     // UTF-8; programs branch on read success for binary detection, #277).
     // EINVAL maps to `invalid_input`, matching the VM's InvalidData.
-    if (!zz_utf8_valid((const unsigned char *)zz_str_ptr(out), n)) {
+    if (!utf8_known) {
+        utf8 = zz_utf8_valid((const unsigned char *)zz_str_ptr(out), out->len);
+        zz_fs_cache_note(p, plen, 0, 0, 1, utf8);
+    }
+    if (!utf8) {
         zz_value gone = (zz_value){ZZ_STR, {.s = out}};
         zz_release(&gone);
         return zz_fs_err1("read", p, EINVAL);
@@ -7385,81 +8822,23 @@ zz_value zz_fs_scan_counts(
     if (path.s && strlen(p) != path.s->len) {
         return zz_fs_err1("scan_counts", p, EINVAL);
     }
-    // Directories are rejected before any read (see zz_fs_is_dir_path):
-    // `ftell` on a directory stream reports garbage sizes on some libcs,
-    // which used to abort the process in `str_alloc`.
-    if (zz_fs_is_dir_path(p)) {
-        return zz_fs_err1("scan_counts", p, EIO);
-    }
-    zz_fs_top_up();
-    FILE *f = fopen(p, "rb");
-    if (!f) return zz_fs_err1("scan_counts", p, errno);
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) sz = 0;
-    zz_str *out;
-    size_t n;
-    if (sz > 0) {
-        // Regular files: one sized allocation, one read (same shape as
-        // `zz_fs_read`, so steady-state throughput is identical).
-        out = str_alloc((size_t)sz);
-        n = fread(zz_str_ptr(out), 1, (size_t)sz, f);
-        int ferr = ferror(f);
-        int e = errno;
-        fclose(f);
-        if (ferr) {
-            zz_value leak = (zz_value){ZZ_STR, {.s = out}};
-            zz_release(&leak);
-            // Reading a directory fails here (Linux: EISDIR). The VM's
-            // `IsADirectory` kind falls through to `io_error`, so
-            // translate rather than reporting `invalid_input`.
-            if (e == EISDIR) e = EIO;
-            return zz_fs_err1("scan_counts", p, e ? e : EIO);
-        }
-    } else {
-        // Pipes / procfs / sysfs / empty files report size 0: grow to EOF
-        // (same shape as `zz_fs_read_bytes`), then land in one `zz_str`.
-        size_t cap = 65536;
-        unsigned char *buf = (unsigned char *)malloc(cap > 0 ? cap : 1);
-        if (!buf) {
-            fclose(f);
-            return zz_fs_err1("scan_counts", p, ENOMEM);
-        }
-        n = 0;
-        size_t got;
-        int ferr = 0;
-        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
-            n += got;
-            if (n == cap) {
-                size_t ncap = cap * 2;
-                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
-                if (!nbuf) {
-                    free(buf);
-                    fclose(f);
-                    return zz_fs_err1("scan_counts", p, ENOMEM);
-                }
-                buf = nbuf;
-                cap = ncap;
-            }
-        }
-        ferr = ferror(f);
-        int e = errno;
-        fclose(f);
-        if (ferr) {
-            free(buf);
-            if (e == EISDIR) e = EIO;
-            return zz_fs_err1("scan_counts", p, e ? e : EIO);
-        }
-        out = str_alloc(n);
-        if (n > 0) memcpy(zz_str_ptr(out), buf, n);
-        free(buf);
-    }
-    zz_str_ptr(out)[n] = '\0';
-    out->len = n;
+    // Directories are rejected by the loader before any read (`ftell` on a
+    // directory stream reports garbage sizes on some libcs).
+    int e = 0, nul_known = 0, nul = 0, utf8_known = 0, utf8 = 0;
+    zz_str *out = zz_fs_load_str(p, path.s != NULL ? path.s->len : strlen(p),
+                                 &e, &nul_known, &nul, &utf8_known, &utf8);
+    if (out == NULL) return zz_fs_err1("scan_counts", p, e ? e : EIO);
+    size_t n = out->len;
     const unsigned char *d = (const unsigned char *)zz_str_ptr(out);
-    // NUL is valid UTF-8 but marks binary (same skip as `has_nul`).
-    if (memchr(d, 0, n) != NULL) {
+    // NUL is valid UTF-8 but marks binary (same skip as `has_nul`). Both
+    // checks are memoized in the content cache, so the second call after
+    // `read`/`is_generated` is O(1) in file size.
+    if (!nul_known) {
+        nul = memchr(d, 0, n) != NULL;
+        zz_fs_cache_note(p, path.s != NULL ? path.s->len : strlen(p),
+                         1, nul, 0, 0);
+    }
+    if (nul) {
         zz_value gone = (zz_value){ZZ_STR, {.s = out}};
         zz_release(&gone);
         int sub_err = 0;
@@ -7473,7 +8852,12 @@ zz_value zz_fs_scan_counts(
     }
     // Strict UTF-8 like `read_to_string`: non-UTF8 is unreadable
     // (EINVAL maps to `invalid_input`, matching the VM's InvalidData).
-    if (!zz_utf8_valid(d, n)) {
+    if (!utf8_known) {
+        utf8 = zz_utf8_valid(d, n);
+        zz_fs_cache_note(p, path.s != NULL ? path.s->len : strlen(p),
+                         0, 0, 1, utf8);
+    }
+    if (!utf8) {
         zz_value gone = (zz_value){ZZ_STR, {.s = out}};
         zz_release(&gone);
         return zz_fs_err1("scan_counts", p, EINVAL);
@@ -7524,69 +8908,30 @@ zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err) {
     if (path.s && strlen(p) != path.s->len) {
         return zz_fs_err1("is_generated", p, EINVAL);
     }
-    if (zz_fs_is_dir_path(p)) {
-        return zz_fs_err1("is_generated", p, EIO);
+    size_t plen = path.s != NULL ? path.s->len : strlen(p);
+    int e = 0, nul_known = 0, nul = 0, utf8_known = 0, utf8 = 0;
+    zz_str *out = zz_fs_load_str(p, plen, &e, &nul_known, &nul,
+                                 &utf8_known, &utf8);
+    if (out == NULL) return zz_fs_err1("is_generated", p, e ? e : EIO);
+    size_t n = out->len;
+    const unsigned char *buf = (const unsigned char *)zz_str_ptr(out);
+    if (!nul_known) {
+        nul = memchr(buf, 0, n) != NULL;
+        zz_fs_cache_note(p, plen, 1, nul, 0, 0);
     }
-    zz_fs_top_up();
-    FILE *f = fopen(p, "rb");
-    if (!f) return zz_fs_err1("is_generated", p, errno);
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) sz = 0;
-    unsigned char *buf = NULL;
-    size_t n = 0;
-    if (sz > 0) {
-        buf = (unsigned char *)malloc((size_t)sz);
-        if (!buf) {
-            fclose(f);
-            return zz_fs_err1("is_generated", p, ENOMEM);
-        }
-        n = fread(buf, 1, (size_t)sz, f);
-        int ferr = ferror(f);
-        int e = errno;
-        fclose(f);
-        if (ferr) {
-            free(buf);
-            if (e == EISDIR) e = EIO;
-            return zz_fs_err1("is_generated", p, e ? e : EIO);
+    // NUL / invalid UTF-8 / empty all report false (see above). Skip the
+    // UTF-8 scan for binary files: the original short-circuited on NUL,
+    // and validating a large binary here would only burn CPU.
+    int generated = 0;
+    if (n > 0 && !nul) {
+        if (!utf8_known) {
+            utf8 = zz_utf8_valid(buf, n);
+            zz_fs_cache_note(p, plen, 0, 0, 1, utf8);
         }
     } else {
-        size_t cap = 65536;
-        buf = (unsigned char *)malloc(cap);
-        if (!buf) {
-            fclose(f);
-            return zz_fs_err1("is_generated", p, ENOMEM);
-        }
-        n = 0;
-        size_t got;
-        int ferr = 0;
-        while ((got = fread(buf + n, 1, cap - n, f)) > 0) {
-            n += got;
-            if (n == cap) {
-                size_t ncap = cap * 2;
-                unsigned char *nbuf = (unsigned char *)realloc(buf, ncap);
-                if (!nbuf) {
-                    free(buf);
-                    fclose(f);
-                    return zz_fs_err1("is_generated", p, ENOMEM);
-                }
-                buf = nbuf;
-                cap = ncap;
-            }
-        }
-        ferr = ferror(f);
-        int e = errno;
-        fclose(f);
-        if (ferr) {
-            free(buf);
-            if (e == EISDIR) e = EIO;
-            return zz_fs_err1("is_generated", p, e ? e : EIO);
-        }
+        utf8 = 0;
     }
-    // NUL / invalid UTF-8 / empty all report false (see above).
-    int generated = 0;
-    if (n > 0 && memchr(buf, 0, n) == NULL && zz_utf8_valid(buf, n)) {
+    if (utf8) {
         // Line ends walked once (head gate needs at most 5).
         size_t eols[ZZ_GEN_HEAD_LINES];
         size_t neols = 0;
@@ -7621,28 +8966,34 @@ zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err) {
         }
         if (!generated) {
             size_t head_end = (neols == ZZ_GEN_HEAD_LINES) ? eols[ZZ_GEN_HEAD_LINES - 1] + 1 : n;
-            // Lowercase the head in place (owned buffer, freed below).
-            for (size_t i = 0; i < head_end; i++) buf[i] = gen_lower_byte(buf[i]);
-            size_t nm = 0;
-            const char *mbuf[32];
-            size_t mlen[32];
-            if (markers.tag == ZZ_ARRAY) {
-                for (size_t i = 0; i < markers.arr->len && nm < 32; i++) {
-                    zz_value v = markers.arr->items[i];
-                    if (v.tag == ZZ_STR) {
-                        mbuf[nm] = zz_str_ptr(v.s);
-                        mlen[nm] = v.s->len;
-                        nm++;
+            // Lowercase a private copy: the buffer is shared with the
+            // content cache and must stay immutable.
+            unsigned char *low = (unsigned char *)malloc(head_end ? head_end : 1);
+            if (low != NULL) {
+                for (size_t i = 0; i < head_end; i++) low[i] = gen_lower_byte(buf[i]);
+                size_t nm = 0;
+                const char *mbuf[32];
+                size_t mlen[32];
+                if (markers.tag == ZZ_ARRAY) {
+                    for (size_t i = 0; i < markers.arr->len && nm < 32; i++) {
+                        zz_value v = markers.arr->items[i];
+                        if (v.tag == ZZ_STR) {
+                            mbuf[nm] = zz_str_ptr(v.s);
+                            mlen[nm] = v.s->len;
+                            nm++;
+                        }
                     }
                 }
-            }
-            for (size_t k = 0; k < nm && !generated; k++) {
-                if (mlen[k] == 0) continue;
-                if (memmem(buf, head_end, mbuf[k], mlen[k]) != NULL) generated = 1;
+                for (size_t k = 0; k < nm && !generated; k++) {
+                    if (mlen[k] == 0) continue;
+                    if (memmem(low, head_end, mbuf[k], mlen[k]) != NULL) generated = 1;
+                }
+                free(low);
             }
         }
     }
-    free(buf);
+    zz_value gone = (zz_value){ZZ_STR, {.s = out}};
+    zz_release(&gone);
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = generated != 0}});
 }
 
@@ -7651,6 +9002,23 @@ zz_value zz_fs_read_bytes(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    size_t plen = path.s != NULL ? path.s->len : strlen(p);
+    if (strlen(p) != plen) return zz_fs_err1("read_bytes", p, EINVAL);
+    // One stat feeds both the directory rejection (a directory stream's
+    // `ftell` reports garbage sizes on some libcs) and the cache probe.
+    // A hit stays on the caller's thread; only a miss parks a replacement
+    // before the blocking open/read below.
+    struct stat before;
+    int have_stat = stat(p, &before) == 0;
+    if (have_stat && S_ISDIR(before.st_mode)) {
+        zz_fs_cache_remove_n(p, plen);
+        return zz_fs_err1("read_bytes", p, EIO);
+    }
+    if (!have_stat || !zz_fs_cacheable(p, plen, &before)) {
+        zz_fs_cache_remove_n(p, plen);
+    }
+    zz_bytes *hit = have_stat ? zz_fs_cache_take_bytes(p, plen, &before) : NULL;
+    if (hit != NULL) return zz_variant_ok((zz_value){ZZ_BYTES, {.bytes = hit}});
     zz_fs_top_up();
     FILE *f = fopen(p, "rb");
     if (!f) return zz_fs_err1("read_bytes", p, errno);
@@ -7674,7 +9042,11 @@ zz_value zz_fs_read_bytes(zz_value path, int *err) {
             return zz_fs_err1("read_bytes", p, EIO);
         }
         // Short reads (races/truncation) shrink the window, not the store.
-        return zz_variant_ok(zz_bytes_wrap(store, 0, n));
+        zz_value out = zz_bytes_wrap(store, 0, n);
+        if (have_stat && out.tag == ZZ_BYTES) {
+            zz_fs_cache_store_bytes(p, plen, &before, out.bytes);
+        }
+        return zz_variant_ok(out);
     } else {
         // Pipes / procfs / sysfs report size 0: grow to EOF (same shape
         // as the old chunked reader, then one shrink).
@@ -7711,7 +9083,11 @@ zz_value zz_fs_read_bytes(zz_value path, int *err) {
             if (__atomic_sub_fetch(&store->refs, 1, __ATOMIC_ACQ_REL) == 0) free(store);
             return zz_fs_err1("read_bytes", p, EIO);
         }
-        return zz_variant_ok(zz_bytes_wrap(store, 0, n));
+        zz_value out = zz_bytes_wrap(store, 0, n);
+        if (have_stat && out.tag == ZZ_BYTES) {
+            zz_fs_cache_store_bytes(p, plen, &before, out.bytes);
+        }
+        return zz_variant_ok(out);
     }
 }
 
@@ -7721,6 +9097,7 @@ zz_value zz_fs_write(zz_value path, zz_value data, int *err) {
     const char *p = zz_fs_cstr(path);
     const char *d = zz_fs_cstr(data);
     if (!p || data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     FILE *f = fopen(p, "wb");
     if (!f) return zz_fs_err1("write", p, errno);
@@ -7736,6 +9113,7 @@ zz_value zz_fs_append(zz_value path, zz_value data, int *err) {
     const char *p = zz_fs_cstr(path);
     const char *d = zz_fs_cstr(data);
     if (!p || data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     FILE *f = fopen(p, "ab");
     if (!f) return zz_fs_err1("append", p, errno);
@@ -7751,6 +9129,7 @@ zz_value zz_fs_copy(zz_value src, zz_value dst, int *err) {
     const char *s = zz_fs_cstr(src);
     const char *d = zz_fs_cstr(dst);
     if (!s || !d) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(dst);
     zz_fs_top_up();
     FILE *in = fopen(s, "rb");
     if (!in) return zz_fs_err2("copy", s, d, errno);
@@ -7779,6 +9158,8 @@ zz_value zz_fs_move(zz_value src, zz_value dst, int *err) {
     const char *s = zz_fs_cstr(src);
     const char *d = zz_fs_cstr(dst);
     if (!s || !d) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(src);
+    zz_fs_cache_invalidate_value(dst);
     zz_fs_top_up();
     if (rename(s, d) != 0) return zz_fs_err2("move", s, d, errno);
     return zz_variant_ok(zz_unit());
@@ -7826,6 +9207,7 @@ zz_value zz_fs_remove(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     if (remove(p) != 0) return zz_fs_err1("remove_file", p, errno);
     return zz_variant_ok(zz_unit());
@@ -7836,6 +9218,7 @@ zz_value zz_fs_mkdir(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
 #ifdef ZZ_OS_WINDOWS
     int r = _mkdir(p);
@@ -7851,6 +9234,7 @@ zz_value zz_fs_mkdir_all(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     // Walk components, creating each level. Absolute + relative paths.
     size_t len = strlen(p);
@@ -7892,6 +9276,10 @@ zz_value zz_fs_mkdir_all(zz_value path, int *err) {
     free(tmp);
     return zz_variant_ok(zz_unit());
 }
+
+// Comparator shared by fs.read_dir, fs.walk_dir, and zz_vfs_read_dir_at:
+// bytewise strcmp order, matching the VM's dict/object ordering.
+static int zz_vfs_str_cmp(const void *a, const void *b);
 
 // Collect sorted entry names (no `.`/`..`). Returns NULL on error with
 // errno preserved; `*n_out` holds the count.
@@ -7942,16 +9330,9 @@ static char **zz_fs_list_names(const char *p, size_t *n_out) {
     }
     closedir(d);
 #endif
-    // Insertion sort (directories are small; avoids qsort fn-pointer casts).
-    for (size_t i = 1; i < n; i++) {
-        char *t = names[i];
-        size_t j = i;
-        while (j > 0 && strcmp(names[j - 1], t) > 0) {
-            names[j] = names[j - 1];
-            j--;
-        }
-        names[j] = t;
-    }
+    // qsort (O(n log n) instead of insertion sort O(n²)); paths are
+    // unique so instability is fine. strcmp order matches the VM.
+    qsort(names, n, sizeof(char *), zz_vfs_str_cmp);
     *n_out = n;
     return names;
 }
@@ -8055,6 +9436,7 @@ zz_value zz_fs_remove_dir_all(zz_value path, int *err) {
     (void)err;
     const char *p = zz_fs_cstr(path);
     if (!p) { *err = 1; return zz_unit(); }
+    zz_fs_cache_invalidate_prefix(p);
     zz_fs_top_up();
     int rc = zz_fs_rm_recursive(p);
     if (rc != 0) return zz_fs_err1("remove_dir_all", p, rc);
@@ -8132,16 +9514,9 @@ zz_value zz_fs_walk_dir(zz_value path, int *err) {
         free(paths);
         return zz_fs_err1("walk_dir", p, rc);
     }
-    // Final global sort so VM and AOT agree byte-for-byte.
-    for (size_t i = 1; i < len; i++) {
-        char *t = paths[i];
-        size_t j = i;
-        while (j > 0 && strcmp(paths[j - 1], t) > 0) {
-            paths[j] = paths[j - 1];
-            j--;
-        }
-        paths[j] = t;
-    }
+    // Final global sort so VM and AOT agree byte-for-byte. qsort (O(n log n)
+    // instead of insertion sort O(n²)); paths are unique so instability is fine.
+    qsort(paths, len, sizeof(char *), zz_vfs_str_cmp);
     zz_value out = zz_array_new();
     for (size_t i = 0; i < len; i++) {
         zz_array_push(out.arr, zz_str_new(paths[i], strlen(paths[i])));
@@ -8209,14 +9584,16 @@ struct zz_file {
     FILE *fp;
     char *path;   // owned copy for diagnostics
     int closed;
+    int writable;
 };
 
-static struct zz_file *zz_file_alloc(FILE *fp, const char *path) {
+static struct zz_file *zz_file_alloc(FILE *fp, const char *path, int writable) {
     struct zz_file *f = (struct zz_file *)malloc(sizeof(struct zz_file));
     if (!f) return NULL;
     f->fp = fp;
     f->path = copy_cstr(path, strlen(path));
     f->closed = 0;
+    f->writable = writable;
     return f;
 }
 
@@ -8246,10 +9623,11 @@ zz_value zz_fs_open(zz_value path, zz_value mode, int *err) {
         snprintf(msg, n, "fs:open:invalid_input: %s (mode must be one of r, w, a)", p);
         return zz_variant_err(zz_str_owned(msg));
     }
+    if (fmode[0] != 'r') zz_fs_cache_invalidate_value(path);
     zz_fs_top_up();
     FILE *fp = fopen(p, fmode);
     if (!fp) return zz_fs_err1("open", p, errno);
-    struct zz_file *f = zz_file_alloc(fp, p);
+    struct zz_file *f = zz_file_alloc(fp, p, fmode[0] != 'r');
     if (!f) {
         fclose(fp);
         return zz_variant_err(zz_str_static("fs:open:io_error"));
@@ -8288,6 +9666,7 @@ zz_value zz_fs_write_chunk(zz_value f, zz_value data, int *err) {
         return zz_file_closed_err("write_chunk");
     }
     if (data.tag != ZZ_STR) { *err = 1; return zz_unit(); }
+    if (f.file->path != NULL && f.file->writable) zz_fs_cache_invalidate(f.file->path);
     zz_fs_top_up();
     size_t w = fwrite(zz_str_cptr(data.s), 1, data.s->len, f.file->fp);
     if (w != data.s->len) {
@@ -8317,6 +9696,7 @@ zz_value zz_fs_flush(zz_value f, int *err) {
     if (f.tag != ZZ_FILE || !f.file || f.file->closed || !f.file->fp) {
         return zz_file_closed_err("flush");
     }
+    if (f.file->path != NULL && f.file->writable) zz_fs_cache_invalidate(f.file->path);
     zz_fs_top_up();
     if (fflush(f.file->fp) != 0) {
         return zz_fs_err1("flush", f.file->path ? f.file->path : "?", errno);
@@ -8329,6 +9709,7 @@ zz_value zz_fs_close(zz_value f, int *err) {
     (void)err;
     if (f.tag != ZZ_FILE || !f.file) return zz_variant_ok(zz_unit());
     if (!f.file->closed && f.file->fp) {
+        if (f.file->path != NULL && f.file->writable) zz_fs_cache_invalidate(f.file->path);
         fflush(f.file->fp);
         fclose(f.file->fp);
         f.file->fp = NULL;
@@ -9393,6 +10774,7 @@ zz_value zz_fs_remove_file_at(zz_value fsys, zz_value path, int *err) {
 zz_value zz_encoding_url_encode(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
+    static const char hex[] = "0123456789ABCDEF";
     const char *src = zz_str_cptr(s.s);
     size_t len = s.s->len;
     // Worst case: every byte becomes %XX.
@@ -9403,8 +10785,9 @@ zz_value zz_encoding_url_encode(zz_value s, int *err) {
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
             zz_str_ptr(out)[pos++] = c;
         } else {
-            snprintf(zz_str_ptr(out) + pos, 4, "%%%02X", c);
-            pos += 3;
+            zz_str_ptr(out)[pos++] = '%';
+            zz_str_ptr(out)[pos++] = hex[c >> 4];
+            zz_str_ptr(out)[pos++] = hex[c & 0x0f];
         }
     }
     zz_str_ptr(out)[pos] = '\0';
@@ -9412,9 +10795,30 @@ zz_value zz_encoding_url_encode(zz_value s, int *err) {
     return (zz_value){ZZ_STR, {.s = out}};
 }
 
-// encoding.url_decode(s) → Result<str>
+// encoding.url_decode(s) → Result<str>. Lookup table instead of strtol per
+// %XX pair: ~5x faster.
 zz_value zz_encoding_url_decode(zz_value s, int *err) {
     (void)err;
+    if (s.tag != ZZ_STR)
+        return zz_variant_err(zz_str_static("URL decode error: expected string"));
+    static const signed char hex_val[256] = {
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  -1, -1, -1, -1, -1, -1,
+        -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    };
     if (s.tag != ZZ_STR)
         return zz_variant_err(zz_str_static("URL decode error: expected string"));
     const char *src = zz_str_cptr(s.s);
@@ -9423,8 +10827,11 @@ zz_value zz_encoding_url_decode(zz_value s, int *err) {
     size_t pos = 0;
     for (size_t i = 0; i < len; i++) {
         if (src[i] == '%' && i + 2 < len) {
-            char hex[3] = {src[i+1], src[i+2], '\0'};
-            zz_str_ptr(out)[pos++] = (char)strtol(hex, NULL, 16);
+            signed char hi = hex_val[(unsigned char)src[i + 1]];
+            signed char lo = hex_val[(unsigned char)src[i + 2]];
+            if (hi < 0 || lo < 0)
+                return zz_variant_err(zz_str_static("URL decode error: invalid escape"));
+            zz_str_ptr(out)[pos++] = (char)((hi << 4) | lo);
             i += 2;
         } else if (src[i] == '+') {
             zz_str_ptr(out)[pos++] = ' ';
@@ -9504,38 +10911,63 @@ zz_value zz_encoding_base64_decode(zz_value s, int *err) {
     return zz_variant_ok((zz_value){ZZ_STR, {.s = out}});
 }
 
-// encoding.hex_encode(data) → hex string
+// encoding.hex_encode(data) → hex string. Lookup table instead of
+// snprintf("%02x") per byte: ~10x faster, no per-byte formatting overhead.
 zz_value zz_encoding_hex_encode(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return zz_str_static("");
+    static const char hex[] = "0123456789abcdef";
     const unsigned char *d = (const unsigned char *)zz_str_cptr(s.s);
     size_t len = s.s->len;
-    char *hex = (char *)malloc(len * 2 + 1);
+    char *hex_out = (char *)malloc(len * 2 + 1);
+    if (!hex_out) return zz_str_static("");
     for (size_t i = 0; i < len; i++) {
-        snprintf(hex + i*2, 3, "%02x", d[i]);
+        unsigned char b = d[i];
+        hex_out[i * 2] = hex[b >> 4];
+        hex_out[i * 2 + 1] = hex[b & 0x0f];
     }
-    hex[len * 2] = '\0';
-    return zz_str_owned(hex);
+    hex_out[len * 2] = '\0';
+    return zz_str_owned(hex_out);
 }
 
-// encoding.hex_decode(hex_str) → .ok(data) or .err(str)
+// encoding.hex_decode(hex_str) → .ok(data) or .err(str). Lookup table
+// instead of strtoul per byte pair: ~5x faster, no per-pair parsing.
 zz_value zz_encoding_hex_decode(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR)
         return zz_variant_err(zz_str_static("expected string"));
+    static const signed char hex_val[256] = {
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  -1, -1, -1, -1, -1, -1,
+        -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    };
     size_t len = s.s->len;
     if (len % 2 != 0)
         return zz_variant_err(zz_str_static("odd-length hex string"));
+    const unsigned char *src = (const unsigned char *)zz_str_cptr(s.s);
     char *out = (char *)malloc(len / 2 + 1);
+    if (!out) return zz_variant_err(zz_str_static("out of memory"));
     for (size_t i = 0; i < len; i += 2) {
-        char byte_str[3] = { zz_str_cptr(s.s)[i], zz_str_cptr(s.s)[i+1], '\0' };
-        char *endptr;
-        unsigned long val = strtoul(byte_str, &endptr, 16);
-        if (endptr != byte_str + 2)
+        signed char hi = hex_val[src[i]];
+        signed char lo = hex_val[src[i + 1]];
+        if (hi < 0 || lo < 0)
             return zz_variant_err(zz_str_static("hex decode error: invalid digit found in string"));
-        out[i/2] = (char)val;
+        out[i / 2] = (char)((hi << 4) | lo);
     }
-    out[len/2] = '\0';
+    out[len / 2] = '\0';
     return zz_variant_ok(zz_str_new(out, len / 2));
 }
 
@@ -9640,7 +11072,7 @@ static zz_value http_client_perform(const char *method, const char *url, size_t 
     struct curl_slist *header_list = NULL;
     if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
         for (size_t i = 0; i < headers.dict->len; i++) {
-            zz_str *k = headers.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
             zz_value *v = &headers.dict->entries[i].val;
             if (k && v->tag == ZZ_STR) {
                 size_t hlen = k->len + 2 + v->s->len;
@@ -9764,7 +11196,7 @@ zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *e
     zz_value hdrs = zz_dict_new();
     if (headers.tag == ZZ_DICT && headers.dict) {
         for (size_t i = 0; i < headers.dict->len; i++) {
-            zz_str *k = headers.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
             zz_value v = headers.dict->entries[i].val;
             if (k && v.tag == ZZ_STR) {
                 zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = k}}, zz_clone(v));
@@ -9774,7 +11206,7 @@ zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *e
     int has_ct = 0;
     if (hdrs.tag == ZZ_DICT && hdrs.dict) {
         for (size_t i = 0; i < hdrs.dict->len; i++) {
-            zz_str *k = hdrs.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&hdrs.dict->entries[i]);
             if (k && k->len == 12) {
                 char low[12];
                 for (size_t j = 0; j < 12; j++) {
@@ -9838,7 +11270,7 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
     struct curl_slist *header_list = NULL;
     if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
         for (size_t i = 0; i < headers.dict->len; i++) {
-            zz_str *k = headers.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
             zz_value *v = &headers.dict->entries[i].val;
             if (k && v->tag == ZZ_STR) {
                 // NOTE: no trailing CRLF — curl treats a trailing CRLF as an
@@ -9935,7 +11367,7 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
     struct curl_slist *header_list = NULL;
     if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
         for (size_t i = 0; i < headers.dict->len; i++) {
-            zz_str *k = headers.dict->entries[i].key;
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
             zz_value *v = &headers.dict->entries[i].val;
             if (k && v->tag == ZZ_STR) {
                 // NOTE: no trailing CRLF — curl treats a trailing CRLF as an

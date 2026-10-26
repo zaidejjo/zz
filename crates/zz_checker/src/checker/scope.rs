@@ -1,10 +1,14 @@
 //! Scope management and variable lookup.
 
-use crate::checker::Checker;
+use crate::checker::{Checker, DefinedBinding};
 use crate::type_::Type;
 use zz_frontend::diag::{error_at, warning_at, FixIt};
 use zz_frontend::levenshtein::{suggest_all, suggest_dotted};
 use zz_frontend::span::Span;
+
+// Import suggestions and canonical resolution derive from the single
+// `super::STD_MODULES` source (see `is_std_module_head`) — no parallel
+// list to drift.
 
 impl Checker {
     // --- environments -----------------------------------------------------
@@ -64,38 +68,59 @@ impl Checker {
     pub(crate) fn pop_scope(&mut self) {
         // Warn about unused variables in this scope (skip the global scope).
         if let Some(defined) = self.defined_names.pop() {
+            let scope_index = self.defined_names.len();
             // Sort by (span, name): HashMap iteration order is
             // per-process random, and diagnostics must be byte-identical
             // across runs (the dual-engine parity harness diffs stderr
             // between two separate `zz` processes).
-            let mut entries: Vec<(&String, &Span)> = defined.iter().collect();
-            entries.sort_by(|a, b| (a.1.start, a.1.end, a.0).cmp(&(b.1.start, b.1.end, b.0)));
-            for (name, span) in entries {
-                let display = Self::display_name(name);
-                if !self.used_names.contains(name)
-                    && !self.pub_names.contains(name)
-                    && !display.starts_with('_')
-                {
-                    let fixit_name = format!("_{display}");
-                    self.errors.push(
-                        warning_at(
-                            format!(
-                                "unused variable `{display}`, consider prefixing with `_{display}`"
-                            ),
-                            *span,
-                        )
-                        .with_note("variable is never read")
-                        .with_fixit(FixIt::safe(
-                            *span,
-                            fixit_name,
-                            "rename to",
-                        )),
-                    );
-                }
-            }
+            let mut entries: Vec<(String, DefinedBinding)> = defined.into_iter().collect();
+            entries.sort_by(|a, b| {
+                (a.1.span.start, a.1.span.end, &a.0).cmp(&(b.1.span.start, b.1.span.end, &b.0))
+            });
+            self.emit_unused_binding_warnings(scope_index, &entries);
+            // Reads of this scope's bindings can no longer be observed.
+            self.used_bindings.retain(|(idx, _)| *idx != scope_index);
         }
         self.env.pop();
         self.const_env.pop();
+    }
+
+    /// Emit `unused variable` warnings for one scope's recorded bindings,
+    /// in the caller-provided (source) order. Bindings marked
+    /// `warn_unused: false` (closure parameters) are skipped: their
+    /// position comes from the callee's signature, so there is nothing
+    /// the author could remove.
+    fn emit_unused_binding_warnings(
+        &mut self,
+        scope_index: usize,
+        entries: &[(String, DefinedBinding)],
+    ) {
+        for (name, binding) in entries {
+            if !binding.warn_unused {
+                continue;
+            }
+            let display = Self::display_name(name);
+            if !self.used_bindings.contains(&(scope_index, name.clone()))
+                && !self.pub_names.contains(name)
+                && !display.starts_with('_')
+            {
+                let fixit_name = format!("_{display}");
+                self.errors.push(
+                    warning_at(
+                        format!(
+                            "unused variable `{display}`, consider prefixing with `_{display}`"
+                        ),
+                        binding.span,
+                    )
+                    .with_note("variable is never read")
+                    .with_fixit(FixIt::safe(
+                        binding.span,
+                        fixit_name,
+                        "rename to",
+                    )),
+                );
+            }
+        }
     }
 
     pub(crate) fn define(&mut self, name: &str, ty: Type) {
@@ -103,10 +128,24 @@ impl Checker {
     }
 
     pub(crate) fn define_at(&mut self, name: &str, ty: Type, span: Span) {
+        self.define_binding_at(name, ty, span, true);
+    }
+
+    /// Define a binding, recording whether its unused-ness is worth
+    /// warning about. Closure parameters pass `warn_unused: false`: the
+    /// callee dictates the closure's arity, so a parameter cannot be
+    /// removed and `_name` would only hide what the API signature says.
+    pub(crate) fn define_binding_at(
+        &mut self,
+        name: &str,
+        ty: Type,
+        span: Span,
+        warn_unused: bool,
+    ) {
         self.env.last_mut().unwrap().insert(name.to_string(), ty);
         // Record the definition span for unused-variable warnings.
         if let Some(scope) = self.defined_names.last_mut() {
-            scope.insert(name.to_string(), span);
+            scope.insert(name.to_string(), DefinedBinding { span, warn_unused });
         }
         // A binding reusing a namespace root (own module name or imported
         // head) shadows the namespace object: qualified calls through it
@@ -168,36 +207,24 @@ impl Checker {
     /// fire for top-level definitions. Also emits unused-import warnings.
     pub(crate) fn emit_global_unused_warnings(&mut self) {
         // --- Unused variables ---
-        if let Some(defined) = self.defined_names.first() {
+        {
             // Snapshot defined names to avoid borrow issues, sorted by
             // (span, name): HashMap iteration order is per-process random
             // (see pop_scope).
-            let mut entries: Vec<(String, Span)> =
-                defined.iter().map(|(k, &v)| (k.clone(), v)).collect();
-            entries.sort_by(|a, b| (a.1.start, a.1.end, &a.0).cmp(&(b.1.start, b.1.end, &b.0)));
-            for (name, span) in &entries {
-                let display = Self::display_name(name);
-                if !self.used_names.contains(name)
-                    && !self.pub_names.contains(name)
-                    && !display.starts_with('_')
-                {
-                    let fixit_name = format!("_{display}");
-                    self.errors.push(
-                        warning_at(
-                            format!(
-                                "unused variable `{display}`, consider prefixing with `_{display}`"
-                            ),
-                            *span,
-                        )
-                        .with_note("variable is never read")
-                        .with_fixit(FixIt::safe(
-                            *span,
-                            fixit_name,
-                            "rename to",
-                        )),
-                    );
-                }
-            }
+            let mut entries: Vec<(String, DefinedBinding)> = self
+                .defined_names
+                .first()
+                .map(|defined| {
+                    defined
+                        .iter()
+                        .map(|(k, &v)| (k.clone(), v))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            entries.sort_by(|a, b| {
+                (a.1.span.start, a.1.span.end, &a.0).cmp(&(b.1.span.start, b.1.span.end, &b.0))
+            });
+            self.emit_unused_binding_warnings(0, &entries);
         }
 
         // --- Unused imports ---
@@ -243,7 +270,7 @@ impl Checker {
                 t
             }
             None => {
-                if let Some(sig) = self.funcs.get(name) {
+                if let Some(sig) = crate::lookup_std(&self.funcs, name) {
                     if !sig.generics.is_empty() {
                         self.errors.push(error_at(
                             format!(
@@ -297,16 +324,15 @@ impl Checker {
                 // If the name looks like `module.func` and matches a known
                 // stdlib pattern, suggest adding the import.
                 if let Some((module, _func)) = name.split_once('.') {
-                    let std_module = match module {
-                        "io" | "str" | "vec" | "json" | "http" | "fs" | "env" | "math" | "time"
-                        | "sqlz" | "db" => Some(module.to_string()),
+                    let std_module = if super::is_std_module_head(module) {
+                        Some(module.to_string())
+                    } else {
                         // Generalized: any other std module present in the
-                        // seed (`std.M.*` keys), not just the hardcoded list.
-                        _ => self
-                            .funcs
+                        // seed (`std.M.*` keys), not just the table above.
+                        self.funcs
                             .keys()
                             .any(|k| k.starts_with(&format!("std.{module}.")))
-                            .then(|| module.to_string()),
+                            .then(|| module.to_string())
                     };
                     if let Some(mod_name) = std_module {
                         let import_stmt = format!("import std.{mod_name}");
@@ -365,16 +391,54 @@ impl Checker {
         }
     }
 
+    /// Start observing `name` while its `:=` initializer is checked (#518).
+    /// Returns the marker for [`Checker::finish_shadow_probes`].
+    pub(crate) fn begin_shadow_probe(&mut self, name: String, span: Span) -> usize {
+        let mark = self.shadow_probes.len();
+        self.shadow_probes.push(crate::checker::ShadowProbe {
+            name,
+            span,
+            depth: self.env.len().saturating_sub(1),
+            referenced: false,
+        });
+        mark
+    }
+
+    /// Stop observing and return every probe whose initializer read the
+    /// binding it shadows, outermost first.
+    pub(crate) fn finish_shadow_probes(&mut self, mark: usize) -> Vec<crate::checker::ShadowProbe> {
+        let mut out = Vec::new();
+        while self.shadow_probes.len() > mark {
+            let probe = self.shadow_probes.pop().expect("probe above the mark");
+            if probe.referenced {
+                out.push(probe);
+            }
+        }
+        out
+    }
+
     /// Like [`Checker::lookup`] but without the error: returns `None` when
     /// the name is not bound anywhere.
     pub(crate) fn lookup_opt(&mut self, name: &str) -> Option<Type> {
-        for scope in self.env.iter().rev() {
+        for (depth, scope) in self.env.iter().enumerate().rev() {
             if let Some(t) = scope.get(name) {
+                let t = t.clone();
                 self.used_names.insert(name.to_string());
-                return Some(t.clone());
+                // Binding-level usage: an inner shadow must not keep an
+                // outer same-named binding alive (and vice versa).
+                self.used_bindings.insert((depth, name.to_string()));
+                // #518: a read resolving to a *shallower* scope hit the
+                // binding the declaration under check would shadow. Fields
+                // are borrowed disjointly — `self.env` above is still live.
+                for probe in self.shadow_probes.iter_mut() {
+                    if probe.name == name && depth < probe.depth {
+                        probe.referenced = true;
+                    }
+                }
+                return Some(t);
             }
         }
-        if let Some(sig) = self.funcs.get(name) {
+        if let Some(sig) = crate::lookup_std(&self.funcs, name) {
             self.used_names.insert(name.to_string());
             if !sig.generics.is_empty() {
                 return None;
@@ -424,6 +488,23 @@ impl Checker {
                 }
             }
             let mut diag = error_at(format!("undefined variable `{joined}`"), span);
+            // Unimported-but-known std module root (`math.sin` without
+            // `import std.math`): suggest the import alongside any typo
+            // hint below. Reaching here means the root did not resolve,
+            // so a known module name is necessarily unimported. Attached
+            // before the typo branches because the dotted branch returns
+            // early.
+            if parts.len() >= 2 && super::is_std_module_head(&parts[0]) {
+                let import_stmt = format!("import std.{}", parts[0]);
+                diag = diag.with_note(format!(
+                    "add `{import_stmt}` at the top of the file to use `{joined}`"
+                ));
+                diag = diag.with_fixit(FixIt::safe(
+                    Span::new(0, 0),
+                    format!("{import_stmt}\n"),
+                    "add import",
+                ));
+            }
             // Dotted paths (`env.tmp_dir`) match segment-wise first:
             // whole-string Levenshtein drowns a 1-char tail typo in the
             // shared prefix. Falls back to root-name suggestions.

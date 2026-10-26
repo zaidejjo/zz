@@ -1,9 +1,9 @@
-//! `.zzc` binary codec (spec §8, v2).
+//! `.zzc` binary codec (spec §8, v3).
 //!
 //! Little-endian throughout. Layout:
 //!
 //! ```text
-//! magic[4] = "ZZC1", version u32 (=2), section-count u32,
+//! magic[4] = "ZZC1", version u32 (=3), section-count u32,
 //! per section: tag u32, offset u32, length u32,
 //! TYPES | STRINGS | CONSTS | FUNCS | CODE | SPANS | ANNOT payloads
 //! ```
@@ -11,13 +11,16 @@
 //! Section tags: `TYPES=1 STRINGS=2 CONSTS=3 FUNCS=4 CODE=5 SPANS=6
 //! ANNOT=7`. `FUNCS` entries reference (offset, length) ranges into the
 //! concatenated `CODE`/`SPANS` streams, in function order, and carry the
-//! locals type table (v2; mandatory semantics, NOT annotations). The
+//! locals type table (v2; mandatory semantics, NOT annotations). Op tags
+//! are append-only: v3 adds the VM's fused slot fast paths (80–86), which
+//! are carried as ops rather than desugared (see [`crate::op`]). The
 //! encoder is deterministic: decoding then re-encoding yields identical
 //! bytes.
 //!
 //! Decoding never panics: every read is bounds-checked and every id is
 //! range-checked, so fuzzed inputs surface as [`IrError`], never a crash.
-//! Only version 2 decodes; v1 files are rejected (re-emit them).
+//! Only the current version decodes; older files are rejected (re-emit
+//! them).
 
 use crate::op::{BinOp, UnOp};
 use crate::ty::IrType;
@@ -392,6 +395,20 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             encode_home(v, home_slot, home_var);
             put_u32(v, field.0);
         }
+        Op::StoreIndexTake {
+            home_slot,
+            home_var,
+        } => {
+            encode_home(v, home_slot, home_var);
+        }
+        Op::CompoundIndexTake {
+            home_slot,
+            home_var,
+            op,
+        } => {
+            encode_home(v, home_slot, home_var);
+            encode_binop(v, *op);
+        }
         Op::FieldBinopTake {
             home_slot,
             home_var,
@@ -418,8 +435,97 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             encode_home(v, home_slot, home_var);
             put_u32(v, field.0);
         }
+        Op::GetFieldSlotIdx {
+            home_slot,
+            home_var,
+            idx,
+            dst,
+        } => {
+            encode_home(v, home_slot, home_var);
+            put_u16(v, *idx);
+            put_u16(v, *dst);
+        }
+        Op::IndexIntSlot { arr, idx, dst } => {
+            put_u16(v, *arr);
+            put_u16(v, *idx);
+            put_u16(v, *dst);
+        }
+        Op::IndexDictInt { dict, key, dst } => {
+            put_u16(v, *dict);
+            put_u16(v, *key);
+            put_u16(v, *dst);
+        }
         Op::BinOp(op) => encode_binop(v, *op),
         Op::UnOp(op) => encode_unop(v, *op),
+        Op::SlotAddInt { dst, src } => {
+            put_u16(v, *dst);
+            put_u16(v, *src);
+        }
+        Op::SlotInc { slot } => put_u16(v, *slot),
+        Op::SlotAddIntImm { dst, imm } => {
+            put_u16(v, *dst);
+            put_i64(v, *imm);
+        }
+        Op::SlotSubIntImm { dst, imm } => {
+            put_u16(v, *dst);
+            put_i64(v, *imm);
+        }
+        Op::SlotMulIntImm { dst, imm } => {
+            put_u16(v, *dst);
+            put_i64(v, *imm);
+        }
+        Op::SlotLessIntSlot { a, b } => {
+            put_u16(v, *a);
+            put_u16(v, *b);
+        }
+        Op::SlotLessIntImm { a, imm } => {
+            put_u16(v, *a);
+            put_i64(v, *imm);
+        }
+        Op::SlotCmpIntSlot { a, b, op } => {
+            put_u16(v, *a);
+            put_u16(v, *b);
+            encode_binop(v, *op);
+        }
+        Op::SlotCmpIntImm { a, imm, op } => {
+            put_u16(v, *a);
+            put_i64(v, *imm);
+            encode_binop(v, *op);
+        }
+        Op::SlotCmpConst { a, k, op } => {
+            put_u16(v, *a);
+            put_u32(v, k.0);
+            encode_binop(v, *op);
+        }
+        Op::PushSlotIntImm { a, imm, op } => {
+            put_u16(v, *a);
+            put_i64(v, *imm);
+            encode_binop(v, *op);
+        }
+        Op::JumpIfFalseSlotCmpIntImm { a, imm, op, target } => {
+            put_u16(v, *a);
+            put_i64(v, *imm);
+            encode_binop(v, *op);
+            put_u32(v, *target);
+        }
+        Op::JumpIfFalseSlotCmpIntSlot { a, b, op, target } => {
+            put_u16(v, *a);
+            put_u16(v, *b);
+            encode_binop(v, *op);
+            put_u32(v, *target);
+        }
+        Op::SlotBinaryInt { dst, lhs, rhs, op } => {
+            put_u16(v, *dst);
+            put_u16(v, *lhs);
+            put_u16(v, *rhs);
+            encode_binop(v, *op);
+        }
+        Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
+            put_u16(v, *dst);
+            put_u16(v, *lhs);
+            put_i64(v, *imm);
+            encode_binop(v, *op);
+        }
         Op::CompoundIndexOp { op } => encode_binop(v, *op),
         Op::CompoundFieldOp { name, op } => {
             put_u32(v, name.0);
@@ -437,9 +543,15 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             put_u32(v, *header);
             put_u8(v, *num_vars);
         }
-        Op::ForNext { vars, exit, in_env } => {
+        Op::ForNext {
+            vars,
+            exit,
+            body,
+            in_env,
+        } => {
             put_ids(v, vars);
             put_u32(v, *exit);
+            put_u32(v, *body);
             put_u8(v, *in_env as u8);
         }
         Op::WhileSetup { exit, header } => {
@@ -1191,6 +1303,22 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
                 field: StrId(r.u32()?),
             })
         }
+        87 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            Ok(Op::StoreIndexTake {
+                home_slot,
+                home_var,
+            })
+        }
+        88 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            let op = decode_binop(r)?;
+            Ok(Op::CompoundIndexTake {
+                home_slot,
+                home_var,
+                op,
+            })
+        }
         77 => {
             let (home_slot, home_var) = decode_home(r)?;
             let field = StrId(r.u32()?);
@@ -1217,6 +1345,94 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
                 field: StrId(r.u32()?),
             })
         }
+        95 => {
+            let (home_slot, home_var) = decode_home(r)?;
+            Ok(Op::GetFieldSlotIdx {
+                home_slot,
+                home_var,
+                idx: r.u16()?,
+                dst: r.u16()?,
+            })
+        }
+        96 => Ok(Op::IndexIntSlot {
+            arr: r.u16()?,
+            idx: r.u16()?,
+            dst: r.u16()?,
+        }),
+        97 => Ok(Op::IndexDictInt {
+            dict: r.u16()?,
+            key: r.u16()?,
+            dst: r.u16()?,
+        }),
+        80 => Ok(Op::SlotAddInt {
+            dst: r.u16()?,
+            src: r.u16()?,
+        }),
+        81 => Ok(Op::SlotInc { slot: r.u16()? }),
+        82 => Ok(Op::SlotAddIntImm {
+            dst: r.u16()?,
+            imm: r.i64()?,
+        }),
+        99 => Ok(Op::SlotSubIntImm {
+            dst: r.u16()?,
+            imm: r.i64()?,
+        }),
+        100 => Ok(Op::SlotMulIntImm {
+            dst: r.u16()?,
+            imm: r.i64()?,
+        }),
+        83 => Ok(Op::SlotLessIntSlot {
+            a: r.u16()?,
+            b: r.u16()?,
+        }),
+        84 => Ok(Op::SlotLessIntImm {
+            a: r.u16()?,
+            imm: r.i64()?,
+        }),
+        89 => Ok(Op::SlotCmpIntSlot {
+            a: r.u16()?,
+            b: r.u16()?,
+            op: decode_binop(r)?,
+        }),
+        90 => Ok(Op::SlotCmpIntImm {
+            a: r.u16()?,
+            imm: r.i64()?,
+            op: decode_binop(r)?,
+        }),
+        91 => Ok(Op::SlotCmpConst {
+            a: r.u16()?,
+            k: ConstId(r.u32()?),
+            op: decode_binop(r)?,
+        }),
+        92 => Ok(Op::PushSlotIntImm {
+            a: r.u16()?,
+            imm: r.i64()?,
+            op: decode_binop(r)?,
+        }),
+        93 => Ok(Op::JumpIfFalseSlotCmpIntImm {
+            a: r.u16()?,
+            imm: r.i64()?,
+            op: decode_binop(r)?,
+            target: r.u32()?,
+        }),
+        94 => Ok(Op::JumpIfFalseSlotCmpIntSlot {
+            a: r.u16()?,
+            b: r.u16()?,
+            op: decode_binop(r)?,
+            target: r.u32()?,
+        }),
+        85 => Ok(Op::SlotBinaryInt {
+            dst: r.u16()?,
+            lhs: r.u16()?,
+            rhs: r.u16()?,
+            op: decode_binop(r)?,
+        }),
+        86 => Ok(Op::SlotBinaryIntImm {
+            dst: r.u16()?,
+            lhs: r.u16()?,
+            imm: r.i64()?,
+            op: decode_binop(r)?,
+        }),
         14 => Ok(Op::IntAdd),
         15 => Ok(Op::IntSub),
         16 => Ok(Op::IntMul),
@@ -1238,6 +1454,7 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
         28 => Ok(Op::ForNext {
             vars: str_ids(r)?,
             exit: r.u32()?,
+            body: r.u32()?,
             in_env: r.u8()? == 1,
         }),
         29 => Ok(Op::WhileSetup {

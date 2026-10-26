@@ -1,0 +1,55 @@
+// features: closures, comparison, func-call, indexing, locals, print, return, string-literal, structs
+// E2E: bare function names as values in func-typed struct fields —
+// `Entry{run: greet}` must resolve `greet` to its Func type, exactly
+// like call arguments already do (#385: collections `Entry{name, run}`
+// structs depend on this). Generic functions stay rejected as values.
+// Top-level names carry the `fnfield_` prefix (batch drivers share one
+// native binary; see #437).
+struct FnFieldEntry {
+    name: str,
+    run: func([str]) -> int,
+}
+
+func fnfield_greet(args: [str]) -> int {
+    return args.len()
+}
+
+func fnfield_apply(f: func([str]) -> int, x: [str]) -> int {
+    return f(x)
+}
+
+func fnfield_double(x: int) -> int {
+    return x * 2
+}
+
+// Type alias naming a function type, used as a struct field type.
+
+type FnFieldFunc = func([str]) -> int
+
+struct FnFieldAliasEntry {
+    name: str,
+    run: FnFieldFunc,
+}
+
+func fnfield_alias_greet(args: [str]) -> int {
+    return args.len()
+}
+
+func main() {
+    e := FnFieldEntry{name: "greet", run: fnfield_greet}
+    two := ["a", "b"]
+    println("fnfield_direct={e.run(two)}")
+    one := ["a"]
+    println("fnfield_arg={fnfield_apply(fnfield_greet, one)}")
+    w := |a: [str]| {
+        fnfield_greet(a)
+    }
+    f := FnFieldEntry{name: "wrap", run: w}
+    three := ["a", "b", "c"]
+    println("fnfield_closure={f.run(three)}")
+    // Alias-named function type as a struct field.
+    ae := FnFieldAliasEntry{name: "greet", run: fnfield_alias_greet}
+    four := ["a", "b", "c", "d"]
+    println("fnfield_alias={ae.run(four)}")
+    println("fnfield_ok")
+}

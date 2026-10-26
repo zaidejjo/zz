@@ -16,7 +16,7 @@ pub(crate) fn args_get_raw(
     _args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    Ok(Value::Array(Box::new(
+    Ok(Value::Array(std::sync::Arc::new(
         interp
             .args
             .iter()

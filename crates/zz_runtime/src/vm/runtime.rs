@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use zz_frontend::ast::{Block, Expr};
+use zz_frontend::ast::{BinOp, Block, Expr};
 use zz_frontend::span::Span;
 
 use super::chunk::Chunk;
 use super::op::{Op, TakeHome};
-use crate::env::{Env, EnvLink};
+use crate::env::{Bound, Env, EnvLink};
 use crate::eval::{EvalError, Interp};
 use crate::runtime::ops::{
     eval_binary, eval_int_binary, eval_unary, fill_default_headers, get_index, normalize_index,
-    object_field, set_index, set_object_field, slice_value,
+    object_field, object_field_opt, set_index, set_object_field, slice_value,
 };
 use crate::runtime::Flow;
 use crate::value::{FuncValue, NativeFunc, RangeValue, Value};
@@ -22,6 +22,74 @@ const SAFEPOINT_BUDGET: u32 = 1024;
 /// yields its executor thread so siblings run. 1ms keeps interactive
 /// (channel ping) latency low while requeue churn stays negligible.
 const SAFEPOINT_QUANTUM_MS: u128 = 1;
+
+/// Overwrite a stack slot in place without running `drop_in_place` on the
+/// value it replaces.
+///
+/// The int-specialised slot ops match the slot as `Value::Int` in the same
+/// arm (and `ForNext`'s fast paths only ever replace an `Int` index or a
+/// loop-var slot this op last filled — `Unit` on the first iteration, `Int`
+/// afterwards), so the old value owns no heap payload and dropping it is a
+/// no-op. The drop glue for the 16-variant `Value` enum is a call that LLVM
+/// cannot see through; measured at ~3ns per write on a 16-byte `Value`,
+/// roughly a fifth of a `SlotAddInt` iteration.
+///
+/// The caller still indexes the stack normally, so a bad slot index panics
+/// exactly as before — only the drop is elided.
+///
+/// # Safety
+///
+/// The value currently in `slot` must be a scalar (`Int`, `Float`, `Bool` or
+/// `Unit`): nothing that needs dropping.
+#[inline(always)]
+unsafe fn overwrite_scalar(slot: &mut Value, v: Value) {
+    debug_assert!(
+        matches!(
+            slot,
+            Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit
+        ),
+        "overwrite_scalar replaced a heap-owning value"
+    );
+    unsafe { std::ptr::write(slot, v) };
+}
+
+/// Inlined `i64` comparison for the fused `SlotCmpInt*` ops.
+///
+/// `None` for operators the compiler never emits in a comparison slot (the
+/// handlers fall back to `eval_int_binary`, which also keeps the generic
+/// result type — `Int` for arithmetic).
+#[inline]
+fn int_cmp(op: BinOp, a: i64, b: i64) -> Option<bool> {
+    Some(match op {
+        BinOp::Eq => a == b,
+        BinOp::Ne => a != b,
+        BinOp::Lt => a < b,
+        BinOp::Gt => a > b,
+        BinOp::Le => a <= b,
+        BinOp::Ge => a >= b,
+        _ => return None,
+    })
+}
+
+/// Write `v` into a user-assignable slot, skipping the drop glue when the
+/// slot currently holds a scalar.
+///
+/// Unlike the int-specialised slot ops (`x = x + y`), this slot can hold
+/// anything: a loop variable is assignable (`for i in 0..3 { i = 5 }`), and
+/// dynamic code can put a heap value there. The scalar match keeps the
+/// elision safe and costs one predictable branch.
+#[inline(always)]
+fn write_slot_checked(slot: &mut Value, v: Value) {
+    if matches!(
+        slot,
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit
+    ) {
+        // SAFETY: matched as a scalar just above.
+        unsafe { overwrite_scalar(slot, v) };
+    } else {
+        *slot = v;
+    }
+}
 
 // Per-thread scratch args buffer for native calls (see the `CallNative`
 // arm): one reusable allocation instead of one per call.
@@ -68,8 +136,6 @@ struct Frame {
     /// Deferred closures accumulated in this frame. Saved/restored across
     /// nested calls so each frame only drains its own defers.
     defer_stack: Vec<Value>,
-    /// Function name for backtraces (empty string for top-level).
-    func_name: String,
     /// Source span of the function definition for backtraces.
     func_span: Span,
 }
@@ -127,7 +193,32 @@ pub struct Vm {
     /// safepoint expiry (lazy: programs without loops never pay for a
     /// clock read, not even in `Vm::new`).
     slice_start: Option<std::time::Instant>,
+    /// Attached debugger session, shared so breakpoints (and step
+    /// rules) update live while parked. `None` (the default) disables
+    /// the per-op check to a single `Option` discriminant test.
+    pub debug: Option<std::sync::Arc<std::sync::Mutex<crate::debug::DebugSession>>>,
+    /// Memoized `CallPath` resolution, indexed by `(chunk, ip)` — see
+    /// [`Vm::direct_call_hit`].
+    call_cache: Vec<Option<CachedDirect>>,
 }
+
+/// One memoized `CallPath` resolution.
+///
+/// `gen` pins the environment + function-table state the entry was resolved
+/// against; any define/assign/freeze/insert invalidates every entry at once
+/// (shadowing is dynamic, see [`crate::env::ENV_GEN`]).
+struct CachedDirect {
+    chunk_id: u64,
+    ip: usize,
+    argc: u16,
+    gen: u64,
+    callee: Arc<Chunk>,
+    env: crate::env::EnvLink,
+}
+
+/// Power-of-two size of [`Vm::call_cache`] (direct-mapped: a collision just
+/// costs one extra resolution).
+const CALL_CACHE_LEN: usize = 256;
 
 /// State saved during defer-before-return execution.
 struct DeferReturn {
@@ -160,7 +251,130 @@ impl Vm {
             try_convert_depths: Vec::new(),
             slice_budget: SAFEPOINT_BUDGET,
             slice_start: None,
+            debug: None,
+            call_cache: (0..CALL_CACHE_LEN).map(|_| None).collect(),
         }
+    }
+
+    /// Attach a debugger session: line breakpoints suspend the run loop
+    /// via [`YieldReason::DebugBreak`](crate::value::YieldReason).
+    /// Detaching (`None`) restores full speed.
+    pub fn attach_debug(&mut self, session: crate::debug::DebugSession) {
+        self.debug = Some(std::sync::Arc::new(std::sync::Mutex::new(session)));
+    }
+
+    /// Shared handle to the attached session (for live breakpoint
+    /// updates while parked or running).
+    pub fn debug_session(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<crate::debug::DebugSession>>> {
+        self.debug.clone()
+    }
+
+    /// Stack snapshot for the debugger: innermost-first
+    /// (function name, source label, op span).
+    pub fn debug_frames(&self) -> Vec<(String, Option<String>, zz_frontend::span::Span)> {
+        self.frames
+            .iter()
+            .rev()
+            .map(|f| {
+                let span = f.chunk.spans.get(f.ip).copied().unwrap_or_default();
+                (
+                    String::new(),
+                    f.chunk.source.as_deref().map(|s| s.to_string()),
+                    span,
+                )
+            })
+            .collect()
+    }
+
+    /// Variables visible in frame `idx` (innermost-first index into
+    /// [`debug_frames`](Self::debug_frames)): slot names plus
+    /// environment names, sorted, shadowing resolved slot-first.
+    pub fn debug_frame_vars(
+        &self,
+        interp: &crate::eval::Interp,
+        idx: usize,
+    ) -> Vec<(String, crate::value::Value)> {
+        let frames: Vec<&Frame> = self.frames.iter().rev().collect();
+        let Some(frame) = frames.get(idx) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, crate::value::Value)> = Vec::new();
+        for (name, slot) in &frame.chunk.toplevel_slots {
+            if let Some(v) = self.stack.get(frame.stack_base + *slot as usize) {
+                out.push((name.clone(), v.clone()));
+            }
+        }
+        // The visible environment: the caller's saved env for inner
+        // frames, the live env for the top frame.
+        let env = if idx + 1 < frames.len() {
+            &frames[idx + 1].prev_env
+        } else {
+            &interp.env
+        };
+        for name in env.local_names() {
+            if out.iter().any(|(n, _)| n == &name) {
+                continue;
+            }
+            if let Some(v) = env.get(&name) {
+                out.push((name, v));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Resolve a variable path for the variables view: the named root
+    /// in frame `idx`, then [`DebugSeg`](crate::debug::DebugSeg) steps.
+    /// Returns `None` for unknown roots, out-of-range indexes, and
+    /// missing fields — the adapter reports an empty scope instead of
+    /// guessing.
+    pub fn debug_resolve(
+        &self,
+        interp: &crate::eval::Interp,
+        idx: usize,
+        root: &str,
+        path: &[crate::debug::DebugSeg],
+    ) -> Option<crate::value::Value> {
+        let mut value = self
+            .debug_frame_vars(interp, idx)
+            .into_iter()
+            .find(|(name, _)| name == root)
+            .map(|(_, value)| value)?;
+        for seg in path {
+            value = match seg {
+                crate::debug::DebugSeg::Field(name) => {
+                    crate::debug::debug_child_named(&value, name)?
+                }
+                crate::debug::DebugSeg::Index(i) => match &value {
+                    crate::value::Value::Array(a) | crate::value::Value::Tuple(a) => {
+                        a.get(*i)?.clone()
+                    }
+                    _ => return None,
+                },
+            };
+        }
+        Some(value)
+    }
+
+    /// Look up a variable where execution currently stands: the top
+    /// frame's slots first (top-level lets live there until frame exit
+    /// syncs them into the environment), then the interpreter env.
+    /// Deeper frames and closure captures follow in later work.
+    pub fn debug_lookup(
+        &self,
+        interp: &crate::eval::Interp,
+        name: &str,
+    ) -> Option<crate::value::Value> {
+        if let Some(frame) = self.frames.last() {
+            if let Some((_, slot)) = frame.chunk.toplevel_slots.iter().find(|(n, _)| n == name) {
+                if let Some(v) = self.stack.get(frame.stack_base + *slot as usize) {
+                    return Some(v.clone());
+                }
+            }
+        }
+        interp.env.get(name)
     }
 
     /// Reset for shell-pool reuse (Phase 6 arena): clear all execution
@@ -178,6 +392,9 @@ impl Vm {
         self.try_convert_depths.clear();
         self.slice_budget = SAFEPOINT_BUDGET;
         self.slice_start = None;
+        // Debugger sessions never survive pooling: a leftover breakpoint
+        // set would suspend unrelated reused tasks.
+        self.debug = None;
     }
 
     /// Push a value onto the VM stack. Used by `Interp::call_func` to set up
@@ -209,7 +426,7 @@ impl Vm {
         let state = self.defer_return.as_mut().unwrap();
         let closure = state.remaining.pop().unwrap();
         if let Value::Func(fv) = closure {
-            if let Some(chunk) = fv.chunk {
+            if let Some(chunk) = fv.chunk.clone() {
                 let stack_base = self.stack.len();
                 let prev_env = std::mem::replace(&mut interp.env, fv.env.clone());
                 let saved_defers = std::mem::take(&mut self.defer_stack);
@@ -219,7 +436,6 @@ impl Vm {
                     prev_env,
                     stack_base,
                     defer_stack: saved_defers,
-                    func_name: String::new(),
                     func_span: Span::default(),
                 });
             }
@@ -253,7 +469,6 @@ impl Vm {
             prev_env: interp.env.clone(),
             stack_base,
             defer_stack: Vec::new(),
-            func_name: String::new(),
             func_span: Span::default(),
         });
 
@@ -270,8 +485,47 @@ impl Vm {
         self.run_loop(interp)
     }
 
+    /// One cooperative-safepoint tick: decrement the call-frame slice budget
+    /// and, once per budget, read the clock to see whether the current
+    /// timeslice expired.
+    ///
+    /// Returns `true` only on executor threads, where a yield is actionable
+    /// (`zz run` has no executor and burns no clock here): the caller must
+    /// then rewind `ip` to the op it is executing and return
+    /// [`Flow::Yield`] so that resuming re-executes that op from the top.
+    fn safepoint_expired(&mut self) -> bool {
+        if self.slice_budget == 0 {
+            self.slice_budget = SAFEPOINT_BUDGET;
+            let now = std::time::Instant::now();
+            let expired = self
+                .slice_start
+                .is_none_or(|t| now.duration_since(t).as_millis() >= SAFEPOINT_QUANTUM_MS);
+            if expired {
+                self.slice_start = Some(now);
+                return crate::value::on_executor();
+            }
+            false
+        } else {
+            self.slice_budget -= 1;
+            false
+        }
+    }
+
     /// The interpreter loop shared by fresh and resumed execution.
+    ///
+    /// Split on a const-generic `STATS` flag so the `ZZ_VM_STATS` counters
+    /// cost exactly nothing when off: the counter branch is compiled out of
+    /// the `STATS = false` instantiation instead of being tested per op.
+    /// Exactly one instantiation runs per process.
     fn run_loop(&mut self, interp: &mut Interp) -> Result<Flow, EvalError> {
+        if super::stats::enabled() {
+            self.run_loop_impl::<true>(interp)
+        } else {
+            self.run_loop_impl::<false>(interp)
+        }
+    }
+
+    fn run_loop_impl<const STATS: bool>(&mut self, interp: &mut Interp) -> Result<Flow, EvalError> {
         // Cache chunk pointers locally to avoid re-fetching from frames on
         // every instruction. `ip` stays in a register; we only sync it back
         // to the Frame struct at frame-change points (Call/Return/defer).
@@ -281,6 +535,30 @@ impl Vm {
         let mut cached_code: *const Vec<Op>;
         let mut cached_constants: *const Vec<Value>;
         let mut ip: usize;
+        // Flat base of the current frame's stack window. Every slot op adds
+        // it to the op's slot index; cached here (re-synced by `re_cache!`)
+        // so a slot op does not re-walk `self.frames` per execution.
+        let mut cached_base: usize;
+        // Coverage: parallel span-id array + resolved file index for the
+        // current frame's chunk (`usize::MAX` = skip: unattributed chunk
+        // or coverage disabled). Re-resolved per frame change; the per-op
+        // hook then costs one integer compare when disabled.
+        let mut cached_cov_ids: *const Vec<u32>;
+        let mut cached_cov_file: usize;
+        // Parallel op spans + this frame's source label for debugger
+        // breakpoints (same caching discipline as coverage).
+        let mut cached_spans: *const Vec<Span>;
+        let mut cached_dbg_label: Option<Arc<str>>;
+        // Branch ids parallel to `code` (`COV_UNMAPPED` = not a branch).
+        // Recording goes through `record_branch!` inside the five
+        // conditional handlers below.
+        let mut cached_cov_branch: *const Vec<u32>;
+        // Instrumentation gate: `true` when this frame records coverage or a
+        // debugger session is attached. The per-op prelude then costs one
+        // flag test in the steady state (neither hook active) instead of a
+        // coverage compare plus a debugger discriminant check per op; each
+        // hook re-checks its own condition inside the gate.
+        let mut hooks_on: bool;
 
         // Re-cache from the current top frame (after any frame push/pop).
         macro_rules! re_cache {
@@ -290,6 +568,52 @@ impl Vm {
                 cached_code = &c.code;
                 cached_constants = &c.constants;
                 ip = f.ip;
+                cached_base = f.stack_base;
+                cached_cov_ids = &c.cov_ids;
+                cached_cov_file = match &interp.coverage {
+                    Some(cov) => c
+                        .source
+                        .as_deref()
+                        .and_then(|label| cov.file_index(label))
+                        .unwrap_or(usize::MAX),
+                    None => usize::MAX,
+                };
+                cached_cov_branch = &c.cov_branch;
+                cached_spans = &c.spans;
+                // Only paid when a debugger session is attached: the label
+                // is a per-frame `Arc` clone otherwise, and `re_cache!` runs
+                // on every call/return. A session attached later (between
+                // yields) refreshes this on the resume path.
+                cached_dbg_label = if self.debug.is_some() {
+                    c.source.clone()
+                } else {
+                    None
+                };
+                hooks_on = cached_cov_file != usize::MAX || cached_dbg_label.is_some();
+            }};
+        }
+
+        // Record one branch direction for the just-executed conditional
+        // op at `ip - 1` (`ip` already advanced past it). No-op unless
+        // this frame's chunk is attributed. Call before retargeting `ip`.
+        macro_rules! record_branch {
+            ($taken:expr) => {{
+                if cached_cov_file != usize::MAX {
+                    let branches: &Vec<u32> = unsafe { &*cached_cov_branch };
+                    if let Some(&bid) = branches.get(ip - 1) {
+                        if bid != crate::coverage::COV_UNMAPPED {
+                            if let Some(cov) = interp.coverage.as_mut() {
+                                if let Some(h) = cov.branch_hits.get_mut(bid as usize) {
+                                    if $taken {
+                                        h.0 += 1;
+                                    } else {
+                                        h.1 += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }};
         }
 
@@ -300,10 +624,24 @@ impl Vm {
         // frame ip was synced pre-call, so resumption continues right after
         // this op without any re-cache. Only the executor interprets
         // `Flow::Yield`.
+        //
+        // The executor guard first: `request_yield` fires only on executor
+        // threads, so off-executor (plain `zz run`) this is one thread-local
+        // cell read instead of a RefCell borrow plus take on every call.
+        //
+        // `take_yield` itself lives behind a #[cold] boundary so the hot
+        // per-op path stays small and I-cache friendly; the inline
+        // `on_executor()` check is one thread-local load.
+        #[cold]
+        fn take_yield_slow() -> Option<crate::value::YieldReason> {
+            crate::value::take_yield()
+        }
         macro_rules! yield_check {
             () => {{
-                if let Some(reason) = crate::value::take_yield() {
-                    return Ok(Flow::Yield(reason));
+                if crate::value::on_executor() {
+                    if let Some(reason) = take_yield_slow() {
+                        return Ok(Flow::Yield(reason));
+                    }
                 }
             }};
         }
@@ -324,7 +662,7 @@ impl Vm {
             let constants: &Vec<Value> = unsafe { &*cached_constants };
 
             if ip >= code.len() {
-                let sb = self.frames.last().unwrap().stack_base;
+                let sb = cached_base;
                 let f = self.frames.last().unwrap();
                 // Sync promoted top-level slots back into the environment so
                 // later chunks (REPL statements, other modules) can read them.
@@ -427,7 +765,48 @@ impl Vm {
 
             let op = &code[ip];
             ip += 1;
+            if STATS {
+                super::stats::record(op);
+            }
             // NO frame.ip write-back here — ip lives in a register.
+            // Instrumentation: one flag test in the steady state (no
+            // coverage, no debugger). Coverage then costs one integer
+            // compare; the debugger one discriminant check.
+            if hooks_on {
+                if cached_cov_file != usize::MAX {
+                    let ids: &Vec<u32> = unsafe { &*cached_cov_ids };
+                    if let Some(&id) = ids.get(ip - 1) {
+                        if id != crate::coverage::COV_UNMAPPED {
+                            if let Some(cov) = interp.coverage.as_mut() {
+                                if let Some(h) = cov.hits.get_mut(id as usize) {
+                                    *h += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Debugger breakpoints: attributed ops resolve (label, line)
+                // through the session and suspend on a line-change hit with
+                // the frame ip rewound to the breaking op (`ip` already
+                // advanced past it), so resume_chunk executes it instead of
+                // skipping it, with the environment intact for inspection.
+                if self.debug.is_some() {
+                    let spans: &Vec<Span> = unsafe { &*cached_spans };
+                    let depth = self.frames.len();
+                    let hit = spans.get(ip - 1).and_then(|span| {
+                        self.debug.as_ref().and_then(|dbg| {
+                            dbg.lock().ok().and_then(|mut session| {
+                                session.check_span(cached_dbg_label.as_deref(), *span, depth)
+                            })
+                        })
+                    });
+                    if let Some(line) = hit {
+                        self.frames.last_mut().unwrap().ip = ip - 1;
+                        return Ok(Flow::Yield(crate::value::YieldReason::DebugBreak { line }));
+                    }
+                }
+            }
 
             match op {
                 Op::PushConst(i) => {
@@ -480,12 +859,12 @@ impl Vm {
                                 // through to the value lookup so the error
                                 // names the path, not the enum.
                                 Some(true) | None => None,
-                                Some(false) => {
-                                    Some(Value::Object(Box::new(crate::value::ObjectValue {
+                                Some(false) => Some(Value::Object(std::sync::Arc::new(
+                                    crate::value::ObjectValue {
                                         name: format!("{canonical}.{variant}"),
                                         fields: Vec::new(),
-                                    })))
-                                }
+                                    },
+                                ))),
                             }
                         } else {
                             None
@@ -517,17 +896,17 @@ impl Vm {
                     interp.assign_path(parts, v, *span)?;
                 }
                 Op::LoadSlot(slot) => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let v = self.stack[base + *slot as usize].clone();
                     self.stack.push(v);
                 }
                 Op::StoreSlot(slot) => {
                     let v = self.stack.pop().unwrap();
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     self.stack[base + *slot as usize] = v;
                 }
                 Op::TakeSlot(slot) => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let v = std::mem::replace(&mut self.stack[base + *slot as usize], Value::Unit);
                     self.stack.push(v);
                 }
@@ -557,7 +936,9 @@ impl Vm {
                         ));
                     };
                     let mut vs = match taken {
-                        Value::Array(b) => *b,
+                        Value::Array(b) => {
+                            std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone())
+                        }
                         other => {
                             let msg = format!("`vec.push` expects an array, found `{other}`");
                             Self::restore_home(self, interp, home, other);
@@ -566,7 +947,7 @@ impl Vm {
                         }
                     };
                     vs.push(elem);
-                    Self::restore_home(self, interp, home, Value::Array(Box::new(vs)));
+                    Self::restore_home(self, interp, home, Value::Array(std::sync::Arc::new(vs)));
                 }
                 Op::VecPushField { home, field, span } => {
                     let elem = self.stack.pop().unwrap();
@@ -611,9 +992,15 @@ impl Vm {
                     };
                     match taken {
                         Value::Array(b) => {
-                            let mut vs = *b;
+                            let mut vs =
+                                std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone());
                             vs.push(elem);
-                            Self::restore_home(self, interp, home, Value::Array(Box::new(vs)));
+                            Self::restore_home(
+                                self,
+                                interp,
+                                home,
+                                Value::Array(std::sync::Arc::new(vs)),
+                            );
                         }
                         other => {
                             // Not an array: restore first (no transient
@@ -681,11 +1068,14 @@ impl Vm {
                     // `field_val` is untouched and writing it back
                     // restores the exact pre-op object.
                     let mut field_val = match &mut taken {
-                        Value::Object(o) if o.fields.iter().any(|(n, _)| n == field) => {
+                        Value::Object(o)
+                            if o.fields.iter().any(|(n, _)| n.as_ref() == field.as_str()) =>
+                        {
+                            let o = std::sync::Arc::make_mut(o);
                             let slot = o
                                 .fields
                                 .iter_mut()
-                                .find(|(n, _)| n == field)
+                                .find(|(n, _)| n.as_ref() == field.as_str())
                                 .expect("direct field re-resolved");
                             std::mem::replace(&mut slot.1, Value::Unit)
                         }
@@ -772,9 +1162,11 @@ impl Vm {
                     // not the field. Anything else completes generically
                     // on the owned object (same calls, same errors).
                     let direct = match &taken {
-                        Value::Object(o) => {
-                            o.fields.iter().find(|(n, _)| n == field).map(|(_, v)| v)
-                        }
+                        Value::Object(o) => o
+                            .fields
+                            .iter()
+                            .find(|(n, _)| n.as_ref() == field.as_str())
+                            .map(|(_, v)| v),
                         _ => None,
                     };
                     let elem = match (direct, &index) {
@@ -796,10 +1188,7 @@ impl Vm {
                                 }
                             }
                         }
-                        (Some(Value::Dict(entries)), key) => entries
-                            .iter()
-                            .find(|(k, _)| k == key)
-                            .map(|(_, v)| v.clone()),
+                        (Some(Value::Dict(dict)), key) => dict.get(key).cloned(),
                         _ => None,
                     };
                     match elem {
@@ -822,6 +1211,50 @@ impl Vm {
                             }
                         }
                     }
+                }
+                Op::GetFieldSlotIdx {
+                    home,
+                    idx,
+                    dst,
+                    span,
+                } => {
+                    let Some(taken) = Self::take_home(self, interp, home) else {
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // Copy the field straight into dst — no container clone,
+                    // no stack traffic, fused with the assignment destination.
+                    let elem = match &taken {
+                        Value::Object(o) => {
+                            if (*idx as usize) < o.fields.len() {
+                                o.fields[*idx as usize].1.clone()
+                            } else {
+                                return Err(EvalError::new(
+                                    format!(
+                                        "struct `{}` field index {} out of bounds",
+                                        o.name, idx
+                                    ),
+                                    *span,
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(EvalError::new(
+                                "expected struct for indexed field access".to_string(),
+                                *span,
+                            ));
+                        }
+                    };
+                    Self::restore_home(self, interp, home, taken);
+                    self.stack[cached_base + *dst as usize] = elem;
                 }
                 Op::LenField { home, field, span } => {
                     let Some(taken) = Self::take_home(self, interp, home) else {
@@ -846,13 +1279,15 @@ impl Vm {
                         Err(EvalError),
                     }
                     let fast = match &taken {
-                        Value::Object(o) => match o.fields.iter().find(|(n, _)| n == field) {
-                            Some((_, v)) => match Self::value_len(v) {
-                                Some(n) => LenFast::Hit(n),
-                                None => LenFast::Err(Self::len_error(v, *span)),
-                            },
-                            None => LenFast::Miss,
-                        },
+                        Value::Object(o) => {
+                            match o.fields.iter().find(|(n, _)| n.as_ref() == field.as_str()) {
+                                Some((_, v)) => match Self::value_len(v) {
+                                    Some(n) => LenFast::Hit(n),
+                                    None => LenFast::Err(Self::len_error(v, *span)),
+                                },
+                                None => LenFast::Miss,
+                            }
+                        }
                         _ => LenFast::Miss,
                     };
                     match fast {
@@ -883,12 +1318,14 @@ impl Vm {
                     }
                 }
                 Op::SlotAddInt { dst, src } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx_dst = base + *dst as usize;
                     let idx_src = base + *src as usize;
                     match (&self.stack[idx_dst], &self.stack[idx_src]) {
                         (Value::Int(a), Value::Int(b)) => {
-                            self.stack[idx_dst] = Value::Int(a.wrapping_add(*b));
+                            let v = Value::Int(a.wrapping_add(*b));
+                            // SAFETY: `idx_dst` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx_dst], v) };
                         }
                         // Slow path: fall back to generic add semantics.
                         _ => {
@@ -900,10 +1337,14 @@ impl Vm {
                     }
                 }
                 Op::SlotInc { slot } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx = base + *slot as usize;
                     match &self.stack[idx] {
-                        Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(1)),
+                        Value::Int(a) => {
+                            let v = Value::Int(a.wrapping_add(1));
+                            // SAFETY: `idx` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx], v) };
+                        }
                         _ => {
                             let v = self.stack[idx].clone();
                             let span = Span::default();
@@ -914,10 +1355,14 @@ impl Vm {
                     }
                 }
                 Op::SlotAddIntImm { dst, imm } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx = base + *dst as usize;
                     match &self.stack[idx] {
-                        Value::Int(a) => self.stack[idx] = Value::Int(a.wrapping_add(*imm)),
+                        Value::Int(a) => {
+                            let v = Value::Int(a.wrapping_add(*imm));
+                            // SAFETY: `idx` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx], v) };
+                        }
                         _ => {
                             let v = self.stack[idx].clone();
                             let span = Span::default();
@@ -931,8 +1376,52 @@ impl Vm {
                         }
                     }
                 }
+                Op::SlotSubIntImm { dst, imm } => {
+                    let base = cached_base;
+                    let idx = base + *dst as usize;
+                    match &self.stack[idx] {
+                        Value::Int(a) => {
+                            let v = Value::Int(a.wrapping_sub(*imm));
+                            // SAFETY: `idx` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx], v) };
+                        }
+                        _ => {
+                            let v = self.stack[idx].clone();
+                            let span = Span::default();
+                            let r = eval_binary(
+                                zz_frontend::ast::BinOp::Sub,
+                                v,
+                                Value::Int(*imm),
+                                span,
+                            )?;
+                            self.stack[idx] = r;
+                        }
+                    }
+                }
+                Op::SlotMulIntImm { dst, imm } => {
+                    let base = cached_base;
+                    let idx = base + *dst as usize;
+                    match &self.stack[idx] {
+                        Value::Int(a) => {
+                            let v = Value::Int(a.wrapping_mul(*imm));
+                            // SAFETY: `idx` was just matched as `Int`.
+                            unsafe { overwrite_scalar(&mut self.stack[idx], v) };
+                        }
+                        _ => {
+                            let v = self.stack[idx].clone();
+                            let span = Span::default();
+                            let r = eval_binary(
+                                zz_frontend::ast::BinOp::Mul,
+                                v,
+                                Value::Int(*imm),
+                                span,
+                            )?;
+                            self.stack[idx] = r;
+                        }
+                    }
+                }
                 Op::SlotLessIntSlot { a, b } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx_a = base + *a as usize;
                     let idx_b = base + *b as usize;
                     match (&self.stack[idx_a], &self.stack[idx_b]) {
@@ -948,7 +1437,7 @@ impl Vm {
                     }
                 }
                 Op::SlotLessIntImm { a, imm } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx = base + *a as usize;
                     match &self.stack[idx] {
                         Value::Int(x) => self.stack.push(Value::Bool(x < imm)),
@@ -965,40 +1454,172 @@ impl Vm {
                         }
                     }
                 }
+                Op::SlotCmpIntSlot { a, b, op } => {
+                    let base = cached_base;
+                    let idx_a = base + *a as usize;
+                    let idx_b = base + *b as usize;
+                    match (&self.stack[idx_a], &self.stack[idx_b]) {
+                        (Value::Int(x), Value::Int(y)) => match int_cmp(*op, *x, *y) {
+                            Some(c) => self.stack.push(Value::Bool(c)),
+                            // Not a comparison: the compiler never emits one
+                            // here, but IR payloads can; keep the generic
+                            // result (an `Int` for arithmetic) instead of
+                            // erroring on a valid op.
+                            None => {
+                                let v = eval_int_binary(*op, *x, *y, Span::default())?;
+                                self.stack.push(v);
+                            }
+                        },
+                        _ => {
+                            let (l, r) = (self.stack[idx_a].clone(), self.stack[idx_b].clone());
+                            let v = eval_binary(*op, l, r, Span::default())?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::SlotCmpIntImm { a, imm, op } => {
+                    let base = cached_base;
+                    let idx = base + *a as usize;
+                    match &self.stack[idx] {
+                        Value::Int(x) => match int_cmp(*op, *x, *imm) {
+                            Some(c) => self.stack.push(Value::Bool(c)),
+                            None => {
+                                let v = eval_int_binary(*op, *x, *imm, Span::default())?;
+                                self.stack.push(v);
+                            }
+                        },
+                        _ => {
+                            let l = self.stack[idx].clone();
+                            let v = eval_binary(*op, l, Value::Int(*imm), Span::default())?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::SlotCmpConst { a, k, op } => {
+                    let base = cached_base;
+                    let idx = base + *a as usize;
+                    let rhs = &constants[*k as usize];
+                    // `==`/`!=` are the whole point of this op (the string
+                    // chain in a `str_scan`-shaped loop): compare the
+                    // `Arc<String>` in place instead of cloning both sides
+                    // through `eval_binary`.
+                    let fast = match (&self.stack[idx], rhs) {
+                        (Value::Str(x), Value::Str(y)) => match op {
+                            BinOp::Eq => Some(x == y),
+                            BinOp::Ne => Some(x != y),
+                            _ => None,
+                        },
+                        (Value::Int(x), Value::Int(y)) => int_cmp(*op, *x, *y),
+                        _ => None,
+                    };
+                    match fast {
+                        Some(c) => self.stack.push(Value::Bool(c)),
+                        None => {
+                            let l = self.stack[idx].clone();
+                            let v = eval_binary(*op, l, rhs.clone(), Span::default())?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
                 Op::SlotBinaryInt { dst, lhs, rhs, op } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx_d = base + *dst as usize;
                     let idx_l = base + *lhs as usize;
                     let idx_r = base + *rhs as usize;
                     match (&self.stack[idx_l], &self.stack[idx_r]) {
                         (Value::Int(a), Value::Int(b)) => {
                             let v = eval_int_binary(*op, *a, *b, Span::default())?;
-                            self.stack[idx_d] = v;
+                            write_slot_checked(&mut self.stack[idx_d], v);
                         }
                         _ => {
                             let (l, r) = (self.stack[idx_l].clone(), self.stack[idx_r].clone());
                             let span = Span::default();
                             let v = eval_binary(*op, l, r, span)?;
-                            self.stack[idx_d] = v;
+                            write_slot_checked(&mut self.stack[idx_d], v);
                         }
                     }
                 }
                 Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
-                    let base = self.frames.last().unwrap().stack_base;
+                    let base = cached_base;
                     let idx_d = base + *dst as usize;
                     let idx_l = base + *lhs as usize;
                     match &self.stack[idx_l] {
                         Value::Int(a) => {
                             let v = eval_int_binary(*op, *a, *imm, Span::default())?;
-                            self.stack[idx_d] = v;
+                            write_slot_checked(&mut self.stack[idx_d], v);
                         }
                         _ => {
                             let l = self.stack[idx_l].clone();
                             let span = Span::default();
                             let v = eval_binary(*op, l, Value::Int(*imm), span)?;
-                            self.stack[idx_d] = v;
+                            write_slot_checked(&mut self.stack[idx_d], v);
                         }
                     }
+                }
+                Op::JumpIfFalseSlotCmpIntImm {
+                    a,
+                    imm,
+                    op,
+                    target,
+                    span,
+                } => {
+                    let idx = cached_base + *a as usize;
+                    let cond = match &self.stack[idx] {
+                        Value::Int(x) => match int_cmp(*op, *x, *imm) {
+                            Some(c) => Value::Bool(c),
+                            None => eval_int_binary(*op, *x, *imm, *span)?,
+                        },
+                        _ => {
+                            let l = self.stack[idx].clone();
+                            eval_binary(*op, l, Value::Int(*imm), *span)?
+                        }
+                    };
+                    let jumped = match cond {
+                        Value::Bool(b) => !b,
+                        // Same contract as `JumpIfFalseBool`, which this op
+                        // replaces.
+                        _ => return Err(self.error("`if` condition must be a bool", *span)),
+                    };
+                    record_branch!(jumped);
+                    if jumped {
+                        ip = *target;
+                    }
+                }
+                Op::JumpIfFalseSlotCmpIntSlot {
+                    a,
+                    b,
+                    op,
+                    target,
+                    span,
+                } => {
+                    let idx_a = cached_base + *a as usize;
+                    let idx_b = cached_base + *b as usize;
+                    let cond = match (&self.stack[idx_a], &self.stack[idx_b]) {
+                        (Value::Int(x), Value::Int(y)) => match int_cmp(*op, *x, *y) {
+                            Some(c) => Value::Bool(c),
+                            None => eval_int_binary(*op, *x, *y, *span)?,
+                        },
+                        _ => {
+                            let (l, r) = (self.stack[idx_a].clone(), self.stack[idx_b].clone());
+                            eval_binary(*op, l, r, *span)?
+                        }
+                    };
+                    let jumped = match cond {
+                        Value::Bool(b) => !b,
+                        _ => return Err(self.error("`if` condition must be a bool", *span)),
+                    };
+                    record_branch!(jumped);
+                    if jumped {
+                        ip = *target;
+                    }
+                }
+                Op::PushSlotIntImm { a, imm, op, span } => {
+                    let idx = cached_base + *a as usize;
+                    let v = match &self.stack[idx] {
+                        Value::Int(l) => eval_int_binary(*op, *l, *imm, *span)?,
+                        other => eval_binary(*op, other.clone(), Value::Int(*imm), *span)?,
+                    };
+                    self.stack.push(v);
                 }
                 Op::MakeFunc {
                     name,
@@ -1015,10 +1636,13 @@ impl Vm {
                         env: interp.env.clone(),
                         chunk: Some(Arc::clone(fchunk)),
                         chunk_defaults: defaults.clone(),
+                        // Named function (`func`): explicit `return` only.
+                        tail_value: false,
                     };
-                    interp.funcs.insert(name.clone(), fv.clone());
+                    let fv = std::rc::Rc::new(fv);
+                    interp.funcs.insert(name.clone(), std::rc::Rc::clone(&fv));
                     interp.funcs_version = interp.funcs_version.wrapping_add(1);
-                    interp.env.define(name, Value::Func(Box::new(fv)));
+                    interp.env.define(name, Value::Func(fv));
                     self.stack.push(Value::Unit);
                 }
                 Op::RegisterStruct { name, fields } => {
@@ -1071,7 +1695,10 @@ impl Vm {
                     let fields = match (has_payload, vals.len()) {
                         (false, 0) => Vec::new(),
                         (true, 1) => {
-                            vec![("value".to_string(), vals.into_iter().next().unwrap())]
+                            vec![(
+                                std::sync::Arc::from("value"),
+                                vals.into_iter().next().unwrap(),
+                            )]
                         }
                         _ => {
                             return Err(self.error(
@@ -1085,11 +1712,12 @@ impl Vm {
                             ));
                         }
                     };
-                    self.stack
-                        .push(Value::Object(Box::new(crate::value::ObjectValue {
+                    self.stack.push(Value::Object(std::sync::Arc::new(
+                        crate::value::ObjectValue {
                             name: format!("{lookup}.{variant}"),
                             fields,
-                        })));
+                        },
+                    )));
                 }
                 Op::BinOp(op, span) => {
                     let r = self.stack.pop().unwrap();
@@ -1194,6 +1822,87 @@ impl Vm {
                         }
                     }
                 }
+                // Typed int comparisons (#364): inline `(Int, Int)`
+                // (plain i64 semantics, exactly like `eval_binary`);
+                // anything else keeps generic dispatch.
+                Op::IntLt(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a < b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Lt, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntGt(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a > b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Gt, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntLe(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a <= b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Le, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntGe(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a >= b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Ge, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntEq(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a == b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Eq, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
+                Op::IntNe(span) => {
+                    let r = self.stack.pop().unwrap();
+                    let l = self.stack.pop().unwrap();
+                    match (&l, &r) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            self.stack.push(Value::Bool(a != b));
+                        }
+                        _ => {
+                            let v = eval_binary(zz_frontend::ast::BinOp::Ne, l, r, *span)?;
+                            self.stack.push(v);
+                        }
+                    }
+                }
                 Op::UnOp(op, span) => {
                     let v = self.stack.pop().unwrap();
                     let v = eval_unary(*op, v, *span)?;
@@ -1209,32 +1918,24 @@ impl Vm {
                     // yield here resumes after it — but the frame's saved
                     // ip must be synced first (the register is only
                     // written back at frame-change points otherwise).
-                    if self.slice_budget == 0 {
-                        self.slice_budget = SAFEPOINT_BUDGET;
-                        let now = std::time::Instant::now();
-                        let expired = self.slice_start.is_none_or(|t| {
-                            now.duration_since(t).as_millis() >= SAFEPOINT_QUANTUM_MS
-                        });
-                        if expired {
-                            self.slice_start = Some(now);
-                            if crate::value::on_executor() {
-                                self.frames.last_mut().unwrap().ip = ip;
-                                return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
-                            }
-                        }
-                    } else {
-                        self.slice_budget -= 1;
+                    if self.safepoint_expired() {
+                        self.frames.last_mut().unwrap().ip = ip;
+                        return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
                     }
                 }
                 Op::JumpIfFalse(target) => {
                     let v = self.stack.pop().unwrap();
-                    if !v.is_truthy() {
+                    let jumped = !v.is_truthy();
+                    record_branch!(jumped);
+                    if jumped {
                         ip = *target;
                     }
                 }
                 Op::JumpIfTrue(target) => {
                     let v = self.stack.pop().unwrap();
-                    if v.is_truthy() {
+                    let jumped = v.is_truthy();
+                    record_branch!(jumped);
+                    if jumped {
                         ip = *target;
                     }
                 }
@@ -1243,7 +1944,9 @@ impl Vm {
                     if !matches!(v, Value::Bool(_)) {
                         return Err(self.error("`if` condition must be a bool", *span));
                     }
-                    if !v.is_truthy() {
+                    let jumped = !v.is_truthy();
+                    record_branch!(jumped);
+                    if jumped {
                         ip = *target;
                     }
                 }
@@ -1327,9 +2030,124 @@ impl Vm {
                 Op::ForNext {
                     vars,
                     exit,
+                    body,
                     in_env,
                     span,
                 } => {
+                    // Cooperative safepoint for `for` loops, folded in from
+                    // the header (see the `Stmt::For` arm in `compiler.rs`):
+                    // this op is the loop header target for both the
+                    // back-edge and `continue`, so the check covers every
+                    // iteration without a dispatch of its own. Taken before
+                    // any iteration state is mutated so a yield can rewind
+                    // to this op and re-execute it whole.
+                    if self.safepoint_expired() {
+                        self.frames.last_mut().unwrap().ip = ip - 1;
+                        return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
+                    }
+                    // In-place fast paths. `for i in a..b` and `for x in xs`
+                    // — the shapes nearly every index/element loop compiles
+                    // to — leave `[iterable, idx, var]` on top of the stack,
+                    // so the generic churn below (truncate the var, pop the
+                    // index as a `Value`, match the iterable, push idx + var
+                    // back) is a compare and two in-place writes. Both edges
+                    // end in the exact state the generic path ends in: a live
+                    // iteration leaves the next index under the new var, and
+                    // the exhausted edge pops the loop frame and truncates to
+                    // its base, so the caller's `Pop` still drops the
+                    // iterable. `in_env` loops (the var lives in a scope),
+                    // multi-var loops and every other iterable (dict,
+                    // `enumerate()` pairs) stay generic.
+                    //
+                    // The window is split so the entry can be read while the
+                    // var is written (`head` ends at the index, `tail` is
+                    // `[idx, var]`). Nothing is staged in a temporary: an
+                    // `Option<(Value, Value)>` here copies two `Value`s per
+                    // iteration and measured -21% on `loop_sum`.
+                    let fast: Option<bool> = {
+                        let len = self.stack.len();
+                        let mut step = None;
+                        if !*in_env && vars.len() == 1 && len >= 3 {
+                            let (head, tail) = self.stack.split_at_mut(len - 2);
+                            if let &Value::Int(i) = &tail[0] {
+                                step = match &head[len - 3] {
+                                    Value::Range(r) => {
+                                        let (s, end) = (r.step, r.end);
+                                        if (s > 0 && i >= end) || (s <= 0 && i <= end) {
+                                            Some(true)
+                                        } else {
+                                            // SAFETY: `tail[0]` was matched as
+                                            // `Int` above; `tail[1]` is the
+                                            // loop var, checked scalar.
+                                            unsafe {
+                                                overwrite_scalar(
+                                                    &mut tail[0],
+                                                    Value::Int(i.wrapping_add(s)),
+                                                )
+                                            };
+                                            write_slot_checked(&mut tail[1], Value::Int(i));
+                                            Some(false)
+                                        }
+                                    }
+                                    Value::Array(arr) => {
+                                        if i >= arr.len() as i64 {
+                                            Some(true)
+                                        } else {
+                                            // Clone while the entry borrows
+                                            // the front of the window.
+                                            tail[1] = arr[i as usize].clone();
+                                            // SAFETY: `tail[0]` was matched
+                                            // as `Int` above.
+                                            unsafe {
+                                                overwrite_scalar(
+                                                    &mut tail[0],
+                                                    Value::Int(i.wrapping_add(1)),
+                                                )
+                                            };
+                                            Some(false)
+                                        }
+                                    }
+                                    Value::Bytes(b) => {
+                                        if i >= b.len() as i64 {
+                                            Some(true)
+                                        } else {
+                                            write_slot_checked(
+                                                &mut tail[1],
+                                                Value::Int(b.as_slice()[i as usize] as i64),
+                                            );
+                                            // SAFETY: `tail[0]` was matched
+                                            // as `Int` above.
+                                            unsafe {
+                                                overwrite_scalar(
+                                                    &mut tail[0],
+                                                    Value::Int(i.wrapping_add(1)),
+                                                )
+                                            };
+                                            Some(false)
+                                        }
+                                    }
+                                    _ => None,
+                                };
+                            }
+                        }
+                        step
+                    };
+                    match fast {
+                        Some(true) => {
+                            record_branch!(true);
+                            let li = self.loops.pop().unwrap();
+                            self.stack.truncate(li.stack_base + 1);
+                            interp.env = li.env;
+                            ip = *exit;
+                            continue;
+                        }
+                        Some(false) => {
+                            record_branch!(false);
+                            ip = *body;
+                            continue;
+                        }
+                        None => {}
+                    }
                     let num_vars = vars.len();
                     // Pop num_vars loop variables from previous iteration
                     self.stack.truncate(self.stack.len() - num_vars);
@@ -1373,8 +2191,14 @@ impl Vm {
                                         // evaluate to 2-element arrays —
                                         // accept both.
                                         let pair_vec: Option<Vec<Value>> = match item {
-                                            Value::Tuple(pair) => Some(*pair),
-                                            Value::Array(items) if items.len() == 2 => Some(*items),
+                                            Value::Tuple(pair) => Some(
+                                                std::sync::Arc::try_unwrap(pair)
+                                                    .unwrap_or_else(|a| (*a).clone()),
+                                            ),
+                                            Value::Array(items) if items.len() == 2 => Some(
+                                                std::sync::Arc::try_unwrap(items)
+                                                    .unwrap_or_else(|a| (*a).clone()),
+                                            ),
                                             _ => None,
                                         };
                                         match pair_vec {
@@ -1420,9 +2244,9 @@ impl Vm {
                                 } else {
                                     iter_done = false;
                                     next_idx = Value::Int((i as i64).wrapping_add(1));
-                                    push_val = pairs[i].0.clone();
+                                    push_val = pairs.entries()[i].0.clone();
                                     if num_vars == 2 {
-                                        push_val2 = Some(pairs[i].1.clone());
+                                        push_val2 = Some(pairs.entries()[i].1.clone());
                                     } else {
                                         push_val2 = None;
                                     }
@@ -1433,11 +2257,13 @@ impl Vm {
                     } // immutable borrow of self.stack dropped here
 
                     if iter_done {
+                        record_branch!(true);
                         let li = self.loops.pop().unwrap();
                         self.stack.truncate(li.stack_base + 1);
                         interp.env = li.env;
                         ip = *exit;
                     } else {
+                        record_branch!(false);
                         self.stack.push(next_idx);
                         self.stack.push(push_val.clone());
                         if let Some(ref v) = push_val2 {
@@ -1456,6 +2282,10 @@ impl Vm {
                             }
                             interp.env = scope;
                         }
+                        // Rotated layout: the body follows in `body` (the
+                        // loop is entered at this op), so this jump is the
+                        // back-edge — one dispatch per iteration.
+                        ip = *body;
                     }
                 }
                 Op::WhileSetup { exit, header } => {
@@ -1469,11 +2299,24 @@ impl Vm {
                     });
                 }
                 Op::WhileCond { exit, span } => {
+                    // Cooperative safepoint for `while` loops, folded in from
+                    // the header (see `Compiler::compile_while`): this op is
+                    // reached once per test — entry, back-edge and `continue`
+                    // all land on the condition — so the check cannot be
+                    // skipped, at one dispatch less per iteration. Taken
+                    // before the condition is popped so a yield rewinds to
+                    // this op and re-executes it whole.
+                    if self.safepoint_expired() {
+                        self.frames.last_mut().unwrap().ip = ip - 1;
+                        return Ok(Flow::Yield(crate::value::YieldReason::Timeslice));
+                    }
                     let c = self.stack.pop().unwrap();
                     if !matches!(c, Value::Bool(_)) {
                         return Err(self.error("`while` condition must be a bool", *span));
                     }
-                    if !c.is_truthy() {
+                    let done = !c.is_truthy();
+                    record_branch!(done);
+                    if done {
                         let li = self.loops.pop().unwrap();
                         self.stack.truncate(li.stack_base + 1);
                         interp.env = li.env;
@@ -1513,7 +2356,7 @@ impl Vm {
                         items.push(self.stack.pop().unwrap());
                     }
                     items.reverse();
-                    self.stack.push(Value::Array(Box::new(items)));
+                    self.stack.push(Value::Array(std::sync::Arc::new(items)));
                 }
                 Op::UnpackTuple(n) => {
                     let val = self.stack.pop().unwrap();
@@ -1531,7 +2374,11 @@ impl Vm {
                                 ));
                             }
                             // Push elements in reverse so first is on top
-                            for item in items.into_iter().rev() {
+                            for item in std::sync::Arc::try_unwrap(items)
+                                .unwrap_or_else(|a| (*a).clone())
+                                .into_iter()
+                                .rev()
+                            {
                                 self.stack.push(item);
                             }
                         }
@@ -1554,7 +2401,8 @@ impl Vm {
                             ));
                         }
                     };
-                    arr.push(value);
+                    // Owned pop: mutate in place when uniquely owned.
+                    std::sync::Arc::make_mut(&mut arr).push(value);
                     self.stack.push(Value::Array(arr));
                 }
                 Op::MakeDict(n) => {
@@ -1565,13 +2413,94 @@ impl Vm {
                         pairs.push((k, v));
                     }
                     pairs.reverse();
-                    self.stack.push(Value::Dict(Box::new(pairs)));
+                    self.stack.push(Value::Dict(std::sync::Arc::new(
+                        crate::value::DictData::from_entries(pairs),
+                    )));
                 }
                 Op::IndexOp(span) => {
                     let iv = self.stack.pop().unwrap();
                     let ov = self.stack.pop().unwrap();
                     let v = get_index(&ov, &iv, *span)?;
                     self.stack.push(v);
+                }
+                // Read `array[idx]` where both are stack slots: single bounds
+                // check, no `normalize_index` call, no `Value` tag loop.
+                Op::IndexIntSlot {
+                    arr,
+                    idx,
+                    dst,
+                    span,
+                } => {
+                    let ov = self.stack[cached_base + *arr as usize].clone();
+                    let iv = self.stack[cached_base + *idx as usize].clone();
+                    let v = match (&ov, &iv) {
+                        (Value::Array(items), Value::Int(i)) => {
+                            let ix = normalize_index(*i, items.len(), *span)?;
+                            items[ix].clone()
+                        }
+                        (Value::Tuple(items), Value::Int(i)) => {
+                            let ix = normalize_index(*i, items.len(), *span)?;
+                            items[ix].clone()
+                        }
+                        (Value::Bytes(b), Value::Int(i)) => {
+                            let ix = normalize_index(*i, b.len(), *span)?;
+                            Value::Int(b.as_slice()[ix] as i64)
+                        }
+                        (Value::Dict(dict), key) => match dict.get_cloned(key) {
+                            Some(v) => v,
+                            None => {
+                                return Err(
+                                    self.error(format!("key `{key}` not found in dict"), *span)
+                                );
+                            }
+                        },
+                        (Value::Str(s), Value::Int(i)) => {
+                            if s.is_ascii() {
+                                let ix = normalize_index(*i, s.len(), *span)?;
+                                Value::Str(std::sync::Arc::clone(
+                                    &crate::runtime::ops::ascii_chars()[s.as_bytes()[ix] as usize],
+                                ))
+                            } else {
+                                let chars: Vec<char> = s.chars().collect();
+                                let ix = normalize_index(*i, chars.len(), *span)?;
+                                Value::Str(chars[ix].to_string().into())
+                            }
+                        }
+                        _ => {
+                            return Err(self.error(
+                                format!("cannot index a value of type `{}`", ov.type_name()),
+                                *span,
+                            ));
+                        }
+                    };
+                    self.stack[cached_base + *dst as usize] = v;
+                }
+                // Read `dict[key]` where key is an int: probe DictData with
+                // a precomputed hash + open-addressed table.
+                Op::IndexDictInt {
+                    dict,
+                    key,
+                    dst,
+                    span,
+                } => {
+                    let ov = self.stack[cached_base + *dict as usize].clone();
+                    let iv = self.stack[cached_base + *key as usize].clone();
+                    let v = match (&ov, &iv) {
+                        (Value::Dict(dict), key) => match dict.get_cloned(key) {
+                            Some(v) => v,
+                            None => {
+                                return Err(
+                                    self.error(format!("key `{key}` not found in dict"), *span)
+                                );
+                            }
+                        },
+                        _ => {
+                            return Err(
+                                self.error("expected dict for indexed access".to_string(), *span)
+                            );
+                        }
+                    };
+                    self.stack[cached_base + *dst as usize] = v;
                 }
                 Op::StoreIndexOp(span) => {
                     // Stack layout is evaluation order: [object, index,
@@ -1582,6 +2511,34 @@ impl Vm {
                     set_index(&mut ov, &iv, value, *span)?;
                     self.stack.push(ov);
                 }
+                Op::StoreIndexTake { home, span } => {
+                    // Stack layout is [index, value]: the base lives in
+                    // the home and only the two operands were evaluated,
+                    // so the take window is this instruction alone.
+                    let value = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let Some(mut ov) = Self::take_home(self, interp, home) else {
+                        self.stack.push(iv);
+                        self.stack.push(value);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // `set_index` mutates in place (refcount 1) and only
+                    // writes on success, so restoring the taken value puts
+                    // back exactly the pre-op container on error and the
+                    // updated one on success.
+                    let res = set_index(&mut ov, &iv, value, *span);
+                    Self::restore_home(self, interp, home, ov);
+                    res?;
+                }
                 Op::CompoundIndexOp { op, span } => {
                     let rhs = self.stack.pop().unwrap();
                     let iv = self.stack.pop().unwrap();
@@ -1590,6 +2547,36 @@ impl Vm {
                     let new = eval_binary(*op, cur, rhs, *span)?;
                     set_index(&mut ov, &iv, new, *span)?;
                     self.stack.push(ov);
+                }
+                Op::CompoundIndexTake { home, op, span } => {
+                    // Stack layout is [index, rhs] (the base lives in the
+                    // home), so the take window holds no user code.
+                    let rhs = self.stack.pop().unwrap();
+                    let iv = self.stack.pop().unwrap();
+                    let Some(mut ov) = Self::take_home(self, interp, home) else {
+                        self.stack.push(iv);
+                        self.stack.push(rhs);
+                        return Err(self.error(
+                            format!(
+                                "undefined variable `{}`",
+                                match home {
+                                    TakeHome::Slot(_) => String::from("<slot>"),
+                                    TakeHome::Env(n) => n.clone(),
+                                }
+                            ),
+                            *span,
+                        ));
+                    };
+                    // Any failure before the write leaves the container
+                    // untouched, so restoring it puts back exactly the pre-op
+                    // state; a successful write is restored too.
+                    let cur = get_index(&ov, &iv, *span);
+                    let res = cur.and_then(|cur| {
+                        let new = eval_binary(*op, cur, rhs, *span)?;
+                        set_index(&mut ov, &iv, new, *span)
+                    });
+                    Self::restore_home(self, interp, home, ov);
+                    res?;
                 }
                 Op::SliceOp(span) => {
                     let e = self.stack.pop().unwrap();
@@ -1636,7 +2623,10 @@ impl Vm {
                     } else {
                         return Err(self.error(format!("unknown struct `{name}`"), *span));
                     };
-                    let Some(registered) = interp.structs.get(lookup).cloned() else {
+                    // Borrowed, not cloned: the layout lives in `interp` for
+                    // the whole run, and a clone is a `Vec<String>` plus one
+                    // `String` per field on every construction.
+                    let Some(registered) = interp.structs.get(lookup) else {
                         return Err(self.error(format!("unknown struct `{name}`"), *span));
                     };
                     let mut vals = Vec::with_capacity(field_names.len());
@@ -1644,19 +2634,65 @@ impl Vm {
                         vals.push(self.stack.pop().unwrap());
                     }
                     vals.reverse();
-                    let given: Vec<(String, Value)> =
-                        field_names.iter().cloned().zip(vals).collect();
-                    // Flattened (promoted) fields are distributed into
-                    // embedded sub-objects inside `build_struct_literal`.
-                    let obj = crate::runtime::ops::build_struct_literal(
-                        &interp.structs,
-                        lookup,
-                        &registered,
-                        &given,
-                        *span,
-                        0,
-                    )?;
-                    self.stack.push(Value::Object(Box::new(obj)));
+                    // Fast path: the literal names exactly the struct's own
+                    // fields, so none is an embedded (promoted) field.
+                    // `build_struct_literal` would then pay a `given` vector,
+                    // a `leftovers` filter, a `contains` per field and a
+                    // `find` per field — all avoidable once positions are
+                    // known. The names come interned from the chunk, so each
+                    // instance copies refcounts instead of allocating.
+                    let direct = field_names.len() == registered.len()
+                        && field_names
+                            .iter()
+                            .all(|n| registered.iter().any(|r| r.as_str() == n.as_ref()))
+                        && registered
+                            .iter()
+                            .all(|r| field_names.iter().any(|n| n.as_ref() == r.as_str()));
+                    let obj = if direct {
+                        let mut out: Vec<(std::sync::Arc<str>, Value)> =
+                            Vec::with_capacity(registered.len());
+                        if field_names
+                            .iter()
+                            .zip(registered.iter())
+                            .all(|(a, b)| a.as_ref() == b.as_str())
+                        {
+                            // Declared order: pair positionally.
+                            for (fname, v) in field_names.iter().zip(vals) {
+                                out.push((std::sync::Arc::clone(fname), v));
+                            }
+                        } else {
+                            let mut slots: Vec<Option<Value>> =
+                                vals.into_iter().map(Some).collect();
+                            for fname in registered.iter() {
+                                let pos = field_names
+                                    .iter()
+                                    .position(|n| n.as_ref() == fname.as_str())
+                                    .expect("direct fast path proved membership");
+                                let v = slots[pos]
+                                    .take()
+                                    .expect("direct fast path proved uniqueness");
+                                out.push((std::sync::Arc::clone(&field_names[pos]), v));
+                            }
+                        }
+                        crate::value::ObjectValue {
+                            name: lookup.to_string(),
+                            fields: out,
+                        }
+                    } else {
+                        // Flattened (promoted) fields are distributed into
+                        // embedded sub-objects inside `build_struct_literal`.
+                        let given: Vec<(std::sync::Arc<str>, Value)> =
+                            field_names.iter().cloned().zip(vals).collect();
+                        crate::runtime::ops::build_struct_literal(
+                            &interp.structs,
+                            lookup,
+                            registered,
+                            &given,
+                            *span,
+                            0,
+                        )?
+                    };
+                    self.stack.push(Value::Object(std::sync::Arc::new(obj)));
                 }
                 Op::GetField(name, span) => {
                     let ov = self.stack.pop().unwrap();
@@ -1706,6 +2742,7 @@ impl Vm {
                     let value = self.stack.pop().unwrap();
                     match &mut ov {
                         Value::Object(o) => {
+                            let o = std::sync::Arc::make_mut(o);
                             if (*idx as usize) < o.fields.len() {
                                 o.fields[*idx as usize].1 = value;
                             } else {
@@ -1741,8 +2778,10 @@ impl Vm {
                         env: interp.env.clone(),
                         chunk: Some(Arc::clone(chunk)),
                         chunk_defaults: defaults.clone(),
+                        // Closure: body tail is the value.
+                        tail_value: true,
                     };
-                    self.stack.push(Value::Func(Box::new(fv)));
+                    self.stack.push(Value::Func(std::rc::Rc::new(fv)));
                 }
                 Op::SpawnClosure {
                     params,
@@ -1882,7 +2921,9 @@ impl Vm {
                                         Unwind::Error(err) => return Err(err),
                                     },
                                     Some(fname) => {
-                                        let Some(fv) = interp.funcs.get(&fname).cloned() else {
+                                        let Some(fv) =
+                                            zz_checker::lookup_std(&interp.funcs, &fname).cloned()
+                                        else {
                                             match self.unwind_frame(
                                                 Flow::Return(Value::Result(Box::new(Err(
                                                     e.clone()
@@ -1901,12 +2942,12 @@ impl Vm {
                                         let err_c = e.clone();
                                         if fv.chunk.is_some() {
                                             self.frames.last_mut().unwrap().ip = ip;
-                                            let callee = Value::Func(Box::new(fv));
+                                            let callee = Value::Func(std::rc::Rc::clone(&fv));
                                             self.call_value(callee, vec![err_c], span_c, interp)?;
                                             self.try_convert_depths.push(self.frames.len());
                                             re_cache!();
                                         } else {
-                                            let callee = Value::Func(Box::new(fv));
+                                            let callee = Value::Func(std::rc::Rc::clone(&fv));
                                             let converted =
                                                 interp.call(callee, vec![err_c], span_c)?;
                                             match self.unwind_frame(
@@ -1973,11 +3014,18 @@ impl Vm {
                 Op::Call { argc, span } => {
                     let argc = *argc;
                     let span = *span;
-                    let mut args = Vec::with_capacity(argc as usize);
+                    // Scratch args buffer (same discipline as `CallNative`):
+                    // reuses one allocation per thread instead of one per
+                    // call. `call_value` returns the buffer for chunked
+                    // callees; slow paths consume it (correct, just slower).
+                    let mut args = take_scratch_args();
+                    args.reserve(argc as usize);
                     for _ in 0..argc {
                         args.push(self.stack.pop().unwrap());
                     }
-                    args.reverse();
+                    if args.len() > 1 {
+                        args.reverse();
+                    }
                     let callee = self.stack.pop().unwrap();
                     // Sync ip back so the parent frame resumes at the right spot.
                     self.frames.last_mut().unwrap().ip = ip;
@@ -1995,33 +3043,92 @@ impl Vm {
                     let argc = *argc;
                     let span = *span;
                     let pspan = *pspan;
-                    let mut args = Vec::with_capacity(argc as usize);
+                    // Direct script-function call: `fib(n)` and module paths
+                    // like `lib.fib(n)` resolve to a compiled function bound
+                    // under the precomputed `joined` key. Entering its frame
+                    // here skips the per-call `Value::Func` clones (the
+                    // `is_direct` probe's discarded one included) and every
+                    // fallback probe below. Anything this can't prove
+                    // equivalent — a shadowing binding, a native, defaults to
+                    // fill, a wrong arity — falls through unchanged.
+                    self.frames.last_mut().unwrap().ip = ip;
+                    // Memoized resolution: this site calls the same function
+                    // until the environment or the function table changes, so
+                    // the two name probes (`env.bound` + `funcs.get`, ~120 ns
+                    // together) only run once per generation.
+                    let caller = self.frames.last().map(|f| f.chunk.id).unwrap_or(0);
+                    let gen = crate::env::env_gen() ^ interp.funcs_version;
+                    if let Some((chunk, env)) = self.direct_call_hit(caller, ip, argc, gen) {
+                        // Arguments are already contiguous at the top of the
+                        // stack, in parameter order: no scratch buffer, no
+                        // pop/push round trip.
+                        let base = self.stack.len() - argc as usize;
+                        self.open_frame(base, chunk, env, span, interp);
+                        re_cache!();
+                        yield_check!();
+                        continue;
+                    }
+                    // Miss: the fallbacks below want the arguments off the
+                    // stack (they may be reversed, reordered, or handed to a
+                    // native), so pay the scratch buffer once.
+                    let mut args = take_scratch_args();
+                    args.reserve(argc as usize);
                     for _ in 0..argc {
                         args.push(self.stack.pop().unwrap());
                     }
-                    args.reverse();
+                    if args.len() > 1 {
+                        args.reverse();
+                    }
+                    match self.try_enter_direct_call(
+                        joined,
+                        args,
+                        span,
+                        interp,
+                        Some((caller, ip, gen)),
+                    ) {
+                        None => {
+                            re_cache!();
+                            yield_check!();
+                            continue;
+                        }
+                        Some(back) => args = back,
+                    }
                     if parts.len() >= 2 {
                         // Precomputed at compile time (see `Op::CallPath`):
                         // no lookup-string allocation per call.
                         let is_direct = interp.env.get(joined).is_some()
-                            || interp.funcs.contains_key(joined)
-                            || interp.natives.contains_key(joined);
+                            || zz_checker::lookup_std(&interp.funcs, joined).is_some()
+                            || zz_checker::lookup_std(&interp.natives, joined).is_some();
+                        // Fast path (#364): a direct hit skips every
+                        // fallback probe below (head-shadow joins, enum
+                        // tables, and a second full path resolution) —
+                        // identical semantics, one resolution per call.
+                        if is_direct {
+                            let callee = interp.resolve_path_value(parts, pspan)?;
+                            self.frames.last_mut().unwrap().ip = ip;
+                            self.call_value(callee, args, span, interp)?;
+                            re_cache!();
+                            yield_check!();
+                            continue;
+                        }
                         // Enum construction fallback (untyped compiles,
                         // cross-snippet REPL): the head names an enum and
                         // resolves to no value — build the variant object
                         // directly instead of failing the path lookup.
                         // Miss-only: a shadowing value keeps its
                         // meaning (mirrors the checker and tree-walker).
-                        let head_shadowed = parts.len() >= 2
-                            && (interp
-                                .env
-                                .get(&parts[..parts.len() - 1].join("."))
-                                .is_some()
-                                || interp
-                                    .funcs
-                                    .contains_key(&parts[..parts.len() - 1].join(".")));
-                        if !is_direct && !head_shadowed && parts.len() >= 2 {
-                            let head = parts[..parts.len() - 1].join(".");
+                        // `head` is built once and reused below (it was
+                        // joined three times per call before).
+                        let head: Option<String> = if parts.len() >= 2 {
+                            Some(parts[..parts.len() - 1].join("."))
+                        } else {
+                            None
+                        };
+                        let head_shadowed = head.as_ref().is_some_and(|h| {
+                            interp.env.get(h).is_some() || interp.funcs.contains_key(h)
+                        });
+                        if !head_shadowed {
+                            let head = head.unwrap_or_default();
                             let canonical = if interp.enums.contains_key(&head) {
                                 Some(head.clone())
                             } else {
@@ -2044,13 +3151,13 @@ impl Vm {
                                         Some(has_payload) if has_payload == (args.len() == 1) => {
                                             let fields = if has_payload {
                                                 vec![(
-                                                    "value".to_string(),
+                                                    std::sync::Arc::from("value"),
                                                     args.into_iter().next().unwrap(),
                                                 )]
                                             } else {
                                                 Vec::new()
                                             };
-                                            self.stack.push(Value::Object(Box::new(
+                                            self.stack.push(Value::Object(std::sync::Arc::new(
                                                 crate::value::ObjectValue {
                                                     name: format!("{ename}.{variant}"),
                                                     fields,
@@ -2070,16 +3177,18 @@ impl Vm {
                         // same resolution as above, then method dispatch
                         // on the constructed receiver. Payload variants
                         // can't chain (checker rejects with bind-first).
-                        let head2_shadowed = parts.len() >= 3
-                            && (interp
-                                .env
-                                .get(&parts[..parts.len() - 2].join("."))
-                                .is_some()
-                                || interp
-                                    .funcs
-                                    .contains_key(&parts[..parts.len() - 2].join(".")));
-                        if !is_direct && !head2_shadowed && parts.len() >= 3 {
-                            let head2 = parts[..parts.len() - 2].join(".");
+                        // `head2` is built once and reused below (it was
+                        // joined three times per call before).
+                        let head2: Option<String> = if parts.len() >= 3 {
+                            Some(parts[..parts.len() - 2].join("."))
+                        } else {
+                            None
+                        };
+                        let head2_shadowed = head2.as_ref().is_some_and(|h| {
+                            interp.env.get(h).is_some() || interp.funcs.contains_key(h)
+                        });
+                        if !head2_shadowed {
+                            let head2 = head2.unwrap_or_default();
                             let canonical2 = if interp.enums.contains_key(&head2) {
                                 Some(head2.clone())
                             } else {
@@ -2100,15 +3209,21 @@ impl Vm {
                                     })
                                     .is_some_and(|has| !has);
                                 if is_unit {
-                                    let recv = Value::Object(Box::new(crate::value::ObjectValue {
-                                        name: format!("{ename}.{variant}"),
-                                        fields: Vec::new(),
-                                    }));
+                                    let recv = Value::Object(std::sync::Arc::new(
+                                        crate::value::ObjectValue {
+                                            name: format!("{ename}.{variant}"),
+                                            fields: Vec::new(),
+                                        },
+                                    ));
                                     if let Ok((f, recv)) =
                                         interp.lookup_method_recv(&recv, &method, span)
                                     {
-                                        let mut arg_vals = vec![recv];
-                                        arg_vals.extend(args);
+                                        // Reuse the scratch buffer: prepend
+                                        // the receiver instead of allocating
+                                        // a second Vec (shift is O(argc),
+                                        // argc is tiny on this path).
+                                        let mut arg_vals = args;
+                                        arg_vals.insert(0, recv);
                                         self.frames.last_mut().unwrap().ip = ip;
                                         self.call_value(f, arg_vals, span, interp)?;
                                         re_cache!();
@@ -2118,13 +3233,15 @@ impl Vm {
                                 }
                             }
                         }
-                        if !is_direct && interp.resolve_path_value(parts, pspan).is_err() {
+                        if interp.resolve_path_value(parts, pspan).is_err() {
                             let method = parts.last().unwrap();
                             let recv =
                                 interp.resolve_path_value(&parts[..parts.len() - 1], pspan)?;
                             // sqlz fast path (CallPath form): Db handle +
                             // query/exec/close dispatches straight to the
-                            // canonical sqlz.* native (db.* alias fallback).
+                            // canonical sqlz.* native only (there is no
+                            // `db` module; module-position `db.*` is a
+                            // checker hard error).
                             // lookup_method would also work via the Db
                             // method_namespace, but this avoids the
                             // object_field detour entirely.
@@ -2137,20 +3254,15 @@ impl Vm {
                                     .copied()
                                     .or_else(|| {
                                         interp.natives.get(&format!("std.sqlz.{method}")).copied()
-                                    })
-                                    .or_else(|| {
-                                        interp.natives.get(&format!("db.{method}")).copied()
-                                    })
-                                    .or_else(|| {
-                                        interp.natives.get(&format!("std.db.{method}")).copied()
                                     });
                                 match entry {
                                     Some(e) => {
-                                        let mut arg_vals = vec![recv];
-                                        arg_vals.extend(args);
+                                        let mut arg_vals = args;
+                                        arg_vals.insert(0, recv);
                                         self.frames.last_mut().unwrap().ip = ip;
                                         let result = (e.f)(interp, &mut arg_vals, span)?;
                                         self.stack.push(result);
+                                        return_scratch_args(arg_vals);
                                         re_cache!();
                                         yield_check!();
                                         continue;
@@ -2162,8 +3274,8 @@ impl Vm {
                                 }
                             }
                             let (f, recv) = interp.lookup_method_recv(&recv, method, pspan)?;
-                            let mut arg_vals = vec![recv];
-                            arg_vals.extend(args);
+                            let mut arg_vals = args;
+                            arg_vals.insert(0, recv);
                             self.frames.last_mut().unwrap().ip = ip;
                             self.call_value(f, arg_vals, span, interp)?;
                             re_cache!();
@@ -2180,34 +3292,38 @@ impl Vm {
                 Op::CallMethod { name, argc, span } => {
                     let argc = *argc;
                     let span = *span;
-                    let mut args = Vec::with_capacity(argc as usize);
+                    let mut args = take_scratch_args();
+                    // +1: method fallbacks prepend the receiver into this
+                    // same buffer (`insert(0, recv)`) instead of allocating
+                    // a second Vec.
+                    args.reserve(argc as usize + 1);
                     for _ in 0..argc {
                         args.push(self.stack.pop().unwrap());
                     }
-                    args.reverse();
+                    if args.len() > 1 {
+                        args.reverse();
+                    }
                     let recv = self.stack.pop().unwrap();
                     self.frames.last_mut().unwrap().ip = ip;
                     // sqlz fast path: `mydb.query/exec` on a Db handle
                     // bypasses object_field (Db has no struct fields) and
                     // dispatches straight to the canonical sqlz.* native
-                    // (db.* alias fallback).
+                    // (`db` module removed; see above).
                     if matches!(recv, Value::Db(_))
                         && matches!(name.as_str(), "query" | "exec" | "close")
                     {
                         let native_name = format!("sqlz.{name}");
-                        let entry = interp
-                            .natives
-                            .get(&native_name)
-                            .copied()
-                            .or_else(|| interp.natives.get(&format!("std.sqlz.{name}")).copied())
-                            .or_else(|| interp.natives.get(&format!("db.{name}")).copied())
-                            .or_else(|| interp.natives.get(&format!("std.db.{name}")).copied());
+                        let entry =
+                            interp.natives.get(&native_name).copied().or_else(|| {
+                                interp.natives.get(&format!("std.sqlz.{name}")).copied()
+                            });
                         match entry {
                             Some(e) => {
-                                let mut arg_vals = vec![recv];
-                                arg_vals.extend(args);
+                                let mut arg_vals = args;
+                                arg_vals.insert(0, recv);
                                 let result = (e.f)(interp, &mut arg_vals, span)?;
                                 self.stack.push(result);
+                                return_scratch_args(arg_vals);
                                 re_cache!();
                                 yield_check!();
                                 continue;
@@ -2217,12 +3333,15 @@ impl Vm {
                             }
                         }
                     }
-                    match object_field(&recv, name, span) {
-                        Ok(f) => self.call_value(f, args, span, interp)?,
-                        Err(_) => {
+                    // Probe fields without building the miss error: a
+                    // method call is a field miss by definition, so the
+                    // formatted error was pure waste on every call.
+                    match object_field_opt(&recv, name) {
+                        Some(f) => self.call_value(f, args, span, interp)?,
+                        None => {
                             let (f, recv) = interp.lookup_method_recv(&recv, name, span)?;
-                            let mut arg_vals = vec![recv];
-                            arg_vals.extend(args);
+                            let mut arg_vals = args;
+                            arg_vals.insert(0, recv);
                             self.call_value(f, arg_vals, span, interp)?;
                         }
                     }
@@ -2309,6 +3428,33 @@ impl Vm {
                 Op::CallNative { name, argc, span } => {
                     let argc = *argc;
                     let span = *span;
+                    // `len` is the most frequent native call in string and
+                    // collection code and a pure function of one stack value,
+                    // so specialise it ahead of the dynamic path: no args
+                    // buffer, no registry lookup, no frame re-cache. The
+                    // fixed dispatch cost measured ~150ns per call, against
+                    // ~10ns here. The semantics are the registry entry's own
+                    // — `value_len`/`len_error` are the shared implementation
+                    // (they already serve `LenField`) and the registered
+                    // arity is exactly 1, so the generic arity gate cannot
+                    // disagree for this spelling; every other arity and every
+                    // other native stays on the generic path below.
+                    if argc == 1 && name.as_str() == "len" {
+                        let v = self.stack.pop().unwrap();
+                        if let Some(n) = Self::value_len(&v) {
+                            self.stack.push(Value::Int(n));
+                        } else {
+                            return Err(Self::len_error(&v, span));
+                        }
+                        // A pending cooperative yield must resume *after*
+                        // this op, never re-execute it: the argument has been
+                        // consumed and the result pushed, so syncing `ip`
+                        // (as the generic path does before it calls the
+                        // native) is what makes re-entry idempotent.
+                        self.frames.last_mut().unwrap().ip = ip;
+                        yield_check!();
+                        continue;
+                    }
                     // Scratch args buffer: reuses one allocation per thread
                     // instead of allocating an args `Vec` per call (~50ns
                     // saved on the hot path). Reentrant calls (a native
@@ -2332,10 +3478,6 @@ impl Vm {
                             | "std.sqlz.query"
                             | "sqlz.exec"
                             | "std.sqlz.exec"
-                            | "db.query"
-                            | "std.db.query"
-                            | "db.exec"
-                            | "std.db.exec"
                             | "pg.query"
                             | "pg.exec"
                             | "postgres.query"
@@ -2349,10 +3491,12 @@ impl Vm {
                             | "std.sqlz.mysql.query"
                             | "std.sqlz.mysql.exec"
                     );
-                    // sqlz.query/sqlz.exec (+ db.* alias) carry a variable
+                    // sqlz.query/sqlz.exec carry a variable
                     // number of bound params; resolve the entry without an
                     // arity gate (Interp::call skips it for sqlz.* too).
-                    let entry = interp.natives.get(name).copied();
+                    // (`pg.*`/`my.*` only exist as import aliases of the
+                    // nested `std.sqlz.postgres/mysql`.)
+                    let entry = zz_checker::lookup_std(&interp.natives, name).copied();
                     let arity = match &entry {
                         Some(e) => e.arity,
                         // C-only plugins resolve by name from the registry.
@@ -2392,6 +3536,158 @@ impl Vm {
         }
     }
 
+    /// Enter a bytecode function's frame: move the arguments onto the
+    /// stack, switch the active environment, and push the frame.
+    ///
+    /// Shared by [`Vm::call_value`] and the direct-call fast path so frame
+    /// setup is identical wherever a chunk is entered.
+    fn enter_call_frame(
+        &mut self,
+        chunk: Arc<Chunk>,
+        env: EnvLink,
+        args: Vec<Value>,
+        span: Span,
+        interp: &mut Interp,
+    ) {
+        let stack_base = self.stack.len();
+        let mut args = args;
+        // Append (not extend+drain): elements move onto the stack while
+        // the buffer keeps its allocation and goes back to the scratch
+        // slot below — steady-state calls never allocate.
+        self.stack.append(&mut args);
+        return_scratch_args(args);
+        self.open_frame(stack_base, chunk, env, span, interp);
+    }
+
+    /// Push a call frame whose arguments already occupy the top of the
+    /// value stack (`stack_base = stack.len() - argc`).
+    ///
+    /// The direct-call site memo resolves the callee *before* touching the
+    /// stack, so a hit copies nothing: the arguments are already in
+    /// parameter order where the callee expects them.
+    fn open_frame(
+        &mut self,
+        stack_base: usize,
+        chunk: Arc<Chunk>,
+        env: EnvLink,
+        span: Span,
+        interp: &mut Interp,
+    ) {
+        let prev_env = std::mem::replace(&mut interp.env, env);
+        let saved_defers = std::mem::take(&mut self.defer_stack);
+        self.frames.push(Frame {
+            chunk,
+            ip: 0,
+            prev_env,
+            stack_base,
+            defer_stack: saved_defers,
+            func_span: span,
+        });
+    }
+
+    /// Call the compiled function bound under `name` without materialising
+    /// a `Value`.
+    ///
+    /// `resolve_path_value` answers a callable name with a cloned
+    /// `Value::Func`, which copies the function's parameters and defaults
+    /// on **every** call. Whole-program functions are registered in the
+    /// environment *and* the function table, so recursive code (`fib`)
+    /// pays that twice per call — once for the `is_direct` probe's
+    /// discarded value and once for the callee.
+    ///
+    /// Returns the arguments back when the call needs the general path:
+    /// a shadowing non-function binding, a native, a canonical `std.*`
+    /// alias, an arity that needs defaults filled, or a closure with no
+    /// bytecode. Everything this handles is exactly what the general path
+    /// would have done, without the copies.
+    pub(super) fn try_enter_direct_call(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+        interp: &mut Interp,
+        site: Option<(u64, usize, u64)>,
+    ) -> Option<Vec<Value>> {
+        match self.resolve_direct(name, args.len(), interp) {
+            Some((chunk, env)) => {
+                if let Some((chunk_id, ip, gen)) = site {
+                    self.fill_direct_call(chunk_id, ip, args.len() as u16, gen, &chunk, &env);
+                }
+                self.enter_call_frame(chunk, env, args, span, interp);
+                None
+            }
+            None => Some(args),
+        }
+    }
+
+    /// Resolve a call name to a compiled function the direct path can enter
+    /// without materialising a `Value`.
+    ///
+    /// `None` means "take the general path": a shadowing non-function
+    /// binding, a native, a canonical `std.*` alias, defaults to fill, a
+    /// chunk-less closure, or an arity mismatch.
+    fn resolve_direct(
+        &self,
+        name: &str,
+        argc: usize,
+        interp: &Interp,
+    ) -> Option<(Arc<Chunk>, crate::env::EnvLink)> {
+        // Bindings win over the function table (mirrors
+        // `resolve_path_value`'s environment-first order).
+        match interp.env.bound(name) {
+            Some(Bound::Compiled { chunk, env, params }) if argc == params => {
+                return Some((chunk, env));
+            }
+            Some(_) => return None,
+            None => {}
+        }
+        // Unbound: a direct hit in the function table is the same value
+        // the general path resolves next. Canonical `std.*` aliases are
+        // left to it (rare, and they carry no local binding to shadow).
+        let fv = interp.funcs.get(name)?;
+        if argc != fv.params.len() {
+            return None;
+        }
+        let chunk = fv.chunk.as_ref()?;
+        Some((Arc::clone(chunk), fv.env.clone()))
+    }
+
+    /// Memoized [`Vm::resolve_direct`] for a `CallPath` site.
+    fn direct_call_hit(
+        &self,
+        chunk_id: u64,
+        ip: usize,
+        argc: u16,
+        gen: u64,
+    ) -> Option<(Arc<Chunk>, crate::env::EnvLink)> {
+        let e = self.call_cache[(chunk_id as usize ^ ip) & (CALL_CACHE_LEN - 1)].as_ref()?;
+        if e.chunk_id == chunk_id && e.ip == ip && e.argc == argc && e.gen == gen {
+            Some((Arc::clone(&e.callee), e.env.clone()))
+        } else {
+            None
+        }
+    }
+
+    fn fill_direct_call(
+        &mut self,
+        chunk_id: u64,
+        ip: usize,
+        argc: u16,
+        gen: u64,
+        callee: &Arc<Chunk>,
+        env: &crate::env::EnvLink,
+    ) {
+        let i = (chunk_id as usize ^ ip) & (CALL_CACHE_LEN - 1);
+        self.call_cache[i] = Some(CachedDirect {
+            chunk_id,
+            ip,
+            argc,
+            gen,
+            callee: Arc::clone(callee),
+            env: env.clone(),
+        });
+    }
+
     fn call_value(
         &mut self,
         callee: Value,
@@ -2403,12 +3699,11 @@ impl Vm {
             Value::Func(fv) if fv.chunk.is_some() => {
                 let mut args = args;
                 if args.len() > fv.params.len() {
+                    let expected = fv.params.len();
+                    let found = args.len();
+                    return_scratch_args(args);
                     return Err(self.error(
-                        format!(
-                            "expected {} arguments, found {}",
-                            fv.params.len(),
-                            args.len()
-                        ),
+                        format!("expected {expected} arguments, found {found}"),
                         span,
                     ));
                 }
@@ -2448,12 +3743,10 @@ impl Vm {
                                         }
                                     }
                                 } else {
+                                    let expected = fv.params.len();
+                                    return_scratch_args(args);
                                     return Err(self.error(
-                                        format!(
-                                            "expected {} arguments, found {}",
-                                            fv.params.len(),
-                                            start
-                                        ),
+                                        format!("expected {expected} arguments, found {start}"),
                                         span,
                                     ));
                                 }
@@ -2461,19 +3754,8 @@ impl Vm {
                         }
                     }
                 }
-                let stack_base = self.stack.len();
-                self.stack.extend(args);
-                let prev_env = std::mem::replace(&mut interp.env, fv.env.clone());
-                let saved_defers = std::mem::take(&mut self.defer_stack);
-                self.frames.push(Frame {
-                    chunk: fv.chunk.unwrap(),
-                    ip: 0,
-                    prev_env,
-                    stack_base,
-                    defer_stack: saved_defers,
-                    func_name: String::new(),
-                    func_span: span,
-                });
+                let chunk = fv.chunk.clone().expect("chunk presence checked above");
+                self.enter_call_frame(chunk, fv.env.clone(), args, span, interp);
                 Ok(())
             }
             other => {
@@ -2537,14 +3819,20 @@ impl Vm {
     }
 
     fn unwind_frame(&mut self, flow: Flow, interp: &mut Interp) -> Unwind {
-        // Move (never clone) the return payload out: the frame is
-        // discarded below, so this is its last use. Cloning here costs
-        // a full deep copy per call return — O(n) per key for threaded
-        // accumulators like `doc = push_node(doc, x)`.
-        let (payload, brk, ctn) = match flow {
-            Flow::Return(v) => (Some(v), None, None),
-            Flow::Break(s) => (None, Some(s), None),
-            Flow::Continue(s) => (None, None, Some(s)),
+        // Keep the return payload in a register (plain `Value` + bool) instead
+        // of wrapping it in `Option<Value>` — avoids a tag check on every
+        // return and keeps the value live across `truncate`.
+        let mut payload = Value::Unit;
+        let mut has_payload = false;
+        let mut brk: Option<Span> = None;
+        let mut ctn: Option<Span> = None;
+        match flow {
+            Flow::Return(v) => {
+                payload = v;
+                has_payload = true;
+            }
+            Flow::Break(s) => brk = Some(s),
+            Flow::Continue(s) => ctn = Some(s),
             Flow::Value(_) => unreachable!("unwind_frame on a plain value"),
             Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
@@ -2559,7 +3847,11 @@ impl Vm {
             if let Some(span) = ctn {
                 return Unwind::Escaped(Flow::Continue(span));
             }
-            return Unwind::Escaped(Flow::Return(payload.unwrap_or(Value::Unit)));
+            return Unwind::Escaped(Flow::Return(if has_payload {
+                payload
+            } else {
+                Value::Unit
+            }));
         }
         if let Some(span) = brk {
             return Unwind::Error(self.error("`break` outside of a loop", span));
@@ -2567,7 +3859,8 @@ impl Vm {
         if let Some(span) = ctn {
             return Unwind::Error(self.error("`continue` outside of a loop", span));
         }
-        self.stack.push(payload.unwrap_or(Value::Unit));
+        self.stack
+            .push(if has_payload { payload } else { Value::Unit });
         Unwind::Continue
     }
 
@@ -2575,7 +3868,7 @@ impl Vm {
     pub(crate) fn backtrace(&self) -> Vec<(String, Span)> {
         self.frames
             .iter()
-            .map(|f| (f.func_name.clone(), f.func_span))
+            .map(|f| (String::new(), f.func_span))
             .collect()
     }
 
@@ -2591,13 +3884,11 @@ impl Vm {
             .env
             .get(name)
             .or_else(|| {
-                interp
-                    .funcs
-                    .get(name)
-                    .map(|fv| Value::Func(Box::new(fv.clone())))
+                zz_checker::lookup_std(&interp.funcs, name)
+                    .map(|fv| Value::Func(std::rc::Rc::clone(fv)))
             })
             .or_else(|| {
-                interp.natives.get(name).map(|entry| {
+                zz_checker::lookup_std(&interp.natives, name).map(|entry| {
                     Value::Native(Box::new(NativeFunc {
                         name: name.to_string(),
                         arity: entry.arity,
@@ -2634,7 +3925,11 @@ impl Vm {
             Value::Array(vs) => Some(vs.len() as i64),
             Value::Tuple(vs) => Some(vs.len() as i64),
             Value::Bytes(b) => Some(b.len() as i64),
-            Value::Str(st) => Some(st.chars().count() as i64),
+            Value::Str(st) => Some(if st.is_ascii() {
+                st.len()
+            } else {
+                st.chars().count()
+            } as i64),
             Value::Dict(entries) => Some(entries.len() as i64),
             Value::Range(r) => {
                 let (start, stop, step) = (r.start, r.end, r.step);
@@ -2712,16 +4007,19 @@ impl Vm {
         span: Span,
     ) -> Result<(), String> {
         if let Value::Object(o) = home {
-            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == field) {
+            let o = std::sync::Arc::make_mut(o);
+            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n.as_ref() == field) {
                 let mut vs = match std::mem::replace(slot, Value::Unit) {
-                    Value::Array(b) => *b,
+                    Value::Array(b) => {
+                        std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone())
+                    }
                     other => {
                         *slot = other;
                         return Err(format!("`vec.push` expects an array, found `{}`", slot));
                     }
                 };
                 vs.push(elem);
-                *slot = Value::Array(Box::new(vs));
+                *slot = Value::Array(std::sync::Arc::new(vs));
                 return Ok(());
             }
         }
@@ -2733,13 +4031,13 @@ impl Vm {
             }
         };
         let mut vs = match cur {
-            Value::Array(b) => *b,
+            Value::Array(b) => std::sync::Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone()),
             other => {
                 return Err(format!("`vec.push` expects an array, found `{other}`"));
             }
         };
         vs.push(elem);
-        let pushed = Value::Array(Box::new(vs));
+        let pushed = Value::Array(std::sync::Arc::new(vs));
         match set_object_field(home, field, pushed, span) {
             Ok(()) => Ok(()),
             Err(e) => Err(e.message),

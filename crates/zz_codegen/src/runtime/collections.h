@@ -15,7 +15,6 @@ extern "C" {
 zz_value zz_array_new(void);
 zz_value zz_dict_new(void);
 zz_value zz_dict_new_sized(size_t hint);
-zz_value zz_range(int64_t start, int64_t end, int64_t step);
 
 // ---- arena healing -----------------------------------------------------
 // True when the container header lives on an arena (or the C stack), so a
@@ -29,6 +28,13 @@ int zz_dict_is_arena(const zz_dict *d);
 // recursively, heap elements shared via clone) become independent
 // heap-owned copies; heap values pass through unchanged (adopted).
 zz_value zz_heal_for_move(zz_value v);
+// Heal for share paths (callers pass borrowed: `std.cell` pool,
+// container slots): arena-owned values become independent heap-owned
+// copies; heap values are shared via `zz_clone` (one extra share for
+// the store). Using `zz_heal_for_move(zz_clone(v))` here instead would
+// leak one header share for dirty boxed structs (the intermediate clone
+// bumps the header, but the deep copy drops that share unreleased).
+zz_value zz_clone_for_store(zz_value v);
 
 // ---- arena-aware constructors -------------------------------------------
 // When arena is non-NULL, the object header is bump-allocated on the arena
@@ -117,23 +123,15 @@ void zz_release_bytes(zz_bytes *b);
 
 // Index expression support (lowered from `obj[idx]`). Dispatch on the
 // object tag at runtime: arrays and dicts. Returns unit + *err=1 on unsupported.
-// Inlined for the same reason as zz_array_get above.
-static inline zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
-    *err = 0;
-    if (key.tag != ZZ_STR) {
-        *err = 1;
-        return zz_unit();
-    }
-    for (size_t i = 0; i < d->len; i++) {
-        zz_dict_entry *e = &d->entries[i];
-        if (e->key->len == key.s->len &&
-            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
-            return zz_clone(e->val);
-        }
-    }
-    *err = 1;
-    return zz_unit();
-}
+// Out of line: it probes the dict's key index (open addressing over the
+// ordered entries) instead of walking them, so it no longer benefits from
+// inlining over a loop body.
+zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err);
+
+// Probe the dict's key index (open addressing over ordered entries) and
+// return the entry position via *out; 1 = found, 0 = not found. Falls back
+// to a linear scan when the index is not built. No value is cloned.
+int zz_dict_find(const zz_dict *d, zz_value key, size_t *out);
 
 static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
     switch (obj.tag) {
@@ -168,7 +166,6 @@ void zz_index_trap(zz_value obj, zz_value idx, const char *func);
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
 
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val);
-zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err);
 size_t zz_dict_len(const zz_dict *d);
 
 // ---- higher-order iterators --------------------------------------------
@@ -201,6 +198,9 @@ zz_value zz_vec_remove(zz_value arr, zz_value idx, int *err);
 zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err);
 zz_value zz_vec_contains(zz_value arr, zz_value item, int *err);
 zz_value zz_vec_sort(zz_value arr, int *err);
+zz_value zz_vec_sort_by(zz_value arr, zz_value cmp, int *err);
+zz_value zz_vec_sort_by_desc(zz_value arr, zz_value cmp, int *err);
+zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err);
 zz_value zz_vec_reverse(zz_value arr, int *err);
 
 // ---- dict natives ------------------------------------------------------
@@ -242,6 +242,7 @@ zz_value zz_match_some(zz_value v);
 
 // ---- codegen shims -----------------------------------------------------
 zz_value zz_range_build(zz_value start, zz_value end);
+zz_value zz_range_build_step(zz_value start, zz_value end, zz_value step);
 zz_value zz_elvis(zz_value left, zz_value right);
 
 #ifdef __cplusplus

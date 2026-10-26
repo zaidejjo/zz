@@ -28,10 +28,10 @@
 use std::collections::HashSet;
 
 use crate::ast::{Block, Decorator, Expr, FmtPart, Program, Stmt};
+use crate::bench_attr as bench_attr_mod;
 use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
 use crate::test_attr as test_attr_mod;
-
 /// True when any function definition carries decorators — top-level, methods,
 /// or nested in blocks. Callers use this to skip [`expand_program`] on the
 /// common decorator-free path (expansion would only deep-clone).
@@ -250,6 +250,29 @@ fn expand_stmts(
                     });
                     continue;
                 }
+                // Bench decorators behave like test-like ones (preserved for
+                // `zz bench` discovery, validated by `bench_attr`).
+                if decorators.iter().any(bench_attr_mod::is_bench_like) {
+                    bench_attr_mod::validate_bench_decorator_list(
+                        decorators,
+                        *span,
+                        generics.is_empty(),
+                        params.is_empty(),
+                        errors,
+                    );
+                    taken.insert(name.join("."));
+                    out.push(Stmt::Func {
+                        name: name.clone(),
+                        generics: generics.clone(),
+                        params: params.clone(),
+                        ret: ret.clone(),
+                        body: expand_block(body, taken, errors),
+                        span: *span,
+                        pub_: *pub_,
+                        decorators: decorators.clone(),
+                    });
+                    continue;
+                }
                 if name.is_empty() || name.iter().all(String::is_empty) {
                     // Recovery stub from parse errors; leave for later passes.
                     out.push(stmt.clone());
@@ -338,6 +361,29 @@ fn expand_stmts(
                                     decorators,
                                     *mspan,
                                     generics.is_empty(),
+                                    errors,
+                                );
+                                sibling.insert(mn.join("."));
+                                taken.insert(format!("{tname}.{}", mn.join(".")));
+                                expanded_methods.push(Stmt::Func {
+                                    name: mn.clone(),
+                                    generics: generics.clone(),
+                                    params: params.clone(),
+                                    ret: ret.clone(),
+                                    body: expand_block(body, taken, errors),
+                                    span: *mspan,
+                                    pub_: *mpub,
+                                    decorators: decorators.clone(),
+                                });
+                                continue;
+                            }
+                            // Preserve bench impl methods the same way.
+                            if decorators.iter().any(bench_attr_mod::is_bench_like) {
+                                bench_attr_mod::validate_bench_decorator_list(
+                                    decorators,
+                                    *mspan,
+                                    generics.is_empty(),
+                                    params.is_empty(),
                                     errors,
                                 );
                                 sibling.insert(mn.join("."));

@@ -4,7 +4,7 @@
 
 pub base := 100
 pub func scale(x: int) -> int {
-    x * base
+    return x * base
 }
 
 func main() {

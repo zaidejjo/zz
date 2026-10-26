@@ -53,6 +53,20 @@ end
 -- Start the server.
 lspconfig.zz_lsp.setup({})
 
+-- Completion while typing: Neovim's built-in completion only pops
+-- automatically on trigger characters unless autotrigger is on.
+-- Enable it so keywords, builtins, and scope items appear as you type
+-- (the server advertises `.`, `(`, `{`, `:` triggers for members,
+-- selective imports, struct literals, and annotations).
+vim.api.nvim_create_autocmd("LspAttach", {
+  callback = function(args)
+    local client = vim.lsp.get_client_by_id(args.data.client_id)
+    if client and client.name == "zz_lsp" then
+      vim.lsp.completion.enable(true, client.id, args.buf, { autotrigger = true })
+    end
+  end,
+})
+
 -- Optional: format on save.
 vim.api.nvim_create_autocmd("BufWritePre", {
   pattern = "*.zz",
@@ -87,14 +101,18 @@ auto-format = true
 | Feature | Description |
 |---|---|
 | Diagnostics | Real-time error and warning reporting |
-| Completion | Context-aware completions for variables, functions, fields |
+| Completion | Context-aware completions for variables, functions, fields, import paths (stdlib, local modules, installed `zz.toml` dependencies) |
 | Hover | Type and documentation on hover |
 | Go-to-definition | Navigate to symbol definitions (cross-file) |
-| Find references | Find all uses of a symbol (cross-file) |
-| Rename | Rename a symbol across all files |
-| Code actions | Quick fixes for diagnostics (unused vars, typos) |
+| Find references | Find all uses of a symbol (defining file + importers; fresh buffers preferred) |
+| Rename | Rename a symbol across the defining file and its importers (qualified `ns.name` keeps its qualifier) |
+| File watching | External edits to `.zz`/`zz.toml`/`zz.lock` re-index and recheck open dependents transitively; saving a file rechecks its open dependents (unchanged files with an unchanged seed skip the checker) |
+| Code actions | Quick fixes for diagnostics (unused vars, typos) + auto-import for workspace and installed-package symbols |
+| Code lenses | `Run test` buttons above `@test` functions (executes `zz test --filter <name> --exact`) |
+| Refactors | Extract variable/function, inline variable, move to new file |
+| Manifest diagnostics | Malformed `zz.toml` surfaces as a file-level error so broken imports stop being a mystery |
 | Formatting | `zz fmt` style via `textDocument/formatting` |
-| Inlay hints | Parameter names at call sites |
+| Inlay hints | Parameter names at call sites + inferred types on unannotated bindings |
 | Semantic tokens | Syntax highlighting from the AST |
 | Folding ranges | Collapse function bodies, structs, loops |
 | Workspace symbols | Search symbols across the workspace |

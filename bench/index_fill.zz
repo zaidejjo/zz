@@ -1,0 +1,46 @@
+import std.time
+
+// Index-write scaling probe. `arr[i] = v`, `arr[i] += v` and `d[k] = v`
+// must stay linear in `n`: each store used to share the container with its
+// slot, so `set_index`'s copy-on-write deep-copied the whole array/dict per
+// element (PR #573 made the write take the container out of its home for
+// one instruction, so it mutates in place).
+//
+// Run with `zz run bench/index_fill.zz`; doubling `n` should roughly double
+// each figure. Quadratic behaviour turns the 40k line into minutes.
+
+func main() {
+    for n in [10000, 20000, 40000] {
+        a:[int] = []
+        for _i in 0..n {
+            a.push(0)
+        }
+        t0 := time.now_ms()
+        for i in 0..n {
+            a[i] = i
+        }
+        t1 := time.now_ms()
+        println("index_store n={n} {t1 - t0}ms result={a[n - 1]}")
+    }
+    for n in [5000, 10000, 20000] {
+        a:[int] = []
+        for _i in 0..n {
+            a.push(1)
+        }
+        t0 := time.now_ms()
+        for i in 0..n {
+            a[i] += 1
+        }
+        t1 := time.now_ms()
+        println("compound_store n={n} {t1 - t0}ms result={a[n - 1]}")
+    }
+    for n in [5000, 10000, 20000] {
+        d:{int: int} = {}
+        t0 := time.now_ms()
+        for i in 0..n {
+            d[i] = i * 3
+        }
+        t1 := time.now_ms()
+        println("dict_store n={n} {t1 - t0}ms result={d[n - 1]}")
+    }
+}

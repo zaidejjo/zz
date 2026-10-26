@@ -20,7 +20,7 @@ func fan(n: int) -> int {
         v = std.chan.recv(c)
         sum = sum + v
     }
-    sum
+    return sum
 }
 
 func main() {

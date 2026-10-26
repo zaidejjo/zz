@@ -9,7 +9,9 @@
 
 use std::process::ExitCode;
 
+mod bench_runner;
 mod build;
+mod cover;
 mod doctor;
 mod loader;
 mod pm;
@@ -21,6 +23,7 @@ mod test_runner;
 mod toolchain;
 mod ui;
 mod upgrade;
+mod vm_disasm;
 mod watch;
 
 use zz_frontend::diag::{error_at, render_to_string, Files};
@@ -62,7 +65,10 @@ USAGE:
     zz run --bytecode [<file>]    run via .zzc bytecode (compiles .zz, or
                                   loads .zzc directly with no frontend)
     zz dis [<file.zzc|file.zz>]   disassemble bytecode to stable text
+    zz dis --vm [--stats] [file]  print the VM chunk (ops, or per-class mix)
     zz test <file.zz | dir>       run @test-annotated functions
+    zz bench <file.zz | dir>      run @bench-annotated functions and report timings
+    zz cover [<file.zz>]          run a program and report line coverage
     zz check [FLAGS] [PATH]       scan for errors/warnings (file or directory)
     zz fix [FLAGS] [PATH]         apply auto-fixes (shortcut for check --fix)
     zz fmt [FLAGS] [PATH]         format ZZ source files in-place
@@ -102,7 +108,8 @@ REGISTRY (see `zz pm --help` for full flags):
     zz deps tree [--depth N]      print the dependency tree
     zz deps why <pkg>             show why a package is depended on
     zz outdated                   locked vs wanted vs latest per dep
-    zz audit                      verify pins (published? hash? licensed?)
+    zz audit                      verify pins + native closure (hash? licensed? drift? hooks?)
+    zz generate-wrapper [--check] generate src/<pkg>.zz wrappers from plugin.zzi
     zz search <query>             search the package registry
     zz info <pkg>                 show package metadata and versions
     zz login [--browser]          authenticate for publishing
@@ -243,8 +250,24 @@ fn main() -> ExitCode {
             }
         }
         Some("run") => {
+            if help_before_entry(rest) {
+                print_run_help();
+                return ExitCode::SUCCESS;
+            }
+            // Feature-gated dependencies (#488): strip the flags before
+            // file/arg parsing, then thread the selection through every
+            // run path (VM, bytecode, native, watch, cache key).
+            let (features, run_args) = match extract_feature_flags(rest) {
+                Ok(parsed) => parsed,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let rest = run_args.as_slice();
             let native = rest.iter().any(|a| a == "--native");
             let bytecode = rest.iter().any(|a| a == "--bytecode");
+            let walker = rest.iter().any(|a| a == "--tree-walker" || a == "--walker");
             let watching = rest.iter().any(|a| a == "--watch");
             let embed = parse_flag_value(rest, "--embed").map(std::path::PathBuf::from);
             // `-o` / `--output` names the published binary, `--native`
@@ -261,7 +284,7 @@ fn main() -> ExitCode {
             // `--bytecode`, plus `-o <name>` for native) so neither the
             // loader nor the script sees them as paths/args.
             let mut args: Vec<String> = strip_flag_value(rest, "--embed", "--native");
-            args.retain(|a| a != "--bytecode");
+            args.retain(|a| a != "--bytecode" && a != "--tree-walker" && a != "--walker");
             if native {
                 args = strip_output_flag(&args);
             }
@@ -271,11 +294,22 @@ fn main() -> ExitCode {
                 eprintln!("zz: cannot combine `--native` and `--bytecode`");
                 return ExitCode::FAILURE;
             }
+            if native && walker {
+                eprintln!("zz: cannot combine `--native` and `--tree-walker`");
+                return ExitCode::FAILURE;
+            }
+            if bytecode && walker {
+                eprintln!("zz: cannot combine `--bytecode` and `--tree-walker`");
+                return ExitCode::FAILURE;
+            }
             if watching {
-                // Hot reload is a VM-only loop: native rebuilds are minutes,
-                // not milliseconds. Reject loudly instead of slow-looping.
+                // Hot reload is an interpreter loop: native rebuilds are
+                // minutes, not milliseconds. Bytecode is excluded because a
+                // watch child replays a fresh `run` invocation, which would
+                // re-pay the .zzc round trip on every restart. Tree-walker
+                // is allowed (same interpreter class as the VM).
                 if native || bytecode {
-                    eprintln!("zz: `--watch` supports VM runs only, not `--native` / `--bytecode`");
+                    eprintln!("zz: `--watch` supports VM and tree-walker runs only, not `--native` / `--bytecode`");
                     return ExitCode::FAILURE;
                 }
                 let (flags, child_rest) = match watch::parse_watch_flags(&args) {
@@ -305,6 +339,7 @@ fn main() -> ExitCode {
                     child_argv.push("--embed".to_string());
                     child_argv.push(dir.to_string_lossy().into_owned());
                 }
+                push_feature_flags(&mut child_argv, &features);
                 match watch::run_watch(resolved, child_argv, embed, flags) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
@@ -313,7 +348,7 @@ fn main() -> ExitCode {
                     }
                 }
             } else if native {
-                match run_native(file, &script_args, embed, output) {
+                match run_native(file, &script_args, embed, output, &features) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -321,7 +356,9 @@ fn main() -> ExitCode {
                     }
                 }
             } else if bytecode {
-                match run_bytecode(file, &script_args, embed) {
+                let result = run_bytecode(file, &script_args, embed, &features);
+                zz_runtime::vm::stats::dump_if_enabled();
+                match result {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -329,7 +366,11 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                match run_file(file, &script_args, embed) {
+                // Default engine: bytecode VM (run_typed) unless
+                // `--tree-walker`/`--walker` forces the Phase 1 walker.
+                let result = run_file(file, &script_args, embed, &features, walker);
+                zz_runtime::vm::stats::dump_if_enabled();
+                match result {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -339,8 +380,10 @@ fn main() -> ExitCode {
             }
         }
         Some("dis") => {
+            let summary = rest.iter().any(|a| a == "--stats");
+            let vm = summary || rest.iter().any(|a| a == "--vm");
             let file = rest.iter().find(|a| !a.starts_with('-'));
-            match dis_file(file) {
+            match dis_file(file, vm, summary) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -363,7 +406,43 @@ fn main() -> ExitCode {
             }
         },
         Some("check") => {
-            let (path, flags) = parse_path_and_flags(rest);
+            // `--help` must short-circuit every subcommand (#586): `check`
+            // scans a whole tree, `fix` rewrites files and `fmt` rewrites
+            // files — none of them may run when the user asked for usage.
+            if wants_help(rest) {
+                print_subcommand_help("check");
+                return ExitCode::SUCCESS;
+            }
+            // Feature gates (#488): strip before the path/flags split.
+            let (features, check_args) = match extract_feature_flags(rest) {
+                Ok(parsed) => parsed,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let rest = check_args.as_slice();
+            // Strip the two-token `--format <value>` form before path
+            // parsing (the bare value would otherwise parse as the path);
+            // `--format=<value>` is already a single flag token.
+            let mut rest_filtered: Vec<String> = Vec::with_capacity(rest.len());
+            let mut rest_iter = rest.iter().peekable();
+            let mut format_value: Option<String> = None;
+            while let Some(a) = rest_iter.next() {
+                if a == "--format" {
+                    if let Some(v) = rest_iter.next() {
+                        format_value = Some(v.clone());
+                    }
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--format=") {
+                    format_value = Some(v.to_string());
+                    rest_filtered.push(a.clone());
+                    continue;
+                }
+                rest_filtered.push(a.clone());
+            }
+            let (path, flags) = parse_path_and_flags(&rest_filtered);
             if flags.iter().any(|f| f == "--check" || f == "-c") {
                 eprintln!(
                     "zz: `zz check --check` is not a flag\n\
@@ -376,9 +455,36 @@ fn main() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let has_stats = flags.contains(&"--stats".to_string());
+            // Machine-readable diagnostics for tooling (and the
+            // LSP-parity gate): `--format=json` or `--format json`
+            // (the value was stripped above).
+            let format_json = matches!(format_value.as_deref(), Some("json"));
+            if format_value.is_some() && !format_json {
+                eprintln!(
+                    "zz: unknown `--format` value `{}` (expected `json`)\n\
+                     hint: run `zz check --format json <path>`",
+                    format_value.as_deref().unwrap_or_default()
+                );
+                return ExitCode::FAILURE;
+            }
+            if has_fix && format_json {
+                eprintln!(
+                    "zz: `--format json` cannot be combined with `--fix`\n\
+                     hint: run plain `zz check --format json` for machine-readable diagnostics"
+                );
+                return ExitCode::FAILURE;
+            }
 
             let interactive = has_fix && has_interactive && !has_hard;
-            match check_or_fix_path(&path, has_fix, interactive, has_hard, has_stats) {
+            match check_or_fix_path(
+                &path,
+                has_fix,
+                interactive,
+                has_hard,
+                has_stats,
+                format_json,
+                &features,
+            ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -387,11 +493,26 @@ fn main() -> ExitCode {
             }
         }
         Some("fix") => {
+            // `--help` prints usage and exits without touching a single
+            // file (#586): the old behavior parsed `--help` as a flag,
+            // defaulted the path to `.` and rewrote the whole project.
+            if wants_help(rest) {
+                print_subcommand_help("fix");
+                return ExitCode::SUCCESS;
+            }
             let (path, flags) = parse_path_and_flags(rest);
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let interactive = has_interactive && !has_hard;
-            match check_or_fix_path(&path, true, interactive, has_hard, false) {
+            match check_or_fix_path(
+                &path,
+                true,
+                interactive,
+                has_hard,
+                false,
+                false,
+                &zz_pm::manifest::FeatureSelection::default(),
+            ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -400,6 +521,12 @@ fn main() -> ExitCode {
             }
         }
         Some("fmt") => {
+            // `--help` prints usage and exits without reformatting the
+            // tree (#586) — `fmt` rewrites files in place.
+            if wants_help(rest) {
+                print_subcommand_help("fmt");
+                return ExitCode::SUCCESS;
+            }
             let (path, flags) = parse_path_and_flags(rest);
             let check_only =
                 flags.contains(&"--check".to_string()) || flags.contains(&"-c".to_string());
@@ -419,6 +546,20 @@ fn main() -> ExitCode {
             }
         }
         Some("test") => match test_runner::test_command(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("bench") => match bench_runner::bench_command(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("cover") => match cover::cover_command(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
@@ -483,6 +624,13 @@ fn main() -> ExitCode {
             }
         },
         Some("audit") => match pm::audit(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("generate-wrapper") => match pm::generate_wrapper(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
@@ -610,6 +758,98 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
         }
     }
     (path, flags)
+}
+
+/// True when the argument list asks for usage instead of an action.
+///
+/// `--help`/`-h` must be handled *before* path resolution: `check`, `fix`
+/// and `fmt` all default their path to `.`, so an unhandled `--help` used
+/// to scan or rewrite the whole project instead of printing usage (#586).
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--help" || a == "-h")
+}
+
+/// Print the usage text of a subcommand on stdout.
+///
+/// Each subcommand gets its own block (flags differ per command); unknown
+/// commands fall back to the top-level usage.
+fn print_subcommand_help(cmd: &str) {
+    let text = match cmd {
+        "check" => {
+            "\
+usage: zz check [FLAGS] [PATH]
+
+Scan ZZ sources for errors and warnings. Nothing is written unless --fix is
+given.
+
+FLAGS:
+  --fix, -f          apply safe auto-fixes while checking
+  --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
+  --interactive, -i  with --fix, prompt for ambiguous fixes interactively
+  --stats            print per-file check statistics
+  --format json      machine-readable diagnostics on stdout
+  --features <list>  enable project features (comma-separated; repeatable)
+  --all-features     enable every declared [features] entry
+  -h, --help         show this help
+
+PATH can be a single .zz file or a directory (recursively scans all .zz files).
+Defaults to `.` (current directory) if omitted.
+"
+        }
+        "fix" => {
+            "\
+usage: zz fix [FLAGS] [PATH]
+
+Apply auto-fixes (shortcut for `zz check --fix`).
+
+FLAGS:
+  --hard             apply ALL fixes including ambiguous ones (no prompts)
+  --interactive, -i  prompt for ambiguous fixes interactively
+  -h, --help         show this help
+
+PATH can be a single .zz file or a directory (recursively fixes all .zz files).
+Defaults to `.` (current directory) if omitted.
+
+FIX SAFETY:
+  Safe fixes (single unambiguous match) are applied automatically.
+  Ambiguous fixes (multiple candidates) require --hard or --interactive (-i).
+"
+        }
+        "fmt" => {
+            "\
+usage: zz fmt [FLAGS] [PATH]
+
+Format ZZ source files in place.
+
+FLAGS:
+  --check, -c        check formatting without writing (exit 1 if changed)
+  --stdin            read source from stdin and write formatted to stdout
+  -h, --help         show this help
+
+PATH can be a single .zz file or a directory (recursively formats all .zz files).
+Defaults to `.` (current directory) if omitted.
+"
+        }
+        _ => USAGE,
+    };
+    print!("{text}");
+}
+
+/// Convert a byte offset into a 1-based `(line, column)` pair.
+///
+/// The fix report used to print the raw byte offset where a line number was
+/// expected (`two.zz:56` for an 8-line file), which is misleading when
+/// reviewing what a fix changed (#586).
+fn line_col(source: &str, offset: usize) -> (usize, usize) {
+    let clamped = offset.min(source.len());
+    let before = &source[..clamped];
+    let line = before.matches('\n').count() + 1;
+    let col = before
+        .rsplit('\n')
+        .next()
+        .map(|last| last.chars().count() + 1)
+        .unwrap_or(1);
+    (line, col)
 }
 
 /// Load plugin shared libraries for VM-based native dispatch.
@@ -793,13 +1033,14 @@ fn load_vm_plugins(
 
 /// A `.zz` program ready to execute: loaded modules, HIR types, and a
 /// fully seeded interpreter (natives, consts, pure-ZZ stdlib, aliases).
-struct PreparedRun {
-    interp: Interp,
-    programs: Vec<zz_frontend::ast::Program>,
-    files: Vec<(String, String)>,
-    types: std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
-    structs: std::collections::HashMap<String, zz_checker::StructSig>,
-    enums: std::collections::HashMap<String, zz_checker::EnumSig>,
+pub(crate) struct PreparedRun {
+    pub(crate) interp: Interp,
+    pub(crate) programs: Vec<zz_frontend::ast::Program>,
+    pub(crate) files: Vec<(String, String)>,
+    pub(crate) types:
+        std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
+    pub(crate) structs: std::collections::HashMap<String, zz_checker::StructSig>,
+    pub(crate) enums: std::collections::HashMap<String, zz_checker::EnumSig>,
     funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
     entry_path: String,
     /// Threaded out for the run cache: interpreter inputs that cannot be
@@ -951,10 +1192,25 @@ fn setup_interp(
 }
 
 /// Load, check, and seed a `.zz` program for execution.
-fn prepare_run(
+pub(crate) fn prepare_run(
     path: &str,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+) -> Result<PreparedRun, String> {
+    prepare_run_with_features(
+        path,
+        script_args,
+        embed,
+        &zz_pm::manifest::FeatureSelection::default(),
+    )
+}
+
+/// [`prepare_run`] with an explicit feature selection (#488).
+pub(crate) fn prepare_run_with_features(
+    path: &str,
+    script_args: &[String],
+    embed: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<PreparedRun, String> {
     let script_path = std::path::Path::new(path);
     // Project root: walk up from the script (entry files usually live in
@@ -967,14 +1223,15 @@ fn prepare_run(
     });
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(script_path)?;
+    loader::validate_feature_selection(script_path, features)?;
     // Discover plugin manifest signatures so `zz run` type-checks the
     // same dotted names the AOT path merges.
     let plugin_funcs = crate::build::discover_plugin_manifests(script_path);
 
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program(script_path)?
+        loader::load_program_with_features(script_path, features)?
     } else {
-        loader::load_program_with_plugins(script_path, &plugin_funcs)?
+        loader::load_program_with_plugins_and_features(script_path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -1113,7 +1370,10 @@ fn meta_from_prep(prep: &PreparedRun) -> run_cache::RunMeta {
 /// prints only when compilation actually happened. Never runs user code
 /// (`prepare_run` loads, checks and seeds — execution stays in `run`).
 /// Never fails: any error means `zz run` will surface it properly there.
-pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
+pub(crate) fn prewarm_run_cache(
+    root: &std::path::Path,
+    features: &zz_pm::manifest::FeatureSelection,
+) {
     if !run_cache::cache_enabled() {
         return;
     }
@@ -1122,7 +1382,7 @@ pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
         Err(_) => return, // no entry (lib-only package): nothing to warm
     };
     let plugin_funcs = crate::build::discover_plugin_manifests(&entry);
-    let slug = match run_cache::run_key(&entry, &plugin_funcs, None) {
+    let slug = match run_cache::run_key_with_features(&entry, &plugin_funcs, None, features) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -1130,7 +1390,7 @@ pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
         return;
     }
     let path = entry.to_string_lossy().into_owned();
-    let prep = match prepare_run(&path, &[], None) {
+    let prep = match prepare_run_with_features(&path, &[], None, features) {
         Ok(p) => p,
         Err(_) => return, // check errors: `zz run` reports them
     };
@@ -1139,7 +1399,7 @@ pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
         println!("pre-compiled entry cache for instant runs");
     }
 }
-fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> String {
+pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> String {
     if source.is_empty() {
         eprintln!(
             "error: {} (bytecode span {}..{})",
@@ -1173,7 +1433,7 @@ fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> Str
 
 /// Print a non-unit program result, then auto-call `main()` when the
 /// entry namespace defines it (with script args iff it takes params).
-fn run_entry_main(
+pub(crate) fn run_entry_main(
     interp: &mut Interp,
     last: Value,
     entry_path: &str,
@@ -1197,14 +1457,14 @@ fn run_entry_main(
         let call_args = if fv.params.is_empty() {
             vec![]
         } else {
-            vec![Value::Array(Box::new(
+            vec![Value::Array(std::sync::Arc::new(
                 script_args
                     .iter()
                     .map(|a| Value::Str(a.clone().into()))
                     .collect(),
             ))]
         };
-        match interp.call(Value::Func(Box::new(fv)), call_args, span) {
+        match interp.call(Value::Func(fv), call_args, span) {
             Ok(v) => {
                 // `func main() -> Result<(), E>`: `Err(e)` prints to stderr
                 // and fails the run (exit 1). `Ok`/`Unit` are success.
@@ -1239,6 +1499,7 @@ fn run_bytecode(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     let path = resolve_run_entry(
         path,
@@ -1248,7 +1509,7 @@ fn run_bytecode(
     if path.ends_with(".zzc") {
         run_bytecode_file(&path, script_args)
     } else {
-        run_bytecode_zz(&path, script_args, embed)
+        run_bytecode_zz(&path, script_args, embed, features)
     }
 }
 
@@ -1256,8 +1517,9 @@ fn run_bytecode_zz(
     path: &str,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
-    let mut prep = prepare_run(path, script_args, embed)?;
+    let mut prep = prepare_run_with_features(path, script_args, embed, features)?;
     let mut last = Value::Unit;
     for (i, program) in prep.programs.iter().enumerate() {
         let native_names: std::sync::Arc<std::collections::HashSet<String>> =
@@ -1354,15 +1616,28 @@ fn run_bytecode_file(path: &str, script_args: &[String]) -> Result<(), String> {
 
 /// `zz dis <file>`: disassemble `.zzc` bytes (or a `.zz` program lowered
 /// in memory) to stable text.
-fn dis_file(path: Option<&String>) -> Result<(), String> {
+fn dis_file(path: Option<&String>, vm: bool, summary: bool) -> Result<(), String> {
+    let usage = if vm {
+        "zz dis --vm [--stats] [<file.zzc|file.zz>]"
+    } else {
+        "zz dis [<file.zzc|file.zz>]"
+    };
     let path = resolve_run_entry(
         path,
-        "zz dis [<file.zzc|file.zz>]",
+        usage,
         "provide a .zzc file or a .zz file to disassemble",
     )?;
+    let show_ops = !summary;
     if path.ends_with(".zzc") {
         let bytes = std::fs::read(&path).map_err(|e| format!("zz: cannot read {path}: {e}"))?;
         let module = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
+        if vm {
+            // Raised chunks carry no source map; ops print without sites.
+            let chunk = zz_ir::raise::raise(&module)
+                .map_err(|e| format!("zz: bytecode raise failed: {e}"))?;
+            print!("{}", vm_disasm::render_module(&path, "", &chunk, show_ops));
+            return Ok(());
+        }
         print!("{}", zz_ir::dis::disassemble(&module));
         return Ok(());
     }
@@ -1377,13 +1652,25 @@ fn dis_file(path: Option<&String>) -> Result<(), String> {
             prep.enums.clone(),
             native_names,
         );
-        let module = zz_ir::lower::lower_typed(&chunk, &prep.funcs)
-            .map_err(|e| format!("zz: ir lower failed: {e}"))?;
         let name = prep
             .files
             .get(i)
             .map(|(n, _)| n.clone())
             .unwrap_or_default();
+        if vm {
+            let source = prep
+                .files
+                .get(i)
+                .map(|(_, s)| s.as_str())
+                .unwrap_or_default();
+            print!(
+                "{}",
+                vm_disasm::render_module(&name, source, &chunk, show_ops)
+            );
+            continue;
+        }
+        let module = zz_ir::lower::lower_typed(&chunk, &prep.funcs)
+            .map_err(|e| format!("zz: ir lower failed: {e}"))?;
         println!("; module {name}");
         print!("{}", zz_ir::dis::disassemble(&module));
     }
@@ -1486,7 +1773,11 @@ fn resolve_default_entry(usage: &str, hint: &str) -> Result<String, String> {
 
 /// Resolve the entry file for `run` / `run --native`: explicit argument
 /// wins, otherwise [`resolve_default_entry`].
-fn resolve_run_entry(path: Option<&String>, usage: &str, hint: &str) -> Result<String, String> {
+pub(crate) fn resolve_run_entry(
+    path: Option<&String>,
+    usage: &str,
+    hint: &str,
+) -> Result<String, String> {
     match path {
         Some(p) => Ok(p.clone()),
         None => resolve_default_entry(usage, hint),
@@ -1497,6 +1788,8 @@ fn run_file(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
+    walker: bool,
 ) -> Result<(), String> {
     let resolved = resolve_run_entry(
         path,
@@ -1504,6 +1797,7 @@ fn run_file(
         "provide the path to a .zz file to execute",
     )?;
     let path = &resolved;
+    loader::validate_feature_selection(std::path::Path::new(path), features)?;
 
     // One-time-compiler fast path: the key is content-addressed over the
     // whole closure, so a hit executes cached IR with no frontend work.
@@ -1512,7 +1806,9 @@ fn run_file(
     let mut timer = run_cache::StageTimer::start();
     let plugin_funcs = crate::build::discover_plugin_manifests(entry_path);
     timer.stage("plugin discovery");
-    if let Ok(slug) = run_cache::run_key(entry_path, &plugin_funcs, embed.as_deref()) {
+    if let Ok(slug) =
+        run_cache::run_key_with_features(entry_path, &plugin_funcs, embed.as_deref(), features)
+    {
         timer.stage("run key");
         if let Some(hit) = run_cache::lookup(&slug) {
             timer.stage("lookup");
@@ -1542,8 +1838,33 @@ fn run_file(
             }
         }
         // Miss: full pipeline, then store the compiled IR for next time.
-        let mut prep = prepare_run(path, script_args, embed.clone())?;
+        let mut prep = prepare_run_with_features(path, script_args, embed.clone(), features)?;
         let mut last = Value::Unit;
+        // `--tree-walker` / `--walker`: run each module through the Phase 1
+        // tree-walker interpreter instead of the bytecode VM. Kept for
+        // REPL/debug parity; bytecode VM is the default run engine.
+        if walker {
+            for (i, program) in prep.programs.iter().enumerate() {
+                match prep.interp.run_tree_walker(program) {
+                    Ok(v) => last = v,
+                    Err(e) => {
+                        let (name, source) = prep
+                            .files
+                            .get(i)
+                            .cloned()
+                            .unwrap_or_else(|| (prep.entry_path.clone(), String::new()));
+                        return Err(render_eval_error(&e, &name, &source));
+                    }
+                }
+            }
+            return run_entry_main(
+                &mut prep.interp,
+                last,
+                &prep.entry_path,
+                script_args,
+                &prep.files,
+            );
+        }
         // Compile each module to IR bytes alongside the typed execution
         // (shared with install-time prewarming below).
         let cached_modules = compile_prep(&prep);
@@ -1578,8 +1899,32 @@ fn run_file(
     }
 
     // Key computation failed (unreadable entry): today's behavior exactly.
-    let mut prep = prepare_run(path, script_args, embed)?;
+    let mut prep = prepare_run_with_features(path, script_args, embed, features)?;
     let mut last = Value::Unit;
+    // `--tree-walker` / `--walker`: run each module through the Phase 1
+    // tree-walker interpreter instead of the bytecode VM.
+    if walker {
+        for (i, program) in prep.programs.iter().enumerate() {
+            match prep.interp.run_tree_walker(program) {
+                Ok(v) => last = v,
+                Err(e) => {
+                    let (name, source) = prep
+                        .files
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| (prep.entry_path.clone(), String::new()));
+                    return Err(render_eval_error(&e, &name, &source));
+                }
+            }
+        }
+        return run_entry_main(
+            &mut prep.interp,
+            last,
+            &prep.entry_path,
+            script_args,
+            &prep.files,
+        );
+    }
     for (i, program) in prep.programs.iter().enumerate() {
         match prep.interp.run_typed(
             program,
@@ -1702,6 +2047,7 @@ fn run_native(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
     output: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     let resolved = resolve_run_entry(
         path,
@@ -1712,6 +2058,7 @@ fn run_native(
     let p = std::path::Path::new(path);
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(p)?;
+    loader::validate_feature_selection(p, features)?;
     // Release mode for true native speed — unless `ZZ_NATIVE_DEV=1`
     // (parity sweeps: `-O0 -g`, no LTO, ~4x faster clang per fixture;
     // same generated C, separate cache entries via the fingerprint).
@@ -1724,6 +2071,7 @@ fn run_native(
     let rel = build::ReleaseOptions {
         embed,
         output,
+        features: features.clone(),
         ..Default::default()
     };
     // Publish through a private destination when the user gave no `-o`:
@@ -1772,6 +2120,57 @@ fn run_native(
     Ok(())
 }
 
+/// `zz run [FLAGS] [<file>]`: the VM by default, the native backend with
+/// `--native`. Flags and the run-cache engine switch were undiscoverable
+/// from the subcommand (it answered `--help` with "missing file argument"),
+/// so print them here (#509).
+fn print_run_help() {
+    println!(
+        "\
+usage: zz run [--native|--bytecode|--tree-walker] [--watch] [--embed <dir>] [-o <name>] [--features <list>|--all-features] [<file.zz>]
+
+type-check and run a ZZ source file through the VM (leaving no build
+artifacts), or through the native backend with `--native`. Inside a
+project the file defaults to the entry (`src/main.zz`, then `main.zz`).
+
+ENGINES:
+  (default)            VM: a warm run cache executes the cached IR in the chunk VM;
+                       a cold one compiles to IR and executes the chunk VM.
+  --bytecode           always compile to IR and execute the chunk VM (never the
+                       walker); accepts a `.zzc` file to load directly
+  --tree-walker        force the Phase 1 tree-walker interpreter (REPL/debug);
+                       identical results to a VM run, slower
+  --walker             alias for `--tree-walker`
+  --native             build through the cached Clang pipeline and run the binary
+
+FLAGS:
+  --embed <dir>        expose a static asset directory (`fs.embedfs()`)
+  -o, --output <name>  name the published binary (`--native` only)
+  --watch              re-check and restart on save (VM and tree-walker only)
+  --clear              clear the screen per restart (with `--watch`)
+  --debounce <ms>      quiet time before a restart (default 150; with `--watch`)
+  --watch-ignore <glob>  skip matching paths (repeatable; with `--watch`)
+  --features <list>    enable project features (comma-separated; repeatable)
+  --all-features       enable every declared [features] entry
+  -h, --help           show this help
+
+RUN CACHE:
+  Warm runs decode the cached IR for the whole dependency closure and execute it
+  in the chunk VM; cold runs execute through the chosen engine (VM by default,
+  tree-walker with `--tree-walker`) and cache the IR they compile.
+  Entries live under `~/.zz/cache/run-v2` (LRU, 256 entries); a miss, a corrupt
+  entry or any toolchain change falls back to a full recompile.
+
+ENVIRONMENT:
+  ZZ_RUN_CACHE=0       disable the run cache (read and write) — this forces the
+                       tree walker, which is what interpreter benchmarks must measure
+  ZZ_VERBOSE=1         print run-cache hit/miss and stage lines
+
+Arguments after the file are passed to the program. `zz cache clean` wipes the
+global cache, run entries included."
+    );
+}
+
 /// `zz build [FLAGS] [<file>]`: always a native Clang binary.
 ///
 /// Default (`zz build`): static self-contained binary (ThinLTO, DCE,
@@ -1791,9 +2190,39 @@ fn run_native(
 /// (`zz run` without `--native` is the only command that executes
 /// through the VM, leaving no build artifacts.)
 fn build_cmd(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [--features <list>|--all-features] [-o <name>] [<file.zz>]\n\
+             \n\
+             compile a native binary (cached; defaults to a static self-contained build).\n\
+             \n\
+             MODES:\n  \
+               (default)            static build (self-contained)\n  \
+               -p, --release        optimized build (-O3 -flto=thin, dynamic, stripped)\n  \
+               --dynamic            fast dynamic debug build (-O0 -g)\n  \
+               --static             static build, explicit\n  \
+               --full               max optimization (full LTO; with `-- <args>` runs PGO training first)\n  \
+               --pgo                profile-guided optimization build\n\
+             \n\
+             FLAGS:\n  \
+               --target <triple>    cross-compile via clang --target=\n  \
+               --cc <clang|zig>     select the Clang provider\n  \
+               --embed <dir>        bake a static asset directory into the binary\n  \
+               --features <list>    enable project features (comma-separated)\n  \
+               --all-features       enable every declared [features] entry\n  \
+               -o, --output <name>  name the output binary\n  \
+               --verbose            print the exact clang command line\n  \
+               -h, --help           show this help"
+        );
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--emit-ir") {
         return emit_ir_cmd(args);
     }
+    // Feature gates (#488): strip before positional-path parsing so the
+    // value never looks like a file, then thread into cache + loader.
+    let (features, build_args) = extract_feature_flags(args)?;
+    let args = build_args.as_slice();
     // Training args for `--full -- <program args>`: everything after the
     // first `--` belongs to the training run, never to flag parsing —
     // so the split happens before any flag is read. A bare `--` still
@@ -1885,6 +2314,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
 
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     crate::enforce_project_zz(p)?;
+    loader::validate_feature_selection(p, &features)?;
 
     // Default (no flags) is a static self-contained build; `--full`
     // selects max optimization (full LTO; plus PGO when training args
@@ -1929,6 +2359,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             .iter()
             .any(|a| a == "--chunk" || a == "--unstable-chunk")
             || std::env::var("ZZ_CHUNK_C").is_ok(),
+        features: features.clone(),
     };
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",
@@ -2242,6 +2673,111 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// Extract `--features <list>` (repeatable, comma-separated) and
+/// `--all-features` from a subcommand's argv (#488). Returns the parsed
+/// selection plus the remaining argv; the loader and the script must never
+/// see the flags.
+pub(crate) fn extract_feature_flags(
+    args: &[String],
+) -> Result<(zz_pm::manifest::FeatureSelection, Vec<String>), String> {
+    let mut requested: Vec<String> = Vec::new();
+    let mut all = false;
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    // Everything after `--` belongs to the program being run/built (e.g.
+    // `zz build -- ...` training args), never to zz's own flags.
+    let split = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let (head, tail) = args.split_at(split);
+    let mut i = 0;
+    while i < head.len() {
+        let a = &head[i];
+        if a == "--all-features" {
+            all = true;
+            i += 1;
+            continue;
+        }
+        if a == "--features" {
+            let Some(value) = head.get(i + 1) else {
+                return Err("`--features` needs a value\n\
+                     hint: pass a comma-separated list, e.g. `--features locales-ar,extras`"
+                    .to_string());
+            };
+            if value.trim().is_empty() {
+                return Err("`--features` needs a value\n\
+                     hint: pass a comma-separated list, e.g. `--features locales-ar,extras`"
+                    .to_string());
+            }
+            requested.push(value.clone());
+            i += 2;
+            continue;
+        }
+        if let Some(value) = a.strip_prefix("--features=") {
+            if value.trim().is_empty() {
+                return Err("`--features` needs a value\n\
+                     hint: pass a comma-separated list, e.g. `--features locales-ar,extras`"
+                    .to_string());
+            }
+            requested.push(value.to_string());
+            i += 1;
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    out.extend_from_slice(tail);
+    let names = zz_pm::manifest::parse_feature_list(&requested);
+    Ok((zz_pm::manifest::FeatureSelection::new(names, all), out))
+}
+
+/// Re-emit feature flags into a child argv (`zz run --watch` replay).
+fn push_feature_flags(argv: &mut Vec<String>, features: &zz_pm::manifest::FeatureSelection) {
+    if features.all {
+        argv.push("--all-features".to_string());
+    }
+    let names = features.names();
+    if !names.is_empty() {
+        argv.push("--features".to_string());
+        argv.push(names.join(","));
+    }
+}
+
+/// Whether `run`'s help flag appears before the entry file.
+///
+/// `zz run --help` must describe the subcommand, but everything after the
+/// file belongs to the program: `zz run main.zz --help` forwards `--help`
+/// and must not be swallowed. Values of value-taking flags are skipped so
+/// `zz run --embed assets --help` still reaches the help.
+fn help_before_entry(args: &[String]) -> bool {
+    const VALUE_FLAGS: [&str; 6] = [
+        "--embed",
+        "-o",
+        "--output",
+        "--debounce",
+        "--watch-ignore",
+        "--features",
+    ];
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "--help" || a == "-h" {
+            return true;
+        }
+        if a.starts_with('-') {
+            // `--flag=value` carries its value inline.
+            if !a.contains('=') && VALUE_FLAGS.contains(&a.as_str()) {
+                skip_next = true;
+            }
+            continue;
+        }
+        // First positional: the entry file. Everything after it is the
+        // program's argument vector.
+        return false;
+    }
+    false
+}
+
 /// Strip value-flags (`--embed <dir>` / `--embed=<dir>`) plus any bare
 /// flags in `bare` from an arg list (for `run`: the loader and the script
 /// must never see CLI-only flags).
@@ -2461,6 +2997,8 @@ fn check_or_fix_path(
     interactive: bool,
     force: bool,
     show_stats: bool,
+    format_json: bool,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     use zz_frontend::diag::{FixSafety, Severity};
 
@@ -2483,6 +3021,9 @@ fn check_or_fix_path(
     let mut stat_misses = 0usize;
     let mut stat_seed = 0usize;
     let stats_start = std::time::Instant::now();
+    // Machine-readable accumulation for `--format json` (#264): one
+    // entry per checked file (empty diagnostics = clean).
+    let mut json_files: Vec<(String, Vec<zz_frontend::diag::RawDiag>)> = Vec::new();
 
     for path in &files {
         let path_str = path.display().to_string();
@@ -2490,7 +3031,8 @@ fn check_or_fix_path(
             std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
 
         let file_start = std::time::Instant::now();
-        let loaded = loader::load_program_check(path)?;
+        loader::validate_feature_selection(path, features)?;
+        let loaded = loader::load_program_check_with_features(path, features)?;
         let file_ms = file_start.elapsed().as_secs_f64() * 1000.0;
         if show_stats {
             stat_files += 1;
@@ -2535,10 +3077,18 @@ fn check_or_fix_path(
 
         if !do_fix {
             // Check-only mode: print diagnostics, track what's fixable.
-            for e in &loaded.errors {
-                let mut files_ctx = Files::new();
-                let id = files_ctx.add(e.name.clone(), e.source.clone());
-                eprint!("{}", render_to_string(&files_ctx, id, &e.diags));
+            if format_json {
+                let mut diags = Vec::new();
+                for e in &loaded.errors {
+                    diags.extend(e.diags.iter().cloned());
+                }
+                json_files.push((path_str.clone(), diags));
+            } else {
+                for e in &loaded.errors {
+                    let mut files_ctx = Files::new();
+                    let id = files_ctx.add(e.name.clone(), e.source.clone());
+                    eprint!("{}", render_to_string(&files_ctx, id, &e.diags));
+                }
             }
             if !safe_fixits.is_empty() {
                 any_safe_fixits = true;
@@ -2656,9 +3206,10 @@ fn check_or_fix_path(
                     } else {
                         "fixed (force)"
                     };
+                    let (line, col) = line_col(&source, start);
                     eprintln!(
-                        "  {label}: `{original}` → `{}` at {path_str}:{}",
-                        fixit.replacement, fixit.span.start,
+                        "  {label}: `{original}` → `{}` at {path_str}:{line}:{col}",
+                        fixit.replacement,
                     );
                 }
             }
@@ -2672,9 +3223,38 @@ fn check_or_fix_path(
         }
     }
 
+    // Machine-readable report for `--format json` (#264): stdout
+    // carries the full diagnostic set even when the exit code signals
+    // failure (same contract as compiler JSON protocols).
+    if format_json && !do_fix {
+        #[derive(serde::Serialize)]
+        struct CheckJsonFile<'a> {
+            file: &'a str,
+            diagnostics: &'a [zz_frontend::diag::RawDiag],
+        }
+        #[derive(serde::Serialize)]
+        struct CheckJson<'a> {
+            files: Vec<CheckJsonFile<'a>>,
+        }
+        let report = CheckJson {
+            files: json_files
+                .iter()
+                .map(|(file, diagnostics)| CheckJsonFile {
+                    file: file.as_str(),
+                    diagnostics: diagnostics.as_slice(),
+                })
+                .collect(),
+        };
+        match serde_json::to_string(&report) {
+            Ok(json) => println!("{json}"),
+            Err(e) => return Err(format!("cannot encode diagnostics as JSON: {e}")),
+        }
+    }
+
     if !do_fix && total_errors > 0 {
         return Err(format!("{total_errors} file(s) failed type-check"));
     }
+
     if do_fix && total_fixes == 0 {
         eprintln!("zz: no fixable diagnostics in `{raw}`");
     }
@@ -2726,14 +3306,30 @@ mod tests {
     /// otherwise pollutes their entry counts mid-flight.
     fn check_isolated(path: &str) -> Result<(), String> {
         super::loader::cache::with_isolated_cache(|| {
-            check_or_fix_path(&Some(path.to_string()), false, false, false, false)
+            check_or_fix_path(
+                &Some(path.to_string()),
+                false,
+                false,
+                false,
+                false,
+                false,
+                &zz_pm::manifest::FeatureSelection::default(),
+            )
         })
     }
 
     /// Run `zz check --fix` (fix mode) under the isolated cache env.
     fn fix_isolated(path: &str) -> Result<(), String> {
         super::loader::cache::with_isolated_cache(|| {
-            check_or_fix_path(&Some(path.to_string()), true, false, false, false)
+            check_or_fix_path(
+                &Some(path.to_string()),
+                true,
+                false,
+                false,
+                false,
+                false,
+                &zz_pm::manifest::FeatureSelection::default(),
+            )
         })
     }
 
@@ -2759,7 +3355,7 @@ mod tests {
     #[test]
     fn check_ok_on_phase4_features() {
         let path = write_temp(
-            "scores := [10, 20, 30]\ny := scores[1]\nz := scores[1:3]\nfunc dbl(a: int, b: int) -> int { a * b }\nw := 5 |> dbl(3)\nt := typeof(w)\n",
+            "scores := [10, 20, 30]\ny := scores[1]\nz := scores[1:3]\nfunc dbl(a: int, b: int) -> int { return a * b }\nw := 5 |> dbl(3)\nt := typeof(w)\n",
         );
         let result = check_isolated(&path.to_string_lossy());
         assert!(result.is_ok(), "expected ok, got {result:?}");
@@ -2818,7 +3414,7 @@ mod tests {
         let mut src = String::new();
         for i in 0..400 {
             src.push_str(&format!(
-                "func zz_perf_fn_{i}(x: int) -> int {{ x + {i} }}\n"
+                "func zz_perf_fn_{i}(x: int) -> int {{ return x + {i} }}\n"
             ));
         }
         src.push_str("func main() {\n    println(zz_perf_fn_0(1))\n}\n");

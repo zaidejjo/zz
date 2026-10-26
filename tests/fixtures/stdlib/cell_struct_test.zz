@@ -1,0 +1,24 @@
+// features: comparison, func-call, imports, int-arith, locals, option-result, print, std-cell, string-literal
+// E2E: method calls on struct-field receivers (#423).
+// `b.slot.get()` must dispatch `cell.get` on the field value, like the
+// bare-local `c.get()` form. The multi-segment call lowering only tried
+// struct-impl methods and silently emitted unit (reading back 0).
+import std.cell
+
+pub struct Box {
+    slot: cell,
+}
+
+func main() -> Result<int, str> {
+    c := cell.new(41)
+    c0:int = c.get()?
+    println("raw:{c0}")
+    b := Box{slot: c}
+    v:int = b.slot.get()?
+    println("got:{v}")
+    _ := b.slot.set(7)?
+    w:int = b.slot.get()?
+    println("set:{w}")
+    println("cell_struct_ok")
+    return .ok(0)
+}

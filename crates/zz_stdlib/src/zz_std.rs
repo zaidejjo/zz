@@ -28,6 +28,7 @@ const SET_ZZ: &str = include_str!("../zz/collections/set.zz");
 const DEC_MOD_ZZ: &str = include_str!("../zz/dec/mod.zz");
 const BYTES_MOD_ZZ: &str = include_str!("../zz/bytes/mod.zz");
 const CSV_MOD_ZZ: &str = include_str!("../zz/csv/mod.zz");
+const PROPERTY_MOD_ZZ: &str = include_str!("../zz/property/mod.zz");
 
 /// All embedded source files, in compilation order.
 const ZZ_SOURCES: &[(&str, &str)] = &[
@@ -46,6 +47,7 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:dec.mod.zz", DEC_MOD_ZZ),
     ("std:bytes.mod.zz", BYTES_MOD_ZZ),
     ("std:csv.mod.zz", CSV_MOD_ZZ),
+    ("std:property.mod.zz", PROPERTY_MOD_ZZ),
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
@@ -58,7 +60,8 @@ static COMPILED: OnceLock<Vec<TypedProgram>> = OnceLock::new();
 const fn new_slot() -> OnceLock<TypedProgram> {
     OnceLock::new()
 }
-static SLOTS: [OnceLock<TypedProgram>; 15] = [
+static SLOTS: [OnceLock<TypedProgram>; 16] = [
+    new_slot(),
     new_slot(),
     new_slot(),
     new_slot(),
@@ -77,7 +80,7 @@ static SLOTS: [OnceLock<TypedProgram>; 15] = [
 ];
 
 const _: () = assert!(
-    ZZ_SOURCES.len() == 15,
+    ZZ_SOURCES.len() == 16,
     "SLOTS must cover every embedded stdlib source"
 );
 
@@ -199,6 +202,7 @@ const PROGRAM_DEPS: &[&[usize]] = &[
     &[],  // 12 dec/mod.zz
     &[],  // 13 bytes/mod.zz
     &[3], // 14 csv/mod.zz (csv.to_json via json.parse_or_null)
+    &[],  // 15 property/mod.zz (natives + builtins only)
 ];
 
 /// Loader modules each program serves, by `ZZ_SOURCES` index. Used by
@@ -224,6 +228,7 @@ const PROGRAM_MODULES: &[&[&str]] = &[
     &["dec"],          // 12 dec/mod.zz
     &["bytes", "str"], // 13 bytes/mod.zz (also defines str builders)
     &["csv"],          // 14 csv/mod.zz
+    &["property"],     // 15 property/mod.zz
 ];
 
 /// Dotted short names one program declares (`ns.name`), test oracle for
@@ -291,7 +296,7 @@ pub fn stdlib_program_closure(modules: &[String]) -> Vec<usize> {
 /// Idempotent: re-running skips keys that already exist.
 pub fn define_canonical_purezz_aliases(
     env: &mut zz_runtime::EnvLink,
-    funcs: &mut HashMap<String, zz_runtime::FuncValue>,
+    funcs: &mut HashMap<String, std::rc::Rc<zz_runtime::FuncValue>>,
 ) {
     let sigs = crate::funcs::stdlib_funcs_cached();
     let flat = env.flatten();
@@ -308,7 +313,7 @@ pub fn define_canonical_purezz_aliases(
         }
         env.define(&canon, v.clone());
         if let zz_runtime::Value::Func(fv) = v {
-            funcs.entry(canon).or_insert_with(|| (**fv).clone());
+            funcs.entry(canon).or_insert_with(|| std::rc::Rc::clone(fv));
         }
     }
 }
@@ -320,11 +325,11 @@ mod tests {
     #[test]
     fn compile_pure_zz_stdlib() {
         let programs = zz_stdlib_programs();
-        // Should have compiled fifteen modules (str, math, collections/vec,
+        // Should have compiled sixteen modules (str, math, collections/vec,
         // json, regexp, time, args, colors, path, http, map, set, dec,
-        // bytes, csv). TOML lives as an external package (~/Projects/toml),
+        // bytes, csv, property). TOML lives as an external package (~/Projects/toml),
         // not in the stdlib.
-        assert_eq!(programs.len(), 15, "expected 15 pure-ZZ stdlib modules");
+        assert_eq!(programs.len(), 16, "expected 16 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             assert!(
@@ -343,8 +348,8 @@ mod tests {
             "str.repeat should be defined"
         );
         assert!(
-            str_prog.funcs.contains_key("str.count"),
-            "str.count should be defined"
+            str_prog.funcs.contains_key("std.str.count"),
+            "std.str.count should be defined (canonical seed)"
         );
         assert!(
             str_prog.funcs.contains_key("str.is_empty"),
@@ -651,6 +656,23 @@ mod tests {
         for name in ["csv.parse", "csv.stringify", "csv.to_json", "csv.header"] {
             assert!(
                 csv_prog.funcs.contains_key(name),
+                "{name} should be defined"
+            );
+        }
+        // property (property/mod.zz, index 15)
+        let prop_prog = &programs[15];
+        for name in [
+            "property.seed",
+            "property.int_in",
+            "property.pick",
+            "property.boolean",
+            "property.alpha_str",
+            "property.shrink_int",
+            "property.check",
+            "property.for_all_int",
+        ] {
+            assert!(
+                prop_prog.funcs.contains_key(name),
                 "{name} should be defined"
             );
         }

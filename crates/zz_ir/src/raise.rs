@@ -55,20 +55,22 @@ impl<'a> Raiser<'a> {
             Const::Bool(b) => Ok(VmValue::Bool(*b)),
             Const::Int(i) => Ok(VmValue::Int(*i)),
             Const::Float(f) => Ok(VmValue::Float(*f)),
-            Const::Str(s) => Ok(VmValue::Str(Box::new(self.str(*s)?))),
+            Const::Str(s) => Ok(VmValue::Str(std::sync::Arc::new(self.str(*s)?))),
             Const::Array(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     out.push(self.raise_const(*item, seen)?);
                 }
-                Ok(VmValue::Array(Box::new(out)))
+                Ok(VmValue::Array(std::sync::Arc::new(out)))
             }
             Const::Dict(pairs) => {
                 let mut out = Vec::with_capacity(pairs.len());
                 for (k, v) in pairs {
                     out.push((self.raise_const(*k, seen)?, self.raise_const(*v, seen)?));
                 }
-                Ok(VmValue::Dict(Box::new(out)))
+                Ok(VmValue::Dict(std::sync::Arc::new(
+                    zz_runtime::DictData::from_entries(out),
+                )))
             }
             Const::Option(inner) => Ok(VmValue::Option(match inner {
                 Some(x) => Some(Box::new(self.raise_const(*x, seen)?)),
@@ -193,6 +195,19 @@ impl<'a> Raiser<'a> {
         }
     }
 
+    /// The constant an op reads from the module pool, if any.
+    ///
+    /// Raising rebuilds each chunk's constant pool in first-use order, so
+    /// every op that names a constant must be remapped — keep them here
+    /// rather than in two places.
+    fn op_const(op: &Op) -> Option<ConstId> {
+        match op {
+            Op::PushConst(cid) => Some(*cid),
+            Op::SlotCmpConst { k, .. } => Some(*k),
+            _ => None,
+        }
+    }
+
     /// Raise one tabled function to a runtime chunk, recursively.
     fn raise_func(&self, id: FuncId, seen: &mut Vec<FuncId>) -> Result<Arc<VmChunk>, IrError> {
         if seen.contains(&id) {
@@ -209,13 +224,13 @@ impl<'a> Raiser<'a> {
         // across the serialization boundary — only the values do.
         let mut order: Vec<ConstId> = Vec::new();
         for op in &func.code {
-            if let Op::PushConst(cid) = op {
-                if !order.contains(cid) {
+            if let Some(cid) = Self::op_const(op) {
+                if !order.contains(&cid) {
                     if (cid.0 as usize) >= self.module.consts.len() {
                         seen.pop();
                         return Err(IrError::new("raise: const id out of range"));
                     }
-                    order.push(*cid);
+                    order.push(cid);
                 }
             }
         }
@@ -227,12 +242,21 @@ impl<'a> Raiser<'a> {
         let mut code = Vec::with_capacity(func.code.len());
         for op in &func.code {
             let mut raised = self.raise_op(op, seen)?;
-            if let VmOp::PushConst(_) = raised {
-                let Op::PushConst(cid) = op else {
-                    unreachable!()
+            // Every const-carrying op has to be re-indexed into the fresh
+            // per-chunk pool built above (`order`); `PushConst` did this
+            // alone before, so an op that names a constant any other way
+            // (`SlotCmpConst`) would silently read the wrong value.
+            if let Some(cid) = Self::op_const(op) {
+                let idx = order
+                    .iter()
+                    .position(|x| x == &cid)
+                    .ok_or_else(|| IrError::new("raise: const missing from pool order"))?
+                    as u32;
+                raised = match raised {
+                    VmOp::PushConst(_) => VmOp::PushConst(idx),
+                    VmOp::SlotCmpConst { a, op, .. } => VmOp::SlotCmpConst { a, k: idx, op },
+                    other => other,
                 };
-                let idx = order.iter().position(|x| x == cid).expect("pool order") as u32;
-                raised = VmOp::PushConst(idx);
             }
             code.push(raised);
         }
@@ -337,6 +361,22 @@ impl<'a> Raiser<'a> {
                 field: self.str(*field)?,
                 span: VmSpan::default(),
             }),
+            Op::StoreIndexTake {
+                home_slot,
+                home_var,
+            } => Ok(VmOp::StoreIndexTake {
+                home: self.raise_home(home_slot, home_var)?,
+                span: VmSpan::default(),
+            }),
+            Op::CompoundIndexTake {
+                home_slot,
+                home_var,
+                op,
+            } => Ok(VmOp::CompoundIndexTake {
+                home: self.raise_home(home_slot, home_var)?,
+                op: Self::raise_binop(*op),
+                span: VmSpan::default(),
+            }),
             Op::FieldBinopTake {
                 home_slot,
                 home_var,
@@ -366,6 +406,106 @@ impl<'a> Raiser<'a> {
                 field: self.str(*field)?,
                 span: VmSpan::default(),
             }),
+            Op::GetFieldSlotIdx {
+                home_slot,
+                home_var,
+                idx,
+                dst,
+            } => Ok(VmOp::GetFieldSlotIdx {
+                home: self.raise_home(home_slot, home_var)?,
+                idx: *idx,
+                dst: *dst,
+                span: VmSpan::default(),
+            }),
+            Op::IndexIntSlot { arr, idx, dst } => Ok(VmOp::IndexIntSlot {
+                arr: *arr,
+                idx: *idx,
+                dst: *dst,
+                span: VmSpan::default(),
+            }),
+            Op::IndexDictInt { dict, key, dst } => Ok(VmOp::IndexDictInt {
+                dict: *dict,
+                key: *key,
+                dst: *dst,
+                span: VmSpan::default(),
+            }),
+            // Fused slot fast paths raise one to one: the interpreter
+            // takes the native fast path (with the generic fallback the
+            // op already carries), which is what the format carries them
+            // for. Backends that want the desugared stream call
+            // `lower::expand_fused` first.
+            Op::SlotAddInt { dst, src } => Ok(VmOp::SlotAddInt {
+                dst: *dst,
+                src: *src,
+            }),
+            Op::SlotInc { slot } => Ok(VmOp::SlotInc { slot: *slot }),
+            Op::SlotAddIntImm { dst, imm } => Ok(VmOp::SlotAddIntImm {
+                dst: *dst,
+                imm: *imm,
+            }),
+            Op::SlotSubIntImm { dst, imm } => Ok(VmOp::SlotSubIntImm {
+                dst: *dst,
+                imm: *imm,
+            }),
+            Op::SlotMulIntImm { dst, imm } => Ok(VmOp::SlotMulIntImm {
+                dst: *dst,
+                imm: *imm,
+            }),
+            Op::SlotLessIntSlot { a, b } => Ok(VmOp::SlotLessIntSlot { a: *a, b: *b }),
+            Op::SlotLessIntImm { a, imm } => Ok(VmOp::SlotLessIntImm { a: *a, imm: *imm }),
+            Op::SlotCmpIntSlot { a, b, op } => Ok(VmOp::SlotCmpIntSlot {
+                a: *a,
+                b: *b,
+                op: Self::raise_binop(*op),
+            }),
+            Op::SlotCmpIntImm { a, imm, op } => Ok(VmOp::SlotCmpIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::raise_binop(*op),
+            }),
+            Op::JumpIfFalseSlotCmpIntImm { a, imm, op, target } => {
+                Ok(VmOp::JumpIfFalseSlotCmpIntImm {
+                    a: *a,
+                    imm: *imm,
+                    op: Self::raise_binop(*op),
+                    target: *target as usize,
+                    span: VmSpan::default(),
+                })
+            }
+            Op::JumpIfFalseSlotCmpIntSlot { a, b, op, target } => {
+                Ok(VmOp::JumpIfFalseSlotCmpIntSlot {
+                    a: *a,
+                    b: *b,
+                    op: Self::raise_binop(*op),
+                    target: *target as usize,
+                    span: VmSpan::default(),
+                })
+            }
+            Op::PushSlotIntImm { a, imm, op } => Ok(VmOp::PushSlotIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::raise_binop(*op),
+                // Spans travel in the parallel array (like every other op
+                // raised from bytes), not in the op.
+                span: VmSpan::default(),
+            }),
+            Op::SlotCmpConst { a, k, op } => Ok(VmOp::SlotCmpConst {
+                a: *a,
+                k: k.0,
+                op: Self::raise_binop(*op),
+            }),
+            Op::SlotBinaryInt { dst, lhs, rhs, op } => Ok(VmOp::SlotBinaryInt {
+                dst: *dst,
+                lhs: *lhs,
+                rhs: *rhs,
+                op: Self::raise_binop(*op),
+            }),
+            Op::SlotBinaryIntImm { dst, lhs, imm, op } => Ok(VmOp::SlotBinaryIntImm {
+                dst: *dst,
+                lhs: *lhs,
+                imm: *imm,
+                op: Self::raise_binop(*op),
+            }),
             Op::IntAdd => Ok(VmOp::IntAdd(VmSpan::default())),
             Op::IntSub => Ok(VmOp::IntSub(VmSpan::default())),
             Op::IntMul => Ok(VmOp::IntMul(VmSpan::default())),
@@ -389,12 +529,18 @@ impl<'a> Raiser<'a> {
                 span: VmSpan::default(),
                 num_vars: *num_vars,
             }),
-            Op::ForNext { vars, exit, in_env } => Ok(VmOp::ForNext {
+            Op::ForNext {
+                vars,
+                exit,
+                body,
+                in_env,
+            } => Ok(VmOp::ForNext {
                 vars: vars
                     .iter()
                     .map(|v| self.str(*v))
                     .collect::<Result<_, _>>()?,
                 exit: *exit as usize,
+                body: *body as usize,
                 in_env: *in_env,
                 span: VmSpan::default(),
             }),
@@ -426,8 +572,8 @@ impl<'a> Raiser<'a> {
                 name: self.str(*name)?,
                 field_names: fields
                     .iter()
-                    .map(|f| self.str(*f))
-                    .collect::<Result<_, _>>()?,
+                    .map(|f| Ok(std::sync::Arc::from(self.str(*f)?.as_str())))
+                    .collect::<Result<Vec<_>, _>>()?,
                 span: VmSpan::default(),
             }),
             Op::GetField(id) => Ok(VmOp::GetField(self.str(*id)?, VmSpan::default())),

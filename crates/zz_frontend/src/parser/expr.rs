@@ -625,7 +625,8 @@ impl<'a> Parser<'a> {
     /// interpolate elsewhere (template mode), a bare `{` that cannot expand
     /// is almost certainly a mistake: warn once with the exact rule.
     /// Mirrors the triple-quoted rule: `{{`, `{}`, and JSON-like `{"key"`
-    /// stay silent.
+    /// stay silent. Spaces and tabs after `{` are insignificant (#516), so
+    /// they are skipped before every one of these tests.
     pub(crate) fn check_literal_braces(
         &mut self,
         chunks: &[(String, Span)],
@@ -642,7 +643,16 @@ impl<'a> Parser<'a> {
                 if c != '{' {
                     continue;
                 }
-                match chars.peek() {
+                // #516: `{ n}` expands like `{n}`, so the deciding char is
+                // the first one that is not a space or tab.
+                let mut rest = chars.clone();
+                let after = loop {
+                    match rest.next() {
+                        Some((_, c)) if c == ' ' || c == '\t' => continue,
+                        other => break other,
+                    }
+                };
+                match after {
                     // `{{` escape, or `{` at chunk end (escape boundary).
                     Some((_, '{')) | None => {
                         chars.next();
@@ -650,7 +660,7 @@ impl<'a> Parser<'a> {
                     }
                     // Expands, or is a deliberate literal (`{}`, `{"key"`).
                     Some((_, next))
-                        if is_interp_start(Some(*next)) || *next == '"' || *next == '}' =>
+                        if is_interp_start(Some(next)) || next == '"' || next == '}' =>
                     {
                         continue;
                     }
@@ -664,7 +674,7 @@ impl<'a> Parser<'a> {
                                 string_span,
                             )
                             .with_note(
-                                "single-line strings expand `{name}`, `{1 + 2}`, `{(x)}` — `{{`, `{}`, and `{\"key\"` stay literal; use `{{` for a literal `{`",
+                                "single-line strings expand `{name}`, `{1 + 2}`, `{(x)}` (spaces after `{` are fine) — `{{`, `{}`, and `{\"key\"` stay literal; use `{{` for a literal `{`",
                             ),
                         );
                         return; // One warning per string.
@@ -687,8 +697,26 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Int => {
                 self.advance();
-                let cleaned = tok.text.replace('_', "");
-                match cleaned.parse::<i64>() {
+                let text = tok.text.as_ref();
+                // Detect a base prefix: `0x`/`0X` hex, `0b`/`0B` binary,
+                // `0o`/`0O` octal. Plain decimals use radix 10.
+                let (radix, digits) = if let Some(rest) =
+                    text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                {
+                    (16, rest)
+                } else if let Some(rest) =
+                    text.strip_prefix("0b").or_else(|| text.strip_prefix("0B"))
+                {
+                    (2, rest)
+                } else if let Some(rest) =
+                    text.strip_prefix("0o").or_else(|| text.strip_prefix("0O"))
+                {
+                    (8, rest)
+                } else {
+                    (10, text)
+                };
+                let cleaned = digits.replace('_', "");
+                match i64::from_str_radix(&cleaned, radix) {
                     Ok(value) => Expr::Int {
                         value,
                         span: tok.span,
@@ -738,10 +766,20 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Ident if tok.text == "_" => {
-                self.errors
-                    .push(error_at("`_` is only valid in patterns", tok.span));
                 self.advance();
-                dummy_expr(tok.span)
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // `_` is never a real binding, so the checker treats it as a
+                // discard target and never resolves it as a variable.
+                if self.at(TokenKind::Assign) {
+                    Expr::Ident {
+                        name: "_".to_string(),
+                        span: tok.span,
+                    }
+                } else {
+                    self.errors
+                        .push(error_at("`_` is only valid in patterns", tok.span));
+                    dummy_expr(tok.span)
+                }
             }
             TokenKind::Ident => {
                 self.advance();
@@ -1195,6 +1233,36 @@ impl<'a> Parser<'a> {
             return Expr::Array {
                 elems: Vec::new(),
                 span,
+            };
+        }
+        // Detect the wrong comprehension order: `[for x in iter: body]`.
+        // ZZ writes the body first: `[body for x in iter]`. Name the
+        // supported form and recover by skipping to the closing `]` so a
+        // single clear diagnostic is emitted instead of a cascade.
+        if self.at(TokenKind::For) {
+            let for_tok = self.peek();
+            self.errors.push(error_at(
+                "expected expression before `for` — list comprehension body comes first: \
+                 `[expr for x in iter]`",
+                for_tok.span,
+            ));
+            while !self.at(TokenKind::RBracket)
+                && !self.at(TokenKind::Eof)
+                && !self.at(TokenKind::StmtEnd)
+            {
+                self.advance();
+            }
+            let end = if self.eat(TokenKind::RBracket) {
+                let rbracket = self.previous().span;
+                self.pop_delim(TokenKind::RBracket, rbracket);
+                rbracket
+            } else {
+                self.pop_delim(TokenKind::RBracket, lbracket.span);
+                lbracket.span
+            };
+            return Expr::Array {
+                elems: Vec::new(),
+                span: lbracket.span.join(end),
             };
         }
         // Parse first expression — could be a comprehension body or array element.

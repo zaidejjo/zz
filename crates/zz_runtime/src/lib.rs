@@ -4,6 +4,8 @@
 //! phase. The frontend stays shared between all execution modes.
 
 pub mod c_abi;
+pub mod coverage;
+pub mod debug;
 pub mod env;
 pub mod eval;
 pub mod json;
@@ -12,10 +14,13 @@ pub mod runtime;
 pub mod value;
 pub mod vm;
 
+pub use coverage::{CoverageState, COV_UNMAPPED};
 pub use env::Env;
 pub use env::EnvLink;
 pub use eval::{EvalError, Interp, NativeEntry, NativeFn, SpawnHook, SPAWN_HOOK};
-pub use value::{BytesData, FuncValue, NativeFunc, ObjectValue, RangeValue, Value};
+pub use value::{
+    deep_clone, BytesData, DictData, FuncValue, NativeFunc, ObjectValue, RangeValue, Value,
+};
 pub use vm::Chunk;
 pub use zz_frontend::ast::{Expr, Param};
 pub use zz_frontend::span::Span;

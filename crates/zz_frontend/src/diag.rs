@@ -110,6 +110,21 @@ pub type Files = SimpleFiles<String, String>;
 
 // --- constructors ----------------------------------------------------------
 
+/// Render a fixit replacement for display: backtick-quoted, except a
+/// replacement made solely of backticks (e.g. a raw-string closer),
+/// which would render ambiguously as ``` — spell those by name (#414).
+pub(crate) fn render_replacement(rep: &str) -> String {
+    if !rep.is_empty() && rep.chars().all(|c| c == '`') {
+        if rep.len() == 1 {
+            "a backtick".to_string()
+        } else {
+            format!("{} backticks", rep.len())
+        }
+    } else {
+        format!("`{rep}`")
+    }
+}
+
 pub fn error(message: impl Into<String>) -> RawDiag {
     RawDiag {
         severity: Severity::Error,
@@ -221,8 +236,9 @@ impl RawDiag {
         let mut notes = self.notes.clone();
         for fixit in &self.fixits {
             notes.push(format!(
-                "{}: replace with `{}`",
-                fixit.message, fixit.replacement
+                "{}: replace with {}",
+                fixit.message,
+                render_replacement(&fixit.replacement)
             ));
         }
 
@@ -389,7 +405,10 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                     let hint = if fixit.replacement.is_empty() {
                         " help: remove this".to_string()
                     } else {
-                        format!(" help: replace with `{}`", fixit.replacement)
+                        format!(
+                            " help: replace with {}",
+                            render_replacement(&fixit.replacement)
+                        )
                     };
                     let _ = write!(
                         out,
@@ -420,10 +439,10 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
     for fixit in raw.fixits.iter().skip(1) {
         let _ = write!(
             out,
-            "\n    {} {}: replace with `{}`",
+            "\n    {} {}: replace with {}",
             "=".bold(),
             "help".cyan().bold(),
-            fixit.replacement.green()
+            render_replacement(&fixit.replacement).green()
         );
     }
 
@@ -515,6 +534,18 @@ pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_replacement_spells_backticks_by_name() {
+        // #414: all-backtick insertions would render ambiguously as ```
+        // when wrapped in backticks — spell them out instead.
+        assert_eq!(render_replacement("`"), "a backtick");
+        assert_eq!(render_replacement("```"), "3 backticks");
+        // Everything else keeps the backtick-quoted rendering.
+        assert_eq!(render_replacement("println"), "`println`");
+        assert_eq!(render_replacement("{"), "`{`");
+        assert_eq!(render_replacement(""), "``");
+    }
 
     #[test]
     fn renders_caret_diagnostic() {

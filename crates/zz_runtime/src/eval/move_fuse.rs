@@ -7,7 +7,7 @@
 //! toml package's 15-array `Doc`) paid O(n²) deep copies (measured:
 //! 1.18s → 3.6s → 14.4s for 175/350/700 keys). This module ports the
 //! shared shapes plus take-restore store/read rules to the tree-walker,
-//! reusing `classify_self_assign_vm` so all engines agree on WHAT fuses.
+//! reusing `classify_self_assign` so all engines agree on WHAT fuses.
 //!
 //! Soundness lemma (every shape): the transient-`Unit` window runs no
 //! user code, and the moved name occurs exactly once (or zero times, for
@@ -35,7 +35,7 @@
 
 use zz_frontend::ast::Expr;
 use zz_frontend::move_elide::{
-    classify_self_assign_vm, count_refs, has_call, has_closure_or_spawn, has_early_exit, MoveKind,
+    classify_self_assign, count_refs, has_call, has_closure_or_spawn, has_early_exit, MoveKind,
 };
 use zz_frontend::span::Span;
 
@@ -64,10 +64,10 @@ fn resolve_fusable_callee(interp: &Interp, callee: &Expr, span: Span) -> Option<
             if let Some(v) = interp.env.get(name) {
                 return Some(v);
             }
-            if let Some(fv) = interp.funcs.get(name) {
-                return Some(Value::Func(Box::new(fv.clone())));
+            if let Some(fv) = zz_checker::lookup_std(&interp.funcs, name) {
+                return Some(Value::Func(std::rc::Rc::clone(fv)));
             }
-            if let Some(entry) = interp.natives.get(name) {
+            if let Some(entry) = zz_checker::lookup_std(&interp.natives, name) {
                 return Some(Value::Native(Box::new(crate::value::NativeFunc {
                     name: name.clone(),
                     arity: entry.arity,
@@ -87,10 +87,10 @@ fn resolve_fusable_callee(interp: &Interp, callee: &Expr, span: Span) -> Option<
             if let Some(v) = interp.env.get(&joined) {
                 return Some(v);
             }
-            if let Some(fv) = interp.funcs.get(&joined) {
-                return Some(Value::Func(Box::new(fv.clone())));
+            if let Some(fv) = zz_checker::lookup_std(&interp.funcs, &joined) {
+                return Some(Value::Func(std::rc::Rc::clone(fv)));
             }
-            if let Some(entry) = interp.natives.get(&joined) {
+            if let Some(entry) = zz_checker::lookup_std(&interp.natives, &joined) {
                 return Some(Value::Native(Box::new(crate::value::NativeFunc {
                     name: joined,
                     arity: entry.arity,
@@ -138,7 +138,7 @@ impl Interp {
         target: &Expr,
         value: &Expr,
     ) -> Result<bool, EvalError> {
-        match classify_self_assign_vm(target, value) {
+        match classify_self_assign(target, value) {
             Some(MoveKind::VecPush(var)) => self.fuse_vec_push(&var, value),
             Some(MoveKind::FieldPush { obj, field }) => self.fuse_field_push(&obj, &field, value),
             Some(MoveKind::ThreadCall(var)) => self.fuse_thread_call(&var, value),
@@ -181,7 +181,9 @@ impl Interp {
             }
         };
         let mut vs = match taken {
-            Value::Array(vs) => *vs,
+            // Owned take: reuse the buffer when uniquely owned, copy
+            // once otherwise (the copy value semantics requires).
+            Value::Array(vs) => std::sync::Arc::try_unwrap(vs).unwrap_or_else(|a| (*a).clone()),
             other => {
                 let msg = format!("`vec.push` expects an array, found `{other}`");
                 restore(self, var, other)?;
@@ -191,7 +193,7 @@ impl Interp {
         // `vec.push` is infallible on arrays: inline the wrap instead of
         // re-entering the native (identical value, zero dispatch).
         vs.push(elem);
-        restore(self, var, Value::Array(Box::new(vs)))?;
+        restore(self, var, Value::Array(std::sync::Arc::new(vs)))?;
         Ok(true)
     }
 
@@ -232,16 +234,18 @@ impl Interp {
         let direct = matches!(
             &mut taken,
             Value::Object(o)
-                if o.fields.iter().any(|(n, v)| n == field
+                if o.fields.iter().any(|(n, v)| n.as_ref() == field
                     && matches!(v, Value::Array(_)))
         );
         if direct {
             if let Value::Object(o) = &mut taken {
-                if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == field) {
+                let o = std::sync::Arc::make_mut(o);
+                if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n.as_ref() == field) {
                     if let Value::Array(vs) = std::mem::replace(slot, Value::Unit) {
-                        let mut vs = *vs;
+                        let mut vs =
+                            std::sync::Arc::try_unwrap(vs).unwrap_or_else(|a| (*a).clone());
                         vs.push(elem);
-                        *slot = Value::Array(Box::new(vs));
+                        *slot = Value::Array(std::sync::Arc::new(vs));
                         restore(self, obj, taken)?;
                         return Ok(true);
                     }
@@ -526,7 +530,11 @@ impl Interp {
             }
         };
         let field_val = match &taken {
-            Value::Object(o) => o.fields.iter().find(|(n, _)| n == field).map(|(_, v)| v),
+            Value::Object(o) => o
+                .fields
+                .iter()
+                .find(|(n, _)| n.as_ref() == field)
+                .map(|(_, v)| v),
             _ => None,
         };
         let elem = match (field_val, &idx_val) {
@@ -548,10 +556,7 @@ impl Interp {
                     }
                 }
             }
-            (Some(Value::Dict(entries)), key) => entries
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone()),
+            (Some(Value::Dict(dict)), key) => dict.get(key).cloned(),
             _ => None,
         };
         match elem {

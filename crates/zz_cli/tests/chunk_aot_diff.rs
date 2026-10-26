@@ -10,6 +10,29 @@
 //! `nested_vec` (take-push fusion on two live slots), and `bool_iter`
 //! ([bool] iteration through the boxed path) pin chunk↔HIR parity for
 //! the shapes the sieve bench exercises at scale.
+//!
+//! `match` family (`MatchArm` / `MatchGuard` / `MatchError` /
+//! `IfLetMatch`): covered since #508. Arm bindings live in function-local
+//! `zz_value` cells (the VM uses a child env), pattern tests read through
+//! borrowed places, and `|`, guards, nested payloads, user enums (with
+//! `MakeEnum`/`RegisterEnum`) and `if let` all pin chunk↔HIR parity in
+//! `match_option` / `match_result` / `match_guard` / `match_literals` /
+//! `match_enum` / `match_iflet`.
+//!
+//! Deliberately uncovered: `Op::CallMethod` for receivers the compiler
+//! cannot type (chained field receivers, `match` arm bindings, and methods
+//! on module-scope bindings — #557 tracks the IR-side resolution). Variant methods that *are* typed
+//! (`Option`/`Result` receivers; `unwrap` / `unwrap_or` / `expect`) no
+//! longer reach the dynamic op — the compiler emits the resolved
+//! `option.*` / `result.*` native, so `variant_methods` pins them on all
+//! backends. Struct methods still need build-time resolution (or an
+//! emitted method table) and stay out of the corpus. Variant
+//! *construction* is covered since #508.
+//!
+//! Not in the corpus because the *HIR* backend miscompiles them today
+//! (chunk output matches the VM): tuple patterns (`match (3, 4)`, HIR
+//! prints 0) and `match` on `bool` with `true`/`false` arms (HIR emits
+//! unbalanced C).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,7 +75,7 @@ fn require_native() -> bool {
 
 const FIB: &str = r#"
 func fib(n: int) -> int {
-    if n <= 1 {
+    return if n <= 1 {
         n
     } else {
         fib(n - 1) + fib(n - 2)
@@ -121,7 +144,7 @@ func main() {
 
 const TAK: &str = r#"
 func tak(x: int, y: int, z: int) -> int {
-    if y >= x {
+    return if y >= x {
         z
     } else {
         tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y))
@@ -374,6 +397,86 @@ func main() {
 }
 "#;
 
+// Pure-ZZ stdlib helper coverage (#253): helpers implemented in ZZ
+// (not natives) must resolve under `--chunk` via the referenced-only
+// stdlib merge, matching HIR output exactly.
+const STDLIB_STR: &str = r#"
+import std.str
+
+func main() {
+    println(str.repeat("ab", 3))
+    println(str.repeat("x", 0))
+    println(str.pad_left("hi", 5, "-"))
+}
+"#;
+
+// Bare range values print s..e through the shared first-class range
+// (chunk boxes once rendered pointer bits, #254), with structural
+// equality on both backends.
+const RANGE_DISPLAY: &str = r#"
+func main() {
+    r := 0..5
+    println(r)
+    println(2..7)
+    println((0..5) == (0..5))
+    println((0..5) == (0..6))
+}
+"#;
+
+// Variant construction (`MakeVariant`) and variant boxes crossing
+// container boundaries: `.some` / `.none` / `.ok` / `.err` were rejected
+// outright ("unsupported makevariant"), which kept the whole Option/Result
+// stdlib surface off the chunk backend (#508). The array case pins the
+// ownership rule too: variants are refcounted boxes now (`zz_vbox`), so
+// `MakeArray`'s clone-then-release is a net move — with the pre-#507
+// immortal box it double-freed (repro in the issue).
+const VARIANT_CONSTRUCT: &str = r#"
+import std.math
+import std.vec
+
+func mk(v: int) -> Option<int> {
+    return .some(v)
+}
+
+func main() {
+    println(vec.min_val([3, 1, 2]))
+    println(vec.max_val([3, 1, 2]))
+    println(math.min_arr([4, 2, 9]))
+    a := [mk(1), mk(2), mk(3)]
+    for v in a {
+        println(v)
+    }
+    println(.some(7))
+    println(.none)
+    println(.ok(41))
+    println(.err("boom"))
+}
+"#;
+
+// Variant methods resolved at compile time (#508): a typed receiver turns
+// `x.unwrap_or(d)` / `x.unwrap()` / `x.expect(m)` into the `option.` /
+// `result.` native (same receiver namespace the VM's dynamic `CallMethod`
+// dispatch would pick), so the call reaches the chunk backend, which has no
+// run-time method table. Covers locals, a chained receiver, both variant
+// families, and the error-arm `unwrap_or` fallback.
+const VARIANT_METHODS: &str = r#"
+func main() {
+    a := .some(1)
+    println(a.unwrap_or(0))
+    b: Result<int, str> = .ok(2)
+    println(b.unwrap_or(3))
+    println(.some(7).unwrap_or(0))
+    c := .some(5)
+    println(c.unwrap())
+    d: Result<int, str> = .err("bad")
+    println(d.unwrap_or(-1))
+    e := .some(4)
+    println(e.expect("boom"))
+    f: Result<int, str> = .ok(6)
+    println(f.expect("boom"))
+}
+"#;
+
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
     ("sum_range", SUM_RANGE),
@@ -391,7 +494,270 @@ const CASES: &[(&str, &str)] = &[
     ("idx_trap", IDX_TRAP),
     ("idx_neg", IDX_NEG),
     ("range_start", RANGE_START),
+    ("stdlib_str", STDLIB_STR),
+    ("range_display", RANGE_DISPLAY),
+    ("cond_cmp", COND_CMP),
+    ("variant_construct", VARIANT_CONSTRUCT),
+    ("variant_methods", VARIANT_METHODS),
+    ("module_globals", MODULE_GLOBALS),
+    ("module_globals_main", MODULE_GLOBALS_MAIN),
+    ("match_option", MATCH_OPTION),
+    ("match_result", MATCH_RESULT),
+    ("match_guard", MATCH_GUARD),
+    ("match_literals", MATCH_LITERALS),
+    ("match_enum", MATCH_ENUM),
+    ("match_iflet", MATCH_IFLET),
+    ("match_shadow", MATCH_SHADOW),
 ];
+
+// Module-scope bindings read and written from functions: the VM keeps
+// them in the program environment, so the chunk backend emits file-scope
+// C globals (`module_globals`). Script shape (top-level statements, no
+// user `main`) and `func main` shape both pinned.
+const MODULE_GLOBALS: &str = r#"
+greeting := "hi"
+count := 0
+func show() {
+    println(greeting)
+    println(count)
+}
+func bump() {
+    count = count + 1
+}
+show()
+bump()
+bump()
+println(count)
+show()
+"#;
+
+const MODULE_GLOBALS_MAIN: &str = r#"
+total := 0
+limit := 3
+func add(n: int) {
+    total = total + n
+}
+func main() {
+    for i in 0..limit {
+        add(i)
+    }
+    println(total)
+}
+"#;
+
+// Condition fusion pin: slot-vs-slot and slot-vs-const int compares
+// feeding WhileCond stay identical across backends (chunk fuses them
+// to raw compare+branch; see `condfuse_scan`).
+const COND_CMP: &str = r#"
+func main() {
+    s := 0
+    i := 0
+    n := 1000
+    while i < n {
+        s = s + i
+        i = i + 1
+    }
+    println(s)
+    t := 0
+    j := 1000
+    while j > 10 {
+        j = j - 1
+        t = t + 1
+    }
+    println(t)
+}
+"#;
+
+// `match` family: the VM keeps arm bindings in a child environment; the
+// chunk backend gives each binding a function-local `zz_value` cell and
+// tests patterns with borrowed reads (no clone on a miss).
+const MATCH_OPTION: &str = r#"func pick(n: int) -> Option<int> {
+    return if n > 0 { .some(n) } else { .none }
+}
+func wrap(n: int) -> Option<Result<int, str>> {
+    return if n > 0 { .some(.ok(n)) } else { .some(.err("no")) }
+}
+func main() {
+    a := pick(5)
+    println(match a {
+        .some(x) => x * 2,
+        .none => 0 - 1,
+    })
+    println(match pick(0) {
+        .some(x) => x * 2,
+        .none => 0 - 1,
+    })
+    nested := wrap(3)
+    println(match nested {
+        .some(.ok(y)) => y + 100,
+        .some(.err(e)) => 0 - 2,
+        .none => 0 - 3,
+    })
+    println(match wrap(0) {
+        .some(.ok(y)) => y + 100,
+        .some(.err(e)) => 0 - 2,
+        .none => 0 - 3,
+    })
+}
+"#;
+
+const MATCH_RESULT: &str = r#"func check(n: int) -> Result<int, str> {
+    return if n > 0 { .ok(n * 2) } else { .err("neg") }
+}
+func main() {
+    a := check(3)
+    println(match a {
+        .ok(x) => x,
+        .err(e) => 0 - 1,
+    })
+    b := check(-2)
+    println(match b {
+        .ok(x) => x,
+        .err(e) => 0 - 2,
+    })
+}
+"#;
+
+const MATCH_GUARD: &str = r#"func grade(o: Option<int>) -> int {
+    return match o {
+        .some(x) if x > 10 => 1,
+        .some(x) => x * 10,
+        .none => 0,
+    }
+}
+func main() {
+    println(grade(.some(50)))
+    println(grade(.some(5)))
+    println(grade(.none))
+}
+"#;
+
+const MATCH_LITERALS: &str = r#"func classify(n: int) -> int {
+    return match n {
+        0 => 100,
+        1 | 2 => 200,
+        _ => 300,
+    }
+}
+func nested(n: int) -> int {
+    return match n {
+        7 => match n {
+            7 => 77,
+            _ => 0,
+        },
+        _ => 0 - 1,
+    }
+}
+func main() {
+    println(classify(0))
+    println(classify(1))
+    println(classify(2))
+    println(classify(9))
+    println(nested(7))
+    println(nested(8))
+}
+"#;
+
+const MATCH_ENUM: &str = r#"enum Shape {
+    Circle(int),
+    Square(int),
+    Empty,
+}
+func area(s: Shape) -> int {
+    return match s {
+        .Circle(r) => r * r,
+        .Square(w) => w * w,
+        .Empty => 0,
+    }
+}
+func main() {
+    println(area(Shape.Circle(3)))
+    println(area(Shape.Square(4)))
+    println(area(Shape.Empty))
+    e := Shape.Empty
+    println(match e {
+        .Circle(r) => r,
+        .Square(w) => w,
+        .Empty => 0 - 1,
+    })
+}
+"#;
+
+const MATCH_IFLET: &str = r#"func take(o: Option<int>) -> int {
+    return if let .some(x) = o {
+        x
+    } else {
+        0 - 1
+    }
+}
+func main() {
+    println(take(.some(9)))
+    println(take(.none))
+    v := 0
+    if let .some(x) = .some(4) {
+        v = v + x
+    }
+    if let .some(y) = .none {
+        v = v + 100
+    }
+    println(v)
+}
+"#;
+
+// Arm bindings are scoped, not function-wide: a nested arm that reuses a
+// name shadows the enclosing binding (the VM binds each arm in a child
+// environment), and the enclosing value must survive the inner match.
+const MATCH_SHADOW: &str = r#"func nested(o: Option<Option<int>>) -> int {
+    return match o {
+        .some(px) => {
+            inner := match px {
+                .some(q) => q * 2,
+                .none => 0 - 1,
+            }
+            outer := match px {
+                .some(q) => q,
+                .none => 0 - 2,
+            }
+            inner + outer
+        }
+        .none => 0 - 99,
+    }
+}
+func same_name(o: Option<Option<int>>) -> int {
+    return match o {
+        .some(inner) => {
+            w := match inner {
+                .some(inner) => inner * 3,
+                .none => 0,
+            }
+            outer := match inner {
+                .some(z) => z,
+                .none => 0 - 1,
+            }
+            w + outer
+        }
+        .none => 0 - 7,
+    }
+}
+func guard(o: Option<int>) -> int {
+    return match o {
+        .some(x) if x > 3 => x,
+        .some(x) => x * 10,
+        .none => 0,
+    }
+}
+func main() {
+    println(nested(.some(.some(5))))
+    println(nested(.some(.none)))
+    println(nested(.none))
+    println(same_name(.some(.some(5))))
+    println(same_name(.some(.none)))
+    println(same_name(.none))
+    println(guard(.some(9)))
+    println(guard(.some(2)))
+    println(guard(.none))
+}
+"#;
 
 #[test]
 fn chunk_matches_hir_stdout_and_exit() {

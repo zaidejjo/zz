@@ -22,7 +22,7 @@ pub fn signature_help_for_position(
     let ctx = detect_call_context(source, offset)?;
     let cr = check_result?;
 
-    let sig = cr.funcs.get(&ctx.func_name)?;
+    let sig = zz_checker::lookup_std(&cr.funcs, &ctx.func_name)?;
 
     let label = format_func_label(&ctx.func_name, sig);
     let parameters: Vec<ParameterInformation> = sig

@@ -23,7 +23,10 @@ use std::sync::{Mutex, OnceLock};
 
 use zz_runtime::{EvalError, Interp, Span, Value};
 
-use super::{err_str, ok_str, ok_unit, ok_value, path, run_fs};
+use super::{
+    bytes_result, cache, err_str, ok_str, ok_unit, ok_value, path, probe_cached, run_fs,
+    text_result_for,
+};
 use crate::natives::expect_str;
 
 /// Pool tag for FS provider handles. Selects no method namespace — all
@@ -257,6 +260,10 @@ fn vfs_lookup(id: u64) -> Option<std::sync::Arc<VfsHandle>> {
     vfs_pool().lock().unwrap().get(&id).cloned()
 }
 
+fn is_os_provider(handle: &VfsHandle) -> bool {
+    matches!(&*handle.kind.lock().unwrap(), Provider::Os)
+}
+
 fn vfs_value(id: u64) -> Value {
     ok_value(Value::Opaque(Box::new(zz_native_rt::Handle {
         tag: VFS_TAG.to_string(),
@@ -390,6 +397,11 @@ pub(crate) fn fs_read_to_string_at(
         Err(closed) => return Ok(closed),
     };
     let raw = expect_str(args, 1, "std.fs.read_to_string_at")?;
+    if is_os_provider(&handle) {
+        if let Some(file) = probe_cached(&raw) {
+            return Ok(text_result_for(&file, &raw));
+        }
+    }
     let key = vfs_key(&raw);
     run_fs(interp, span, move || {
         let Some(h) = vfs_lookup(id) else {
@@ -398,8 +410,8 @@ pub(crate) fn fs_read_to_string_at(
         let _ = handle;
         let guard = h.kind.lock().unwrap();
         match &*guard {
-            Provider::Os => match std::fs::read_to_string(&raw) {
-                Ok(c) => ok_str(c),
+            Provider::Os => match cache::read_uncached(&raw) {
+                Ok(file) => text_result_for(&file, &raw),
                 Err(e) => super::fs_err("read", &raw, &e),
             },
             Provider::Mem(_) | Provider::Tar(_) | Provider::Embed(_) => {
@@ -432,6 +444,11 @@ pub(crate) fn fs_read_bytes_at(
         Err(closed) => return Ok(closed),
     };
     let raw = expect_str(args, 1, "std.fs.read_bytes_at")?;
+    if is_os_provider(&handle) {
+        if let Some(file) = probe_cached(&raw) {
+            return Ok(bytes_result(&file));
+        }
+    }
     let key = vfs_key(&raw);
     run_fs(interp, span, move || {
         let Some(h) = vfs_lookup(id) else {
@@ -440,10 +457,8 @@ pub(crate) fn fs_read_bytes_at(
         let _ = handle;
         let guard = h.kind.lock().unwrap();
         match &*guard {
-            Provider::Os => match std::fs::read(&raw) {
-                Ok(bytes) => ok_value(Value::Bytes(Box::new(zz_runtime::BytesData::from_vec(
-                    bytes,
-                )))),
+            Provider::Os => match cache::read_uncached(&raw) {
+                Ok(file) => bytes_result(&file),
                 Err(e) => super::fs_err("read_bytes", &raw, &e),
             },
             Provider::Mem(_) | Provider::Tar(_) | Provider::Embed(_) => {
@@ -476,6 +491,9 @@ pub(crate) fn fs_write_at(
     };
     let raw = expect_str(args, 1, "std.fs.write_at")?;
     let data = expect_str(args, 2, "std.fs.write_at")?;
+    if is_os_provider(&handle) {
+        cache::invalidate(&raw);
+    }
     let key = vfs_key(&raw);
     run_fs(interp, span, move || {
         let Some(h) = vfs_lookup(id) else {
@@ -508,6 +526,9 @@ pub(crate) fn fs_append_at(
     };
     let raw = expect_str(args, 1, "std.fs.append_at")?;
     let data = expect_str(args, 2, "std.fs.append_at")?;
+    if is_os_provider(&handle) {
+        cache::invalidate(&raw);
+    }
     let key = vfs_key(&raw);
     run_fs(interp, span, move || {
         let Some(h) = vfs_lookup(id) else {
@@ -652,21 +673,24 @@ pub(crate) fn fs_read_dir_at(
                     let mut out: Vec<Value> = Vec::new();
                     for e in rd {
                         match e {
-                            Ok(e) => out.push(Value::Str(Box::new(
+                            Ok(e) => out.push(Value::Str(std::sync::Arc::new(
                                 e.file_name().to_string_lossy().into_owned(),
                             ))),
                             Err(e) => return super::fs_err("read_dir", &raw, &e),
                         }
                     }
                     out.sort_by(|a, b| format!("{a}").cmp(&format!("{b}")));
-                    ok_value(Value::Array(Box::new(out)))
+                    ok_value(Value::Array(std::sync::Arc::new(out)))
                 }
                 Err(e) => super::fs_err("read_dir", &raw, &e),
             },
             Provider::Mem(_) | Provider::Tar(_) | Provider::Embed(_) => {
                 match guard.tree().unwrap().read_dir(&key) {
-                    Ok(names) => ok_value(Value::Array(Box::new(
-                        names.into_iter().map(|s| Value::Str(Box::new(s))).collect(),
+                    Ok(names) => ok_value(Value::Array(std::sync::Arc::new(
+                        names
+                            .into_iter()
+                            .map(|s| Value::Str(std::sync::Arc::new(s)))
+                            .collect(),
                     ))),
                     Err(code) => code_err("read_dir", &raw, code),
                 }
@@ -685,6 +709,9 @@ pub(crate) fn fs_mkdir_all_at(
         Err(closed) => return Ok(closed),
     };
     let raw = expect_str(args, 1, "std.fs.mkdir_all_at")?;
+    if is_os_provider(&handle) {
+        cache::invalidate(&raw);
+    }
     let key = vfs_key(&raw);
     run_fs(interp, span, move || {
         let Some(h) = vfs_lookup(id) else {
@@ -716,6 +743,9 @@ pub(crate) fn fs_remove_file_at(
         Err(closed) => return Ok(closed),
     };
     let raw = expect_str(args, 1, "std.fs.remove_file_at")?;
+    if is_os_provider(&handle) {
+        cache::invalidate(&raw);
+    }
     let key = vfs_key(&raw);
     run_fs(interp, span, move || {
         let Some(h) = vfs_lookup(id) else {

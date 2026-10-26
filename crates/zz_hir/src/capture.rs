@@ -345,13 +345,27 @@ pub fn captured_in_block(
     block: &Block,
     globals: &HashSet<String>,
 ) -> HashSet<String> {
+    captured_in_stmts(params, &block.stmts, globals)
+}
+
+/// Same as [`captured_in_block`] for a bare statement list.
+///
+/// Module scope has no parameter list: `zz_main` is still a C frame, so a
+/// closure created there cannot read its C locals (loop variables, block
+/// bindings) and those need the same shared-cell treatment as function
+/// locals. Pass `params = &[]`.
+pub fn captured_in_stmts(
+    params: &[String],
+    stmts: &[Stmt],
+    globals: &HashSet<String>,
+) -> HashSet<String> {
     let mut w = Walk {
         scopes: vec![params.iter().cloned().collect::<HashSet<_>>()],
         bounds: Vec::new(),
         globals,
         out: HashSet::new(),
     };
-    for stmt in &block.stmts {
+    for stmt in stmts {
         w.stmt(stmt);
     }
     w.out

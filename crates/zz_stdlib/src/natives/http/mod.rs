@@ -12,7 +12,8 @@ use router::{best_match, matches_other_method};
 use zz_runtime::json::{parse_json, to_json_string, JsonValue};
 use zz_runtime::value::{
     detach_cached_funcs, reachable_refs, snapshot_env, snapshot_env_filtered, snapshot_funcs,
-    FuncValue, HttpRequest, HttpServer, RateBucket, RateLimit, Response, RATE_LIMIT_MAX_KEYS,
+    DictData, FuncValue, HttpRequest, HttpServer, RateBucket, RateLimit, Response,
+    RATE_LIMIT_MAX_KEYS,
 };
 use zz_runtime::{
     vm::Op, Chunk, Env, EnvLink, EvalError, Expr, Interp, NativeEntry, Param, Span, Value,
@@ -64,7 +65,7 @@ fn jsonify_value(v: &Value) -> JsonValue {
                     }
                 })
                 .collect();
-            JsonValue::Obj(obj)
+            JsonValue::from(obj)
         }
         Value::Json(j) => (**j).clone(),
         _ => JsonValue::Null,
@@ -384,7 +385,10 @@ pub(crate) fn http_get(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.get")?;
-    let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::default()));
+    let headers = args
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())));
     let client = shared_client();
     let hdrs = dict_to_headers(&headers);
     let mut req = client
@@ -430,7 +434,11 @@ pub(crate) fn http_respond(
     // `headers` is optional (defaults to `{}` — the arity gate in
     // `fill_default_headers` pads it, but direct `Interp::call` users and
     // tests may also omit it).
-    let headers = match args.get(2).cloned().unwrap_or(Value::Dict(Box::default())) {
+    let headers = match args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())))
+    {
         Value::Dict(entries) => entries
             .iter()
             .filter_map(|(k, v)| match (k, v) {
@@ -478,7 +486,10 @@ pub(crate) fn http_post(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.post")?;
     let body = expect_body_bytes(args, 1, "std.http.post", span)?;
-    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
+    let headers = args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())));
     let client = shared_client();
     let hdrs = dict_to_headers(&headers);
     let mut req = client
@@ -555,7 +566,10 @@ fn fetch_with_client(
             span,
         ));
     }
-    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
+    let headers = args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())));
     let body: Vec<u8> = match args.get(3) {
         None => Vec::new(),
         Some(Value::Str(s)) => s.as_bytes().to_vec(),
@@ -613,11 +627,15 @@ pub(crate) fn http_post_json(
     let url = expect_str(args, 0, NAME)?;
     let body_val = arg(args, 1, NAME)?.clone();
     let text = to_json_string(&jsonify_value(&body_val));
-    let headers = match args.get(2).cloned().unwrap_or(Value::Dict(Box::default())) {
+    let headers = match args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())))
+    {
         // Non-dict headers are ignored (mirrors the C client + `dict_to_headers`
         // leniency); the checker guarantees `{str: str}` statically.
         Value::Dict(entries) => {
-            let mut out: Vec<(Value, Value)> = (**entries).to_vec();
+            let mut out: Vec<(Value, Value)> = entries.entries().to_vec();
             let has_ct = out.iter().any(|(k, _)| match k {
                 Value::Str(key) => key.to_lowercase() == "content-type",
                 _ => false,
@@ -628,12 +646,12 @@ pub(crate) fn http_post_json(
                     Value::Str("application/json".to_string().into()),
                 ));
             }
-            Value::Dict(Box::new(out))
+            Value::Dict(std::sync::Arc::new(DictData::from_entries(out)))
         }
-        _ => Value::Dict(Box::new(vec![(
+        _ => Value::Dict(std::sync::Arc::new(DictData::from_entries(vec![(
             Value::Str("Content-Type".to_string().into()),
             Value::Str("application/json".to_string().into()),
-        )])),
+        )]))),
     };
     let mut sub = vec![Value::Str(url.into()), Value::Str(text.into()), headers];
     http_post(interp, &mut sub, span)
@@ -647,7 +665,10 @@ pub(crate) fn http_put(
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.put")?;
     let body = expect_body_bytes(args, 1, "std.http.put", span)?;
-    let headers = args.get(2).cloned().unwrap_or(Value::Dict(Box::default()));
+    let headers = args
+        .get(2)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())));
     let client = shared_client();
     let hdrs = dict_to_headers(&headers);
     let mut req = client
@@ -671,7 +692,10 @@ pub(crate) fn http_delete(
     _span: Span,
 ) -> Result<Value, EvalError> {
     let url = expect_str(args, 0, "std.http.delete")?;
-    let headers = args.get(1).cloned().unwrap_or(Value::Dict(Box::default()));
+    let headers = args
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())));
     let client = shared_client();
     let hdrs = dict_to_headers(&headers);
     let mut req = client
@@ -729,7 +753,7 @@ pub(crate) fn http_response_json(
         // Always a `Result`: `.ok(json)` on success so `res.json()?`
         // propagates parse failures like every other fallible API.
         Value::Response(r) => match parse_json(&r.body) {
-            Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
+            Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Arc::new(j)))))),
             Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
                 format!("JSON parse error: {e}").into(),
             ))))),
@@ -753,7 +777,9 @@ pub(crate) fn http_response_headers(
                 .iter()
                 .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
                 .collect();
-            Ok(Value::Dict(Box::new(entries)))
+            Ok(Value::Dict(std::sync::Arc::new(DictData::from_entries(
+                entries,
+            ))))
         }
         other => Err(EvalError::new(
             format!("std.http.headers: expected an http.response, found `{other}`"),
@@ -1141,7 +1167,11 @@ pub(crate) fn http_with_headers(
             ));
         }
     };
-    let extra = match args.get(1).cloned().unwrap_or(Value::Dict(Box::default())) {
+    let extra = match args
+        .get(1)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())))
+    {
         Value::Dict(entries) => entries
             .iter()
             .filter_map(|(k, v)| match (k, v) {
@@ -1277,7 +1307,10 @@ pub(crate) fn http_test_req(
     let server = expect_server(args, 0, NAME)?;
     let method = expect_str(args, 1, NAME)?;
     let path_with_query = expect_str(args, 2, NAME)?;
-    let headers_val = args.get(3).cloned().unwrap_or(Value::Dict(Box::default()));
+    let headers_val = args
+        .get(3)
+        .cloned()
+        .unwrap_or(Value::Dict(std::sync::Arc::new(DictData::new())));
     let headers_map = dict_to_headers(&headers_val);
     let headers: Vec<(String, String)> = headers_map.into_iter().collect();
     let body = expect_str(args, 4, NAME)?;
@@ -1362,9 +1395,9 @@ pub(crate) fn http_query(
         }
     };
     let Some(view) = view_request(&req) else {
-        return Ok(Value::Dict(Box::default()));
+        return Ok(Value::Dict(std::sync::Arc::new(DictData::new())));
     };
-    Ok(Value::Dict(Box::new(
+    Ok(Value::Dict(std::sync::Arc::new(
         view.query
             .iter()
             .map(|(k, v)| {
@@ -1408,7 +1441,7 @@ pub(crate) fn http_header(
     }
     // Fall back to a top-level scan (bare headers dict).
     if let Value::Dict(entries) = &req {
-        for (k, v) in &**entries {
+        for (k, v) in entries.iter() {
             if let (Value::Str(key), val) = (k, v) {
                 if (**key).to_lowercase() == name.to_lowercase() {
                     return Ok(Value::Result(Box::new(Ok(val.clone()))));
@@ -1430,7 +1463,7 @@ pub(crate) fn http_body_json(
     let body = request_body(args, 0, "std.http.body_json", span)?;
     match parse_json(&body) {
         // Always a `Result` (see `http_response_json`).
-        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
+        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Arc::new(j)))))),
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
             format!("JSON parse error: {e}").into(),
         ))))),
@@ -1449,7 +1482,9 @@ pub(crate) fn http_body_form(
         .iter()
         .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
         .collect();
-    Ok(Value::Dict(Box::new(dict)))
+    Ok(Value::Dict(std::sync::Arc::new(DictData::from_entries(
+        dict,
+    ))))
 }
 
 /// `http.body_bytes(req: Request) -> bytes`
@@ -1704,11 +1739,12 @@ fn dispatch_with_request(
             .iter()
             .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
             .collect();
-        entries.retain(|(k, _)| k != &Value::Str("params".to_string().into()));
-        entries.push((
+        let buf = std::sync::Arc::make_mut(&mut entries);
+        buf.retain(|(k, _)| k != &Value::Str("params".to_string().into()));
+        buf.insert(
             Value::Str("params".to_string().into()),
-            Value::Dict(Box::new(params_dict)),
-        ));
+            Value::Dict(std::sync::Arc::new(DictData::from_entries(params_dict))),
+        );
         Value::Dict(entries)
     } else {
         current_req
@@ -1861,6 +1897,8 @@ struct FuncSnapshot {
     chunk: Option<Arc<Chunk>>,
     chunk_defaults: Vec<Option<Arc<Chunk>>>,
     env_snapshot: HashMap<String, Value>,
+    /// Named-function flag carried across threads (see `FuncValue`).
+    tail_value: bool,
 }
 
 impl FuncSnapshot {
@@ -1871,12 +1909,13 @@ impl FuncSnapshot {
             fresh.define(k, v.clone());
         }
         let env = EnvLink::Owned(Rc::new(std::cell::RefCell::new(fresh)));
-        Value::Func(Box::new(FuncValue {
+        Value::Func(std::rc::Rc::new(FuncValue {
             params: self.params.clone(),
             body: self.body.clone(),
             env,
             chunk: self.chunk.clone(),
             chunk_defaults: self.chunk_defaults.clone(),
+            tail_value: self.tail_value,
         }))
     }
 }
@@ -1960,6 +1999,7 @@ fn snapshot_func_scoped(v: &Value, interp: &Interp) -> Option<FuncSnapshot> {
                 chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
                 env_snapshot,
+                tail_value: fv.tail_value,
             })
         }
         _ => None,
@@ -2049,7 +2089,7 @@ impl ServerSnapshot {
         let mut interp = Interp::with_natives_shared(Arc::clone(&self.natives));
         interp.structs = Arc::new(self.structs.clone());
         if let Ok(guard) = self.funcs.lock() {
-            interp.funcs = detach_cached_funcs(&guard);
+            interp.funcs = zz_runtime::value::shared_funcs(detach_cached_funcs(&guard));
         }
         interp
     }
@@ -2902,7 +2942,10 @@ mod tests {
     #[test]
     fn respond_builds_status_headers_body() {
         let mut interp = Interp::new();
-        let headers = Value::Dict(Box::new(vec![(str_val("Location"), str_val("/x"))]));
+        let headers = Value::Dict(std::sync::Arc::new(DictData::from_entries(vec![(
+            str_val("Location"),
+            str_val("/x"),
+        )])));
         let mut args = vec![Value::Int(302), str_val(""), headers];
         let out = http_respond(&mut interp, &mut args, Span::new(0, 0)).unwrap();
         match out {
@@ -2918,7 +2961,11 @@ mod tests {
     #[test]
     fn respond_rejects_bad_status() {
         let mut interp = Interp::new();
-        let mut args = vec![Value::Int(99), str_val(""), Value::Dict(Box::default())];
+        let mut args = vec![
+            Value::Int(99),
+            str_val(""),
+            Value::Dict(std::sync::Arc::new(DictData::new())),
+        ];
         assert!(http_respond(&mut interp, &mut args, Span::new(0, 0)).is_err());
     }
 
@@ -2966,7 +3013,7 @@ mod tests {
         let mut args = vec![
             str_val(&format!("http://{addr}/upload")),
             Value::Bytes(Box::new(zz_runtime::BytesData::from_vec(raw.clone()))),
-            Value::Dict(Box::default()),
+            Value::Dict(std::sync::Arc::new(DictData::new())),
         ];
         let out = http_post(&mut interp, &mut args, Span::new(0, 0)).unwrap();
         match out {
@@ -3074,20 +3121,26 @@ mod header_tests {
     }
 
     fn server_req() -> Value {
-        Value::Dict(Box::new(vec![
+        Value::Dict(std::sync::Arc::new(DictData::from_entries(vec![
             (str_val("method"), str_val("POST")),
             (str_val("path"), str_val("/api/pkg/publish")),
             (str_val("body"), str_val("{}")),
             (
                 str_val("headers"),
-                Value::Dict(Box::new(vec![(
+                Value::Dict(std::sync::Arc::new(DictData::from_entries(vec![(
                     str_val("Authorization"),
                     str_val("Bearer zz_pat_abc"),
-                )])),
+                )]))),
             ),
-            (str_val("query"), Value::Dict(Box::default())),
-            (str_val("params"), Value::Dict(Box::default())),
-        ]))
+            (
+                str_val("query"),
+                Value::Dict(std::sync::Arc::new(DictData::new())),
+            ),
+            (
+                str_val("params"),
+                Value::Dict(std::sync::Arc::new(DictData::new())),
+            ),
+        ])))
     }
 
     #[test]
@@ -3118,7 +3171,10 @@ mod header_tests {
     #[test]
     fn header_bare_dict_still_works() {
         let mut interp = Interp::new();
-        let bare = Value::Dict(Box::new(vec![(str_val("X-A"), str_val("1"))]));
+        let bare = Value::Dict(std::sync::Arc::new(DictData::from_entries(vec![(
+            str_val("X-A"),
+            str_val("1"),
+        )])));
         let mut args = vec![bare, str_val("x-a")];
         let out = http_header(&mut interp, &mut args, Span::new(0, 0)).unwrap();
         match out {

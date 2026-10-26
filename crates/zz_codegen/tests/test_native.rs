@@ -76,7 +76,7 @@ fn test_struct_return_boxed() {
     let src = r#"
 struct Counts { files: int, lines: int }
 func zero() -> Counts {
-    Counts{ files: 0, lines: 0 }
+    return Counts{ files: 0, lines: 0 }
 }
 func main() {
     c := zero()
@@ -96,13 +96,13 @@ fn test_struct_field_mutation_through_call_result() {
     let src = r#"
 struct Counts { files: int, lines: int }
 func zero() -> Counts {
-    Counts{ files: 0, lines: 0 }
+    return Counts{ files: 0, lines: 0 }
 }
 func bump(n: int) -> Counts {
     c := zero()
     c.files = c.files + n
     c.lines = c.lines + 1
-    c
+    return c
 }
 func main() {
     c := bump(5)
@@ -186,7 +186,7 @@ func main() {
 fn test_tail_if_multi_statement_branches() {
     let src = r#"
 func pick(n: int) -> int {
-    if n > 0 {
+    return if n > 0 {
         println("pos")
         n * 2
     } else {

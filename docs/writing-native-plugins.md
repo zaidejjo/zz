@@ -132,18 +132,18 @@ build time instead of dlopen.
 ```rust
 // src/fnv.zz — the only surface consumers learn.
 pub func hash(s: str) -> int {
-    fnv_hash(s)
+    return fnv_hash(s)
 }
 
 pub func seed() -> int {
-    fnv_seed()
+    return fnv_seed()
 }
 
 /// Pure-ZZ value-add over raw FFI: combine two hashes (no native code).
 /// Folded mod 1000 first: raw FNV values overflow i64 when scaled
 /// (ZZ ints trap on overflow — `hash * 31` fails at runtime).
 pub func combine(a: str, b: str) -> int {
-    (fnv_hash(a) % 1000) * 31 + (fnv_hash(b) % 1000)
+    return (fnv_hash(a) % 1000) * 31 + (fnv_hash(b) % 1000)
 }
 ```
 
@@ -244,8 +244,9 @@ targets = ["linux-x86_64-gnu-glibc2.28", "macos-arm64-min11.0"]
 - `zz build` links `.a` (+ `ldflags.txt` system libs); `zz run`
   dlopens `.so`, checks the ABI stamp, dispatches.
 
-Rust-crate plugins stay on the legacy hook until the v2 cargo-vendor
-design lands (guide §5).
+Rust-crate plugins use the hermetic cargo backend: `[native.build-rust]`
+vendors the locked closure and `zz` drives offline builds (guide §5).
+No hook, no `build.sh`, no `build.rs`.
 
 ## Troubleshooting
 

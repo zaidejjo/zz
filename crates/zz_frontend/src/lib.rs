@@ -6,8 +6,10 @@
 //! round-trip, statement-level error recovery) is the permanent foundation.
 
 pub mod ast;
+pub mod bench_attr;
 pub mod decorators;
 pub mod diag;
+pub mod doctest;
 pub mod fmt;
 pub mod levenshtein;
 pub mod lexer;

@@ -124,9 +124,11 @@ pub struct TaskJoinState {
 /// Mutex-guarded join payload: the task outcome plus green-thread waiters
 /// parked in `task.join` / `task.try_join`-style waits.
 ///
-/// `result` is consumed by the first main-thread `task.join`/`task.try_join`
-/// take; `completed` stays set so late joiners get a loud "already consumed"
-/// error instead of hanging forever on a result that will never arrive.
+/// `result` is consumed by the first main-thread `task.join` take;
+/// `task.try_join` only clones (never consumes), so any number of polls
+/// plus one taking join resolve from a single completion. `completed`
+/// stays set so late joiners get a loud "already consumed" error instead
+/// of hanging forever on a result that will never arrive.
 /// Green-thread waiters always receive clones at completion time and never
 /// consume.
 #[derive(Debug, Default)]
@@ -154,6 +156,10 @@ pub enum YieldReason {
     /// the task ran longer than its timeslice without blocking. No object
     /// is involved — the executor just requeues it so siblings run.
     Timeslice,
+    /// Debugger breakpoint hit (line, 1-based). Only ever produced on
+    /// the main thread under an attached debug session — never on the
+    /// executor, which treats it as an internal error.
+    DebugBreak { line: u32 },
 }
 
 // ── Executor thread-locals ────────────────────────────────────────────────
@@ -220,10 +226,16 @@ pub fn with_executor_task<R>(task: TaskId, f: impl FnOnce() -> R) -> R {
 }
 
 /// A struct instance payload (boxed so `Value` stays small).
+///
+/// Field names are interned `Arc<str>`: a struct type's declared names are
+/// created once (by the compiler for literals, by the runtime for enums), so
+/// construction copies refcounts instead of allocating one `String` per
+/// field. `Value::Object` compares and prints by content, so sharing is
+/// invisible.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectValue {
     pub name: String,
-    pub fields: Vec<(String, Value)>,
+    pub fields: Vec<(std::sync::Arc<str>, Value)>,
 }
 
 impl ObjectValue {
@@ -280,7 +292,12 @@ pub enum Value {
     Int(i64),
     Float(f64),
     /// A heap-allocated string (thin pointer).
-    Str(Box<String>),
+    ///
+    /// `Arc<String>` shares the backing store on clone (O(1) bump);
+    /// ZZ strings are immutable through every engine path, so no
+    /// copy-on-write gate is needed — concat/slice produce fresh
+    /// values. Thin pointer keeps `Value` at 16 bytes.
+    Str(std::sync::Arc<String>),
     Bool(bool),
     Unit,
     /// `.some(v)` / `.none`.
@@ -288,20 +305,33 @@ pub enum Value {
     /// `.ok(v)` / `.err(e)`.
     Result(Box<Result<Value, Value>>),
     /// A closure or named function, with its captured environment.
-    Func(Box<FuncValue>),
+    Func(std::rc::Rc<FuncValue>),
     /// `[v1, v2, ...]`.
-    Array(Box<Vec<Value>>),
+    ///
+    /// `Arc`-backed: cloning an array bumps the store (O(1)) and every
+    /// mutation goes through `Arc::make_mut` / `try_unwrap`, which reuses
+    /// the buffer when uniquely owned and copies once otherwise — the
+    /// same copy value semantics always required.
+    Array(std::sync::Arc<Vec<Value>>),
     /// Contiguous byte buffer (produced by `fs.read_bytes`,
     /// `fs.read_chunk_bytes`). Shares its backing store on clone/slice
     /// (`Arc` + window), so slicing is O(1) and whole-file reads cost
     /// ~1 byte of RSS per byte of file instead of ~31.
     Bytes(Box<BytesData>),
     /// `{k1: v1, k2: v2, ...}` — insertion-ordered key/value pairs.
-    Dict(Box<Vec<(Value, Value)>>),
+    ///
+    /// `Arc`-backed like arrays: clones bump, mutations copy once.
+    /// Large dicts additionally carry a lazy key→first-position index
+    /// (see [`DictData`}); small dicts stay a plain linear Vec exactly
+    /// as before.
+    Dict(std::sync::Arc<DictData>),
     /// A native (Rust-backed) function from the standard library.
     Native(Box<NativeFunc>),
     /// A parsed JSON value (opaque to the type system).
-    Json(Box<JsonValue>),
+    ///
+    /// `Arc`-backed: clones bump the reference count instead of deep-cloning
+    /// the whole document; read-only natives borrow, mutations copy once.
+    Json(std::sync::Arc<JsonValue>),
     /// An HTTP server handle with its registered routes.
     HttpServer(Box<HttpServer>),
     /// A TCP stream (opaque, wrapped in Arc<Mutex> for clone safety).
@@ -319,11 +349,16 @@ pub enum Value {
     /// An HTTP request (method/path/body/headers/query/params).
     HttpRequest(Box<HttpRequest>),
     /// A struct instance: its type name and insertion-ordered fields.
-    Object(Box<ObjectValue>),
+    ///
+    /// `Arc`-backed like arrays: clones bump, field writes copy once.
+    Object(std::sync::Arc<ObjectValue>),
     /// `a..b` or `a..b..step` — an integer range (used by `for` loops).
     Range(Box<RangeValue>),
     /// `(v1, v2, ...)` — tuple value.
-    Tuple(Box<Vec<Value>>),
+    ///
+    /// `Arc`-backed like arrays (tuples share the array representation
+    /// and support index-set).
+    Tuple(std::sync::Arc<Vec<Value>>),
     /// Thread-safe channel (unbounded queue + condvar).
     Chan(Arc<ChanState>),
     /// Join handle from spawn — recv() blocks until task completes.
@@ -381,7 +416,7 @@ pub fn snapshot_env(env: &EnvLink) -> HashMap<String, Value> {
 pub fn snapshot_env_filtered(
     env: &EnvLink,
     keep: &HashSet<String>,
-    funcs: &HashMap<String, FuncValue>,
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
     natives: &std::sync::Arc<HashMap<String, NativeEntry>>,
 ) -> HashMap<String, Value> {
     let flat = env.flatten();
@@ -428,7 +463,7 @@ pub fn snapshot_env_filtered(
 ///   object either way (frozen shares it; the table carries it).
 pub fn snapshot_env_cow(
     env: &EnvLink,
-    funcs: &HashMap<String, FuncValue>,
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
     reachable: &HashSet<String>,
     loads: &HashSet<String>,
     keep_cache: &mut SpawnKeepCache,
@@ -504,7 +539,9 @@ pub fn snapshot_env_cow(
 
 /// Snapshot a function table so it is safe to send across thread boundaries.
 /// Each `FuncValue`'s captured env is flattened into a self-contained copy.
-pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, FuncValue> {
+pub fn snapshot_funcs(
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
+) -> HashMap<String, FuncValue> {
     let mut out = HashMap::new();
     // ONE memo map for the whole table: module scopes share envs, so a
     // fresh map per value re-clones shared graphs exponentially (165
@@ -535,10 +572,24 @@ pub fn snapshot_funcs(funcs: &HashMap<String, FuncValue>) -> HashMap<String, Fun
                 env: new_env,
                 chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
+                tail_value: fv.tail_value,
             },
         );
     }
     out
+}
+
+/// Adopt a detached worker snapshot into the interpreter's shared table.
+///
+/// Snapshots are produced as owned `FuncValue`s (`snapshot_funcs`,
+/// `detach_cached_funcs`) because they cross thread boundaries, while
+/// `Interp::funcs` hands out `Rc` shares on every lookup. One `Rc` per
+/// entry, constructed on the worker thread that owns the interpreter.
+pub fn shared_funcs(owned: HashMap<String, FuncValue>) -> HashMap<String, std::rc::Rc<FuncValue>> {
+    owned
+        .into_iter()
+        .map(|(name, fv)| (name, std::rc::Rc::new(fv)))
+        .collect()
 }
 
 /// Clone a cached (already detached) function-table snapshot for one worker.
@@ -567,6 +618,7 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
                 env: new_env,
                 chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
+                tail_value: fv.tail_value,
             },
         );
     }
@@ -592,7 +644,7 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
 ///   method tails (env-first method fallback) and transitive bodies.
 pub fn reachable_refs(
     root: &Arc<Chunk>,
-    funcs: &HashMap<String, FuncValue>,
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
 ) -> (HashSet<String>, HashSet<String>) {
     let mut names: HashSet<String> = HashSet::new();
     let mut loads: HashSet<String> = HashSet::new();
@@ -608,7 +660,7 @@ pub fn reachable_refs(
     // mutably across the scan loop).
     fn admit(
         cand: &str,
-        funcs: &HashMap<String, FuncValue>,
+        funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
         names: &mut HashSet<String>,
         stack: &mut Vec<Arc<Chunk>>,
     ) {
@@ -646,6 +698,8 @@ pub fn reachable_refs(
                 | Op::VecPushMethod { home, .. }
                 | Op::SetFieldTake { home, .. }
                 | Op::SetFieldIndexTake { home, .. }
+                | Op::StoreIndexTake { home, .. }
+                | Op::CompoundIndexTake { home, .. }
                 | Op::FieldBinopTake { home, .. }
                 | Op::GetFieldIndex { home, .. }
                 | Op::LenField { home, .. } => {
@@ -710,13 +764,13 @@ pub fn reachable_refs(
 /// Used with [`reachable_func_names`] so a spawn carries only the functions
 /// its worker can call instead of the whole table.
 pub fn snapshot_funcs_subset(
-    funcs: &HashMap<String, FuncValue>,
+    funcs: &HashMap<String, std::rc::Rc<FuncValue>>,
     names: &HashSet<String>,
 ) -> HashMap<String, FuncValue> {
-    let filtered: HashMap<String, FuncValue> = funcs
+    let filtered: HashMap<String, std::rc::Rc<FuncValue>> = funcs
         .iter()
         .filter(|(k, _)| names.contains(k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k.clone(), std::rc::Rc::clone(v)))
         .collect();
     snapshot_funcs(&filtered)
 }
@@ -782,8 +836,9 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 env: EnvLink::new(),
                 chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
+                tail_value: fv.tail_value,
             };
-            let placeholder_val = Value::Func(Box::new(placeholder));
+            let placeholder_val = Value::Func(std::rc::Rc::new(placeholder));
             seen.insert(key, placeholder_val.clone());
 
             // Flatten the captured env and create a self-contained version.
@@ -793,47 +848,251 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
                 fresh.define(&name, deep_clone_value(val, seen));
             }
             let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
-            let cloned = Value::Func(Box::new(FuncValue {
-                params: fv.params,
-                body: fv.body,
+            let cloned = Value::Func(std::rc::Rc::new(FuncValue {
+                params: fv.params.clone(),
+                body: fv.body.clone(),
                 env: new_env,
-                chunk: fv.chunk,
+                chunk: fv.chunk.clone(),
                 chunk_defaults: fv.chunk_defaults.clone(),
+                tail_value: fv.tail_value,
             }));
             seen.insert(key, cloned.clone());
             cloned
         }
-        Value::Array(arr) => Value::Array(Box::new(
-            arr.into_iter().map(|v| deep_clone_value(v, seen)).collect(),
-        )),
-        Value::Dict(pairs) => Value::Dict(Box::new(
-            pairs
-                .into_iter()
-                .map(|(k, v)| (deep_clone_value(k, seen), deep_clone_value(v, seen)))
+        Value::Array(arr) => Value::Array(std::sync::Arc::new(
+            arr.iter()
+                .map(|v| deep_clone_value(v.clone(), seen))
                 .collect(),
         )),
+        Value::Dict(dict) => Value::Dict(std::sync::Arc::new(DictData::from_entries(
+            dict.entries()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        deep_clone_value(k.clone(), seen),
+                        deep_clone_value(v.clone(), seen),
+                    )
+                })
+                .collect(),
+        ))),
         Value::Option(opt) => Value::Option(opt.map(|v| Box::new(deep_clone_value(*v, seen)))),
         Value::Result(res) => Value::Result(Box::new(match *res {
             Ok(v) => Ok(deep_clone_value(v, seen)),
             Err(e) => Err(deep_clone_value(e, seen)),
         })),
-        Value::Tuple(items) => Value::Tuple(Box::new(
+        Value::Tuple(items) => Value::Tuple(std::sync::Arc::new(
             items
-                .into_iter()
-                .map(|v| deep_clone_value(v, seen))
+                .iter()
+                .map(|v| deep_clone_value(v.clone(), seen))
                 .collect(),
         )),
-        Value::Object(obj) => Value::Object(Box::new(ObjectValue {
-            name: obj.name,
+        Value::Object(obj) => Value::Object(std::sync::Arc::new(ObjectValue {
+            name: obj.name.clone(),
             fields: obj
                 .fields
-                .into_iter()
-                .map(|(n, v)| (n, deep_clone_value(v, seen)))
+                .iter()
+                .map(|(n, v)| (n.clone(), deep_clone_value(v.clone(), seen)))
                 .collect(),
         })),
         // Primitives and opaque Arc-wrapped types: cheap clone is fine.
         other => other,
     }
+}
+
+/// Index threshold: dicts at or below this size stay linear (a hash probe
+/// costs more than a few comparisons); larger dicts carry a key index.
+/// Small dicts — headers, query pairs, literals — behave exactly as before.
+const DICT_INDEX_THRESHOLD: usize = 8;
+
+/// Hashable dict-key fast lane: ints, bools, and strings cover every key
+/// the stdlib and fixtures use. Anything else (floats — NaN never equals
+/// itself — arrays, objects, funcs, ...) falls back to the linear scan
+/// with byte-identical `Value ==` semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DictKey {
+    Int(i64),
+    Bool(bool),
+    Str(std::sync::Arc<String>),
+}
+
+impl DictKey {
+    fn of(key: &Value) -> Option<DictKey> {
+        match key {
+            Value::Int(i) => Some(DictKey::Int(*i)),
+            Value::Bool(b) => Some(DictKey::Bool(*b)),
+            // `Arc` bump only: the index shares the key's backing store.
+            Value::Str(s) => Some(DictKey::Str(std::sync::Arc::clone(s))),
+            _ => None,
+        }
+    }
+}
+
+/// Insertion-ordered dict backing store with a lazy key index.
+///
+/// `entries` is the source of truth (order, duplicates, iteration);
+/// `index` is a pure cache: key → FIRST occurrence (matching the linear
+/// `find`), built once the dict outgrows [`DICT_INDEX_THRESHOLD`] and
+/// maintained by every mutator. All fields are private so the invariant
+/// (index consistent or absent) holds by construction.
+#[derive(Debug, Clone, Default)]
+pub struct DictData {
+    entries: Vec<(Value, Value)>,
+    index: Option<HashMap<DictKey, usize>>,
+}
+
+impl DictData {
+    /// Empty dict.
+    pub fn new() -> Self {
+        DictData {
+            entries: Vec::new(),
+            index: None,
+        }
+    }
+
+    /// Build from ordered pairs, indexing only when large enough to win.
+    /// Duplicate keys keep every occurrence; the index (like the old
+    /// linear scan) resolves to the first.
+    pub fn from_entries(entries: Vec<(Value, Value)>) -> Self {
+        let mut dict = DictData {
+            entries,
+            index: None,
+        };
+        if dict.entries.len() > DICT_INDEX_THRESHOLD {
+            dict.rebuild_index();
+        }
+        dict
+    }
+
+    /// Rebuild the index from scratch (first occurrence wins).
+    fn rebuild_index(&mut self) {
+        let mut index = HashMap::with_capacity(self.entries.len());
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            if let Some(dk) = DictKey::of(k) {
+                index.entry(dk).or_insert(i);
+            }
+        }
+        self.index = Some(index);
+    }
+
+    /// Build the index once the dict outgrows the linear lane.
+    fn ensure_index(&mut self) {
+        if self.index.is_none() && self.entries.len() > DICT_INDEX_THRESHOLD {
+            self.rebuild_index();
+        }
+    }
+
+    /// Number of pairs (including duplicate keys, as before).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the dict holds no pairs.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Ordered pair iterator (insertion order, duplicates included).
+    pub fn iter(&self) -> std::slice::Iter<'_, (Value, Value)> {
+        self.entries.iter()
+    }
+
+    /// Ordered pairs as a slice (positional iteration, direct indexing).
+    pub fn entries(&self) -> &[(Value, Value)] {
+        &self.entries
+    }
+
+    /// Consume into the ordered pairs, dropping the index (used by
+    /// by-value iteration fast paths that only need the entries).
+    pub fn into_entries(self) -> Vec<(Value, Value)> {
+        self.entries
+    }
+
+    /// Read a key: O(1) on the indexed lane, linear scan otherwise —
+    /// same miss errors, same first-match rule.
+    pub fn get(&self, key: &Value) -> Option<&Value> {
+        match (&self.index, DictKey::of(key)) {
+            (Some(index), Some(dk)) => index.get(&dk).map(|&i| &self.entries[i].1),
+            _ => self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+        }
+    }
+
+    /// Owned read (the common `d[k]` path).
+    pub fn get_cloned(&self, key: &Value) -> Option<Value> {
+        self.get(key).cloned()
+    }
+
+    /// Write `dict[key] = value`: first-match update, else append —
+    /// exactly the old linear semantics, with the index maintained.
+    pub fn insert(&mut self, key: Value, value: Value) {
+        if let Some(dk) = DictKey::of(&key) {
+            if let Some(index) = self.index.as_mut() {
+                if let Some(&i) = index.get(&dk) {
+                    debug_assert!(self.entries[i].0 == key);
+                    self.entries[i].1 = value;
+                    return;
+                }
+                let i = self.entries.len();
+                self.entries.push((key, value));
+                index.insert(dk, i);
+                return;
+            }
+        }
+        if let Some(slot) = self
+            .entries
+            .iter_mut()
+            .find(|pair| pair.0 == key)
+            .map(|pair| &mut pair.1)
+        {
+            *slot = value;
+        } else {
+            self.entries.push((key, value));
+            self.ensure_index();
+        }
+    }
+
+    /// Retain only matching pairs, rebuilding the index when present
+    /// (positions may have shifted). Rare path (one legacy caller).
+    pub fn retain(&mut self, mut pred: impl FnMut(&(Value, Value)) -> bool) {
+        self.entries.retain(|e| pred(e));
+        if self.index.is_some() {
+            if self.entries.len() > DICT_INDEX_THRESHOLD {
+                self.rebuild_index();
+            } else {
+                self.index = None;
+            }
+        }
+    }
+}
+
+impl FromIterator<(Value, Value)> for DictData {
+    // Lets pair iterators `.collect()` straight into an indexed dict
+    // (headers, query pairs, JSON objects built from Rust tuples).
+    fn from_iter<I: IntoIterator<Item = (Value, Value)>>(iter: I) -> Self {
+        DictData::from_entries(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a DictData {
+    type Item = &'a (Value, Value);
+    type IntoIter = std::slice::Iter<'a, (Value, Value)>;
+    // Borrowed iteration in insertion order (JSON encoding, header scans).
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl PartialEq for DictData {
+    // The index is a pure cache: equality compares entries only, so two
+    // dicts with identical pairs are equal however each was built.
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+/// Deep-copy a value into a fully independent value (the `clone(x)`
+/// builtin, #267). Cycle-safe; shared backing stores are duplicated.
+pub fn deep_clone(v: Value) -> Value {
+    deep_clone_value(v, &mut HashMap::new())
 }
 
 /// A JSON value (see [`crate::json`]).
@@ -864,6 +1123,17 @@ impl BytesData {
     /// the buffer).
     pub fn from_vec(data: Vec<u8>) -> Self {
         Self::new(data)
+    }
+
+    /// Share an existing `Arc` buffer (used by the `std.fs` content cache:
+    /// repeated `read_bytes`/`read_bytes_at` calls are an `Arc` bump).
+    pub fn from_shared(data: std::sync::Arc<Vec<u8>>) -> Self {
+        let len = data.len();
+        BytesData {
+            data,
+            start: 0,
+            len,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -1002,6 +1272,10 @@ pub struct FuncValue {
     /// the normal compile path leaves this empty and evaluates the AST
     /// `Param::default` instead. Tree-walker values never set it.
     pub chunk_defaults: Vec<Option<std::sync::Arc<crate::vm::Chunk>>>,
+    /// Whether the body's trailing expression is its value. `true` for
+    /// closures (expression bodies); `false` for named functions, which
+    /// return only through `return` and fall off with `unit`.
+    pub tail_value: bool,
 }
 
 impl Value {
@@ -1010,6 +1284,23 @@ impl Value {
         match self {
             Value::Int(i) => Some(*i as f64),
             Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Compiled-function projection for the VM's direct-call fast path:
+    /// the bytecode chunk, the definition environment, and the declared
+    /// arity — everything entering a frame needs, without the
+    /// `FuncValue` clone (`params`, `defaults`) that `Value::clone` costs.
+    ///
+    /// `None` for everything else, including closures that exist only as
+    /// AST and must run through the tree-walker.
+    pub fn callable_parts(&self) -> Option<(Arc<Chunk>, EnvLink, usize)> {
+        match self {
+            Value::Func(fv) => fv
+                .chunk
+                .as_ref()
+                .map(|chunk| (Arc::clone(chunk), fv.env.clone(), fv.params.len())),
             _ => None,
         }
     }
@@ -1079,7 +1370,8 @@ impl Value {
                 // and prints as `Wrap(5)` — cosmetic only, equality and
                 // field access are unaffected.
                 let is_enum_shape = o.name.contains('.')
-                    && (o.fields.is_empty() || (o.fields.len() == 1 && o.fields[0].0 == "value"));
+                    && (o.fields.is_empty()
+                        || (o.fields.len() == 1 && o.fields[0].0.as_ref() == "value"));
                 if is_enum_shape {
                     // Like structs, the module namespace is shortened off
                     // (`shapes.Token.Eof` → `Token.Eof`); identity keeps
@@ -1263,7 +1555,7 @@ impl fmt::Display for Value {
                 write!(f, "}}")
             }
             Value::Native(nf) => write!(f, "<native {}>", nf.name),
-            Value::Json(j) => write!(f, "{j}"),
+            Value::Json(j) => write!(f, "{}", j.as_ref()),
             Value::HttpServer(_) => write!(f, "<http server>"),
             Value::TcpStream(_) => write!(f, "<tcp stream>"),
             Value::TcpListener(_) => write!(f, "<tcp listener>"),
@@ -1378,7 +1670,7 @@ mod tests {
     #[test]
     fn array_displays() {
         assert_eq!(
-            Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)])).to_string(),
+            Value::Array(std::sync::Arc::new(vec![Value::Int(1), Value::Int(2)])).to_string(),
             "[1, 2]"
         );
     }
@@ -1386,10 +1678,10 @@ mod tests {
     #[test]
     fn dict_displays() {
         assert_eq!(
-            Value::Dict(Box::new(vec![
+            Value::Dict(std::sync::Arc::new(DictData::from_entries(vec![
                 (Value::Str("a".to_string().into()), Value::Int(1)),
                 (Value::Str("b".to_string().into()), Value::Int(2)),
-            ]))
+            ])))
             .to_string(),
             "{a: 1, b: 2}"
         );
@@ -1432,7 +1724,7 @@ mod tests {
             ".some(42)"
         );
         // Containers unwrap nested Options for display but keep them for debug.
-        let arr = Value::Array(Box::new(vec![
+        let arr = Value::Array(std::sync::Arc::new(vec![
             Value::Option(Some(Box::new(Value::Int(1)))),
             Value::Option(None),
             Value::Int(3),
@@ -1472,13 +1764,87 @@ mod snapshot_tests {
     }
 
     fn mk_func(env: &EnvLink, body: &str) -> Value {
-        Value::Func(Box::new(FuncValue {
+        Value::Func(std::rc::Rc::new(FuncValue {
             params: vec![],
             body: str_body(body),
             env: env.clone(),
             chunk: None,
             chunk_defaults: Vec::new(),
+            tail_value: true,
         }))
+    }
+
+    #[test]
+    fn dict_index_first_wins_and_updates_in_place() {
+        // Duplicate keys keep every occurrence; reads and writes resolve
+        // to the first (the old linear-scan rule).
+        let mut d = DictData::from_entries(vec![
+            (Value::Int(1), Value::Int(10)),
+            (Value::Int(1), Value::Int(20)),
+        ]);
+        assert_eq!(d.get(&Value::Int(1)), Some(&Value::Int(10)));
+        d.insert(Value::Int(1), Value::Int(30));
+        assert_eq!(d.len(), 2);
+        assert_eq!(d.entries()[0].1, Value::Int(30));
+        assert_eq!(d.entries()[1].1, Value::Int(20));
+    }
+
+    #[test]
+    fn dict_index_grows_and_reads_large_dicts() {
+        // 500 string keys: indexed lane, order preserved.
+        let mut d = DictData::new();
+        for i in 0..500 {
+            d.insert(Value::Str(format!("k{i}").into()), Value::Int(i as i64));
+        }
+        assert_eq!(d.len(), 500);
+        let probe = Value::Str("k499".to_string().into());
+        assert_eq!(d.get(&probe), Some(&Value::Int(499)));
+        assert!(d.get(&Value::Str("missing".to_string().into())).is_none());
+        // Insertion order survives indexing.
+        assert_eq!(d.entries()[0].0, Value::Str("k0".to_string().into()));
+        // Small dicts stay linear (no index allocated).
+        let small = DictData::from_entries(vec![(Value::Int(1), Value::Int(2))]);
+        assert_eq!(small.get(&Value::Int(1)), Some(&Value::Int(2)));
+    }
+
+    #[test]
+    fn dict_exotic_keys_keep_linear_semantics() {
+        // Floats (and other exotic keys) never enter the index: NaN still
+        // never matches, 0.0 still finds its entry.
+        let d = DictData::from_entries(vec![
+            (Value::Float(0.0), Value::Int(1)),
+            (Value::Float(f64::NAN), Value::Int(2)),
+        ]);
+        assert_eq!(d.get(&Value::Float(0.0)), Some(&Value::Int(1)));
+        assert_eq!(d.get(&Value::Float(f64::NAN)), None);
+    }
+
+    #[test]
+    fn dict_equality_ignores_index_state() {
+        // Same pairs built different ways (indexed vs linear) compare equal.
+        let mut indexed = DictData::new();
+        for i in 0..20 {
+            indexed.insert(Value::Int(i), Value::Int(i));
+        }
+        let linear =
+            DictData::from_entries((0..9).map(|i| (Value::Int(i), Value::Int(i))).collect());
+        let linear_full =
+            DictData::from_entries((0..20).map(|i| (Value::Int(i), Value::Int(i))).collect());
+        assert_eq!(indexed, linear_full);
+        assert_ne!(indexed, linear);
+    }
+
+    #[test]
+    fn dict_retain_and_into_entries() {
+        let mut d =
+            DictData::from_entries((0..20).map(|i| (Value::Int(i), Value::Int(i))).collect());
+        d.retain(|(k, _)| matches!(k, Value::Int(i) if i % 2 == 0));
+        assert_eq!(d.len(), 10);
+        assert_eq!(d.get(&Value::Int(3)), None);
+        assert_eq!(d.get(&Value::Int(4)), Some(&Value::Int(4)));
+        let v = d.into_entries();
+        assert_eq!(v.len(), 10);
+        assert_eq!(v[0], (Value::Int(0), Value::Int(0)));
     }
 
     #[test]

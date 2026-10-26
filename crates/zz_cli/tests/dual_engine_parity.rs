@@ -74,15 +74,20 @@ fn run_zz_with_input_env(
     use std::process::Stdio;
     let zz_bin = env!("CARGO_BIN_EXE_zz");
     let mut cmd = Command::new(zz_bin);
-    cmd.args(args)
+    // Both legs must run the same, uncached pipeline: a VM run-cache hit
+    // skips the check pass (so its warnings never reach stderr) and
+    // executes cached IR instead of going through the source pipeline,
+    // which would silently weaken the VM-vs-native comparison (#511).
+    cmd.env("ZZ_RUN_CACHE", "0")
+        .args(args)
         .arg(file)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
     // Standalone native outputs publish to the invocation dir, so the
-    // `--native` legs name a unique `-o` destination per fixture inside
-    // an isolated temp dir: parallel fixtures never share (and race on)
+    // `--native` legs name a unique `-o` destination per task inside
+    // an isolated temp dir: parallel tasks never share (and race on)
     // one destination, and the repo stays litter-free. CWD stays at the
     // workspace root — fixtures read repo-root-relative paths
     // (`tests/fixtures/.../data/*`), so moving CWD would break them.
@@ -198,19 +203,29 @@ fn run_zz_native_token(file: &Path, token: &str) -> (i32, String, String) {
     run_zz_with_input_env(&["run", "--native"], file, &input, Some(token))
 }
 
-/// `-o` parent dir for `--native` legs: a unique temp dir per fixture
-/// (path hash + stem), created on demand. CWD itself stays at the
-/// workspace root (fixtures read repo-root-relative paths); only the
-/// published binary moves aside. See the call-site comment.
+/// `-o` parent dir for `--native` legs: a unique temp dir per test task
+/// (process + per-task counter + stem), created on demand. CWD itself
+/// stays at the workspace root (fixtures read repo-root-relative paths);
+/// only the published binary moves aside. See the call-site comment.
+///
+/// Uniqueness is per task, not per fixture: libtest runs tests in
+/// parallel in one process, and the strict test and the sweep task for
+/// the SAME fixture overlap — a deterministic per-fixture dir lets one
+/// task's end-of-leg `remove_dir_all` reap the other's in-progress
+/// clang build (native exit != 0 flakes). The counter + pid
+/// disambiguate; the dir is reaped after the leg either way.
 fn native_cwd(file: &Path) -> PathBuf {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    file.to_string_lossy().hash(&mut h);
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NATIVE_CWD_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = NATIVE_CWD_COUNTER.fetch_add(1, Ordering::SeqCst);
     let stem = file
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "zz".to_string());
-    let dir = std::env::temp_dir().join(format!("zz-parity-native-{:016x}-{stem}", h.finish()));
+        .unwrap_or_else(|| "zz_out".to_string());
+    let dir = std::env::temp_dir().join(format!(
+        "zz-parity-native-{}-{uniq}-{stem}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("native CWD tmpdir");
     dir
 }
@@ -361,20 +376,23 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // VM and pass as strict error fixtures.
 
         // --- Phase 2/3 HTTP: VM-only natives abort loudly on AOT ---
-        // `listen_tls`, `listen_cfg`, `fetch_insecure`, `body_bytes`,
-        // `hijack` et al have no C impl yet (tracked in
-        // zz_codegen/tests.rs KNOWN_CODEGEN_GAPS as "P3 AOT"). Native
-        // legs abort at first use via `zz_unimplemented_native` (exit 1
-        // with `not implemented in AOT builds`) instead of the old
-        // silent unit, which wedged retry loops forever.
+        // `listen_tls`, `fetch_insecure`, `body_bytes`, `hijack`,
+        // `serve_dir_at`, and `test_req` et al have no C impl yet
+        // (tracked in zz_codegen/tests.rs KNOWN_CODEGEN_GAPS as "P3
+        // AOT"). Native legs abort at first use via
+        // `zz_unimplemented_native` (exit 1 with `not implemented in AOT
+        // builds`) instead of the old silent unit, which wedged retry
+        // loops forever.
         "http_tls_p3" => Some(
             "P3 AOT: listen_tls + fetch_insecure are VM-only; native aborts",
         ),
         "http_hijack_p3" | "http_bytes_p3" => {
             Some("P3 AOT: hijack / body_bytes are VM-only; native aborts")
         }
-        "http_limits_p2" | "http_middleware_p2" | "http_static_p2" => {
-            Some("P3 AOT: listen_cfg / serve_dir_at are VM-only; native aborts")
+        // `http_limits_p2` is strict parity now: AOT implements
+        // `http.listen_cfg` with the same limits/shutdown behavior as the VM.
+        "http_middleware_p2" | "http_static_p2" => {
+            Some("P3 AOT: serve_dir_at / test_req are VM-only; native aborts")
         }
         _ => None,
     }
@@ -743,6 +761,7 @@ parity_strict!(
     "syntax",
     "closure_fn_params.zz"
 );
+parity_strict!(parity_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
     parity_syntax_tuple_unboxed_struct,
@@ -761,12 +780,19 @@ parity_strict!(
 );
 parity_strict!(parity_syntax_fstrings, "syntax", "fstrings.zz");
 parity_strict!(parity_syntax_brace_escapes, "syntax", "brace_escapes.zz");
+parity_strict!(parity_syntax_raw_strings, "syntax", "raw_strings.zz");
 parity_strict!(
     parity_syntax_brace_escapes_multiline,
     "syntax",
     "brace_escapes_multiline.zz"
 );
 parity_strict!(parity_syntax_dicts, "syntax", "dicts.zz");
+parity_strict!(parity_syntax_dicts_nonstr, "syntax", "dicts_nonstr.zz");
+parity_strict!(
+    parity_syntax_destructure_method_test,
+    "syntax",
+    "destructure_method_test.zz"
+);
 parity_strict!(parity_syntax_string_blocks, "syntax", "string_blocks.zz");
 parity_strict!(parity_syntax_pipe_elvis, "syntax", "pipe_elvis.zz");
 parity_strict!(parity_syntax_scalar_copy, "syntax", "scalar_copy.zz");
@@ -800,6 +826,13 @@ parity_strict!(
     parity_syntax_method_chain_recv,
     "syntax",
     "method_chain_recv.zz"
+);
+// #500: an `impl` method outranks a same-named free function in dot calls
+// (`w.get()` → `W.get`), while `get(w)` still calls the free function.
+parity_strict!(
+    parity_syntax_method_shadow_free,
+    "syntax",
+    "method_shadow_free.zz"
 );
 parity_strict!(
     parity_syntax_for_annotated_decl,
@@ -885,6 +918,12 @@ parity_strict!(
     parity_regression_neg_after_loop,
     "regression",
     "neg_after_loop.zz"
+);
+// #581: a block-local `:=` must not clobber an enclosing binding.
+parity_strict!(
+    parity_regression_block_local_no_clobber,
+    "regression",
+    "block_local_no_clobber.zz"
 );
 // M0 edge corpus: strict-parity probes (both engines agree).
 parity_strict!(
@@ -987,6 +1026,12 @@ parity_strict!(
     "regression",
     "edge_float_nan_display.zz"
 );
+// A type alias statement owns no value in either engine.
+parity_strict!(
+    parity_regression_edge_type_alias_stmt,
+    "regression",
+    "edge_type_alias_stmt.zz"
+);
 // Canonical float formatting conformance (spec §4.1): exact pins + legs.
 parity_strict!(
     parity_regression_edge_float_format,
@@ -1009,6 +1054,7 @@ parity_strict_error!(parity_err_edge_min_div_neg1, "edge_int_min_div_neg1.zz");
 parity_strict_error!(parity_err_edge_min_rem_neg1, "edge_int_min_rem_neg1.zz");
 parity_strict_error!(parity_err_edge_pow_neg, "edge_int_pow_neg.zz");
 parity_strict_error!(parity_err_edge_index_oob, "edge_index_oob.zz");
+parity_strict_error!(parity_err_property_falsified, "property_falsified.zz");
 // Modules fixtures: standalone-runnable files must match on both engines
 // (`import_alias.zz` excluded — broken on the VM itself, see
 // `module_skip_reason`).
@@ -1219,6 +1265,7 @@ parity_strict!(
     "stdlib",
     "fs_is_generated_test.zz"
 );
+parity_strict!(parity_stdlib_fs_cache_test, "stdlib", "fs_cache_test.zz");
 parity_strict!(
     parity_stdlib_fs_read_invalid_utf8_test,
     "stdlib",
@@ -1249,9 +1296,19 @@ parity_strict!(
     "concurrency_stress_test.zz"
 );
 parity_strict!(
+    parity_stdlib_concurrency_timeslice_loop_test,
+    "stdlib",
+    "concurrency_timeslice_loop_test.zz"
+);
+parity_strict!(
     parity_stdlib_concurrency_try_join_test,
     "stdlib",
     "concurrency_try_join_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_shared_fn_test,
+    "stdlib",
+    "concurrency_shared_fn_test.zz"
 );
 parity_strict!(
     parity_stdlib_concurrency_capture_test,
@@ -1305,6 +1362,12 @@ parity_strict_error!(parity_err_int_float_cmp, "int_float_cmp.zz");
 // --- Match and return_in_loops: fixed by box_scalar_operand + __tail scoping ---
 parity_strict!(parity_syntax_match, "syntax", "match.zz");
 parity_strict!(parity_syntax_match_assign, "syntax", "match_assign.zz");
+parity_strict!(parity_syntax_match_tuple, "syntax", "match_tuple.zz");
+parity_strict!(
+    parity_syntax_match_bool_literal,
+    "syntax",
+    "match_bool_literal.zz"
+);
 parity_strict!(
     parity_syntax_return_in_loops,
     "syntax",
@@ -1316,7 +1379,13 @@ parity_strict!(parity_syntax_control_flow, "syntax", "control_flow.zz");
 
 // --- Fixed: nested field access boxing ---
 parity_strict!(parity_types_structs, "types", "structs.zz");
+parity_strict!(
+    parity_types_func_field_value,
+    "types",
+    "func_field_value.zz"
+);
 parity_strict!(parity_types_recursive, "types", "recursive.zz");
+parity_strict!(parity_types_enum_call_order, "types", "enum_call_order.zz");
 parity_strict!(parity_types_aliases, "types", "aliases.zz");
 parity_strict!(parity_types_alias_import, "types", "alias_import.zz");
 parity_strict!(parity_types_enums, "types", "enums.zz");
@@ -1335,8 +1404,14 @@ parity_strict!(parity_syntax_arrays, "syntax", "arrays.zz");
 parity_strict!(parity_syntax_defer, "syntax", "defer.zz");
 parity_strict!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 parity_strict!(parity_stdlib_vectors, "stdlib", "vectors.zz");
+parity_strict!(parity_stdlib_vec_sort, "stdlib", "vec_sort.zz");
 parity_strict!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
 parity_strict!(parity_stdlib_math_consts, "stdlib", "math_consts.zz");
+parity_strict!(
+    parity_stdlib_const_index_test,
+    "stdlib",
+    "const_index_test.zz"
+);
 parity_strict!(parity_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");
 parity_strict!(parity_stdlib_path_join, "stdlib", "path_join.zz");
 parity_strict!(parity_stdlib_map_set, "stdlib", "map_set.zz");
@@ -1381,6 +1456,12 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_env_full, "stdlib", "env_full.zz");
 parity_strict!(parity_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+parity_strict!(parity_stdlib_net_dns_test, "stdlib", "net_dns_test.zz");
+parity_strict!(
+    parity_stdlib_net_write_after_close_test,
+    "stdlib",
+    "net_write_after_close_test.zz"
+);
 parity_strict!(
     parity_stdlib_tcp_method_on_try,
     "stdlib",
@@ -1390,9 +1471,52 @@ parity_strict!(parity_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 parity_strict!(parity_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
 parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
 parity_strict!(
+    parity_stdlib_option_result_unwrap_test,
+    "stdlib",
+    "option_result_unwrap_test.zz"
+);
+parity_strict!(
+    parity_stdlib_cell_struct_test,
+    "stdlib",
+    "cell_struct_test.zz"
+);
+parity_strict!(
+    parity_stdlib_cell_arena_test,
+    "stdlib",
+    "cell_arena_test.zz"
+);
+parity_strict!(
     parity_stdlib_vec_push_shapes,
     "stdlib",
     "vec_push_shapes.zz"
+);
+parity_strict!(parity_stdlib_clone_test, "stdlib", "clone_test.zz");
+parity_strict!(parity_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
+parity_strict!(
+    parity_stdlib_test_asserts_test,
+    "stdlib",
+    "test_asserts_test.zz"
+);
+parity_strict!(
+    parity_stdlib_test_helpers_test,
+    "stdlib",
+    "test_helpers_test.zz"
+);
+parity_strict!(
+    parity_stdlib_test_snapshot_test,
+    "stdlib",
+    "test_snapshot_test.zz"
+);
+parity_strict!(parity_stdlib_property_test, "stdlib", "property_test.zz");
+parity_strict!(
+    parity_stdlib_test_black_box_test,
+    "stdlib",
+    "test_black_box_test.zz"
+);
+parity_strict!(
+    parity_stdlib_range_display_test,
+    "stdlib",
+    "range_display_test.zz"
 );
 parity_strict!(parity_stdlib_input_chained, "stdlib", "input_chained.zz");
 parity_strict!(
@@ -1617,7 +1741,7 @@ fn run_quad_leg(
         .stderr(Stdio::piped())
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
     // Same standalone-destination rule as above: `--native` legs run
-    // from a unique temp dir per fixture (the VM writes nothing),
+    // from a unique temp dir per task (the VM writes nothing),
     // reaped after the leg (see above for orphan safety).
     let native_tmp: Option<PathBuf> = if native {
         let dir = native_cwd(file);
@@ -1632,6 +1756,12 @@ fn run_quad_leg(
     };
     cmd.env("ZZ_SWEEP_TOKEN", token);
     cmd.env("ZZ_CRYPTO_FAST", "1");
+    // Same uncached-pipeline rule as `run_zz_with_input_env` (#511): the
+    // quad legs run the same fixture under two drivers that share one run
+    // cache, so a hit on the second leg skips the check pass (its warnings
+    // never reach stderr) and executes cached IR instead of the source
+    // pipeline — `vm_dbg` and `vm_rel` then disagree on stderr.
+    cmd.env("ZZ_RUN_CACHE", "0");
     if dev {
         cmd.env("ZZ_NATIVE_DEV", "1");
     }

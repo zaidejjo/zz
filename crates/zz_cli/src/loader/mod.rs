@@ -14,16 +14,17 @@
 //! are rewritten to qualified paths. Imported modules are referenced by their
 //! namespace: `utils.double(6)`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use zz_checker::{
     check_program_with_module_ns, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type,
 };
-use zz_frontend::ast::{Expr, ImportItem, Program, Stmt};
+use zz_frontend::ast::{Block, Expr, ImportItem, Program, Stmt, Ty, TyKind};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
+use zz_pm::manifest::FeatureSelection;
 use zz_runtime::NativeEntry;
 use zz_stdlib::{
     register_module_namespace, register_selective_namespace, register_wildcard_namespace,
@@ -31,7 +32,7 @@ use zz_stdlib::{
 };
 
 pub(crate) mod cache;
-mod rewrite;
+pub(crate) mod rewrite;
 
 #[cfg(test)]
 mod tests;
@@ -105,6 +106,40 @@ pub struct LoadResult {
     pub stdlib_wildcards: Vec<String>,
 }
 
+/// One discovered member of a `[collect.<name>]` registry.
+#[derive(Debug, Clone)]
+struct CollectionMember {
+    /// Member name as used by `get("<name>")`.
+    name: String,
+    /// Internal module namespace (`__collect_<collection>_<member>`).
+    ns: String,
+    /// Canonical member file path.
+    path: PathBuf,
+    /// File name as written on disk, for diagnostics.
+    file: String,
+    /// Span of the exported function definition (0..0 when absent).
+    run_span: Span,
+    /// Source text, for member-local diagnostics.
+    source: String,
+}
+
+/// A synthesized collection module, kept until the check pass so member
+/// signatures can be validated against the real checked types before the
+/// final AST is generated.
+#[derive(Debug, Clone)]
+struct CollectionModule {
+    name: String,
+    /// Namespace bound to the synthesized module (`commands`, or an alias).
+    ns: String,
+    /// Required exported function name (`run` by default).
+    export: String,
+    /// Parsed signature type (function type).
+    sig_ty: Ty,
+    /// Canonical source spelling of `sig` (`func([str]) -> int`).
+    sig_source: String,
+    members: Vec<CollectionMember>,
+}
+
 struct Loader {
     sources: HashMap<PathBuf, String>,
     programs: HashMap<PathBuf, Program>,
@@ -138,6 +173,12 @@ struct Loader {
     /// (`import app.x` → `<root>/src/x.zz`, issue #288) without
     /// re-parsing the manifest per import.
     pkg_cache: HashMap<PathBuf, Option<(String, PathBuf)>>,
+    /// Synthesized collection modules, keyed by their synthetic path.
+    collections: HashMap<PathBuf, CollectionModule>,
+    /// Declared collections that failed manifest validation; the error was
+    /// reported once up front, so a later import is skipped instead of
+    /// repeating it.
+    invalid_collections: HashSet<String>,
     /// Plugin function names, for the cache genesis hash.
     plugin_names: Vec<String>,
     /// File dependency edges (importer → imported canonical paths) for S1
@@ -201,6 +242,15 @@ struct Loader {
     /// S1 check-cache outcomes for `--stats` observability (#248).
     cache_hits: usize,
     cache_misses: usize,
+    /// Feature selection from the command line (`--features` /
+    /// `--all-features`, #488) applied to the entry project.
+    feature_selection: FeatureSelection,
+    /// Resolved enabled feature set per project root (cache; cleared when
+    /// a dependency edge adds feature requests for that root).
+    feature_cache: HashMap<PathBuf, BTreeSet<String>>,
+    /// Feature requests contributed by `[dependencies] features = [...]`
+    /// edges, per dependency project root (#488).
+    dep_feature_requests: HashMap<PathBuf, BTreeSet<String>>,
 }
 
 /// Check-pipeline observability for `zz check --stats` (#248): per-load
@@ -222,12 +272,32 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
     load_program_with_plugins(main_path, &[])
 }
 
+/// Load an entry file with an explicit feature selection (#488).
+/// `--features` / `--all-features` govern which modules of the entry
+/// project are importable; dependencies use their `default` set plus the
+/// `features = [...]` requested by their parent's dependency entry.
+pub fn load_program_with_features(
+    main_path: &Path,
+    features: &FeatureSelection,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, &[], false, features.clone())
+}
+
 /// Load an entry file for `zz check`, with the per-module check cache
 /// enabled (S1 arena-scale): unchanged modules skip re-checking via a
 /// content-addressed on-disk cache. `run`/`build` must use `load_program`
 /// (they need span types and codegen inputs the cache does not store).
+#[allow(dead_code)] // default-selection wrapper; tests + API parity
 pub fn load_program_check(main_path: &Path) -> Result<LoadResult, String> {
-    load_program_impl(main_path, &[], true)
+    load_program_check_with_features(main_path, &FeatureSelection::default())
+}
+
+/// [`load_program_check`] with an explicit feature selection (#488).
+pub fn load_program_check_with_features(
+    main_path: &Path,
+    features: &FeatureSelection,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, &[], true, features.clone())
 }
 
 /// Load an entry file and all of its imports, merging additional function
@@ -240,13 +310,23 @@ pub fn load_program_with_plugins(
     main_path: &Path,
     plugin_funcs: &[(String, FuncSig)],
 ) -> Result<LoadResult, String> {
-    load_program_impl(main_path, plugin_funcs, false)
+    load_program_impl(main_path, plugin_funcs, false, FeatureSelection::default())
+}
+
+/// [`load_program_with_plugins`] with an explicit feature selection (#488).
+pub fn load_program_with_plugins_and_features(
+    main_path: &Path,
+    plugin_funcs: &[(String, FuncSig)],
+    features: &FeatureSelection,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, plugin_funcs, false, features.clone())
 }
 
 fn load_program_impl(
     main_path: &Path,
     plugin_funcs: &[(String, FuncSig)],
     use_cache: bool,
+    features: FeatureSelection,
 ) -> Result<LoadResult, String> {
     let entry = cache::canon(main_path).map_err(|e| {
         format!(
@@ -276,6 +356,8 @@ fn load_program_impl(
         contributed_seeds: false,
         use_cache,
         pkg_cache: HashMap::new(),
+        collections: HashMap::new(),
+        invalid_collections: HashSet::new(),
         plugin_names: Vec::new(),
         dep_edges: HashMap::new(),
         ns_aliases: HashMap::new(),
@@ -297,6 +379,9 @@ fn load_program_impl(
         stdlib_wildcards: Vec::new(),
         cache_hits: 0,
         cache_misses: 0,
+        feature_selection: features,
+        feature_cache: HashMap::new(),
+        dep_feature_requests: HashMap::new(),
     };
     // Merge plugin manifest function signatures into the checker's function table.
     for (name, sig) in plugin_funcs {
@@ -304,8 +389,27 @@ fn load_program_impl(
         loader.seed_func_keys.insert(name.clone());
         loader.plugin_names.push(name.clone());
     }
+    loader.validate_declared_collections();
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
+}
+
+/// Validate `--features` / `--all-features` against the manifest governing
+/// `entry` (#488). No manifest (standalone file) means nothing to select;
+/// a declared manifest errors on unknown names and cycles up front instead
+/// of waiting for the first gated import.
+pub fn validate_feature_selection(
+    entry: &Path,
+    selection: &FeatureSelection,
+) -> Result<(), String> {
+    let Some(root) = find_project_root(entry) else {
+        return Ok(());
+    };
+    let Some(manifest) = cache::manifest_of(&root) else {
+        return Ok(());
+    };
+    manifest.resolve_features(selection)?;
+    Ok(())
 }
 
 /// Walk up from `start` (a file or directory) to the project root —
@@ -340,6 +444,40 @@ fn normalize_pkg(name: &str) -> String {
     name.replace('-', "_")
 }
 
+/// Find a lock entry by package name under `-`/`_` agreement: exact
+/// match first (no behavior change when spellings already agree), then
+/// the normalized form (`#486`: `import my_app.x` with `my-app` locked).
+fn find_locked<'a>(
+    lock: &'a zz_pm::lock::Lockfile,
+    name: &str,
+) -> Option<&'a zz_pm::lock::LockedDep> {
+    lock.deps.iter().find(|d| d.name == name).or_else(|| {
+        let want = normalize_pkg(name);
+        lock.deps.iter().find(|d| normalize_pkg(&d.name) == want)
+    })
+}
+
+/// Find a manifest dependency under `-`/`_` agreement (same rule as
+/// [`find_locked`]).
+fn manifest_dep<'a>(
+    manifest: &'a zz_pm::manifest::Manifest,
+    name: &str,
+) -> Option<&'a zz_pm::manifest::DepSpec> {
+    manifest.dependencies.get(name).or_else(|| {
+        let want = normalize_pkg(name);
+        manifest
+            .dependencies
+            .iter()
+            .find(|(n, _)| normalize_pkg(n) == want)
+            .map(|(_, s)| s)
+    })
+}
+
+/// True when `name` is a declared dependency under `-`/`_` agreement.
+fn manifest_declares(manifest: &zz_pm::manifest::Manifest, name: &str) -> bool {
+    manifest_dep(manifest, name).is_some()
+}
+
 /// Resolve `<pkg>.<rest...>` against a project root: `<rest...>` maps to
 /// `<root>/src/<rest...>.zz` (dot-separated → path). A bare `<pkg>`
 /// (empty `rest`) maps to `<root>/src/main.zz`.
@@ -364,24 +502,42 @@ fn resolve_registry_entry(project_root: &Path, dep_name: &str) -> Option<PathBuf
     // Manifest+lock parse once per root process-wide (#233); mtimes
     // revalidate so concurrent edits reload instead of serving stale deps.
     let (manifest, lock) = cache::manifest_lock(project_root)?;
-    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    let locked = find_locked(&lock, dep_name)?;
     // Path deps resolve against the manifest path (same as plugins).
+    // Transitive path pins (#420) have no manifest entry: resolve them
+    // through the dependency-closure BFS instead.
     if locked.source == "path" {
-        match manifest.dependencies.get(dep_name) {
+        match manifest_dep(&manifest, dep_name) {
             Some(zz_pm::manifest::DepSpec::Path(p)) => {
                 return entry_in(&project_root.join(&p.path), dep_name);
             }
-            _ => return None,
+            _ => {
+                return resolve_transitive_path_dir(project_root, dep_name)
+                    .and_then(|dir| entry_in(&dir, dep_name));
+            }
         }
     }
     // Registry/git deps: the vendor link first, CAS entry as fallback.
-    let linked = project_root.join("vendor").join(dep_name);
-    if linked.exists() {
-        if let Some(entry) = entry_in(&linked, dep_name) {
-            return Some(entry);
+    // The link lives under the locked (real-spelling) name, which may
+    // differ from the import spelling under `-`/`_` agreement (#486);
+    // entry files may also use either spelling (`src/my-app.zz` vs
+    // `src/my_app.zz`), so both are tried with `src/main.zz` first.
+    let entry_in_either = |dir: &Path| {
+        entry_in(dir, dep_name).or_else(|| {
+            (locked.name.as_str() != dep_name)
+                .then(|| entry_in(dir, &locked.name))
+                .flatten()
+        })
+    };
+    for candidate in [dep_name, locked.name.as_str()] {
+        let linked = project_root.join("vendor").join(candidate);
+        if linked.exists() {
+            if let Some(entry) = entry_in_either(&linked) {
+                return Some(entry);
+            }
         }
     }
-    entry_in(&zz_pm::paths::cas_entry(&locked.hash), dep_name)
+    entry_in_either(&zz_pm::paths::cas_entry(&locked.hash))
 }
 
 /// Entry-file convention inside a dependency package directory.
@@ -434,34 +590,162 @@ fn resolve_dep_dir(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
     // Manifest+lock parse once per root process-wide (#233), same as the
     // sibling resolvers.
     let (manifest, lock) = cache::manifest_lock(project_root)?;
-    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    let locked = find_locked(&lock, dep_name)?;
     if locked.source == "path" {
-        return match manifest.dependencies.get(dep_name) {
-            Some(zz_pm::manifest::DepSpec::Path(p)) => Some(project_root.join(&p.path)),
-            _ => None,
-        };
+        // Direct path deps resolve against the manifest path; transitive
+        // path pins (#420) resolve through the dep-closure BFS below.
+        if let Some(zz_pm::manifest::DepSpec::Path(p)) = manifest_dep(&manifest, dep_name) {
+            return Some(project_root.join(&p.path));
+        }
+        return resolve_transitive_path_dir(project_root, dep_name);
     }
-    let linked = project_root.join("vendor").join(dep_name);
-    if linked.exists() {
-        return Some(linked);
+    // The vendor link lives under the locked (real-spelling) name (#486).
+    for candidate in [dep_name, locked.name.as_str()] {
+        let linked = project_root.join("vendor").join(candidate);
+        if linked.exists() {
+            return Some(linked);
+        }
     }
     Some(zz_pm::paths::cas_entry(&locked.hash))
 }
 
+/// Content dir of a transitive path dependency (#420): BFS over dep
+/// manifests starting from the root's direct deps. Path children resolve
+/// against their parent dir; registry/git children via the root lock
+/// (vendor link, then CAS). Depth-capped and canonical-dir-guarded so
+/// dependency cycles terminate.
+fn resolve_transitive_path_dir(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
+    fn cas_dir_of(lock: &zz_pm::lock::Lockfile, name: &str) -> Option<PathBuf> {
+        let locked = lock.deps.iter().find(|d| d.name == name)?;
+        let dir = if let Some(commit) = &locked.commit {
+            zz_pm::paths::cas_entry(commit)
+        } else if locked.hash.is_empty() {
+            return None;
+        } else {
+            zz_pm::paths::cas_entry(&locked.hash)
+        };
+        dir.is_dir().then_some(dir)
+    }
+    let (manifest, lock) = cache::manifest_lock(project_root)?;
+    // Seed with every direct dep's content dir.
+    let mut queue: Vec<PathBuf> = Vec::new();
+    for (direct, spec) in &manifest.dependencies {
+        let dir = match spec {
+            zz_pm::manifest::DepSpec::Path(p) => project_root.join(&p.path),
+            _ => {
+                let linked = project_root.join("vendor").join(direct);
+                if linked.is_dir() {
+                    linked
+                } else {
+                    match cas_dir_of(&lock, direct) {
+                        Some(d) => d,
+                        None => continue,
+                    }
+                }
+            }
+        };
+        if dir.is_dir() {
+            queue.push(dir);
+        }
+    }
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut depth = 0;
+    while !queue.is_empty() && depth < 32 {
+        depth += 1;
+        let mut next: Vec<PathBuf> = Vec::new();
+        for dir in queue {
+            let canon = cache::canon(&dir).unwrap_or_else(|_| dir.clone());
+            if !visited.insert(canon) {
+                continue;
+            }
+            let Some(child_manifest) = cache::manifest_of(&dir) else {
+                continue;
+            };
+            for (child, spec) in &child_manifest.dependencies {
+                match spec {
+                    zz_pm::manifest::DepSpec::Path(p) => {
+                        let target = dir.join(&p.path);
+                        if child == dep_name {
+                            if target.is_dir() {
+                                return Some(target);
+                            }
+                        } else if target.is_dir() {
+                            next.push(target);
+                        }
+                    }
+                    _ => {
+                        if child == dep_name {
+                            // Non-path transitive matches resolve via the
+                            // lock + vendor link elsewhere, not here.
+                            continue;
+                        }
+                        let linked = project_root.join("vendor").join(child);
+                        if linked.is_dir() {
+                            next.push(linked);
+                        } else if let Some(cas) = cas_dir_of(&lock, child) {
+                            next.push(cas);
+                        }
+                    }
+                }
+            }
+        }
+        queue = next;
+    }
+    None
+}
 /// Resolve a dotted dependency import (`import tui.screen`) to its
 /// submodule file: `<depdir>/src/screen.zz` via [`resolve_dep_dir`] +
-/// [`submodule_in`]. Every ancestor root is tried so transitive imports
-/// (from inside `vendor/`) resolve against the outer project lock — the
-/// same discipline as bare registry imports.
-fn resolve_dep_submodule(start: &Path, imp: &[String]) -> Option<PathBuf> {
-    for root in ancestor_roots(start) {
+/// [`submodule_in`]. Every search root is tried (ancestors plus consumer
+/// roots, see [`search_roots`]) so transitive imports — from inside
+/// `vendor/` or a sibling path dep — resolve against the outer project
+/// lock, the same discipline as bare registry imports.
+fn resolve_dep_submodule(start: &Path, imp: &[String]) -> Option<(PathBuf, PathBuf)> {
+    for root in search_roots(start) {
         if let Some(dir) = resolve_dep_dir(&root, &imp[0]) {
             if let Some(file) = submodule_in(&dir, &imp[1..]) {
-                return Some(file);
+                return Some((root, file));
             }
         }
     }
     None
+}
+
+/// Package dir holding an entry file: nearest ancestor (or self) with
+/// `zz.toml`. Used to attribute a loaded dep file to its package for
+/// consumer-root tracking.
+fn pkg_dir_of_entry(entry: &Path) -> Option<PathBuf> {
+    let canon = cache::canon(entry).unwrap_or_else(|_| entry.to_path_buf());
+    let mut dir = if canon.is_file() {
+        canon.parent()?.to_path_buf()
+    } else {
+        canon.clone()
+    };
+    loop {
+        if dir.join("zz.toml").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Project roots to try for an import from `start`: ancestor roots plus
+/// the consumer roots of the enclosing package (#420). A sibling path
+/// dep is not under its consumer on disk, so ancestors alone never reach
+/// the consumer lock; the reverse edges recorded at each dep load close
+/// the loop (parents load before their imports are processed).
+fn search_roots(start: &Path) -> Vec<PathBuf> {
+    let mut out = ancestor_roots(start);
+    let mut seen: HashSet<PathBuf> = out.iter().cloned().collect();
+    if let Some(pkg) = pkg_dir_of_entry(start) {
+        for root in cache::dep_consumers(&pkg) {
+            if seen.insert(root.clone()) {
+                out.push(root);
+            }
+        }
+    }
+    out
 }
 
 /// All ancestor project roots (nearest first) for `import <dep>` lookup.
@@ -495,11 +779,23 @@ fn ancestor_roots(start: &Path) -> Vec<PathBuf> {
 /// ships a `plugin.zzi` manifest.
 fn resolve_plugin_pkg(project_root: &Path, dep_name: &str) -> Option<PathBuf> {
     let (manifest, lock) = cache::manifest_lock(project_root)?;
-    let locked = lock.deps.iter().find(|d| d.name == dep_name)?;
+    let locked = find_locked(&lock, dep_name)?;
     let pkg_dir = if locked.source == "path" {
-        match manifest.dependencies.get(dep_name) {
+        match manifest_dep(&manifest, dep_name) {
             Some(zz_pm::manifest::DepSpec::Path(p)) => project_root.join(&p.path),
-            _ => return None,
+            // Transitive path pins (#420) live under vendor/ like every
+            // other locked dep (real-spelling link, #486).
+            _ => {
+                let mut found = None;
+                for candidate in [dep_name, locked.name.as_str()] {
+                    let linked = project_root.join("vendor").join(candidate);
+                    if linked.exists() {
+                        found = Some(linked);
+                        break;
+                    }
+                }
+                found?
+            }
         }
     } else {
         zz_pm::paths::cas_entry(&locked.hash)
@@ -600,6 +896,18 @@ fn resolve_module_key(
     Some(key)
 }
 
+/// True when `name` is usable as a ZZ identifier (and hence a C
+/// symbol): leading letter/underscore, then alphanumerics/underscores.
+/// Mirrors the codegen-side `c_ident_valid` for the alias gate.
+pub(crate) fn is_zz_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl Loader {
     /// Project name + root owning `canon` (nearest `zz.toml`), cached per
     /// root. `None` outside any project or when the manifest cannot load
@@ -625,6 +933,197 @@ impl Loader {
     /// canonical spelling instead.
     fn seed_ns(&self, dep: &Path, fallback: String) -> String {
         self.ns_of.get(dep).cloned().unwrap_or(fallback)
+    }
+
+    /// Feature selection governing a project root (#488): the CLI flags
+    /// for the entry project, `default` + parent-requested features for a
+    /// dependency.
+    fn selection_for_root(&self, root: &Path) -> FeatureSelection {
+        if self.root.as_deref() == Some(root) {
+            return self.feature_selection.clone();
+        }
+        let requested = self
+            .dep_feature_requests
+            .get(root)
+            .cloned()
+            .unwrap_or_default();
+        FeatureSelection::new(requested, false)
+    }
+
+    /// Enabled feature names for a project root, cached per root.
+    /// Manifests without `[features]` resolve to an empty set: legacy
+    /// projects behave exactly as before.
+    fn enabled_features_for_root(&mut self, root: &Path) -> Result<BTreeSet<String>, String> {
+        if let Some(cached) = self.feature_cache.get(root) {
+            return Ok(cached.clone());
+        }
+        let Some(manifest) = cache::manifest_of(root) else {
+            return Ok(BTreeSet::new());
+        };
+        let enabled = manifest.resolve_features(&self.selection_for_root(root))?;
+        self.feature_cache
+            .insert(root.to_path_buf(), enabled.clone());
+        Ok(enabled)
+    }
+
+    /// Record `features = [...]` from a dependency edge before loading the
+    /// dependency. A later edge may union in more features; drop the cached
+    /// set so gating sees the updated selection.
+    fn note_dep_features(&mut self, root: &Path, dep_name: &str) {
+        let Some(manifest) = cache::manifest_of(root) else {
+            return;
+        };
+        let Some(spec) = manifest_dep(&manifest, dep_name) else {
+            return;
+        };
+        if spec.features().is_empty() {
+            return;
+        }
+        let entry = self
+            .dep_feature_requests
+            .entry(root.to_path_buf())
+            .or_default();
+        let before = entry.len();
+        entry.extend(spec.features().iter().cloned());
+        if entry.len() != before {
+            self.feature_cache.remove(root);
+        }
+    }
+
+    /// Module-path spellings for `file` inside project `root`: relative to
+    /// `src/` and to the project root, normalized for `[features] modules`.
+    fn module_paths(root: &Path, file: &Path) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for base in [root.join("src"), root.to_path_buf()] {
+            let Ok(rel) = file.strip_prefix(&base) else {
+                continue;
+            };
+            let normalized =
+                zz_pm::manifest::normalize_module_path(&rel.to_string_lossy().replace('\\', "/"));
+            if !normalized.is_empty() && !out.contains(&normalized) {
+                out.push(normalized);
+            }
+        }
+        out
+    }
+
+    /// Helpful diagnostic when `file` belongs to a feature-gated module
+    /// whose feature is not enabled (#488). `None` = importable.
+    fn module_gate_error(&mut self, root: &Path, file: &Path, imp: &[String]) -> Option<String> {
+        let manifest = cache::manifest_of(root)?;
+        let gates = manifest.module_gates();
+        if gates.is_empty() {
+            return None;
+        }
+        let (module, feature_names) = Self::module_paths(root, file)
+            .into_iter()
+            .find_map(|path| gates.get(&path).map(|f| (path, f.clone())))?;
+        let enabled = match self.enabled_features_for_root(root) {
+            Ok(set) => set,
+            Err(error) => return Some(error),
+        };
+        if feature_names.iter().any(|f| enabled.contains(f)) {
+            return None;
+        }
+        let primary = &feature_names[0];
+        let list = feature_names
+            .iter()
+            .map(|f| format!("`{f}`"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let flags = feature_names.join(",");
+        let dep_hint = if self.root.as_deref() == Some(root) {
+            String::new()
+        } else {
+            format!(
+                "\n hint: for a dependency, add `features = [\"{primary}\"]` to its [dependencies] entry"
+            )
+        };
+        Some(format!(
+            "cannot resolve import `{}`: module `{module}` is provided by feature {list}, which is not enabled\n\
+             hint: enable it with --features {flags} (or add it to `default`){dep_hint}",
+            imp.join(".")
+        ))
+    }
+
+    /// Helpful diagnostic when `name` is an optional dependency that the
+    /// active feature set does not enable (#488). `None` = active or not
+    /// declared.
+    fn gated_dep_message(&mut self, root: &Path, name: &str) -> Result<Option<String>, String> {
+        let Some(manifest) = cache::manifest_of(root) else {
+            return Ok(None);
+        };
+        let Some((declared, spec)) = manifest
+            .dependencies
+            .iter()
+            .find(|(n, _)| n.as_str() == name || normalize_pkg(n) == normalize_pkg(name))
+        else {
+            return Ok(None);
+        };
+        if !spec.optional() {
+            return Ok(None);
+        }
+        let enabled = self.enabled_features_for_root(root)?;
+        let active = manifest.enabled_dependencies(&enabled)?;
+        if active.contains(declared) {
+            return Ok(None);
+        }
+        let mut providers: Vec<String> = manifest
+            .features
+            .iter()
+            .filter(|(_, spec)| {
+                spec.dep_refs().iter().any(|d| d == declared)
+                    || spec.feature_refs().iter().any(|d| d == declared)
+            })
+            .map(|(feature, _)| feature.clone())
+            .collect();
+        providers.sort();
+        providers.dedup();
+        let feature = providers.first().cloned().unwrap_or_default();
+        if feature.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "cannot resolve import `{name}`: it is provided by feature `{feature}`, which is not enabled\n\
+             hint: enable it with --features {feature} (or add it to `default` in [features])"
+        )))
+    }
+
+    /// Push a gated-dependency diagnostic at the import site. Returns
+    /// `true` when the import must be skipped.
+    fn report_dep_gate(&mut self, root: &Path, name: &str, importer: &Path, source: &str) -> bool {
+        let message = match self.gated_dep_message(root, name) {
+            Ok(None) => return false,
+            Ok(Some(message)) => message,
+            Err(error) => error,
+        };
+        self.errors.push(LoadError {
+            name: importer.display().to_string(),
+            source: source.to_string(),
+            diags: vec![error_at(message, Span::new(0, 0))],
+        });
+        true
+    }
+
+    /// Push a gated-module diagnostic at the import site. Returns `true`
+    /// when the import must be skipped.
+    fn report_module_gate(
+        &mut self,
+        root: &Path,
+        file: &Path,
+        imp: &[String],
+        importer: &Path,
+        source: &str,
+    ) -> bool {
+        let Some(message) = self.module_gate_error(root, file, imp) else {
+            return false;
+        };
+        self.errors.push(LoadError {
+            name: importer.display().to_string(),
+            source: source.to_string(),
+            diags: vec![error_at(message, Span::new(0, 0))],
+        });
+        true
     }
 
     /// Record a same-file namespace alias for later reference rewriting
@@ -673,6 +1172,61 @@ impl Loader {
         if !entry.contains(&dep.to_path_buf()) {
             entry.push(dep.to_path_buf());
         }
+    }
+
+    /// Direct dependencies of `root` whose own manifests declare `name`
+    /// (#420): `rand` via `faker` — present in the tree (vendor/path)
+    /// but not importable without `zz add`. Reads are failure-path-only
+    /// (a handful of small TOML parses on an otherwise fatal path).
+    fn transitive_providers(root: &Path, name: &str) -> Vec<String> {
+        let Some(manifest) = cache::manifest_of(root) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (dep_name, spec) in &manifest.dependencies {
+            let dir = match spec {
+                zz_pm::manifest::DepSpec::Path(p) => root.join(&p.path),
+                _ => root.join("vendor").join(dep_name),
+            };
+            if !dir.is_dir() {
+                continue;
+            }
+            if let Some(dep_man) = cache::manifest_of(&dir) {
+                if manifest_declares(&dep_man, name) {
+                    out.push(dep_name.clone());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Actionable diagnostic for a bare-name import with no resolvable
+    /// file inside a project (#420). Returns `None` when neither case
+    /// applies (caller keeps the relative-path error).
+    fn missing_dep_hint(root: &Path, name: &str) -> Option<String> {
+        let manifest = cache::manifest_of(root)?;
+        // Declared but not installed (no vendor link / no lock entry).
+        if manifest_declares(&manifest, name) {
+            return Some(format!(
+                "cannot resolve import `{name}`: declared in zz.toml but not installed\n\
+                 hint: run `zz install`, then build again"
+            ));
+        }
+        // Transitive: declared by a direct dependency's manifest.
+        let providers = Self::transitive_providers(root, name);
+        if providers.is_empty() {
+            return None;
+        }
+        let via = providers
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "cannot resolve import `{name}`: not a direct dependency of this project\n\
+             hint: `{name}` is available transitively via {via} — run `zz add {name}` to use it directly"
+        ))
     }
 
     /// Parse a file and recursively load its imports (DFS post-order, so
@@ -779,6 +1333,21 @@ impl Loader {
                     continue;
                 }
                 let module = imp[1..].join(".");
+                // Removed `db` module: hard error with a rename hint.
+                // Handle variables named `db` are unaffected — this fires
+                // only on the import.
+                if module == "db" {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: vec![error_at(
+                            "no std module `db` — rename to `sqlz`",
+                            Span::new(0, 0),
+                        )
+                        .with_note("hint: `import std.db` → `import std.sqlz`")],
+                    });
+                    continue;
+                }
                 if !STDLIB_MODULES.contains(&module.as_str()) {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),
@@ -848,6 +1417,97 @@ impl Loader {
                 }
                 continue;
             }
+            // Declared collection (`import collect.commands`): synthesize
+            // the registry module. Only the root package's own collections
+            // are supported in v1 — a dependency importing its collection
+            // gets a targeted diagnostic instead of silent misbehavior.
+            if imp.first().map(String::as_str) == Some("collect") {
+                let importer_root = find_project_root(&canon);
+                let collection_name = imp.get(1).cloned().unwrap_or_default();
+                if let Some(ir) = importer_root.as_deref() {
+                    if self.root.as_deref() != Some(ir) {
+                        let declares = cache::manifest_of(ir)
+                            .map(|m| m.collections.contains_key(&collection_name))
+                            .unwrap_or(false);
+                        if declares {
+                            self.errors.push(LoadError {
+                                name: path.display().to_string(),
+                                source: source.clone(),
+                                diags: vec![error_at(
+                                    format!(
+                                        "collection `collect.{collection_name}` is declared in dependency `{}`, which is not supported yet\n\
+                                         hint: collections are root-package-only in v1; declare `[collect.{collection_name}]` in the root package's zz.toml",
+                                        ir.display()
+                                    ),
+                                    Span::new(0, 0),
+                                )],
+                            });
+                            continue;
+                        }
+                    }
+                }
+                let root = self.root.clone();
+                let root_manifest = root.as_deref().and_then(cache::manifest_of);
+                let declared = root_manifest
+                    .as_ref()
+                    .and_then(|m| m.collections.get(&collection_name))
+                    .cloned();
+                if let Some(spec) = declared {
+                    if imp.len() != 2 {
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(
+                                format!(
+                                    "`collect.{collection_name}` takes no submodules\n\
+                                     hint: v1 collections are single-level; import `collect.{collection_name}`"
+                                ),
+                                Span::new(0, 0),
+                            )],
+                        });
+                        continue;
+                    }
+                    if !zz_pm::manifest::is_identifier(&collection_name) {
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(
+                                format!(
+                                    "collection name `{collection_name}` is not a valid identifier"
+                                ),
+                                Span::new(0, 0),
+                            )],
+                        });
+                        continue;
+                    }
+                    let ok = self.load_collection(
+                        &collection_name,
+                        &spec,
+                        &canon,
+                        &source,
+                        imp_alias.as_deref(),
+                    );
+                    if ok {
+                        let synth = PathBuf::from(format!("collect.{collection_name}"));
+                        Self::record_edge(
+                            &mut self.dep_edges,
+                            &canon,
+                            &cache::canon(&synth).unwrap_or_else(|_| synth.clone()),
+                        );
+                        if is_selective {
+                            let sel_path =
+                                self.canonical_sel_path(&imp, imp_alias.as_deref(), Some(&synth));
+                            self.selective_imports.push((
+                                canon.clone(),
+                                sel_path,
+                                imp_items.clone(),
+                                false,
+                            ));
+                        }
+                    }
+                    continue;
+                }
+            }
             // Implicit package mapping (`import app.math`, issue #288):
             // the first segment matches `package.name` in the nearest
             // `zz.toml` → `<root>/src/...`. Precedence: std (above) >
@@ -877,6 +1537,12 @@ impl Loader {
                                 Span::new(0, 0),
                             )],
                         });
+                        continue;
+                    }
+                    // Feature gate (#488): the file exists but its feature
+                    // is not enabled. Diagnose before loading, naming the
+                    // exact feature and the flag that enables it.
+                    if self.report_module_gate(&root, &candidate, &imp, path, &source) {
                         continue;
                     }
                     // Bare `import app` binds `src/main.zz` under the
@@ -948,7 +1614,14 @@ impl Loader {
             // names first-wins, mirroring std selective imports (#229).
             if imp.len() == 1 {
                 if let Some(root) = find_project_root(&canon) {
+                    if self.report_dep_gate(&root, &imp[0], path, &source) {
+                        continue;
+                    }
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
+                        // Reverse edge for nested imports (#420), same as
+                        // the registry branches.
+                        cache::record_dep_consumer(&pkg_dir, &root);
+                        self.note_dep_features(&root, &imp[0]);
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
                         if !imp_items.is_empty() {
                             let ns = imp_alias.as_deref().unwrap_or(&imp[0]);
@@ -1019,14 +1692,30 @@ impl Loader {
                 // (imported from inside vendor/) resolve against the outer
                 // project lock.
                 {
-                    let mut resolved = None;
-                    for root in ancestor_roots(&canon) {
-                        if let Some(entry) = resolve_registry_entry(&root, &imp[0]) {
-                            resolved = Some(entry);
+                    let mut gated = false;
+                    for root in search_roots(&canon) {
+                        if self.report_dep_gate(&root, &imp[0], path, &source) {
+                            gated = true;
                             break;
                         }
                     }
-                    if let Some(entry) = resolved {
+                    if gated {
+                        continue;
+                    }
+                    let mut resolved: Option<(PathBuf, PathBuf)> = None;
+                    for root in search_roots(&canon) {
+                        if let Some(entry) = resolve_registry_entry(&root, &imp[0]) {
+                            resolved = Some((root, entry));
+                            break;
+                        }
+                    }
+                    if let Some((root, entry)) = resolved {
+                        // Reverse edge for nested imports (#420): files
+                        // inside this package resolve against `root` too.
+                        if let Some(pkg_dir) = pkg_dir_of_entry(&entry) {
+                            cache::record_dep_consumer(&pkg_dir, &root);
+                        }
+                        self.note_dep_features(&root, &imp[0]);
                         let alias = imp_alias.clone().unwrap_or_else(|| imp[0].clone());
                         self.load_file(&entry, Some(alias.as_str()))?;
                         // S1 dep edge (registry package file).
@@ -1063,7 +1752,29 @@ impl Loader {
             // falls through to legacy relative resolution untouched, so
             // local `a/b.zz` layouts never change meaning.
             if imp.len() > 1 {
-                if let Some(candidate) = resolve_dep_submodule(&canon, &imp) {
+                let mut gated = false;
+                for root in search_roots(&canon) {
+                    if self.report_dep_gate(&root, &imp[0], path, &source) {
+                        gated = true;
+                        break;
+                    }
+                }
+                if gated {
+                    continue;
+                }
+                if let Some((root, candidate)) = resolve_dep_submodule(&canon, &imp) {
+                    // Reverse edge for nested imports (#420), same as the
+                    // bare-registry branch above.
+                    if let Some(pkg_dir) = pkg_dir_of_entry(&candidate) {
+                        cache::record_dep_consumer(&pkg_dir, &root);
+                    }
+                    self.note_dep_features(&root, &imp[0]);
+                    // Feature-gated submodule (#488): diagnose against the
+                    // dependency's own manifest/selection.
+                    let gate_root = find_project_root(&candidate).unwrap_or_else(|| root.clone());
+                    if self.report_module_gate(&gate_root, &candidate, &imp, path, &source) {
+                        continue;
+                    }
                     // Effective namespace mirrors local imports: the `as`
                     // alias when present, else the last segment
                     // (`import tui.screen` binds `screen.*`, #368).
@@ -1119,6 +1830,64 @@ impl Loader {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join(format!("{}.zz", imp.join("/")));
+            // Actionable missing-dependency hints (#420): the file is
+            // missing and this is a bare-name import. Two cases the
+            // relative-path error obscures:
+            //   1. the name is declared in zz.toml but not installed
+            //      (`zz install` materializes vendor/ + lock), and
+            //   2. the name is a transitive dep (declared by a direct
+            //      dependency's manifest) — usable after `zz add`.
+            // Dotted paths, existing files, and project-less imports
+            // keep their current messages (the no-project hint above).
+            if imp.len() == 1 && cache::canon(&rel).is_err() {
+                if let Some(root) = find_project_root(&canon) {
+                    if let Some(diag) = Self::missing_dep_hint(&root, &imp[0]) {
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(diag, Span::new(0, 0))],
+                        });
+                        continue;
+                    }
+                }
+            }
+            // Standalone file with a bare-name import and no project
+            // (#419): the name is almost certainly a registry package,
+            // but registry resolution needs a project (zz.toml + lock).
+            // Say so instead of falling through to the relative-path
+            // error, which sends standalone-file users down the wrong
+            // path. Dotted paths keep the relative error (they read as
+            // local layouts), as do files inside a project (missing dep
+            // or missing install — different problems with their own
+            // messages elsewhere).
+            if imp.len() == 1 && cache::canon(&rel).is_err() && find_project_root(&canon).is_none()
+            {
+                self.errors.push(LoadError {
+                    name: path.display().to_string(),
+                    source: source.clone(),
+                    diags: vec![error_at(
+                        format!(
+                            "cannot resolve import `{}`: no project (zz.toml) found above `{}`\n\
+                             hint: outside a project, `import {0}` resolves as a relative file; \
+                             for a registry package, scaffold a project (`zz new <name>`) and `zz install` it first",
+                            imp[0],
+                            canon.display(),
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                continue;
+            }
+            // Feature-gated local module (#488): the file exists but the
+            // feature that provides it is not enabled. Diagnose before
+            // falling through to a confusing type/name error.
+            if cache::canon(&rel).is_ok() {
+                if let Some(root) = find_project_root(&rel).or_else(|| find_project_root(&canon)) {
+                    if self.report_module_gate(&root, &rel, &imp, path, &source) {
+                        continue;
+                    }
+                }
+            }
             // Report cycles at the import site, against the importer's source.
             if let Ok(rel_canon) = cache::canon(&rel) {
                 if self.visiting.contains(&rel_canon) {
@@ -1181,9 +1950,358 @@ impl Loader {
                 .collect();
             namespace_program(&mut program, &ns, &aliases);
             self.programs.insert(canon.clone(), program);
-            self.order.push(canon);
+            self.order.push(canon.clone());
+            // Plugin package entry (`<pkg>.zz` / `src/<pkg>.zz` next to
+            // `plugin.zzi`): the package's own module sees its manifest
+            // signatures, so a generated wrapper (`src/<pkg>.zz`, #235)
+            // can call through by declared name. Same seed treatment as
+            // importer-side merging (seed-owned, every module agrees).
+            self.merge_own_plugin_sigs(&canon);
         }
         Ok(())
+    }
+
+    /// Validate every `[collect.*]` declared by the root manifest, even
+    /// when nothing imports it yet. This keeps `zz check` honest about a
+    /// broken registry and lets the import path skip a repeat diagnostic.
+    fn validate_declared_collections(&mut self) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let Some(manifest) = cache::manifest_of(&root) else {
+            return;
+        };
+        if manifest.collections.is_empty() {
+            return;
+        }
+        let toml = root.join("zz.toml");
+        let source = std::fs::read_to_string(&toml).unwrap_or_default();
+        for (name, spec) in &manifest.collections {
+            let err = if !zz_pm::manifest::is_identifier(name) {
+                Some(format!(
+                    "collection name `{name}` is not a valid identifier"
+                ))
+            } else {
+                spec.validate(&root)
+                    .err()
+                    .or_else(|| spec.discover(&root).err())
+            };
+            if let Some(err) = err {
+                self.invalid_collections.insert(name.clone());
+                self.errors.push(LoadError {
+                    name: toml.display().to_string(),
+                    source: source.clone(),
+                    diags: vec![error_at(
+                        format!("collection `{name}` in zz.toml is invalid: {err}"),
+                        Span::new(0, 0),
+                    )],
+                });
+            }
+        }
+    }
+
+    /// Load a declared `[collect.<name>]` registry as a synthesized module.
+    ///
+    /// Members are loaded first (under internal namespaces) so their `run`
+    /// signatures seed the checker before the generated module is checked.
+    /// The final AST is built in [`Loader::prepare_collection`] during the
+    /// check pass, once each member's real checked signature is available.
+    fn load_collection(
+        &mut self,
+        name: &str,
+        spec: &zz_pm::manifest::CollectionSpec,
+        importer: &Path,
+        source: &str,
+        alias: Option<&str>,
+    ) -> bool {
+        let Some(root) = self.root.clone() else {
+            self.errors.push(LoadError {
+                name: importer.display().to_string(),
+                source: source.to_string(),
+                diags: vec![error_at(
+                    format!(
+                        "cannot import collection `collect.{name}`: no project (zz.toml) found\n\
+                         hint: collections are declared in the root package's zz.toml"
+                    ),
+                    Span::new(0, 0),
+                )],
+            });
+            return false;
+        };
+        let synth = PathBuf::from(format!("collect.{name}"));
+        let ns = alias.unwrap_or(name).to_string();
+        if !zz_pm::manifest::is_identifier(&ns) {
+            self.errors.push(LoadError {
+                name: importer.display().to_string(),
+                source: source.to_string(),
+                diags: vec![error_at(
+                    format!("collection namespace `{ns}` is not a valid identifier"),
+                    Span::new(0, 0),
+                )],
+            });
+            return false;
+        }
+        // Manifest validation already reported this collection; don't
+        // repeat the same error at every import site.
+        if self.invalid_collections.contains(name) {
+            return false;
+        }
+        if self.done.contains(&synth) {
+            self.record_ns_alias(importer, &ns, &synth);
+            return true;
+        }
+        if self.visiting.contains(&synth) {
+            self.errors.push(LoadError {
+                name: importer.display().to_string(),
+                source: source.to_string(),
+                diags: vec![error_at(
+                    format!(
+                        "circular collection import: `collect.{name}` is imported while the collection is still loading"
+                    ),
+                    Span::new(0, 0),
+                )],
+            });
+            return false;
+        }
+        if let Err(e) = spec.validate(&root) {
+            self.errors.push(LoadError {
+                name: importer.display().to_string(),
+                source: source.to_string(),
+                diags: vec![error_at(
+                    format!("collection `{name}` in zz.toml is invalid: {e}"),
+                    Span::new(0, 0),
+                )],
+            });
+            return false;
+        }
+        let members = match spec.discover(&root) {
+            Ok(members) => members,
+            Err(e) => {
+                self.errors.push(LoadError {
+                    name: importer.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!("collection `{name}`: {e}"),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+        };
+        let (sig_ty, sig_source) = match spec.parsed_signature_with_source() {
+            Ok(v) => v,
+            Err(e) => {
+                self.errors.push(LoadError {
+                    name: importer.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!("collection `{name}` has an invalid signature: {e}"),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+        };
+
+        self.visiting.insert(synth.clone());
+        let mut loaded = Vec::new();
+        for member in members {
+            let member_ns = format!("__collect_{name}_{}", member.name);
+            if let Err(e) = self.load_file(&member.path, Some(&member_ns)) {
+                self.errors.push(LoadError {
+                    name: importer.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!(
+                            "cannot load collection member `{}`: {e}",
+                            member.path.display()
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                continue;
+            }
+            let canon = cache::canon(&member.path).unwrap_or_else(|_| member.path.clone());
+            Self::record_edge(&mut self.dep_edges, &synth, &canon);
+            let member_source = self.sources.get(&canon).cloned().unwrap_or_default();
+            let run_span = self
+                .programs
+                .get(&canon)
+                .and_then(|p| {
+                    p.stmts.iter().find_map(|s| match s {
+                        Stmt::Func {
+                            name,
+                            pub_: true,
+                            span,
+                            ..
+                        } if name.last().map(String::as_str) == Some(spec.export.as_str()) => {
+                            Some(*span)
+                        }
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| Span::new(0, 0));
+            loaded.push(CollectionMember {
+                name: member.name,
+                ns: member_ns,
+                path: canon,
+                file: member.file,
+                run_span,
+                source: member_source,
+            });
+        }
+        self.visiting.remove(&synth);
+        self.done.insert(synth.clone());
+
+        if !self.register_ns(&ns, &synth, importer, source) {
+            return false;
+        }
+        self.sources.insert(
+            synth.clone(),
+            format!(
+                "// synthesized collection `collect.{name}`\n\
+                 dir = \"{}\"\n\
+                 sig = \"{}\"\n\
+                 name = \"{}\"\n\
+                 export = \"{}\"\n",
+                spec.dir, spec.sig, spec.name, spec.export
+            ),
+        );
+        self.programs.insert(
+            synth.clone(),
+            Program {
+                stmts: Vec::new(),
+                span: Span::new(0, 0),
+            },
+        );
+        self.order.push(synth.clone());
+        self.collections.insert(
+            synth,
+            CollectionModule {
+                name: name.to_string(),
+                ns,
+                export: spec.export.clone(),
+                sig_ty,
+                sig_source,
+                members: loaded,
+            },
+        );
+        true
+    }
+
+    /// Validate members against the declared signature and synthesize the
+    /// collection AST. Called during the check pass, after every member
+    /// module has been checked and its `pub run` signature seeded.
+    ///
+    /// Returns the generated source (also stored in `files` for diagnostic
+    /// rendering). Invalid members are reported at their own file/line and
+    /// omitted from the generated `ALL` array; the collection then contains
+    /// only valid members, exactly as the failing build would suggest.
+    fn prepare_collection(&mut self, path: &Path, failed_ns: &HashSet<String>) -> String {
+        let Some(info) = self.collections.get(path).cloned() else {
+            return String::new();
+        };
+        let expected = self.collection_expected_type(&info.sig_ty);
+        let mut valid = Vec::new();
+        for member in &info.members {
+            let key = format!("{}.{}", member.ns, info.export);
+            let Some(sig) = self.funcs.get(&key).cloned() else {
+                // A failed member module already reported its own error;
+                // don't bury it under a collection cascade.
+                if failed_ns.contains(&member.ns) {
+                    continue;
+                }
+                let rel = member
+                    .path
+                    .strip_prefix(self.root.as_deref().unwrap_or(Path::new("")))
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| member.path.display().to_string());
+                let expected_text = format_expected_sig(&info.export, &expected);
+                self.errors.push(LoadError {
+                    name: member.path.display().to_string(),
+                    source: member.source.clone(),
+                    diags: vec![error_at(
+                        format!(
+                            "{rel} does not match collection `{}`\n\
+                             expected: {expected_text}\n\
+                             found:    `pub {export}` is missing",
+                            info.name,
+                            export = info.export
+                        ),
+                        member.run_span,
+                    )
+                    .with_note(format!(
+                        "hint: add `pub {}({}) -> {}` to `{}`",
+                        info.export,
+                        expected_param_list(&expected),
+                        expected_ret(&expected),
+                        member.file
+                    ))],
+                });
+                continue;
+            };
+            let actual = Type::Func(
+                sig.params.iter().map(|(_, t)| t.clone()).collect(),
+                Box::new(sig.ret.clone()),
+            );
+            if actual == expected {
+                valid.push(member.clone());
+                continue;
+            }
+            let rel = member
+                .path
+                .strip_prefix(self.root.as_deref().unwrap_or(Path::new("")))
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| member.path.display().to_string());
+            let expected_text = format_expected_sig(&info.export, &expected);
+            let found_text = format_found_sig(&info.export, &sig);
+            self.errors.push(LoadError {
+                name: member.path.display().to_string(),
+                source: member.source.clone(),
+                diags: vec![error_at(
+                    format!(
+                        "{rel} does not match collection `{}`\n\
+                         expected: {expected_text}\n\
+                         found:    {found_text}",
+                        info.name
+                    ),
+                    member.run_span,
+                )
+                .with_note(format!(
+                    "hint: change `{}` in `{}` to `{expected_text}`",
+                    info.export, member.file
+                ))],
+            });
+        }
+        let source = render_collection_source(&info, &valid);
+        let parsed = parse(&source);
+        if let Some(diag) = parsed
+            .errors
+            .iter()
+            .find(|d| d.severity == zz_frontend::diag::Severity::Error)
+            .cloned()
+        {
+            // A synthesized module must always parse; surface a bug loudly
+            // rather than silently dropping the collection.
+            self.errors.push(LoadError {
+                name: path.display().to_string(),
+                source: source.clone(),
+                diags: vec![diag],
+            });
+            return source;
+        }
+        let mut program = parsed.program;
+        let aliases = HashMap::new();
+        namespace_program(&mut program, &info.ns, &aliases);
+        self.programs.insert(path.to_path_buf(), program);
+        source
+    }
+
+    /// Convert a parsed signature `Ty` to the checker's `Type`, resolving
+    /// local aliases/structs/enums so member signatures compare like for
+    /// like. Mirrors the checker's own table precedence.
+    fn collection_expected_type(&self, ty: &Ty) -> Type {
+        ty_to_checker_type(ty, &self.structs, &self.aliases, &self.enums)
     }
 
     /// Import a plugin dependency (`import zimg`): merge its manifest
@@ -1217,6 +2335,12 @@ impl Loader {
             // Seed-owned: plugin deps shared by several modules must
             // resolve identically in each (same consumption bug as #214).
             self.seed_func_keys.insert(name.clone());
+        }
+        // C-symbol aliases (#235) resolve identically too.
+        for (alias, sig) in Self::plugin_aliases(&manifest.funcs) {
+            self.funcs.entry(alias.clone()).or_insert(sig.clone());
+            self.all_funcs.entry(alias.clone()).or_insert(sig);
+            self.seed_func_keys.insert(alias);
         }
         let ns = alias.unwrap_or(dep);
         if ns != dep {
@@ -1323,6 +2447,57 @@ impl Loader {
         self.namespaces.insert(ns.to_string(), canon.to_path_buf());
         self.ns_of.insert(canon.to_path_buf(), ns.to_string());
         true
+    }
+
+    /// Merge a plugin package's own manifest signatures into its entry
+    /// module (`<pkg>.zz` / `src/<pkg>.zz` next to `plugin.zzi`), so a
+    /// generated wrapper (#235) can call its natives without dotted
+    /// self-paths (which read as method calls). Registers the C-symbol
+    /// alias spellings (`bytehash.sum` → `bytehash_sum`): bare names the
+    /// defining module calls directly. Aliases never override real names
+    /// (or_insert); an author-defined collision surfaces as a loud arity
+    /// error at the call, never a silent reroute. No-op for non-plugin
+    /// files.
+    fn merge_own_plugin_sigs(&mut self, canon: &Path) {
+        let Some((pkg_name, root)) = self.package_of(canon) else {
+            return;
+        };
+        if canon != root.join(format!("{pkg_name}.zz"))
+            && canon != root.join("src").join(format!("{pkg_name}.zz"))
+        {
+            return;
+        }
+        let zzi = root.join("plugin.zzi");
+        if !zzi.exists() {
+            return;
+        }
+        let manifest = match zz_plugin::load_manifest(&zzi) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        for (alias, sig) in Self::plugin_aliases(&manifest.funcs) {
+            self.funcs.entry(alias.clone()).or_insert(sig.clone());
+            self.all_funcs.entry(alias.clone()).or_insert(sig);
+            self.seed_func_keys.insert(alias);
+        }
+    }
+
+    /// C-symbol alias spellings for plugin externs (`bytehash.sum` →
+    /// `bytehash_sum`, #235). Only spellings that are valid ZZ
+    /// identifiers, differ from the declared name, and collide with no
+    /// other manifest entry qualify. Sorted for determinism.
+    fn plugin_aliases(
+        funcs: &HashMap<String, zz_checker::FuncSig>,
+    ) -> Vec<(String, zz_checker::FuncSig)> {
+        let mut out = Vec::new();
+        for (name, sig) in funcs {
+            let alias = sig.c_symbol(name);
+            if alias != *name && !funcs.contains_key(&alias) && is_zz_ident(&alias) {
+                out.push((alias, sig.clone()));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Rewrite a diagnostic that references an item which exists but was not
@@ -1453,10 +2628,23 @@ impl Loader {
         // importers are processed and their cascade noise can be collapsed
         // to one targeted error each.
         let mut failed_ns: HashSet<String> = HashSet::new();
-        for path in &self.order {
+        let order = self.order.clone();
+        for path in &order {
             let name = path.display().to_string();
             let source = self.sources.remove(path).unwrap_or_default();
             files.push((name.clone(), source.clone()));
+
+            // Collection modules are materialized here: member modules
+            // have been checked (dependency-first order), so their real
+            // signatures are available for validation and the generated
+            // `ALL`/`get`/`all` AST can be built exactly once, before the
+            // check that both engines consume.
+            if self.collections.contains_key(path) {
+                let generated = self.prepare_collection(path, &failed_ns);
+                if let Some(last) = files.last_mut() {
+                    last.1 = generated;
+                }
+            }
 
             // Process selective/wildcard imports for this module before
             // type-checking, so imported symbols are in the seed.
@@ -2381,6 +3569,11 @@ impl Loader {
 
         let import_aliases =
             collect_import_aliases(&programs, &self.order, &self.ns_aliases, &self.funcs);
+        // #503: bare references to pure-ZZ stdlib helpers need their module
+        // in the compiled closure (see `collect_bare_purezz_modules`).
+        for module in collect_bare_purezz_modules(&programs, &self.funcs, &self.natives) {
+            self.stdlib_modules.insert(module);
+        }
         LoadResult {
             programs,
             files,
@@ -2409,6 +3602,170 @@ impl Loader {
             stdlib_wildcards: self.stdlib_wildcards,
         }
     }
+}
+
+/// Convert an AST type annotation to a checker [`Type`], resolving aliases,
+/// structs, and enums from the current seed tables. Used to compare a
+/// collection signature against each member's checked `pub run` type.
+fn ty_to_checker_type(
+    ty: &Ty,
+    structs: &HashMap<String, StructSig>,
+    aliases: &HashMap<String, AliasSig>,
+    enums: &HashMap<String, EnumSig>,
+) -> Type {
+    match &ty.kind {
+        TyKind::Int => Type::Int,
+        TyKind::Float => Type::Float,
+        TyKind::Bool => Type::Bool,
+        TyKind::Str => Type::Str,
+        TyKind::Unit => Type::Unit,
+        TyKind::Void => Type::Void,
+        TyKind::Ptr { mutable, inner } => Type::Ptr {
+            mutable: *mutable,
+            inner: Box::new(ty_to_checker_type(inner, structs, aliases, enums)),
+        },
+        TyKind::Tuple(ts) => Type::Tuple(
+            ts.iter()
+                .map(|t| ty_to_checker_type(t, structs, aliases, enums))
+                .collect(),
+        ),
+        TyKind::Option(t) => Type::Option(Box::new(ty_to_checker_type(t, structs, aliases, enums))),
+        TyKind::Result(a, b) => Type::Result(
+            Box::new(ty_to_checker_type(a, structs, aliases, enums)),
+            Box::new(ty_to_checker_type(b, structs, aliases, enums)),
+        ),
+        TyKind::Func(ps, ret) => Type::Func(
+            ps.iter()
+                .map(|t| ty_to_checker_type(t, structs, aliases, enums))
+                .collect(),
+            Box::new(ty_to_checker_type(ret, structs, aliases, enums)),
+        ),
+        TyKind::Array(t) => Type::Array(Box::new(ty_to_checker_type(t, structs, aliases, enums))),
+        TyKind::Dict(k, v) => Type::Dict(
+            Box::new(ty_to_checker_type(k, structs, aliases, enums)),
+            Box::new(ty_to_checker_type(v, structs, aliases, enums)),
+        ),
+        TyKind::Union(ts) => Type::Union(
+            ts.iter()
+                .map(|t| ty_to_checker_type(t, structs, aliases, enums))
+                .collect(),
+        ),
+        TyKind::Named(name, args) => {
+            let converted_args: Vec<Type> = args
+                .iter()
+                .map(|t| ty_to_checker_type(t, structs, aliases, enums))
+                .collect();
+            if name == "bytes" && args.is_empty() {
+                return Type::Bytes;
+            }
+            if let Some(key) = find_named_key(aliases.keys(), name) {
+                let alias = &aliases[&key];
+                if alias.generics.len() == converted_args.len() {
+                    let subs: HashMap<String, Type> =
+                        alias.generics.iter().cloned().zip(converted_args).collect();
+                    return zz_checker::subst_type(&alias.target, &subs);
+                }
+                return alias.target.clone();
+            }
+            if let Some(key) = find_named_key(structs.keys(), name) {
+                return Type::Struct(key, converted_args);
+            }
+            if let Some(key) = find_named_key(enums.keys(), name) {
+                return Type::Enum(key, converted_args);
+            }
+            Type::Named(name.clone())
+        }
+    }
+}
+
+/// Exact key, else a unique `*.name` suffix match (mirrors the checker's
+/// canonical-name lookup for unqualified struct/enum/alias spellings).
+fn find_named_key<'a>(keys: impl Iterator<Item = &'a String>, name: &str) -> Option<String> {
+    let suffix = format!(".{name}");
+    let mut unique: Option<String> = None;
+    for key in keys {
+        if key == name {
+            return Some(key.clone());
+        }
+        if key.ends_with(&suffix) {
+            if unique.is_some() {
+                return None;
+            }
+            unique = Some(key.clone());
+        }
+    }
+    unique
+}
+
+fn expected_param_list(ty: &Type) -> String {
+    let Type::Func(params, _) = ty else {
+        return ty.to_string();
+    };
+    let names: Vec<String> = if params.len() == 1 {
+        vec!["args".to_string()]
+    } else {
+        (0..params.len()).map(|i| format!("a{i}")).collect()
+    };
+    params
+        .iter()
+        .zip(names)
+        .map(|(t, n)| format!("{n}: {t}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn expected_ret(ty: &Type) -> String {
+    match ty {
+        Type::Func(_, ret) => ret.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn format_expected_sig(export: &str, ty: &Type) -> String {
+    format!(
+        "func {export}({}) -> {}",
+        expected_param_list(ty),
+        expected_ret(ty)
+    )
+}
+
+fn format_found_sig(export: &str, sig: &FuncSig) -> String {
+    let params = sig
+        .params
+        .iter()
+        .map(|(n, t)| format!("{n}: {t}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("func {export}({params}) -> {}", sig.ret)
+}
+
+/// Render the synthesized collection module. Members are already sorted
+/// by name and filtered to signature-matching entries.
+fn render_collection_source(info: &CollectionModule, members: &[CollectionMember]) -> String {
+    let export = &info.export;
+    let mut out = String::new();
+    out.push_str("// Generated from [collect.");
+    out.push_str(&info.name);
+    out.push_str("] in zz.toml. Do not edit.\n");
+    out.push_str(&format!(
+        "pub struct Entry {{\n    name: str,\n    {export}: {}\n}}\n\n",
+        info.sig_source
+    ));
+    out.push_str("pub const ALL: [Entry] = [\n");
+    for member in members {
+        out.push_str(&format!(
+            "    Entry {{ name: \"{}\", {export}: {}.{export} }},\n",
+            member.name, member.ns
+        ));
+    }
+    out.push_str("]\n\n");
+    out.push_str("pub func all() -> [Entry] {\n    return ALL\n}\n\n");
+    out.push_str("pub func get(name: str) -> Option<Entry> {\n");
+    out.push_str("    for entry in ALL {\n");
+    out.push_str("        if entry.name == name {\n");
+    out.push_str("            return .some(entry)\n");
+    out.push_str("        }\n    }\n    return .none\n}\n");
+    out
 }
 
 /// Collect bare→qualified selective-import aliases from every module's
@@ -2498,6 +3855,220 @@ fn collect_import_aliases(
     aliases
 }
 
+// Collect Ident/Path references inside a function (params included —
+// conservative: a param shadowing a Decl name just blocks hoisting).
+fn collect_refs_expr(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Ident { name, .. } => {
+            out.insert(name.clone());
+        }
+        Expr::Path { parts, .. } => {
+            out.insert(parts.join("."));
+            for p in parts {
+                out.insert(p.clone());
+            }
+        }
+        _ => {}
+    }
+    // Recurse through children generically via debug walk: enumerate
+    // every nested Ident/Path by re-walking known containers.
+    match e {
+        Expr::Paren { expr: x, .. }
+        | Expr::Unary { expr: x, .. }
+        | Expr::Try { expr: x, .. }
+        | Expr::Closure { body: x, .. } => collect_refs_expr(x, out),
+        Expr::Binary { left, right, .. }
+        | Expr::Range {
+            start: left,
+            end: right,
+            ..
+        } => {
+            collect_refs_expr(left, out);
+            collect_refs_expr(right, out);
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_refs_expr(callee, out);
+            for a in args {
+                collect_refs_expr(a, out);
+            }
+            for (_, v) in named {
+                collect_refs_expr(v, out);
+            }
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_refs_expr(cond, out);
+            collect_refs_block(then, out);
+            if let Some(x) = els {
+                collect_refs_expr(x, out);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            collect_refs_expr(cond, out);
+            collect_refs_block(body, out);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_refs_expr(scrutinee, out);
+            for a in arms {
+                collect_refs_expr(&a.body, out);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            collect_refs_expr(value, out);
+            collect_refs_block(then, out);
+            if let Some(x) = els {
+                collect_refs_expr(x, out);
+            }
+        }
+        Expr::Block(b) => collect_refs_block(b, out),
+        Expr::Array { elems, .. } | Expr::Tuple { items: elems, .. } => {
+            for x in elems {
+                collect_refs_expr(x, out);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_refs_expr(k, out);
+                collect_refs_expr(v, out);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for p in parts {
+                if let zz_frontend::ast::FmtPart::Expr(x, _) = p {
+                    collect_refs_expr(x, out);
+                }
+            }
+        }
+        Expr::Field { obj, .. } => collect_refs_expr(obj, out),
+        Expr::Index { obj, index, .. } => {
+            collect_refs_expr(obj, out);
+            collect_refs_expr(index, out);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            collect_refs_expr(obj, out);
+            if let Some(x) = start {
+                collect_refs_expr(x, out);
+            }
+            if let Some(x) = end {
+                collect_refs_expr(x, out);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_refs_expr(v, out);
+            }
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            collect_refs_expr(body, out);
+            collect_refs_expr(iter, out);
+            if let Some(f) = filter {
+                collect_refs_expr(f, out);
+            }
+        }
+        Expr::Variant { arg: Some(x), .. } => {
+            collect_refs_expr(x, out);
+        }
+        _ => {}
+    }
+}
+fn collect_refs_block(b: &Block, out: &mut HashSet<String>) {
+    for s in &b.stmts {
+        collect_refs_stmt(s, out);
+    }
+}
+fn collect_refs_stmt(s: &Stmt, out: &mut HashSet<String>) {
+    match s {
+        Stmt::Decl { value, .. } => collect_refs_expr(value, out),
+        Stmt::Func { body, .. } => collect_refs_block(body, out),
+        Stmt::Return { value: Some(x), .. } => {
+            collect_refs_expr(x, out);
+        }
+        Stmt::Expr(x) => collect_refs_expr(x, out),
+        Stmt::Defer { expr: x, .. } => collect_refs_expr(x, out),
+        Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+            collect_refs_expr(target, out);
+            collect_refs_expr(value, out);
+        }
+        Stmt::Destructure { value, .. } => collect_refs_expr(value, out),
+        Stmt::For { iter, body, .. } => {
+            collect_refs_expr(iter, out);
+            collect_refs_block(body, out);
+        }
+        Stmt::Impl { methods, .. } => {
+            for m in methods {
+                collect_refs_stmt(m, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// #503: std namespaces a program references *bare* through a pure-ZZ stdlib
+/// helper — `str.repeat("ab", 2)` with no `import std.str` — and which must
+/// therefore join the compiled closure.
+///
+/// The seed exposes every canonical `std.*` signature under its bare spelling
+/// too, so the checker resolves such a call and `zz check` says nothing. The
+/// helper's *body*, however, only exists in the closure that the VM and both
+/// codegen backends compile (`zz_stdlib::stdlib_program_closure`), which is
+/// otherwise driven by imports alone. That left the engines disagreeing: the
+/// VM failed at run time with `undefined method`, the HIR backend merged every
+/// reachable stdlib program and silently succeeded, and the chunk backend could
+/// not resolve the call at all.
+///
+/// Natives are always registered, so a bare native (`vec.push`) is left alone.
+/// Imprecision is harmless here — naming a namespace costs a little startup
+/// compile, never correctness — which is why a plain reference scan suffices
+/// and no type information is needed.
+fn collect_bare_purezz_modules(
+    programs: &[Program],
+    funcs: &HashMap<String, FuncSig>,
+    natives: &HashMap<String, NativeEntry>,
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for program in programs {
+        let mut refs = HashSet::new();
+        for stmt in &program.stmts {
+            collect_refs_stmt(stmt, &mut refs);
+        }
+        for name in refs {
+            // `ns.func`: a real std namespace head and a non-dotted tail.
+            let Some((head, tail)) = name.split_once('.') else {
+                continue;
+            };
+            if tail.is_empty() || tail.contains('.') || !STDLIB_MODULES.contains(&head) {
+                continue;
+            }
+            // The canonical signature must exist: a user function, or a
+            // module named like a std namespace, is never seeded under `std.`.
+            if !funcs.contains_key(&format!("std.{name}")) {
+                continue;
+            }
+            // Natives (bare or canonical spelling) are registered
+            // unconditionally; only a missing ZZ body needs the closure.
+            if natives.contains_key(&name) || natives.contains_key(&format!("std.{name}")) {
+                continue;
+            }
+            out.insert(head.to_string());
+        }
+    }
+    out
+}
+
 /// Rewrite a module's AST so its top-level definitions are namespaced:
 /// - top-level `func foo` becomes `func ns.foo`,
 /// - top-level `x := ...` becomes `x := ...` with binding name `ns.x`,
@@ -2507,6 +4078,7 @@ fn collect_import_aliases(
 ///   through the canonical namespace from `ns_aliases`.
 fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<String, String>) {
     let mut top = HashSet::new();
+    let mut top_bindings = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
             Stmt::Func { name, .. }
@@ -2517,11 +4089,12 @@ fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<Strin
             }
             Stmt::Decl { name, .. } => {
                 top.insert(name.name.clone());
+                top_bindings.insert(name.name.clone());
             }
             _ => {}
         }
     }
-    let mut rw = rewrite::Rewriter::new(ns, &top);
+    let mut rw = rewrite::Rewriter::new(ns, &top, &top_bindings);
     rw.ns_aliases = ns_aliases.clone();
     // Imported namespace heads resolve on their own; the Call rewriter
     // must leave `alias.func(...)` paths untouched.
@@ -2558,7 +4131,7 @@ fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<Strin
 /// mutual recursion between hoisted functions move stably, while programs
 /// hoisting cannot help keep exactly today's behavior.
 fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
-    use zz_frontend::ast::{Block, Expr, Pattern};
+    use zz_frontend::ast::Pattern;
     // Top-level binding names: `Decl`s post-rewrite ("ns.x") plus their
     // bare forms, and `Destructure` bindings (never namespaced — the
     // rewriter leaves patterns alone, and refs to them stay bare).
@@ -2602,167 +4175,6 @@ fn hoist_forward_callable_funcs(program: &mut Program, ns: &str) {
     }
     if funcs.is_empty() {
         return;
-    }
-    // Collect Ident/Path references inside a function (params included —
-    // conservative: a param shadowing a Decl name just blocks hoisting).
-    fn collect_refs_expr(e: &Expr, out: &mut HashSet<String>) {
-        match e {
-            Expr::Ident { name, .. } => {
-                out.insert(name.clone());
-            }
-            Expr::Path { parts, .. } => {
-                out.insert(parts.join("."));
-                for p in parts {
-                    out.insert(p.clone());
-                }
-            }
-            _ => {}
-        }
-        // Recurse through children generically via debug walk: enumerate
-        // every nested Ident/Path by re-walking known containers.
-        match e {
-            Expr::Paren { expr: x, .. }
-            | Expr::Unary { expr: x, .. }
-            | Expr::Try { expr: x, .. }
-            | Expr::Closure { body: x, .. } => collect_refs_expr(x, out),
-            Expr::Binary { left, right, .. }
-            | Expr::Range {
-                start: left,
-                end: right,
-                ..
-            } => {
-                collect_refs_expr(left, out);
-                collect_refs_expr(right, out);
-            }
-            Expr::Call {
-                callee,
-                args,
-                named,
-                ..
-            } => {
-                collect_refs_expr(callee, out);
-                for a in args {
-                    collect_refs_expr(a, out);
-                }
-                for (_, v) in named {
-                    collect_refs_expr(v, out);
-                }
-            }
-            Expr::If {
-                cond, then, els, ..
-            } => {
-                collect_refs_expr(cond, out);
-                collect_refs_block(then, out);
-                if let Some(x) = els {
-                    collect_refs_expr(x, out);
-                }
-            }
-            Expr::While { cond, body, .. } => {
-                collect_refs_expr(cond, out);
-                collect_refs_block(body, out);
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                collect_refs_expr(scrutinee, out);
-                for a in arms {
-                    collect_refs_expr(&a.body, out);
-                }
-            }
-            Expr::IfLet {
-                value, then, els, ..
-            } => {
-                collect_refs_expr(value, out);
-                collect_refs_block(then, out);
-                if let Some(x) = els {
-                    collect_refs_expr(x, out);
-                }
-            }
-            Expr::Block(b) => collect_refs_block(b, out),
-            Expr::Array { elems, .. } | Expr::Tuple { items: elems, .. } => {
-                for x in elems {
-                    collect_refs_expr(x, out);
-                }
-            }
-            Expr::Dict { entries, .. } => {
-                for (k, v) in entries {
-                    collect_refs_expr(k, out);
-                    collect_refs_expr(v, out);
-                }
-            }
-            Expr::Fmt { parts, .. } => {
-                for p in parts {
-                    if let zz_frontend::ast::FmtPart::Expr(x, _) = p {
-                        collect_refs_expr(x, out);
-                    }
-                }
-            }
-            Expr::Field { obj, .. } => collect_refs_expr(obj, out),
-            Expr::Index { obj, index, .. } => {
-                collect_refs_expr(obj, out);
-                collect_refs_expr(index, out);
-            }
-            Expr::Slice {
-                obj, start, end, ..
-            } => {
-                collect_refs_expr(obj, out);
-                if let Some(x) = start {
-                    collect_refs_expr(x, out);
-                }
-                if let Some(x) = end {
-                    collect_refs_expr(x, out);
-                }
-            }
-            Expr::StructInit { fields, .. } => {
-                for (_, v) in fields {
-                    collect_refs_expr(v, out);
-                }
-            }
-            Expr::ListComp {
-                body, iter, filter, ..
-            } => {
-                collect_refs_expr(body, out);
-                collect_refs_expr(iter, out);
-                if let Some(f) = filter {
-                    collect_refs_expr(f, out);
-                }
-            }
-            Expr::Variant { arg: Some(x), .. } => {
-                collect_refs_expr(x, out);
-            }
-            _ => {}
-        }
-    }
-    fn collect_refs_block(b: &Block, out: &mut HashSet<String>) {
-        for s in &b.stmts {
-            collect_refs_stmt(s, out);
-        }
-    }
-    fn collect_refs_stmt(s: &Stmt, out: &mut HashSet<String>) {
-        match s {
-            Stmt::Decl { value, .. } => collect_refs_expr(value, out),
-            Stmt::Func { body, .. } => collect_refs_block(body, out),
-            Stmt::Return { value: Some(x), .. } => {
-                collect_refs_expr(x, out);
-            }
-            Stmt::Expr(x) => collect_refs_expr(x, out),
-            Stmt::Defer { expr: x, .. } => collect_refs_expr(x, out),
-            Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
-                collect_refs_expr(target, out);
-                collect_refs_expr(value, out);
-            }
-            Stmt::Destructure { value, .. } => collect_refs_expr(value, out),
-            Stmt::For { iter, body, .. } => {
-                collect_refs_expr(iter, out);
-                collect_refs_block(body, out);
-            }
-            Stmt::Impl { methods, .. } => {
-                for m in methods {
-                    collect_refs_stmt(m, out);
-                }
-            }
-            _ => {}
-        }
     }
     // Per-func refs (body + defaults).
     let mut refs: Vec<HashSet<String>> = Vec::with_capacity(funcs.len());

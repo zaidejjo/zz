@@ -98,6 +98,29 @@ pub enum Op {
         field: String,
         span: Span,
     },
+    /// Pop an index then a value; take the home container out, write
+    /// `home[index] = value` in place, store it back. Fused `a[i] = v`
+    /// when the base is a direct home: the write then reaches a container
+    /// with refcount 1, so `set_index` mutates it instead of
+    /// `Arc::make_mut` deep-copying on every element write (the O(n²)
+    /// index-fill pathology).
+    ///
+    /// Index and value are evaluated **before** the take (the op runs
+    /// after both are on the stack), so the window is a single
+    /// instruction with no safepoint and no user code inside it.
+    /// Restores the home — mutated or not — on error, like the other
+    /// take ops.
+    StoreIndexTake { home: TakeHome, span: Span },
+    /// Pop an index and a right-hand side; take the home container out, read
+    /// `home[index]`, apply `op` against the rhs, write the result back, and
+    /// store the container home. Fused `a[i] += v` with the same guarantees
+    /// as [`Op::StoreIndexTake`]: both operands are evaluated before the op,
+    /// the take window is one instruction, and the home is restored on error.
+    CompoundIndexTake {
+        home: TakeHome,
+        op: BinOp,
+        span: Span,
+    },
     /// Pop a right-hand side; take the home, take the field, apply
     /// `field OP rhs` via `eval_binary`, store back. Fused
     /// `s.f = s.f OP v` (#242, e.g. string-concat accumulation).
@@ -117,12 +140,42 @@ pub enum Op {
         field: String,
         span: Span,
     },
+    /// Take the home, clone one element of the named field at `idx`, store
+    /// it straight into slot `dst`, restore the home. Fused `s.f[i]` reads:
+    /// O(1) element clone instead of cloning the field array, no stack
+    /// traffic, fused with the assignment destination. Non-direct shapes
+    /// complete generically at runtime (same errors).
+    GetFieldSlotIdx {
+        home: TakeHome,
+        idx: u16,
+        dst: u16,
+        span: Span,
+    },
     /// Take the home, push the length of the named field, restore the
     /// home. Fused `len(s.f)` (#242): no container or field clone.
     /// Non-direct shapes complete generically at runtime (same errors).
     LenField {
         home: TakeHome,
         field: String,
+        span: Span,
+    },
+    /// Read `array[idx]` where both are stack slots: single bounds check,
+    /// no `normalize_index` call, no `Value` tag loop. Fused `a[i]` reads
+    /// when both operands are slot-resolvable. Result written to `dst`.
+    IndexIntSlot {
+        arr: u16,
+        idx: u16,
+        dst: u16,
+        span: Span,
+    },
+    /// Read `dict[key]` where key is an int: probe DictData with a
+    /// precomputed hash + open-addressed table. Fused int-keyed dict reads
+    /// when both operands are slot-resolvable. Non-int keys fall back to
+    /// generic `IndexOp`. Result written to `dst`.
+    IndexDictInt {
+        dict: u16,
+        key: u16,
+        dst: u16,
         span: Span,
     },
     /// In-place integer add: `slot[dst] = Int(slot[dst] + slot[src])`.
@@ -139,10 +192,37 @@ pub enum Op {
     ///
     /// Fused fast path for `x = x + N` with a literal `N`.
     SlotAddIntImm { dst: u16, imm: i64 },
+    /// In-place integer subtract of an immediate: `slot[dst] = Int(slot[dst] - imm)`.
+    ///
+    /// Fused fast path for `x = x - N` with a literal `N`.
+    SlotSubIntImm { dst: u16, imm: i64 },
+    /// In-place integer multiply by an immediate: `slot[dst] = Int(slot[dst] * imm)`.
+    ///
+    /// Fused fast path for `x = x * N` with a literal `N`.
+    SlotMulIntImm { dst: u16, imm: i64 },
     /// Compare two slots as integers, push `Bool(a < b)`.
     SlotLessIntSlot { a: u16, b: u16 },
     /// Compare a slot against an immediate integer, push `Bool(a < imm)`.
     SlotLessIntImm { a: u16, imm: i64 },
+    /// Compare two slots as integers with any comparison operator, push
+    /// `Bool(slot[a] op slot[b])`.
+    ///
+    /// `SlotLessIntSlot` covers `<` (the loop-condition shape); this carries
+    /// the other five, so `if i > 0` stops materialising `LoadSlot PushConst
+    /// IntGt` before the jump. Falls back to `eval_binary` when either slot
+    /// is not an `Int` (same semantics as the generic comparison).
+    SlotCmpIntSlot {
+        a: u16,
+        b: u16,
+        op: zz_frontend::ast::BinOp,
+    },
+    /// Compare a slot against an immediate integer with any comparison
+    /// operator, push `Bool(slot[a] op imm)`.
+    SlotCmpIntImm {
+        a: u16,
+        imm: i64,
+        op: zz_frontend::ast::BinOp,
+    },
     /// 3-address integer binary op: `slot[dst] = Int(slot[lhs] op slot[rhs])`.
     ///
     /// Fused fast path for `x = y op z` where all three resolve to local
@@ -161,6 +241,65 @@ pub enum Op {
         dst: u16,
         lhs: u16,
         imm: i64,
+        op: zz_frontend::ast::BinOp,
+    },
+    /// Push `Int(slot[a] op imm)`.
+    ///
+    /// [`SlotBinaryIntImm`](Self::SlotBinaryIntImm) needs a destination
+    /// slot, so it only fits assignment shapes; value-position arithmetic
+    /// (`fib(n - 1)` as an argument, `x := n + 1`, `return i * 2`) otherwise
+    /// pays `LoadSlot PushConst IntOp` — three dispatches. Falls back to
+    /// `eval_binary` when the slot is not an `Int`.
+    ///
+    /// Unlike the older fused slot ops this one carries its expression span,
+    /// so coverage attributes the line (a `Span::default()` op drops the
+    /// source line from the report) and a trapping `Div`/`Rem` keeps its
+    /// error location.
+    PushSlotIntImm {
+        a: u16,
+        imm: i64,
+        op: zz_frontend::ast::BinOp,
+        span: Span,
+    },
+    /// Jump to `target` unless `Int(slot[a]) op imm` holds.
+    ///
+    /// The fused `SlotCmpIntImm` + `JumpIfFalseBool` pair an `if` condition
+    /// emits: a loop guard written `if i < n` cost two dispatches per
+    /// iteration plus the `Bool` on the stack. `while` tests keep the two-op
+    /// shape because `WhileCond` carries the loop bookkeeping (back-edge,
+    /// `break` target, yield check).
+    ///
+    /// Falls back to `eval_binary` when the slot is not an `Int`, and keeps
+    /// the `if`-condition-must-be-a-bool error of the op it replaces.
+    JumpIfFalseSlotCmpIntImm {
+        a: u16,
+        imm: i64,
+        op: zz_frontend::ast::BinOp,
+        target: usize,
+        span: Span,
+    },
+    /// Jump to `target` unless `Int(slot[a]) op Int(slot[b])` holds; the
+    /// fused `SlotCmpIntSlot` + `JumpIfFalseBool` pair.
+    JumpIfFalseSlotCmpIntSlot {
+        a: u16,
+        b: u16,
+        op: zz_frontend::ast::BinOp,
+        target: usize,
+        span: Span,
+    },
+    /// Compare a slot against a constant-pool entry, push `Bool(a op c)`.
+    ///
+    /// `SlotCmpIntImm` inlines `i64` literals; every other literal (string,
+    /// float, bool) lived in the pool but still cost `LoadSlot PushConst
+    /// BinOp` — three dispatches for one comparison. `k` indexes
+    /// [`Chunk::constants`](super::Chunk::constants), like `PushConst`.
+    ///
+    /// Strings compare in place (`Arc<String>` equality, no clone) for
+    /// `==`/`!=`; everything else falls back to `eval_binary`, so mixed
+    /// types keep the generic semantics.
+    SlotCmpConst {
+        a: u16,
+        k: u32,
         op: zz_frontend::ast::BinOp,
     },
 
@@ -210,6 +349,19 @@ pub enum Op {
     IntRem(Span),
     /// Pop one int, push `-a`.
     IntNeg(Span),
+    /// Pop two ints, push `a < b` (#364: mirrors the IntAdd fast path;
+    /// comparisons previously always took generic `BinOp` dispatch).
+    IntLt(Span),
+    /// Pop two ints, push `a > b`.
+    IntGt(Span),
+    /// Pop two ints, push `a <= b`.
+    IntLe(Span),
+    /// Pop two ints, push `a >= b`.
+    IntGe(Span),
+    /// Pop two ints, push `a == b`.
+    IntEq(Span),
+    /// Pop two ints, push `a != b`.
+    IntNe(Span),
 
     // ---- generic arithmetic (fallback) ----
     /// Pop `b`, pop `a`, push `a op b` (int/float/str semantics).
@@ -242,9 +394,18 @@ pub enum Op {
     /// item(s) (bound to `var` in a fresh iteration scope when `in_env`, or
     /// left on the stack as a local slot(s)), or exit when the iterable is
     /// exhausted.
+    ///
+    /// `for` loops are laid out rotated — the test sits at the bottom of
+    /// the loop and jumps forward into the body — so this op is both the
+    /// test and the back-edge: one dispatch per iteration instead of a
+    /// test plus an unconditional `Jump`.
     ForNext {
         vars: Vec<String>,
+        /// Loop exit: the iterable is exhausted, so control lands just
+        /// past the `Pop` that drops it.
         exit: usize,
+        /// Body entry: where a non-exhausted iteration resumes.
+        body: usize,
         in_env: bool,
         span: Span,
     },
@@ -252,7 +413,11 @@ pub enum Op {
     /// compiler.
     WhileSetup { exit: usize, header: usize },
     /// Pop the condition; error unless it is a bool; exit the loop when
-    /// falsy.
+    /// falsy. Also the loop's cooperative safepoint (folded in from the
+    /// header — see `Compiler::compile_while`): this op is reached once per
+    /// test from every edge, so the yield check cannot be skipped, and it
+    /// runs before the condition is popped so a yield re-executes the op
+    /// whole.
     WhileCond { exit: usize, span: Span },
     /// Exit the innermost loop (restores the loop's environment).
     Break(Span),
@@ -260,11 +425,13 @@ pub enum Op {
     Continue(Span),
     /// Pop a value and store it as the innermost loop's result.
     SetLoopResult,
-    /// Cooperative safepoint at a loop header (emitted by the compiler for
-    /// every `for`/`while`). Stack-neutral: decrements the VM's slice
+    /// Cooperative safepoint (stack-neutral: decrements the VM's slice
     /// budget, and once per budget worth of iterations checks the timeslice
     /// clock — yielding to the executor when the task overruns its quantum
-    /// so CPU-bound loops cannot starve sibling tasks. Header (not
+    /// so CPU-bound loops cannot starve sibling tasks). `for` loops charge
+    /// the check to `ForNext` and `while` loops to `WhileCond`, both of
+    /// which every edge of the loop passes through; this standalone op is
+    /// what a producer that cannot fold it emits, with header (not
     /// back-edge) placement so `continue` cannot skip the check.
     Safepoint,
 
@@ -298,9 +465,13 @@ pub enum Op {
     // ---- structs ----
     /// Pop `field_names.len()` values and build a struct instance, matching
     /// them to the registered field order by name.
+    ///
+    /// The names are the chunk's interned copies: the literal site pays for
+    /// them once at compile time, and every execution copies a refcount into
+    /// the instance instead of allocating a `String` per field.
     MakeStruct {
         name: String,
-        field_names: Vec<String>,
+        field_names: Vec<Arc<str>>,
         span: Span,
     },
     /// Pop an object, push `object.field`.
@@ -439,4 +610,308 @@ pub enum Op {
     /// Record a deferred closure: pop a closure value, push onto the
     /// frame's defer stack. Executed LIFO on scope exit.
     DeferRecord,
+}
+
+/// Coarse class of an opcode, used by `zz dis --vm` and `ZZ_VM_STATS`.
+///
+/// The split answers one question: how much of the executed stream runs
+/// through a fused or specialized fast path (`Fused`, `IntOp`) instead of
+/// generic dispatch?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpClass {
+    /// Ops that remove stack traffic or a generic call (`Slot*`, `Take*`,
+    /// `VecPush*`, fused field/index writes).
+    Fused,
+    /// Typed i64 arithmetic and comparison fast paths (`IntAdd`…`IntNe`).
+    IntOp,
+    /// Stack, slot, scope, and environment movement.
+    Stack,
+    /// Generic operators (`BinOp`, `UnOp`, `Concat`, formatting).
+    Arith,
+    /// Jumps, loops, branches, returns, and match/trap control.
+    Control,
+    /// Function and native invocation, plus function construction.
+    Call,
+    /// Field, index, slice, and tuple access.
+    Access,
+    /// Container and aggregate construction.
+    Alloc,
+    /// Everything else.
+    Other,
+}
+
+impl OpClass {
+    pub const ALL: [OpClass; 9] = [
+        OpClass::Fused,
+        OpClass::IntOp,
+        OpClass::Stack,
+        OpClass::Arith,
+        OpClass::Control,
+        OpClass::Call,
+        OpClass::Access,
+        OpClass::Alloc,
+        OpClass::Other,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            OpClass::Fused => "fused",
+            OpClass::IntOp => "int-op",
+            OpClass::Stack => "stack",
+            OpClass::Arith => "arith",
+            OpClass::Control => "control",
+            OpClass::Call => "call",
+            OpClass::Access => "access",
+            OpClass::Alloc => "alloc",
+            OpClass::Other => "other",
+        }
+    }
+
+    /// Dense index into counter arrays (`0..ALL.len()`).
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// `true` for the fast paths that fusion work is measured against.
+    pub fn is_fast(self) -> bool {
+        matches!(self, OpClass::Fused | OpClass::IntOp)
+    }
+}
+
+impl Op {
+    /// Variant name without its payload — stable enough for disassembly,
+    /// histogram keys, and PR evidence.
+    pub fn mnemonic(&self) -> &'static str {
+        match self {
+            Op::PushConst(..) => "PushConst",
+            Op::Pop => "Pop",
+            Op::Swap => "Swap",
+            Op::Truthy => "Truthy",
+            Op::LoadVar(..) => "LoadVar",
+            Op::LoadPath(..) => "LoadPath",
+            Op::DefineVar(..) => "DefineVar",
+            Op::StoreVar(..) => "StoreVar",
+            Op::StorePath(..) => "StorePath",
+            Op::LoadSlot(..) => "LoadSlot",
+            Op::StoreSlot(..) => "StoreSlot",
+            Op::TakeSlot(..) => "TakeSlot",
+            Op::TakeVar(..) => "TakeVar",
+            Op::VecPush { .. } => "VecPush",
+            Op::VecPushField { .. } => "VecPushField",
+            Op::VecPushMethod { .. } => "VecPushMethod",
+            Op::SetFieldTake { .. } => "SetFieldTake",
+            Op::SetFieldIndexTake { .. } => "SetFieldIndexTake",
+            Op::StoreIndexTake { .. } => "StoreIndexTake",
+            Op::CompoundIndexTake { .. } => "CompoundIndexTake",
+            Op::FieldBinopTake { .. } => "FieldBinopTake",
+            Op::GetFieldIndex { .. } => "GetFieldIndex",
+            Op::GetFieldSlotIdx { .. } => "GetFieldSlotIdx",
+            Op::IndexIntSlot { .. } => "IndexIntSlot",
+            Op::IndexDictInt { .. } => "IndexDictInt",
+            Op::LenField { .. } => "LenField",
+            Op::SlotAddInt { .. } => "SlotAddInt",
+            Op::SlotInc { .. } => "SlotInc",
+            Op::SlotAddIntImm { .. } => "SlotAddIntImm",
+            Op::SlotSubIntImm { .. } => "SlotSubIntImm",
+            Op::SlotMulIntImm { .. } => "SlotMulIntImm",
+            Op::SlotLessIntSlot { .. } => "SlotLessIntSlot",
+            Op::SlotLessIntImm { .. } => "SlotLessIntImm",
+            Op::SlotCmpIntSlot { .. } => "SlotCmpIntSlot",
+            Op::SlotCmpIntImm { .. } => "SlotCmpIntImm",
+            Op::SlotCmpConst { .. } => "SlotCmpConst",
+            Op::SlotBinaryInt { .. } => "SlotBinaryInt",
+            Op::SlotBinaryIntImm { .. } => "SlotBinaryIntImm",
+            Op::PushSlotIntImm { .. } => "PushSlotIntImm",
+            Op::JumpIfFalseSlotCmpIntImm { .. } => "JumpIfFalseSlotCmpIntImm",
+            Op::JumpIfFalseSlotCmpIntSlot { .. } => "JumpIfFalseSlotCmpIntSlot",
+            Op::MakeFunc { .. } => "MakeFunc",
+            Op::RegisterStruct { .. } => "RegisterStruct",
+            Op::RegisterEnum { .. } => "RegisterEnum",
+            Op::MakeEnum { .. } => "MakeEnum",
+            Op::IntAdd(..) => "IntAdd",
+            Op::IntSub(..) => "IntSub",
+            Op::IntMul(..) => "IntMul",
+            Op::IntDiv(..) => "IntDiv",
+            Op::IntRem(..) => "IntRem",
+            Op::IntNeg(..) => "IntNeg",
+            Op::IntLt(..) => "IntLt",
+            Op::IntGt(..) => "IntGt",
+            Op::IntLe(..) => "IntLe",
+            Op::IntGe(..) => "IntGe",
+            Op::IntEq(..) => "IntEq",
+            Op::IntNe(..) => "IntNe",
+            Op::BinOp(..) => "BinOp",
+            Op::UnOp(..) => "UnOp",
+            Op::Jump(..) => "Jump",
+            Op::JumpIfFalse(..) => "JumpIfFalse",
+            Op::JumpIfTrue(..) => "JumpIfTrue",
+            Op::JumpIfFalseBool(..) => "JumpIfFalseBool",
+            Op::Return => "Return",
+            Op::ForSetup { .. } => "ForSetup",
+            Op::ForNext { .. } => "ForNext",
+            Op::WhileSetup { .. } => "WhileSetup",
+            Op::WhileCond { .. } => "WhileCond",
+            Op::Break(..) => "Break",
+            Op::Continue(..) => "Continue",
+            Op::SetLoopResult => "SetLoopResult",
+            Op::Safepoint => "Safepoint",
+            Op::MakeArray(..) => "MakeArray",
+            Op::UnpackTuple(..) => "UnpackTuple",
+            Op::ArrayPush(..) => "ArrayPush",
+            Op::MakeDict(..) => "MakeDict",
+            Op::IndexOp(..) => "IndexOp",
+            Op::StoreIndexOp(..) => "StoreIndexOp",
+            Op::CompoundIndexOp { .. } => "CompoundIndexOp",
+            Op::SliceOp(..) => "SliceOp",
+            Op::MakeRange(..) => "MakeRange",
+            Op::MakeStruct { .. } => "MakeStruct",
+            Op::GetField(..) => "GetField",
+            Op::GetFieldIdx(..) => "GetFieldIdx",
+            Op::SetField(..) => "SetField",
+            Op::CompoundFieldOp { .. } => "CompoundFieldOp",
+            Op::SetFieldIdx(..) => "SetFieldIdx",
+            Op::MakeClosure { .. } => "MakeClosure",
+            Op::SpawnClosure { .. } => "SpawnClosure",
+            Op::MakeVariant { .. } => "MakeVariant",
+            Op::MatchArm { .. } => "MatchArm",
+            Op::MatchGuard { .. } => "MatchGuard",
+            Op::MatchError(..) => "MatchError",
+            Op::IfLetMatch { .. } => "IfLetMatch",
+            Op::TryOp(..) => "TryOp",
+            Op::Elvis(..) => "Elvis",
+            Op::ElvisResult => "ElvisResult",
+            Op::Call { .. } => "Call",
+            Op::CallPath { .. } => "CallPath",
+            Op::CallMethod { .. } => "CallMethod",
+            Op::CallNative { .. } => "CallNative",
+            Op::Concat(..) => "Concat",
+            Op::FormatValue(..) => "FormatValue",
+            Op::DbQuery { .. } => "DbQuery",
+            Op::EnterScope => "EnterScope",
+            Op::ExitScope => "ExitScope",
+            Op::PopN { .. } => "PopN",
+            Op::DeferRecord => "DeferRecord",
+        }
+    }
+
+    /// Coarse class (see [`OpClass`]).
+    pub fn class(&self) -> OpClass {
+        match self {
+            Op::TakeSlot(..)
+            | Op::TakeVar(..)
+            | Op::VecPush { .. }
+            | Op::VecPushField { .. }
+            | Op::VecPushMethod { .. }
+            | Op::SetFieldTake { .. }
+            | Op::SetFieldIndexTake { .. }
+            | Op::StoreIndexTake { .. }
+            | Op::CompoundIndexTake { .. }
+            | Op::FieldBinopTake { .. }
+            | Op::GetFieldIndex { .. }
+            | Op::GetFieldSlotIdx { .. }
+            | Op::LenField { .. }
+            | Op::SlotAddInt { .. }
+            | Op::SlotInc { .. }
+            | Op::SlotAddIntImm { .. }
+            | Op::SlotSubIntImm { .. }
+            | Op::SlotMulIntImm { .. }
+            | Op::SlotLessIntSlot { .. }
+            | Op::SlotLessIntImm { .. }
+            | Op::SlotCmpIntSlot { .. }
+            | Op::SlotCmpIntImm { .. }
+            | Op::SlotCmpConst { .. }
+            | Op::SlotBinaryInt { .. }
+            | Op::SlotBinaryIntImm { .. }
+            | Op::PushSlotIntImm { .. }
+            | Op::JumpIfFalseSlotCmpIntImm { .. }
+            | Op::JumpIfFalseSlotCmpIntSlot { .. } => OpClass::Fused,
+
+            Op::IntAdd(..)
+            | Op::IntSub(..)
+            | Op::IntMul(..)
+            | Op::IntDiv(..)
+            | Op::IntRem(..)
+            | Op::IntNeg(..)
+            | Op::IntLt(..)
+            | Op::IntGt(..)
+            | Op::IntLe(..)
+            | Op::IntGe(..)
+            | Op::IntEq(..)
+            | Op::IntNe(..) => OpClass::IntOp,
+
+            Op::PushConst(..)
+            | Op::Pop
+            | Op::PopN { .. }
+            | Op::Swap
+            | Op::Truthy
+            | Op::LoadSlot(..)
+            | Op::StoreSlot(..)
+            | Op::LoadVar(..)
+            | Op::LoadPath(..)
+            | Op::StoreVar(..)
+            | Op::StorePath(..)
+            | Op::DefineVar(..)
+            | Op::EnterScope
+            | Op::ExitScope => OpClass::Stack,
+
+            Op::BinOp(..)
+            | Op::UnOp(..)
+            | Op::Concat(..)
+            | Op::FormatValue(..)
+            | Op::Elvis(..)
+            | Op::ElvisResult => OpClass::Arith,
+
+            Op::Jump(..)
+            | Op::JumpIfFalse(..)
+            | Op::JumpIfTrue(..)
+            | Op::JumpIfFalseBool(..)
+            | Op::Return
+            | Op::ForSetup { .. }
+            | Op::ForNext { .. }
+            | Op::WhileSetup { .. }
+            | Op::WhileCond { .. }
+            | Op::Break(..)
+            | Op::Continue(..)
+            | Op::SetLoopResult
+            | Op::Safepoint
+            | Op::MatchArm { .. }
+            | Op::MatchGuard { .. }
+            | Op::MatchError(..)
+            | Op::IfLetMatch { .. }
+            | Op::TryOp(..)
+            | Op::DeferRecord => OpClass::Control,
+
+            Op::Call { .. }
+            | Op::CallPath { .. }
+            | Op::CallMethod { .. }
+            | Op::CallNative { .. }
+            | Op::MakeFunc { .. }
+            | Op::MakeClosure { .. }
+            | Op::SpawnClosure { .. } => OpClass::Call,
+
+            Op::GetField(..)
+            | Op::GetFieldIdx(..)
+            | Op::SetField(..)
+            | Op::SetFieldIdx(..)
+            | Op::CompoundFieldOp { .. }
+            | Op::IndexOp(..)
+            | Op::IndexIntSlot { .. }
+            | Op::IndexDictInt { .. }
+            | Op::StoreIndexOp(..)
+            | Op::CompoundIndexOp { .. }
+            | Op::SliceOp(..)
+            | Op::ArrayPush(..)
+            | Op::UnpackTuple(..) => OpClass::Access,
+
+            Op::MakeArray(..)
+            | Op::MakeDict(..)
+            | Op::MakeRange(..)
+            | Op::MakeStruct { .. }
+            | Op::MakeEnum { .. }
+            | Op::MakeVariant { .. }
+            | Op::RegisterStruct { .. }
+            | Op::RegisterEnum { .. }
+            | Op::DbQuery { .. } => OpClass::Alloc,
+        }
+    }
 }

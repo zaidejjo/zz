@@ -10,13 +10,13 @@ enum Token {
 
 impl Token {
     func is_eof(self) -> bool {
-        match self {
+        return match self {
             .Eof => true
             _ => false
         }
     }
     func tag(self) -> str {
-        match self {
+        return match self {
             .Eof => "eof"
             .IntLit(_) => "int"
             .Name(_) => "name"
@@ -24,7 +24,7 @@ impl Token {
         }
     }
     func bump(self, n: int) -> int {
-        match self {
+        return match self {
             .Eof => n
             .IntLit(v) => v + n
             .Name(_) => -1
@@ -34,7 +34,7 @@ impl Token {
 }
 
 func describe(t: Token) -> str {
-    match t {
+    return match t {
         .Eof => "eof"
         .IntLit(_v) => "int"
         .Name(_s) => _s
@@ -53,7 +53,7 @@ enum ShapeWrap {
 }
 
 func describe_shape(w: ShapeWrap) -> int {
-    match w {
+    return match w {
         .S(.Circle(r)) => r,
         .S(_) => -1,
         .N(n) => n,

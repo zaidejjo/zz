@@ -315,6 +315,26 @@ pub struct VersionDetail {
     pub sha256: String,
     #[serde(default)]
     pub license: String,
+    /// Feature gates published with this version (#488). Legacy servers
+    /// omit the key; readers default to none.
+    #[serde(default)]
+    pub features: Vec<FeatureDetail>,
+}
+
+/// One published feature gate (`[features]` entry, #488).
+///
+/// The list form (`default = ["a", "b"]`) fills `enables`; the table
+/// form (`locales-ar = { modules = [...], deps = [...] }`) fills
+/// `modules`/`deps`. Empty vectors are omitted on the wire.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FeatureDetail {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
 }
 
 /// Registry metadata for a package (`GET /api/pkg/{name}`).
@@ -340,6 +360,9 @@ pub struct PackageMetadata {
     pub tarball_sha256: String,
     #[serde(default)]
     pub download_url: String,
+    /// Feature gates of the latest version (#488). Legacy servers omit it.
+    #[serde(default)]
+    pub features: Vec<FeatureDetail>,
 }
 
 /// Full `GET /api/pkg/{name}` response body.
@@ -362,6 +385,14 @@ pub struct PublishRequest {
     pub tarball_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readme_md: Option<String>,
+    /// Long-form docs (`DOCS.md`, else bundled `docs/**/*.md`), max 200KB.
+    /// Non-empty values overwrite; absent keeps website-edited docs (#395).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_md: Option<String>,
+    /// Stacked language bar (`{"ZZ": 82, "C": 18}`, max 8 entries,
+    /// values 0–100). Empty omits the key (#395).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub languages: std::collections::HashMap<String, f64>,
     #[serde(default)]
     pub deps: std::collections::HashMap<String, String>,
     #[serde(default)]
@@ -376,6 +407,10 @@ pub struct PublishRequest {
     /// Free-form discovery keywords.
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// Feature gates published with this version (#488). Optional in the
+    /// payload so older servers keep accepting requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<FeatureDetail>,
 }
 
 /// `POST /api/pkg/publish` success body.
@@ -490,6 +525,52 @@ pub(crate) mod tests {
         std::env::set_var("ZZ_REGISTRY", "https://example.com/");
         assert_eq!(registry_base(), "https://example.com");
         std::env::remove_var("ZZ_REGISTRY");
+    }
+
+    #[test]
+    fn version_detail_features_are_backward_compatible() {
+        // Legacy server payload: no `features` key anywhere.
+        let legacy = r#"{
+            "name": "pkg",
+            "latest": "1.0.0",
+            "author": "a",
+            "versions": ["1.0.0"],
+            "version_details": {"1.0.0": {"sha256": "x", "license": "MIT"}}
+        }"#;
+        let meta: PackageMetadata = serde_json::from_str(legacy).unwrap();
+        assert!(meta.features.is_empty());
+        assert!(meta.version_details["1.0.0"].features.is_empty());
+
+        // New payload: list + table shapes survive the wire.
+        let new = r#"{
+            "name": "pkg",
+            "latest": "1.1.0",
+            "author": "a",
+            "versions": ["1.1.0"],
+            "features": [
+                {"name": "default", "enables": ["std"]},
+                {"name": "locales-ar", "modules": ["locales/ar"], "deps": ["faker"]}
+            ],
+            "version_details": {"1.1.0": {"features": [
+                {"name": "locales-ar", "modules": ["locales/ar"], "deps": ["faker"]}
+            ]}}
+        }"#;
+        let meta: PackageMetadata = serde_json::from_str(new).unwrap();
+        assert_eq!(meta.features.len(), 2);
+        assert_eq!(meta.features[0].enables, vec!["std".to_string()]);
+        assert_eq!(meta.features[1].modules, vec!["locales/ar".to_string()]);
+        assert_eq!(
+            meta.version_details["1.1.0"].features[0].deps,
+            vec!["faker".to_string()]
+        );
+
+        // Empty vectors stay off the wire (old servers see the old shape).
+        let detail = FeatureDetail {
+            name: "alone".to_string(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&detail).unwrap();
+        assert!(!json.contains("modules") && !json.contains("deps"));
     }
 
     #[test]

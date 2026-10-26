@@ -43,7 +43,11 @@ pub(crate) fn len(
         // arrays, where `zz_len` already counts them).
         Some(Value::Tuple(vs)) => Ok(Value::Int(vs.len() as i64)),
         Some(Value::Bytes(b)) => Ok(Value::Int(b.len() as i64)),
-        Some(Value::Str(s)) => Ok(Value::Int(s.chars().count() as i64)),
+        Some(Value::Str(s)) => Ok(Value::Int(if s.is_ascii() {
+            s.len()
+        } else {
+            s.chars().count()
+        } as i64)),
         Some(Value::Dict(entries)) => Ok(Value::Int(entries.len() as i64)),
         Some(Value::Range(r)) => {
             let (start, stop, step) = (r.start, r.end, r.step);
@@ -111,7 +115,7 @@ pub(crate) fn map(
         let res = _interp.call(f.clone(), call_args, span)?;
         result.push(res);
     }
-    Ok(Value::Array(Box::new(result)))
+    Ok(Value::Array(std::sync::Arc::new(result)))
 }
 
 pub(crate) fn filter(
@@ -133,7 +137,7 @@ pub(crate) fn filter(
             result.push(item);
         }
     }
-    Ok(Value::Array(Box::new(result)))
+    Ok(Value::Array(std::sync::Arc::new(result)))
 }
 
 pub(crate) fn enumerate(
@@ -148,9 +152,12 @@ pub(crate) fn enumerate(
     )?;
     let mut result = Vec::with_capacity(items.len());
     for (i, item) in items.into_iter().enumerate() {
-        result.push(Value::Tuple(Box::new(vec![Value::Int(i as i64), item])));
+        result.push(Value::Tuple(std::sync::Arc::new(vec![
+            Value::Int(i as i64),
+            item,
+        ])));
     }
-    Ok(Value::Array(Box::new(result)))
+    Ok(Value::Array(std::sync::Arc::new(result)))
 }
 
 pub(crate) fn zip(
@@ -171,7 +178,10 @@ pub(crate) fn zip(
     let len = a.len().min(b.len());
     let mut result = Vec::with_capacity(len);
     for i in 0..len {
-        result.push(Value::Tuple(Box::new(vec![a[i].clone(), b[i].clone()])));
+        result.push(Value::Tuple(std::sync::Arc::new(vec![
+            a[i].clone(),
+            b[i].clone(),
+        ])));
     }
-    Ok(Value::Array(Box::new(result)))
+    Ok(Value::Array(std::sync::Arc::new(result)))
 }

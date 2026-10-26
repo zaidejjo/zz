@@ -1,0 +1,41 @@
+// features: assert, func-call, imports, locals, match, option-result, print, string-literal, fstrings, std-fs
+// E2E: std.test pro helpers — temp_dir + free_port (bare + test.*), cleanup via fs.
+import std.fs
+import std.test
+
+func main() {
+    d := ""
+    match test.temp_dir("zz-helper") {
+        .ok(v) => d = v
+        .err(_) => fail("temp_dir failed")
+    }
+    assert(fs.exists(d))
+    f := "{d}/hello.txt"
+    assert_is_ok(fs.write(f, "hi"))
+    assert(fs.exists(f))
+    assert_is_ok(fs.remove_dir_all(d))
+    assert(!fs.exists(d))
+    // bare spellings
+    d2 := ""
+    match temp_dir("zz-bare") {
+        .ok(v) => d2 = v
+        .err(_) => fail("temp_dir failed")
+    }
+    assert(fs.exists(d2))
+    assert_is_ok(fs.remove_dir_all(d2))
+    p := 0
+    match test.free_port() {
+        .ok(v) => p = v
+        .err(_) => fail("free_port failed")
+    }
+    assert_gt(p, 0)
+    assert_lt(p, 65536)
+    p2 := 0
+    match free_port() {
+        .ok(v) => p2 = v
+        .err(_) => fail("free_port failed")
+    }
+    assert_gt(p2, 0)
+    assert_lt(p2, 65536)
+    println("test_helpers_ok")
+}

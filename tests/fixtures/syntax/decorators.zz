@@ -34,18 +34,18 @@ func login_required(f: func(str) -> str) -> func(str) -> str {
 
 @logging
 func hello(name: str) -> str {
-    "hi {name}"
+    return "hi {name}"
 }
 
 @logging
 @route("/hello")
 func stacked(name: str) -> str {
-    "hi {name}"
+    return "hi {name}"
 }
 
 @login_required
 func secret(name: str) -> str {
-    "secret for {name}"
+    return "secret for {name}"
 }
 
 // Method decorators receive the method value (including `self`) explicitly.
@@ -63,7 +63,7 @@ struct Box { tag: str }
 impl Box {
     @mlogging
     func show(self, name: str) -> str {
-        "box {self.tag} {name}"
+        return "box {self.tag} {name}"
     }
 }
 

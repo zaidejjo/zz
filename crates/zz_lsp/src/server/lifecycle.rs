@@ -8,6 +8,24 @@ pub(crate) async fn handle_initialize(
     params: InitializeParams,
 ) -> Result<InitializeResult> {
     log::info!("zz-lsp initializing");
+    // File-creating edits need explicit client support: advertise
+    // move-to-file only when it will apply.
+    let create_supported = params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|w| w.workspace_edit.as_ref())
+        .is_some_and(|edit| {
+            edit.document_changes == Some(true)
+                && edit
+                    .resource_operations
+                    .as_ref()
+                    .is_some_and(|ops| ops.contains(&ResourceOperationKind::Create))
+        });
+    backend
+        .state
+        .create_supported
+        .store(create_supported, std::sync::atomic::Ordering::SeqCst);
     if let Some(folders) = &params.workspace_folders {
         if let Some(folder) = folders.first() {
             if let Ok(path) = folder.uri.to_file_path() {
@@ -44,12 +62,35 @@ pub(crate) async fn handle_initialize(
             code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
-            rename_provider: Some(OneOf::Left(true)),
+            rename_provider: Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            })),
             references_provider: Some(OneOf::Left(true)),
             document_highlight_provider: Some(OneOf::Left(true)),
+            code_lens_provider: Some(CodeLensOptions {
+                resolve_provider: Some(false),
+            }),
+            execute_command_provider: Some(ExecuteCommandOptions {
+                commands: vec![
+                    crate::test_lens::RUN_TEST_COMMAND.to_string(),
+                    crate::project_check::CHECK_PROJECT_COMMAND.to_string(),
+                ],
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            }),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
-                trigger_characters: Some(vec![".".to_string()]),
+                // `.` covers members; `(` selective imports + calls;
+                // `{` struct literals; `:` annotations. Editors that
+                // auto-request on keystrokes get everything regardless;
+                // these exist for clients (Neovim autotrigger) that only
+                // fire on trigger characters.
+                trigger_characters: Some(vec![
+                    ".".to_string(),
+                    "(".to_string(),
+                    "{".to_string(),
+                    ":".to_string(),
+                ]),
                 ..Default::default()
             }),
             signature_help_provider: Some(SignatureHelpOptions {
@@ -81,6 +122,7 @@ pub(crate) async fn handle_initialize(
 }
 
 pub(crate) async fn handle_initialized(backend: &Backend, _: InitializedParams) {
+    crate::watch::register_watches(&backend.client).await;
     backend
         .client
         .log_message(MessageType::INFO, "zz-lsp ready")

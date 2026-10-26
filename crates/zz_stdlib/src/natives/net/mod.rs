@@ -4,7 +4,6 @@ pub(crate) mod tls;
 pub(crate) mod unix;
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,27 +40,18 @@ pub(crate) fn tcp_connect(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    use std::net::ToSocketAddrs;
     let addr = expect_str(args, 0, "std.net.tcp_connect")?;
     let timeout_ms = expect_int(args, 1, "std.net.tcp_connect")? as u64;
     let timeout = Duration::from_millis(timeout_ms);
-    let socket_addr = match addr.to_socket_addrs() {
-        Ok(mut addrs) => addrs.next().ok_or_else(|| {
-            EvalError::new(format!("no addresses found for `{addr}`"), Span::new(0, 0))
-        })?,
-        Err(e) => {
-            return Ok(Value::Result(Box::new(Err(Value::Str(
-                format!("invalid address: {e}").into(),
-            )))))
-        }
-    };
-    match TcpStream::connect_timeout(&socket_addr, timeout) {
+    // System resolution, every address tried in order (#425, #426).
+    match zz_native_rt::dial::dial_multi(addr.as_str(), timeout) {
         Ok(stream) => Ok(Value::Result(Box::new(Ok(Value::TcpStream(Arc::new(
             Mutex::new(stream),
         )))))),
-        Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
-            format!("tcp_connect failed: {e}").into(),
-        ))))),
+        Err(msg) if msg.starts_with("no addresses found") => {
+            Err(EvalError::new(msg, Span::new(0, 0)))
+        }
+        Err(msg) => Ok(Value::Result(Box::new(Err(Value::Str(msg.into()))))),
     }
 }
 
@@ -297,8 +287,8 @@ pub(crate) fn tcp_write_bytes(
 
 /// `net.tcp_shutdown(stream: tcp.stream) -> Result<unit, str>`
 ///
-/// Real socket shutdown (`Shutdown::Both`): both directions stop, unlike
-/// `tcp_close`, which is a no-op kept for API completeness.
+/// Real socket shutdown (`Shutdown::Both`): both directions stop. Use
+/// `close`/`shutdown`; the legacy `tcp_close` no-op was removed.
 pub(crate) fn tcp_shutdown(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -322,19 +312,6 @@ pub(crate) fn tcp_shutdown(
             format!("tcp_shutdown failed: {e}").into(),
         ))))),
     }
-}
-
-/// `net.tcp_close(stream: tcp.stream) -> Result<bool, str>`
-///
-/// Legacy no-op (returns true): TCP streams close when dropped.
-/// Prefer `tcp_shutdown`/`close` for a real shutdown.
-pub(crate) fn tcp_close(
-    _interp: &mut Interp,
-    _args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    // The stream will be closed when the last Arc reference is dropped.
-    Ok(Value::Result(Box::new(Ok(Value::Bool(true)))))
 }
 
 /// `net.peer_addr(stream: tcp.stream) -> Result<str, str>`

@@ -57,57 +57,12 @@ fn build_stdlib_consts() -> std::collections::HashMap<String, f64> {
 }
 
 /// The set of known `std.*` module names (second path component).
-/// `sqlz` is the canonical SQLite module; `db` is a zero-overhead alias
-/// pointing directly at `std.sqlz` (see [`canonical_module`]).
-/// `sqlz.postgres` is the nested PostgreSQL wire-protocol submodule and
-/// `sqlz.mysql` the nested MySQL wire-protocol submodule
-/// (dotted keys; see the loader's multi-component handling).
-pub const STDLIB_MODULES: &[&str] = &[
-    "str",
-    "vec",
-    "json",
-    "http",
-    "fs",
-    "path",
-    "env",
-    "math",
-    "time",
-    "encoding",
-    "net",
-    "chan",
-    "task",
-    "regexp",
-    "crypto",
-    "log",
-    "sys",
-    "args",
-    "process",
-    "uuid",
-    "sqlz",
-    "db",
-    "sqlz.postgres",
-    "sqlz.mysql",
-    "colors",
-    "term",
-    "test",
-    "map",
-    "set",
-    "dec",
-    "bytes",
-    "csv",
-    "cell",
-    "unix",
-];
-
-/// Resolve a module name to its canonical backing module.
-/// Currently `db` is an alias for the canonical `sqlz` module; every
-/// other module is its own canonical name.
-pub fn canonical_module(module: &str) -> &str {
-    match module {
-        "db" => "sqlz",
-        _ => module,
-    }
-}
+/// Single-sourced from `zz_checker::STD_MODULES` — see there for the
+/// contract. Nested modules (`sqlz.postgres`) included; `sqlz` is the
+/// only SQLite module. Nested `postgres`/`mysql` are reachable only via
+/// `import std.sqlz.postgres` / `import std.sqlz.mysql` (optionally
+/// `as pg` / `as my`); bare `pg.*` / `my.*` do not resolve.
+pub use zz_checker::STD_MODULES as STDLIB_MODULES;
 
 /// Per-module direct members, precomputed once per process (#233).
 /// [`register_module_namespace`] used to scan the ENTIRE std func/native
@@ -191,7 +146,7 @@ fn split_std_key(key: &str) -> Option<(&str, &str)> {
     // `sqlz.postgres`, not `sqlz`.
     let mut best: Option<(&str, &str)> = None;
     for module in STDLIB_MODULES {
-        let canonical = canonical_module(module);
+        let canonical = module;
         if let Some(rest) = without_std.strip_prefix(canonical) {
             if let Some(rest) = rest.strip_prefix('.') {
                 if rest.is_empty() {
@@ -237,11 +192,9 @@ pub fn register_module_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    // `std.db` is a zero-overhead alias: importing it copies the canonical
-    // `std.sqlz.*` entries (identical sigs + fn pointers, no extra layer).
     // Members are precomputed once per process (#233): per import we walk
     // only this module's members instead of scanning the whole tables.
-    let source = canonical_module(module);
+    let source = module;
     let Some(members) = module_members_table().get(source) else {
         return Ok(Vec::new());
     };
@@ -282,9 +235,8 @@ pub fn register_selective_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    // Alias: selective `import std.db(open)` resolves against `std.sqlz.*`.
     // Borrow cached tables (no per-import rebuild); lookups only.
-    let prefix = format!("std.{}.", canonical_module(module));
+    let prefix = format!("std.{module}.");
     let std_funcs = crate::funcs::stdlib_funcs_cached();
     let std_natives = crate::natives::stdlib_natives_cached();
     let std_consts = stdlib_consts_cached();
@@ -329,10 +281,9 @@ pub fn register_wildcard_namespace(
     if !STDLIB_MODULES.contains(&module) {
         return Err(format!("unknown stdlib module `std.{module}`"));
     }
-    // Alias: wildcard `import std.db(*)` resolves against `std.sqlz.*`.
     // Members precomputed once per process (#233), same set as the old
     // full-table scan (direct members only — see `register_module_namespace`).
-    let Some(members) = module_members_table().get(canonical_module(module)) else {
+    let Some(members) = module_members_table().get(module) else {
         return Ok(Vec::new());
     };
     let mut inserted = Vec::with_capacity(members.funcs.len() + members.consts.len());

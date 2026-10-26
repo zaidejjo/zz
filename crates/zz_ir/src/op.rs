@@ -131,6 +131,22 @@ pub enum Op {
         field: StrId,
         op: BinOp,
     },
+    /// Pop an index then a value; take the home container out, write
+    /// `home[index] = value` in place, store it back. Fused `a[i] = v`:
+    /// the container stays uniquely owned across the write, so arrays and
+    /// dicts fill by index without deep-copying per element.
+    StoreIndexTake {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+    },
+    /// Pop an index and a right-hand side; take the home container out, read
+    /// `home[index]`, apply `op`, write the result back, store the home.
+    /// Fused `a[i] += v`.
+    CompoundIndexTake {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        op: BinOp,
+    },
     /// Pop an index; take the home, clone one element of the field,
     /// restore the home, push the element.
     GetFieldIndex {
@@ -143,6 +159,152 @@ pub enum Op {
         home_slot: Option<u16>,
         home_var: Option<StrId>,
         field: StrId,
+    },
+    /// Copy a struct field straight into slot `dst`: `dst = home.field`,
+    /// no container clone, no stack traffic.
+    GetFieldSlotIdx {
+        home_slot: Option<u16>,
+        home_var: Option<StrId>,
+        idx: u16,
+        dst: u16,
+    },
+    /// Read `array[idx]` where both operands are slots: single bounds
+    /// check, no tag loop. Result written to `dst`.
+    IndexIntSlot {
+        arr: u16,
+        idx: u16,
+        dst: u16,
+    },
+    /// Read `dict[key]` where key is an int slot: probes DictData.
+    /// Result written to `dst`.
+    IndexDictInt {
+        dict: u16,
+        key: u16,
+        dst: u16,
+    },
+
+    // ---- fused slot fast paths (carried from the VM compiler) ----
+    //
+    // The VM compiler emits these for hot locals (`x = x + 1` shapes).
+    // v3 carries them through the format instead of desugaring: the
+    // interpreter runs them natively, and desugaring cost the cached-run
+    // steady state ~2x on loop-shaped code (every iteration re-expanded
+    // to three extra stack ops). Each op is *exactly* the core sequence
+    // named in its doc comment — the sequence `lower` emitted before v3 —
+    // so `lower::expand_fused` restores that stream byte for byte for
+    // backends that re-specialize (the chunk→C emitter).
+    //
+    // The fast paths are guards, not types: a non-`Int` slot falls back to
+    // the generic op with `Span::default()` (see `vm::runtime`), so keeping
+    // them needs no type information and adds no semantics.
+    /// `slot[dst] = Int(slot[dst] + slot[src])`; desugars to
+    /// `LoadSlot dst; LoadSlot src; BinOp Add; StoreSlot dst`.
+    SlotAddInt {
+        dst: u16,
+        src: u16,
+    },
+    /// `slot[slot] = Int(slot[slot] + 1)`; desugars to
+    /// `LoadSlot s; PushConst 1; BinOp Add; StoreSlot s`.
+    SlotInc {
+        slot: u16,
+    },
+    /// `slot[dst] = Int(slot[dst] + imm)`; desugars to
+    /// `LoadSlot dst; PushConst imm; BinOp Add; StoreSlot dst`.
+    SlotAddIntImm {
+        dst: u16,
+        imm: i64,
+    },
+    /// `slot[dst] = Int(slot[dst] - imm)`; desugars to
+    /// `LoadSlot dst; PushConst imm; BinOp Sub; StoreSlot dst`.
+    SlotSubIntImm {
+        dst: u16,
+        imm: i64,
+    },
+    /// `slot[dst] = Int(slot[dst] * imm)`; desugars to
+    /// `LoadSlot dst; PushConst imm; BinOp Mul; StoreSlot dst`.
+    SlotMulIntImm {
+        dst: u16,
+        imm: i64,
+    },
+    /// Push `Bool(slot[a] < slot[b])`; desugars to
+    /// `LoadSlot a; LoadSlot b; BinOp Lt`.
+    SlotLessIntSlot {
+        a: u16,
+        b: u16,
+    },
+    /// Push `Bool(slot[a] < imm)`; desugars to
+    /// `LoadSlot a; PushConst imm; BinOp Lt`.
+    SlotLessIntImm {
+        a: u16,
+        imm: i64,
+    },
+    /// Push `Bool(slot[a] op slot[b])` for any comparison operator; desugars
+    /// to `LoadSlot a; LoadSlot b; BinOp op`.
+    SlotCmpIntSlot {
+        a: u16,
+        b: u16,
+        op: BinOp,
+    },
+    /// Push `Bool(slot[a] op imm)` for any comparison operator; desugars to
+    /// `LoadSlot a; PushConst imm; BinOp op`.
+    SlotCmpIntImm {
+        a: u16,
+        imm: i64,
+        op: BinOp,
+    },
+    /// Push `Bool(slot[a] op const c)`; desugars to
+    /// `LoadSlot a; PushConst c; BinOp op`. Used for non-`Int` literals,
+    /// which have no immediate form.
+    SlotCmpConst {
+        a: u16,
+        k: ConstId,
+        op: BinOp,
+    },
+    /// `slot[dst] = Int(slot[lhs] op slot[rhs])`; desugars to
+    /// `LoadSlot lhs; LoadSlot rhs; BinOp op; StoreSlot dst`.
+    SlotBinaryInt {
+        dst: u16,
+        lhs: u16,
+        rhs: u16,
+        op: BinOp,
+    },
+    /// `slot[dst] = Int(slot[lhs] op imm)`; desugars to
+    /// `LoadSlot lhs; PushConst imm; BinOp op; StoreSlot dst`.
+    SlotBinaryIntImm {
+        dst: u16,
+        lhs: u16,
+        imm: i64,
+        op: BinOp,
+    },
+    /// Push `Int(slot[a] op imm)`; desugars to
+    /// `LoadSlot a; PushConst imm; BinOp op`.
+    ///
+    /// Value-position arithmetic: `SlotBinaryIntImm` needs a destination
+    /// slot, so it cannot express `fib(n - 1)` in argument position.
+    PushSlotIntImm {
+        a: u16,
+        imm: i64,
+        op: BinOp,
+    },
+    /// Jump to `target` unless `Bool(slot[a] op imm)` holds; desugars to
+    /// `LoadSlot a; PushConst imm; BinOp op; JumpIfFalse`.
+    ///
+    /// The fused form of an `if` guard (`if i < n`): the compare's `Bool`
+    /// never reaches the stack. `while` tests keep the two-op shape, because
+    /// `WhileCond` carries the back-edge and `break` bookkeeping.
+    JumpIfFalseSlotCmpIntImm {
+        a: u16,
+        imm: i64,
+        op: BinOp,
+        target: u32,
+    },
+    /// Jump to `target` unless `Bool(slot[a] op slot[b])` holds; desugars to
+    /// `LoadSlot a; LoadSlot b; BinOp op; JumpIfFalse`.
+    JumpIfFalseSlotCmpIntSlot {
+        a: u16,
+        b: u16,
+        op: BinOp,
+        target: u32,
     },
 
     // ---- typed integer arithmetic (wrap; trap MIN/-1, MIN%-1, div0) ----
@@ -176,9 +338,20 @@ pub enum Op {
         num_vars: u8,
     },
     /// Advance a `for` loop or exit when exhausted.
+    ///
+    /// Loops are laid out rotated (v4): the test is the loop's last op
+    /// and jumps forward into the body, so a non-exhausted iteration
+    /// costs one dispatch instead of a test plus a back-edge `Jump`.
+    /// Backends that want the historical layout (`ForNext` header,
+    /// straight-line body, `Jump` back-edge) call
+    /// [`crate::lower::derotate_loops`] first.
     ForNext {
         vars: Vec<StrId>,
         exit: u32,
+        /// Body entry for a non-exhausted iteration. In the rotated
+        /// layout this precedes the op; in the historical layout it is
+        /// simply `pc + 1`.
+        body: u32,
         in_env: bool,
     },
     /// Push a `while` loop frame.
@@ -366,9 +539,29 @@ impl Op {
             Op::VecPushMethod { .. } => 13,
             Op::SetFieldTake { .. } => 75,
             Op::SetFieldIndexTake { .. } => 76,
+            Op::StoreIndexTake { .. } => 87,
+            Op::CompoundIndexTake { .. } => 88,
             Op::FieldBinopTake { .. } => 77,
             Op::GetFieldIndex { .. } => 78,
             Op::LenField { .. } => 79,
+            Op::GetFieldSlotIdx { .. } => 95,
+            Op::IndexIntSlot { .. } => 96,
+            Op::IndexDictInt { .. } => 97,
+            Op::SlotAddInt { .. } => 80,
+            Op::SlotInc { .. } => 81,
+            Op::SlotAddIntImm { .. } => 82,
+            Op::SlotSubIntImm { .. } => 99,
+            Op::SlotMulIntImm { .. } => 100,
+            Op::SlotLessIntSlot { .. } => 83,
+            Op::SlotLessIntImm { .. } => 84,
+            Op::SlotBinaryInt { .. } => 85,
+            Op::SlotBinaryIntImm { .. } => 86,
+            Op::SlotCmpIntSlot { .. } => 89,
+            Op::SlotCmpIntImm { .. } => 90,
+            Op::SlotCmpConst { .. } => 91,
+            Op::PushSlotIntImm { .. } => 92,
+            Op::JumpIfFalseSlotCmpIntImm { .. } => 93,
+            Op::JumpIfFalseSlotCmpIntSlot { .. } => 94,
             Op::IntAdd => 14,
             Op::IntSub => 15,
             Op::IntMul => 16,
@@ -452,9 +645,29 @@ impl Op {
             Op::VecPushMethod { .. } => "vecpushmethod",
             Op::SetFieldTake { .. } => "setfieldtake",
             Op::SetFieldIndexTake { .. } => "setfieldindextake",
+            Op::StoreIndexTake { .. } => "storeindextake",
+            Op::CompoundIndexTake { .. } => "compoundindextake",
             Op::FieldBinopTake { .. } => "fieldbinoptake",
             Op::GetFieldIndex { .. } => "getfieldindex",
             Op::LenField { .. } => "lenfield",
+            Op::GetFieldSlotIdx { .. } => "getfieldslotidx",
+            Op::IndexIntSlot { .. } => "indexintslot",
+            Op::IndexDictInt { .. } => "indexdictint",
+            Op::SlotAddInt { .. } => "slotaddint",
+            Op::SlotInc { .. } => "slotinc",
+            Op::SlotAddIntImm { .. } => "slotaddintimm",
+            Op::SlotSubIntImm { .. } => "slotsubintimm",
+            Op::SlotMulIntImm { .. } => "slotmulintimm",
+            Op::SlotLessIntSlot { .. } => "slotlessintslot",
+            Op::SlotLessIntImm { .. } => "slotlessintimm",
+            Op::SlotBinaryInt { .. } => "slotbinint",
+            Op::SlotBinaryIntImm { .. } => "slotbinintimm",
+            Op::SlotCmpIntSlot { .. } => "slotcmpintslot",
+            Op::SlotCmpIntImm { .. } => "slotcmpintimm",
+            Op::SlotCmpConst { .. } => "slotcmpconst",
+            Op::PushSlotIntImm { .. } => "pushslotintimm",
+            Op::JumpIfFalseSlotCmpIntImm { .. } => "jumpiffalseslotcmpintimm",
+            Op::JumpIfFalseSlotCmpIntSlot { .. } => "jumpiffalseslotcmpintslot",
             Op::IntAdd => "iadd",
             Op::IntSub => "isub",
             Op::IntMul => "imul",
@@ -515,6 +728,55 @@ impl Op {
             Op::EnterScope => "enterscope",
             Op::ExitScope => "exitscope",
             Op::DeferRecord => "defer",
+        }
+    }
+
+    /// Highest frame slot this op reads or writes; `None` when it names no
+    /// slot. Single source of truth for frame extents: lowering sizes the
+    /// locals table with it and the verifier re-checks the same set, so a
+    /// slot can never be named by an op and missed by the table. Covers
+    /// the ops that name slots directly — the home-carrying take ops name
+    /// one too, but always alongside the load/store their sequence opens
+    /// with, so they add nothing here (and adding them would resize
+    /// existing tables for no correctness gain).
+    pub fn slot_extent(&self) -> Option<u16> {
+        let mut max: Option<u16> = None;
+        self.for_each_slot(|s| max = Some(max.map_or(s, |m: u16| m.max(s))));
+        max
+    }
+
+    /// Call `f` with every frame slot this op reads or writes (order is
+    /// unspecified). [`Op::slot_extent`] is defined through this, so the
+    /// extents lowering and verification agree on are the same set by
+    /// construction.
+    pub fn for_each_slot(&self, mut f: impl FnMut(u16)) {
+        match self {
+            Op::LoadSlot(s) | Op::StoreSlot(s) | Op::SlotInc { slot: s } => f(*s),
+            Op::SlotAddInt { dst, src }
+            | Op::SlotLessIntSlot { a: dst, b: src }
+            | Op::SlotCmpIntSlot { a: dst, b: src, .. }
+            | Op::JumpIfFalseSlotCmpIntSlot { a: dst, b: src, .. } => {
+                f(*dst);
+                f(*src);
+            }
+            Op::SlotAddIntImm { dst, .. }
+            | Op::SlotSubIntImm { dst, .. }
+            | Op::SlotMulIntImm { dst, .. }
+            | Op::SlotLessIntImm { a: dst, .. }
+            | Op::SlotCmpIntImm { a: dst, .. }
+            | Op::PushSlotIntImm { a: dst, .. }
+            | Op::JumpIfFalseSlotCmpIntImm { a: dst, .. }
+            | Op::SlotCmpConst { a: dst, .. } => f(*dst),
+            Op::SlotBinaryInt { dst, lhs, rhs, .. } => {
+                f(*dst);
+                f(*lhs);
+                f(*rhs);
+            }
+            Op::SlotBinaryIntImm { dst, lhs, .. } => {
+                f(*dst);
+                f(*lhs);
+            }
+            _ => {}
         }
     }
 }

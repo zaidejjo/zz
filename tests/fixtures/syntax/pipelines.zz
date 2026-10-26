@@ -9,15 +9,15 @@ import std.str
 // E2E: Pipeline operator |>
 
 func double(n: int) -> int {
-    n * 2
+    return n * 2
 }
 
 func add_one(n: int) -> int {
-    n + 1
+    return n + 1
 }
 
 func negate(n: int) -> int {
-    -n
+    return -n
 }
 
 // basic pipeline
@@ -32,5 +32,15 @@ result := 10
     |> add_one
     |> double
 println(result)
+
+// pipeline with comments between links (#489): comment-only lines are
+// trivia and must not terminate the chain
+commented := 5
+    // double it
+    |> double
+    /* then bump it */
+    |> add_one // trailing comment stays on its link
+    |> double
+println(commented)
 
 println("pipe_ok")

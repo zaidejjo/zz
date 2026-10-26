@@ -170,7 +170,7 @@ fn generic_unbound_arith_errors_with_hint() {
 #[test]
 fn generic_ord_bound_comparison_ok() {
     let r = check_src(
-        "func min<T: Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nm := min(3, 7)",
+        "func min<T: Ord>(a: T, b: T) -> T { return if a < b { a } else { b } }\nm := min(3, 7)",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["m"], Type::Int);
@@ -202,7 +202,7 @@ fn generic_unbound_eq_errors_with_hint() {
 #[test]
 fn generic_multi_bound_ok() {
     let r = check_src(
-        "func minmax<T: Num + Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nm := minmax(1.5, 2.5)",
+        "func minmax<T: Num + Ord>(a: T, b: T) -> T { return if a < b { a } else { b } }\nm := minmax(1.5, 2.5)",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["m"], Type::Float);
@@ -211,7 +211,7 @@ fn generic_multi_bound_ok() {
 #[test]
 fn generic_call_site_bound_violation() {
     errors_contain(
-        "func min<T: Ord>(a: T, b: T) -> T { if a < b { a } else { b } }\nmin(true, false)",
+        "func min<T: Ord>(a: T, b: T) -> T { return if a < b { a } else { b } }\nmin(true, false)",
         "does not satisfy bound `Ord`",
     );
 }
@@ -257,7 +257,8 @@ fn generic_identity_still_works() {
 
 #[test]
 fn recursion_works() {
-    let r = check_src("func fact(n: int) -> int { if n <= 1 { 1 } else { n * fact(n - 1) } }");
+    let r =
+        check_src("func fact(n: int) -> int { return if n <= 1 { 1 } else { n * fact(n - 1) } }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
 
@@ -349,7 +350,7 @@ fn struct_embedding_direct_field_shadows_promoted() {
 #[test]
 fn struct_embedding_promoted_method_call() {
     let r = check_src(
-        "struct Base { id: int }\nimpl Base { func get(self) -> int { self.id } }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.get()",
+        "struct Base { id: int }\nimpl Base { func get(self) -> int { return self.id } }\nstruct User { Base, age: int }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.get()",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["z"], Type::Int);
@@ -358,7 +359,7 @@ fn struct_embedding_promoted_method_call() {
 #[test]
 fn struct_embedding_direct_method_shadows_promoted() {
     let r = check_src(
-        "struct Base { id: int }\nimpl Base { func who(self) -> str { \"base\" } }\nstruct User { Base, age: int }\nimpl User { func who(self) -> str { \"user\" } }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.who()",
+        "struct Base { id: int }\nimpl Base { func who(self) -> str { return \"base\" } }\nstruct User { Base, age: int }\nimpl User { func who(self) -> str { return \"user\" } }\nu := User{ Base: Base{ id: 1 }, age: 2 }\nz := u.who()",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["z"], Type::Str);
@@ -443,6 +444,45 @@ fn struct_unknown_type_errors() {
 }
 
 #[test]
+fn unknown_type_suggests_str_for_string() {
+    // `string` is not a ZZ type; the diagnostic must suggest `str`.
+    let r = check_src("func f() -> string { return \"x\" }");
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("unknown type `string` — did you mean `str`?")),
+        "expected `string` → `str` suggestion, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unknown_type_levenshtein_suggests_str() {
+    // A near-miss typo of `str` should suggest `str` via Levenshtein.
+    let r = check_src("func f() -> strng { return 1 }");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("did you mean `str`?")),
+        "expected `str` suggestion for `strng`, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unknown_type_no_suggestion_when_far() {
+    // A genuinely unrelated name should get the plain message, no hint.
+    let r = check_src("func f() -> qwerty { return 1 }");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message == "unknown type `qwerty`"),
+        "expected plain `unknown type` message, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn struct_self_reference_resolves() {
     // Recursive fields (behind arrays/options) resolve: the type name is
     // pre-registered before fields are collected.
@@ -465,7 +505,7 @@ fn enum_self_reference_resolves() {
 #[test]
 fn struct_in_func_signature() {
     let r = check_src(
-        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { p.x + p.y }\nz := dist(Point{ x: 1, y: 2 })",
+        "struct Point { x: int, y: int }\nfunc dist(p: Point) -> int { return p.x + p.y }\nz := dist(Point{ x: 1, y: 2 })",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["z"], Type::Int);
@@ -738,14 +778,28 @@ fn handled_result_statement_does_not_warn() {
 }
 
 #[test]
-fn block_tail_result_is_a_value_not_a_discard() {
-    // Tail expressions are the block's value (implicit return) — warning
-    // here would be a false positive on `-> Result` functions.
-    let r = check_src("func f() -> Result<int, str> { .ok(1) }");
+fn closure_tail_result_is_a_value_not_a_discard() {
+    // Closure bodies keep tail-value semantics (implicit return); warning
+    // here would be a false positive on `-> Result` closures.
+    let r = check_src("_f := || -> Result<int, str> { .ok(1) }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert!(
         !r.errors.iter().any(|d| d.message.contains("unused")),
         "tail value must not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn named_fn_tail_expression_is_discarded() {
+    // Named functions return values only through `return`: a bare tail
+    // expression is a discard, so the missing return is an error.
+    let r = check_src("func f() -> Result<int, str> { .ok(1) }");
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("can fall through")),
+        "expected missing-return error, got: {:?}",
         r.errors
     );
 }
@@ -871,6 +925,17 @@ fn string_literal_in_match_guard_errors() {
 }
 
 #[test]
+fn raw_strings_type_as_str() {
+    // #414: backtick delimiters don't change typing — raw literals are
+    // plain str in every position, single-line and triple.
+    let r = check_src("x := `{a} {1} C:\\new`");
+    assert_eq!(r.bindings["x"], Type::Str);
+    let r = check_src("x: str = `typed`");
+    assert_eq!(r.bindings["x"], Type::Str);
+    errors_contain("x: int = `not an int`", "type mismatch");
+}
+
+#[test]
 fn guarded_catchall_does_not_kill_next_arm() {
     let r = check_src("match 1 { _ if 1 > 0 => 0, 1 => 1 }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
@@ -982,14 +1047,14 @@ fn if_let_binds() {
 #[test]
 fn try_propagates_result() {
     let r = check_src(
-        "func div(a: int, b: int) -> Result<int, str> { if b == 0 { .err(\"z\") } else { .ok(a / b) } }\nfunc f(a: int, b: int) -> Result<int, str> { q := div(a, b)?; .ok(q) }",
+        "func div(a: int, b: int) -> Result<int, str> { return if b == 0 { .err(\"z\") } else { .ok(a / b) } }\nfunc f(a: int, b: int) -> Result<int, str> { q := div(a, b)?; return .ok(q) }",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
 
 #[test]
 fn try_on_option() {
-    let r = check_src("func f() -> Option<int> { x := .some(1)?; .some(x) }");
+    let r = check_src("func f() -> Option<int> { x := .some(1)?; return .some(x) }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
 
@@ -1067,6 +1132,105 @@ fn shadowing_allowed() {
     assert_eq!(r.bindings["x"], Type::Int);
 }
 
+/// #518: a loop-body `x := x + 1` declares a body-scoped `x` from the
+/// untouched outer value, so the loop never advances the outer binding.
+/// Warn (not error) and offer the `:=` → `=` fix.
+#[test]
+fn shadowed_decl_reading_outer_binding_warns() {
+    let src = "func main() {\n    x := 0\n    i := 0\n    while i < 3 {\n        x := x + 1\n        i = i + 1\n    }\n    x\n}";
+    let r = check_src(src);
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    let w = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("shadows the outer `x`"))
+        .expect("expected shadow warning");
+    assert!(
+        w.fixits.iter().any(|f| f.replacement == " = "),
+        "expected `:=` -> `=` fixit, got: {:?}",
+        w.fixits
+    );
+}
+
+/// The same shape through the loader path (module owner named) must not turn
+/// into an error, and plain same-scope redeclaration stays silent: `x := 1;
+/// x := x + 1` reads the binding it is about to replace, not an outer one.
+#[test]
+fn shadowed_decl_plain_rebinding_does_not_warn() {
+    for src in [
+        "func main() {\n    x := 0\n    x := x + 1\n    x\n}",
+        "func main() {\n    x := 0\n    while false {\n        x := 5\n    }\n    x\n}",
+    ] {
+        let r = check_src(src);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.message.contains("shadows the outer `x`")),
+            "unexpected shadow warning for {src:?}: {:?}",
+            r.errors
+        );
+    }
+}
+
+/// A binder *inside* the initializer (here a closure parameter) is not the
+/// shadowed binding, so the probe must stay quiet.
+#[test]
+fn shadowed_decl_closure_parameter_does_not_warn() {
+    let src = "func main() {\n    x := 0\n    while false {\n        x := (|x: int| x + 1)(2)\n    }\n    x\n}";
+    let r = check_src(src);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("shadows the outer `x`")),
+        "unexpected shadow warning: {:?}",
+        r.errors
+    );
+}
+
+/// An annotated declaration has no assignment form, so it warns with the note
+/// but without a one-token fix.
+#[test]
+fn shadowed_annotated_decl_warns_without_fix() {
+    let src =
+        "func main() {\n    x := 0\n    while false {\n        x: int = x + 1\n    }\n    x\n}";
+    let r = check_src(src);
+    let w = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("shadows the outer `x`"))
+        .expect("expected shadow warning");
+    assert!(
+        w.fixits.is_empty(),
+        "annotated form has no assignment: {:?}",
+        w.fixits
+    );
+}
+
+/// #518 real-world shape: `one, b := faker.first_name(b)` in a loop re-declares
+/// the body-scoped `b`. Destructuring cannot become an assignment, so the
+/// warning carries the split hint and no fix-it.
+#[test]
+fn shadowed_destructure_reading_outer_binding_warns() {
+    let src = "func pair(b: int) -> (str, int) {\n    return (\"x\", b + 1)\n}\n\nfunc main() {\n    b := 1\n    i := 0\n    while i < 3 {\n        one, b := pair(b)\n        i = i + 1\n    }\n    b\n}";
+    let r = check_src(src);
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    let w = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("shadows the outer `b`"))
+        .expect("expected destructuring shadow warning");
+    assert!(
+        w.fixits.is_empty(),
+        "no one-token fix exists: {:?}",
+        w.fixits
+    );
+    assert!(
+        w.notes.iter().any(|n| n.contains("p := ")),
+        "expected the split hint, got: {:?}",
+        w.notes
+    );
+}
+
 #[test]
 fn duplicate_func_errors() {
     errors_contain("func f() { 1 }\nfunc f() { 2 }", "duplicate definition");
@@ -1112,6 +1276,50 @@ fn array_type_mismatch_errors() {
 fn array_union_member_accepted() {
     let r = check_src("v: [int] = [1, \"a\"]");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn array_variant_payload_var_merges() {
+    // A bare `.none` carries an unbound payload variable. Merging it with a
+    // concrete sibling has to fold into that type (and bind the variable),
+    // in either element order — a union would strand the variable and the
+    // declaration was rejected with "cannot infer the type of `a`" (#533).
+    for src in ["a := [.some(1), .none]", "a := [.none, .some(1)]"] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src}: errors: {:?}", r.errors);
+        assert_eq!(
+            r.bindings["a"],
+            Type::Array(Box::new(Type::Option(Box::new(Type::Int)))),
+            "{src}"
+        );
+    }
+
+    // Same for the Result payload positions and for dict values.
+    let r = check_src("d := {\"x\": .some(5), \"y\": .none}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["d"],
+        Type::Dict(
+            Box::new(Type::Str),
+            Box::new(Type::Option(Box::new(Type::Int)))
+        )
+    );
+}
+
+#[test]
+fn array_variant_annotation_accepts_bare_none() {
+    for src in [
+        "a: [Option<int>] = [.some(1), .none]",
+        "a: [Option<int>] = [.none, .some(1)]",
+    ] {
+        let r = check_src(src);
+        assert!(!has_errors(&r), "{src}: errors: {:?}", r.errors);
+        assert_eq!(
+            r.bindings["a"],
+            Type::Array(Box::new(Type::Option(Box::new(Type::Int)))),
+            "{src}"
+        );
+    }
 }
 
 #[test]
@@ -1274,14 +1482,14 @@ fn dict_index_assign_ok() {
 
 #[test]
 fn pipe_type_checks() {
-    let r = check_src("func dbl(a: int, b: int) -> int { a * b }\nx := 5 |> dbl(3)");
+    let r = check_src("func dbl(a: int, b: int) -> int { return a * b }\nx := 5 |> dbl(3)");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["x"], Type::Int);
 }
 
 #[test]
 fn pipe_bare_name_type_checks() {
-    let r = check_src("func inc(n: int) -> int { n + 1 }\nx := 5 |> inc");
+    let r = check_src("func inc(n: int) -> int { return n + 1 }\nx := 5 |> inc");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["x"], Type::Int);
 }
@@ -1289,7 +1497,7 @@ fn pipe_bare_name_type_checks() {
 #[test]
 fn pipe_type_mismatch_errors() {
     errors_contain(
-        "func dbl(a: int, b: int) -> int { a * b }\nx := \"s\" |> dbl(3)",
+        "func dbl(a: int, b: int) -> int { return a * b }\nx := \"s\" |> dbl(3)",
         "type mismatch",
     );
 }
@@ -1297,7 +1505,7 @@ fn pipe_type_mismatch_errors() {
 #[test]
 fn pipe_chain_type_checks() {
     let r = check_src(
-        "func inc(n: int) -> int { n + 1 }\nfunc dbl(n: int) -> int { n * 2 }\nx := 5 |> inc |> dbl",
+        "func inc(n: int) -> int { return n + 1 }\nfunc dbl(n: int) -> int { return n * 2 }\nx := 5 |> inc |> dbl",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["x"], Type::Int);
@@ -1707,6 +1915,81 @@ fn used_variable_no_warning() {
 }
 
 #[test]
+fn unused_closure_param_no_warning() {
+    // Callback signatures are dictated by the callee: `.route(..., |req| ...)`
+    // cannot drop `req`, so an unread closure parameter is not a mistake.
+    let r = check_src("f := |req: int| \"x\"\ns := f(1)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|d| d.message.contains("unused variable `req`")),
+        "closure parameter must not warn: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_closure_param_no_warning() {
+    let r = check_src("f := |x: int| x + 1\ny := f(1)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|d| d.message.contains("unused variable `x`")),
+        "used closure parameter must not warn: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_named_param_still_warns() {
+    // Named-function parameters are the author's choice — keep warning.
+    let r = check_src("func f(a: int) -> int { return 1 }\nz := f(1)");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused variable `a`")),
+        "named parameter must still warn: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_local_warns_despite_same_name_used_elsewhere() {
+    // Binding-scoped tracking: reads of a *different* `x` in another
+    // function must not silence this function's unused `x`.
+    let r = check_src("func f() {\n    x := 1\n}\nfunc g() -> int {\n    x := 2\n    return x\n}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    let unused_x = r
+        .errors
+        .iter()
+        .filter(|d| d.message.contains("unused variable `x`"))
+        .count();
+    assert_eq!(
+        unused_x, 1,
+        "f's unused `x` must warn exactly once: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_inner_shadow_warns_with_outer_use() {
+    // The outer `x` is read, the inner shadow is not: only the inner one
+    // is unused. Name-level tracking used to hide both.
+    let r = check_src("x := 1\ny := x\nfunc f() {\n    x := 2\n}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("unused variable `x`")),
+        "inner shadow must warn: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn typo_suggestion_variable() {
     let mut funcs = HashMap::new();
     funcs.insert(
@@ -1958,13 +2241,120 @@ fn impl_method_without_pub_checkable() {
     let r = check_src(
         "struct Point { x: int, y: int }\n\
          impl Point {\n\
-         \x20   func dist(self) -> int { self.x + self.y }\n\
+         \x20   func dist(self) -> int { return self.x + self.y }\n\
          }\n\
          p := Point{ x: 1, y: 2 }\n\
          z := p.dist()",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     assert_eq!(r.bindings["z"], Type::Int);
+}
+
+// --- #500: `impl` method vs same-named free function in dot calls --------
+
+/// `w.get()` binds the receiver's own `impl` method. The two readings are
+/// type-distinguishable (free returns `str`, the method returns `int`), so
+/// the `int` binding only checks when the method won.
+#[test]
+fn impl_method_outranks_same_named_free_function() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         func get(w: W) -> str { return \"free\" }\n\
+         impl W { func get(self) -> int { return self.v } }\n\
+         w := W{ v: 1 }\n\
+         n: int = w.get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+/// Same precedence for a non-trivial base (`makeW().get()` reaches the
+/// parser as a `Field` callee, not a `Path`).
+#[test]
+fn impl_method_outranks_free_function_on_field_callee() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         func get(w: W) -> str { return \"free\" }\n\
+         impl W { func get(self) -> int { return self.v } }\n\
+         func mk() -> W { return W{ v: 1 } }\n\
+         n: int = mk().get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+/// Neither form is lost: the free function stays callable by name.
+#[test]
+fn free_function_still_reachable_by_name() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         func get(w: W) -> str { return \"free\" }\n\
+         impl W { func get(self) -> int { return self.v } }\n\
+         w := W{ v: 1 }\n\
+         s: str = get(w)",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["s"], Type::Str);
+}
+
+/// Receiver-implicit reading for receivers without an `impl` method of
+/// that name is untouched (`p.dist()` ≡ `dist(p)`).
+#[test]
+fn free_function_dot_form_still_resolves() {
+    let r = check_src(
+        "struct Point { x: int, y: int }\n\
+         func dist(p: Point) -> int { return p.x + p.y }\n\
+         p := Point{ x: 1, y: 2 }\n\
+         z := p.dist()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["z"], Type::Int);
+}
+
+/// The rule is keyed on the receiver's named type, not on whether the free
+/// signature happens to fit: a different receiver type still reaches its
+/// own method.
+#[test]
+fn impl_method_wins_for_a_different_receiver_type() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         struct X { v: int }\n\
+         func get(w: W) -> str { return \"free\" }\n\
+         impl X { func get(self) -> int { return self.v } }\n\
+         x := X{ v: 2 }\n\
+         n: int = x.get()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+/// A free signature needing more arguments than the call supplies does not
+/// block the receiver's own method either.
+#[test]
+fn impl_method_wins_over_a_wider_free_signature() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         func paint(w: W, shade: int) -> str { return \"free\" }\n\
+         impl W { func paint(self) -> int { return self.v } }\n\
+         w := W{ v: 1 }\n\
+         n: int = w.paint()",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["n"], Type::Int);
+}
+
+/// With no method to fall back to, the free signature is still reported
+/// (`x: X` against `get(w: W)`) — the mismatch is never swallowed.
+#[test]
+fn receiver_mismatch_without_method_still_errors() {
+    let r = check_src(
+        "struct W { v: int }\n\
+         struct X { v: int }\n\
+         func get(w: W) -> str { return \"free\" }\n\
+         x := X{ v: 2 }\n\
+         s: str = x.get()",
+    );
+    assert!(has_errors(&r), "expected a mismatch, got: {:?}", r.errors);
 }
 
 #[test]
@@ -1974,8 +2364,8 @@ fn impl_method_export_requires_pub() {
     let r = check_src(
         "struct Point { x: int, y: int }\n\
          impl Point {\n\
-         \x20   func priv_m(self) -> int { self.x }\n\
-         \x20   pub func pub_m(self) -> int { self.y }\n\
+         \x20   func priv_m(self) -> int { return self.x }\n\
+         \x20   pub func pub_m(self) -> int { return self.y }\n\
          }\n\
          p := Point{ x: 1, y: 2 }\n\
          a := p.priv_m()\n\
@@ -2267,7 +2657,7 @@ fn return_diverges_if_fallthrough_mismatch_rejected() {
     // n1: the `else` value path must match the return type even though
     // the `then` arm diverges via `return`.
     errors_contain(
-        "func f(c: bool) -> int {\n    if c {\n        return 1\n    } else {\n        \"hi\"\n    }\n}",
+        "func f(c: bool) -> int {\n    return if c {\n        return 1\n    } else {\n        \"hi\"\n    }\n}",
         "type mismatch",
     );
 }
@@ -2279,7 +2669,7 @@ fn return_diverges_missing_else_rejected() {
     // where any `return` anywhere skipped the body check entirely).
     errors_contain(
         "func f(c: bool) -> int {\n    if c {\n        return 1\n    }\n}",
-        "type mismatch",
+        "can fall through",
     );
 }
 
@@ -2288,7 +2678,7 @@ fn return_diverges_match_fallthrough_mismatch_rejected() {
     // n7: match version of n1 — the value arm must match the return type
     // even though the other arm diverges.
     errors_contain(
-        "func f(x: int) -> int {\n    match x {\n        0 => {\n            return 10\n        },\n        _ => {\n            \"negative\"\n        },\n    }\n}",
+        "func f(x: int) -> int {\n    return match x {\n        0 => {\n            return 10\n        },\n        _ => {\n            \"negative\"\n        },\n    }\n}",
         "type mismatch",
     );
 }
@@ -2346,7 +2736,7 @@ fn match_return_in_if_accepted() {
     // Original bug 2 shape: match with returns nested in `if`, falling
     // through to a tail value of the right type.
     let r = check_src(
-        "struct E { msg: str }\nfunc inner(x: int) -> Result<int, E> {\n    if x < 0 {\n        return .err(E{msg: \"neg\"})\n    }\n    .ok(x)\n}\nfunc outer(x: int) -> Result<int, E> {\n    if x > 100 {\n        r := inner(x)\n        match r {\n            .ok(v) => {\n                return .ok(v + 1)\n            },\n            .err(e) => {\n                return .err(e)\n            },\n        }\n    }\n    .ok(x)\n}",
+        "struct E { msg: str }\nfunc inner(x: int) -> Result<int, E> {\n    if x < 0 {\n        return .err(E{msg: \"neg\"})\n    }\n    return .ok(x)\n}\nfunc outer(x: int) -> Result<int, E> {\n    if x > 100 {\n        r := inner(x)\n        match r {\n            .ok(v) => {\n                return .ok(v + 1)\n            },\n            .err(e) => {\n                return .err(e)\n            },\n        }\n    }\n    return .ok(x)\n}",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
@@ -2356,7 +2746,7 @@ fn trailing_if_in_else_accepted() {
     // Original bug 4 shape: trailing guard-`if` with returns as an else
     // tail, falling through to a tail value of the right type.
     let r = check_src(
-        "struct E { msg: str }\nfunc f(k: str, n: int) -> Result<int, E> {\n    cur := 0\n    if k == \"table\" {\n        cur = 1\n    } else {\n        if k != \"array\" {\n            return .err(E{msg: \"bad\"})\n        }\n        cur = n\n        if cur > 10 {\n            return .err(E{msg: \"big\"})\n        }\n    }\n    .ok(cur)\n}",
+        "struct E { msg: str }\nfunc f(k: str, n: int) -> Result<int, E> {\n    cur := 0\n    if k == \"table\" {\n        cur = 1\n    } else {\n        if k != \"array\" {\n            return .err(E{msg: \"bad\"})\n        }\n        cur = n\n        if cur > 10 {\n            return .err(E{msg: \"big\"})\n        }\n    }\n    return .ok(cur)\n}",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
@@ -2366,8 +2756,10 @@ fn unused_warnings_emit_in_source_order() {
     // Unused-variable warnings must be source-ordered, not HashMap
     // order: the dual-engine parity harness diffs stderr across two
     // separate `zz` processes (different hash seeds). Names are chosen
-    // so alphabetical order disagrees with source order.
-    let r = check_src("func f() {\n    zzz := 1\n    aaa := 2\n}");
+    // so alphabetical order disagrees with source order. End with
+    // `println` so the tail is unit and doesn't trigger the
+    // implicit-return warning (#606).
+    let r = check_src("func f() {\n    zzz := 1\n    aaa := 2\n    println(\"x\")\n}");
     let warns: Vec<&str> = r
         .errors
         .iter()
@@ -2568,11 +2960,11 @@ fn generic_struct_nested() {
 #[test]
 fn generic_struct_methods() {
     let r = check_src(
-        "struct Box<T> { v: T }\nimpl Box<T> { func get(self) -> T { self.v } }\nb := Box{ v: 42 }\nx: int = b.get()",
+        "struct Box<T> { v: T }\nimpl Box<T> { func get(self) -> T { return self.v } }\nb := Box{ v: 42 }\nx: int = b.get()",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
     errors_contain(
-        "struct Box<T> { v: T }\nimpl Box<T> { func get(self) -> T { self.v } }\nb := Box{ v: 42 }\nx: str = b.get()",
+        "struct Box<T> { v: T }\nimpl Box<T> { func get(self) -> T { return self.v } }\nb := Box{ v: 42 }\nx: str = b.get()",
         "type mismatch",
     );
 }
@@ -2596,7 +2988,7 @@ fn generic_struct_arity_errors() {
 #[test]
 fn generic_struct_impl_mismatch() {
     errors_contain(
-        "struct Box<T> { v: T }\nimpl Box { func get(self) -> int { self.v } }",
+        "struct Box<T> { v: T }\nimpl Box { func get(self) -> int { return self.v } }",
         "expected `impl",
     );
     errors_contain(
@@ -2627,7 +3019,7 @@ fn cross_module_inferred_ret_resolves_on_export() {
     assert_eq!(ping.ret, Type::Unit, "exported ret must resolve to unit");
     let mut seed = HashMap::new();
     seed.insert("n.ping".to_string(), ping);
-    let main = "func main() -> [str] {\n    stop := false\n    if stop {\n        n.ping()\n    }\n    []\n}";
+    let main = "func main() -> [str] {\n    stop := false\n    if stop {\n        n.ping()\n    }\n    return []\n}";
     let r = check_src_with_funcs(main, seed);
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
@@ -2637,12 +3029,12 @@ fn cross_module_nonunit_block_still_rejected() {
     // A single-branch `if` whose body yields a non-unit value is still an
     // error — including for cross-module calls. Only the spurious
     // var-collision failure above was fixed.
-    let dep = check_src("pub func zstr() -> str { \"s\" }");
+    let dep = check_src("pub func zstr() -> str { return \"s\" }");
     assert!(!has_errors(&dep), "errors: {:?}", dep.errors);
     let zstr = dep.pub_funcs.get("zstr").expect("pub zstr").clone();
     let mut seed = HashMap::new();
     seed.insert("o.zstr".to_string(), zstr);
-    let main = "func main() -> [str] {\n    out: [str] = []\n    stop := false\n    if stop {\n        o.zstr()\n    }\n    out\n}";
+    let main = "func main() -> [str] {\n    out: [str] = []\n    stop := false\n    if stop {\n        o.zstr()\n    }\n    return out\n}";
     let r = check_src_with_funcs(main, seed);
     let errs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
     assert!(
@@ -2710,7 +3102,7 @@ fn local_db_method_call_reads_as_method() {
 #[test]
 fn enum_construction_and_match() {
     let r = check_src_with_funcs(
-        "enum Token { Eof, IntLit(int) }\nfunc f(t: Token) -> str {\n    match t {\n        .Eof => \"eof\",\n        .IntLit(_v) => \"int\",\n    }\n}\nfunc main() {\n    t := Token.IntLit(1)\n    println(f(t))\n    println(f(Token.Eof))\n}\n",
+        "enum Token { Eof, IntLit(int) }\nfunc f(t: Token) -> str {\n    return match t {\n        .Eof => \"eof\",\n        .IntLit(_v) => \"int\",\n    }\n}\nfunc main() {\n    t := Token.IntLit(1)\n    println(f(t))\n    println(f(Token.Eof))\n}\n",
         print_test_funcs(),
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
@@ -2763,7 +3155,7 @@ fn enum_duplicate_reports() {
 #[test]
 fn enum_impl_method_resolves() {
     let r = check_src_with_funcs(
-        "enum Token { Eof, IntLit(int) }\nimpl Token {\n    func is_eof(self) -> bool {\n        match self {\n            .Eof => true,\n            _ => false,\n        }\n    }\n}\nfunc main() {\n    _b := Token.Eof.is_eof()\n}\n",
+        "enum Token { Eof, IntLit(int) }\nimpl Token {\n    func is_eof(self) -> bool {\n        return match self {\n            .Eof => true,\n            _ => false,\n        }\n    }\n}\nfunc main() {\n    _b := Token.Eof.is_eof()\n}\n",
         print_test_funcs(),
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
@@ -2781,7 +3173,7 @@ fn enum_generic_inference() {
 #[test]
 fn enum_generic_pattern_binds_payload() {
     let r = check_src(
-        "enum Box<T> { V(T), E }\nfunc f<T>(b: Box<T>) -> T {\n    match b {\n        .V(v) => v,\n        .E => f(Box.E),\n    }\n}\n",
+        "enum Box<T> { V(T), E }\nfunc f<T>(b: Box<T>) -> T {\n    return match b {\n        .V(v) => v,\n        .E => f(Box.E),\n    }\n}\n",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
@@ -2829,7 +3221,7 @@ fn result_matched_with_some_suggests_ok() {
 #[test]
 fn unwrapped_result_at_return_suggests_fixes() {
     let r = check_src(
-        "func f() -> Result<int, str> { .ok(1) }\nfunc g() -> int {\n    t := f()\n    t\n}",
+        "func f() -> Result<int, str> { return .ok(1) }\nfunc g() -> int {\n    t := f()\n    return t\n}",
     );
     let msgs: Vec<String> = r.errors.iter().map(|e| e.message.clone()).collect();
     assert!(
@@ -2849,7 +3241,7 @@ fn match_mismatch_binds_no_cascade() {
     // Root mismatch errors only: payload names bind as Error so their uses
     // stay silent (#246).
     let r = check_src(
-        "func div(a: int, b: int) -> int { a / b }\nfunc main() {\n    r := div(1, 1)\n    match r {\n        .ok(v) => v\n        .err(e) => e\n    }\n}",
+        "func div(a: int, b: int) -> int { return a / b }\nfunc main() {\n    r := div(1, 1)\n    match r {\n        .ok(v) => v\n        .err(e) => e\n    }\n}",
     );
     let errs: Vec<String> = r
         .errors
@@ -2934,7 +3326,7 @@ fn param_shadowing_module_name_warns() {
     // #376: a param named after its own module shadows the namespace
     // object, so same-module helper calls fail at runtime while the
     // check stays green. Must warn (not error) with a rename fix.
-    let r = check_src_with_module_ns("func parse(fen: str) -> str {\n    fen\n}", "fen");
+    let r = check_src_with_module_ns("func parse(fen: str) -> str {\n    return fen\n}", "fen");
     assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
     let w = r
         .errors
@@ -2951,7 +3343,10 @@ fn param_shadowing_module_name_warns() {
 #[test]
 fn local_shadowing_module_name_warns() {
     // #361: `lib9 := []` inside `lib9` breaks `helper(...)` at runtime.
-    let r = check_src_with_module_ns("func outer() -> int {\n    lib9 := 1\n    lib9\n}", "lib9");
+    let r = check_src_with_module_ns(
+        "func outer() -> int {\n    lib9 := 1\n    return lib9\n}",
+        "lib9",
+    );
     assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
     assert!(
         r.errors
@@ -2967,7 +3362,7 @@ fn binding_shadowing_imported_namespace_warns() {
     // Same hazard through imports: a local named `vec` hides
     // `vec.push` resolution the same way.
     let r = check_src_with_module_ns(
-        "import std.vec\nfunc f() -> int {\n    vec := 1\n    vec\n}",
+        "import std.vec\nfunc f() -> int {\n    vec := 1\n    return vec\n}",
         "m",
     );
     assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
@@ -2995,7 +3390,7 @@ fn unrelated_names_do_not_shadow_warn() {
 #[test]
 fn shadow_lint_needs_module_owner() {
     // Without a module owner (REPL, merged programs) nothing fires.
-    let r = check_src("func parse(fen: str) -> str {\n    fen\n}");
+    let r = check_src("func parse(fen: str) -> str {\n    return fen\n}");
     assert!(
         !r.errors
             .iter()
@@ -3327,7 +3722,7 @@ fn branch_trailing_call_bound_is_fine() {
 
 #[test]
 fn branch_unit_tail_is_fine() {
-    let r = check_src("func probe(hist: [int]) -> bool {\n    side := 1\n    if side != 0 {\n        side = side + 1\n    }\n    true\n}");
+    let r = check_src("func probe(hist: [int]) -> bool {\n    side := 1\n    if side != 0 {\n        side = side + 1\n    }\n    return true\n}");
     assert!(
         !r.errors.iter().any(|e| e.message.contains("discarded")),
         "no discarded error expected, got: {:?}",
@@ -3355,4 +3750,452 @@ fn if_let_trailing_call_reports_at_call() {
         "must point at the call, got: {:?}",
         e.span
     );
+}
+
+#[test]
+fn unimported_std_module_suggests_import() {
+    let r = check_src("y := math.sin(1.0)");
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("undefined variable `math.sin`"))
+        .expect("expected undefined math.sin error");
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("add `import std.math`")),
+        "expected import hint, got notes: {:?}",
+        diag.notes
+    );
+    let fixit = diag
+        .fixits
+        .iter()
+        .find(|f| f.message == "add import")
+        .expect("expected add-import fixit");
+    assert_eq!(fixit.replacement, "import std.math\n");
+}
+
+#[test]
+fn unknown_root_gets_no_import_suggestion() {
+    // `wat` is no std module: typo machinery only, never an import hint.
+    let r = check_src("y := wat.sin(1.0)");
+    assert!(
+        r.errors
+            .iter()
+            .all(|e| e.fixits.iter().all(|f| f.message != "add import")),
+        "no import fixit for unknown modules: {:?}",
+        r.errors
+    );
+}
+
+/// A variant constructor with an unconstrained payload position keeps its
+/// outer constructor in the span map (payloads default to `unit`, exactly as
+/// annotated declarations are validated). Method dispatch reads the outer
+/// type: dropping the entry made `.ok(42).unwrap_or(0)` resolve the
+/// `option.unwrap_or` twin in the AOT while the VM dispatched on the value
+/// (#505).
+#[test]
+fn bare_variant_constructor_keeps_outer_type_in_span_map() {
+    fn span_types_of(src: &str) -> Vec<Type> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let (_checked, span_types) = zz_checker::check_program_typed(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        span_types.into_values().collect()
+    }
+
+    let ok = span_types_of("func main() {\n    r := .ok(42)\n}");
+    assert!(
+        ok.iter()
+            .any(|t| matches!(t, Type::Result(a, b) if **a == Type::Int && **b == Type::Unit)),
+        "`.ok(42)` must record `Result<int, unit>`, got {ok:?}"
+    );
+
+    let err = span_types_of("func main() {\n    e := .err(\"boom\")\n}");
+    assert!(
+        err.iter()
+            .any(|t| matches!(t, Type::Result(a, b) if **a == Type::Unit && **b == Type::Str)),
+        "`.err(\"boom\")` must record `Result<unit, str>`, got {err:?}"
+    );
+
+    let none = span_types_of("func main() {\n    n := .none\n}");
+    assert!(
+        none.iter()
+            .any(|t| matches!(t, Type::Option(x) if **x == Type::Unit)),
+        "`.none` must record `Option<unit>`, got {none:?}"
+    );
+}
+
+// --- explicit return for named functions ----------------------------------
+
+#[test]
+fn explicit_return_tail_ok() {
+    let r = check_src("func f() -> int { return 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.funcs.get("f").unwrap().ret, Type::Int);
+}
+
+#[test]
+fn all_paths_return_without_tail_ok() {
+    let r = check_src("func f(c: bool) -> int {\n    if c {\n        return 1\n    } else {\n        return 2\n    }\n}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn infinite_while_that_returns_does_not_fall_through() {
+    let r = check_src("func f() -> int {\n    while true {\n        return 7\n    }\n}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn infinite_while_with_break_still_falls_through() {
+    let r = check_src("func f() -> int {\n    while true {\n        break\n    }\n}");
+    assert!(
+        r.errors
+            .iter()
+            .any(|d| d.message.contains("can fall through")),
+        "a break can leave the loop, so the tail must be flagged: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn missing_return_offers_insertion_fixit() {
+    let src = "func f() -> int {\n    1 + 2\n}";
+    let r = check_src(src);
+    let diag = r
+        .errors
+        .iter()
+        .find(|d| d.message.contains("can fall through"))
+        .unwrap_or_else(|| panic!("expected missing-return error, got: {:?}", r.errors));
+    let fix = diag
+        .fixits
+        .iter()
+        .find(|f| f.replacement == "return ")
+        .expect("missing-return must offer an insertion fixit");
+    assert_eq!(
+        fix.span.start, fix.span.end,
+        "insertion fixit is empty-span"
+    );
+    assert_eq!(
+        &src[fix.span.to_range()],
+        "",
+        "fixit inserts at the tail start"
+    );
+}
+
+#[test]
+fn missing_return_without_else_has_no_unsafe_fixit() {
+    // `return if c { 1 }` would still fall through: an `if` without an
+    // `else` yields unit, so offering the insertion would just trade one
+    // error for another.
+    let src = "func f(c: bool) -> int {\n    if c {\n        1\n    }\n}";
+    let r = check_src(src);
+    let diag = r
+        .errors
+        .iter()
+        .find(|d| d.message.contains("can fall through"))
+        .unwrap_or_else(|| panic!("expected missing-return error, got: {:?}", r.errors));
+    assert!(
+        !diag.fixits.iter().any(|f| f.replacement == "return "),
+        "if-without-else must not get a `return ` fixit: {:?}",
+        diag.fixits
+    );
+}
+
+#[test]
+fn missing_return_unit_tail_has_no_fixit() {
+    // `return g()` would still be `unit` in an `-> int` function.
+    let src = "func g() {}\nfunc f() -> int {\n    g()\n}";
+    let r = check_src(src);
+    let diag = r
+        .errors
+        .iter()
+        .find(|d| d.message.contains("can fall through"))
+        .unwrap_or_else(|| panic!("expected missing-return error, got: {:?}", r.errors));
+    assert!(
+        !diag.fixits.iter().any(|f| f.replacement == "return "),
+        "unit tail must not get a `return ` fixit: {:?}",
+        diag.fixits
+    );
+}
+
+#[test]
+fn missing_return_points_at_tail_expression() {
+    let src = "func f() -> int {\n    1 + 2\n}";
+    let r = check_src(src);
+    let diag = r
+        .errors
+        .iter()
+        .find(|d| d.message.contains("can fall through"))
+        .expect("missing-return error");
+    let span = diag.span.expect("missing-return must carry a span");
+    assert_eq!(&src[span.to_range()], "1 + 2");
+}
+
+#[test]
+fn unannotated_fallthrough_stays_unit() {
+    // No annotation: the fall-through makes the signature `unit`; there is
+    // nothing to return, so this is not a missing-return error.
+    let r = check_src("pub func f() { 1 }");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    // Exported signatures are deep-resolved; the fall-through unit wins.
+    assert_eq!(r.pub_funcs.get("f").unwrap().ret, Type::Unit);
+}
+
+#[test]
+fn implicit_return_type_warns_on_value_tail() {
+    // No `->` annotation but the body yields a value: should warn that it is discarded.
+    let r = check_src("func greet(name: str) { \"Hello, {name}\" }");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        warns
+            .iter()
+            .any(|m| m.contains("no `->` return type") && m.contains("discarded")),
+        "expected implicit-return warning, got: {warns:?}"
+    );
+}
+
+#[test]
+fn implicit_return_type_no_warn_on_unit_tail() {
+    // No `->` annotation and body yields unit: no warning.
+    let r = check_src("func greet(name: str) { println(\"Hello, {name}\") }");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("no `->` return type")),
+        "should not warn on unit tail: {warns:?}"
+    );
+}
+
+#[test]
+fn explicit_return_type_no_implicit_warning() {
+    // With `-> int` annotation and value tail: error (missing return), not the implicit warning.
+    let r = check_src("func greet(name: str) -> int { \"Hello, {name}\" }");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("no `->` return type")),
+        "should not warn when return type is explicit: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_module_head_shadows_warns() {
+    // Importing a module whose head collides with a std module head
+    // should warn at the import site when a module namespace is set.
+    let r = check_src_with_module_ns("import args", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        warns.iter().any(|m| m.contains("shadowing the std module")),
+        "expected std-module shadow warning, got: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_module_head_with_alias_no_warn() {
+    // Aliasing the import avoids the shadow warning.
+    let r = check_src_with_module_ns("import args as myargs", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
+        "aliased import should not warn: {warns:?}"
+    );
+}
+
+#[test]
+fn import_non_std_module_head_no_warn() {
+    // Importing a module whose head is not a std module should not warn.
+    let r = check_src_with_module_ns("import mycustommod", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
+        "non-std module import should not warn: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_head_no_module_ns_no_warn() {
+    // Without a module namespace (e.g. stdlib internals), no shadow warning.
+    let r = check_src("import args");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
+        "no module_ns should not warn: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_head_selective_no_warn() {
+    // Selective import binds only the named items, not the head: no shadow
+    // warning (#630).
+    let r = check_src_with_module_ns("import std.str(split)", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
+        "selective import should not warn: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_head_full_warns_with_fixit() {
+    // Full import binds the head: warn + auto-applicable alias fixit (#630).
+    let r = check_src_with_module_ns("import std.str", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        warns.iter().any(|m| m.contains("shadowing the std module")),
+        "expected std-module shadow warning, got: {warns:?}"
+    );
+    let fixit = r
+        .errors
+        .iter()
+        .flat_map(|d| d.fixits.iter())
+        .find(|f| f.replacement == "import std.str as str_mod")
+        .expect("expected safe alias fixit");
+    assert_eq!(fixit.safety, zz_frontend::diag::FixSafety::Safe);
+}
+
+#[test]
+fn return_if_expression_checks() {
+    let r = check_src("func f(c: bool) -> int {\n    return if c { 1 } else { 2 }\n}");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn return_match_expression_checks() {
+    let r = check_src(
+        "enum E { A, B }\nfunc f(e: E) -> int {\n    return match e {\n        .A => 1,\n        .B => 2,\n    }\n}",
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn named_fn_tail_result_warns_unused_and_missing_return() {
+    let r = check_src("func f() -> Result<int, str> { .ok(1) }");
+    let msgs: Vec<&str> = r.errors.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("unused `Result`")),
+        "discarded tail must warn: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("can fall through")),
+        "discarded tail must be a missing return: {msgs:?}"
+    );
+}
+
+#[test]
+fn discard_assign_checks_cleanly() {
+    // `_ = compute()` — discard the result of a function call.
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "compute".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Int,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    let r = check_src_with_funcs(
+        "func f() -> int {\n    _ = compute()\n    return 2\n}",
+        funcs,
+    );
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn discard_assign_type_is_unit() {
+    // A bare `_ = expr` statement is a discard statement.
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "compute".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Str,
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    let r = check_src_with_funcs("_ = compute()", funcs);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+}
+
+#[test]
+fn discard_assign_discards_result_type() {
+    // `_ = compute()` discards even a Result value without a must-use
+    // warning — the discard is explicit.
+    let mut funcs = HashMap::new();
+    funcs.insert(
+        "compute".to_string(),
+        FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+            is_extern: false,
+            extern_c_symbol: None,
+        },
+    );
+    let r = check_src_with_funcs("_ = compute()", funcs);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }

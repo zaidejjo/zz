@@ -7,7 +7,7 @@ func f3(p4: int) -> int {
     if p4 < 0 {
         return 45
     }
-    (18 - v1)
+    return (18 - v1)
 }
 acc5 := 0
 for _i6 in 5..9 {

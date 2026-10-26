@@ -1,0 +1,188 @@
+// Pure-ZZ property testing: seeded generators + shrinking.
+// Module: std.property
+//
+// Values derive from (seed, index) pairs through a Park-Miller LCG, so
+// every run with the same seed produces the same cases. Falsifying cases
+// shrink toward minimal ones before the failure aborts with the seed for
+// replay. No engine support needed: plain loops calling plain functions.
+
+// LCG state range is [1, 2147483646] (2^31 - 1 prime modulus);
+// products stay far below i64 range, so wrapping never skews the stream.
+
+// Normalize any int into [1, 2147483646] (the LCG state range).
+
+func property.norm_state(s: int) -> int {
+    m := 2147483646
+    return ((s % m) + m) % m + 1
+}
+
+// One LCG step: state in [1, 2147483646].
+
+func property.step(state: int) -> int {
+    s := property.norm_state(state)
+    return s * 48271 % 2147483647
+}
+
+// Independent substream for case index i: mix the seed with a hashed
+// stride, then step once. Wrapping is deterministic.
+
+func property.stream(seed: int, i: int) -> int {
+    return property.step(seed + i * 2654435761)
+}
+
+// Canonical seed shape (nonzero LCG state).
+
+func property.seed(n: int) -> int {
+    return property.norm_state(n)
+}
+
+// Uniform int in [lo, hi]. Reversed bounds are swapped (total function).
+
+func property.int_in(seed: int, i: int, lo: int, hi: int) -> int {
+    a := lo
+    b := hi
+    if b < a {
+        a = hi
+        b = lo
+    }
+    span := b - a + 1
+    return a + property.stream(seed, i) % span
+}
+
+// Uniform int in [0, n). n <= 0 yields 0 (total function).
+
+func property.pick(seed: int, i: int, n: int) -> int {
+    if n <= 0 {
+        return 0
+    }
+    return property.int_in(seed, i, 0, n - 1)
+}
+
+func property.boolean(seed: int, i: int) -> bool {
+    return property.pick(seed, i, 2) == 1
+}
+
+// Lowercase letter from a 26-letter alphabet.
+
+func property.alpha_char(seed: int, i: int) -> str {
+    alphabet := "abcdefghijklmnopqrstuvwxyz"
+    return alphabet[property.pick(seed, i, 26)]
+}
+
+// Lowercase string of exactly len chars (len <= 0 yields "").
+
+func property.alpha_str(seed: int, i: int, len: int) -> str {
+    out := ""
+    j := 0
+    while j < len {
+        out = out + property.alpha_char(seed, i * 64 + j)
+        j = j + 1
+    }
+    return out
+}
+
+// Simpler candidates toward zero (deduped, never containing v itself).
+
+func property.shrink_int(v: int) -> [int] {
+    out:[int] = []
+    if v == 0 {
+        return out
+    }
+    out = vec.push(out, 0)
+    half := v / 2
+    if half != 0 {
+        out = vec.push(out, half)
+    }
+    step := v - 1
+    if v < 0 {
+        step = v + 1
+    }
+    if step != 0 {
+        already := false
+        k := 0
+        while k < len(out) {
+            if out[k] == step {
+                already = true
+            }
+            k = k + 1
+        }
+        if !already {
+            out = vec.push(out, step)
+        }
+    }
+    return out
+}
+
+// Shorter prefixes, halving (never containing s itself).
+
+func property.shrink_str(s: str) -> [str] {
+    out:[str] = []
+    n := str.length(s)
+    if n == 0 {
+        return out
+    }
+    k := n / 2
+    while k >= 1 {
+        out = vec.push(out, s[:k])
+        if k == 1 {
+            break
+        }
+        k = k / 2
+    }
+    return out
+}
+
+// Minimize a falsifying value: first falsifying candidate wins each round,
+// bounded so hostile shrinkers terminate.
+
+func property.shrink_value<T>(prop: func(T) -> bool, shrink: func(T) -> [T], v: T) -> T {
+    cur := v
+    n := 0
+    while n < 100 {
+        cands := shrink(cur)
+        moved := false
+        j := 0
+        while j < len(cands) {
+            if !prop(cands[j]) {
+                cur = cands[j]
+                moved = true
+                break
+            }
+            j = j + 1
+        }
+        if !moved {
+            break
+        }
+        n = n + 1
+    }
+    return cur
+}
+
+// Assert prop holds for iters generated cases; on falsification shrink to
+// a minimal case and fail with the replay seed.
+
+func property.check<T>(gen: func(int, int) -> T, shrink: func(T) -> [T], prop: func(T) -> bool, iters: int, seed: int) {
+    i := 0
+    while i < iters {
+        v := gen(seed, i)
+        if !prop(v) {
+            m := property.shrink_value(prop, shrink, v)
+            fail("property falsified (seed {seed}): {m}")
+        }
+        i = i + 1
+    }
+}
+
+// Convenience: ints in [lo, hi] without wiring gen/shrink by hand.
+
+func property.for_all_int(lo: int, hi: int, prop: func(int) -> bool, iters: int, seed: int) {
+    i := 0
+    while i < iters {
+        v := property.int_in(seed, i, lo, hi)
+        if !prop(v) {
+            m := property.shrink_value(prop, property.shrink_int, v)
+            fail("property falsified (seed {seed}): {m}")
+        }
+        i = i + 1
+    }
+}

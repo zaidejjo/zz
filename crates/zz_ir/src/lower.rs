@@ -10,6 +10,10 @@
 //! - `SlotAddInt/Inc/Imm/Less*/Binary*` → slot loads, generic `BinOp`,
 //!   store (their non-int fallbacks already run generic `eval_binary`)
 //!
+//! `for` loops lower in the rotated v4 layout: the test sits at the bottom
+//! and `ForNext` is both the test and the back-edge. Backends tuned to the
+//! historical layout call [`derotate_loops`] before their own passes.
+//!
 //! Ops with dispatch/fallback semantics stay core: `TakeVar` (falls back
 //! to the funcs/natives chain), `VecPushField` / `VecPushMethod`
 //! (field/method dispatch), `SpawnClosure` (task-hook dispatch).
@@ -379,7 +383,12 @@ impl<'a> Lowerer<'a> {
             max_stack: 0,
         });
         let expanded = self.expand_chunk(chunk)?;
-        let (code, spans) = self.remap_jumps(chunk, expanded)?;
+        let vm_spans: Vec<Span> = chunk
+            .spans
+            .iter()
+            .map(|s| Span::new(s.start, s.end))
+            .collect();
+        let (code, spans) = remap_and_flatten(expanded, &vm_spans)?;
         let max_stack = crate::verify::max_stack_for(&code).map_err(|e| {
             let head: Vec<String> = code.iter().take(6).map(|o| format!("{o:?}")).collect();
             IrError::new(format!(
@@ -395,21 +404,24 @@ impl<'a> Lowerer<'a> {
             .collect();
         // Locals table: intern the compiler-recorded slot types, sized
         // to one past the highest referenced slot id (params are seeded
-        // from the signature later, in `seal_sig`).
+        // from the signature later, in `seal_sig`), and floored at the
+        // signature arity. Arity is a property of the signature: a
+        // parameter the body never reads emits no `LoadSlot`/`StoreSlot`,
+        // so sizing from referenced slots alone can leave the table
+        // shorter than the parameter list, which `verify` then rejects
+        // ("locals: fewer slots than signature params").
         let mut max_slot: Option<usize> = None;
         for op in &code {
-            match op {
-                Op::LoadSlot(s) | Op::StoreSlot(s) => {
-                    max_slot = Some(max_slot.map_or(*s as usize, |m: usize| m.max(*s as usize)));
-                }
-                _ => {}
+            if let Some(s) = op.slot_extent() {
+                max_slot = Some(max_slot.map_or(s as usize, |m: usize| m.max(s as usize)));
             }
         }
         for (_, s) in chunk.toplevel_slots.iter() {
             max_slot = Some(max_slot.map_or(*s as usize, |m: usize| m.max(*s as usize)));
         }
         let unknown = self.unknown();
-        let mut locals = vec![unknown; max_slot.map_or(0, |m| m + 1)];
+        let local_count = max_slot.map_or(0, |m| m + 1).max(arity as usize);
+        let mut locals = vec![unknown; local_count];
         for (i, recorded) in chunk.slot_types.iter().enumerate() {
             if let (Some(dst), Some(ty)) = (locals.get_mut(i), recorded) {
                 *dst = self.intern_type(ty);
@@ -544,6 +556,21 @@ impl<'a> Lowerer<'a> {
                     field: self.intern(field),
                 }])
             }
+            VmOp::StoreIndexTake { home, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::StoreIndexTake {
+                    home_slot,
+                    home_var,
+                }])
+            }
+            VmOp::CompoundIndexTake { home, op, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::CompoundIndexTake {
+                    home_slot,
+                    home_var,
+                    op: Self::lower_binop(op),
+                }])
+            }
             VmOp::FieldBinopTake {
                 home, field, op, ..
             } => {
@@ -571,58 +598,102 @@ impl<'a> Lowerer<'a> {
                     field: self.intern(field),
                 }])
             }
-            VmOp::SlotAddInt { dst, src } => Ok(vec![
-                Op::LoadSlot(*dst),
-                Op::LoadSlot(*src),
-                Op::BinOp(IrBinOp::Add),
-                Op::StoreSlot(*dst),
-            ]),
-            VmOp::SlotInc { slot } => {
-                let one = self.int_const(1);
-                Ok(vec![
-                    Op::LoadSlot(*slot),
-                    Op::PushConst(one),
-                    Op::BinOp(IrBinOp::Add),
-                    Op::StoreSlot(*slot),
-                ])
+            VmOp::GetFieldSlotIdx { home, idx, dst, .. } => {
+                let (home_slot, home_var) = self.lower_home(home);
+                Ok(vec![Op::GetFieldSlotIdx {
+                    home_slot,
+                    home_var,
+                    idx: *idx,
+                    dst: *dst,
+                }])
             }
-            VmOp::SlotAddIntImm { dst, imm } => {
-                let c = self.int_const(*imm);
-                Ok(vec![
-                    Op::LoadSlot(*dst),
-                    Op::PushConst(c),
-                    Op::BinOp(IrBinOp::Add),
-                    Op::StoreSlot(*dst),
-                ])
+            VmOp::IndexIntSlot { arr, idx, dst, .. } => Ok(vec![Op::IndexIntSlot {
+                arr: *arr,
+                idx: *idx,
+                dst: *dst,
+            }]),
+            VmOp::IndexDictInt { dict, key, dst, .. } => Ok(vec![Op::IndexDictInt {
+                dict: *dict,
+                key: *key,
+                dst: *dst,
+            }]),
+            // Fused slot fast paths travel as ops (v3): the interpreter
+            // runs them natively, and the desugared form cost it 3 extra
+            // stack ops per loop iteration on cached runs. The expansion
+            // lives in `expand_fused`, which the chunk→C backend applies
+            // before its own analyses.
+            VmOp::SlotAddInt { dst, src } => Ok(vec![Op::SlotAddInt {
+                dst: *dst,
+                src: *src,
+            }]),
+            VmOp::SlotInc { slot } => Ok(vec![Op::SlotInc { slot: *slot }]),
+            VmOp::SlotAddIntImm { dst, imm } => Ok(vec![Op::SlotAddIntImm {
+                dst: *dst,
+                imm: *imm,
+            }]),
+            VmOp::SlotSubIntImm { dst, imm } => Ok(vec![Op::SlotSubIntImm {
+                dst: *dst,
+                imm: *imm,
+            }]),
+            VmOp::SlotMulIntImm { dst, imm } => Ok(vec![Op::SlotMulIntImm {
+                dst: *dst,
+                imm: *imm,
+            }]),
+            VmOp::SlotLessIntSlot { a, b } => Ok(vec![Op::SlotLessIntSlot { a: *a, b: *b }]),
+            VmOp::SlotLessIntImm { a, imm } => Ok(vec![Op::SlotLessIntImm { a: *a, imm: *imm }]),
+            VmOp::SlotCmpIntSlot { a, b, op } => Ok(vec![Op::SlotCmpIntSlot {
+                a: *a,
+                b: *b,
+                op: Self::lower_binop(op),
+            }]),
+            VmOp::SlotCmpIntImm { a, imm, op } => Ok(vec![Op::SlotCmpIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::lower_binop(op),
+            }]),
+            VmOp::JumpIfFalseSlotCmpIntImm {
+                a, imm, op, target, ..
+            } => Ok(vec![Op::JumpIfFalseSlotCmpIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::lower_binop(op),
+                target: *target as u32,
+            }]),
+            VmOp::JumpIfFalseSlotCmpIntSlot {
+                a, b, op, target, ..
+            } => Ok(vec![Op::JumpIfFalseSlotCmpIntSlot {
+                a: *a,
+                b: *b,
+                op: Self::lower_binop(op),
+                target: *target as u32,
+            }]),
+            VmOp::PushSlotIntImm { a, imm, op, .. } => Ok(vec![Op::PushSlotIntImm {
+                a: *a,
+                imm: *imm,
+                op: Self::lower_binop(op),
+            }]),
+            VmOp::SlotCmpConst { a, k, op } => {
+                let value = consts
+                    .get(*k as usize)
+                    .ok_or_else(|| IrError::new("SlotCmpConst index out of range"))?;
+                Ok(vec![Op::SlotCmpConst {
+                    a: *a,
+                    k: self.lower_value(value)?,
+                    op: Self::lower_binop(op),
+                }])
             }
-            VmOp::SlotLessIntSlot { a, b } => Ok(vec![
-                Op::LoadSlot(*a),
-                Op::LoadSlot(*b),
-                Op::BinOp(IrBinOp::Lt),
-            ]),
-            VmOp::SlotLessIntImm { a, imm } => {
-                let c = self.int_const(*imm);
-                Ok(vec![
-                    Op::LoadSlot(*a),
-                    Op::PushConst(c),
-                    Op::BinOp(IrBinOp::Lt),
-                ])
-            }
-            VmOp::SlotBinaryInt { dst, lhs, rhs, op } => Ok(vec![
-                Op::LoadSlot(*lhs),
-                Op::LoadSlot(*rhs),
-                Op::BinOp(Self::lower_binop(op)),
-                Op::StoreSlot(*dst),
-            ]),
-            VmOp::SlotBinaryIntImm { dst, lhs, imm, op } => {
-                let c = self.int_const(*imm);
-                Ok(vec![
-                    Op::LoadSlot(*lhs),
-                    Op::PushConst(c),
-                    Op::BinOp(Self::lower_binop(op)),
-                    Op::StoreSlot(*dst),
-                ])
-            }
+            VmOp::SlotBinaryInt { dst, lhs, rhs, op } => Ok(vec![Op::SlotBinaryInt {
+                dst: *dst,
+                lhs: *lhs,
+                rhs: *rhs,
+                op: Self::lower_binop(op),
+            }]),
+            VmOp::SlotBinaryIntImm { dst, lhs, imm, op } => Ok(vec![Op::SlotBinaryIntImm {
+                dst: *dst,
+                lhs: *lhs,
+                imm: *imm,
+                op: Self::lower_binop(op),
+            }]),
             VmOp::MakeFunc {
                 name,
                 params,
@@ -660,6 +731,17 @@ impl<'a> Lowerer<'a> {
             VmOp::IntDiv(_) => Ok(vec![Op::IntDiv]),
             VmOp::IntRem(_) => Ok(vec![Op::IntRem]),
             VmOp::IntNeg(_) => Ok(vec![Op::IntNeg]),
+            // Typed int comparisons (#364) are VM-interpreter-only: the
+            // chunk→C backend already specializes int comparisons inside
+            // generic `BinOp`, so the IR keeps the generic form (zero
+            // codec/chunk/verify churn, no .zzc compat risk). `zz run`
+            // executes `VmOp` directly and takes the fast path.
+            VmOp::IntLt(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Lt))]),
+            VmOp::IntGt(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Gt))]),
+            VmOp::IntLe(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Le))]),
+            VmOp::IntGe(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Ge))]),
+            VmOp::IntEq(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Eq))]),
+            VmOp::IntNe(_) => Ok(vec![Op::BinOp(Self::lower_binop(&AstBinOp::Ne))]),
             VmOp::BinOp(op, _) => Ok(vec![Op::BinOp(Self::lower_binop(op))]),
             VmOp::UnOp(op, _) => Ok(vec![Op::UnOp(Self::lower_unop(op))]),
             VmOp::Jump(t) => Ok(vec![Op::Jump(*t as u32)]),
@@ -678,10 +760,15 @@ impl<'a> Lowerer<'a> {
                 num_vars: *num_vars,
             }]),
             VmOp::ForNext {
-                vars, exit, in_env, ..
+                vars,
+                exit,
+                body,
+                in_env,
+                ..
             } => Ok(vec![Op::ForNext {
                 vars: vars.iter().map(|v| self.intern(v)).collect(),
                 exit: *exit as u32,
+                body: *body as u32,
                 in_env: *in_env,
             }]),
             VmOp::WhileSetup { exit, header } => Ok(vec![Op::WhileSetup {
@@ -795,106 +882,134 @@ impl<'a> Lowerer<'a> {
         }
         Ok(out)
     }
+}
 
-    fn remap_jumps(
-        &mut self,
-        chunk: &VmChunk,
-        expanded: Vec<Vec<Op>>,
-    ) -> Result<(Vec<Op>, Vec<Span>), IrError> {
-        // Old pc -> new pc (expansion starts).
-        let mut base: Vec<u32> = Vec::with_capacity(expanded.len() + 1);
-        let mut at = 0u32;
-        for seq in &expanded {
-            base.push(at);
-            at += seq.len() as u32;
-        }
+/// Flatten per-op expansions into a single op stream, remapping absolute
+/// jump targets (they address the pre-expansion stream) and stamping every
+/// produced op with the span of the op it came from. Shared by the VM
+/// lowering and by [`expand_fused`], so both remap exactly the same set.
+fn remap_and_flatten(
+    expanded: Vec<Vec<Op>>,
+    old_spans: &[Span],
+) -> Result<(Vec<Op>, Vec<Span>), IrError> {
+    // Old pc -> new pc (expansion starts).
+    let mut base: Vec<u32> = Vec::with_capacity(expanded.len() + 1);
+    let mut at = 0u32;
+    for seq in &expanded {
         base.push(at);
-        let mut code = Vec::with_capacity(at as usize);
-        let mut spans = Vec::with_capacity(at as usize);
-        for (old_pc, seq) in expanded.into_iter().enumerate() {
-            let vm_span = chunk.spans.get(old_pc).copied().unwrap_or_default();
-            let span = Span::new(vm_span.start, vm_span.end);
-            for mut op in seq {
-                let targets: Option<Vec<u32>> = match &op {
-                    Op::Jump(t)
-                    | Op::JumpIfFalse(t)
-                    | Op::JumpIfTrue(t)
-                    | Op::JumpIfFalseBool(t) => Some(vec![*t]),
-                    Op::ForSetup { exit, .. } => Some(vec![*exit]),
-                    Op::ForNext { exit, .. } => Some(vec![*exit]),
-                    Op::WhileSetup { exit, .. } => Some(vec![*exit]),
-                    Op::WhileCond { exit } => Some(vec![*exit]),
-                    Op::MatchArm { next, .. } => Some(vec![*next]),
-                    Op::MatchGuard { next, .. } => Some(vec![*next]),
-                    Op::IfLetMatch { els, .. } => Some(vec![*els]),
-                    _ => None,
-                };
-                if let Some(ts) = targets {
-                    let nt: Vec<u32> = ts
-                        .iter()
-                        .map(|t| {
-                            base.get(*t as usize)
-                                .copied()
-                                .ok_or_else(|| IrError::new("jump target out of range"))
-                        })
-                        .collect::<Result<_, _>>()?;
-                    op = match op {
-                        Op::Jump(_) => Op::Jump(nt[0]),
-                        Op::JumpIfFalse(_) => Op::JumpIfFalse(nt[0]),
-                        Op::JumpIfTrue(_) => Op::JumpIfTrue(nt[0]),
-                        Op::JumpIfFalseBool(_) => Op::JumpIfFalseBool(nt[0]),
-                        Op::ForSetup {
-                            header, num_vars, ..
-                        } => Op::ForSetup {
-                            exit: nt[0],
-                            header: base
-                                .get(header as usize)
-                                .copied()
-                                .ok_or_else(|| IrError::new("loop header out of range"))?,
-                            num_vars,
-                        },
-                        Op::ForNext { vars, in_env, .. } => Op::ForNext {
-                            vars,
-                            exit: nt[0],
-                            in_env,
-                        },
-                        Op::WhileSetup { header, .. } => Op::WhileSetup {
-                            exit: nt[0],
-                            header: base
-                                .get(header as usize)
-                                .copied()
-                                .ok_or_else(|| IrError::new("loop header out of range"))?,
-                        },
-                        Op::WhileCond { .. } => Op::WhileCond { exit: nt[0] },
-                        Op::MatchArm {
-                            pat,
-                            has_env,
-                            restore,
-                            ..
-                        } => Op::MatchArm {
-                            pat,
-                            next: nt[0],
-                            has_env,
-                            restore,
-                        },
-                        Op::MatchGuard { has_env, .. } => Op::MatchGuard {
-                            next: nt[0],
-                            has_env,
-                        },
-                        Op::IfLetMatch { pat, has_env, .. } => Op::IfLetMatch {
-                            pat,
-                            els: nt[0],
-                            has_env,
-                        },
-                        other => other,
-                    };
-                }
-                code.push(op);
-                spans.push(span);
-            }
-        }
-        Ok((code, spans))
+        at += seq.len() as u32;
     }
+    base.push(at);
+    let mut code = Vec::with_capacity(at as usize);
+    let mut spans = Vec::with_capacity(at as usize);
+    for (old_pc, seq) in expanded.into_iter().enumerate() {
+        let span = old_spans
+            .get(old_pc)
+            .copied()
+            .unwrap_or_else(|| Span::new(0, 0));
+        for mut op in seq {
+            let targets: Option<Vec<u32>> = match &op {
+                Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfFalseBool(t) => {
+                    Some(vec![*t])
+                }
+                Op::ForSetup { exit, .. } => Some(vec![*exit]),
+                Op::ForNext { exit, body, .. } => Some(vec![*exit, *body]),
+                Op::WhileSetup { exit, .. } => Some(vec![*exit]),
+                Op::JumpIfFalseSlotCmpIntImm { target, .. }
+                | Op::JumpIfFalseSlotCmpIntSlot { target, .. } => Some(vec![*target]),
+                Op::WhileCond { exit } => Some(vec![*exit]),
+                Op::MatchArm { next, .. } => Some(vec![*next]),
+                Op::MatchGuard { next, .. } => Some(vec![*next]),
+                Op::IfLetMatch { els, .. } => Some(vec![*els]),
+                _ => None,
+            };
+            if let Some(ts) = targets {
+                let nt: Vec<u32> = ts
+                    .iter()
+                    .map(|t| {
+                        base.get(*t as usize)
+                            .copied()
+                            .ok_or_else(|| IrError::new("jump target out of range"))
+                    })
+                    .collect::<Result<_, _>>()?;
+                op = match op {
+                    Op::Jump(_) => Op::Jump(nt[0]),
+                    Op::JumpIfFalse(_) => Op::JumpIfFalse(nt[0]),
+                    Op::JumpIfTrue(_) => Op::JumpIfTrue(nt[0]),
+                    Op::JumpIfFalseBool(_) => Op::JumpIfFalseBool(nt[0]),
+                    Op::ForSetup {
+                        header, num_vars, ..
+                    } => Op::ForSetup {
+                        exit: nt[0],
+                        header: base
+                            .get(header as usize)
+                            .copied()
+                            .ok_or_else(|| IrError::new("loop header out of range"))?,
+                        num_vars,
+                    },
+                    Op::ForNext {
+                        vars,
+                        body: _,
+                        in_env,
+                        ..
+                    } => Op::ForNext {
+                        vars,
+                        exit: nt[0],
+                        body: nt[1],
+                        in_env,
+                    },
+                    Op::WhileSetup { header, .. } => Op::WhileSetup {
+                        exit: nt[0],
+                        header: base
+                            .get(header as usize)
+                            .copied()
+                            .ok_or_else(|| IrError::new("loop header out of range"))?,
+                    },
+                    Op::JumpIfFalseSlotCmpIntImm { a, imm, op, .. } => {
+                        Op::JumpIfFalseSlotCmpIntImm {
+                            a,
+                            imm,
+                            op,
+                            target: nt[0],
+                        }
+                    }
+                    Op::JumpIfFalseSlotCmpIntSlot { a, b, op, .. } => {
+                        Op::JumpIfFalseSlotCmpIntSlot {
+                            a,
+                            b,
+                            op,
+                            target: nt[0],
+                        }
+                    }
+                    Op::WhileCond { .. } => Op::WhileCond { exit: nt[0] },
+                    Op::MatchArm {
+                        pat,
+                        has_env,
+                        restore,
+                        ..
+                    } => Op::MatchArm {
+                        pat,
+                        next: nt[0],
+                        has_env,
+                        restore,
+                    },
+                    Op::MatchGuard { has_env, .. } => Op::MatchGuard {
+                        next: nt[0],
+                        has_env,
+                    },
+                    Op::IfLetMatch { pat, has_env, .. } => Op::IfLetMatch {
+                        pat,
+                        els: nt[0],
+                        has_env,
+                    },
+                    other => other,
+                };
+            }
+            code.push(op);
+            spans.push(span);
+        }
+    }
+    Ok((code, spans))
 }
 
 /// Lower a compiled VM chunk to a verified IR module (untyped:
@@ -926,4 +1041,335 @@ pub fn lower_typed(
     };
     crate::verify::verify(&module)?;
     Ok(module)
+}
+
+/// True for the fused slot fast paths the format carries (v3).
+fn is_fused_slot_op(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::SlotAddInt { .. }
+            | Op::SlotInc { .. }
+            | Op::SlotAddIntImm { .. }
+            | Op::SlotSubIntImm { .. }
+            | Op::SlotMulIntImm { .. }
+            | Op::SlotLessIntSlot { .. }
+            | Op::SlotLessIntImm { .. }
+            | Op::SlotCmpIntSlot { .. }
+            | Op::SlotCmpIntImm { .. }
+            | Op::SlotCmpConst { .. }
+            | Op::SlotBinaryInt { .. }
+            | Op::SlotBinaryIntImm { .. }
+            | Op::PushSlotIntImm { .. }
+            | Op::JumpIfFalseSlotCmpIntImm { .. }
+            | Op::JumpIfFalseSlotCmpIntSlot { .. }
+    )
+}
+
+/// Intern an int literal (deduplicated, like the lowering pool).
+fn intern_int(consts: &mut Vec<Const>, i: i64) -> ConstId {
+    let c = Const::Int(i);
+    if let Some(p) = consts.iter().position(|e| *e == c) {
+        return ConstId(p as u32);
+    }
+    let id = ConstId(consts.len() as u32);
+    consts.push(c);
+    id
+}
+
+/// Undo the v4 rotated `for` layout for backends that expect the
+/// historical shape. Borrows the input when every loop already falls
+/// through (`ForNext.body == pc + 1`).
+///
+/// The VM compiler emits each `for` loop rotated — the entry jumps to the
+/// test at the bottom, and a live `ForNext` jumps forward into the body:
+///
+/// ```text
+///   ForSetup{exit, header = check}
+///   Jump(check)                    ; entry
+/// body_start:
+///   <body>
+/// check:
+///   ForNext{body = body_start, exit}
+/// ```
+///
+/// The chunk→C backend's int-twin / peel / cond-fuse passes recognize the
+/// historical layout (`ForNext` header, straight-line body, `Jump` back
+/// edge), so this pass swaps the two op positions back:
+///
+/// ```text
+///   ForSetup{exit, header = check}
+/// check:
+///   ForNext{body = check + 1, exit}  ; falls through into the body
+///   <body>
+///   Jump(check)
+/// ```
+///
+/// The swap is position-preserving (`ForNext.body` is already the
+/// fall-through pc) and every pc-carrying field is retargeted, so the
+/// result is the pre-v4 stream — same op count, same spans. `vartab` (the
+/// per-`ForNext` loop-var slot table the peeler indexes by op order) is
+/// reordered with the ops: nesting reverses the pair, the inner test being
+/// emitted first in the rotated layout.
+pub fn derotate_loops(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrError> {
+    let rotated = module.funcs.iter().any(|f| {
+        f.code
+            .iter()
+            .enumerate()
+            .any(|(pc, op)| matches!(op, Op::ForNext { body, .. } if (*body as usize) <= pc))
+    });
+    if !rotated {
+        return Ok(std::borrow::Cow::Borrowed(module));
+    }
+    let mut out = module.clone();
+    for f in &mut out.funcs {
+        // Rotated loops as (entry `Jump` pc, `ForNext` pc).
+        let mut swaps: Vec<(usize, usize)> = Vec::new();
+        for (pc, op) in f.code.iter().enumerate() {
+            let Op::ForNext { body, .. } = op else {
+                continue;
+            };
+            let body = *body as usize;
+            if body == pc + 1 {
+                // Already the historical layout: falls through.
+                continue;
+            }
+            if body > pc {
+                return Err(IrError::new(format!(
+                    "cannot derotate loop: `ForNext` at {pc} has a forward body {body}"
+                )));
+            }
+            let entry = body.checked_sub(1);
+            let entry =
+                entry.filter(|e| matches!(f.code.get(*e), Some(Op::Jump(t)) if *t as usize == pc));
+            // A rotated loop whose entry jump is missing cannot happen in
+            // the compiler's output; fail closed instead of handing a
+            // backend a shape its peeler would misread.
+            let Some(entry) = entry else {
+                return Err(IrError::new(format!(
+                    "cannot derotate loop: `ForNext` at {pc} has body {body} but no entry `Jump`"
+                )));
+            };
+            swaps.push((entry, pc));
+        }
+        if swaps.is_empty() {
+            continue;
+        }
+        // vartab is indexed by `ForNext` order, and the swap can reverse a
+        // nested pair (the inner test is emitted first in the rotated
+        // layout). Record the old order so it can follow the ops.
+        let fornext_pcs: Vec<usize> = f
+            .code
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| matches!(op, Op::ForNext { .. }))
+            .map(|(pc, _)| pc)
+            .collect();
+        if f.vartab.len() != fornext_pcs.len() {
+            return Err(IrError::new(
+                "cannot derotate loop: vartab length does not match `ForNext` count",
+            ));
+        }
+        // Old pc -> new pc for every pc-carrying field. A target that
+        // named the test follows it to the entry slot (the historical
+        // `ForNext` header). One-past-the-end stays terminal.
+        let mut map: Vec<u32> = (0..=f.code.len() as u32).collect();
+        for &(entry, check) in &swaps {
+            map[check] = entry as u32;
+        }
+        for &(entry, check) in &swaps {
+            let test = std::mem::replace(&mut f.code[check], Op::Jump(entry as u32));
+            f.code[entry] = test;
+        }
+        for op in &mut f.code {
+            retarget_in_place(&map, op)?;
+        }
+        // The moved test falls through into the body in the historical
+        // layout, so its `body` is the op right after it — never a mapped
+        // old pc (`body == check` for an empty body, and an inner test can
+        // sit at `entry + 1`).
+        for &(entry, _) in &swaps {
+            if let Op::ForNext { body, .. } = &mut f.code[entry] {
+                *body = entry as u32 + 1;
+            }
+        }
+        let mut order: Vec<usize> = (0..fornext_pcs.len()).collect();
+        order.sort_by_key(|&i| map[fornext_pcs[i]]);
+        let vartab = std::mem::take(&mut f.vartab);
+        f.vartab = order.into_iter().map(|i| vartab[i].clone()).collect();
+    }
+    Ok(std::borrow::Cow::Owned(out))
+}
+
+/// Rewrite every pc-carrying field of `op` through `map`.
+fn retarget_in_place(map: &[u32], op: &mut Op) -> Result<(), IrError> {
+    let at = |t: &mut u32| -> Result<(), IrError> {
+        *t = map
+            .get(*t as usize)
+            .copied()
+            .ok_or_else(|| IrError::new("derotate: jump target out of range"))?;
+        Ok(())
+    };
+    match op {
+        Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfFalseBool(t) => at(t)?,
+        Op::ForSetup { exit, header, .. } => {
+            at(exit)?;
+            at(header)?;
+        }
+        Op::ForNext { exit, body, .. } => {
+            at(exit)?;
+            at(body)?;
+        }
+        Op::WhileSetup { exit, header } => {
+            at(exit)?;
+            at(header)?;
+        }
+        Op::JumpIfFalseSlotCmpIntImm { target, .. }
+        | Op::JumpIfFalseSlotCmpIntSlot { target, .. } => at(target)?,
+        Op::WhileCond { exit } => at(exit)?,
+        Op::MatchArm { next, .. } => at(next)?,
+        Op::MatchGuard { next, .. } => at(next)?,
+        Op::IfLetMatch { els, .. } => at(els)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Desugar the fused slot fast paths into the core sequences they stand
+/// for — exactly the stream this module produced before v3. Borrowed input
+/// when there is nothing to expand.
+///
+/// [`lower`] keeps the fused ops because the interpreter runs them
+/// natively; the chunk→C backend's int-twin / peel / cond-fuse passes are
+/// tuned to the core stream, so it expands first and sees the pre-v3
+/// stream unchanged. `max_stack` is restamped (the desugared form is
+/// deeper) so the result still verifies; `locals` needs no restamping —
+/// both forms name the same slots ([`Op::slot_extent`]).
+pub fn expand_fused(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrError> {
+    if !module
+        .funcs
+        .iter()
+        .any(|f| f.code.iter().any(is_fused_slot_op))
+    {
+        return Ok(std::borrow::Cow::Borrowed(module));
+    }
+    let mut out = module.clone();
+    for fi in 0..out.funcs.len() {
+        if !out.funcs[fi].code.iter().any(is_fused_slot_op) {
+            continue;
+        }
+        let code = out.funcs[fi].code.clone();
+        let spans = out.funcs[fi].spans.clone();
+        let mut groups: Vec<Vec<Op>> = Vec::with_capacity(code.len());
+        for op in &code {
+            let group: Vec<Op> = match op {
+                Op::SlotAddInt { dst, src } => vec![
+                    Op::LoadSlot(*dst),
+                    Op::LoadSlot(*src),
+                    Op::BinOp(IrBinOp::Add),
+                    Op::StoreSlot(*dst),
+                ],
+                Op::SlotInc { slot } => {
+                    let one = intern_int(&mut out.consts, 1);
+                    vec![
+                        Op::LoadSlot(*slot),
+                        Op::PushConst(one),
+                        Op::BinOp(IrBinOp::Add),
+                        Op::StoreSlot(*slot),
+                    ]
+                }
+                Op::SlotAddIntImm { dst, imm } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![
+                        Op::LoadSlot(*dst),
+                        Op::PushConst(c),
+                        Op::BinOp(IrBinOp::Add),
+                        Op::StoreSlot(*dst),
+                    ]
+                }
+                Op::SlotSubIntImm { dst, imm } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![
+                        Op::LoadSlot(*dst),
+                        Op::PushConst(c),
+                        Op::BinOp(IrBinOp::Sub),
+                        Op::StoreSlot(*dst),
+                    ]
+                }
+                Op::SlotMulIntImm { dst, imm } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![
+                        Op::LoadSlot(*dst),
+                        Op::PushConst(c),
+                        Op::BinOp(IrBinOp::Mul),
+                        Op::StoreSlot(*dst),
+                    ]
+                }
+                Op::SlotLessIntSlot { a, b } => {
+                    vec![Op::LoadSlot(*a), Op::LoadSlot(*b), Op::BinOp(IrBinOp::Lt)]
+                }
+                Op::SlotLessIntImm { a, imm } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![Op::LoadSlot(*a), Op::PushConst(c), Op::BinOp(IrBinOp::Lt)]
+                }
+                Op::SlotCmpIntSlot { a, b, op } => {
+                    vec![Op::LoadSlot(*a), Op::LoadSlot(*b), Op::BinOp(*op)]
+                }
+                Op::SlotCmpIntImm { a, imm, op } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![Op::LoadSlot(*a), Op::PushConst(c), Op::BinOp(*op)]
+                }
+                Op::SlotCmpConst { a, k, op } => {
+                    vec![Op::LoadSlot(*a), Op::PushConst(*k), Op::BinOp(*op)]
+                }
+                Op::SlotBinaryInt { dst, lhs, rhs, op } => vec![
+                    Op::LoadSlot(*lhs),
+                    Op::LoadSlot(*rhs),
+                    Op::BinOp(*op),
+                    Op::StoreSlot(*dst),
+                ],
+                Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![
+                        Op::LoadSlot(*lhs),
+                        Op::PushConst(c),
+                        Op::BinOp(*op),
+                        Op::StoreSlot(*dst),
+                    ]
+                }
+                Op::PushSlotIntImm { a, imm, op } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![Op::LoadSlot(*a), Op::PushConst(c), Op::BinOp(*op)]
+                }
+                // The expansion is the final core sequence: this pass runs
+                // once over the stream, so a fused compare left here would
+                // never be picked up by a second round.
+                Op::JumpIfFalseSlotCmpIntImm { a, imm, op, target } => {
+                    let c = intern_int(&mut out.consts, *imm);
+                    vec![
+                        Op::LoadSlot(*a),
+                        Op::PushConst(c),
+                        Op::BinOp(*op),
+                        Op::JumpIfFalse(*target),
+                    ]
+                }
+                Op::JumpIfFalseSlotCmpIntSlot { a, b, op, target } => vec![
+                    Op::LoadSlot(*a),
+                    Op::LoadSlot(*b),
+                    Op::BinOp(*op),
+                    Op::JumpIfFalse(*target),
+                ],
+                other => vec![other.clone()],
+            };
+            groups.push(group);
+        }
+        // Jump targets address the fused stream: remap them across the
+        // expansion with the same pass the VM lowering runs.
+        let (nc, ns) = remap_and_flatten(groups, &spans)?;
+        let max_stack = crate::verify::max_stack_for(&nc)?;
+        let f = &mut out.funcs[fi];
+        f.code = nc;
+        f.spans = ns;
+        f.max_stack = max_stack;
+    }
+    Ok(std::borrow::Cow::Owned(out))
 }

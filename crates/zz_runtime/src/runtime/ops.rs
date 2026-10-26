@@ -8,9 +8,21 @@ use zz_frontend::ast::{BinOp, UnOp};
 use zz_frontend::span::Span;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::EvalError;
-use crate::value::{ObjectValue, Value};
+use crate::value::{DictData, ObjectValue, Value};
+
+/// Interned one-byte ASCII strings, indexed by the byte value.
+///
+/// `s[i]` on an ASCII string used to build a fresh `String` *and* a fresh
+/// `Arc` per character, which is what `str_scan` (176 k reads) paid for.
+/// The table is filled once per process and a read is then a refcount bump.
+pub(crate) fn ascii_chars() -> &'static [std::sync::Arc<String>; 128] {
+    static TABLE: std::sync::OnceLock<[std::sync::Arc<String>; 128]> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| std::array::from_fn(|b| std::sync::Arc::new((b as u8 as char).to_string())))
+}
 
 // ---------------------------------------------------------------------------
 // Object / field helpers
@@ -53,7 +65,7 @@ pub(crate) fn build_struct_literal(
     layouts: &HashMap<String, Vec<String>>,
     sname: &str,
     registered: &[String],
-    given: &[(String, Value)],
+    given: &[(Arc<str>, Value)],
     span: Span,
     depth: usize,
 ) -> Result<ObjectValue, EvalError> {
@@ -65,15 +77,15 @@ pub(crate) fn build_struct_literal(
     }
     // Leftovers: given fields that are not direct fields of this struct —
     // candidates for embedded sub-objects.
-    let leftovers: Vec<(String, Value)> = given
+    let leftovers: Vec<(Arc<str>, Value)> = given
         .iter()
-        .filter(|(n, _)| !registered.contains(n))
+        .filter(|(n, _)| !registered.iter().any(|r| r.as_str() == n.as_ref()))
         .cloned()
         .collect();
-    let mut out = Vec::with_capacity(registered.len());
+    let mut out: Vec<(Arc<str>, Value)> = Vec::with_capacity(registered.len());
     for fname in registered {
-        if let Some((_, v)) = given.iter().find(|(n, _)| n == fname) {
-            out.push((fname.clone(), v.clone()));
+        if let Some((name, v)) = given.iter().find(|(n, _)| n.as_ref() == fname.as_str()) {
+            out.push((Arc::clone(name), v.clone()));
         } else if let Some(inner_name) = embedded_layout_name(layouts, fname) {
             let Some(inner_layout) = layouts.get(&inner_name).cloned() else {
                 return Err(EvalError::new(
@@ -89,7 +101,10 @@ pub(crate) fn build_struct_literal(
                 span,
                 depth + 1,
             )?;
-            out.push((fname.clone(), Value::Object(Box::new(inner))));
+            out.push((
+                Arc::from(fname.as_str()),
+                Value::Object(std::sync::Arc::new(inner)),
+            ));
         } else {
             return Err(EvalError::new(
                 format!("missing field `{fname}` in struct literal"),
@@ -111,65 +126,82 @@ const MAX_EMBED_DEPTH: usize = 32;
 /// (anonymous) fields transitively: `u.id` finds `u.Base.id`.
 #[inline(always)]
 pub(crate) fn object_field(obj: &Value, name: &str, span: Span) -> Result<Value, EvalError> {
-    object_field_depth(obj, name, span, 0)
+    match object_field_opt(obj, name) {
+        Some(v) => Ok(v),
+        None => Err(object_field_miss(obj, name, span)),
+    }
 }
 
-fn object_field_depth(
-    obj: &Value,
-    name: &str,
-    span: Span,
-    depth: usize,
-) -> Result<Value, EvalError> {
+/// [`object_field`] without the miss error.
+///
+/// Method dispatch misses by construction — a method is a function-table
+/// entry (`Type.method`), not a struct field — so `CallMethod` probes with
+/// this instead: formatting ``struct `X` has no field `m` `` plus an
+/// `EvalError` on every call, only to drop it, was a sizeable slice of the
+/// per-call cost.
+pub(crate) fn object_field_opt(obj: &Value, name: &str) -> Option<Value> {
+    object_field_depth_opt(obj, name, 0)
+}
+
+fn object_field_depth_opt(obj: &Value, name: &str, depth: usize) -> Option<Value> {
     match obj {
         Value::Object(o) => {
-            if let Some((_, v)) = o.fields.iter().find(|(n, _)| n == name) {
-                return Ok(v.clone());
+            if let Some((_, v)) = o.fields.iter().find(|(n, _)| &**n == name) {
+                return Some(v.clone());
             }
             if depth < MAX_EMBED_DEPTH {
                 for (fname, v) in &o.fields {
                     if is_embedded_value(fname, v) {
-                        if let Ok(promoted) = object_field_depth(v, name, span, depth + 1) {
-                            return Ok(promoted);
+                        if let Some(promoted) = object_field_depth_opt(v, name, depth + 1) {
+                            return Some(promoted);
                         }
                     }
                 }
             }
-            Err(EvalError::new(
-                format!("struct `{}` has no field `{name}`", o.name),
-                span,
-            ))
+            None
         }
         Value::Dict(entries) => entries
             .iter()
             .find(|(k, _)| matches!(k, Value::Str(s) if s.as_str() == name))
-            .map(|(_, v)| v.clone())
-            .ok_or_else(|| EvalError::new(format!("dict has no key `{name}`"), span)),
+            .map(|(_, v)| v.clone()),
         Value::HttpRequest(req) => match name {
-            "method" => Ok(Value::Str(req.method.clone().into())),
-            "path" => Ok(Value::Str(req.path.clone().into())),
-            "body" => Ok(Value::Str(req.body.clone().into())),
+            "method" => Some(Value::Str(req.method.clone().into())),
+            "path" => Some(Value::Str(req.path.clone().into())),
+            "body" => Some(Value::Str(req.body.clone().into())),
             "headers" | "query" | "params" => {
                 let pairs = match name {
                     "headers" => &req.headers,
                     "query" => &req.query,
                     _ => &req.params,
                 };
-                Ok(Value::Dict(Box::new(
+                Some(Value::Dict(std::sync::Arc::new(
                     pairs
                         .iter()
                         .map(|(k, v)| (Value::Str(k.clone().into()), Value::Str(v.clone().into())))
                         .collect(),
                 )))
             }
-            _ => Err(EvalError::new(
-                format!("http.request has no field `{name}`"),
-                span,
-            )),
+            _ => None,
         },
-        other => Err(EvalError::new(
+        _ => None,
+    }
+}
+
+/// The miss error for [`object_field`], kept off the probe path: the
+/// message (and its `format!`) is only built when a real field read fails.
+fn object_field_miss(obj: &Value, name: &str, span: Span) -> EvalError {
+    match obj {
+        Value::Object(o) => {
+            EvalError::new(format!("struct `{}` has no field `{name}`", o.name), span)
+        }
+        Value::Dict(_) => EvalError::new(format!("dict has no key `{name}`"), span),
+        Value::HttpRequest(_) => {
+            EvalError::new(format!("http.request has no field `{name}`"), span)
+        }
+        other => EvalError::new(
             format!("cannot access field `{name}` on a value of type `{other}`"),
             span,
-        )),
+        ),
     }
 }
 
@@ -193,7 +225,10 @@ fn set_object_field_depth(
 ) -> Result<(), EvalError> {
     match obj {
         Value::Object(o) => {
-            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| n == name) {
+            // Copy-on-write: uniquely-owned objects mutate in place,
+            // shared ones copy once here.
+            let o = std::sync::Arc::make_mut(o);
+            if let Some((_, slot)) = o.fields.iter_mut().find(|(n, _)| &**n == name) {
                 *slot = value;
                 Ok(())
             } else if depth < MAX_EMBED_DEPTH {
@@ -251,7 +286,7 @@ pub(crate) fn fill_default_headers(name: &str, args: &mut Vec<Value>, arity: usi
         "http.post_json",
     ];
     if OPTIONAL_HEADERS.contains(&name) && args.len() + 1 == arity {
-        args.push(Value::Dict(Box::default()));
+        args.push(Value::Dict(std::sync::Arc::new(DictData::new())));
         return true;
     }
     // Unified client defaults, in signature order:
@@ -273,7 +308,7 @@ pub(crate) fn fill_default_headers(name: &str, args: &mut Vec<Value>, arity: usi
             tail.push(Value::Str(String::new().into()));
         }
         if missing >= 3 {
-            tail.push(Value::Dict(Box::default()));
+            tail.push(Value::Dict(std::sync::Arc::new(DictData::new())));
         }
         if missing >= 4 {
             tail.push(Value::Str("GET".to_string().into()));
@@ -320,15 +355,22 @@ pub(crate) fn get_index(obj: &Value, index: &Value, span: Span) -> Result<Value,
             let idx = normalize_index(*i, b.len(), span)?;
             Ok(Value::Int(b.as_slice()[idx] as i64))
         }
-        (Value::Dict(entries), key) => entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
+        (Value::Dict(dict), key) => dict
+            .get_cloned(key)
             .ok_or_else(|| EvalError::new(format!("key `{key}` not found in dict"), span)),
         (Value::Str(s), Value::Int(i)) => {
-            let chars: Vec<char> = s.chars().collect();
-            let idx = normalize_index(*i, chars.len(), span)?;
-            Ok(Value::Str(chars[idx].to_string().into()))
+            // ASCII fast path: byte index == char index, no `Vec<char>`
+            // allocation, and the single-character value comes from the
+            // interned table. Non-ASCII keeps the exact char semantics below.
+            if s.is_ascii() {
+                let idx = normalize_index(*i, s.len(), span)?;
+                let byte = s.as_bytes()[idx] as usize;
+                Ok(Value::Str(std::sync::Arc::clone(&ascii_chars()[byte])))
+            } else {
+                let chars: Vec<char> = s.chars().collect();
+                let idx = normalize_index(*i, chars.len(), span)?;
+                Ok(Value::Str(chars[idx].to_string().into()))
+            }
         }
         (other, _) => Err(EvalError::new(
             format!("cannot index a value of type `{}`", other.type_name()),
@@ -348,21 +390,24 @@ pub(crate) fn set_index(
     match (obj, index) {
         (Value::Array(items), Value::Int(i)) => {
             let idx = normalize_index(*i, items.len(), span)?;
-            items[idx] = value;
+            // Copy-on-write: uniquely-owned buffers mutate in place,
+            // shared ones copy once here (the copy value semantics
+            // always required).
+            std::sync::Arc::make_mut(items)[idx] = value;
             Ok(())
         }
         (Value::Tuple(items), Value::Int(i)) => {
             // Tuples share the array representation at runtime.
             let idx = normalize_index(*i, items.len(), span)?;
-            items[idx] = value;
+            std::sync::Arc::make_mut(items)[idx] = value;
             Ok(())
         }
-        (Value::Dict(entries), key) => {
-            if let Some((_, slot)) = entries.iter_mut().find(|(k, _)| k == key) {
-                *slot = value;
-            } else {
-                entries.push((key.clone(), value));
-            }
+        (Value::Dict(dict), key) => {
+            // Copy-on-write: uniquely-owned dicts mutate in place, shared
+            // ones copy once here (same value semantics as before); the
+            // index is maintained by `insert`.
+            let dict = std::sync::Arc::make_mut(dict);
+            dict.insert(key.clone(), value);
             Ok(())
         }
         (Value::Str(_), _) => Err(EvalError::new(
@@ -411,16 +456,23 @@ pub(crate) fn slice_value(
     match obj {
         Value::Array(items) => {
             let (a, b) = slice_bounds(start, end, items.len());
-            Ok(Value::Array(Box::new(items[a..b].to_vec())))
+            Ok(Value::Array(std::sync::Arc::new(items[a..b].to_vec())))
         }
         Value::Bytes(b) => {
             let (a, c) = slice_bounds(start, end, b.len());
             Ok(Value::Bytes(Box::new(b.slice(a, c))))
         }
         Value::Str(s) => {
-            let chars: Vec<char> = s.chars().collect();
-            let (a, b) = slice_bounds(start, end, chars.len());
-            Ok(Value::Str(chars[a..b].iter().collect::<String>().into()))
+            // ASCII fast path: byte bounds == char bounds (every byte is a
+            // char boundary), so slice without the `Vec<char>` round-trip.
+            if s.is_ascii() {
+                let (a, b) = slice_bounds(start, end, s.len());
+                Ok(Value::Str(s.get(a..b).unwrap_or("").to_string().into()))
+            } else {
+                let chars: Vec<char> = s.chars().collect();
+                let (a, b) = slice_bounds(start, end, chars.len());
+                Ok(Value::Str(chars[a..b].iter().collect::<String>().into()))
+            }
         }
         other => Err(EvalError::new(
             format!("cannot slice a value of type `{}`", other.type_name()),
@@ -574,6 +626,19 @@ pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<V
                 span,
             )),
         },
+        // Array concat: `[T] + [T] -> [T]`. Value semantics: both inputs are
+        // cloned into a fresh independent buffer, so neither alias the result.
+        (Value::Array(a), Value::Array(b)) => match op {
+            BinOp::Add => {
+                let mut out = (*a).clone();
+                out.extend(b.iter().cloned());
+                Ok(Value::Array(std::sync::Arc::new(out)))
+            }
+            _ => Err(EvalError::new(
+                format!("operator `{}` is not supported for arrays", op.symbol()),
+                span,
+            )),
+        },
         (l, r) => {
             if let (Some(a), Some(b)) = (l.to_float(), r.to_float()) {
                 return match op {
@@ -633,5 +698,75 @@ pub(crate) fn eval_unary(op: UnOp, v: Value, span: Span) -> Result<Value, EvalEr
                 span,
             )),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_index, object_field, object_field_opt};
+    use crate::value::{ObjectValue, Value};
+    use zz_frontend::span::Span;
+
+    /// `s[i]` on an ASCII string hands out interned one-character values, so
+    /// repeated reads are a refcount bump (the `str_scan` cost). Non-ASCII
+    /// keeps char semantics: byte index != char index there.
+    #[test]
+    fn ascii_char_reads_are_interned() {
+        let span = Span::new(0, 0);
+        let s = Value::Str("ab".to_string().into());
+        let first = get_index(&s, &Value::Int(0), span).unwrap();
+        let again = get_index(&s, &Value::Int(0), span).unwrap();
+        assert_eq!(first, Value::Str("a".to_string().into()));
+        match (first, again) {
+            (Value::Str(a), Value::Str(b)) => assert!(std::sync::Arc::ptr_eq(&a, &b)),
+            _ => panic!("expected string values"),
+        }
+        let unicode = Value::Str("héllo".to_string().into());
+        assert_eq!(
+            get_index(&unicode, &Value::Int(1), span).unwrap(),
+            Value::Str("é".to_string().into())
+        );
+        assert_eq!(
+            get_index(&unicode, &Value::Int(4), span).unwrap(),
+            Value::Str("o".to_string().into())
+        );
+    }
+
+    /// `CallMethod` probes with [`object_field_opt`] and only the real read
+    /// path formats [`object_field`]'s error, so both must agree on hits and
+    /// the error text must not drift.
+    #[test]
+    fn field_probe_matches_the_error_path() {
+        let span = Span::new(0, 0);
+        let obj = Value::Object(std::sync::Arc::new(ObjectValue {
+            name: "P".into(),
+            fields: vec![("x".into(), Value::Int(1))],
+        }));
+        assert_eq!(object_field_opt(&obj, "x"), Some(Value::Int(1)));
+        assert_eq!(object_field_opt(&obj, "nope"), None);
+        assert_eq!(
+            object_field(&obj, "nope", span).unwrap_err().message,
+            "struct `P` has no field `nope`"
+        );
+
+        let dict = Value::Dict(std::sync::Arc::new(crate::value::DictData::from_entries(
+            vec![(
+                Value::Str(std::sync::Arc::new("k".to_string())),
+                Value::Int(2),
+            )],
+        )));
+        assert_eq!(object_field_opt(&dict, "k"), Some(Value::Int(2)));
+        assert_eq!(object_field_opt(&dict, "missing"), None);
+        assert_eq!(
+            object_field(&dict, "missing", span).unwrap_err().message,
+            "dict has no key `missing`"
+        );
+
+        let int = Value::Int(3);
+        assert_eq!(object_field_opt(&int, "f"), None);
+        assert_eq!(
+            object_field(&int, "f", span).unwrap_err().message,
+            "cannot access field `f` on a value of type `3`"
+        );
     }
 }

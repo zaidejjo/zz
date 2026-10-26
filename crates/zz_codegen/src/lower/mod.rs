@@ -277,6 +277,13 @@ impl Lowerer {
         // globals. Top-level Decl assigns into its global (no local redecl).
         let mut names = NameCtx::new();
         self.seed_globals(&mut names);
+        // `zz_main` is a C frame too: a closure created in top-level code
+        // cannot read its C locals. Bindings that live only in that frame —
+        // loop variables and block locals — must be heap cells when a nested
+        // closure uses them, exactly like function locals. Module globals are
+        // excluded by the walker (closures read those directly), so this set
+        // only ever names inline-scope bindings.
+        names.capture_set = zz_hir::captured_in_stmts(&[], self.tp.stmts(), &self.global_set);
         self.seed_scalar_fns(&mut names);
         let mut global_init_done: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -865,11 +872,45 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "input" => Some("zz_io_input"),
         // Test assertions — success returns unit, failure aborts with
         // `error:` on stderr (mirrors the VM's EvalError).
-        "assert" | "std.test.assert" => Some("zz_assert"),
-        "assert_eq" | "std.test.assert_eq" => Some("zz_assert_eq"),
-        "assert_ne" | "std.test.assert_ne" => Some("zz_assert_ne"),
-        "assert_approx_eq" | "std.test.assert_approx_eq" => Some("zz_assert_approx_eq"),
-        "fail" | "panic" | "std.test.fail" | "std.test.panic" => Some("zz_fail"),
+        // Three spellings: bare (no import), `test.*` (via `import std.test`),
+        // `std.test.*` (canonical).
+        "assert" | "test.assert" | "std.test.assert" => Some("zz_assert"),
+        "assert_eq" | "test.assert_eq" | "std.test.assert_eq" => Some("zz_assert_eq"),
+        "assert_ne" | "test.assert_ne" | "std.test.assert_ne" => Some("zz_assert_ne"),
+        "assert_approx_eq" | "test.assert_approx_eq" | "std.test.assert_approx_eq" => {
+            Some("zz_assert_approx_eq")
+        }
+        "fail" | "panic" | "test.fail" | "test.panic" | "std.test.fail" | "std.test.panic" => {
+            Some("zz_fail")
+        }
+        "assert_contains" | "test.assert_contains" | "std.test.assert_contains" => {
+            Some("zz_assert_contains")
+        }
+        "assert_starts_with" | "test.assert_starts_with" | "std.test.assert_starts_with" => {
+            Some("zz_assert_starts_with")
+        }
+        "assert_ends_with" | "test.assert_ends_with" | "std.test.assert_ends_with" => {
+            Some("zz_assert_ends_with")
+        }
+        "assert_len" | "test.assert_len" | "std.test.assert_len" => Some("zz_assert_len"),
+        "assert_gt" | "test.assert_gt" | "std.test.assert_gt" => Some("zz_assert_gt"),
+        "assert_lt" | "test.assert_lt" | "std.test.assert_lt" => Some("zz_assert_lt"),
+        "assert_is_some" | "test.assert_is_some" | "std.test.assert_is_some" => {
+            Some("zz_assert_is_some")
+        }
+        "assert_is_none" | "test.assert_is_none" | "std.test.assert_is_none" => {
+            Some("zz_assert_is_none")
+        }
+        "assert_is_ok" | "test.assert_is_ok" | "std.test.assert_is_ok" => Some("zz_assert_is_ok"),
+        "assert_is_err" | "test.assert_is_err" | "std.test.assert_is_err" => {
+            Some("zz_assert_is_err")
+        }
+        "temp_dir" | "test.temp_dir" | "std.test.temp_dir" => Some("zz_test_temp_dir"),
+        "free_port" | "test.free_port" | "std.test.free_port" => Some("zz_test_free_port"),
+        "assert_snapshot" | "test.assert_snapshot" | "std.test.assert_snapshot" => {
+            Some("zz_assert_snapshot")
+        }
+        "black_box" | "test.black_box" | "std.test.black_box" => Some("zz_black_box"),
         // Debug print preserving Option wrappers; returns its argument.
         "dbg" => Some("zz_dbg"),
         "len" => Some("zz_len"),
@@ -879,7 +920,7 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "filter" | "vec.filter" | "std.vec.filter" => Some("zz_iter_filter"),
         "enumerate" | "vec.enumerate" | "std.vec.enumerate" => Some("zz_iter_enumerate"),
         "zip" | "vec.zip" | "std.vec.zip" => Some("zz_iter_zip"),
-        "append" => Some("zz_vec_push"),
+        "clone" => Some("zz_clone_deep"),
         "range" => Some("zz_range3"),
         "typeof" => Some("zz_typeof"),
         "int" => Some("zz_int_cast"),
@@ -889,12 +930,8 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         // vec methods — bare names for method dispatch
         "vec.len" | "std.vec.len" | "vec_len" => Some("zz_vec_len"),
         "bytes.len" | "std.bytes.len" => Some("zz_len"),
-        // `vec.append` is documented (stdlib.md, checker sigs) as an alias
-        // for `vec.push`: it returns the new array. Map to the value form
-        // `zz_vec_push`; statement position still mutates in place via the
-        // existing void-context `zz_vec_push` → `zz_vec_append` swap in
-        // expr.rs (same as `vec.push` and bare `append`).
-        "vec.append" | "std.vec.append" => Some("zz_vec_push"),
+        // `vec.append` was removed — canonical spelling is `vec.push`.
+        // (Mapping deleted; the checker errors with a rename hint.)
         "vec.push" | "std.vec.push" => Some("zz_vec_push"),
         "vec.pop" | "std.vec.pop" => Some("zz_vec_pop"),
         "vec.remove" | "std.vec.remove" => Some("zz_vec_remove"),
@@ -902,6 +939,9 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "vec.join" | "std.vec.join" => Some("zz_str_join"), // join is a str function called on arrays
         "vec.contains" | "std.vec.contains" => Some("zz_vec_contains"),
         "vec.sort" | "std.vec.sort" => Some("zz_vec_sort"),
+        "vec.sort_by" | "std.vec.sort_by" => Some("zz_vec_sort_by"),
+        "vec.sort_by_desc" | "std.vec.sort_by_desc" => Some("zz_vec_sort_by_desc"),
+        "vec.sort_key" | "std.vec.sort_key" => Some("zz_vec_sort_key"),
         "vec.reverse" | "std.vec.reverse" => Some("zz_vec_reverse"),
         // str
         "str.length" | "std.str.length" => Some("zz_str_length"),
@@ -1024,6 +1064,10 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         // option / result
         "option.expect" | "std.option.expect" => Some("zz_option_expect"),
         "result.expect" | "std.result.expect" => Some("zz_result_expect"),
+        "option.unwrap" | "std.option.unwrap" => Some("zz_option_unwrap"),
+        "option.unwrap_or" | "std.option.unwrap_or" => Some("zz_option_unwrap_or"),
+        "result.unwrap" | "std.result.unwrap" => Some("zz_result_unwrap"),
+        "result.unwrap_or" | "std.result.unwrap_or" => Some("zz_result_unwrap_or"),
         // fs — comprehensive non-blocking filesystem (C runtime in
         // core.c; unified `fs:<op>:<code>` diagnostics match the VM).
         "fs.read" | "std.fs.read" => Some("zz_fs_read"),
@@ -1101,7 +1145,6 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.tcp_write" | "std.net.tcp_write" => Some("zz_tcp_write"),
         "net.tcp_read" | "std.net.tcp_read" => Some("zz_tcp_read"),
         "net.tcp_readline" | "std.net.tcp_readline" => Some("zz_tcp_readline"),
-        "net.tcp_close" | "std.net.tcp_close" => Some("zz_tcp_close"),
         "net.tcp_read_bytes" | "std.net.tcp_read_bytes" => Some("zz_tcp_read_bytes"),
         "net.tcp_read_exact" | "std.net.tcp_read_exact" => Some("zz_tcp_read_exact"),
         "net.tcp_write_bytes" | "std.net.tcp_write_bytes" => Some("zz_tcp_write_bytes"),
@@ -1122,16 +1165,16 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.set_write_timeout" | "std.net.set_write_timeout" => Some("zz_tcp_set_write_timeout"),
         // sqlz (AOT: sqlite3 prepared-statement C impl + postgres via
         // the staticlib; the C handle records the backend).
-        // Canonical `sqlz.*` / `std.sqlz.*`; `db.*` / `std.db.*` are
-        // zero-overhead aliases; `pg.*` / `std.sqlz.postgres.*` are the
-        // explicit PG spellings (same handle, same dispatch).
-        "sqlz.open" | "std.sqlz.open" | "db.open" | "std.db.open" => Some("zz_db_open"),
+        // Canonical `sqlz.*` / `std.sqlz.*` (`db` was removed);
+        // `pg.*` / `std.sqlz.postgres.*` are the explicit PG spellings
+        // (`pg` only exists as an import alias of the nested module).
+        "sqlz.open" | "std.sqlz.open" => Some("zz_db_open"),
         "pg.connect" | "std.sqlz.postgres.connect" => Some("zz_pg_connect"),
-        "sqlz.exec" | "std.sqlz.exec" | "db.exec" | "std.db.exec" => Some("zz_db_exec"),
+        "sqlz.exec" | "std.sqlz.exec" => Some("zz_db_exec"),
         "pg.exec" | "std.sqlz.postgres.exec" => Some("zz_db_exec"),
-        "sqlz.query" | "std.sqlz.query" | "db.query" | "std.db.query" => Some("zz_db_query"),
+        "sqlz.query" | "std.sqlz.query" => Some("zz_db_query"),
         "pg.query" | "std.sqlz.postgres.query" => Some("zz_db_query"),
-        "sqlz.close" | "std.sqlz.close" | "db.close" | "std.db.close" => Some("zz_db_close"),
+        "sqlz.close" | "std.sqlz.close" => Some("zz_db_close"),
         "pg.close" | "std.sqlz.postgres.close" => Some("zz_db_close"),
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),
@@ -1152,7 +1195,9 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "http.route" | "std.http.route" => Some("zz_http_route"),
         "http.log" | "std.http.log" => Some("zz_http_log"),
         "http.pipe" | "std.http.pipe" => Some("zz_http_pipe"),
+        "http.rate_limit" | "std.http.rate_limit" => Some("zz_http_rate_limit"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
+        "http.listen_cfg" | "std.http.listen_cfg" => Some("zz_http_listen_cfg"),
         "http.test" | "std.http.test" => Some("zz_http_test"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),
         "http.respond" | "std.http.respond" => Some("zz_http_respond"),

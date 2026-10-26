@@ -978,7 +978,15 @@ impl Lowerer {
                 // into a shared temp (statement position discards it).
                 // Chained `else if` arrives as a bare If — recurse so
                 // nested branches emit instead of collapsing to unit.
+                // The condition always evaluates in non-void context
+                // (a mutating call there keeps its value); the arms
+                // inherit the ambient context, so statement-position
+                // `if/else` (void) lowers pushes in-place instead of
+                // discarding copy-on-write results (#427).
+                let saved_void = *self.void_context.borrow();
+                *self.void_context.borrow_mut() = false;
                 let c = self.emit_expr(cond, names, out);
+                *self.void_context.borrow_mut() = saved_void;
                 // `_u` fast path: a raw scalar condition tests directly
                 // (`zz_truthy` on `int`/`float` is `!= 0`, matching the
                 // runtime). Boxed mode keeps `zz_truthy` byte-identical.
@@ -1856,7 +1864,7 @@ impl Lowerer {
         };
         let val = match &block_body {
             Some(b) => {
-                self.emit_func_block(b, &mut names, &mut body_out);
+                self.emit_func_block(b, &mut names, &mut body_out, true);
                 o.push_str(&body_out);
                 // Defer runner lands before the tail returns below.
                 String::new()
@@ -2212,6 +2220,13 @@ impl Lowerer {
                             (c, Some(r))
                         } else if let Some((c, r)) = enum_dispatch {
                             (c, Some(r))
+                        } else if self.is_func_field_call(parts, names) {
+                            // Func-typed struct field (`e.run(...)` where
+                            // `run: func...`): not a method — the sentinel
+                            // routes past every resolver to the
+                            // indirect-closure path, which evaluates the
+                            // field read and emits `zz_call_closure`.
+                            (Self::FUNC_FIELD_CNAME.to_string(), None)
                         } else {
                             // Use the receiver's type from the type checker to
                             // select the correct namespace. Without this, the
@@ -2277,9 +2292,10 @@ impl Lowerer {
                             if !type_ns.is_empty() {
                                 let candidate = format!("{type_ns}.{method}");
                                 let std_candidate = format!("std.{type_ns}.{method}");
-                                if self.reachable_natives.contains(&candidate)
-                                    || self.reachable_natives.contains(&std_candidate)
-                                    || native_supported(&candidate)
+                                if self.ns_method_usable(type_ns, method)
+                                    && (self.reachable_natives.contains(&candidate)
+                                        || self.reachable_natives.contains(&std_candidate)
+                                        || native_supported(&candidate))
                                 {
                                     found_ns = type_ns;
                                 }
@@ -2303,8 +2319,9 @@ impl Lowerer {
                                     .filter(|ns| {
                                         let candidate = format!("{ns}.{method}");
                                         let std_candidate = format!("std.{ns}.{method}");
-                                        self.reachable_natives.contains(&candidate)
-                                            || self.reachable_natives.contains(&std_candidate)
+                                        self.ns_method_usable(ns, method)
+                                            && (self.reachable_natives.contains(&candidate)
+                                                || self.reachable_natives.contains(&std_candidate))
                                     })
                                     .collect();
                                 if let Some(ns) =
@@ -2331,6 +2348,7 @@ impl Lowerer {
                                         n.strip_suffix(suffix.as_str())
                                             .map(|ns| ns.strip_prefix("std.").unwrap_or(ns))
                                     })
+                                    .filter(|ns| self.ns_method_usable(ns, method))
                                     .collect();
                                 cands.sort_unstable();
                                 cands.dedup();
@@ -2433,6 +2451,7 @@ impl Lowerer {
                                             hits.push(k);
                                         }
                                     }
+                                    hits.retain(|h| self.is_real_callee(h));
                                     hits.sort_unstable();
                                     hits.dedup();
                                     if hits.len() == 1 {
@@ -2560,14 +2579,21 @@ impl Lowerer {
                             parts: parts[..parts.len() - 1].to_vec(),
                             span: callee.span(),
                         };
-                        match self.field_free_target(&method, None) {
-                            Some(t) => (t, Some(recv_expr)),
-                            None => {
-                                let mut fixed = parts.clone();
-                                if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
-                                    fixed[0] = head.clone();
+                        // Func-typed struct field on a longer path
+                        // (`a.b.run(...)`): same value-call route as the
+                        // 2-part arm (sentinel → indirect closure).
+                        if self.is_func_field_call(parts, names) {
+                            (Self::FUNC_FIELD_CNAME.to_string(), None)
+                        } else {
+                            match self.field_free_target(&method, None) {
+                                Some(t) => (t, Some(recv_expr)),
+                                None => {
+                                    let mut fixed = parts.clone();
+                                    if let Some(head) = self.import_ns_aliases.get(&parts[0]) {
+                                        fixed[0] = head.clone();
+                                    }
+                                    (fixed.join("."), None)
                                 }
-                                (fixed.join("."), None)
                             }
                         }
                     } else {
@@ -2587,8 +2613,11 @@ impl Lowerer {
                 obj, name: method, ..
             } => {
                 // Expr::Field callee — rare since parser consumes ident chains as Path.
-                // Look up receiver type and dispatch.
-                if let Some(zzty) = self.ty_at(names, obj.span()) {
+                // Func-typed struct field: value call via the sentinel
+                // (same route as the Path arms above).
+                if self.is_func_field_callee(callee, names) {
+                    (Self::FUNC_FIELD_CNAME.to_string(), None)
+                } else if let Some(zzty) = self.ty_at(names, obj.span()) {
                     match zzty {
                         zz_checker::Type::Enum(ename, _) => {
                             // Enum values erase to boxed objects: methods
@@ -2670,7 +2699,10 @@ impl Lowerer {
                                 _ => "",
                             };
                             if !ns.is_empty() {
-                                (format!("{ns}.{method}"), Some(*obj.clone()))
+                                (
+                                    self.method_spelling(ns, method, args.len() + 1),
+                                    Some(*obj.clone()),
+                                )
                             } else {
                                 // Unknown-type receiver (e.g. a span the
                                 // checker never recorded): still resolve a
@@ -2838,20 +2870,10 @@ impl Lowerer {
         // Both are passed explicitly.
         if matches!(
             cname.as_str(),
-            "sqlz.query"
-                | "std.sqlz.query"
-                | "db.query"
-                | "std.db.query"
-                | "pg.query"
-                | "std.sqlz.postgres.query"
+            "sqlz.query" | "std.sqlz.query" | "pg.query" | "std.sqlz.postgres.query"
         ) || matches!(
             cname.as_str(),
-            "sqlz.exec"
-                | "std.sqlz.exec"
-                | "db.exec"
-                | "std.db.exec"
-                | "pg.exec"
-                | "std.sqlz.postgres.exec"
+            "sqlz.exec" | "std.sqlz.exec" | "pg.exec" | "std.sqlz.postgres.exec"
         ) {
             return self.emit_db_call(&cname, method_receiver.as_ref(), ordered_args, names, out);
         }
@@ -2860,10 +2882,7 @@ impl Lowerer {
         // path (closures have no C function pointer).  Instead we inline the
         // closure body between BEGIN / COMMIT / ROLLBACK directly, binding
         // the closure parameter (typically `tx`) to the same db handle.
-        if matches!(
-            cname.as_str(),
-            "sqlz.transaction" | "std.sqlz.transaction" | "db.transaction" | "std.db.transaction"
-        ) {
+        if matches!(cname.as_str(), "sqlz.transaction" | "std.sqlz.transaction") {
             if let Some(Expr::Closure { params, body, .. }) = args.last() {
                 // Emit the db handle — for the method form
                 // `db.transaction(|tx| {...})` the receiver IS the db;
@@ -2891,7 +2910,7 @@ impl Lowerer {
                 // bodies so that __tail is preserved (emit_block truncates it).
                 let mut body_out = String::new();
                 let body_val = if let Expr::Block(b) = body.as_ref() {
-                    self.emit_func_block(b, names, &mut body_out);
+                    self.emit_func_block(b, names, &mut body_out, true);
                     if let Some((tmp, _)) = names.stack.get("__tail").and_then(|s| s.last()) {
                         tmp.clone()
                     } else {
@@ -3399,7 +3418,15 @@ impl Lowerer {
             // `zz_clone(barecid)` shapes are stripped (live C locals and
             // globals, which outlive the synchronous call); complex
             // temporaries keep their owned form.
-            if matches!(effective_name, "zz_len" | "zz_fs_write" | "zz_fs_append") {
+            if matches!(
+                effective_name,
+                "zz_len"
+                    | "zz_fs_write"
+                    | "zz_fs_append"
+                    | "zz_db_query"
+                    | "zz_db_exec"
+                    | "zz_db_close"
+            ) {
                 for item in arg_items.iter_mut() {
                     if let Some(inner) = item
                         .strip_prefix("zz_clone(")
@@ -3516,8 +3543,15 @@ impl Lowerer {
         // Bare-name fallback: the loader qualifies same-file calls, but a
         // bare `greet_user` can still arrive here (generated code, REPL).
         // A unique `*.name` reachable function is that same-file target.
+        // A local binding (param, local, or closure capture) shadows any
+        // module-level function of the same name (#437): skip the
+        // fallback so the direct-call branch below cannot steal it —
+        // the call falls through to the indirect closure-call branch,
+        // which dispatches through the binding.
+        let shadowed = names.lookup(&cname_for_native).is_some();
         let owned_fallback: Option<String>;
-        let cname_ref: &str = if !cname_for_native.contains('.')
+        let cname_ref: &str = if !shadowed
+            && !cname_for_native.contains('.')
             && !self.reachable_funcs.contains(&cname_for_native)
             && !self.tp.funcs.contains_key(&cname_for_native)
         {
@@ -3527,6 +3561,7 @@ impl Lowerer {
                 .iter()
                 .filter(|f| f.ends_with(suffix.as_str()))
                 .collect();
+            hits.retain(|h| self.is_real_callee(h));
             hits.sort_unstable();
             hits.dedup();
             if hits.len() == 1 {
@@ -3545,8 +3580,27 @@ impl Lowerer {
         let cname_for_native: String = cname_ref.to_string();
         let _ = &owned_fallback;
 
-        if self.reachable_funcs.contains(&cname_for_native)
+        // Canonical-to-short definition bridge: pure-ZZ bodies are
+        // declared under short names (`path.join`) while selective-import
+        // and canonical call spellings arrive as `std.path.join`. The
+        // definition loop emits the short spelling, so reference it —
+        // otherwise the call dangles (decl without def). Only remaps when
+        // the canonical name has no definition of its own (user `std.*`
+        // definitions, such as they are, keep exact match) — natives
+        // never reach here without an impl (handled above).
+        let cname_for_native: String = if self.find_func_def(&cname_for_native).is_none() {
+            match cname_for_native.strip_prefix("std.") {
+                Some(stripped) if self.find_func_def(stripped).is_some() => stripped.to_string(),
+                _ => cname_for_native,
+            }
+        } else {
+            cname_for_native
+        };
+
+        if !shadowed
+            && self.reachable_funcs.contains(&cname_for_native)
             && (self.tp.funcs.contains_key(&cname_for_native)
+                || self.find_func_def(&cname_for_native).is_some()
                 || self.is_impl_method(&cname_for_native))
         {
             let cf = format!("zz_fn_{}", mangle(&cname_for_native));
@@ -3736,7 +3790,11 @@ impl Lowerer {
                 }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
-                    if names.lookup(&joined).is_some() {
+                    if self.is_func_field_call(parts, names) {
+                        // Func-typed struct field value (`e.run`): evaluate
+                        // the field read, then `zz_call_closure`.
+                        Indirect::Other
+                    } else if names.lookup(&joined).is_some() {
                         Indirect::Known
                     } else if parts
                         .last()
@@ -3751,8 +3809,14 @@ impl Lowerer {
                 }
                 // Arbitrary callee expression (e.g. `make_adder()(5)`):
                 // evaluate it, then dispatch. `Field` callees are method-ish
-                // and keep the old unit fallback.
-                _ if !matches!(callee, Expr::Field { .. }) => Indirect::Other,
+                // and keep the old unit fallback — except func-typed struct
+                // fields, which evaluate to a function value like any
+                // other indirect callee.
+                _ if !matches!(callee, Expr::Field { .. })
+                    || self.is_func_field_callee(callee, names) =>
+                {
+                    Indirect::Other
+                }
                 _ => Indirect::No,
             };
             let closure_val: Option<String> = match kind {
@@ -4194,6 +4258,150 @@ impl Lowerer {
     /// namespaced), unique `*.{method}` suffix, bare native. Returns
     /// `None` when nothing resolves — callers then keep the old
     /// `(method, None)` fallthrough.
+    /// Func-typed struct field call (`e.run(...)` where `run: func...`):
+    /// not a method — the field holds a first-class function the call
+    /// invokes as a value (`zz_call_closure`), mirroring the checker's
+    /// type-driven callee resolution and the VM (#385: collections
+    /// `Entry{name, run}` structs depend on this). Walks the receiver
+    /// path through struct field types; the leaf field must be `Func`.
+    /// `false` for methods, natives, and plain paths (which keep the
+    /// existing dispatch below).
+    fn is_func_field_call(&self, parts: &[String], names: &NameCtx) -> bool {
+        if parts.len() < 2 {
+            return false;
+        }
+        let head = &parts[0];
+        if names.lookup(head).is_none() {
+            return false;
+        }
+        let mut cur = match names.checker_types.get(head) {
+            Some(t) => t.clone(),
+            None => return false,
+        };
+        for seg in &parts[1..parts.len() - 1] {
+            let sname = match &cur {
+                zz_checker::Type::Struct(s, _) => s.clone(),
+                _ => return false,
+            };
+            let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
+            let field_ty = self
+                .tp
+                .structs
+                .get(&sname)
+                .or_else(|| self.tp.structs.get(&bare))
+                .and_then(|sig| sig.fields.iter().find(|(n, _)| n == seg))
+                .map(|(_, t)| t.clone());
+            match field_ty {
+                Some(t) => cur = t,
+                None => return false,
+            }
+        }
+        // Leaf: `method` must be a Func-typed field of a struct.
+        // (Direct fields only; promoted func fields keep the old path.)
+        let sname = match &cur {
+            zz_checker::Type::Struct(s, _) => s.clone(),
+            _ => return false,
+        };
+        let method = parts.last().unwrap();
+        let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
+        self.tp
+            .structs
+            .get(&sname)
+            .or_else(|| self.tp.structs.get(&bare))
+            .and_then(|sig| sig.fields.iter().find(|(n, _)| n == method))
+            .is_some_and(|(_, t)| matches!(t, zz_checker::Type::Func(_, _)))
+    }
+
+    /// Callee-shape wrapper over [`Self::is_func_field_call`]: accepts the
+    /// `Path` and `Field` callee forms (the parser emits the former;
+    /// lowering synthesizes the latter).
+    fn is_func_field_callee(&self, callee: &Expr, names: &NameCtx) -> bool {
+        match callee {
+            Expr::Path { parts, .. } => self.is_func_field_call(parts, names),
+            Expr::Field {
+                obj, name: method, ..
+            } => match obj.as_ref() {
+                Expr::Ident { name, .. } => {
+                    self.is_func_field_call(&[name.clone(), method.clone()], names)
+                }
+                Expr::Path { parts, .. } => {
+                    let mut p = parts.clone();
+                    p.push(method.clone());
+                    self.is_func_field_call(&p, names)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Sentinel callee name for func-typed struct field calls. Resolves
+    /// to nothing downstream (every use is a miss-guarded table lookup),
+    /// so emission always reaches the indirect-closure path, which
+    /// evaluates the field read and emits `zz_call_closure`. The NUL byte
+    /// keeps it unforgeable: no ZZ identifier (and hence no real func,
+    /// native, or specialization key) can contain it.
+    const FUNC_FIELD_CNAME: &'static str = "\0funfield";
+
+    /// Whether a callgraph name is a spelling this backend can really
+    /// call: a definition in the program or an embedded-C/Rust native
+    /// impl (checked under the name and its `std.`-qualified twin — the
+    /// callgraph records native candidates std-qualified).
+    ///
+    /// `reachable_funcs` also carries ghost candidates: the callgraph
+    /// records `<recv-ns>.<method>` for every receiver type because the
+    /// IR keeps method calls generic (`callmethod "len"`), so a `str.len`
+    /// entry can exist in a program that never defines or implements that
+    /// spelling (#521).
+    fn is_real_callee(&self, name: &str) -> bool {
+        let twin = match name.strip_prefix("std.") {
+            Some(bare) => bare.to_string(),
+            None => format!("std.{name}"),
+        };
+        self.tp.funcs.contains_key(name)
+            || native_supported(name)
+            || self.tp.funcs.contains_key(&twin)
+            || native_supported(&twin)
+    }
+
+    /// Whether this backend can actually call the `<ns>.<method>`
+    /// spelling.
+    ///
+    /// Reachability alone is not evidence that a spelling exists: the
+    /// callgraph records a candidate for every receiver type (the IR
+    /// keeps method calls generic — `callmethod "len"` — and resolves
+    /// them by value at run time), so a `str` receiver always produces a
+    /// `str.len` edge even though no such native exists — the generic
+    /// `len` builtin covers strings. Selecting that ghost spelling
+    /// emitted the loud ``native `str.len` is not implemented`` stub for
+    /// programs the VM runs, and dropped the receiver expression with it
+    /// (#521).
+    fn ns_method_usable(&self, ns: &str, method: &str) -> bool {
+        let cand = format!("{ns}.{method}");
+        native_supported(&cand) || self.tp.funcs.contains_key(&cand)
+    }
+
+    /// Spelling for a receiver-typed method call (`s.len()`, `b.len()`).
+    ///
+    /// The checker resolves dot-calls bare-first (the receiver-type
+    /// namespace is consulted only when the bare name has no signature)
+    /// and the IR keeps the call generic, so when the namespace spelling
+    /// is unusable (see [`Self::ns_method_usable`]) the bare callable of
+    /// matching arity is the call the program means. Anything else keeps
+    /// the namespace spelling, whose ZZ body — or loud missing-native
+    /// stub — is handled downstream.
+    fn method_spelling(&self, ns: &str, method: &str, nvalues: usize) -> String {
+        if self.ns_method_usable(ns, method) {
+            return format!("{ns}.{method}");
+        }
+        if self.tp.funcs.contains_key(method)
+            || (native_supported(method) && native_arity(method) == Some(nvalues))
+        {
+            return method.to_string();
+        }
+        format!("{ns}.{method}")
+    }
+
     fn field_free_target(&self, method: &str, sname: Option<&str>) -> Option<String> {
         // Bare names count only with a real definition: reachable_funcs
         // can hold phantom short names (the callgraph records
@@ -4222,6 +4430,7 @@ impl Lowerer {
                 hits.push(k);
             }
         }
+        hits.retain(|h| self.is_real_callee(h));
         hits.sort_unstable();
         hits.dedup();
         if hits.len() == 1 {
@@ -4567,10 +4776,13 @@ impl Lowerer {
         // Strategy 1: longest-prefix local match.
         // parts = ["mod", "rect", "area"] → try "mod.rect" (no), then
         // "rect" (yes, since locals are registered under the bare name
-        // and not the module-prefixed form). The matched lookup key is
-        // either the joined prefix or the last segment of the prefix
-        // — whichever hits a registered local.
-        for split in (1..parts.len() - 1).rev() {
+        // and not the module-prefixed form). A plain `local.method()`
+        // has the whole path as its receiver, so the prefix range must
+        // reach `parts.len() - 1` — otherwise the two-part form (the most
+        // common dot call) never reaches this strategy at all. The matched
+        // lookup key is either the joined prefix or the last segment of
+        // the prefix — whichever hits a registered local.
+        for split in (1..parts.len()).rev() {
             let recv_parts = &parts[..split];
             let recv_joined = recv_parts.join(".");
             let recv_tail = recv_parts.last().unwrap().clone();
@@ -4581,7 +4793,11 @@ impl Lowerer {
             } else {
                 continue;
             };
-            let recv_type = names.lookup_type(&matched_key)?;
+            // A receiver with no registered C type (abstract/erased) is
+            // not a dead end: shorter prefixes may still match.
+            let Some(recv_type) = names.lookup_type(&matched_key) else {
+                continue;
+            };
             let unmangled = self
                 .struct_name_from_c_type(recv_type)
                 .and_then(|mangled| {
@@ -4595,23 +4811,25 @@ impl Lowerer {
                     // Boxed receiver: resolve through the checker type.
                     let span = zz_frontend::span::Span::new(0, 0);
                     self.checker_struct_of(names, &matched_tail, Some(span))
-                })?;
-            if let Some((impl_name, path)) = self.struct_method_target(&unmangled, &method) {
-                let span = zz_frontend::span::Span::new(0, 0);
-                let recv_expr = if path.is_empty() {
-                    Expr::Ident {
-                        name: matched_tail,
-                        span,
-                    }
-                } else {
-                    let mut rparts = vec![matched_tail];
-                    rparts.extend(path);
-                    Expr::Path {
-                        parts: rparts,
-                        span,
-                    }
-                };
-                return Some((impl_name, recv_expr));
+                });
+            if let Some(unmangled) = unmangled {
+                if let Some((impl_name, path)) = self.struct_method_target(&unmangled, &method) {
+                    let span = zz_frontend::span::Span::new(0, 0);
+                    let recv_expr = if path.is_empty() {
+                        Expr::Ident {
+                            name: matched_tail,
+                            span,
+                        }
+                    } else {
+                        let mut rparts = vec![matched_tail];
+                        rparts.extend(path);
+                        Expr::Path {
+                            parts: rparts,
+                            span,
+                        }
+                    };
+                    return Some((impl_name, recv_expr));
+                }
             }
             // Enum-typed local (`zz_value` erasure): resolve `Enum.method`
             // the same way. No promotion: variants carry no embedded values.
@@ -4624,6 +4842,96 @@ impl Lowerer {
                     };
                     return Some((impl_name, recv_expr));
                 }
+            }
+        }
+
+        // Strategy 1.5: field-path receiver with a native-handle leaf
+        // type (#423). parts = ["b", "slot", "get"]: `b` is a local
+        // struct but `get` is no `Box` method — it is `cell.get` on the
+        // field. Walk struct fields from the head's checker type; when
+        // the leaf maps to a native namespace with a reachable/supported
+        // `{ns}.{method}`, dispatch with the receiver path as first
+        // argument. Longest receiver first, mirroring strategy 1.
+        // Only exact leaf types: options/generics stay on the old paths.
+        for split in (2..parts.len()).rev() {
+            let recv_parts = &parts[..split];
+            let head = &recv_parts[0];
+            if names.lookup(head).is_none() {
+                continue;
+            }
+            let mut cur = match names.checker_types.get(head) {
+                Some(t) => t.clone(),
+                None => continue,
+            };
+            let mut ok = true;
+            for seg in &recv_parts[1..] {
+                let sname = match &cur {
+                    zz_checker::Type::Struct(s, _) => s.clone(),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                };
+                let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
+                let field_ty = self
+                    .tp
+                    .structs
+                    .get(&sname)
+                    .or_else(|| self.tp.structs.get(&bare))
+                    .and_then(|sig| sig.fields.iter().find(|(n, _)| n == seg))
+                    .map(|(_, t)| t.clone());
+                match field_ty {
+                    Some(t) => cur = t,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
+            // Same type→namespace mapping as the 2-part local arm above.
+            let ns: Option<String> = match &cur {
+                zz_checker::Type::Str => Some("str".to_string()),
+                zz_checker::Type::Array(_) => Some("vec".to_string()),
+                zz_checker::Type::Dict(_, _) => Some("dict".to_string()),
+                zz_checker::Type::Option(_) => Some("option".to_string()),
+                zz_checker::Type::Result(_, _) => Some("result".to_string()),
+                zz_checker::Type::Db => Some("sqlz".to_string()),
+                zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
+                    Some("net".to_string())
+                }
+                zz_checker::Type::HttpServer
+                | zz_checker::Type::Response
+                | zz_checker::Type::HttpRequest => Some("http".to_string()),
+                zz_checker::Type::Json => Some("json".to_string()),
+                zz_checker::Type::Bytes => Some("bytes".to_string()),
+                zz_checker::Type::Chan => Some("chan".to_string()),
+                zz_checker::Type::Opaque(tag) => Some(tag.clone()),
+                _ => None,
+            };
+            let Some(ns) = ns else { continue };
+            let candidate = format!("{ns}.{method}");
+            let std_candidate = format!("std.{ns}.{method}");
+            // Reachable-first, but only for spellings this backend can
+            // really call: the callgraph records `<recv-ns>.<method>`
+            // candidates for every receiver type, so a ghost (`str.len`
+            // on a `str` field) would otherwise abort here instead of
+            // falling through to the bare native below (#521).
+            if self.ns_method_usable(&ns, &method)
+                && (self.reachable_natives.contains(&candidate)
+                    || self.reachable_natives.contains(&std_candidate)
+                    || native_supported(&candidate))
+            {
+                let span = zz_frontend::span::Span::new(0, 0);
+                return Some((
+                    candidate,
+                    Expr::Path {
+                        parts: recv_parts.to_vec(),
+                        span,
+                    },
+                ));
             }
         }
 
@@ -4870,6 +5178,10 @@ impl Lowerer {
             }
             None => (None, sql_args),
         };
+        // The DB natives only borrow the handle for the duration of the
+        // call. Give the receiver an owned temporary (locals arrive as a
+        // clone, calls as an owned result) and release it after the call,
+        // so neither a helper return nor a local's +1 leaks the backend.
         let recv_c = match (method_receiver, recv_expr.as_ref()) {
             (Some(r), _) => {
                 let raw = self.emit_expr(r, names, out);
@@ -4967,12 +5279,7 @@ impl Lowerer {
         }
         let is_query = matches!(
             cname,
-            "sqlz.query"
-                | "std.sqlz.query"
-                | "db.query"
-                | "std.db.query"
-                | "pg.query"
-                | "std.sqlz.postgres.query"
+            "sqlz.query" | "std.sqlz.query" | "pg.query" | "std.sqlz.postgres.query"
         );
         let rt = if is_query {
             "zz_db_query"
@@ -4981,7 +5288,15 @@ impl Lowerer {
         };
         // Native convention (db, sql_str, binds_array) → route through
         // zz_call_native3 so err plumbing matches every other native.
-        format!("zz_call_native3({rt}, {recv_c}, {tvar}, {arr})")
+        // The statement expression scopes the borrowed receiver so the
+        // release runs immediately after the call, not at block exit.
+        let db_tmp = names.fresh("zz_db_arg");
+        let ret_tmp = names.fresh("zz_db_ret");
+        format!(
+            "({{ zz_value {db_tmp} = {recv_c}; \
+             zz_value {ret_tmp} = zz_call_native3({rt}, {db_tmp}, {tvar}, {arr}); \
+             zz_release(&{db_tmp}); {ret_tmp}; }})"
+        )
     }
 
     /// Best-effort static text of a non-Fmt SQL arg (plain string literal
@@ -5010,6 +5325,16 @@ impl Lowerer {
     ) -> usize {
         match pat {
             Pattern::Binding { name } => {
+                // Record the checker's type for method dispatch:
+                // destructured/match bindings otherwise lower untyped,
+                // and multi-namespace methods (str/vec.contains)
+                // misresolve through the generic fallback (#417).
+                // Name-keyed (scope-free): use-site spans do not resolve
+                // for these bindings, so only this record reaches the
+                // 2-part method arm. Mirrors the Decl path.
+                if let Some(ty) = self.ty_at(names, name.span) {
+                    names.checker_types.insert(name.name.clone(), ty.clone());
+                }
                 // Green: arm bindings live in frame cells (a yield in
                 // the arm body resumes past this declaration).
                 if self.green_active() {
@@ -5514,7 +5839,7 @@ impl Lowerer {
         let mut flat_pats: Vec<FlatPat> = Vec::with_capacity(flat.len());
         for arm in flat.iter() {
             match &arm.pat {
-                Pattern::Variant { .. } => {
+                Pattern::Variant { .. } | Pattern::Tuple { .. } => {
                     let mut conds = Vec::new();
                     let mut binds = Vec::new();
                     let ok = self.flatten_match_pat(
@@ -5538,9 +5863,11 @@ impl Lowerer {
             let is_last_arm = i == flat.len() - 1;
             let arm_needs_else_prefix = i > 0;
             let arm_closes_block = match &arm.pat {
-                Pattern::Binding { .. } | Pattern::Wildcard { .. } | Pattern::Variant { .. } => {
-                    arm.guard.is_none() && is_last_arm
-                }
+                Pattern::Binding { .. }
+                | Pattern::Wildcard { .. }
+                | Pattern::Variant { .. }
+                | Pattern::Literal { .. }
+                | Pattern::Tuple { .. } => arm.guard.is_none() && is_last_arm,
                 _ => false,
             };
 
@@ -5761,7 +6088,45 @@ impl Lowerer {
                     }
                 }
                 Pattern::Tuple { .. } => {
-                    out.push_str("    // unsupported match pattern (tuple)\n");
+                    // Tuple pattern: tag+len condition + element bindings
+                    // were flattened in the pre-loop pass (element temps
+                    // pre-emitted there). Bind each name over its temp,
+                    // emit the arm body, then close the block if this is
+                    // the terminal arm.
+                    names.push_scope();
+                    let fp = &flat_pats[i];
+                    if fp.skip {
+                        names.pop_scope();
+                        continue;
+                    }
+                    let cond = fp.conds.join(" && ");
+                    let full_cond = if let Some(guard_expr) = &arm.guard {
+                        let guard_c = emit_guard_expr(guard_expr, names, &scrut_raw, scrut_type);
+                        format!("{cond} && ({guard_c})")
+                    } else {
+                        cond
+                    };
+                    if arm_needs_else_prefix {
+                        out.push_str(&format!("    }} else if ({full_cond}) {{\n"));
+                    } else {
+                        out.push_str(&format!("    if ({full_cond}) {{\n"));
+                    }
+                    for (bname, pexpr) in &fp.binds {
+                        if self.green_active() {
+                            let (ptr, deref, n) = self.green_cell(names, "zz_value", false, out);
+                            out.push_str(&format!("        {deref} = {pexpr};\n"));
+                            names.enter_cell(bname, &ptr, &deref, "zz_value", n);
+                        } else {
+                            let cid = names.enter(bname);
+                            out.push_str(&format!("        zz_value {cid} = {pexpr};\n"));
+                        }
+                    }
+                    let arm_val = self.emit_tail_value(&arm.body, names, out);
+                    out.push_str(&format!("        {result_tmp} = {arm_val};\n"));
+                    names.pop_scope();
+                    if arm_closes_block {
+                        out.push_str("    }\n");
+                    }
                 }
                 Pattern::Or { .. } => {
                     // Unreachable: or-patterns are expanded into separate

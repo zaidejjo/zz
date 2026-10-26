@@ -181,12 +181,7 @@ void zz_release_dict(zz_dict *d) {
     // Arena-allocated dicts have refs==0 sentinel — skip atomic decrement.
     if (d->refs == 0) {
         for (size_t i = 0; i < d->len; i++) {
-            if (d->entries[i].key && !d->entries[i].key->interned) {
-                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
-                    zz_str_header_free(d->entries[i].key);
-                }
-            }
+            zz_release(&d->entries[i].key);
             zz_release(&d->entries[i].val);
         }
         // Entries buffer: arena-allocated (ZZ_DICT_ARENA_MAGIC) → skip free.
@@ -194,33 +189,28 @@ void zz_release_dict(zz_dict *d) {
         if (d->refs != ZZ_DICT_ARENA_MAGIC) {
             free(d->entries);
         }
+        // The key index is heap-built for refs==0 dicts (the arena-sized
+        // constructor uses the magic sentinel and bump-allocates instead).
+        free(d->idx);
         return;
     }
     if (d->refs == ZZ_DICT_ARENA_MAGIC) {
         // Arena-sized dict: entries are arena-allocated, skip individual free.
         // Only release the contained values (keys may be heap strings).
+        // The key index lives on the same arena — nothing to free either.
         for (size_t i = 0; i < d->len; i++) {
-            if (d->entries[i].key && !d->entries[i].key->interned) {
-                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
-                    zz_str_header_free(d->entries[i].key);
-                }
-            }
+            zz_release(&d->entries[i].key);
             zz_release(&d->entries[i].val);
         }
         return;
     }
     if (__atomic_sub_fetch(&d->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         for (size_t i = 0; i < d->len; i++) {
-            if (d->entries[i].key && !d->entries[i].key->interned) {
-                if (__atomic_sub_fetch(&d->entries[i].key->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                    if (d->entries[i].key->cap > 0) free(d->entries[i].key->heap);
-                    zz_str_header_free(d->entries[i].key);
-                }
-            }
+            zz_release(&d->entries[i].key);
             zz_release(&d->entries[i].val);
         }
         free(d->entries);
+        free(d->idx);
         free(d);
     }
 }
@@ -259,11 +249,19 @@ void zz_retain_arc(zz_value *v) {
     case ZZ_FUNC:
         zz_retain_func(v->fn);
         break;
+    case ZZ_RANGE:
+        if (v->range) {
+            __atomic_add_fetch(&v->range->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
-        if (v->payload) zz_retain(v->payload);
+        zz_vbox_retain(v->payload);
+        break;
+    case ZZ_DB:
+        if (v->db) zz_db_retain_handle(v->db);
         break;
     default:
         break;
@@ -296,11 +294,25 @@ void zz_release_arc(zz_value *v) {
     case ZZ_FUNC:
         zz_release_func(v->fn);
         break;
+    case ZZ_RANGE:
+        if (v->range) {
+            if (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                free(v->range);
+            }
+        }
+        break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
         zz_release_variant(v);
+        break;
+    case ZZ_DB:
+        if (v->db) {
+            void *db = v->db;
+            v->db = NULL;
+            zz_db_release_handle(db);
+        }
         break;
     default:
         break;
@@ -326,11 +338,19 @@ zz_value zz_clone_arc(zz_value v) {
     case ZZ_FUNC:
         zz_retain_func(v.fn);
         break;
+    case ZZ_RANGE:
+        if (v.range) {
+            __atomic_add_fetch(&v.range->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
-        if (v.payload) zz_retain(v.payload);
+        zz_vbox_retain(v.payload);
+        break;
+    case ZZ_DB:
+        if (v.db) zz_db_retain_handle(v.db);
         break;
     default:
         break;

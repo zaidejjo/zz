@@ -1,0 +1,59 @@
+// features: arrays, comparison, dicts, func-call, indexing, int-arith, locals, match, print, return, slicing, std-vec, string-literal, structs, vec-push
+// E2E: `clone(v)` pins a fully independent snapshot (#267). Reads and
+// binds share backing stores since the COW migration, so this asserts
+// the escape hatch: mutating the original (index-set, push, field
+// write) never observes through the clone, on either engine.
+// Top-level names carry the `movecow_` prefix (batch drivers share one
+// native binary; see #437).
+struct MovecowPt {
+    x: int,
+    tags: [str],
+}
+
+func movecow_check() -> str {
+    a := [1, 2, 3]
+    c := clone(a)
+    a[0] = 99
+    a.push(4)
+    if a.len() != 4 {
+        return "array-write"
+    }
+    if c.len() != 3 {
+        return "array-len"
+    }
+    if c[0] != 1 {
+        return "array-elem"
+    }
+    d := {"a": [10], "b": [20]}
+    e := clone(d)
+    d["a"] = [10, 30]
+    if d["a"].len() != 2 {
+        return "dict-write"
+    }
+    got := e["a"]
+    if got.len() != 1 {
+        return "dict-len"
+    }
+    if got[0] != 10 {
+        return "dict-elem"
+    }
+    p := MovecowPt{x: 1, tags: ["a"]}
+    q := clone(p)
+    p.tags.push("b")
+    p.x = 2
+    if p.tags.len() != 2 {
+        return "struct-write"
+    }
+    if q.tags.len() != 1 {
+        return "struct-len"
+    }
+    if q.x != 1 {
+        return "struct-field"
+    }
+    return "all-independent"
+}
+
+func main() {
+    println("movecow_clone={movecow_check()}")
+    println("movecow_ok")
+}

@@ -6,7 +6,7 @@ func f() -> int {
         out = out * 10 + 1
     }
     out = 0 - out
-    out
+    return out
 }
 println(f())
 println("neg_after_loop_ok")

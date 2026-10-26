@@ -12,6 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::value::Value;
+use crate::vm::Chunk;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Env {
@@ -45,6 +46,63 @@ impl FrozenScope {
             Some(v.clone())
         } else {
             self.parent.as_ref().and_then(|p| p.get(name))
+        }
+    }
+
+    /// Project a binding for the call fast paths ([`Env::bound`]).
+    fn bound(&self, name: &str) -> Option<Bound> {
+        if let Some(v) = self.vars.get(name) {
+            return Some(Bound::of(v));
+        }
+        self.parent.as_ref().and_then(|p| p.bound(name))
+    }
+}
+
+/// Process-wide environment generation.
+///
+/// Bumped on every binding create/replace (and on freeze, which *removes*
+/// function bindings from the frozen view). The VM memoizes direct-call
+/// resolution per op site, and shadowing in ZZ is dynamic (`f := 5` after
+/// `func f()` wins), so a memo entry is only valid while this counter is
+/// unchanged — one relaxed load per call.
+pub(crate) static ENV_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current generation (see [`ENV_GEN`]).
+#[inline]
+pub(crate) fn env_gen() -> u64 {
+    ENV_GEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+fn bump_env_gen() {
+    ENV_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A binding projected without cloning its value, for callers that only
+/// need to dispatch on what a name is bound to.
+///
+/// [`EnvLink::get`] clones on every hit, which the VM call path pays for
+/// with a `FuncValue` (parameters and defaults) per call; [`Env::bound`]
+/// reads the same binding in place and hands out only the cheap pieces
+/// frame entry actually needs.
+#[derive(Debug, Clone)]
+pub enum Bound {
+    /// A compiled function: its bytecode, its definition environment,
+    /// and its declared arity.
+    Compiled {
+        chunk: Arc<Chunk>,
+        env: EnvLink,
+        params: usize,
+    },
+    /// Any other binding (a native, a chunk-less closure, a plain value).
+    Other,
+}
+
+impl Bound {
+    fn of(value: &Value) -> Bound {
+        match value.callable_parts() {
+            Some((chunk, env, params)) => Bound::Compiled { chunk, env, params },
+            None => Bound::Other,
         }
     }
 }
@@ -83,6 +141,7 @@ impl Env {
     pub fn define(&mut self, name: &str, value: Value) {
         self.vars.insert(name.to_string(), value);
         self.bump();
+        bump_env_gen();
     }
 
     /// Bump the mutation version (new or replaced binding).
@@ -97,6 +156,17 @@ impl Env {
         } else {
             self.parent.as_ref().and_then(|p| p.get(name))
         }
+    }
+
+    /// Look a name up without cloning what it is bound to: [`Bound::Other`]
+    /// for a present non-function binding, `None` for an unbound name.
+    /// Used by the VM call fast path, where `get`'s clone would copy a
+    /// whole `FuncValue` (its parameters and defaults) per call.
+    pub fn bound(&self, name: &str) -> Option<Bound> {
+        if let Some(v) = self.vars.get(name) {
+            return Some(Bound::of(v));
+        }
+        self.parent.as_ref().and_then(|p| p.bound(name))
     }
 
     /// Mutable access to a binding in this scope (no parent fallthrough).
@@ -183,6 +253,7 @@ impl Env {
         if self.vars.contains_key(name) {
             self.vars.insert(name.to_string(), value);
             self.bump();
+            bump_env_gen();
             return true;
         }
         // Recurse through the parent link without holding any borrow
@@ -279,6 +350,14 @@ impl EnvLink {
         match self {
             EnvLink::Owned(rc) => rc.borrow().get(name),
             EnvLink::Frozen(f) => f.get(name),
+        }
+    }
+
+    /// Project a binding without cloning it (see [`Env::bound`]).
+    pub fn bound(&self, name: &str) -> Option<Bound> {
+        match self {
+            EnvLink::Owned(rc) => rc.borrow().bound(name),
+            EnvLink::Frozen(f) => f.bound(name),
         }
     }
 
@@ -650,6 +729,18 @@ impl EnvLink {
     /// frozen copy is independent, so later spawner writes can never
     /// disturb workers holding it (point-in-time semantics, exactly like
     /// the old deep-clone snapshots).
+    ///
+    /// `Func` bindings are OMITTED, not shared (#398): a frozen `Func`
+    /// carries its spawner-owned capture env (`Rc<RefCell>`), and workers
+    /// resolve globals env-first — so every worker would execute the SAME
+    /// function value on the SAME live env, racing the spawner and each
+    /// other on one borrow flag (panics + hangs with 2+ workers calling
+    /// one global). Workers resolve table-covered functions through their
+    /// per-spawn detached table copies instead; a name the table lacks
+    /// fails loudly as undefined rather than aliasing live state.
+    /// Non-function values are plain data (or thread-safe handles) and
+    /// stay shared: reachable containers ride the per-spawn leaf as
+    /// private deep clones, so frozen ones are unreachable in practice.
     pub fn frozen_scope(link: &EnvLink) -> Arc<FrozenScope> {
         match link {
             EnvLink::Frozen(f) => Arc::clone(f),
@@ -658,6 +749,10 @@ impl EnvLink {
                     let borrowed = rc.borrow();
                     (borrowed.vars.clone(), borrowed.parent.clone())
                 };
+                let vars: HashMap<String, Value> = vars
+                    .into_iter()
+                    .filter(|(_, v)| !matches!(v, Value::Func(_)))
+                    .collect();
                 Arc::new(FrozenScope {
                     vars,
                     parent: parent.as_ref().map(Self::frozen_scope),
@@ -668,6 +763,9 @@ impl EnvLink {
 
     /// [`frozen_scope`](Self::frozen_scope) as a link (for chain slots).
     pub fn frozen_view(link: &EnvLink) -> EnvLink {
+        // Freezing drops `Value::Func` bindings, so a memoized direct call
+        // must not survive it.
+        bump_env_gen();
         EnvLink::Frozen(Self::frozen_scope(link))
     }
 

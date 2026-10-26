@@ -480,8 +480,9 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) fputs(", ", out);
-                fwrite(zz_str_ptr(v->dict->entries[i].key), 1,
-                       v->dict->entries[i].key->len, out);
+                // Keys are values: a string prints raw (no quotes, matching
+                // the VM's display), every other type prints its own form.
+                zz_print_value_depth(out, &v->dict->entries[i].key, depth + 1);
                 fputs(": ", out);
                 zz_print_value_depth(out, &v->dict->entries[i].val, depth + 1);
             }
@@ -507,7 +508,15 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
         fputs(")", out);
         break;
     case ZZ_RANGE:
-        fprintf(out, "%lld..%lld", (long long)v->i, (long long)v->i);
+        if (v->range && v->range->step != 1) {
+            fprintf(out, "%lld..%lld..%lld", (long long)v->range->start,
+                    (long long)v->range->end, (long long)v->range->step);
+        } else if (v->range) {
+            fprintf(out, "%lld..%lld", (long long)v->range->start,
+                    (long long)v->range->end);
+        } else {
+            fputs("0..0", out);
+        }
         break;
     case ZZ_FUNC:
         fputs("<func>", out);
@@ -637,8 +646,7 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) fputs(", ", out);
-                fwrite(zz_str_ptr(v->dict->entries[i].key), 1,
-                       v->dict->entries[i].key->len, out);
+                zz_print_value_display_depth(out, &v->dict->entries[i].key, depth + 1);
                 fputs(": ", out);
                 zz_print_value_display_depth(out, &v->dict->entries[i].val, depth + 1);
             }
@@ -656,7 +664,15 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
         fputs(")", out);
         break;
     case ZZ_RANGE:
-        fprintf(out, "%lld..%lld", (long long)v->i, (long long)v->i);
+        if (v->range && v->range->step != 1) {
+            fprintf(out, "%lld..%lld..%lld", (long long)v->range->start,
+                    (long long)v->range->end, (long long)v->range->step);
+        } else if (v->range) {
+            fprintf(out, "%lld..%lld", (long long)v->range->start,
+                    (long long)v->range->end);
+        } else {
+            fputs("0..0", out);
+        }
         break;
     case ZZ_FUNC:
         fputs("<func>", out);
@@ -854,8 +870,7 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) sb_append_str(sb, ", ");
-                sb_append(sb, zz_str_ptr(v->dict->entries[i].key),
-                          v->dict->entries[i].key->len);
+                zz_value_to_strbuf_depth(sb, &v->dict->entries[i].key, depth + 1);
                 sb_append_str(sb, ": ");
                 zz_value_to_strbuf_depth(sb, &v->dict->entries[i].val, depth + 1);
             }
@@ -881,7 +896,15 @@ static void zz_value_to_strbuf_depth(strbuf *sb, const zz_value *v, int depth) {
         sb_append_c(sb, ')');
         break;
     case ZZ_RANGE:
-        snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->i, (long long)v->i);
+        if (v->range && v->range->step != 1) {
+            snprintf(buf, sizeof buf, "%lld..%lld..%lld", (long long)v->range->start,
+                     (long long)v->range->end, (long long)v->range->step);
+        } else if (v->range) {
+            snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->range->start,
+                     (long long)v->range->end);
+        } else {
+            snprintf(buf, sizeof buf, "0..0");
+        }
         sb_append_str(sb, buf);
         break;
     case ZZ_FUNC:
@@ -1032,8 +1055,7 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
         if (v->dict) {
             for (size_t i = 0; i < v->dict->len; i++) {
                 if (i > 0) sb_append_str(sb, ", ");
-                sb_append(sb, zz_str_ptr(v->dict->entries[i].key),
-                          v->dict->entries[i].key->len);
+                zz_value_to_display_strbuf_depth(sb, &v->dict->entries[i].key, depth + 1);
                 sb_append_str(sb, ": ");
                 zz_value_to_display_strbuf_depth(sb, &v->dict->entries[i].val, depth + 1);
             }
@@ -1051,7 +1073,15 @@ static void zz_value_to_display_strbuf_depth(strbuf *sb, const zz_value *v, int 
         sb_append_c(sb, ')');
         break;
     case ZZ_RANGE:
-        snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->i, (long long)v->i);
+        if (v->range && v->range->step != 1) {
+            snprintf(buf, sizeof buf, "%lld..%lld..%lld", (long long)v->range->start,
+                     (long long)v->range->end, (long long)v->range->step);
+        } else if (v->range) {
+            snprintf(buf, sizeof buf, "%lld..%lld", (long long)v->range->start,
+                     (long long)v->range->end);
+        } else {
+            snprintf(buf, sizeof buf, "0..0");
+        }
         sb_append_str(sb, buf);
         break;
     case ZZ_FUNC:

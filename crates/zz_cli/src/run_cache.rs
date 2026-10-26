@@ -9,8 +9,8 @@
 //! Key discipline mirrors the native build cache: [`zz_pm::cache_key`]
 //! covers entry bytes + canonical path (namespace), every `.zz` source
 //! under the project dir, live path-dep content, and the target string.
-//! The VM fingerprint covers the toolchain (CLI version, IR version, git
-//! HEAD for dev-loop rebuilds) plus sorted plugin manifest names; `--embed`
+//! The VM fingerprint covers the toolchain (CLI version, IR version, the
+//! identity of this build) plus sorted plugin manifest names; `--embed`
 //! bytes join via the artifact segment. Script args are runtime-only and
 //! correctly excluded. A miss (or any corruption) falls back to today's
 //! pipeline exactly — callers must treat `lookup` returning `None` as a
@@ -82,52 +82,26 @@ pub fn run_cache_dir() -> PathBuf {
     crate::build::cache_dir().join(format!("run-{CACHE_VERSION}"))
 }
 
-/// Commit hash of the tree this binary was built from (dev-loop cache
-/// correctness: same-version rebuilds must not share entries). `None`
-/// outside a git checkout (tarballs fall back to version-only).
-fn git_hash() -> Option<String> {
-    static HASH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        let mut dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        loop {
-            if dir.join(".git").exists() {
-                let out = std::process::Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(dir)
-                    .output();
-                match out {
-                    Ok(o) if o.status.success() => {
-                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if s.is_empty() {
-                            return None;
-                        }
-                        return Some(s);
-                    }
-                    _ => return None,
-                }
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => return None,
-            }
-        }
-    })
-    .clone()
+/// Toolchain fingerprint for the VM run key: CLI version + IR format
+/// version + the identity of this build + sorted plugin manifest names.
+/// Any toolchain or plugin-shape change busts every entry (sound over
+/// stale code).
+pub fn vm_fingerprint(plugin_funcs: &[(String, zz_checker::FuncSig)]) -> u64 {
+    vm_fingerprint_with(zz_ir::build_stamp(), plugin_funcs)
 }
 
-/// Toolchain fingerprint for the VM run key: CLI version + IR format
-/// version + git HEAD + sorted plugin manifest names. Any toolchain or
-/// plugin-shape change busts every entry (sound over stale code).
-pub fn vm_fingerprint(plugin_funcs: &[(String, zz_checker::FuncSig)]) -> u64 {
+/// [`vm_fingerprint`] with the build identity injected: same CLI version,
+/// same IR format, same plugins — only the binary differs (a dev-loop
+/// rebuild that never touched `HEAD`). Such entries must never be reused:
+/// the artifact is that binary's output.
+fn vm_fingerprint_with(build_stamp: u64, plugin_funcs: &[(String, zz_checker::FuncSig)]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut names: Vec<&str> = plugin_funcs.iter().map(|(n, _)| n.as_str()).collect();
     names.sort();
     let mut h = std::collections::hash_map::DefaultHasher::new();
     env!("CARGO_PKG_VERSION").hash(&mut h);
     zz_ir::VERSION.hash(&mut h);
-    git_hash()
-        .unwrap_or_else(|| "nogit".to_string())
-        .hash(&mut h);
+    build_stamp.hash(&mut h);
     names.hash(&mut h);
     h.finish()
 }
@@ -135,14 +109,32 @@ pub fn vm_fingerprint(plugin_funcs: &[(String, zz_checker::FuncSig)]) -> u64 {
 /// Compute the run-cache slug for an entry file. Reads the entry bytes and
 /// hashes the closure live (same machinery as the native build cache).
 /// `embed` joins the key via the artifact segment when `--embed` is used.
+#[allow(dead_code)] // default-selection wrapper; tests + API parity
 pub fn run_key(
     entry: &Path,
     plugin_funcs: &[(String, zz_checker::FuncSig)],
     embed: Option<&Path>,
 ) -> Result<String, String> {
+    run_key_with_features(
+        entry,
+        plugin_funcs,
+        embed,
+        &zz_pm::manifest::FeatureSelection::default(),
+    )
+}
+
+/// [`run_key`] with an explicit feature selection (#488): different
+/// `--features` compile different modules, so they must never share a
+/// cache entry. The default selection leaves the fingerprint unchanged.
+pub fn run_key_with_features(
+    entry: &Path,
+    plugin_funcs: &[(String, zz_checker::FuncSig)],
+    embed: Option<&Path>,
+    features: &zz_pm::manifest::FeatureSelection,
+) -> Result<String, String> {
     let src = std::fs::read_to_string(entry)
         .map_err(|e| format!("zz: cannot read {}: {e}", entry.display()))?;
-    let fp = vm_fingerprint(plugin_funcs);
+    let fp = fingerprint_with_features(plugin_funcs, features);
     // Fast path: stat-only closure check against the fingerprint sidecar
     // (no source reads on no-change runs). Falls back to the canonical
     // full hash on any doubt; manifest errors propagate like `compute`.
@@ -155,6 +147,23 @@ pub fn run_key(
     }
     fp_store(entry, &key);
     Ok(key.to_slug())
+}
+
+/// Toolchain fingerprint plus the explicit feature selection (#488).
+/// Default selection returns [`vm_fingerprint`] bit-for-bit.
+fn fingerprint_with_features(
+    plugin_funcs: &[(String, zz_checker::FuncSig)],
+    features: &zz_pm::manifest::FeatureSelection,
+) -> u64 {
+    let fp = vm_fingerprint(plugin_funcs);
+    let selection = features.fingerprint();
+    if selection.is_empty() {
+        return fp;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    selection.hash(&mut h);
+    fp ^ h.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +183,7 @@ pub fn run_key(
 
 /// One file's stat signature: seconds + nanos + size. Unknown (unstatable)
 /// never validates — the caller falls back to the full hash.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileStat {
     secs: u64,
     nanos: u32,
@@ -197,6 +206,10 @@ struct ProjectFp {
     sources: ScopeFp,
     deps: HashMap<String, ScopeFp>,
     dep_dirs: HashMap<String, String>,
+    /// `zz.toml` stat at store time. The manifest feeds `[collect.*]`
+    /// synthesis (and dependency config), so an edit must force `compute`.
+    #[serde(default)]
+    manifest: Option<FileStat>,
 }
 
 fn fp_path(root: &Path) -> PathBuf {
@@ -298,6 +311,9 @@ fn fp_lookup(
         return Ok(None);
     };
     let saved: ProjectFp = serde_json::from_slice(&bytes).ok().unwrap_or_default();
+    if saved.manifest != stat_now(&root.join("zz.toml")) {
+        return Ok(None);
+    }
     // An empty sidecar (fresh default) never validates: the sources scope
     // always crawls ≥1 file (the entry itself).
     let files = crawl_zz(&root);
@@ -363,6 +379,7 @@ fn fp_store(entry: &Path, key: &zz_pm::cache_key::CacheKey) {
         sources,
         deps: HashMap::new(),
         dep_dirs: HashMap::new(),
+        manifest: stat_now(&root.join("zz.toml")),
     };
     if let Ok(deps) = zz_pm::cache_key::path_dep_dirs(&root) {
         for (name, dir) in &deps {
@@ -662,6 +679,21 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_busts_on_rebuild() {
+        // A dev-loop rebuild moves neither the version, the IR format nor
+        // the plugin set — only the binary. Its output must never be read
+        // by the next build (the pre-stamp key was git HEAD, which a dirty
+        // working tree never moves: stale bytecode, issues #221/#371).
+        assert_ne!(
+            vm_fingerprint_with(1, &[]),
+            vm_fingerprint_with(2, &[]),
+            "a different build must produce a different fingerprint"
+        );
+        let f = vm_fingerprint(&[]);
+        assert_eq!(f, vm_fingerprint(&[]), "one build, one fingerprint");
+    }
+
+    #[test]
     fn roundtrip_and_corrupt_is_miss() {
         with_isolated_home(|| {
             let slug = "testslug roundtrip must be path-safe";
@@ -720,7 +752,7 @@ mod tests {
             let proj = write_proj(&[
                 ("zz.toml", "[package]\nname = \"fp\"\nversion = \"0.1.0\"\n"),
                 ("main.zz", "func main() {\n    println(1)\n}\n"),
-                ("lib/help.zz", "pub func aid() -> int { 1 }\n"),
+                ("lib/help.zz", "pub func aid() -> int { return 1 }\n"),
             ]);
             // Backdate mtimes past the granularity guard (fresh files
             // always take the canonical path — that is the safe default).
@@ -754,7 +786,7 @@ mod tests {
             assert_ne!(k1, k3, "edited source must bust the sidecar");
             // New file: must bust (set change invalidates).
             let newf = proj.join("lib").join("extra.zz");
-            std::fs::write(&newf, "pub func e() -> int { 2 }\n").unwrap();
+            std::fs::write(&newf, "pub func e() -> int { return 2 }\n").unwrap();
             let k4 = run_key(&entry, &[], None).unwrap();
             assert_ne!(k3, k4, "added file must bust the sidecar");
         });

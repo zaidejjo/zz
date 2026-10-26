@@ -6,6 +6,22 @@ use zz_frontend::ast::{Block, Expr, Pattern, Stmt};
 use super::*;
 
 impl Lowerer {
+    /// Lower a `return` value for the current function. Boxed-return
+    /// functions wrap scalar operands, and an unboxed struct value becomes
+    /// a runtime object: an impl method returning `Box{...}` must not hand
+    /// a raw `zz_struct_Box` back to a `zz_value` prototype.
+    fn return_value(&self, v: &Expr, names: &mut NameCtx, out: &mut String) -> String {
+        if let Some(expected) = *self.unboxed_ret.borrow() {
+            let val = self.emit_expr(v, names, out);
+            return self.unbox_for_return(v, val, names, expected);
+        }
+        // Same boxing contract as an implicit tail: unboxed struct values
+        // (literals, `self`, fields) must become runtime objects before
+        // crossing a `zz_value` return slot. `ty_at` misses expressions
+        // whose span has no recorded type and would leak a raw C struct.
+        self.emit_tail_value(v, names, out)
+    }
+
     /// Root binding of a store target chain (`m` in `m[i][j]`, `s` in
     /// `s[i].v`, base of a path). Stores invalidate its SROA forwarding
     /// (plus dependents) — an element write may change any element.
@@ -164,6 +180,12 @@ impl Lowerer {
                 } else {
                     ("zz_value".to_string(), None) // fallback
                 };
+                // DB handles own a live backend connection; ordinary C
+                // locals are not released at function exit, so attach a
+                // cleanup handler that drops the last reference (and
+                // closes the connection) on every exit path. Captured and
+                // green bindings live in heap/frame cells and are skipped.
+                let db_local = matches!(&checker_ty, Some(zz_checker::Type::Db));
                 // Store the checker type for method dispatch (e.g., to distinguish
                 // str.contains from vec.contains when the receiver is a local).
                 if let Some(ct) = checker_ty {
@@ -287,7 +309,12 @@ impl Lowerer {
                             *existing_ty = ctype.clone();
                         }
                     }
-                    out.push_str(&format!("    {ctype} {cid} = {final_val};\n"));
+                    let db_attr = if db_local {
+                        " __attribute__((cleanup(zz_db_value_cleanup)))"
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!("    {ctype} {cid}{db_attr} = {final_val};\n"));
                 }
                 // Track array literals so `len(v)` can fold to the arity,
                 // and record pure-scalar literals for index forwarding
@@ -308,6 +335,18 @@ impl Lowerer {
                 }
             }
             Stmt::Assign { target, value, .. } => {
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // There is no storage for `_`, so emit the RHS in void
+                // context (its result is discarded) and store nothing.
+                if let Expr::Ident { name, .. } = target {
+                    if name == "_" {
+                        *self.void_context.borrow_mut() = true;
+                        self.emit_expr(value, names, out);
+                        *self.void_context.borrow_mut() = false;
+                        return;
+                    }
+                }
+
                 // Fast-path: `s = s + <rhs>` where `s` is a string
                 // (zz_value). Emit in-place append shims instead of
                 // clone+binop+assign so the capacity-aware path in
@@ -952,19 +991,25 @@ impl Lowerer {
                     *self.void_context.borrow_mut() = false;
                     out.push_str(&format!("    (void)({val});\n"));
                 } else if !is_leaf_expr(e) {
+                    // Statement-position `if/else` discards its temp:
+                    // lower it void so arm pushes take the in-place path
+                    // (see the `If` arm — the condition stays non-void).
+                    // Function/branch tails return above via `is_tail`.
+                    let void_if = matches!(e, Expr::If { .. });
+                    let saved_void = *self.void_context.borrow();
+                    if void_if {
+                        *self.void_context.borrow_mut() = true;
+                    }
                     let _ = self.emit_expr(e, names, out);
+                    if void_if {
+                        *self.void_context.borrow_mut() = saved_void;
+                    }
                 }
             }
             Stmt::Return { value, .. } => match value {
                 Some(v) => {
-                    let val = self.emit_expr(v, names, out);
-                    if let Some(expected) = *self.unboxed_ret.borrow() {
-                        let val = self.unbox_for_return(v, val, names, expected);
-                        out.push_str(&format!("    return {val};\n"));
-                    } else {
-                        let val = box_scalar_operand(v, names, &val);
-                        out.push_str(&format!("    return {val};\n"));
-                    }
+                    let val = self.return_value(v, names, out);
+                    out.push_str(&format!("    return {val};\n"));
                 }
                 None => out.push_str(&format!("    return {};\n", self.ret_unit())),
             },
@@ -1758,7 +1803,7 @@ impl Lowerer {
                          ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
                          : (({iter_tmp}.tag == ZZ_BYTES)\n\
                          ? (zz_value){{ZZ_INT, {{.i = (int64_t){iter_tmp}.bytes->buf->data[{iter_tmp}.bytes->off + (size_t){idx}]}}}}\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}});\n"
+                         : zz_clone({iter_tmp}.dict->entries[{idx}].key));\n"
                     ));
                 } else {
                     out.push_str(&format!(
@@ -1766,7 +1811,7 @@ impl Lowerer {
                          ? zz_clone({iter_tmp}.arr->items[{idx}])\n\
                          : (({iter_tmp}.tag == ZZ_BYTES)\n\
                          ? (zz_value){{ZZ_INT, {{.i = (int64_t){iter_tmp}.bytes->buf->data[{iter_tmp}.bytes->off + (size_t){idx}]}}}}\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}});\n"
+                         : zz_clone({iter_tmp}.dict->entries[{idx}].key));\n"
                     ));
                 }
                 // Captured iteration variable: per-iteration shared cell.
@@ -1857,7 +1902,7 @@ impl Lowerer {
                     out.push_str(&format!(
                         "        {k_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
                          ? {k_pair}\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{ideref}].key}}}};\n"
+                         : zz_clone({iter_tmp}.dict->entries[{ideref}].key);\n"
                     ));
                     out.push_str(&format!(
                         "        {v_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
@@ -1884,7 +1929,7 @@ impl Lowerer {
                     out.push_str(&format!(
                         "        zz_value {k_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
                          ? {k_pair}\n\
-                         : (zz_value){{ZZ_STR, {{.s = {iter_tmp}.dict->entries[{idx}].key}}}};\n"
+                         : zz_clone({iter_tmp}.dict->entries[{idx}].key);\n"
                     ));
                     out.push_str(&format!(
                         "        zz_value {v_cid} = ({iter_tmp}.tag == ZZ_ARRAY)\n\
@@ -1924,15 +1969,24 @@ impl Lowerer {
         }
     }
 
-    /// Emit the function body block. Unlike value-position blocks
-    /// (`emit_block_value`, which pops exactly the tail temp this block
-    /// created), this preserves `__tail` entries so `last_stmt_value`
-    /// can use them for implicit returns.
-    pub(super) fn emit_func_block(&self, block: &Block, names: &mut NameCtx, out: &mut String) {
+    /// Emit a function body block. `tail_value` says whether the final
+    /// statement's value is the body's value: `true` for closures (and
+    /// value-position blocks), `false` for named functions, whose body
+    /// falls off with `unit` and yields values only through `return`.
+    /// With `tail_value = true` this preserves `__tail` entries so
+    /// `last_stmt_value` can use them; with `false` the tail is compiled
+    /// in discard position and nothing is left for a value return.
+    pub(super) fn emit_func_block(
+        &self,
+        block: &Block,
+        names: &mut NameCtx,
+        out: &mut String,
+        tail_value: bool,
+    ) {
         names.clear_array_lens();
         let n = block.stmts.len();
         for (i, stmt) in block.stmts.iter().enumerate() {
-            let is_tail = i == n - 1;
+            let is_tail = tail_value && i == n - 1;
             self.emit_stmt(stmt, names, out, is_tail);
         }
     }
@@ -2008,14 +2062,8 @@ impl Lowerer {
             }
             Some(Stmt::Return { value, .. }) => match value {
                 Some(v) => {
-                    let val = self.emit_expr(v, names, out);
-                    if let Some(expected) = *self.unboxed_ret.borrow() {
-                        let val = self.unbox_for_return(v, val, names, expected);
-                        out.push_str(&format!("        return {val};\n"));
-                    } else {
-                        let val = box_scalar_operand(v, names, &val);
-                        out.push_str(&format!("        return {val};\n"));
-                    }
+                    let val = self.return_value(v, names, out);
+                    out.push_str(&format!("        return {val};\n"));
                 }
                 None => out.push_str(&format!("        return {};\n", self.ret_unit())),
             },

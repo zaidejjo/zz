@@ -36,6 +36,13 @@ pub enum CParam {
     Int,
     Float,
     Str,
+    /// Borrowed byte view: one ZZ `bytes` arg expands to TWO C params
+    /// (`*const u8` + `usize`, no copy, no NUL). Stamps pair it with a
+    /// same-index `Len` slot (see below); both error loudly on non-bytes.
+    Bytes,
+    /// Length half of a [`CParam::Bytes`] pair: always follows its `Bytes`
+    /// at the same arg index. Never constructed from a real parameter.
+    Len,
 }
 
 /// A C-callable return kind.
@@ -76,10 +83,15 @@ fn registry() -> &'static RwLock<HashMap<String, CEntry>> {
 fn shape_key(sig: &CSig) -> String {
     let mut k = String::with_capacity(sig.params.len() + 3);
     for p in &sig.params {
+        // One ZZ arg is one key letter: a bytes view still counts as a
+        // single `B` (its `(ptr, len)` expansion lives in the stamp).
         k.push(match p {
             CParam::Int => 'I',
             CParam::Float => 'F',
             CParam::Str => 'S',
+            CParam::Bytes => 'B',
+            // `Len` is a stamp-level pairing device, never a real param.
+            CParam::Len => continue,
         });
     }
     k.push('>');
@@ -97,6 +109,7 @@ fn shape_key(sig: &CSig) -> String {
 macro_rules! adapters_i {
     ($( $name:ident ( $( $idx:tt : $t:ident ),* ) ; )*) => {
         $(#[allow(unused_variables)]
+        #[allow(unused_mut)]
         fn $name(
             ptr: *mut c_void,
             args: &mut [Value],
@@ -113,6 +126,8 @@ macro_rules! adapters_i {
     (@ctype I) => { i64 };
     (@ctype F) => { f64 };
     (@ctype S) => { *const c_char };
+    (@ctype B) => { *const u8 };
+    (@ctype L) => { usize };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
             Value::Int(i) => *i,
@@ -161,11 +176,38 @@ macro_rules! adapters_i {
             }
         }
     }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt B $held:ident) => {{
+        // Borrowed view: pointer into the Arc-backed buffer, no copy,
+        // no NUL termination. The `args` slice outlives the call, so no
+        // `_held` pinning is needed — but the C side must not retain it
+        // (same contract as borrowed `str`, without even the NUL).
+        match &$args[$idx] {
+            Value::Bytes(b) => b.as_slice().as_ptr(),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected bytes, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt L $held:ident) => {{
+        match &$args[$idx] {
+            Value::Bytes(b) => b.as_slice().len(),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected bytes, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
 }
 
 macro_rules! adapters_v {
     ($( $name:ident ( $( $idx:tt : $t:ident ),* ) ; )*) => {
         $(#[allow(unused_variables)]
+        #[allow(unused_mut)]
         fn $name(
             ptr: *mut c_void,
             args: &mut [Value],
@@ -182,6 +224,8 @@ macro_rules! adapters_v {
     (@ctype I) => { i64 };
     (@ctype F) => { f64 };
     (@ctype S) => { *const c_char };
+    (@ctype B) => { *const u8 };
+    (@ctype L) => { usize };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
             Value::Int(i) => *i,
@@ -223,6 +267,32 @@ macro_rules! adapters_v {
             other => {
                 return Err(EvalError::new(
                     format!("`{}`: expected str, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt B $held:ident) => {{
+        // Borrowed view: pointer into the Arc-backed buffer, no copy,
+        // no NUL termination. The `args` slice outlives the call, so no
+        // `_held` pinning is needed — but the C side must not retain it
+        // (same contract as borrowed `str`, without even the NUL).
+        match &$args[$idx] {
+            Value::Bytes(b) => b.as_slice().as_ptr(),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected bytes, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt L $held:ident) => {{
+        match &$args[$idx] {
+            Value::Bytes(b) => b.as_slice().len(),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected bytes, got `{other}`", $fname),
                     $span,
                 ));
             }
@@ -244,6 +314,8 @@ adapters_i! {
     c6_ifiiii(0: I, 1: F, 2: I, 3: I, 4: I, 5: I);
     c2_is(0: I, 1: S);
     c3_isi(0: I, 1: S, 2: I);
+    // Borrowed bytes view: one ZZ arg, two C params (ptr + len).
+    c1_b(0: B, 0: L);
 }
 
 adapters_v! {
@@ -254,6 +326,7 @@ adapters_v! {
 macro_rules! adapters_f {
     ($( $name:ident ( $( $idx:tt : $t:ident ),* ) ; )*) => {
         $(#[allow(unused_variables)]
+        #[allow(unused_mut)]
         fn $name(
             ptr: *mut c_void,
             args: &mut [Value],
@@ -270,6 +343,8 @@ macro_rules! adapters_f {
     (@ctype I) => { i64 };
     (@ctype F) => { f64 };
     (@ctype S) => { *const c_char };
+    (@ctype B) => { *const u8 };
+    (@ctype L) => { usize };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
             Value::Int(i) => *i,
@@ -311,6 +386,32 @@ macro_rules! adapters_f {
             other => {
                 return Err(EvalError::new(
                     format!("`{}`: expected str, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt B $held:ident) => {{
+        // Borrowed view: pointer into the Arc-backed buffer, no copy,
+        // no NUL termination. The `args` slice outlives the call, so no
+        // `_held` pinning is needed — but the C side must not retain it
+        // (same contract as borrowed `str`, without even the NUL).
+        match &$args[$idx] {
+            Value::Bytes(b) => b.as_slice().as_ptr(),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected bytes, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt L $held:ident) => {{
+        match &$args[$idx] {
+            Value::Bytes(b) => b.as_slice().len(),
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected bytes, got `{other}`", $fname),
                     $span,
                 ));
             }
@@ -343,6 +444,7 @@ fn adapter_for(sig: &CSig) -> Option<Adapter> {
         "IFIIII>i" => c6_ifiiii,
         "IS>i" => c2_is,
         "ISI>i" => c3_isi,
+        "B>i" => c1_b,
         "I>f" => c1_i_f,
         _ => return None,
     })
@@ -445,6 +547,14 @@ mod tests {
     extern "C" fn t_sink(h: i64) {
         let _ = h;
     }
+    // Borrowed bytes view: pointer + length, no copy, no NUL.
+    extern "C" fn t_sum_bytes(ptr: *const u8, len: usize) -> i64 {
+        if ptr.is_null() {
+            return -1;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        slice.iter().map(|b| *b as i64).sum()
+    }
     extern "C" fn t_save(h: i64, path: *const c_char, q: i64) -> i64 {
         if path.is_null() {
             return -1;
@@ -504,9 +614,34 @@ mod tests {
         );
         expect_int(
             "cabi_t_greet",
-            vec![Value::Str(Box::new("hello".to_string()))],
+            vec![Value::Str(std::sync::Arc::new("hello".to_string()))],
             5,
         );
+    }
+
+    #[test]
+    fn bytes_param_crosses_as_ptr_and_len() {
+        reg(
+            "cabi_t_sum_bytes",
+            t_sum_bytes as *mut c_void,
+            vec![CParam::Bytes],
+            CRet::Int,
+        );
+        expect_int(
+            "cabi_t_sum_bytes",
+            vec![Value::Bytes(Box::new(crate::value::BytesData::new(vec![
+                1, 2, 3, 250,
+            ])))],
+            256,
+        );
+        // Arity stays ZZ-level: one arg, not two.
+        assert_eq!(arity_of("cabi_t_sum_bytes"), Some(1));
+        // Mismatched values fail loudly, naming the function.
+        let mut args = vec![Value::Int(7)];
+        match call("cabi_t_sum_bytes", &mut args, span()) {
+            Some(Err(e)) => assert!(e.message.contains("expected bytes"), "{e:?}"),
+            other => panic!("expected bytes error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -550,7 +685,7 @@ mod tests {
             "cabi_t_save",
             vec![
                 Value::Int(100),
-                Value::Str(Box::new("a.png".to_string())),
+                Value::Str(std::sync::Arc::new("a.png".to_string())),
                 Value::Int(5),
             ],
             105,
@@ -569,7 +704,10 @@ mod tests {
             vec![CParam::Int, CParam::Int],
             CRet::Int,
         );
-        let mut args = vec![Value::Str(Box::new("x".to_string())), Value::Int(2)];
+        let mut args = vec![
+            Value::Str(std::sync::Arc::new("x".to_string())),
+            Value::Int(2),
+        ];
         let out = call("cabi_t_add", &mut args, span()).expect("registered");
         assert!(out.is_err());
     }

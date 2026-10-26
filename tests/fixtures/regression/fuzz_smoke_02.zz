@@ -11,7 +11,7 @@ func f2(p3: int) -> int {
         0 => { return (42 + 82) },
         _ => { _q5 := 36 },
     }
-    84
+    return 84
 }
 acc6 := 0
 for _i7 in 1..6 {

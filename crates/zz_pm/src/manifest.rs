@@ -14,13 +14,26 @@
 //! foo = "^1.2.0"
 //! bar = { version = "2.0", git = "https://github.com/user/repo", rev = "main" }
 //! baz = { path = "../baz" }
+//!
+//! [collect.commands]
+//! dir = "commands"
+//! sig = "func(args: [str]) -> int"
+//! locales-ar = { version = "1.0", optional = true }
+//!
+//! [features]
+//! default = ["std"]
+//! std = ["locales-ar"]
+//! locales-ar = { modules = ["locales/ar"], deps = ["locales-ar"] }
 //! ```
 //!
 //! The `authors`, `description`, `license`, and `repository` keys are
 //! optional: manifests written before they existed still parse, and
 //! `save()` omits them while empty so diffs stay minimal.
+//!
+//! `[features]` is optional too. A manifest without it behaves exactly
+//! as before: every dependency is active and no module is gated.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +69,19 @@ pub struct Manifest {
     /// Native build configuration for packages that provide C/Rust extensions.
     #[serde(default)]
     pub native: Option<NativeSpec>,
+    /// Directory-based typed registries (`[collect.<name>]`). Sorted map
+    /// keeps manifest emission deterministic. Empty (the common case)
+    /// omits the key entirely.
+    #[serde(
+        default,
+        rename = "collect",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub collections: BTreeMap<String, CollectionSpec>,
+    /// Feature gates (#488). Absent means today's behavior: no optional
+    /// dependencies and no gated modules.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: BTreeMap<String, FeatureSpec>,
 }
 
 impl Default for Manifest {
@@ -75,8 +101,498 @@ impl Default for Manifest {
             },
             dependencies: HashMap::new(),
             native: None,
+            collections: BTreeMap::new(),
+            features: BTreeMap::new(),
         }
     }
+}
+
+/// A directory-based typed registry declared as `[collect.<name>]`.
+///
+/// Every `*.zz` file directly inside `dir` is a member. The compiler
+/// synthesizes a module with `get(name)` / `all()` accessors; members must
+/// export `pub <export>` (default `run`) with the signature in `sig`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CollectionSpec {
+    /// Member directory, relative to the package root.
+    pub dir: String,
+    /// Required member signature: a function type (`func([str]) -> int`)
+    /// or a function declaration shape (`func run(args: [str]) -> int`).
+    pub sig: String,
+    /// Member naming strategy. v1 supports `"file"` only (file stem,
+    /// with `-` normalized to `_`).
+    #[serde(default = "default_collection_name")]
+    pub name: String,
+    /// Required exported function name (default `run`).
+    #[serde(default = "default_collection_export")]
+    pub export: String,
+}
+
+fn default_collection_name() -> String {
+    "file".to_string()
+}
+
+fn default_collection_export() -> String {
+    "run".to_string()
+}
+
+/// A discovered collection member.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionMember {
+    /// Identifier the member is registered under (`get("<name>")`).
+    pub name: String,
+    /// Path to the member source file.
+    pub path: PathBuf,
+    /// File stem as written on disk (for diagnostics; `foo-bar.zz`).
+    pub file: String,
+}
+
+impl CollectionSpec {
+    /// Validate the spec against a package root: `dir` containment/existence,
+    /// supported `name` mode, identifier-shaped `export`, and a `sig` that
+    /// parses through the real frontend grammar into a function type.
+    pub fn validate(&self, pkg_root: &Path) -> Result<(), String> {
+        if self.name != "file" {
+            return Err(format!(
+                "invalid [collect]: `name = \"{}\"` is not supported\n\
+                 hint: v1 supports only `name = \"file\"` (member name = file stem)",
+                self.name
+            ));
+        }
+        if !is_identifier(&self.export) {
+            return Err(format!(
+                "invalid [collect]: `export = \"{}\"` is not a valid identifier",
+                self.export
+            ));
+        }
+        let rel = Path::new(&self.dir);
+        if self.dir.is_empty()
+            || rel.is_absolute()
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!(
+                "invalid [collect]: `dir = \"{}\"` must be relative and stay inside the package",
+                self.dir
+            ));
+        }
+        let dir = pkg_root.join(rel);
+        if !dir.is_dir() {
+            return Err(format!(
+                "invalid [collect]: `dir = \"{}\"` does not exist or is not a directory\n\
+                 hint: create the directory or fix the path in zz.toml",
+                self.dir
+            ));
+        }
+        // Symlink escape: the directory itself must stay inside the package.
+        let root_canon = pkg_root
+            .canonicalize()
+            .unwrap_or_else(|_| pkg_root.to_path_buf());
+        if let Ok(dir_canon) = dir.canonicalize() {
+            if !dir_canon.starts_with(&root_canon) {
+                return Err(format!(
+                    "invalid [collect]: `dir = \"{}\"` escapes the package (symlink)",
+                    self.dir
+                ));
+            }
+        }
+        self.parsed_signature().map(|_| ())
+    }
+
+    /// Parse `sig` through the frontend parser and return the function type.
+    ///
+    /// Both spellings are accepted:
+    /// - type form: `func([str]) -> int`
+    /// - declaration form: `func run(args: [str]) -> int` (also the
+    ///   issue's `func(args: [str]) -> int` spelling, where `args` is a
+    ///   parameter name).
+    pub fn parsed_signature(&self) -> Result<zz_frontend::ast::Ty, String> {
+        parse_collection_signature(&self.sig)
+    }
+
+    /// Like [`Self::parsed_signature`], but also returns a canonical source
+    /// spelling of the function type (`func([str]) -> int`) for the
+    /// synthesized module. Declaration-form signatures are normalized so
+    /// the generated AST is exactly what the checker sees.
+    pub fn parsed_signature_with_source(&self) -> Result<(zz_frontend::ast::Ty, String), String> {
+        parse_collection_signature_full(&self.sig)
+    }
+
+    /// Discover and validate members: `*.zz` files directly in `dir`,
+    /// sorted by file stem. Empty collections are valid.
+    pub fn discover(&self, pkg_root: &Path) -> Result<Vec<CollectionMember>, String> {
+        let dir = pkg_root.join(&self.dir);
+        let mut members = Vec::new();
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| format!("cannot read collection directory `{}`: {e}", dir.display()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("zz") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let name = stem.replace('-', "_");
+            if !is_identifier(&name) {
+                return Err(format!(
+                    "collection `{}`: file `{}` does not yield a valid identifier\n\
+                     hint: rename the file to start with a letter/underscore and use only letters, digits, and underscores",
+                    self.collection_label(),
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&stem)
+                ));
+            }
+            let file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&stem)
+                .to_string();
+            members.push(CollectionMember { name, path, file });
+        }
+        members.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+        // Normalized-name collisions (`foo-bar.zz` + `foo_bar.zz`) are loud:
+        // silently dropping one member would make registration order decide.
+        for pair in members.windows(2) {
+            if pair[0].name == pair[1].name {
+                return Err(format!(
+                    "collection `{}`: files `{}` and `{}` both map to member `{}`\n\
+                     hint: rename one file so each member name is unique",
+                    self.collection_label(),
+                    pair[0].file,
+                    pair[1].file,
+                    pair[0].name
+                ));
+            }
+        }
+        Ok(members)
+    }
+
+    /// Human-readable collection name used in diagnostics. Callers usually
+    /// have the manifest key; `dir` is the best fallback for spec-local
+    /// errors.
+    fn collection_label(&self) -> &str {
+        &self.dir
+    }
+}
+
+/// Parse a collection signature through the real frontend parser.
+///
+/// Returns the parsed `Ty` (always `TyKind::Func`). This is intentionally
+/// grammar-driven: no hand-rolled signature parser can drift from the
+/// language.
+pub fn parse_collection_signature(sig: &str) -> Result<zz_frontend::ast::Ty, String> {
+    parse_collection_signature_full(sig).map(|(ty, _)| ty)
+}
+
+/// Full signature parse: the `Ty` plus its canonical source spelling.
+pub fn parse_collection_signature_full(
+    sig: &str,
+) -> Result<(zz_frontend::ast::Ty, String), String> {
+    use zz_frontend::ast::{Stmt, Ty, TyKind};
+    let src = sig.trim();
+    if src.is_empty() {
+        return Err("invalid [collect]: `sig` must not be empty".to_string());
+    }
+    // Declaration forms. `func(...)` is ambiguous with the type form
+    // (`func([str]) -> int`), so a failed declaration parse falls through
+    // to the type parser instead of erroring immediately.
+    let decl_src = if let Some(rest) = src.strip_prefix("func ") {
+        Some((format!("pub func {rest} {{ }}"), true))
+    } else {
+        src.strip_prefix("func(")
+            .map(|rest| (format!("pub func __collection_sig({rest} {{ }}"), false))
+    };
+    if let Some((source, strict)) = decl_src {
+        let parsed = zz_frontend::parse(&source);
+        if first_parse_error(&parsed.errors).is_none() {
+            let func = parsed.program.stmts.iter().find_map(|s| match s {
+                Stmt::Func {
+                    generics,
+                    params,
+                    ret,
+                    span,
+                    ..
+                } => Some((generics, params, ret, *span)),
+                _ => None,
+            });
+            let Some((generics, params, ret, span)) = func else {
+                return Err(format!(
+                    "invalid [collect]: `sig = \"{sig}\"` is not a function signature"
+                ));
+            };
+            if !generics.is_empty() {
+                return Err(format!(
+                    "invalid [collect]: `sig = \"{sig}\"` must not be generic\n\
+                     hint: collection members are concrete functions"
+                ));
+            }
+            let mut tys = Vec::new();
+            for p in params {
+                let Some(ty) = &p.ty else {
+                    return Err(format!(
+                        "invalid [collect]: parameter `{}` in `sig = \"{sig}\"` has no type",
+                        p.name.name
+                    ));
+                };
+                tys.push(ty.clone());
+            }
+            let ret_ty = ret.clone().unwrap_or(Ty {
+                kind: TyKind::Unit,
+                span,
+            });
+            let params_src: Vec<String> = tys
+                .iter()
+                .map(|t| source[t.span.start as usize..t.span.end as usize].to_string())
+                .collect();
+            let ret_src = ret
+                .as_ref()
+                .map(|t| source[t.span.start as usize..t.span.end as usize].to_string())
+                .unwrap_or_else(|| "unit".to_string());
+            let ty_source = format!("func({}) -> {ret_src}", params_src.join(", "));
+            return Ok((
+                Ty {
+                    kind: TyKind::Func(tys, Box::new(ret_ty)),
+                    span,
+                },
+                ty_source,
+            ));
+        }
+        if strict {
+            let err = first_parse_error(&parsed.errors).unwrap_or_default();
+            return Err(format!(
+                "invalid [collect]: `sig = \"{sig}\"` does not parse: {err}\n\
+                 hint: use e.g. `sig = \"func(args: [str]) -> int\"` or `sig = \"func([str]) -> int\"`"
+            ));
+        }
+    }
+    // Type form.
+    let source = format!("type __CollectionSig = {src}");
+    let parsed = zz_frontend::parse(&source);
+    if let Some(err) = first_parse_error(&parsed.errors) {
+        return Err(format!(
+            "invalid [collect]: `sig = \"{sig}\"` does not parse: {err}\n\
+             hint: use a function type, e.g. `sig = \"func([str]) -> int\"`"
+        ));
+    }
+    let ty = parsed.program.stmts.iter().find_map(|s| match s {
+        Stmt::TypeAlias { target, .. } => Some(target.clone()),
+        _ => None,
+    });
+    let Some(ty) = ty else {
+        return Err(format!(
+            "invalid [collect]: `sig = \"{sig}\"` is not a type"
+        ));
+    };
+    if !matches!(ty.kind, TyKind::Func(..)) {
+        return Err(format!(
+            "invalid [collect]: `sig = \"{sig}\"` is not a function type\n\
+             hint: collection members export a function, e.g. `sig = \"func([str]) -> int\"`"
+        ));
+    }
+    let ty_source = source[ty.span.start as usize..ty.span.end as usize].to_string();
+    Ok((ty, ty_source))
+}
+
+fn first_parse_error(errors: &[zz_frontend::diag::RawDiag]) -> Option<String> {
+    errors
+        .iter()
+        .find(|e| e.severity == zz_frontend::diag::Severity::Error)
+        .map(|e| e.message.clone())
+}
+
+/// True when `name` is usable as a ZZ identifier: leading letter or `_`,
+/// then letters/digits/underscores.
+pub fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// One `[features]` entry. Two shapes are accepted:
+///
+/// ```toml
+/// default = ["std", "locales-ar"]              # bare list
+/// locales-ar = { modules = ["locales/ar"], deps = ["faker_locales_ar"] }
+/// ```
+///
+/// The list form enables other features (transitively) and may also name
+/// an optional dependency directly. The table form gates module files
+/// (`modules`) and pulls in optional dependencies (`deps`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum FeatureSpec {
+    /// `name = ["other_feature", ...]`
+    List(Vec<String>),
+    /// `name = { modules = [...], deps = [...] }`
+    Table(FeatureTable),
+}
+
+/// Table form of a feature gate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeatureTable {
+    /// Module paths (relative to the package source root, no `.zz`, no
+    /// `..`) gated by this feature. e.g. `["locales/ar"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
+    /// Optional dependency names enabled by this feature. Every entry
+    /// must name a declared `optional = true` dependency.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
+}
+
+impl FeatureSpec {
+    /// Feature names this entry enables transitively (list form only).
+    pub fn feature_refs(&self) -> &[String] {
+        match self {
+            FeatureSpec::List(items) => items,
+            FeatureSpec::Table(_) => &[],
+        }
+    }
+
+    /// Optional dependency names enabled by this entry.
+    pub fn dep_refs(&self) -> &[String] {
+        match self {
+            FeatureSpec::List(_) => &[],
+            FeatureSpec::Table(table) => &table.deps,
+        }
+    }
+
+    /// Gated module paths (table form only).
+    pub fn modules(&self) -> &[String] {
+        match self {
+            FeatureSpec::List(_) => &[],
+            FeatureSpec::Table(table) => &table.modules,
+        }
+    }
+}
+
+/// Feature selection from the command line: `--features a,b` plus
+/// `--all-features`. The implicit `default` set is always included.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FeatureSelection {
+    /// Explicitly requested names (`--features`, repeatable).
+    pub requested: BTreeSet<String>,
+    /// `--all-features`: enable every declared feature.
+    pub all: bool,
+}
+
+impl FeatureSelection {
+    /// Build a selection from explicit names.
+    pub fn new<I, S>(requested: I, all: bool) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            requested: requested.into_iter().map(Into::into).collect(),
+            all,
+        }
+    }
+
+    /// No explicit flags: only the manifest's `default` set.
+    pub fn default_set() -> Self {
+        Self::default()
+    }
+
+    /// Explicit names as a sorted slice-like iterator.
+    pub fn names(&self) -> Vec<String> {
+        self.requested.iter().cloned().collect()
+    }
+
+    /// True when no feature flags were given (default selection).
+    pub fn is_default(&self) -> bool {
+        !self.all && self.requested.is_empty()
+    }
+
+    /// Stable fingerprint of the explicit selection. Empty for the default
+    /// selection so lockfiles, run caches, and build caches keep their
+    /// existing keys when no feature flags are passed.
+    pub fn fingerprint(&self) -> String {
+        if self.is_default() {
+            return String::new();
+        }
+        let mut salt = String::new();
+        if self.all {
+            salt.push_str("all;");
+        }
+        salt.push_str(&self.names().join(","));
+        crate::hash::hash_bytes(salt.as_bytes())
+    }
+}
+
+/// Parse `--features` values: repeatable flags plus comma-separated names.
+/// `--all-features` is handled by the caller (it is a boolean flag).
+pub fn parse_feature_list(values: &[String]) -> BTreeSet<String> {
+    values
+        .iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Normalize a module path for `[features] modules` comparisons:
+/// backslashes become `/`, a leading `./` and a trailing `.zz` are
+/// stripped. Callers compare import paths through this.
+pub fn normalize_module_path(path: &str) -> String {
+    let mut p = path.replace('\\', "/");
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest.to_string();
+    }
+    if let Some(rest) = p.strip_suffix(".zz") {
+        p = rest.to_string();
+    }
+    p
+}
+
+/// Feature names are identifiers/kebab strings so they survive import
+/// diagnostics and CLI flag parsing without quoting.
+fn is_valid_feature_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Module paths in `[features]` are relative to the package source root
+/// and may not escape it.
+fn validate_feature_module(feature: &str, module: &str) -> Result<(), String> {
+    let bad = |why: &str| {
+        format!(
+            "invalid module `{module}` in feature `{feature}`: {why}\n\
+             hint: use a relative path like \"locales/ar\" (no `..`, no leading `/`)"
+        )
+    };
+    if module.trim().is_empty() {
+        return Err(bad("must not be empty"));
+    }
+    let p = Path::new(module);
+    if p.is_absolute()
+        || p.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(bad("must be relative and stay inside the package"));
+    }
+    Ok(())
 }
 
 /// Package metadata.
@@ -142,14 +658,51 @@ pub struct InitOptions {
 ///   behind `--allow-hooks` for direct deps / error for transitive deps).
 /// - `Cc`: declarative C build performed by `zz` itself
 ///   (`[native.build-cc]`), no shell, no script, no network.
+/// - `Rust`: hermetic `cargo build --offline --locked` from a vendored
+///   closure (`[native.build-rust]`), no package scripts.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NativeBackend {
     /// Declarative C build (default when `[native.build-cc]` is present).
     Cc,
+    /// Hermetic Rust crate build (default when `[native.build-rust]` is present).
+    Rust,
     /// Legacy shell hook (default when `build = "..."` is present).
     #[default]
     Hook,
+}
+
+/// Default rustc compatibility range for `[native.build-rust]`.
+///
+/// A range (not an exact pin) is sound for the C-ABI plugin contract:
+/// the link-time `ZZ_*_ABI_VERSION` stamp — not the rustc patch level —
+/// is what refuses incompatible plugins. Authors with a genuine ABI
+/// requirement can narrow it explicitly.
+pub const DEFAULT_RUSTC_RANGE: &str = ">=1.75, <2";
+
+/// Cargo profile accepted by `[native.build-rust]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustProfile {
+    Release,
+    Debug,
+}
+
+impl RustProfile {
+    /// Cargo `--profile` directory name.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            RustProfile::Release => "release",
+            RustProfile::Debug => "debug",
+        }
+    }
+
+    /// Cargo profile flag (`--release` for release, `--profile dev` for debug).
+    pub fn cargo_args(self) -> &'static [&'static str] {
+        match self {
+            RustProfile::Release => &["--release"],
+            RustProfile::Debug => &["--profile", "dev"],
+        }
+    }
 }
 
 /// Native build configuration for packages that provide C extensions.
@@ -197,6 +750,13 @@ pub struct NativeSpec {
     /// Declarative C build spec (`[native.build-cc]`).
     #[serde(default, rename = "build-cc", skip_serializing_if = "Option::is_none")]
     pub build_cc: Option<BuildCcSpec>,
+    /// Hermetic Rust crate build spec (`[native.build-rust]`).
+    #[serde(
+        default,
+        rename = "build-rust",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub build_rust: Option<BuildRustSpec>,
     /// Per-platform prebuilt artifacts (`[native.prebuilt]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prebuilt: Option<PrebuiltSpec>,
@@ -238,6 +798,54 @@ pub struct BuildCcSpec {
     pub targets: Vec<String>,
 }
 
+/// Declarative Rust crate build spec (`[native.build-rust]`).
+///
+/// `zz` vendors the locked crate closure into CAS, then drives
+/// `cargo build --offline --locked` itself under a hermetic environment.
+/// The consumed package has no `build.sh` and no `build.rs`; cargo is a
+/// build tool `zz` drives, never a script the package runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuildRustSpec {
+    /// Crate directory, relative to the package root (e.g. `"native/"`).
+    /// Must contain `Cargo.toml` and a committed `Cargo.lock`.
+    #[serde(rename = "crate")]
+    pub crate_path: String,
+    /// Cargo features to enable (`--features a,b`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cargo_features: Vec<String>,
+    /// Explicit Rust target triple override. Absent derives the triple
+    /// from the platform tag (`native_platform_tag()` mapping).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// rustc compatibility range (semver requirement). Default
+    /// [`DEFAULT_RUSTC_RANGE`] — never an exact pin unless the author
+    /// deliberately narrows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rustc_range: Option<String>,
+    /// Cargo profile: `release` (default) or `debug`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+impl BuildRustSpec {
+    /// Effective rustc requirement (default compatibility range).
+    pub fn rustc_req(&self) -> &str {
+        self.rustc_range.as_deref().unwrap_or(DEFAULT_RUSTC_RANGE)
+    }
+
+    /// Effective cargo profile (`release` default).
+    pub fn rust_profile(&self) -> Result<RustProfile, String> {
+        match self.profile.as_deref().unwrap_or("release") {
+            "release" => Ok(RustProfile::Release),
+            "debug" | "dev" => Ok(RustProfile::Debug),
+            other => Err(format!(
+                "invalid [native.build-rust] profile `{other}`\n\
+                 hint: use \"release\" (default) or \"debug\""
+            )),
+        }
+    }
+}
+
 /// Per-platform prebuilt artifacts: `target.<tag> = { url, sha256 }`.
 /// v1: `https:` URLs only (GitHub releases convention); the `registry:`
 /// scheme is deferred to v2.
@@ -269,6 +877,9 @@ impl NativeSpec {
         if let Some(b) = self.backend {
             return b;
         }
+        if self.build_rust.is_some() {
+            return NativeBackend::Rust;
+        }
         if self.build_cc.is_some() {
             return NativeBackend::Cc;
         }
@@ -278,28 +889,39 @@ impl NativeSpec {
     /// Validate all declarative fields against `pkg_root`.
     ///
     /// Checks: mixed-form rejection, backend/shape agreement, path
-    /// containment (hook, manifest, sources, include_dirs), explicit
-    /// cflag allowlist + rejected classes, `libs` shape, platform tags,
-    /// prebuilt URL/sha shape, legacy/new `pkg_config` exclusivity.
+    /// containment (hook, manifest, crate, sources, include_dirs),
+    /// explicit cflag allowlist + rejected classes, `libs` shape, platform
+    /// tags, prebuilt URL/sha shape, legacy/new `pkg_config` exclusivity,
+    /// and for `[native.build-rust]`: committed Cargo.lock, both
+    /// `crate-type`s, no package `build.rs`, pinned lockfile closure.
     /// Returns `Ok(())` for a legacy hook-only spec (nothing to check
     /// beyond containment of the hook path).
     pub fn validate(&self, pkg_root: &Path) -> Result<(), String> {
         // Mixed form is always an error.
-        if self.build.is_some() && self.build_cc.is_some() {
+        let declarative = [
+            self.build.is_some(),
+            self.build_cc.is_some(),
+            self.build_rust.is_some(),
+        ]
+        .iter()
+        .filter(|present| **present)
+        .count();
+        if declarative > 1 {
             return Err(
-                "invalid [native]: `build` (hook) and `[native.build-cc]` are mutually exclusive\n\
-                 hint: remove `build = \"build.sh\"` to use the declarative backend"
+                "invalid [native]: `build` (hook), `[native.build-cc]`, and `[native.build-rust]` are mutually exclusive\n\
+                 hint: keep exactly one backend; remove `build = \"build.sh\"` when using a declarative table"
                     .to_string(),
             );
         }
-        if self.pkg_config.is_some()
-            && self
-                .build_cc
-                .as_ref()
-                .is_some_and(|b| !b.pkg_config.is_empty())
-        {
-            return Err("invalid [native]: legacy `pkg_config` (string) and `[native.build-cc] pkg_config` (list) are mutually exclusive\n\
-                 hint: keep only the `[native.build-cc]` list form"
+        let legacy_pkg_config_conflicts = self.pkg_config.is_some()
+            && (self.build_rust.is_some()
+                || self
+                    .build_cc
+                    .as_ref()
+                    .is_some_and(|b| !b.pkg_config.is_empty()));
+        if legacy_pkg_config_conflicts {
+            return Err("invalid [native]: legacy `pkg_config` (string) is mutually exclusive with declarative backends\n\
+                 hint: remove the legacy `pkg_config` string; use `[native.build-cc] pkg_config` (list) or `[native.build-rust]`"
                 .to_string());
         }
         // Explicit backend must agree with the shape present.
@@ -312,10 +934,17 @@ impl NativeSpec {
                             .to_string(),
                     );
                 }
+                NativeBackend::Rust if self.build_rust.is_none() => {
+                    return Err(
+                        "invalid [native]: `backend = \"rust\"` requires `[native.build-rust]`\n\
+                         hint: add a `[native.build-rust]` table (crate = \"native/\") or drop the backend tag"
+                            .to_string(),
+                    );
+                }
                 NativeBackend::Hook if self.build.is_none() => {
                     return Err(
                         "invalid [native]: `backend = \"hook\"` requires `build = \"...\"`\n\
-                         hint: add `build = \"build.sh\"` or switch to `backend = \"cc\"`"
+                         hint: add `build = \"build.sh\"` or switch to `backend = \"cc\"`/`\"rust\"`"
                             .to_string(),
                     );
                 }
@@ -328,6 +957,9 @@ impl NativeSpec {
         }
         if let Some(m) = &self.manifest {
             check_contained(pkg_root, m, "manifest")?;
+        }
+        if let Some(rust) = &self.build_rust {
+            return validate_rust_spec(pkg_root, rust);
         }
         let Some(cc) = &self.build_cc else {
             return Ok(());
@@ -394,6 +1026,60 @@ impl NativeSpec {
         }
         Ok(())
     }
+}
+
+/// Validate a `[native.build-rust]` spec against the package root.
+///
+/// Structural checks happen here (paths, ranges, features, target triple,
+/// crate types, committed lock, banned scripts, pinned closure). Network
+/// and cargo probing stay in the build/install path.
+fn validate_rust_spec(pkg_root: &Path, spec: &BuildRustSpec) -> Result<(), String> {
+    check_contained(pkg_root, &spec.crate_path, "build-rust.crate")?;
+    let crate_dir = crate::rust_lock::crate_dir_for(pkg_root, &spec.crate_path)?;
+    if !crate_dir.is_dir() {
+        return Err(format!(
+            "invalid [native.build-rust]: crate `{}` is not a directory\n\
+             hint: crate = \"native/\" relative to the package root",
+            spec.crate_path
+        ));
+    }
+
+    // Profile + rustc range are manifest-level contracts.
+    spec.rust_profile()?;
+    semver::VersionReq::parse(spec.rustc_req()).map_err(|e| {
+        format!(
+            "invalid [native.build-rust] rustc_range `{}`: {e}\n\
+             hint: use a semver range, e.g. \">=1.75, <2\"",
+            spec.rustc_req()
+        )
+    })?;
+    for feat in &spec.cargo_features {
+        if feat.is_empty()
+            || feat.starts_with('-')
+            || feat.contains(|c: char| c.is_whitespace() || c == ',')
+        {
+            return Err(format!(
+                "invalid [native.build-rust] cargo_features entry `{feat}`\n\
+                 hint: bare feature names only (no commas/spaces/leading dashes)"
+            ));
+        }
+    }
+    if let Some(target) = &spec.target {
+        if target.is_empty()
+            || !target
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(format!(
+                "invalid [native.build-rust] target `{target}`: must be a Rust target triple\n\
+                 hint: e.g. x86_64-unknown-linux-gnu"
+            ));
+        }
+    }
+
+    let manifest = crate::rust_lock::validate_crate(&crate_dir)?;
+    crate::rust_lock::read_closure(&crate_dir, &manifest)?;
+    Ok(())
 }
 
 /// Reject paths escaping the package root (`..`, absolute, empty).
@@ -599,8 +1285,11 @@ fn parse_dotted(s: &str) -> Option<(u32, u32)> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum DepSpec {
-    /// Simple version range: `"^1.2.0"`.
-    Version(String),
+    /// Registry version range: `"^1.2.0"`, or the table form
+    /// `{ version = "^1.2.0", optional = true, features = ["x"] }`
+    /// (#419: `[dependencies.x]` tables and Cargo-style inline tables
+    /// spell the same registry dep).
+    Version(VersionDep),
     /// Git dependency with version constraint.
     Git(GitDep),
     /// Path dependency (local filesystem).
@@ -613,18 +1302,217 @@ pub enum DepSpec {
     Path(PathDep),
 }
 
+impl DepSpec {
+    /// `optional = true` on any variant. Optional deps are active only
+    /// when an enabled feature names them in `deps` (or, for the list
+    /// form, directly).
+    pub fn optional(&self) -> bool {
+        match self {
+            DepSpec::Version(v) => v.optional,
+            DepSpec::Git(g) => g.optional,
+            DepSpec::Path(p) => p.optional,
+        }
+    }
+
+    /// Features requested from this dependency's own `[features]` section.
+    pub fn features(&self) -> &[String] {
+        match self {
+            DepSpec::Version(v) => &v.features,
+            DepSpec::Git(g) => &g.features,
+            DepSpec::Path(p) => &p.features,
+        }
+    }
+
+    /// Version requirement for registry/git deps.
+    pub fn version_req(&self) -> Option<&str> {
+        match self {
+            DepSpec::Version(v) => Some(&v.version),
+            DepSpec::Git(g) => Some(&g.version),
+            DepSpec::Path(_) => None,
+        }
+    }
+}
+
+/// Registry dependency: bare version string, or a table adding optional
+/// dependency flags. Serialization stays canonical — a dep with no flags
+/// emits a plain string, so old manifests round-trip byte-for-byte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionDep {
+    pub version: String,
+    pub optional: bool,
+    pub features: Vec<String>,
+}
+
+impl VersionDep {
+    /// Plain (non-optional, no requested features) version dep.
+    pub fn new(version: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+            optional: false,
+            features: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for VersionDep {
+    fn from(v: &str) -> Self {
+        Self::new(v)
+    }
+}
+
+impl From<String> for VersionDep {
+    fn from(v: String) -> Self {
+        Self::new(v)
+    }
+}
+
+impl std::fmt::Display for VersionDep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.version)
+    }
+}
+
+impl std::ops::Deref for VersionDep {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.version
+    }
+}
+
+fn bool_is_false(v: &bool) -> bool {
+    !*v
+}
+
+impl Serialize for VersionDep {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !self.optional && self.features.is_empty() {
+            return serializer.serialize_str(&self.version);
+        }
+        #[derive(Serialize)]
+        struct Table<'a> {
+            version: &'a str,
+            #[serde(skip_serializing_if = "bool_is_false")]
+            optional: bool,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            features: &'a Vec<String>,
+        }
+        Table {
+            version: &self.version,
+            optional: self.optional,
+            features: &self.features,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Table form of a registry dep with unknown keys denied: extras (a `git`
+/// without `rev`, a typo) must stay loud errors rather than silently
+/// degrading to a registry dep.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionTable {
+    version: String,
+    #[serde(default)]
+    optional: bool,
+    #[serde(default)]
+    features: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for VersionDep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct VersionOrTable;
+        impl<'de> serde::de::Visitor<'de> for VersionOrTable {
+            type Value = VersionDep;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a version string or a table with `version`, `optional`, `features`")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<VersionDep, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(VersionDep::new(v))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<VersionDep, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(VersionDep::new(v))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<VersionDep, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let table =
+                    VersionTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(VersionDep {
+                    version: table.version,
+                    optional: table.optional,
+                    features: table.features,
+                })
+            }
+        }
+        deserializer.deserialize_any(VersionOrTable)
+    }
+}
+
 /// Git dependency spec.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GitDep {
     pub version: String,
     pub git: String,
     pub rev: String,
+    /// Optional dependency, enabled by a feature's `deps` list.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub optional: bool,
+    /// Features requested from the dependency's own `[features]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 /// Path dependency spec.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PathDep {
     pub path: String,
+    /// Optional dependency, enabled by a feature's `deps` list.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub optional: bool,
+    /// Features requested from the dependency's own `[features]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+impl PathDep {
+    /// Plain non-optional path dep.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            optional: false,
+            features: Vec::new(),
+        }
+    }
+}
+
+impl GitDep {
+    /// Plain non-optional git dep.
+    pub fn new(version: impl Into<String>, git: impl Into<String>, rev: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+            git: git.into(),
+            rev: rev.into(),
+            optional: false,
+            features: Vec::new(),
+        }
+    }
 }
 
 impl Manifest {
@@ -636,8 +1524,14 @@ impl Manifest {
     }
 
     /// Parse a manifest from a string.
+    ///
+    /// Feature cross-references are validated here, so every caller
+    /// (including dependency manifests loaded transitively) gets the same
+    /// loud errors. A manifest without `[features]` is untouched.
     pub fn parse(s: &str) -> Result<Self, String> {
-        toml::from_str(s).map_err(|e| format!("invalid zz.toml: {e}"))
+        let manifest: Manifest = toml::from_str(s).map_err(|e| format!("invalid zz.toml: {e}"))?;
+        manifest.validate_features()?;
+        Ok(manifest)
     }
 
     /// Save the manifest to a file.
@@ -673,6 +1567,251 @@ impl Manifest {
             Some(req) => check_compiler_req(req, compiler_version)
                 .map_err(|e| format!("{} requires {e}", self.package.name)),
         }
+    }
+
+    /// Validate `[features]`: names, module paths, and cross-references.
+    ///
+    /// - Feature names are identifiers/kebab strings (`^[A-Za-z][A-Za-z0-9_-]*$`).
+    /// - Module paths are relative, non-empty, and never escape the root (`..`).
+    /// - Every `deps` entry names a declared `optional = true` dependency.
+    /// - Every `optional = true` dependency is referenced by at least one
+    ///   feature (otherwise it can never be enabled).
+    /// - Bare-list entries name a feature or an optional dependency.
+    ///
+    /// Cycles are detected by [`Manifest::enabled_features`], not here:
+    /// an unreachable cycle is harmless until someone selects it.
+    pub fn validate_features(&self) -> Result<(), String> {
+        for (name, spec) in &self.features {
+            if !is_valid_feature_name(name) {
+                return Err(format!(
+                    "invalid feature name `{name}` in [features]\n\
+                     hint: use letters, digits, `-`, or `_`, starting with a letter (e.g. `locales-ar`)"
+                ));
+            }
+            for module in spec.modules() {
+                validate_feature_module(name, module)?;
+            }
+            for dep in spec.dep_refs() {
+                if !self.dependencies.contains_key(dep) {
+                    return Err(format!(
+                        "feature `{name}` enables undeclared dependency `{dep}`\n\
+                         hint: declare it under [dependencies] (e.g. `{dep} = {{ version = \"1.0\", optional = true }}`)"
+                    ));
+                }
+            }
+            for item in spec.feature_refs() {
+                let is_feature = self.features.contains_key(item);
+                let is_optional_dep = self
+                    .dependencies
+                    .get(item)
+                    .is_some_and(|dep| dep.optional());
+                if !is_feature && !is_optional_dep {
+                    let hint = if self.dependencies.contains_key(item) {
+                        format!(
+                            "`{item}` is a non-optional dependency (always active); \
+                             remove it from the feature list"
+                        )
+                    } else {
+                        let mut available: Vec<&str> =
+                            self.features.keys().map(String::as_str).collect();
+                        available.sort();
+                        format!("available features: {}", available.join(", "))
+                    };
+                    return Err(format!(
+                        "feature `{name}` references unknown feature `{item}`\n\
+                         hint: {hint}"
+                    ));
+                }
+            }
+        }
+        // Optional deps must be reachable from at least one feature. A
+        // dep that no feature enables can never be installed: loud error.
+        let mut enabled_by_feature: BTreeSet<String> = BTreeSet::new();
+        for (feature, spec) in &self.features {
+            for dep in spec.dep_refs() {
+                enabled_by_feature.insert(dep.clone());
+            }
+            for item in spec.feature_refs() {
+                if self
+                    .dependencies
+                    .get(item)
+                    .is_some_and(|dep| dep.optional())
+                {
+                    enabled_by_feature.insert(item.clone());
+                }
+            }
+            let _ = feature;
+        }
+        for (dep, spec) in &self.dependencies {
+            if spec.optional() && !enabled_by_feature.contains(dep) {
+                return Err(format!(
+                    "optional dependency `{dep}` is never enabled by any feature\n\
+                     hint: add `deps = [\"{dep}\"]` to a [features] entry (e.g. `{dep} = {{ deps = [\"{dep}\"] }}`) \
+                     or drop `optional = true`"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the enabled feature set for `requested` (already-parsed
+    /// `--features` names) or `all` (`--all-features`).
+    ///
+    /// The implicit `default` feature (when declared) is always enabled.
+    /// Feature-to-feature references are followed transitively; unknown
+    /// names and cycles are loud errors naming the offending feature.
+    pub fn enabled_features(
+        &self,
+        requested: &[String],
+        all: bool,
+    ) -> Result<BTreeSet<String>, String> {
+        self.validate_features()?;
+        let mut enabled: BTreeSet<String> = BTreeSet::new();
+        let mut seeds: Vec<String> = Vec::new();
+        if all {
+            seeds.extend(self.features.keys().cloned());
+        } else {
+            if self.features.contains_key("default") {
+                seeds.push("default".to_string());
+            }
+            for name in requested {
+                if !self.features.contains_key(name) {
+                    let mut available: Vec<&str> =
+                        self.features.keys().map(String::as_str).collect();
+                    available.sort();
+                    return Err(format!(
+                        "unknown feature `{name}`\n\
+                         hint: available features: {}\n\
+                         hint: pass one or more with --features <name>[,<name>...] or use --all-features",
+                        if available.is_empty() {
+                            "(none declared)".to_string()
+                        } else {
+                            available.join(", ")
+                        }
+                    ));
+                }
+                seeds.push(name.clone());
+            }
+        }
+        // DFS with an explicit stack; `path` detects cycles among
+        // feature-to-feature references.
+        fn visit(
+            manifest: &Manifest,
+            name: &str,
+            path: &mut Vec<String>,
+            done: &mut BTreeSet<String>,
+            enabled: &mut BTreeSet<String>,
+        ) -> Result<(), String> {
+            if done.contains(name) {
+                return Ok(());
+            }
+            if let Some(pos) = path.iter().position(|p| p == name) {
+                let mut cycle = path[pos..].to_vec();
+                cycle.push(name.to_string());
+                return Err(format!(
+                    "feature cycle: {}\n\
+                     hint: feature lists must not reference each other in a loop",
+                    cycle.join(" -> ")
+                ));
+            }
+            enabled.insert(name.to_string());
+            path.push(name.to_string());
+            if let Some(spec) = manifest.features.get(name) {
+                for item in spec.feature_refs() {
+                    if manifest.features.contains_key(item) {
+                        visit(manifest, item, path, done, enabled)?;
+                    }
+                }
+            }
+            path.pop();
+            done.insert(name.to_string());
+            Ok(())
+        }
+        let mut done = BTreeSet::new();
+        for seed in seeds {
+            let mut path = Vec::new();
+            visit(self, &seed, &mut path, &mut done, &mut enabled)?;
+        }
+        Ok(enabled)
+    }
+
+    /// Resolve a [`FeatureSelection`] against this manifest.
+    pub fn resolve_features(
+        &self,
+        selection: &FeatureSelection,
+    ) -> Result<BTreeSet<String>, String> {
+        self.enabled_features(&selection.names(), selection.all)
+    }
+
+    /// Dependencies active for an enabled feature set: every non-optional
+    /// dependency, plus optional deps named by an enabled feature's `deps`
+    /// (or directly by a bare-list entry).
+    pub fn enabled_dependencies(
+        &self,
+        enabled: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, String> {
+        self.validate_features()?;
+        let mut active: BTreeSet<String> = self
+            .dependencies
+            .iter()
+            .filter(|(_, spec)| !spec.optional())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for feature in enabled {
+            let Some(spec) = self.features.get(feature) else {
+                return Err(format!(
+                    "internal: unknown enabled feature `{feature}`\n\
+                     hint: pass feature names to Manifest::enabled_features"
+                ));
+            };
+            for dep in spec.dep_refs() {
+                // validate_features guarantees the dep exists.
+                active.insert(dep.clone());
+            }
+            for item in spec.feature_refs() {
+                if self
+                    .dependencies
+                    .get(item)
+                    .is_some_and(|dep| dep.optional())
+                {
+                    active.insert(item.clone());
+                }
+            }
+        }
+        Ok(active)
+    }
+
+    /// Convenience: selection → active dependency names.
+    pub fn active_dependency_names(
+        &self,
+        selection: &FeatureSelection,
+    ) -> Result<BTreeSet<String>, String> {
+        let enabled = self.resolve_features(selection)?;
+        self.enabled_dependencies(&enabled)
+    }
+
+    /// Module path → feature names that gate it. Used by the loader to
+    /// turn a disabled-module import into a fix-it diagnostic.
+    pub fn module_gates(&self) -> BTreeMap<String, Vec<String>> {
+        let mut gates: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (feature, spec) in &self.features {
+            for module in spec.modules() {
+                gates
+                    .entry(normalize_module_path(module))
+                    .or_default()
+                    .push(feature.clone());
+            }
+        }
+        for features in gates.values_mut() {
+            features.sort();
+            features.dedup();
+        }
+        gates
+    }
+
+    /// Declared feature names, sorted (`zz info` / diagnostics).
+    pub fn feature_names(&self) -> Vec<String> {
+        self.features.keys().cloned().collect()
     }
 
     /// Configured entry override (`[package] entry = "src/cli.zz"`).
@@ -755,6 +1894,8 @@ impl Manifest {
             },
             dependencies: HashMap::new(),
             native: None,
+            collections: BTreeMap::new(),
+            features: BTreeMap::new(),
         };
         let path = dir.join("zz.toml");
         manifest.save(&path)?;
@@ -803,7 +1944,7 @@ impl Manifest {
     pub fn starter_content(template: Option<&str>) -> &'static str {
         match template {
             Some("lib") => {
-                "/// Add one to a number.\npub func add_one(n: int) -> int {\n    n + 1\n}\n"
+                "/// Add one to a number.\npub func add_one(n: int) -> int {\n    return n + 1\n}\n"
             }
             Some("web") => {
                 "import std.http\n\nfunc main() {\n    s := http.server()\n    s2 := http.route_get(s, \"/\", |req| \"Hello, ZZ!\")\n    http.listen(s2, 8080) ?? println(\"failed to start server\")\n}\n"
@@ -874,6 +2015,7 @@ mod tests {
                 zz: None,
                 entry: None,
             },
+            collections: BTreeMap::new(),
             dependencies: {
                 let mut d = HashMap::new();
                 d.insert("foo".into(), DepSpec::Version("^1.2.0".into()));
@@ -883,17 +2025,22 @@ mod tests {
                         version: "2.0".into(),
                         git: "https://github.com/user/repo".into(),
                         rev: "main".into(),
+                        optional: false,
+                        features: Vec::new(),
                     }),
                 );
                 d.insert(
                     "baz".into(),
                     DepSpec::Path(PathDep {
                         path: "../baz".into(),
+                        optional: false,
+                        features: Vec::new(),
                     }),
                 );
                 d
             },
             native: None,
+            features: BTreeMap::new(),
         };
 
         let d = tmp_dir("round_trip");
@@ -901,6 +2048,276 @@ mod tests {
         m.save(&path).unwrap();
         let loaded = Manifest::load(&path).unwrap();
         assert_eq!(m, loaded);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn version_table_forms_parse_as_version() {
+        // #419: `[dependencies.x]` tables, Cargo-style inline tables, and
+        // bare strings all spell a registry dep — including mixed in one
+        // manifest (the issue's exact shape).
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "faker-tests"
+version = "0.1.0"
+
+[dependencies.faker]
+path = ".."
+
+[dependencies.rand]
+version = "^0.4.1"
+
+[dependencies]
+inline_bare = "^1.0.0"
+inline_table = { version = "^2.0.0" }
+"#,
+        )
+        .expect("mixed dependency spellings must parse");
+        assert_eq!(
+            m.dependencies.get("rand"),
+            Some(&DepSpec::Version("^0.4.1".into()))
+        );
+        assert_eq!(
+            m.dependencies.get("inline_bare"),
+            Some(&DepSpec::Version("^1.0.0".into()))
+        );
+        assert_eq!(
+            m.dependencies.get("inline_table"),
+            Some(&DepSpec::Version("^2.0.0".into()))
+        );
+        assert!(matches!(
+            m.dependencies.get("faker"),
+            Some(DepSpec::Path(_))
+        ));
+    }
+
+    #[test]
+    fn version_table_extras_stay_loud() {
+        // Unknown keys must not silently degrade to a registry dep: a
+        // `git` without `rev` (or any stray key) is still an error.
+        // `optional` and `features` are the only widened keys (#488).
+        for bad in [
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", git = \"https://example.com/r\" }\n",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", rev = \"main\" }\n",
+        ] {
+            assert!(
+                Manifest::parse(bad).is_err(),
+                "extra keys must not parse silently: {bad}"
+            );
+        }
+    }
+
+    const FEATURE_MANIFEST: &str = r#"
+[package]
+name = "faker"
+version = "1.0.0"
+
+[dependencies]
+faker_locales_ar = { path = "../locales/ar", optional = true }
+faker_locales_fr = { path = "../locales/fr", optional = true }
+rand = "^0.4"
+
+[features]
+default = ["std"]
+std = []
+locales-ar = { modules = ["locales/ar"], deps = ["faker_locales_ar"] }
+locales-fr = { modules = ["locales/fr", "locales/fr/extra"], deps = ["faker_locales_fr"] }
+all-locales = ["locales-ar", "locales-fr"]
+"#;
+
+    #[test]
+    fn feature_shapes_parse_and_round_trip() {
+        let m = Manifest::parse(FEATURE_MANIFEST).expect("both feature shapes parse");
+        assert_eq!(
+            m.features.get("default"),
+            Some(&FeatureSpec::List(vec!["std".to_string()]))
+        );
+        assert_eq!(
+            m.features.get("locales-ar"),
+            Some(&FeatureSpec::Table(FeatureTable {
+                modules: vec!["locales/ar".to_string()],
+                deps: vec!["faker_locales_ar".to_string()],
+            }))
+        );
+        assert!(matches!(
+            m.dependencies.get("faker_locales_ar"),
+            Some(DepSpec::Path(p)) if p.optional && p.features.is_empty()
+        ));
+        // No features in the value → canonical bare string on save.
+        let d = tmp_dir("features_round_trip");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("rand = \"^0.4\""), "{text}");
+        assert!(text.contains("[features]"), "{text}");
+        assert!(text.contains("optional = true"), "{text}");
+        let loaded = Manifest::load(&path).unwrap();
+        assert_eq!(m, loaded);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn feature_closure_is_transitive() {
+        let m = Manifest::parse(FEATURE_MANIFEST).unwrap();
+        let enabled = m.enabled_features(&[], false).unwrap();
+        assert!(enabled.contains("default"));
+        assert!(enabled.contains("std"));
+        assert!(!enabled.contains("locales-ar"));
+
+        let enabled = m
+            .enabled_features(&["all-locales".to_string()], false)
+            .unwrap();
+        assert!(enabled.contains("all-locales"));
+        assert!(enabled.contains("locales-ar"));
+        assert!(enabled.contains("locales-fr"));
+        // default stays implicit even when other features are requested.
+        assert!(enabled.contains("default"));
+
+        let all = m.enabled_features(&[], true).unwrap();
+        assert_eq!(all, m.features.keys().cloned().collect());
+
+        let active = m.enabled_dependencies(&enabled).unwrap();
+        assert!(active.contains("rand"), "non-optional always active");
+        assert!(active.contains("faker_locales_ar"));
+        assert!(active.contains("faker_locales_fr"));
+        // Default selection excludes optional locale deps.
+        let default_active = m
+            .enabled_dependencies(&m.enabled_features(&[], false).unwrap())
+            .unwrap();
+        assert!(default_active.contains("rand"));
+        assert!(!default_active.contains("faker_locales_ar"));
+    }
+
+    #[test]
+    fn feature_unknown_name_is_loud() {
+        let m = Manifest::parse(FEATURE_MANIFEST).unwrap();
+        let err = m
+            .enabled_features(&["locales-de".to_string()], false)
+            .unwrap_err();
+        assert!(err.contains("unknown feature `locales-de`"), "{err}");
+        assert!(err.contains("locales-ar"), "lists available: {err}");
+    }
+
+    #[test]
+    fn feature_cycle_is_loud() {
+        let m = Manifest::parse(FEATURE_MANIFEST).unwrap();
+        let mut cyclic = m.clone();
+        cyclic.features.insert(
+            "loop-a".to_string(),
+            FeatureSpec::List(vec!["loop-b".to_string()]),
+        );
+        cyclic.features.insert(
+            "loop-b".to_string(),
+            FeatureSpec::List(vec!["loop-a".to_string()]),
+        );
+        let err = cyclic
+            .enabled_features(&["loop-a".to_string()], false)
+            .unwrap_err();
+        assert!(err.contains("feature cycle"), "{err}");
+        assert!(err.contains("loop-a") && err.contains("loop-b"), "{err}");
+    }
+
+    #[test]
+    fn feature_validation_rejects_bad_manifests() {
+        // Optional dep no feature can enable.
+        let err = Manifest::parse(
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+[dependencies]
+lonely = { version = "1.0", optional = true }
+[features]
+default = []
+"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("never enabled"), "{err}");
+
+        // Dep referenced by a feature but not declared.
+        let err = Manifest::parse(
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+[features]
+gone = { deps = ["missing"] }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("undeclared dependency `missing`"), "{err}");
+
+        // Module paths may not escape the package root.
+        for evil in ["../secrets", "/abs/path", ""] {
+            let err = Manifest::parse(&format!(
+                "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[features]\nf = {{ modules = [\"{evil}\"] }}\n"
+            ))
+            .unwrap_err();
+            assert!(err.contains("invalid module"), "`{evil}`: {err}");
+        }
+
+        // Feature names must be identifier/kebab-ish.
+        let err = Manifest::parse(
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[features]\n\"bad name\" = []\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid feature name"), "{err}");
+    }
+
+    #[test]
+    fn dep_flags_round_trip_canonically() {
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "consumer"
+version = "0.1.0"
+
+[dependencies]
+plain = "^1.0"
+flagged = { version = "^2.0", optional = true, features = ["ar", "fr"] }
+g = { git = "https://example.com/g.git", rev = "main", version = "*", optional = true, features = ["x"] }
+p = { path = "../p", optional = true }
+[features]
+f = { deps = ["flagged", "g", "p"] }
+"#,
+        )
+        .unwrap();
+        let d = tmp_dir("dep_flags_rt");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("plain = \"^1.0\""), "{text}");
+        assert_eq!(Manifest::load(&path).unwrap(), m);
+        let loaded = Manifest::parse(&text).unwrap();
+        assert_eq!(loaded.dependencies["flagged"].features(), ["ar", "fr"]);
+        assert!(loaded.dependencies["flagged"].optional());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn manifest_without_features_is_unchanged() {
+        // Backward compatibility: adding `[features]` support must not
+        // change the serialized form of an old manifest.
+        let original = r#"[package]
+name = "legacy"
+version = "1.0.0"
+authors = ["Alice"]
+
+[dependencies]
+foo = "^1.0"
+bar = { version = "2.0", git = "https://example.com/r", rev = "main" }
+baz = { path = "../baz" }
+"#;
+        let m = Manifest::parse(original).unwrap();
+        let d = tmp_dir("legacy_unchanged");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("[features]"), "{saved}");
+        assert!(!saved.contains("optional"), "{saved}");
+        assert!(!saved.contains("features ="), "{saved}");
+        assert_eq!(Manifest::parse(&saved).unwrap(), m);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -1131,6 +2548,8 @@ foo = "^1.0"
             },
             dependencies: HashMap::new(),
             native: None,
+            collections: BTreeMap::new(),
+            features: BTreeMap::new(),
         };
 
         let d = tmp_dir("meta_rt");
@@ -1219,6 +2638,7 @@ foo = "^1.0"
             manifest: None,
             build: None,
             build_cc: Some(spec.clone()),
+            build_rust: None,
             prebuilt: None,
             pkg_config: None,
         }
@@ -1257,6 +2677,142 @@ foo = "^1.0"
         assert!(err.contains("mutually exclusive"), "{err}");
     }
 
+    fn rust_pkg(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "zz_manifest_rust_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("native/src")).unwrap();
+        fs::write(
+            d.join("native/Cargo.toml"),
+            "[package]\nname=\"rplug\"\nversion=\"0.1.0\"\nlicense=\"MIT\"\n\n[lib]\ncrate-type=[\"cdylib\",\"staticlib\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            d.join("native/Cargo.lock"),
+            "version = 3\n[[package]]\nname=\"rplug\"\nversion=\"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(d.join("native/src/lib.rs"), "").unwrap();
+        d
+    }
+
+    fn rust_native(spec_extra: &str) -> NativeSpec {
+        cc_manifest(&format!(
+            "[native]\n[native.build-rust]\ncrate = \"native\"\n{spec_extra}"
+        ))
+        .native
+        .expect("native present")
+    }
+
+    #[test]
+    fn rust_shape_resolves_rust_and_default_range() {
+        let n = rust_native("");
+        assert_eq!(n.resolved_backend(), NativeBackend::Rust);
+        let spec = n.build_rust.as_ref().unwrap();
+        assert_eq!(spec.rustc_req(), DEFAULT_RUSTC_RANGE);
+        assert_eq!(spec.rust_profile().unwrap(), RustProfile::Release);
+    }
+
+    #[test]
+    fn mixed_rust_and_cc_rejected() {
+        let m = cc_manifest(
+            "[native]\n[native.build-cc]\nsources = [\"csrc/wrapper.c\"]\n[native.build-rust]\ncrate = \"native\"\n",
+        );
+        let err = m
+            .native
+            .expect("native present")
+            .validate(Path::new("/pkg"))
+            .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn rust_backend_without_table_rejected() {
+        let n = cc_manifest("[native]\nbackend = \"rust\"\n")
+            .native
+            .expect("native present");
+        let err = n.validate(Path::new("/pkg")).unwrap_err();
+        assert!(err.contains("requires `[native.build-rust]`"), "{err}");
+    }
+
+    #[test]
+    fn rust_crate_validates_lock_and_crate_types() {
+        let d = rust_pkg("ok");
+        let n = rust_native("");
+        assert!(n.validate(&d).is_ok());
+
+        // Missing committed lock.
+        fs::remove_file(d.join("native/Cargo.lock")).unwrap();
+        let err = n.validate(&d).unwrap_err();
+        assert!(err.contains("Cargo.lock"), "{err}");
+        assert!(err.contains("commit"), "{err}");
+        fs::write(
+            d.join("native/Cargo.lock"),
+            "version = 3\n[[package]]\nname=\"rplug\"\nversion=\"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // Missing staticlib.
+        fs::write(
+            d.join("native/Cargo.toml"),
+            "[package]\nname=\"rplug\"\nversion=\"0.1.0\"\n\n[lib]\ncrate-type=[\"cdylib\"]\n",
+        )
+        .unwrap();
+        let err = n.validate(&d).unwrap_err();
+        assert!(err.contains("staticlib"), "{err}");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rust_build_rs_rejected() {
+        let d = rust_pkg("buildrs");
+        fs::write(d.join("native/build.rs"), "fn main() {}\n").unwrap();
+        let err = rust_native("").validate(&d).unwrap_err();
+        assert!(err.contains("build.rs"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rust_path_escape_rejected() {
+        let d = rust_pkg("escape");
+        let n = cc_manifest("[native]\n[native.build-rust]\ncrate = \"../outside\"\n")
+            .native
+            .expect("native present");
+        let err = n.validate(&d).unwrap_err();
+        assert!(
+            err.contains("must be relative and stay inside the package"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rust_bad_profile_range_features_and_target_rejected() {
+        let d = rust_pkg("bad_fields");
+        for extra in [
+            "profile = \"fast\"\n",
+            "rustc_range = \"not-a-range\"\n",
+            "cargo_features = [\"a,b\"]\n",
+            "target = \"../x86\"\n",
+        ] {
+            // Re-parse so the table body exercises serde + validation.
+            let parsed = cc_manifest(&format!(
+                "[native]\n[native.build-rust]\ncrate = \"native\"\n{extra}"
+            ))
+            .native
+            .expect("native present");
+            assert!(parsed.validate(&d).is_err(), "`{extra}` must be rejected");
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn backend_shape_mismatch_rejected() {
         // backend=cc without the table.
@@ -1286,6 +2842,7 @@ foo = "^1.0"
             manifest: None,
             build: None,
             build_cc: Some(spec),
+            build_rust: None,
             prebuilt: None,
             pkg_config: Some("vips".to_string()),
         };
@@ -1531,10 +3088,182 @@ version = "0.1.0"
             manifest: None,
             build: None,
             build_cc: Some(spec),
+            build_rust: None,
             prebuilt: Some(PrebuiltSpec { target: targets }),
             pkg_config: None,
         };
         let err = n.validate(Path::new("/pkg")).unwrap_err();
         assert!(err.contains("https:"), "{err}");
+    }
+
+    // ── Collections ───────────────────────────────────────────────────
+
+    fn collection_manifest(spec: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "[package]\nname = \"c\"\nversion = \"0.1.0\"\n[collect.commands]\n{spec}"
+        ))
+        .expect("collection manifest parses")
+    }
+
+    fn collection_project(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let d = tmp_dir(tag);
+        for (rel, contents) in files {
+            let p = d.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, contents).unwrap();
+        }
+        fs::create_dir_all(d.join("commands")).unwrap();
+        d
+    }
+
+    #[test]
+    fn collect_parses_defaults() {
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        let spec = m.collections.get("commands").expect("collection parsed");
+        assert_eq!(spec.dir, "commands");
+        assert_eq!(spec.name, "file");
+        assert_eq!(spec.export, "run");
+        assert!(m.collections.contains_key("commands"));
+    }
+
+    #[test]
+    fn collect_round_trips() {
+        let m = collection_manifest(
+            "dir = \"commands\"\nsig = \"func(args: [str]) -> int\"\nexport = \"main\"\n",
+        );
+        let d = tmp_dir("collect_rt");
+        m.save(&d.join("zz.toml")).unwrap();
+        let loaded = Manifest::load(&d.join("zz.toml")).unwrap();
+        assert_eq!(loaded, m);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_absent_is_empty_and_backcompat() {
+        let m = Manifest::parse("[package]\nname = \"old\"\nversion = \"0.1.0\"\n").unwrap();
+        assert!(m.collections.is_empty());
+    }
+
+    #[test]
+    fn collect_validates_dir_and_sig() {
+        let d = collection_project("collect_ok", &[]);
+        let ok = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        ok.collections["commands"].validate(&d).unwrap();
+        // Issue spelling with named parameters also parses.
+        let named = collection_manifest("dir = \"commands\"\nsig = \"func(args: [str]) -> int\"\n");
+        named.collections["commands"].validate(&d).unwrap();
+        let _ = fs::remove_dir_all(&d);
+
+        // Missing dir.
+        let d = collection_project("collect_missing", &[]);
+        let missing = collection_manifest("dir = \"nope\"\nsig = \"func([str]) -> int\"\n");
+        let err = missing.collections["commands"].validate(&d).unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_rejects_escaping_paths() {
+        let d = collection_project("collect_escape", &[]);
+        for dir in ["../outside", "/abs/path", ""] {
+            let m =
+                collection_manifest(&format!("dir = \"{dir}\"\nsig = \"func([str]) -> int\"\n"));
+            let err = m.collections["commands"].validate(&d).unwrap_err();
+            assert!(
+                err.contains("relative") || err.contains("empty") || err.contains("invalid"),
+                "dir `{dir}`: {err}"
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_rejects_bad_signatures() {
+        let d = collection_project("collect_badsig", &[]);
+        for sig in ["", "int", "func([str] -> int", "func() ->"] {
+            let m = collection_manifest(&format!("dir = \"commands\"\nsig = \"{sig}\"\n"));
+            let err = m.collections["commands"]
+                .validate(&d)
+                .expect_err("bad sig must fail");
+            assert!(
+                err.contains("sig") || err.contains("parse") || err.contains("function"),
+                "sig `{sig}`: {err}"
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_rejects_bad_name_mode_and_export() {
+        let d = collection_project("collect_badname", &[]);
+        let m = collection_manifest(
+            "dir = \"commands\"\nsig = \"func([str]) -> int\"\nname = \"numbered\"\n",
+        );
+        let err = m.collections["commands"].validate(&d).unwrap_err();
+        assert!(err.contains("name ="), "{err}");
+        let m = collection_manifest(
+            "dir = \"commands\"\nsig = \"func([str]) -> int\"\nexport = \"not valid\"\n",
+        );
+        let err = m.collections["commands"].validate(&d).unwrap_err();
+        assert!(err.contains("identifier"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_discovery_orders_and_skips_non_zz() {
+        let d = collection_project(
+            "collect_discover",
+            &[
+                ("commands/zeta.zz", ""),
+                ("commands/alpha.zz", ""),
+                ("commands/readme.md", ""),
+                ("commands/nested/inner.zz", ""),
+            ],
+        );
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        let members = m.collections["commands"].discover(&d).unwrap();
+        let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "zeta"], "single-level, sorted");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_empty_dir_is_valid() {
+        let d = collection_project("collect_empty", &[]);
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        assert!(m.collections["commands"].discover(&d).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_name_collisions_are_loud() {
+        let d = collection_project(
+            "collect_collision",
+            &[("commands/foo-bar.zz", ""), ("commands/foo_bar.zz", "")],
+        );
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        let err = m.collections["commands"].discover(&d).unwrap_err();
+        assert!(err.contains("foo-bar.zz"), "{err}");
+        assert!(err.contains("foo_bar.zz"), "{err}");
+        assert!(err.contains("both map"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_invalid_identifier_is_loud() {
+        let d = collection_project("collect_badident", &[("commands/9lives.zz", "")]);
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        let err = m.collections["commands"].discover(&d).unwrap_err();
+        assert!(err.contains("valid identifier"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_identifier_rules() {
+        assert!(is_identifier("run"));
+        assert!(is_identifier("_private1"));
+        assert!(!is_identifier("9lives"));
+        assert!(!is_identifier(""));
+        assert!(!is_identifier("has-dash"));
     }
 }

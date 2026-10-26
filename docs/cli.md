@@ -1,6 +1,7 @@
 # CLI Reference
 
-Complete guide to the `zz` command-line tool.
+> Reference (complete). Learning path: [CLI](tooling/cli.md) →
+> [CLI reference](tooling/cli-reference.md) for every-command tables.
 
 ## Installation
 
@@ -36,7 +37,7 @@ zz> x := 42
 42
 zz> x + 1
 43
-zz> func add(a: int, b: int) -> int { a + b }
+zz> func add(a: int, b: int) -> int { return a + b }
 <func add>
 zz> add(3, 4)
 7
@@ -50,6 +51,11 @@ Getting started):
 ```bash
 zz run hello.zz
 ```
+
+Inside a project with `[features]`, select optional features with
+`--features a,b` (repeatable) or `--all-features`; the manifest's `default`
+feature is always active. `zz build`, `zz check`, and `zz install` accept the
+same flags. A gated import names the exact feature and how to enable it.
 
 ### `zz eval <source>`
 
@@ -172,13 +178,68 @@ the build (debug or release) fails after still emitting `app.c` +
 build scripts next to the planned destination so the program can be
 built manually on a machine with Clang.
 
-### `zz run [--native] [<file.zz>]`
+### `zz run [--native|--bytecode] [<file.zz>]`
 
 `zz run` executes through the VM and leaves no build artifacts.
 `zz run --native` builds through the cached Clang pipeline (publishing
 to the same authoritative destination as `zz build`, `-o` overrides
 like `build`) and executes the binary. The file argument defaults to
 the project entry inside a project.
+
+| Flag | Effect |
+|------|--------|
+| `--bytecode` | Compile to IR and execute the chunk VM, never the tree walker; also accepts a `.zzc` file to load directly |
+| `--embed <dir>` | Expose a static asset directory to the program (`fs.embedfs()`) |
+| `-o, --output <name>` | Name the published binary (`--native` only) |
+| `--watch` | Hot reload (see below; VM only) |
+| `-h, --help` | Print the flags, engines and run-cache controls |
+
+Arguments after the file are passed to the program.
+
+#### The run cache: which engine executes your file
+
+`zz run` keeps a content-addressed cache of compiled IR, and **cache
+state selects the engine**:
+
+| Cache | Engine | Work done |
+|-------|--------|-----------|
+| **hit** | chunk VM (`decode` → `raise` → `run_loaded_chunk`) | key check, scoped native rebuild, execute |
+| **miss** | tree walker (`run_typed`) | parse, check, HIR, execute; then compile and store IR for next time |
+
+So the same file can run on either engine from one invocation to the
+next. Both are gated for semantic equality (`dual_engine_parity`), but a
+benchmark that does not pin the engine is measuring "whichever the cache
+had". Pin the chunk VM with `--bytecode`; pin the tree walker with
+`ZZ_RUN_CACHE=0`.
+
+The key covers the entry bytes and canonical path (namespace), every
+`.zz` source under the project directory, live path-dependency content,
+the `vm-run` target string, a toolchain fingerprint (CLI version, IR
+format version, build identity, sorted plugin manifest names), and
+`--embed` asset bytes. Script arguments are runtime-only and excluded.
+Entries live in `<build-cache>/run-v2` (`ZZ_HOME` relocates the build
+cache), one directory per slug holding `meta.json` and one `.zzc` per
+module in execution order; stores are atomic, the tree is bounded at 256
+entries (LRU by mtime), and no-change runs validate a stat-signature
+sidecar instead of re-hashing every source.
+
+A miss is never an error: cold caches, unreadable entries, and toolchain
+changes fall back to the full pipeline and re-store. Levers:
+
+```bash
+ZZ_VERBOSE=1 zz run main.zz     # print hit/miss and stage lines
+ZZ_RUN_CACHE=0 zz run main.zz   # force the tree walker (benchmark this)
+ZZ_VM_STATS=1 zz run main.zz    # op counters + fused share, on stderr
+zz cache clean                  # wipe ~/.zz/cache, run entries included
+zz cache gc                     # collect unused CAS entries only
+```
+
+`ZZ_VM_STATS=1` counts every dispatched op in the chunk VM and prints a
+per-class summary (`fused`, `int-op`, `stack`, ...) to **stderr** at exit;
+stdout is untouched, so it composes with the benchmark harnesses. The
+static counterpart is `zz dis --vm [--stats] <file.zz>`, which prints the
+loader-path chunk (ops with `line:col` sites) — the only reliable view of
+what the VM is actually handed.
 
 ### `zz run --watch [<file.zz>]`
 
@@ -274,10 +335,15 @@ zz check src/
 | `--hard` | Apply all fixes including ambiguous (no prompts) |
 | `--interactive` / `-i` | Prompt for ambiguous fixes |
 | `--stats` | Print per-file and total check stats (modules, cache hits/misses, seed size, wall time) |
+| `--format json` | Emit machine-readable diagnostics (`{"files": [{"file", "diagnostics"}]}` on stdout); exit codes unchanged; cannot combine with `--fix` |
+| `-h`, `--help` | Print usage and exit — never checks, never writes |
 
 > Note: `--check` / `-c` is a `zz fmt` flag only. `zz check --check`
 > is rejected — `zz check` already checks without writing; use
 > `zz fmt --check` for a formatting dry-run.
+
+> Note: `--help` is read-only. `zz check --fix --help` prints usage and
+> exits 0 without applying a single fix.
 
 #### Check Performance Budget
 
@@ -305,7 +371,14 @@ zz fix src/
 
 # Apply all fixes without prompting
 zz fix --hard src/
+
+# Usage only — prints help, changes nothing
+zz fix --help
 ```
+
+`zz fix --help` (and `-h`) prints the command usage and exits 0 **without
+touching a single file** — asking for documentation never rewrites the
+project.
 
 ### `zz fmt [FLAGS] [PATH]`
 
@@ -323,7 +396,13 @@ zz fmt -c src/
 
 # Format directory recursively
 zz fmt src/
+
+# Usage only — prints help, changes nothing
+zz fmt --help
 ```
+
+`zz fmt --help` (and `-h`) prints the command usage and exits 0 **without
+reformatting any file**.
 
 ## Flags
 

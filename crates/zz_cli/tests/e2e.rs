@@ -202,6 +202,7 @@ e2e_success_test!(e2e_syntax_operators, "syntax", "operators.zz");
 e2e_success_test!(e2e_syntax_short_circuit, "syntax", "short_circuit.zz");
 e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
 e2e_success_test!(e2e_syntax_brace_escapes, "syntax", "brace_escapes.zz");
+e2e_success_test!(e2e_syntax_raw_strings, "syntax", "raw_strings.zz");
 e2e_success_test!(
     e2e_syntax_brace_escapes_multiline,
     "syntax",
@@ -209,6 +210,12 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
+e2e_success_test!(e2e_syntax_dicts_nonstr, "syntax", "dicts_nonstr.zz");
+e2e_success_test!(
+    e2e_syntax_destructure_method_test,
+    "syntax",
+    "destructure_method_test.zz"
+);
 e2e_success_test!(e2e_syntax_defer, "syntax", "defer.zz");
 e2e_success_test!(e2e_syntax_string_blocks, "syntax", "string_blocks.zz");
 e2e_success_test!(
@@ -269,6 +276,11 @@ e2e_success_test!(
     e2e_regression_neg_after_loop,
     "regression",
     "neg_after_loop.zz"
+);
+e2e_success_test!(
+    e2e_regression_block_local_no_clobber,
+    "regression",
+    "block_local_no_clobber.zz"
 );
 e2e_success_test!(
     e2e_regression_branch_call_returns,
@@ -444,6 +456,13 @@ e2e_success_test!(
     "regression",
     "edge_float_nan_display.zz"
 );
+// A type alias statement owns no value: the container must not pop one for it
+// (that shift made the next declaration panic).
+e2e_success_test!(
+    e2e_regression_edge_type_alias_stmt,
+    "regression",
+    "edge_type_alias_stmt.zz"
+);
 // Canonical float formatting (spec §4): exact-string pins on both legs.
 e2e_success_test!(
     e2e_regression_edge_float_format,
@@ -521,6 +540,12 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_syntax_main_entrypoint, "syntax", "main_entrypoint.zz");
 e2e_success_test!(e2e_syntax_match_guards, "syntax", "match_guards.zz");
+e2e_success_test!(e2e_syntax_match_tuple, "syntax", "match_tuple.zz");
+e2e_success_test!(
+    e2e_syntax_match_bool_literal,
+    "syntax",
+    "match_bool_literal.zz"
+);
 e2e_success_test!(
     e2e_syntax_question_operator_newline,
     "syntax",
@@ -538,13 +563,20 @@ e2e_success_test!(
     "syntax",
     "method_chain_recv.zz"
 );
+e2e_success_test!(
+    e2e_syntax_method_shadow_free,
+    "syntax",
+    "method_shadow_free.zz"
+);
 e2e_success_test!(e2e_syntax_function_types, "syntax", "function_types.zz");
 e2e_success_test!(
     e2e_syntax_closure_fn_params,
     "syntax",
     "closure_fn_params.zz"
 );
+e2e_success_test!(e2e_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 e2e_success_test!(e2e_types_recursive, "types", "recursive.zz");
+e2e_success_test!(e2e_types_enum_call_order, "types", "enum_call_order.zz");
 e2e_success_test!(e2e_syntax_decorators, "syntax", "decorators.zz");
 e2e_success_test!(
     e2e_syntax_extension_methods,
@@ -564,6 +596,7 @@ e2e_success_test!(e2e_syntax_generic_structs, "syntax", "generic_structs.zz");
 
 // Type fixtures
 e2e_success_test!(e2e_types_structs, "types", "structs.zz");
+e2e_success_test!(e2e_types_func_field_value, "types", "func_field_value.zz");
 e2e_success_test!(e2e_types_aliases, "types", "aliases.zz");
 e2e_success_test!(e2e_types_alias_import, "types", "alias_import.zz");
 e2e_success_test!(e2e_types_enums, "types", "enums.zz");
@@ -580,6 +613,7 @@ e2e_success_test!(e2e_types_smart_try_convert, "types", "smart_try_convert.zz");
 // Stdlib fixtures
 e2e_success_test!(e2e_stdlib_strings, "stdlib", "strings.zz");
 e2e_success_test!(e2e_stdlib_vectors, "stdlib", "vectors.zz");
+e2e_success_test!(e2e_stdlib_vec_sort, "stdlib", "vec_sort.zz");
 e2e_success_test!(e2e_stdlib_str_utf8_parity, "stdlib", "str_utf8_parity.zz");
 e2e_success_test!(
     e2e_stdlib_str_trim_unicode_test,
@@ -593,6 +627,7 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_math_ops, "stdlib", "math_ops.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
+e2e_success_test!(e2e_stdlib_const_index_test, "stdlib", "const_index_test.zz");
 e2e_success_test!(e2e_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");
 e2e_success_test!(e2e_stdlib_path_join, "stdlib", "path_join.zz");
 e2e_success_test!(e2e_stdlib_map_set, "stdlib", "map_set.zz");
@@ -616,6 +651,7 @@ e2e_success_test!(
     "stdlib",
     "fs_is_generated_test.zz"
 );
+e2e_success_test!(e2e_stdlib_fs_cache_test, "stdlib", "fs_cache_test.zz");
 e2e_success_test!(
     e2e_stdlib_fs_read_invalid_utf8_test,
     "stdlib",
@@ -652,6 +688,12 @@ e2e_success_test!(
     "str_classify_test.zz"
 );
 e2e_success_test!(e2e_stdlib_net_tcp_test, "stdlib", "net_tcp_test.zz");
+e2e_success_test!(e2e_stdlib_net_dns_test, "stdlib", "net_dns_test.zz");
+e2e_success_test!(
+    e2e_stdlib_net_write_after_close_test,
+    "stdlib",
+    "net_write_after_close_test.zz"
+);
 e2e_success_test!(
     e2e_stdlib_tcp_method_on_try,
     "stdlib",
@@ -660,7 +702,42 @@ e2e_success_test!(
 e2e_success_test!(e2e_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 e2e_success_test!(e2e_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
 e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
+e2e_success_test!(
+    e2e_stdlib_option_result_unwrap_test,
+    "stdlib",
+    "option_result_unwrap_test.zz"
+);
+e2e_success_test!(e2e_stdlib_cell_struct_test, "stdlib", "cell_struct_test.zz");
+e2e_success_test!(e2e_stdlib_cell_arena_test, "stdlib", "cell_arena_test.zz");
 e2e_success_test!(e2e_stdlib_vec_push_shapes, "stdlib", "vec_push_shapes.zz");
+e2e_success_test!(e2e_stdlib_clone_test, "stdlib", "clone_test.zz");
+e2e_success_test!(e2e_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
+e2e_success_test!(
+    e2e_stdlib_test_asserts_test,
+    "stdlib",
+    "test_asserts_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_test_helpers_test,
+    "stdlib",
+    "test_helpers_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_test_snapshot_test,
+    "stdlib",
+    "test_snapshot_test.zz"
+);
+e2e_success_test!(e2e_stdlib_property_test, "stdlib", "property_test.zz");
+e2e_success_test!(
+    e2e_stdlib_test_black_box_test,
+    "stdlib",
+    "test_black_box_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_range_display_test,
+    "stdlib",
+    "range_display_test.zz"
+);
 e2e_success_test!(e2e_stdlib_input_chained, "stdlib", "input_chained.zz");
 e2e_success_test!(e2e_stdlib_http_client_test, "stdlib", "http_client_test.zz");
 e2e_success_test!(e2e_stdlib_http_server_test, "stdlib", "http_server_test.zz");
@@ -714,6 +791,11 @@ e2e_success_test!(
     "concurrency_stress_test.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_concurrency_timeslice_loop_test,
+    "stdlib",
+    "concurrency_timeslice_loop_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_concurrency_panic_test,
     "stdlib",
     "concurrency_panic_test.zz"
@@ -722,6 +804,11 @@ e2e_success_test!(
     e2e_stdlib_concurrency_try_join_test,
     "stdlib",
     "concurrency_try_join_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_concurrency_shared_fn_test,
+    "stdlib",
+    "concurrency_shared_fn_test.zz"
 );
 e2e_success_test!(
     e2e_stdlib_concurrency_capture_test,
@@ -1058,7 +1145,7 @@ fn e2e_eval_list_comprehension() {
 #[test]
 fn e2e_eval_default_params() {
     let (exit, stdout, _) =
-        run_zz_eval("func greet(name: str, greeting: str = \"Hello\") -> str { \"{greeting}, {name}\" }; greet(\"ZZ\")");
+        run_zz_eval("func greet(name: str, greeting: str = \"Hello\") -> str { return \"{greeting}, {name}\" }; greet(\"ZZ\")");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "Hello, ZZ");
 }
@@ -1095,9 +1182,47 @@ fn e2e_eval_multi_interpolation() {
     assert_eq!(stdout.trim(), "Hello World!");
 }
 
+/// Unique temp file stem per test process *and* invocation: fixed
+/// names in the shared temp dir collide across parallel `cargo test`
+/// processes (and stale files from killed runs), same class as the
+/// pkgmap-dir race below.
+fn unique_tmp_stem(base: &str) -> String {
+    format!(
+        "{base}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    )
+}
+
+#[test]
+fn e2e_check_unimported_std_module_suggests_import() {
+    let tmp = std::env::temp_dir().join(unique_tmp_stem("zz_unimported_std_test") + ".zz");
+    std::fs::write(
+        &tmp,
+        r#"func main() {
+    y := sin(1.0)
+    println(y)
+}"#,
+    )
+    .unwrap();
+    let (exit, _, stderr) = run_zz_check(&tmp);
+    assert_ne!(
+        exit, 0,
+        "check should fail without the import.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("import std.math"),
+        "expected import hint.\nstderr: {stderr}"
+    );
+    std::fs::remove_file(&tmp).ok();
+}
+
 #[test]
 fn e2e_check_string_before_while_block() {
-    let tmp = std::env::temp_dir().join("zz_str_while_test.zz");
+    let tmp = std::env::temp_dir().join(unique_tmp_stem("zz_str_while_test") + ".zz");
     std::fs::write(
         &tmp,
         r#"s := "test"
@@ -1257,6 +1382,7 @@ e2e_test_success!(e2e_test_tags, "tags.zz");
 e2e_test_success!(e2e_test_assertions, "assertions.zz");
 e2e_test_success!(e2e_test_timeout, "timeout.zz");
 e2e_test_success!(e2e_test_retry, "retry.zz");
+e2e_test_success!(e2e_test_doctests, "doctests.zz");
 
 // --- CLI flag integration tests ---
 
@@ -1427,7 +1553,10 @@ const INPUT_PROG: &str =
     "func main() {\n    line := input(\"\")\n    println(\"got:\" + line)\n}\n";
 
 fn write_input_prog(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zz-e2e-input-{}", std::process::id()));
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zz-e2e-input-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(name);
     std::fs::write(&file, INPUT_PROG).unwrap();
@@ -1499,7 +1628,7 @@ fn write_package_map_project() -> (PathBuf, PathBuf, PathBuf) {
     .unwrap();
     std::fs::write(
         dir.join("src/math.zz"),
-        "pub func add(a: int, b: int) -> int { a + b }\n",
+        "pub func add(a: int, b: int) -> int { return a + b }\n",
     )
     .unwrap();
     let test_file = dir.join("tests/math_test.zz");
@@ -1586,4 +1715,443 @@ fn e2e_package_map_cwd_independent() {
         exit, 0,
         "`zz test` from / should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+}
+
+// --- Bench framework (`zz bench`) ---
+
+fn run_zz_bench(file: &Path, extra: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("bench")
+        .arg(file)
+        .args(extra)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz bench {file:?}`: {e}"));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn e2e_bench_basic_vm() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("bench").join("basic_bench.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_bench(&path, &["--iters", "5", "--warmup", "1"]);
+    assert_eq!(exit, 0, "`zz bench` should exit 0.\nstderr:\n{stderr}");
+    // Timing values vary run to run: assert shape, never numbers.
+    for bench in ["bench_add", "bench_mul", "bench_math"] {
+        assert!(stderr.contains(bench), "missing {bench} in:\n{stderr}");
+    }
+    assert!(stderr.contains("/iter"), "missing timing in:\n{stderr}");
+}
+
+#[test]
+fn e2e_bench_basic_native() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("bench").join("basic_bench.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_bench(
+        &path,
+        &["--engine", "native", "--iters", "5", "--warmup", "1"],
+    );
+    assert_eq!(
+        exit, 0,
+        "`zz bench --engine native` should exit 0.\nstderr:\n{stderr}"
+    );
+    for bench in ["bench_add", "bench_mul", "bench_math"] {
+        assert!(stderr.contains(bench), "missing {bench} in:\n{stderr}");
+    }
+    assert!(stderr.contains("/iter"), "missing timing in:\n{stderr}");
+}
+
+#[test]
+fn e2e_bench_list_and_filter() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("bench").join("basic_bench.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_bench(&path, &["--list"]);
+    assert_eq!(
+        exit, 0,
+        "`zz bench --list` should exit 0.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("bench_add"),
+        "missing bench_add in:\n{stderr}"
+    );
+
+    let (exit, _stdout, stderr) = run_zz_bench(&path, &["--filter", "bench_mul"]);
+    assert_eq!(exit, 0, "filtered bench should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("bench_mul"),
+        "missing bench_mul in:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("bench_add"),
+        "unfiltered bench_add ran:\n{stderr}"
+    );
+}
+
+// --- Coverage (`zz cover`) ---
+
+fn run_zz_cover(file: &Path, extra: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("cover")
+        .arg(file)
+        .args(extra)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz cover {file:?}`: {e}"));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn e2e_cover_basic() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("cover").join("basic_cover.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, stdout, _stderr) = run_zz_cover(&path, &[]);
+    assert_eq!(exit, 0, "`zz cover` should exit 0.\nstdout:\n{stdout}");
+    // Program output still prints, then the deterministic report.
+    // Percentages and uncovered lines are exact (no timings involved).
+    assert!(
+        stdout.contains("42"),
+        "missing program output in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Coverage: 83.3% lines (5/6)"),
+        "missing total in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("uncovered: 15"),
+        "missing uncovered line in:\n{stdout}"
+    );
+    // Branch directions: the else path ran, the then path never did.
+    assert!(
+        stdout.contains("50.0% branches (1/2)"),
+        "missing branch total in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("uncovered branches: 14 (fallthrough)"),
+        "missing uncovered branch in:\n{stdout}"
+    );
+}
+
+#[test]
+fn e2e_cover_fail_under_and_lcov() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("cover").join("basic_cover.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, stdout, stderr) = run_zz_cover(&path, &["--fail-under", "90"]);
+    assert_eq!(
+        exit, 1,
+        "--fail-under 90 should exit 1.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("below --fail-under"),
+        "missing gate msg in:\n{stderr}"
+    );
+
+    let lcov = std::env::temp_dir().join(unique_tmp_stem("zz_e2e_cover") + ".info");
+    let (exit, _stdout, _stderr) = run_zz_cover(
+        &path,
+        &[
+            "--lcov",
+            lcov.to_string_lossy().as_ref(),
+            "--fail-under",
+            "80",
+        ],
+    );
+    assert_eq!(exit, 0, "passing gate should exit 0");
+    let content = std::fs::read_to_string(&lcov).expect("lcov file should exist");
+    assert!(content.contains("TN:"), "missing TN in:\n{content}");
+    assert!(content.contains("LF:6"), "missing LF in:\n{content}");
+    assert!(content.contains("LH:5"), "missing LH in:\n{content}");
+    assert!(content.contains("BRF:2"), "missing BRF in:\n{content}");
+    assert!(content.contains("BRH:1"), "missing BRH in:\n{content}");
+    let _ = std::fs::remove_file(&lcov);
+}
+
+#[test]
+fn e2e_cover_tests_mode() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("basic_assertions.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .arg("cover")
+        .arg("--tests")
+        .arg(&path)
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .expect("failed to exec `zz cover --tests`");
+    let exit = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(
+        exit, 0,
+        "`zz cover --tests` should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Coverage: 100.0% lines (19/19)"),
+        "missing merged total in:\n{stdout}"
+    );
+}
+
+#[test]
+fn e2e_cover_html() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("cover").join("basic_cover.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let html = std::env::temp_dir().join(unique_tmp_stem("zz_e2e_cover") + ".html");
+    let (exit, _stdout, _stderr) =
+        run_zz_cover(&path, &["--html", html.to_string_lossy().as_ref()]);
+    assert_eq!(exit, 0, "`zz cover --html` should exit 0");
+    let content = std::fs::read_to_string(&html).expect("html file should exist");
+    assert!(content.contains("<title>zz cover</title>"), "missing title");
+    assert!(
+        content.contains("class=\"unc\""),
+        "missing uncovered gutter"
+    );
+    assert!(content.contains("class=\"cov\""), "missing covered gutter");
+    let _ = std::fs::remove_file(&html);
+}
+
+// --- Doc-tests (`/// ```zz` fences) ---
+
+fn run_zz_test_with(file: &Path, extra: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let mut cmd = Command::new(zz_bin);
+    cmd.arg("test").arg(file);
+    for a in extra {
+        cmd.arg(a);
+    }
+    let output = cmd
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz test {file:?}`: {e}"));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn e2e_test_doctest_names() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("doctests.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_test_with(&path, &[]);
+    assert_eq!(exit, 0, "doctests should exit 0.\nstderr:\n{stderr}");
+    // Display names use the `doctest <stem>#<n>` convention; the ignored
+    // fence reports as ignored, never silently skipped. compile_fail
+    // inverts into a pass with its reason; no_run reports ignored.
+    for expected in [
+        "doctest doctests#0",
+        "doctest doctests#1",
+        "doctest doctests#2",
+        "doctest doctests#3",
+        "doctest doctests#4",
+        "doctest doctests#5",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing `{expected}` in:\n{stderr}"
+        );
+    }
+    assert!(stderr.contains("ignored"), "missing ignored in:\n{stderr}");
+    assert!(
+        stderr.contains("compile_fail"),
+        "missing compile_fail reason in:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no_run doctest"),
+        "missing no_run reason in:\n{stderr}"
+    );
+}
+
+#[test]
+fn e2e_test_doctest_json_kind() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("doctests.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, stdout, _stderr) = run_zz_test_with(&path, &["--json"]);
+    assert_eq!(exit, 0, "doctests --json should exit 0.\nstdout:\n{stdout}");
+    assert!(
+        stdout.contains("\"kind\": \"doctest\""),
+        "missing doctest kind in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"kind\": \"test\""),
+        "missing test kind in:\n{stdout}"
+    );
+}
+
+#[test]
+fn e2e_test_doctest_native() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("doctests.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_test_with(&path, &["--engine", "native"]);
+    assert_eq!(exit, 0, "doctests should exit 0 on AOT.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("doctest doctests#0"),
+        "missing doctest in AOT output:\n{stderr}"
+    );
+}
+
+#[test]
+fn e2e_test_doctest_no_doctests_flag() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("test").join("doctests.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+
+    let (exit, _stdout, stderr) = run_zz_test_with(&path, &["--no-doctests"]);
+    assert_eq!(exit, 0, "--no-doctests should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        !stderr.contains("doctest doctests#"),
+        "doctests ran despite --no-doctests:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("test_double"),
+        "missing @test in --no-doctests output:\n{stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #586: `--help` must print usage, never run the command.
+//
+// `zz fix --help` used to parse `--help` as a flag, fall back to the
+// default path `.` and rewrite every `.zz` file in the project. `zz fmt
+// --help` had the same hole (it rewrites files in place) and `zz check
+// --help` scanned the tree instead of printing usage.
+// ---------------------------------------------------------------------------
+
+/// A file the fixer has something to fix: the trailing `1` / `2` in each
+/// function body is a missing `return` (the fixit inserts `return `).
+const FIXABLE_SRC: &str = "func alpha() -> int {\n    1\n}\n\nfunc beta() -> int {\n    2\n}\n";
+
+/// Temp project with one fixable file. Returns (dir, file).
+fn make_help_project(tag: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("zz-e2e-help-{tag}-{}", unique_tmp_stem(tag)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("two.zz");
+    std::fs::write(&file, FIXABLE_SRC).unwrap();
+    (dir, file)
+}
+
+/// Run `zz <args...>` with the working directory set to `dir`.
+fn run_zz_in_dir(dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let zz_bin = env!("CARGO_BIN_EXE_zz");
+    let output = Command::new(zz_bin)
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to exec `zz {}`: {e}", args.join(" ")));
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (exit_code, stdout, stderr)
+}
+
+#[test]
+fn e2e_fix_help_prints_usage_and_rewrites_nothing() {
+    let (dir, file) = make_help_project("fix");
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["fix", "--help"]);
+    assert_eq!(exit, 0, "`zz fix --help` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("usage: zz fix"),
+        "missing usage text in stdout:\n{stdout}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, FIXABLE_SRC, "`zz fix --help` must not rewrite files");
+}
+
+#[test]
+fn e2e_fix_short_help_prints_usage_and_rewrites_nothing() {
+    let (dir, file) = make_help_project("fix-short");
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["fix", "-h"]);
+    assert_eq!(exit, 0, "`zz fix -h` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("usage: zz fix"),
+        "missing usage text in stdout:\n{stdout}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, FIXABLE_SRC, "`zz fix -h` must not rewrite files");
+}
+
+#[test]
+fn e2e_check_help_prints_usage() {
+    let (dir, file) = make_help_project("check");
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["check", "--help"]);
+    assert_eq!(
+        exit, 0,
+        "`zz check --help` should exit 0.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("usage: zz check"),
+        "missing usage text in stdout:\n{stdout}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, FIXABLE_SRC, "`zz check --help` must not touch files");
+}
+
+#[test]
+fn e2e_fmt_help_prints_usage_and_rewrites_nothing() {
+    let (dir, file) = make_help_project("fmt");
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["fmt", "--help"]);
+    assert_eq!(exit, 0, "`zz fmt --help` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("usage: zz fmt"),
+        "missing usage text in stdout:\n{stdout}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, FIXABLE_SRC, "`zz fmt --help` must not rewrite files");
+}
+
+#[test]
+fn e2e_fix_report_uses_real_line_numbers() {
+    // The fix report used to print the byte offset where a line number was
+    // expected (`two.zz:56` for an 8-line file) — misleading when reviewing
+    // what a fix changed.
+    let (dir, _file) = make_help_project("fix-lines");
+    let (exit, _stdout, stderr) = run_zz_in_dir(&dir, &["fix", "two.zz"]);
+    assert_eq!(exit, 0, "`zz fix two.zz` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("at two.zz:"),
+        "missing fix location in stderr:\n{stderr}"
+    );
+    let line_count = FIXABLE_SRC.lines().count();
+    for line in stderr.lines().filter(|l| l.contains("at two.zz:")) {
+        let pos = line.split("at two.zz:").nth(1).unwrap().trim();
+        let num: usize = pos
+            .split(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|_| panic!("position `{pos}` is not `line[:col]` in:\n{line}"));
+        assert!(
+            (1..=line_count).contains(&num),
+            "reported line {num} is outside the file's {line_count} lines:\n{line}"
+        );
+    }
 }

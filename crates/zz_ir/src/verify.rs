@@ -29,8 +29,31 @@ fn effect(op: &Op) -> i64 {
         Op::VecPushField { .. } | Op::VecPushMethod { .. } => -1,
         Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => -1,
         Op::SetFieldIndexTake { .. } => -2,
+        Op::StoreIndexTake { .. } => -2,
+        Op::CompoundIndexTake { .. } => -2,
         Op::GetFieldIndex { .. } => 0,
         Op::LenField { .. } => 1,
+        Op::GetFieldSlotIdx { .. } => 0,
+        Op::IndexIntSlot { .. } => 0,
+        Op::IndexDictInt { .. } => 0,
+        // Fused slot fast paths: pure slot traffic — the arithmetic ones
+        // touch slots only (net 0), the comparisons push their Bool.
+        Op::SlotAddInt { .. }
+        | Op::SlotInc { .. }
+        | Op::SlotAddIntImm { .. }
+        | Op::SlotSubIntImm { .. }
+        | Op::SlotMulIntImm { .. }
+        | Op::SlotBinaryInt { .. }
+        | Op::SlotBinaryIntImm { .. } => 0,
+        // The fused conditional jumps read slots and branch: same net effect
+        // as the compare plus the jump they replace.
+        Op::JumpIfFalseSlotCmpIntImm { .. } | Op::JumpIfFalseSlotCmpIntSlot { .. } => 0,
+        Op::SlotLessIntSlot { .. }
+        | Op::SlotLessIntImm { .. }
+        | Op::SlotCmpIntSlot { .. }
+        | Op::SlotCmpIntImm { .. }
+        | Op::SlotCmpConst { .. }
+        | Op::PushSlotIntImm { .. } => 1,
         Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => -1,
         Op::IntNeg => 0,
         Op::BinOp(_) => -1,
@@ -96,7 +119,9 @@ fn jump_targets(op: &Op) -> Vec<u32> {
         Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) | Op::JumpIfFalseBool(t) => {
             vec![*t]
         }
-        Op::ForNext { exit, .. } => vec![*exit],
+        Op::JumpIfFalseSlotCmpIntImm { target, .. }
+        | Op::JumpIfFalseSlotCmpIntSlot { target, .. } => vec![*target],
+        Op::ForNext { exit, body, .. } => vec![*exit, *body],
         Op::WhileCond { exit } => vec![*exit],
         Op::MatchArm { next, .. } => vec![*next],
         Op::MatchGuard { next, .. } => vec![*next],
@@ -183,6 +208,22 @@ fn verify_func(
                     str(*id, "path component")?;
                 }
             }
+            Op::StoreIndexTake {
+                home_slot,
+                home_var,
+            }
+            | Op::CompoundIndexTake {
+                home_slot,
+                home_var,
+                ..
+            } => {
+                if home_slot.is_some() == home_var.is_some() {
+                    return Err(IrError::spanned("take home must be a slot xor a var", span));
+                }
+                if let Some(id) = home_var {
+                    str(*id, "take home")?;
+                }
+            }
             Op::VecPushField {
                 home_slot,
                 home_var,
@@ -232,6 +273,18 @@ fn verify_func(
                     str(*id, "push home")?;
                 }
                 str(*field, "push field/method")?;
+            }
+            Op::GetFieldSlotIdx {
+                home_slot,
+                home_var,
+                ..
+            } => {
+                if home_slot.is_some() == home_var.is_some() {
+                    return Err(IrError::spanned("push home must be a slot xor a var", span));
+                }
+                if let Some(id) = home_var {
+                    str(*id, "push home")?;
+                }
             }
             Op::MakeStruct { name, fields } => {
                 str(*name, "struct name")?;
@@ -297,26 +350,31 @@ fn verify_func(
             func.max_stack
         )));
     }
-    // Locals-table integrity: one entry per referenced slot, params
-    // coherent with the signature. Checked here (after ids, before the
-    // inference walk that reads the table).
+    // Locals-table integrity: one entry per frame slot the code touches, and
+    // never fewer than the parameter list. A parameter the body never reads
+    // emits no `LoadSlot`/`StoreSlot` but still owns a frame slot, so the
+    // canonical size is `max(referenced slots, arity)` — exactly what
+    // lowering produces (`lift_chunk` floors at the arity too). Checked here
+    // (after ids, before the inference walk that reads the table).
     let mut maxref: Option<usize> = None;
     for op in &func.code {
-        match op {
-            Op::LoadSlot(s) | Op::StoreSlot(s) => {
-                maxref = Some(maxref.map_or(*s as usize, |m: usize| m.max(*s as usize)));
-            }
-            _ => {}
+        if let Some(s) = op.slot_extent() {
+            maxref = Some(maxref.map_or(s as usize, |m: usize| m.max(s as usize)));
         }
     }
     for (_, s) in &func.toplevel_slots {
         maxref = Some(maxref.map_or(*s as usize, |m: usize| m.max(*s as usize)));
     }
-    if func.locals.len() != maxref.map_or(0, |m| m + 1) {
+    let referenced = maxref.map_or(0, |m| m + 1);
+    let slot_arity = func.arity as usize;
+    if func.locals.len() < slot_arity {
+        return Err(IrError::new("locals: fewer slots than signature params"));
+    }
+    let expected = referenced.max(slot_arity);
+    if func.locals.len() != expected {
         return Err(IrError::new(format!(
-            "locals length mismatch: table has {}, code references {}",
-            func.locals.len(),
-            maxref.map_or(0, |m| m + 1)
+            "locals length mismatch: table has {}, expected {expected}",
+            func.locals.len()
         )));
     }
     if func.sig.params.len() != func.arity as usize || func.params.len() != func.arity as usize {
@@ -443,8 +501,21 @@ fn simulate(code: &[Op], spans: &[Span]) -> Result<u32, IrError> {
         // Fall-through edge. Jump/Return/Break/Continue never fall
         // through at runtime (break/continue unwind the loop, so code
         // after them is dead): excluding them keeps dead stack
-        // pollution out of downstream joins.
-        let falls_through = !matches!(op, Op::Jump(_) | Op::Return | Op::Break | Op::Continue);
+        // pollution out of downstream joins. MatchError traps the same
+        // way (non-exhaustive match aborts) — its fallthrough edge
+        // would carry a dead scrutinee-restore state into the join.
+        // `ForNext` always transfers (body on a live iteration, exit when
+        // exhausted), and in the rotated layout the pc after it is a loop
+        // exit whose depth model differs.
+        let falls_through = !matches!(
+            op,
+            Op::Jump(_)
+                | Op::Return
+                | Op::Break
+                | Op::Continue
+                | Op::MatchError
+                | Op::ForNext { .. }
+        );
         //
         // Restoring match ops push the scrutinee back on their MISS edge
         // (net 0 there, -1 on the taken edge): model each edge exactly.
@@ -1165,12 +1236,95 @@ fn infer_func(
                 pop(&mut st, pc)?;
                 pop(&mut st, pc)?;
             }
+            Op::StoreIndexTake { .. } | Op::CompoundIndexTake { .. } => {
+                pop(&mut st, pc)?;
+                pop(&mut st, pc)?;
+            }
             Op::GetFieldIndex { .. } => {
                 pop(&mut st, pc)?;
                 st.push(TV::U);
             }
             Op::LenField { .. } => {
                 st.push(TV::U);
+            }
+            Op::GetFieldSlotIdx { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::IndexIntSlot { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::IndexDictInt { dst, .. } => {
+                declared(*dst)?;
+            }
+            // Fused slot fast paths. Guards, not types: a non-`Int` slot
+            // runs the generic op on the same operands, so what lands in
+            // `dst` is only known to be whatever that returns — Unknown.
+            // The named slots still must exist (they are frame extents the
+            // locals table has to cover). Comparisons are `Bool`-or-trap
+            // for every operand pair (`eval_binary` has no other `Lt`).
+            Op::SlotAddInt { dst, src } => {
+                declared(*dst)?;
+                declared(*src)?;
+            }
+            Op::SlotInc { slot } => {
+                declared(*slot)?;
+            }
+            Op::SlotAddIntImm { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::SlotSubIntImm { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::SlotMulIntImm { dst, .. } => {
+                declared(*dst)?;
+            }
+            Op::SlotLessIntSlot { a, b } => {
+                declared(*a)?;
+                declared(*b)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotLessIntImm { a, .. } => {
+                declared(*a)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotCmpIntSlot { a, b, .. } => {
+                declared(*a)?;
+                declared(*b)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotCmpIntImm { a, .. } => {
+                declared(*a)?;
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotCmpConst { a, k, .. } => {
+                declared(*a)?;
+                if (k.0 as usize) >= module.consts.len() {
+                    return Err(IrError::spanned("const id out of range", span));
+                }
+                st.push(prims.bool.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
+            }
+            Op::SlotBinaryInt { dst, lhs, rhs, .. } => {
+                declared(*dst)?;
+                declared(*lhs)?;
+                declared(*rhs)?;
+            }
+            Op::SlotBinaryIntImm { dst, lhs, .. } => {
+                declared(*dst)?;
+                declared(*lhs)?;
+            }
+            Op::JumpIfFalseSlotCmpIntImm { a, .. } => {
+                declared(*a)?;
+            }
+            Op::JumpIfFalseSlotCmpIntSlot { a, b, .. } => {
+                declared(*a)?;
+                declared(*b)?;
+            }
+            Op::PushSlotIntImm { a, .. } => {
+                declared(*a)?;
+                // Emitted only under the compiler's `Int` type guard; the
+                // non-`Int` fallback is not modelled (same as the other
+                // fused arithmetic ops).
+                st.push(prims.int.map(|i| TV::of_id(module, i)).unwrap_or(TV::U));
             }
             Op::IntAdd => {
                 let r = pop(&mut st, pc)?;
@@ -1215,8 +1369,15 @@ fn infer_func(
                 let v = pop(&mut st, pc)?;
                 let ret = TV::of_id(module, func.sig.ret);
                 if !compatible_tv(module, &v, &ret) {
+                    let fname = module
+                        .strings
+                        .get(func.name.0 as usize)
+                        .cloned()
+                        .unwrap_or_default();
                     return Err(IrError::spanned(
-                        "type mismatch: return type mismatch".to_string(),
+                        format!(
+                            "type mismatch: return type mismatch in `{fname}` at op {pc}: have {v:?}, want {ret:?}"
+                        ),
                         span,
                     ));
                 }
@@ -1627,7 +1788,17 @@ fn infer_func(
             }
         }
         // Successor edges (mirror the depth simulation exactly).
-        let falls = !matches!(op, Op::Jump(_) | Op::Return | Op::Break | Op::Continue);
+        // MatchError included with the non-fallthroughs: it traps, so
+        // the edge into whatever follows is dead (see above).
+        let falls = !matches!(
+            op,
+            Op::Jump(_)
+                | Op::Return
+                | Op::Break
+                | Op::Continue
+                | Op::MatchError
+                | Op::ForNext { .. }
+        );
         let miss = match op {
             Op::MatchArm {
                 next,
@@ -1652,8 +1823,15 @@ fn infer_func(
                 if let Some(top) = st.last() {
                     let ret = TV::of_id(module, func.sig.ret);
                     if !compatible_tv(module, top, &ret) {
+                        let fname = module
+                            .strings
+                            .get(func.name.0 as usize)
+                            .cloned()
+                            .unwrap_or_default();
                         return Err(IrError::spanned(
-                            "type mismatch: return type mismatch".to_string(),
+                            format!(
+                                "type mismatch: terminal-edge return mismatch in `{fname}` at op {pc}->(end): have {top:?}, want {ret:?}"
+                            ),
                             span,
                         ));
                     }
@@ -1697,8 +1875,15 @@ fn infer_func(
             if let Some(top) = st.last() {
                 let ret = TV::of_id(module, func.sig.ret);
                 if !compatible_tv(module, top, &ret) {
+                    let fname = module
+                        .strings
+                        .get(func.name.0 as usize)
+                        .cloned()
+                        .unwrap_or_default();
                     return Err(IrError::spanned(
-                        "type mismatch: return type mismatch".to_string(),
+                        format!(
+                            "type mismatch: falloff return mismatch in `{fname}` at op {pc}: have {top:?}, want {ret:?}"
+                        ),
                         span,
                     ));
                 }

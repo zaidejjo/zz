@@ -2,13 +2,13 @@
 // E2E: extension methods on builtins (`impl str`, `impl int`).
 impl str {
     func shout(self) -> str {
-        self.to_upper()
+        return self.to_upper()
     }
 }
 
 impl int {
     func double(self) -> int {
-        self * 2
+        return self * 2
     }
 }
 

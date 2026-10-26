@@ -90,7 +90,7 @@ fn assert_no_reports(where_: &str, stderr: &str) {
 
 const FIB: &str = r#"
 func fib(n: int) -> int {
-    if n <= 1 {
+    return if n <= 1 {
         n
     } else {
         fib(n - 1) + fib(n - 2)
@@ -145,7 +145,7 @@ func main() {
 
 const TAK: &str = r#"
 func tak(x: int, y: int, z: int) -> int {
-    if y >= x {
+    return if y >= x {
         z
     } else {
         tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y))
@@ -230,6 +230,28 @@ const CASES: &[(&str, &str)] = &[
     ("loop_mutate", LOOP_MUTATE),
 ];
 
+/// Cases only the instrumented HIR leg can run: the chunk backend has no
+/// `MakeVariant` yet (#508), so variant construction fails coverage there.
+/// HIR is the backend that owns the payload boxes (`zz_vbox`).
+const HIR_ONLY_CASES: &[(&str, &str)] = &[("variant_arc", VARIANT_ARC)];
+
+// Variant payload boxes are reference counted (#507): one Option value
+// stored in several container slots owns several box references and must
+// be freed exactly once.
+const VARIANT_ARC: &str = r#"
+func main() {
+    o := .some("heap payload")
+    a := [o, o, o]
+    for v in a { println(v) }
+    d := {"a": o, "b": o}
+    println(d["a"])
+    println(d["b"])
+    r := .ok("res payload")
+    println(r ?? "never")
+    println("variant arc ok")
+}
+"#;
+
 /// Parse the clang major version out of a `zz build --verbose` stderr
 /// line (`zz: clang <version...> <flags...>`, where `<version...>` is
 /// `clang version 19.1.2 (...)` for system clang). Returns `None` for
@@ -309,15 +331,23 @@ fn sanitizer_aot_hir_and_chunk() {
             }
         }
     }
-    for (name, src) in CASES {
+    for (name, src) in CASES.iter().chain(HIR_ONLY_CASES.iter()).copied() {
+        // HIR-only cases (see above) still get the instrumented build and
+        // run; there is no second backend to diff against.
+        let hir_only = HIR_ONLY_CASES.iter().any(|(n, _)| *n == name);
+        let backends: &[&str] = if hir_only {
+            &["hir"]
+        } else {
+            &["hir", "chunk"]
+        };
         let mut outs: Vec<(String, i32, String)> = Vec::new();
-        for backend in ["hir", "chunk"] {
+        for backend in backends {
             let dir = root.join(format!("{name}_{backend}"));
             std::fs::create_dir_all(&dir).unwrap();
             let f = dir.join(format!("{name}.zz"));
             std::fs::write(&f, src).unwrap();
             let mut args = vec!["build", "--dynamic"];
-            if backend == "chunk" {
+            if *backend == "chunk" {
                 args.push("--chunk");
             }
             args.push(f.to_str().unwrap());
@@ -331,8 +361,10 @@ fn sanitizer_aot_hir_and_chunk() {
             assert_eq!(rcode, 0, "{backend} sanitizer run of {name} failed: {rerr}");
             outs.push((backend.to_string(), rcode, stdout));
         }
-        assert_eq!(outs[0].1, outs[1].1, "{name}: exit differs");
-        assert_eq!(outs[0].2, outs[1].2, "{name}: stdout differs");
+        if !hir_only {
+            assert_eq!(outs[0].1, outs[1].1, "{name}: exit differs");
+            assert_eq!(outs[0].2, outs[1].2, "{name}: stdout differs");
+        }
     }
     let _ = std::fs::remove_dir_all(&root);
 }

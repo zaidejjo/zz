@@ -718,6 +718,12 @@ impl Executor {
                 entry.inner.lock().unwrap().task = Some(task);
                 Self::enqueue(id);
             }
+            YieldReason::DebugBreak { line } => {
+                // Debugger breakpoints only fire on the main thread under
+                // an attached session. Reaching the executor means debug
+                // state leaked into a spawned task — loud failure.
+                panic!("debug breakpoint (line {line}) escaped onto the executor");
+            }
         }
     }
 
@@ -983,6 +989,6 @@ impl Executor {
 pub(crate) fn outcome_to_value(outcome: Result<Value, String>) -> Value {
     match outcome {
         Ok(v) => v,
-        Err(msg) => Value::Result(Box::new(Err(Value::Str(Box::new(msg))))),
+        Err(msg) => Value::Result(Box::new(Err(Value::Str(std::sync::Arc::new(msg))))),
     }
 }

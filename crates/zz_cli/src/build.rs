@@ -24,6 +24,7 @@ use zz_codegen::{BuildOptions, ClangProvider};
 use zz_frontend::span::Span;
 use zz_hir::TypedProgram;
 use zz_plugin::load_manifest;
+use zz_pm::manifest::FeatureSelection;
 
 use crate::loader;
 
@@ -79,6 +80,10 @@ pub struct ReleaseOptions {
     /// Dual-codegen gate: both paths must agree until full coverage.
     /// Carried into the cache filename so backends never share entries.
     pub chunk: bool,
+    /// `--features` / `--all-features` selection (#488). Excluded from the
+    /// cache key when default (empty fingerprint), so flagless builds keep
+    /// their existing cache entries.
+    pub features: FeatureSelection,
 }
 
 impl ReleaseOptions {
@@ -175,6 +180,7 @@ fn cache_key(
     src: &str,
     opts: &BuildOptions,
     target: Option<&str>,
+    features: &FeatureSelection,
 ) -> Result<String, String> {
     let runtime_mtime = runtime_mtime();
     let build_fingerprint = opts.fingerprint_with(target);
@@ -195,6 +201,12 @@ fn cache_key(
     key.artifact_hash = artifact_hash;
     key.artifact_flags = artifact_flags;
     key.native_build_sig = native_build_sig_for(source_path);
+    // Feature selection changes which modules compile (#488). Default
+    // selection leaves the key untouched (existing caches stay valid).
+    let features_fp = features.fingerprint();
+    if !features_fp.is_empty() {
+        key.artifact_flags = format!("{}+features={features_fp}", key.artifact_flags);
+    }
     Ok(key.to_slug())
 }
 
@@ -356,9 +368,19 @@ pub(crate) fn resolve_pkg_dir(
 ) -> Option<PathBuf> {
     let dir = if dep.source == "path" {
         let m = manifest?;
-        match m.dependencies.get(&dep.name)? {
-            zz_pm::manifest::DepSpec::Path(path_dep) => project_root.join(&path_dep.path),
-            _ => return None,
+        match m.dependencies.get(&dep.name) {
+            Some(zz_pm::manifest::DepSpec::Path(path_dep)) => project_root.join(&path_dep.path),
+            // Transitive path pins (#420) have no manifest entry: they
+            // are linked under vendor/ by `zz install` like everything
+            // else in the lock.
+            _ => {
+                let linked = project_root.join("vendor").join(&dep.name);
+                if linked.exists() {
+                    linked
+                } else {
+                    return None;
+                }
+            }
         }
     } else {
         zz_pm::paths::cas_entry(&dep.hash)
@@ -558,6 +580,7 @@ pub(crate) fn build_native_deps(
                                 compiler: String::new(),
                                 artifact_sha256: artifact.sha256.clone(),
                                 pkg_config_resolved: String::new(),
+                                vendor_key: String::new(),
                             },
                         ));
                         continue;
@@ -604,6 +627,39 @@ pub(crate) fn build_native_deps(
                     pkg_config_resolved: zz_pm::native_build::pkg_config_versions(
                         &cc_spec.pkg_config,
                     ),
+                    vendor_key: String::new(),
+                },
+            ));
+            continue;
+        }
+        // Hermetic Rust backend: vendored closure, cargo driven by zz.
+        if let Some(rust_spec) = native.build_rust.as_ref() {
+            if !direct && !opts.allow_source_builds {
+                return Err(format!(
+                    "plugin `{}` is a Rust source plugin (no prebuilt artifacts); transitive source builds need --allow-source-builds",
+                    dep.name
+                ));
+            }
+            if direct {
+                eprintln!(
+                    "zz: plugin `{}` builds from its vendored Rust closure (no prebuilt artifacts)",
+                    dep.name
+                );
+            }
+            eprintln!("zz: building plugin `{}` (hermetic rust)...", dep.name);
+            let out = zz_pm::native_build::ensure_rust(&pkg_dir, &dep.name, rust_spec, None)
+                .map_err(|e| format!("plugin `{}` hermetic Rust build failed: {e}", dep.name))?;
+            artifacts.push(out.archive);
+            collect_link_args(&out.ldflags_path, &mut link_args);
+            audits.push((
+                dep.name.clone(),
+                zz_pm::lock::LockedNative {
+                    backend: "rust".to_string(),
+                    tag: out.tag,
+                    compiler: out.compiler,
+                    artifact_sha256: String::new(),
+                    pkg_config_resolved: String::new(),
+                    vendor_key: out.vendor_key,
                 },
             ));
             continue;
@@ -803,14 +859,15 @@ fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) {
 fn typed_program_for(
     path: &Path,
     entry_ns: &str,
+    features: &FeatureSelection,
 ) -> Result<(TypedProgram, zz_hir::ReachableSet, String), String> {
     // Discover plugin manifests from installed dependencies and merge their
     // function signatures into the checker's function table.
     let plugin_funcs = discover_plugin_manifests(path);
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program(path)?
+        loader::load_program_with_features(path, features)?
     } else {
-        loader::load_program_with_plugins(path, &plugin_funcs)?
+        loader::load_program_with_plugins_and_features(path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -877,16 +934,19 @@ fn typed_program_for(
 /// Build the unified IR module for `path` (chunk-backend input): load,
 /// check, merge (pure-ZZ stdlib first, mirroring [`typed_program_for`]),
 /// VM-compile, then `lower_typed`. Returns the module + dotted main key.
-fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
+fn chunk_module_for(
+    path: &Path,
+    features: &FeatureSelection,
+) -> Result<(zz_ir::Module, String), String> {
     let entry_ns = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let plugin_funcs = discover_plugin_manifests(path);
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program(path)?
+        loader::load_program_with_features(path, features)?
     } else {
-        loader::load_program_with_plugins(path, &plugin_funcs)?
+        loader::load_program_with_plugins_and_features(path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -906,14 +966,20 @@ fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
     if has_errors {
         return Err("program failed to type-check".into());
     }
-    // Merged user program. Pure-ZZ stdlib sources are deliberately NOT
-    // merged here: their bodies trip the VM compiler's join verifier
-    // when compiled outside their home module (latent gap — stdlib only
-    // ever runs through the tree-walker today). Calls to pure-ZZ
-    // helpers (e.g. `str.repeat`) therefore fail `coverage` with a clean
+    // Merged program: referenced pure-ZZ stdlib sources first
+    // (mirroring the VM, which executes them before user code, and
+    // `typed_program_for`). Only the import closure is merged
+    // (`stdlib_program_closure` over the loaded stdlib modules), so an
+    // import-free program compiles zero stdlib sources and unreferenced
+    // helpers never enter the module (#253: only-when-referenced
+    // inclusion; closes the #243 umbrella). Without them, calls to
+    // pure-ZZ helpers (e.g. `str.repeat`) fail coverage with a clean
     // "cannot resolve call target" error instead of miscompiling.
-    // Slice-2 (cross-module IR merge, #253) will include them.
     let mut merged_stmts = Vec::new();
+    for idx in zz_stdlib::stdlib_program_closure(&loaded.stdlib_modules) {
+        let zz_prog = zz_stdlib::zz_stdlib_program_at(idx);
+        merged_stmts.extend(zz_prog.program.stmts.iter().cloned());
+    }
     let merged_span = loaded
         .programs
         .last()
@@ -955,7 +1021,18 @@ fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
     drop(module);
     let loaded = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
     zz_ir::verify::verify(&loaded).map_err(|e| format!("zz: .zzc verify failed: {e}"))?;
-    Ok((loaded, format!("{entry_ns}.main")))
+    // Script-style programs (top-level statements only) have no
+    // `<ns>.main`; the synthetic entry chunk is the whole program, exactly
+    // like the HIR backend's `zz_main`-only shape. An empty key tells the
+    // chunk backend to emit no CLI main call.
+    let main_key = format!("{entry_ns}.main");
+    let has_main = loaded.funcs.iter().any(|f| {
+        loaded
+            .strings
+            .get(f.name.0 as usize)
+            .is_some_and(|n| n == &main_key)
+    });
+    Ok((loaded, if has_main { main_key } else { String::new() }))
 }
 
 /// Output directory for a build of `src` (authoritative, no duplicates):
@@ -1139,7 +1216,7 @@ pub fn build_release(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let t_front = std::time::Instant::now();
-    let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
+    let (pruned, reach, main_key) = typed_program_for(path, &entry_ns, &rel.features)?;
     if rel.verbose {
         eprintln!(
             "zz: timing load_check_hir_dce={}ms",
@@ -1280,7 +1357,7 @@ pub fn build_release(
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
     let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
-    let key = cache_key(path, &source, &opts, target)?;
+    let key = cache_key(path, &source, &opts, target, &rel.features)?;
     let target_slug = target.unwrap_or("host");
     // The embed tree is content-fingerprinted separately (compact slug
     // addition — asset edits must never reuse a non-embed binary).
@@ -1315,7 +1392,7 @@ pub fn build_release(
     // emitted source with the same option/flag flow as `build_native`.
     if rel.chunk {
         let t_chunk = std::time::Instant::now();
-        let (module, main_key) = chunk_module_for(path)?;
+        let (module, main_key) = chunk_module_for(path, &rel.features)?;
         let lowered =
             zz_codegen::build_chunk_module(&module, &main_key).map_err(|e| e.to_string())?;
         if rel.verbose {
@@ -1552,12 +1629,9 @@ pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Stri
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
+    let (pruned, reach, main_key) =
+        typed_program_for(path, &entry_ns, &FeatureSelection::default())?;
 
-    // Unique per call (pid + process-wide counter): parallel `zz run
-    // --native` invocations in one process (e.g. the e2e/parity suites)
-    // used to share a single `zz_out` path, so tests executed each
-    // other's binaries — rotating VM-vs-native mismatches.
     // Unique per call (pid + process-wide counter): parallel `zz run
     // --native` invocations in one process (e.g. the e2e/parity suites)
     // used to share a single `zz_out` path, so tests executed each

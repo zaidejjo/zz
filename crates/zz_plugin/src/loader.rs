@@ -29,13 +29,26 @@ const VERSION_SYMBOL: &[u8] = b"ZZ_PLUGIN_ABI_VERSION\0";
 
 /// Well-known symbol name for the C-plugin ABI version stamp.
 const C_VERSION_SYMBOL: &[u8] = b"ZZ_C_PLUGIN_ABI_VERSION\0";
-
 /// Current C-plugin ABI version — bump when the marshaling contract changes.
 pub const CURRENT_C_ABI_VERSION: u32 = zz_runtime::c_abi::C_ABI_VERSION;
 
+/// True when `name` is a plain identifier (usable as a ZZ name and a C
+/// symbol): leading letter/underscore, then alphanumerics/underscores.
+/// Gates C-symbol alias registration (#235).
+fn is_plain_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Map a manifest signature to its C-ABI descriptor. Only the scalar
 /// subset travels directly (`int`/`float`/`str` params, `int`/`float`/`void`
-/// returns); anything else is an actionable load error, never UB.
+/// returns) plus borrowed `bytes` views (one ZZ arg → `*const u8` + `usize`
+/// C params, no copy, no NUL — the C side must not retain the pointer);
+/// anything else is an actionable load error, never UB.
 fn c_sig_of(
     params: &[(String, zz_checker::Type)],
     ret: &zz_checker::Type,
@@ -47,9 +60,10 @@ fn c_sig_of(
             Type::Int => zz_runtime::c_abi::CParam::Int,
             Type::Float => zz_runtime::c_abi::CParam::Float,
             Type::Str => zz_runtime::c_abi::CParam::Str,
+            Type::Bytes => zz_runtime::c_abi::CParam::Bytes,
             other => {
                 return Err(format!(
-                    "parameter `{name}` has non-C type `{other}` (C plugins take int/float/str only)"
+                    "parameter `{name}` has non-C type `{other}` (C plugins take int/float/str/bytes only)"
                 ));
             }
         });
@@ -125,13 +139,32 @@ pub fn load_c_plugin(
             func: zz_name.clone(),
             detail,
         })?;
-        zz_runtime::c_abi::register(zz_name, ptr, csig).map_err(|detail| {
+        zz_runtime::c_abi::register(zz_name, ptr, csig.clone()).map_err(|detail| {
             LoadError::UnsupportedSig {
                 path: path_str.clone(),
                 func: zz_name.clone(),
                 detail,
             }
         })?;
+        // C-symbol alias (#235): the defining package calls its
+        // natives by this spelling (dotted self-paths read as method
+        // calls). Same pointer, same signature — never overrides a
+        // real registration (an author-defined collision keeps working
+        // under its own meaning; the wrapper then fails loudly at the
+        // call instead of rerouting silently).
+        let alias = sig.c_symbol(zz_name);
+        if alias != *zz_name
+            && is_plain_ident(&alias)
+            && zz_runtime::c_abi::arity_of(&alias).is_none()
+        {
+            zz_runtime::c_abi::register(&alias, ptr, csig.clone()).map_err(|detail| {
+                LoadError::UnsupportedSig {
+                    path: path_str.clone(),
+                    func: alias.clone(),
+                    detail,
+                }
+            })?;
+        }
     }
 
     Ok(PluginLib { _lib: lib })
@@ -317,6 +350,15 @@ mod tests {
             c_sig_of(&params, &ret).unwrap().ret,
             zz_runtime::c_abi::CRet::Void
         );
+    }
+
+    #[test]
+    fn test_c_sig_bytes_param() {
+        use zz_checker::Type;
+        let (params, ret) = sig(vec![("buf", Type::Bytes)], Type::Int);
+        let csig = c_sig_of(&params, &ret).unwrap();
+        assert_eq!(csig.params, vec![zz_runtime::c_abi::CParam::Bytes]);
+        assert_eq!(csig.ret, zz_runtime::c_abi::CRet::Int);
     }
 
     #[test]

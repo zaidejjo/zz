@@ -82,33 +82,20 @@ pub(crate) fn dbg_fn(
     Ok(v)
 }
 
-/// Built-in `append(arr, val)` — returns the array with val appended.
-/// The compiler write-back stores the result back to `arr`, making it
-/// appear to mutate in-place.
-pub(crate) fn append_fn(
+/// Built-in `clone(v)` — deep copy returning a fully independent value
+/// (#267). Reads and binds share backing stores, so this pins a
+/// snapshot regardless of ownership analysis. Cycle-safe.
+pub(crate) fn clone_fn(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    if args.len() < 2 {
-        return Err(EvalError::new(
-            "append() expects 2 arguments: append(array, value)",
-            span,
-        ));
-    }
-    let val = args.remove(1);
-    match &args[0] {
-        Value::Array(arr) => {
-            let mut new_arr = arr.clone();
-            new_arr.push(val);
-            Ok(Value::Array(new_arr))
-        }
-        other => Err(EvalError::new(
-            format!(
-                "append() first argument must be an array, got `{}`",
-                other.type_name()
-            ),
-            span,
-        )),
-    }
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for clone", span))?;
+    Ok(zz_runtime::deep_clone(v))
 }
+
+// Push is `vec.push(v, x)` plus the method form `xs.push(x)`: the old
+// bare `append(arr, val)` builtin was removed (single push spelling).

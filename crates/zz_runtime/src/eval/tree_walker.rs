@@ -16,6 +16,13 @@ use crate::value::{FuncValue, ObjectValue, RangeValue, Value};
 use super::Interp;
 
 impl Interp {
+    /// Canonical `std.*` spelling for a bare `module.func` name.
+    /// Single source: `zz_checker::canonical_std_name`. Callers gate on
+    /// module position so a local with the same head never rewrites.
+    pub(crate) fn canonical_std_alias(name: &str) -> Option<String> {
+        zz_checker::canonical_std_name(name)
+    }
+
     pub(crate) fn run_stmt(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
         match stmt {
             Stmt::Decl { name, value, .. } => match self.eval(value)? {
@@ -71,16 +78,18 @@ impl Interp {
             Stmt::Func {
                 name, params, body, ..
             } => {
-                let fv = FuncValue {
+                let fv = std::rc::Rc::new(FuncValue {
                     params: params.clone(),
                     body: Expr::Block(body.clone()),
                     env: self.env.clone(),
                     chunk: None,
                     chunk_defaults: Vec::new(),
-                };
-                self.funcs.insert(name.join("."), fv.clone());
+                    // Named function: only `return` yields a value.
+                    tail_value: false,
+                });
+                self.funcs.insert(name.join("."), std::rc::Rc::clone(&fv));
                 self.funcs_version = self.funcs_version.wrapping_add(1);
-                self.env.define(&name.join("."), Value::Func(Box::new(fv)));
+                self.env.define(&name.join("."), Value::Func(fv));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Return { value, .. } => match value {
@@ -129,16 +138,19 @@ impl Interp {
                     } = method
                     {
                         let full_name = format!("{}.{}", type_name, mname.join("."));
-                        let fv = FuncValue {
+                        let fv = std::rc::Rc::new(FuncValue {
                             params: params.clone(),
                             body: Expr::Block(body.clone()),
                             env: self.env.clone(),
                             chunk: None,
                             chunk_defaults: Vec::new(),
-                        };
-                        self.funcs.insert(full_name.clone(), fv.clone());
+                            // Impl method: named-function semantics.
+                            tail_value: false,
+                        });
+                        self.funcs
+                            .insert(full_name.clone(), std::rc::Rc::clone(&fv));
                         self.funcs_version = self.funcs_version.wrapping_add(1);
-                        self.env.define(&full_name, Value::Func(Box::new(fv)));
+                        self.env.define(&full_name, Value::Func(fv));
                     }
                 }
                 Ok(Flow::Value(Value::Unit))
@@ -150,7 +162,9 @@ impl Interp {
                 match it {
                     Value::Array(items) => {
                         let mut result = Value::Unit;
-                        for item in *items {
+                        let owned =
+                            std::sync::Arc::try_unwrap(items).unwrap_or_else(|a| (*a).clone());
+                        for item in owned {
                             let mut scope = Env::with_parent(&self.env);
                             if vars.len() == 2 {
                                 // `for i, x in xs.enumerate()` — each item
@@ -253,7 +267,10 @@ impl Interp {
                     }
                     Value::Dict(pairs) => {
                         let mut result = Value::Unit;
-                        for (k, v) in *pairs {
+                        let owned = std::sync::Arc::try_unwrap(pairs)
+                            .map(crate::value::DictData::into_entries)
+                            .unwrap_or_else(|a| a.entries().to_vec());
+                        for (k, v) in owned {
                             let mut scope = Env::with_parent(&self.env);
                             if vars.len() == 2 {
                                 scope.define(&vars[0].name, k);
@@ -289,11 +306,13 @@ impl Interp {
                     env: self.env.clone(),
                     chunk: None,
                     chunk_defaults: Vec::new(),
+                    // Deferred expression: value ignored.
+                    tail_value: true,
                 };
                 self.defer_stacks
                     .last_mut()
                     .unwrap()
-                    .push(Value::Func(Box::new(closure)));
+                    .push(Value::Func(std::rc::Rc::new(closure)));
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Destructure { pat, value, .. } => {
@@ -307,6 +326,15 @@ impl Interp {
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Assign { target, value, .. } => {
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // There is no storage for `_`, so just evaluate the RHS.
+                if let Expr::Ident { name, .. } = target {
+                    if name == "_" {
+                        let _v = self.eval(value)?.into_value()?;
+                        return Ok(Flow::Value(Value::Unit));
+                    }
+                }
+
                 // Source order for stores (spec §7): the base/index
                 // evaluate BEFORE the value. Plain names and paths have
                 // no user code in the base, so they keep the shared
@@ -368,9 +396,8 @@ impl Interp {
                     ..
                 } = e
                 {
-                    const MUTATING_METHODS: &[&str] = &[
-                        "push", "pop", "insert", "remove", "reverse", "sort", "append",
-                    ];
+                    const MUTATING_METHODS: &[&str] =
+                        &["push", "pop", "insert", "remove", "reverse", "sort"];
 
                     // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
                     if let Expr::Path { parts, span: pspan } = callee.as_ref() {
@@ -380,7 +407,7 @@ impl Interp {
                             // `fs.remove`, …) is a real call, not an
                             // array-method write-back on a variable.
                             let dotted = parts.join(".");
-                            if !self.natives.contains_key(&dotted)
+                            if zz_checker::lookup_std(&self.natives, &dotted).is_none()
                                 && MUTATING_METHODS.contains(&method_name.as_str())
                             {
                                 let obj_name = &parts[0];
@@ -410,7 +437,7 @@ impl Interp {
                             // back through the chain (any depth).
                             let method_name = parts.last().unwrap();
                             let dotted = parts.join(".");
-                            if !self.natives.contains_key(&dotted)
+                            if zz_checker::lookup_std(&self.natives, &dotted).is_none()
                                 && MUTATING_METHODS.contains(&method_name.as_str())
                             {
                                 let recv_parts = parts[..parts.len() - 1].to_vec();
@@ -492,25 +519,8 @@ impl Interp {
                             }
                         }
                     }
-                    // Built-in `append(arr, val)` write-back.
-                    if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-                        if fname == "append" && args.len() == 2 && named.is_empty() {
-                            if let Expr::Ident {
-                                name: arr_name,
-                                span,
-                            } = &args[0]
-                            {
-                                let result = self.eval(e)?;
-                                if !self.env.assign(arr_name, result.into_value()?) {
-                                    return Err(EvalError::new(
-                                        format!("undefined variable `{arr_name}`"),
-                                        *span,
-                                    ));
-                                }
-                                return Ok(Flow::Value(Value::Unit));
-                            }
-                        }
-                    }
+                    // NOTE: the bare `append(arr, val)` builtin was removed —
+                    // push is `vec.push(x, e)` or the method `x.push(e)`.
                 }
                 self.eval(e)
             }
@@ -698,15 +708,21 @@ impl Interp {
             .filter(|(n, _)| !layout.contains(n))
             .cloned()
             .collect();
-        let mut out = Vec::with_capacity(layout.len());
+        let mut out: Vec<(std::sync::Arc<str>, Value)> = Vec::with_capacity(layout.len());
         for fname in &layout {
-            if let Some((_, expr)) = given.iter().find(|(n, _)| n == fname) {
-                out.push((fname.clone(), self.eval(expr)?.into_value()?));
+            if let Some((_, expr)) = given.iter().find(|(n, _)| &**n == fname) {
+                out.push((
+                    std::sync::Arc::from(fname.as_str()),
+                    self.eval(expr)?.into_value()?,
+                ));
             } else if let Some(inner_name) =
                 crate::runtime::ops::embedded_layout_name(&self.structs, fname)
             {
                 let inner = self.build_struct_value(&inner_name, &leftovers, span, depth + 1)?;
-                out.push((fname.clone(), Value::Object(Box::new(inner))));
+                out.push((
+                    std::sync::Arc::from(fname.as_str()),
+                    Value::Object(std::sync::Arc::new(inner)),
+                ));
             } else {
                 return Err(EvalError::new(
                     format!("missing field `{fname}` in struct literal"),
@@ -777,7 +793,10 @@ impl Interp {
         // second positional is never silently dropped.
         let fields = match args {
             [] => Vec::new(),
-            [payload] => vec![("value".to_string(), self.eval(payload)?.into_value()?)],
+            [payload] => vec![(
+                std::sync::Arc::from("value"),
+                self.eval(payload)?.into_value()?,
+            )],
             _ => {
                 return Err(EvalError::new(
                     format!(
@@ -788,7 +807,7 @@ impl Interp {
                 ));
             }
         };
-        Ok(Value::Object(Box::new(ObjectValue {
+        Ok(Value::Object(std::sync::Arc::new(ObjectValue {
             name: format!("{enum_name}.{variant}"),
             fields,
         })))
@@ -799,14 +818,33 @@ impl Interp {
         parts: &[String],
         span: Span,
     ) -> Result<Value, EvalError> {
-        let name = parts.join(".");
+        // Canonical `std.*` seeds only: try the name as-written first
+        // (covers orphans like `option.unwrap`, user definitions, and
+        // import-copied `ns.*` keys, which have no canonical form), then
+        // the canonical spelling when the head has NO local binding. A
+        // handle variable named `db` (`db := sqlz.open(..)`) falls
+        // through to the value path below untouched.
+        let raw = parts.join(".");
+        let name = match Self::canonical_std_alias(&raw) {
+            Some(canon)
+                if !parts.is_empty()
+                    && self.env.get(&parts[0]).is_none()
+                    && self.env.get(&raw).is_none()
+                    && !self.funcs.contains_key(&raw)
+                    && !self.natives.contains_key(&raw)
+                    && (self.funcs.contains_key(&canon) || self.natives.contains_key(&canon)) =>
+            {
+                canon
+            }
+            _ => raw,
+        };
         if let Some(v) = self.env.get(&name) {
             return Ok(v);
         }
-        if let Some(fv) = self.funcs.get(&name) {
-            return Ok(Value::Func(Box::new(fv.clone())));
+        if let Some(fv) = zz_checker::lookup_std(&self.funcs, &name) {
+            return Ok(Value::Func(std::rc::Rc::clone(fv)));
         }
-        if let Some(entry) = self.natives.get(&name) {
+        if let Some(entry) = zz_checker::lookup_std(&self.natives, &name) {
             return Ok(Value::Native(Box::new(NativeFunc {
                 name,
                 arity: entry.arity,
@@ -826,13 +864,32 @@ impl Interp {
     }
 
     fn lookup_callable(&self, name: &str, span: Span) -> Result<Value, EvalError> {
+        // Canonical `std.*` seeds only: as-written first (orphans, user
+        // definitions, import copies), then the canonical spelling.
+        // Same head rule as `resolve_path_value`: locals win, module
+        // position may rewrite.
+        let raw_head = name.split('.').next().unwrap_or(name);
+        let owned;
+        let name = match Self::canonical_std_alias(name) {
+            Some(canon)
+                if self.env.get(raw_head).is_none()
+                    && self.env.get(name).is_none()
+                    && !self.funcs.contains_key(name)
+                    && !self.natives.contains_key(name)
+                    && (self.funcs.contains_key(&canon) || self.natives.contains_key(&canon)) =>
+            {
+                owned = canon;
+                &owned
+            }
+            _ => name,
+        };
         if let Some(v) = self.env.get(name) {
             return Ok(v);
         }
-        if let Some(fv) = self.funcs.get(name) {
-            return Ok(Value::Func(Box::new(fv.clone())));
+        if let Some(fv) = zz_checker::lookup_std(&self.funcs, name) {
+            return Ok(Value::Func(std::rc::Rc::clone(fv)));
         }
-        if let Some(entry) = self.natives.get(name) {
+        if let Some(entry) = zz_checker::lookup_std(&self.natives, name) {
             return Ok(Value::Native(Box::new(NativeFunc {
                 name: name.to_string(),
                 arity: entry.arity,
@@ -863,6 +920,30 @@ impl Interp {
         method: &str,
         span: Span,
     ) -> Result<(Value, Value), EvalError> {
+        // Dot-call order mirrors the checker's: a named receiver's own
+        // `impl` method (`{Type}.{method}`) wins over a same-named
+        // receiver-implicit free function (#500). `w.get()` therefore
+        // reaches `W.get`, while the free `get(w)` stays reachable by
+        // name. Non-named receivers keep the free-function-first order.
+        if let Value::Object(o) = recv {
+            if let Ok(f) = self.lookup_callable(&format!("{}.{}", o.name, method), span) {
+                return Ok((f, recv.clone()));
+            }
+            // Enum values are named `{Enum}.{Variant}` (see
+            // `eval_enum_construction`), so an `impl` method on the enum is
+            // registered under the *enum's* name, not the variant's.
+            if let Some((nombre, variant)) = o.name.rsplit_once('.') {
+                let names_variant = self
+                    .enums
+                    .get(nombre)
+                    .is_some_and(|vs| vs.iter().any(|(v, _)| v == variant));
+                if names_variant {
+                    if let Ok(f) = self.lookup_callable(&format!("{nombre}.{method}"), span) {
+                        return Ok((f, recv.clone()));
+                    }
+                }
+            }
+        }
         if let Ok(f) = self.lookup_callable(method, span) {
             return Ok((f, recv.clone()));
         }
@@ -870,20 +951,10 @@ impl Interp {
             if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
                 return Ok((f, recv.clone()));
             }
-            // `db.*` is a zero-overhead alias for canonical `sqlz.*`:
-            // fall back so handles work regardless of which module was
-            // imported.
-            if ns == "sqlz" {
-                if let Ok(f) = self.lookup_callable(&format!("db.{method}"), span) {
-                    return Ok((f, recv.clone()));
-                }
-            }
+            // NOTE: the old `db.*` fallback for `sqlz` handles was removed
+            // with the `db` module — `sqlz` is canonical.
         }
         if let Value::Object(o) = recv {
-            // Try TypeName.method (impl block methods)
-            if let Ok(f) = self.lookup_callable(&format!("{}.{}", o.name, method), span) {
-                return Ok((f, recv.clone()));
-            }
             // Try namespace.method (cross-module)
             if let Some((ns, _)) = o.name.rsplit_once('.') {
                 if let Ok(f) = self.lookup_callable(&format!("{ns}.{method}"), span) {
@@ -929,7 +1000,7 @@ impl Interp {
         // Bare (same-module) keys first, then namespaced cross-module keys.
         for (name, fv) in &self.funcs.clone() {
             if name.starts_with(&prefix) {
-                hits.push((name.clone(), Value::Func(Box::new(fv.clone()))));
+                hits.push((name.clone(), Value::Func(std::rc::Rc::clone(fv))));
             }
         }
         if hits.is_empty() {
@@ -944,7 +1015,7 @@ impl Interp {
                         .join(".")
                         .starts_with(&prefix)
                 {
-                    hits.push((name.clone(), Value::Func(Box::new(fv.clone()))));
+                    hits.push((name.clone(), Value::Func(std::rc::Rc::clone(fv))));
                 }
             }
         }
@@ -1030,10 +1101,10 @@ impl Interp {
                 if let Some(v) = self.env.get(name) {
                     return Ok(Flow::Value(v));
                 }
-                if let Some(fv) = self.funcs.get(name) {
-                    return Ok(Flow::Value(Value::Func(Box::new(fv.clone()))));
+                if let Some(fv) = zz_checker::lookup_std(&self.funcs, name) {
+                    return Ok(Flow::Value(Value::Func(std::rc::Rc::clone(fv))));
                 }
-                if let Some(entry) = self.natives.get(name) {
+                if let Some(entry) = zz_checker::lookup_std(&self.natives, name) {
                     return Ok(Flow::Value(Value::Native(Box::new(NativeFunc {
                         name: name.clone(),
                         arity: entry.arity,
@@ -1165,8 +1236,8 @@ impl Interp {
                     if parts.len() >= 2 {
                         let joined = parts.join(".");
                         let is_direct = self.env.get(&joined).is_some()
-                            || self.funcs.contains_key(&joined)
-                            || self.natives.contains_key(&joined);
+                            || zz_checker::lookup_std(&self.funcs, &joined).is_some()
+                            || zz_checker::lookup_std(&self.natives, &joined).is_some();
                         // Enum construction (`Token.IntLit(1)`) builds a
                         // qualified `Object` value — no function involved.
                         // Yields to real functions/values on collision
@@ -1301,12 +1372,14 @@ impl Interp {
                 self.call(f, arg_vals, *span).map(Flow::Value)
             }
             Expr::Closure { params, body, .. } => {
-                Ok(Flow::Value(Value::Func(Box::new(FuncValue {
+                Ok(Flow::Value(Value::Func(std::rc::Rc::new(FuncValue {
                     params: params.clone(),
                     body: (**body).clone(),
                     env: self.env.clone(),
                     chunk: None,
                     chunk_defaults: Vec::new(),
+                    // Closure: the body's tail expression is the value.
+                    tail_value: true,
                 }))))
             }
             Expr::If {
@@ -1432,14 +1505,14 @@ impl Interp {
                 for e in elems {
                     vs.push(self.eval(e)?.into_value()?);
                 }
-                Ok(Flow::Value(Value::Array(Box::new(vs))))
+                Ok(Flow::Value(Value::Array(std::sync::Arc::new(vs))))
             }
             Expr::Tuple { items, .. } => {
                 let mut vs = Vec::with_capacity(items.len());
                 for e in items {
                     vs.push(self.eval(e)?.into_value()?);
                 }
-                Ok(Flow::Value(Value::Array(Box::new(vs))))
+                Ok(Flow::Value(Value::Array(std::sync::Arc::new(vs))))
             }
             Expr::ListComp {
                 body,
@@ -1452,7 +1525,9 @@ impl Interp {
                 let mut results = Vec::new();
                 match it {
                     Value::Array(items) => {
-                        for item in *items {
+                        let owned =
+                            std::sync::Arc::try_unwrap(items).unwrap_or_else(|a| (*a).clone());
+                        for item in owned {
                             let mut scope = Env::with_parent(&self.env);
                             scope.define(&var.name, item);
                             let prev = std::mem::replace(&mut self.env, scope);
@@ -1517,7 +1592,7 @@ impl Interp {
                         ));
                     }
                 }
-                Ok(Flow::Value(Value::Array(Box::new(results))))
+                Ok(Flow::Value(Value::Array(std::sync::Arc::new(results))))
             }
             Expr::Dict { entries, .. } => {
                 let mut pairs = Vec::with_capacity(entries.len());
@@ -1526,7 +1601,9 @@ impl Interp {
                     let vv = self.eval(v)?.into_value()?;
                     pairs.push((kv, vv));
                 }
-                Ok(Flow::Value(Value::Dict(Box::new(pairs))))
+                Ok(Flow::Value(Value::Dict(std::sync::Arc::new(
+                    crate::value::DictData::from_entries(pairs),
+                ))))
             }
             Expr::Variant { name, arg, span } => {
                 let av = match arg {
@@ -1568,7 +1645,7 @@ impl Interp {
             }
             Expr::StructInit { name, fields, span } => {
                 let obj = self.build_struct_value(name, fields, *span, 0)?;
-                Ok(Flow::Value(Value::Object(Box::new(obj))))
+                Ok(Flow::Value(Value::Object(std::sync::Arc::new(obj))))
             }
             Expr::Index { obj, index, span } => {
                 // Move fusion (#242): indexed field reads take the
@@ -1680,7 +1757,7 @@ impl Interp {
                             arg.as_deref(),
                             obj.fields
                                 .iter()
-                                .find(|(k, _)| k == "value")
+                                .find(|(k, _)| &**k == "value")
                                 .map(|(_, v)| v),
                         ) {
                             (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
@@ -1734,10 +1811,6 @@ impl Interp {
                         | "std.sqlz.query"
                         | "sqlz.exec"
                         | "std.sqlz.exec"
-                        | "db.query"
-                        | "std.db.query"
-                        | "db.exec"
-                        | "std.db.exec"
                         | "pg.query"
                         | "pg.exec"
                         | "postgres.query"
@@ -1772,7 +1845,7 @@ impl Interp {
                     },
                 }
             }
-            Value::Func(fv) => self.call_func(*fv, args, span),
+            Value::Func(fv) => self.call_func(fv, args, span),
             other => Err(EvalError::new(
                 format!("cannot call a value of type `{other}`"),
                 span,
@@ -1782,7 +1855,7 @@ impl Interp {
 
     fn call_func(
         &mut self,
-        fv: FuncValue,
+        fv: std::rc::Rc<FuncValue>,
         mut args: Vec<Value>,
         span: Span,
     ) -> Result<Value, EvalError> {
@@ -1859,7 +1932,10 @@ impl Interp {
         };
         self.env = prev;
         match result? {
-            Flow::Value(v) => Ok(v),
+            // Only closures yield their body's tail expression. A named
+            // function's fall-through is `unit`; values come from `return`.
+            Flow::Value(v) if fv.tail_value => Ok(v),
+            Flow::Value(_) => Ok(Value::Unit),
             Flow::Return(v) => Ok(v),
             Flow::Break(span) => Err(EvalError::new("`break` outside of a loop", span)),
             Flow::Continue(span) => Err(EvalError::new("`continue` outside of a loop", span)),

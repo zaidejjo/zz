@@ -7,12 +7,17 @@
 //! [`verify`]ied before execution; `zz run --bytecode` executes only
 //! bytes-derived data — no AST is available on the load path.
 //!
-//! Fused/optimizer ops from the VM compiler ([`TakeSlot`][vm], slot-int
-//! fast paths, …) are desugared to core-op sequences by [`lower`] before
-//! serialization, so the format only ever contains core ops. Ops with
-//! dispatch/fallback semantics (`TakeVar`, `VecPushField`,
-//! `VecPushMethod`, `SpawnClosure`) stay core: their behavior is not
-//! expressible as a fixed core sequence.
+//! Fused/optimizer ops from the VM compiler (slot-int fast paths) travel
+//! as ops: the interpreter runs them natively, and [`lower`] /
+//! [`raise`] map them one to one (v3). v4 rotates `for` loops — the test
+//! sits at the bottom, `Op::ForNext` carries its body entry and is also the
+//! back-edge — and [`lower::derotate_loops`] restores the historical shape
+//! for backends that pattern-match it. [`lower::expand_fused`] restores
+//! the desugared core stream for backends that re-specialize the code
+//! themselves (the chunk→C emitter), so those passes see exactly the
+//! pre-v3 stream. `TakeVar` (env chain), `VecPushField` / `VecPushMethod`
+//! (field/method dispatch), and `SpawnClosure` (task-hook dispatch) stay
+//! core: their behavior is not expressible as a fixed core sequence.
 //!
 //! [vm]: zz_runtime::vm
 
@@ -31,10 +36,52 @@ use std::fmt;
 
 /// Magic bytes opening every `.zzc` file (spec §8).
 pub const MAGIC: [u8; 4] = *b"ZZC1";
-/// Format version this crate reads and writes (spec §8: this spec = 2).
-/// v2 adds the per-function locals type table (`FUNCS` records); v1
-/// files are rejected (re-emit with `zz build --emit-ir`).
-pub const VERSION: u32 = 2;
+/// Format version this crate reads and writes (spec §8: this spec = 4).
+/// v2 adds the per-function locals type table (`FUNCS` records); v3
+/// carries the VM's fused slot fast paths (`SlotInc`, `SlotBinaryInt`, …)
+/// as ops instead of desugaring them (the interpreter ran the desugared
+/// form on cached runs and paid 3 extra stack ops per loop iteration);
+/// v4 rotates `for` loops (`ForNext` carries its body entry and is the
+/// back-edge, so an iteration is one test dispatch instead of a test plus
+/// a `Jump`).
+/// Older files are rejected (re-emit with `zz build --emit-ir`).
+pub const VERSION: u32 = 4;
+
+/// Identity of the running binary: executable length + mtime + inode.
+///
+/// Dev-loop cache keys must cover the *build*, not the checkout. A local
+/// edit that changes codegen — a fused VM op, a C template, a checker
+/// rule — leaves `git HEAD` untouched, so artifacts written by the
+/// previous build were served to the new one (stale bytecode, AOT
+/// objects, check outcomes; issues #221 and #371 are two sightings).
+/// Every component here moves when cargo relinks, so any rebuild
+/// invalidates; copying an unchanged binary only costs a cold cache,
+/// never a stale one. Hashing the ~300 MB executable's contents would
+/// cost more than the compile it guards.
+pub fn build_stamp() -> u64 {
+    static STAMP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *STAMP.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        if let Ok(md) = std::env::current_exe().and_then(|p| p.metadata()) {
+            md.len().hash(&mut h);
+            if let Ok(t) = md.modified() {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+                    .hash(&mut h);
+            }
+            // Cargo relinks by rename: a same-second rebuild of identical
+            // size still lands on a fresh inode.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                md.ino().hash(&mut h);
+            }
+        }
+        h.finish()
+    })
+}
 
 /// Interned-string reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -173,3 +220,16 @@ impl fmt::Display for IrError {
 }
 
 impl std::error::Error for IrError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stamp is read once per process (the running binary cannot change
+    /// under a live process), so every caller in one run shares it: a cache
+    /// write and its later read in the same run must agree.
+    #[test]
+    fn build_stamp_is_process_stable() {
+        assert_eq!(build_stamp(), build_stamp());
+    }
+}

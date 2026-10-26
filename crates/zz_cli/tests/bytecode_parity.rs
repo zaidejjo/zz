@@ -30,7 +30,12 @@ fn zz_bin() -> PathBuf {
 
 fn run_zz(args: &[&str], cwd: &std::path::Path) -> (i32, String, String) {
     let mut cmd = Command::new(zz_bin());
-    cmd.args(args)
+    // Parity compares two pipelines, so neither leg may be served from the
+    // VM run cache: a hit skips the check pass (no warnings on stderr) and
+    // executes cached IR, which turns `run` into a second bytecode leg and
+    // fails the stderr comparison below (#511).
+    cmd.env("ZZ_RUN_CACHE", "0")
+        .args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -56,6 +61,41 @@ fn run_zz(args: &[&str], cwd: &std::path::Path) -> (i32, String, String) {
             }
         }
     }
+}
+
+/// Remove frontend diagnostic blocks (warning/error/note/help plus their
+/// source-location continuation lines) so only runtime stderr remains.
+///
+/// `run <source>` runs the full checker and may emit compile-time warnings
+/// (e.g. the import-std-module-shadow warning, #630) that `run --bytecode
+/// <compiled .zzc>` cannot reproduce because it bypasses the frontend and
+/// loads pre-compiled bytes directly. Those warnings are compile-time
+/// diagnostics, not runtime behavior, so they are excluded from the
+/// byte-identical comparison.
+fn strip_frontend_diagnostics(stderr: &str) -> String {
+    let mut kept = Vec::new();
+    let mut lines = stderr.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with("warning:")
+            || line.starts_with("error:")
+            || line.starts_with("note:")
+            || line.starts_with("help:")
+        {
+            // Skip this header and every continuation line of the same
+            // diagnostic: blank lines or indented lines (source pointer,
+            // context source, caret line, fixit hint).
+            while let Some(&next) = lines.peek() {
+                if next.trim().is_empty() || next.starts_with(' ') || next.starts_with('\t') {
+                    lines.next();
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+        kept.push(line.to_string());
+    }
+    kept.join("\n")
 }
 
 /// Check one fixture: `run` vs `run --bytecode`, byte-identical.
@@ -184,7 +224,14 @@ fn bytecode_file_roundtrip() {
         let (code, out, err) = run_zz(&["run", &fixture.display().to_string()], &root);
         assert_eq!(code, 0);
         let (bcode, bout, berr) = run_zz(&["run", "--bytecode", &zzcz], &root);
-        if bcode != code || bout != out || berr != err {
+        // Exit code and stdout must match exactly. For stderr, strip frontend
+        // diagnostic blocks (compile-time warnings the source leg emits but
+        // the bytecode leg cannot, since it bypasses the frontend) before
+        // comparing — only runtime stderr is part of the byte-identical contract.
+        if bcode != code
+            || bout != out
+            || strip_frontend_diagnostics(&berr) != strip_frontend_diagnostics(&err)
+        {
             failures.push(format!("{cat}/{file}: .zzc load differs"));
         }
     }

@@ -14,7 +14,7 @@ pub mod cursor;
 
 use std::borrow::Cow;
 
-use crate::diag::{error_at, FixIt, RawDiag};
+use crate::diag::{error_at, render_replacement, FixIt, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind, Trivia, TriviaKind};
 
@@ -54,6 +54,17 @@ enum LexContext {
         /// current triple-quoted string. On close, all segments are dedented
         /// together based on the closing delimiter's indentation.
         segs: Vec<usize>,
+        /// Unclosed `{{` escapes seen in this string. A `}}` pair collapses
+        /// to a single literal `}` only while this is nonzero; an unmatched
+        /// `}}` (no preceding `{{` — the nested-JSON `...}}` case, #402)
+        /// stays two literal braces. Carried across interpolation
+        /// continuations so `"{{a{x}b}}"` still collapses.
+        brace_depth: u32,
+        /// True for backtick raw strings (`` `...` `` / triple-backtick).
+        /// Raw content is fully literal: no interpolation, no `\` escapes,
+        /// no brace collapsing. A doubled backtick (``` `` ```) is the only
+        /// escape, yielding one literal backtick (#414).
+        raw: bool,
         /// True when the accumulated `value` is byte-identical to the source
         /// slice (no escapes processed, no interpolation split). Clean
         /// single-line segments borrow the source instead of allocating.
@@ -122,13 +133,16 @@ impl<'a> Lexer<'a> {
         };
         self.errors.push(
             error_at(
-                format!("unterminated string literal — add closing `{closer}` {place}"),
+                format!(
+                    "unterminated string literal — add closing {} {place}",
+                    render_replacement(closer)
+                ),
                 span,
             )
             .with_fixit(FixIt::safe(
                 Span::new(at, at),
                 closer,
-                format!("add closing `{closer}`"),
+                format!("add closing {}", render_replacement(closer)),
             )),
         );
     }
@@ -316,6 +330,8 @@ impl<'a> Lexer<'a> {
                 }
                 '.' => self.emit_significant(TokenKind::Dot, self.pos, self.pos + 1),
                 '"' => self.lex_string(),
+                // Backtick raw strings (`` `...` `` / triple-backtick, #414).
+                '`' => self.lex_string(),
                 c if c.is_ascii_digit() => self.lex_number(),
                 c if is_ident_start(c) => self.lex_ident(),
                 _ => {
@@ -330,8 +346,12 @@ impl<'a> Lexer<'a> {
         if !self.contexts.is_empty() {
             // A string (or interpolation) was left open at end of input.
             match self.contexts.last() {
-                Some(LexContext::Str { start, triple, .. }) => {
-                    let (closer, first_line) = if *triple {
+                Some(LexContext::Str {
+                    start, triple, raw, ..
+                }) => {
+                    let (closer, first_line) = if *raw {
+                        (if *triple { "```" } else { "`" }, !*triple)
+                    } else if *triple {
                         ("\"\"\"", false)
                     } else {
                         ("\"", true)
@@ -526,23 +546,56 @@ impl<'a> Lexer<'a> {
         )
     }
 
-    /// Returns true if the next non-whitespace/non-newline in the source is
-    /// `|>`. Used to allow multi-line pipe chains:
+    /// Returns true if the next non-trivia in the source is `|>`. Used to
+    /// allow multi-line pipe chains:
     /// ```zz
     /// val
     ///   |> f
     ///   |> g
     /// ```
+    /// Comments are trivia too: a comment-only line between chain links
+    /// must not terminate the pipeline (#489).
     fn next_is_pipe_arrow(&self) -> bool {
-        let mut offset = 1; // skip the newline we just saw
+        // Scan the raw source ahead of the newline just seen (`self.pos`
+        // is at the `\n`, so `+ 1` skips it). Byte-slice based, so
+        // multibyte chars in skipped trivia can't split a boundary.
+        let mut rest = self.src.get(self.pos + 1..).unwrap_or("");
         loop {
-            match self.peek_char_at(offset) {
-                Some(' ' | '\t' | '\r') => offset += 1,
-                Some('\n') => offset += 1,
-                Some('|') => {
-                    return self.peek_char_at(offset + 1) == Some('>');
+            rest = rest.trim_start_matches([' ', '\t', '\r', '\n']);
+            if let Some(after) = rest.strip_prefix("//") {
+                // Line comment: skip to its newline and re-trim. A
+                // comment running to EOF means no pipe can follow.
+                match after.find('\n') {
+                    Some(i) => rest = &after[i..],
+                    None => return false,
                 }
-                _ => return false,
+            } else if rest.starts_with("/*") {
+                // Block comments nest: track depth until the matching
+                // closer. Unterminated means a real lex error surfaces
+                // later; stay conservative here and end the statement.
+                let mut depth = 1usize;
+                let mut scan = &rest[2..];
+                loop {
+                    let closer = scan.find("*/");
+                    let opener = scan.find("/*");
+                    match (closer, opener) {
+                        (Some(c), Some(o)) if o < c => {
+                            depth += 1;
+                            scan = &scan[o + 2..];
+                        }
+                        (Some(c), _) => {
+                            depth -= 1;
+                            scan = &scan[c + 2..];
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => return false,
+                    }
+                }
+                rest = scan;
+            } else {
+                return rest.starts_with("|>");
             }
         }
     }
@@ -606,15 +659,41 @@ impl<'a> Lexer<'a> {
 
     fn lex_number(&mut self) {
         let start = self.pos;
+        // Detect a base prefix: `0x`/`0X` hex, `0b`/`0B` binary, `0o`/`0O`
+        // octal. The entry point only fires on an ascii digit, so a prefixed
+        // literal always begins with `0` here.
+        let mut base = 10u32;
+        let c0 = self.peek_char();
+        let is_prefixed = matches!(c0, Some('0'))
+            && matches!(
+                self.peek_char_at(1),
+                Some('x') | Some('X') | Some('b') | Some('B') | Some('o') | Some('O')
+            );
+        if is_prefixed {
+            let prefix = self.src[self.pos + 1..self.pos + 2].to_ascii_lowercase();
+            base = match prefix.as_str() {
+                "x" => 16,
+                "b" => 2,
+                "o" => 8,
+                _ => unreachable!(),
+            };
+            // Consume `0` and the prefix letter.
+            self.bump_char();
+            self.bump_char();
+        }
+        // Consume digits valid for the base (plus `_` separators).
         while let Some(c) = self.peek_char() {
-            if c.is_ascii_digit() || c == '_' {
+            if Self::is_digit_for_base(c, base) || c == '_' {
                 self.bump_char();
             } else {
                 break;
             }
         }
         let mut is_float = false;
-        if self.peek_char() == Some('.') && self.peek_char_at(1).is_some_and(|c| c.is_ascii_digit())
+        // Floats are decimal-only; hex/binary/octal literals are integers.
+        if base == 10
+            && self.peek_char() == Some('.')
+            && self.peek_char_at(1).is_some_and(|c| c.is_ascii_digit())
         {
             is_float = true;
             self.bump_char(); // '.'
@@ -625,14 +704,14 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
-        } else if self.peek_char() == Some('.') && self.peek_char_at(1) != Some('.') {
+        } else if base == 10 && self.peek_char() == Some('.') && self.peek_char_at(1) != Some('.') {
             // `1.` — a dot with no digits after it is not a float (and not a
             // range start, which would be `1..`).
             let span = Span::new(start as u32, (self.pos + '.'.len_utf8()) as u32);
             self.errors
                 .push(error_at("expected digit after decimal point", span));
         }
-        // `123abc` is a single invalid token, not two.
+        // `123abc` / `0xFFabc` is a single invalid token, not two.
         // Exception: inside interpolation `{val:.2f}`, allow number+ident
         // sequences so format specs like `.2f` lex as separate tokens.
         if self.peek_char().is_some_and(is_ident_continue)
@@ -663,6 +742,17 @@ impl<'a> Lexer<'a> {
         self.push_token(kind, span, text);
     }
 
+    /// Returns `true` when `c` is a digit valid in the given base.
+    /// `_` separators are handled by the caller.
+    fn is_digit_for_base(c: char, base: u32) -> bool {
+        match base {
+            16 => c.is_ascii_hexdigit(),
+            8 => matches!(c, '0'..='7'),
+            2 => matches!(c, '0' | '1'),
+            _ => c.is_ascii_digit(),
+        }
+    }
+
     /// Begin a fresh string literal: consume the opening quote(s) and enter
     /// string mode. A `"""` opener starts a triple-quoted multiline string;
     /// otherwise a regular single-line string. The main loop then feeds
@@ -670,9 +760,15 @@ impl<'a> Lexer<'a> {
     /// [`Lexer::lex_triple_cont`].
     fn lex_string(&mut self) {
         let start = self.pos;
-        let triple = self.src[start..].starts_with("\"\"\"");
+        let backtick = self.src[start..].starts_with('`');
+        let triple = if backtick {
+            self.src[start..].starts_with("```")
+        } else {
+            self.src[start..].starts_with("\"\"\"")
+        };
+        let raw = backtick;
         if triple {
-            self.pos += 3; // opening `"""`
+            self.pos += 3; // opening `"""` or ` ``` `
         } else {
             self.bump_char(); // opening quote
         }
@@ -683,6 +779,8 @@ impl<'a> Lexer<'a> {
             is_nested,
             triple,
             segs: Vec::new(),
+            brace_depth: 0,
+            raw,
             // Fresh strings are clean until an escape proves otherwise.
             // Triple-quoted strings are never clean: post-hoc dedent
             // rewrites their text, so they always take the owned path.
@@ -690,12 +788,162 @@ impl<'a> Lexer<'a> {
         });
     }
 
+    /// Consume one unit of single-line raw string (`` `...` ``) content:
+    /// a doubled backtick, the closing backtick, or a literal character.
+    /// Everything else — `{`, `}`, `\`, `"` — stays verbatim (#414).
+    fn lex_raw_single(&mut self, start: usize, mut value: String, is_nested: bool, clean: bool) {
+        match self.peek_char() {
+            // Doubled backtick: the only escape, yielding one literal
+            // backtick (mirrors the `{{` / `}}` doubling philosophy).
+            Some('`') if self.src[self.pos..].starts_with("``") => {
+                value.push('`');
+                self.bump_char();
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: false,
+                    segs: Vec::new(),
+                    brace_depth: 0,
+                    raw: true,
+                    // Rewritten text: never borrow afterwards.
+                    clean: false,
+                });
+            }
+            // Lone backtick closes. Same segment logic as `"`: a nested
+            // raw string always terminates; otherwise an open `Interp`
+            // means a continuation segment, else the string is complete.
+            Some('`') => {
+                let end = self.pos + '`'.len_utf8();
+                self.bump_char();
+                let span = Span::new(start as u32, end as u32);
+                if is_nested {
+                    self.push_token(
+                        TokenKind::Str,
+                        span,
+                        clean_str_token(self.src, start, end, value, clean),
+                    );
+                } else if self
+                    .contexts
+                    .iter()
+                    .any(|c| matches!(c, LexContext::Interp { .. }))
+                {
+                    self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
+                    self.contexts.push(LexContext::Str {
+                        start: self.pos,
+                        value: String::new(),
+                        is_nested: false,
+                        triple: false,
+                        segs: Vec::new(),
+                        brace_depth: 0,
+                        raw: false,
+                        // Continuation segment (no opening quote at `start`).
+                        clean: false,
+                    });
+                } else {
+                    self.push_token(
+                        TokenKind::Str,
+                        span,
+                        clean_str_token(self.src, start, end, value, clean),
+                    );
+                }
+            }
+            // Fully literal: interpolation, backslash escapes, and brace
+            // collapsing never fire inside raw strings.
+            Some(c) => {
+                value.push(c);
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: false,
+                    segs: Vec::new(),
+                    brace_depth: 0,
+                    raw: true,
+                    // Verbatim char: cleanliness unchanged.
+                    clean,
+                });
+            }
+            None => {
+                self.unterminated(start, "`", true);
+            }
+        }
+    }
+
+    /// Consume one unit of triple-backtick raw string content: the closing
+    /// delimiter, or a literal character (single/double backticks included).
+    /// Like `"""`, lone backticks are content; only ``` closes. No
+    /// interpolation, no escapes, no dedent surprises — segments dedent
+    /// exactly like triple-quoted strings (#414).
+    fn lex_raw_triple(&mut self, start: usize, value: String, is_nested: bool, segs: Vec<usize>) {
+        // Closing delimiter.
+        if self.src[self.pos..].starts_with("```") {
+            let indent = self.closing_triple_indent();
+            self.pos += 3;
+            let span = Span::new(start as u32, self.pos as u32);
+            if is_nested {
+                let idx = self.tokens.len();
+                self.push_token(TokenKind::Str, span, Cow::Owned(value));
+                self.dedent_triple_segments(&segs, idx, indent);
+            } else if self
+                .contexts
+                .iter()
+                .any(|c| matches!(c, LexContext::Interp { .. }))
+            {
+                let idx = self.tokens.len();
+                self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
+                let mut next_segs = segs;
+                next_segs.push(idx);
+                self.dedent_triple_segments(&next_segs, usize::MAX, indent);
+                self.contexts.push(LexContext::Str {
+                    start: self.pos,
+                    value: String::new(),
+                    is_nested: false,
+                    triple: true,
+                    segs: next_segs,
+                    brace_depth: 0,
+                    raw: false,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
+                });
+            } else {
+                let idx = self.tokens.len();
+                self.push_token(TokenKind::Str, span, Cow::Owned(value));
+                self.dedent_triple_segments(&segs, idx, indent);
+            }
+            return;
+        }
+        match self.peek_char() {
+            Some(c) => {
+                let mut value = value;
+                value.push(c);
+                self.bump_char();
+                self.contexts.push(LexContext::Str {
+                    start,
+                    value,
+                    is_nested,
+                    triple: true,
+                    segs,
+                    brace_depth: 0,
+                    raw: true,
+                    // Triple strings never borrow (dedent rewrites).
+                    clean: false,
+                });
+            }
+            None => {
+                self.unterminated(start, "```", false);
+            }
+        }
+    }
+
     /// Consume one unit of string content (a quote, an escape, an
     /// interpolation start, or a plain character).
     fn lex_string_cont(&mut self) {
         // Pop the current string context; continuation arms re-push it with
         // the updated value.
-        let (start, value, is_nested, clean) = match self.contexts.pop() {
+        let (start, value, is_nested, clean, brace_depth, raw) = match self.contexts.pop() {
             Some(LexContext::Str {
                 start,
                 value,
@@ -703,15 +951,25 @@ impl<'a> Lexer<'a> {
                 triple: false,
                 segs,
                 clean,
+                brace_depth,
+                raw,
             }) => {
                 debug_assert!(segs.is_empty());
-                (start, value, is_nested, clean)
+                (start, value, is_nested, clean, brace_depth, raw)
             }
             Some(LexContext::Str { triple: true, .. }) => {
                 unreachable!("triple-quoted string dispatched to lex_string_cont")
             }
             _ => unreachable!("lex_string_cont called outside string mode"),
         };
+        // Raw strings (`` `...` ``, #414): everything is literal. The only
+        // escape is a doubled backtick (``` `` ``` → `` ` ``); a lone
+        // backtick closes. No interpolation, no `\` escapes, no brace
+        // collapsing — braces, quotes, and backslashes stay verbatim.
+        if raw {
+            self.lex_raw_single(start, value, is_nested, clean);
+            return;
+        }
         match self.peek_char() {
             Some('"') => {
                 let end = self.pos + '"'.len_utf8();
@@ -744,6 +1002,8 @@ impl<'a> Lexer<'a> {
                         segs: Vec::new(),
                         // Continuation segment (no opening quote at `start`).
                         clean: false,
+                        brace_depth,
+                        raw,
                     });
                 } else {
                     // Final closing quote — emit Str (complete string).
@@ -754,10 +1014,11 @@ impl<'a> Lexer<'a> {
                     );
                 }
             }
-            // Doubled-brace escapes: `{{` / `}}` emit a single literal
-            // brace and never open an interpolation. Checked before the
+            // Doubled-brace escape `{{` emits a single literal brace and
+            // never opens an interpolation. Checked before the
             // interpolation arm so `{{name}}` stays literal text while
             // `{{{name}}}` is literal `{` + interpolation + literal `}`.
+            // Each `{{` opens one escape pair (tracked in `brace_depth`).
             // Uses byte-prefix checks (`starts_with`) for exact two-byte
             // consumes; `peek_char_at` is byte-offset based and would be
             // wrong for multi-byte lookahead.
@@ -774,9 +1035,15 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Rewritten text: never borrow afterwards.
                     clean: false,
+                    brace_depth: brace_depth.saturating_add(1),
+                    raw: false,
                 });
             }
-            Some('}') if self.src[self.pos..].starts_with("}}") => {
+            // Doubled-brace escape `}}` closes one `{{` pair. An unmatched
+            // `}}` (no preceding `{{` — the nested-JSON `...}}` case, #402)
+            // is NOT an escape: the guard fails and the braces lex as two
+            // literal characters via the default arm below.
+            Some('}') if self.src[self.pos..].starts_with("}}") && brace_depth > 0 => {
                 let mut value = value;
                 value.push('}');
                 self.bump_char();
@@ -789,17 +1056,21 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Rewritten text: never borrow afterwards.
                     clean: false,
+                    brace_depth: brace_depth - 1,
+                    raw: false,
                 });
             }
             // String interpolation: `{ident...`, `{1...`, `{(...` start an
             // embedded expression — the same trigger set as triple-quoted
-            // strings, so `{1 + 2}` prints `3`. `{{`, `{}`, and JSON-like
-            // `{"key"...` stay literal text (checked above/below).
+            // strings, so `{1 + 2}` prints `3`. Spaces and tabs straight
+            // after `{` are skipped before that test (#516), so `{ n}` is
+            // `{n}`. `{{`, `{}`, and JSON-like `{"key"...` stay literal
+            // text (checked above/below).
             // Emit the accumulated text as StrFmt and enter interpolation
             // mode (leaving the string context underneath); the main loop
             // lexes `{` as LBrace, the expression, and `}` as RBrace, popping
             // back into string mode for the continuation.
-            Some('{') if is_interp_start(self.peek_char_at(1)) => {
+            Some('{') if self.interp_starts_after_brace() => {
                 let span = Span::new(start as u32, self.pos as u32);
                 // Clean prefix (unbroken from the opening quote, no escapes)
                 // borrows `src[start+1..pos]`; anything else keeps the
@@ -823,6 +1094,9 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Post-`{` continuation: no opening quote at `start`.
                     clean: false,
+                    // Pairs span interpolations: `"{{a{x}b}}"` still closes.
+                    brace_depth,
+                    raw,
                 });
                 self.pending_interp = true;
             }
@@ -911,6 +1185,8 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Any `\` escape rewrites text: never borrow afterwards.
                     clean: false,
+                    brace_depth,
+                    raw,
                 });
             }
             Some(c) => {
@@ -925,6 +1201,9 @@ impl<'a> Lexer<'a> {
                     segs: Vec::new(),
                     // Verbatim char: cleanliness unchanged.
                     clean,
+                    // Unmatched `}}` lands here one brace at a time (#402).
+                    brace_depth,
+                    raw,
                 });
             }
             None => {
@@ -944,7 +1223,7 @@ impl<'a> Lexer<'a> {
     /// - on close, all emitted text segments are dedented together based on
     ///   the closing delimiter's indentation.
     fn lex_triple_cont(&mut self) {
-        let (start, value, is_nested, segs) = match self.contexts.pop() {
+        let (start, value, is_nested, segs, brace_depth, raw) = match self.contexts.pop() {
             Some(LexContext::Str {
                 start,
                 value,
@@ -953,12 +1232,19 @@ impl<'a> Lexer<'a> {
                 segs,
                 // Triple strings never borrow (dedent rewrites); ignored.
                 clean: _,
-            }) => (start, value, is_nested, segs),
+                brace_depth,
+                raw,
+            }) => (start, value, is_nested, segs, brace_depth, raw),
             Some(LexContext::Str { triple: false, .. }) => {
                 unreachable!("single-line string dispatched to lex_triple_cont")
             }
             _ => unreachable!("lex_triple_cont called outside string mode"),
         };
+        // Triple-backtick raw strings (#414): fully literal content.
+        if raw {
+            self.lex_raw_triple(start, value, is_nested, segs);
+            return;
+        }
         // Closing delimiter.
         if self.src[self.pos..].starts_with("\"\"\"") {
             let indent = self.closing_triple_indent();
@@ -988,6 +1274,8 @@ impl<'a> Lexer<'a> {
                     segs: next_segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    brace_depth,
+                    raw,
                 });
             } else {
                 let idx = self.tokens.len();
@@ -997,9 +1285,10 @@ impl<'a> Lexer<'a> {
             return;
         }
         match self.peek_char() {
-            // Doubled-brace escapes: `{{` / `}}` emit a single literal
-            // brace and never open an interpolation. Same semantics as
-            // single-line strings; dedent sees only the collapsed value.
+            // Doubled-brace escape `{{` emits a single literal brace and
+            // never opens an interpolation. Same semantics as single-line
+            // strings; dedent sees only the collapsed value. Each `{{`
+            // opens one escape pair (tracked in `brace_depth`).
             Some('{') if self.src[self.pos..].starts_with("{{") => {
                 let mut value = value;
                 value.push('{');
@@ -1013,9 +1302,14 @@ impl<'a> Lexer<'a> {
                     segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    brace_depth: brace_depth.saturating_add(1),
+                    raw: false,
                 });
             }
-            Some('}') if self.src[self.pos..].starts_with("}}") => {
+            // Doubled-brace escape `}}` closes one `{{` pair. An unmatched
+            // `}}` (no preceding `{{` — the nested-JSON `...}}` case, #402)
+            // stays two literal braces via the default arm below.
+            Some('}') if self.src[self.pos..].starts_with("}}") && brace_depth > 0 => {
                 let mut value = value;
                 value.push('}');
                 self.bump_char();
@@ -1028,11 +1322,14 @@ impl<'a> Lexer<'a> {
                     segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    brace_depth: brace_depth - 1,
+                    raw: false,
                 });
             }
             // Interpolation: `{ident...`, `{1...`, `{(...` start an embedded
-            // expression. `{{`, `{}` and `{"...` (JSON-like) stay literal.
-            Some('{') if is_interp_start(self.peek_char_at(1)) => {
+            // expression, also when spaces/tabs follow the brace (#516).
+            // `{{`, `{}` and `{"...` (JSON-like) stay literal.
+            Some('{') if self.interp_starts_after_brace() => {
                 let span = Span::new(start as u32, self.pos as u32);
                 let idx = self.tokens.len();
                 self.push_token(TokenKind::StrFmt, span, Cow::Owned(value));
@@ -1046,6 +1343,9 @@ impl<'a> Lexer<'a> {
                     segs: next_segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    // Pairs span interpolations, as in single-line strings.
+                    brace_depth,
+                    raw,
                 });
                 self.pending_interp = true;
             }
@@ -1134,6 +1434,8 @@ impl<'a> Lexer<'a> {
                     segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    brace_depth,
+                    raw,
                 });
             }
             Some(c) => {
@@ -1148,6 +1450,9 @@ impl<'a> Lexer<'a> {
                     segs,
                     // Triple strings never borrow (dedent rewrites).
                     clean: false,
+                    // Unmatched `}}` lands here one brace at a time (#402).
+                    brace_depth,
+                    raw,
                 });
             }
             None => {
@@ -1269,6 +1574,23 @@ impl<'a> Lexer<'a> {
         self.src[idx..].chars().next()
     }
 
+    /// Whether the `{` at the cursor opens an interpolation (#516).
+    ///
+    /// Spaces and tabs immediately after the brace are skipped before the
+    /// trigger test, so `{ n }` behaves exactly like `{n}`. The body is
+    /// lexed by the main loop, where whitespace between tokens is skipped
+    /// like anywhere else, so only the trigger had to become
+    /// whitespace-aware. `{{` stays the documented literal escape.
+    fn interp_starts_after_brace(&self) -> bool {
+        let mut offset = 1;
+        loop {
+            match self.peek_char_at(offset) {
+                Some(' ') | Some('\t') => offset += 1,
+                c => return is_interp_start(c),
+            }
+        }
+    }
+
     fn bump_char(&mut self) -> char {
         let c = self.peek_char().expect("bump past end of input");
         self.pos += c.len_utf8();
@@ -1330,6 +1652,8 @@ pub(crate) fn is_ident_start(c: char) -> bool {
 /// Interpolation trigger for both single-line and triple-quoted strings:
 /// `{` opens an embedded expression when followed by an identifier start,
 /// a digit, or `(`. `{{`, `{}` and JSON-like `{"key"...` stay literal text.
+/// Callers test this on the first char after `{`, spaces and tabs skipped
+/// (#516 — see [`Lexer::interp_starts_after_brace`]).
 pub(crate) fn is_interp_start(c: Option<char>) -> bool {
     match c {
         Some(ch) if is_ident_start(ch) => true,
@@ -1513,6 +1837,70 @@ mod tests {
         assert_eq!(pipe_count, 2, "should have two PipeGt tokens");
     }
 
+    #[test]
+    fn pipe_chain_with_line_comment_no_stmt_end() {
+        // #489: a `//` comment line between chain links must not end
+        // the statement.
+        let tokens = lex("5\n  // double it\n  |> f").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        let mut found_int = false;
+        for k in &kinds {
+            if *k == TokenKind::Int {
+                found_int = true;
+            }
+            if *k == TokenKind::StmtEnd && found_int {
+                panic!(
+                    "StmtEnd found before PipeGt with comment in chain: {:?}",
+                    kinds
+                );
+            }
+            if *k == TokenKind::PipeGt {
+                assert!(found_int, "PipeGt should appear after Int");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn pipe_chain_with_block_comment_no_stmt_end() {
+        // #489: block comments (incl. nested) are trivia in the lookahead.
+        let tokens = lex("5\n  /* why /* nested */ still why */  |> f").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        let int_idx = kinds.iter().position(|k| *k == TokenKind::Int).unwrap();
+        let pipe_idx = kinds.iter().position(|k| *k == TokenKind::PipeGt).unwrap();
+        assert!(
+            !kinds[int_idx..pipe_idx].contains(&TokenKind::StmtEnd),
+            "no StmtEnd between Int and PipeGt: {:?}",
+            kinds
+        );
+    }
+
+    #[test]
+    fn pipe_chain_trailing_comment_then_link_no_stmt_end() {
+        // #489: trailing comment after a link, next link on its own line.
+        let tokens = lex("5 |> f // first step\n  |> g").tokens;
+        let pipe_count = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::PipeGt)
+            .count();
+        assert_eq!(pipe_count, 2, "should have two PipeGt tokens");
+    }
+
+    #[test]
+    fn comment_then_non_pipe_still_emits_stmt_end() {
+        // A comment followed by a non-pipe line must still end the
+        // statement — the lookahead only skips trivia, it never joins.
+        let tokens = lex("5\n  // just a comment\n  x").tokens;
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+        let int_idx = kinds.iter().position(|k| *k == TokenKind::Int).unwrap();
+        let ident_idx = kinds.iter().position(|k| *k == TokenKind::Ident).unwrap();
+        assert!(
+            kinds[int_idx..ident_idx].contains(&TokenKind::StmtEnd),
+            "StmtEnd expected before non-pipe line: {:?}",
+            kinds
+        );
+    }
+
     // --- triple-quoted (multiline) strings ---------------------------------
 
     /// Significant tokens, excluding StmtEnd trivia and Eof.
@@ -1639,6 +2027,79 @@ mod tests {
     }
 
     #[test]
+    fn raw_single_backtick_is_fully_literal() {
+        // #414: braces, quotes, backslashes, and `{interp}`-lookalikes
+        // all stay verbatim inside backticks.
+        let toks = sig("`{\"a\": {x}} C:\\new`");
+        assert_eq!(
+            toks,
+            vec![(TokenKind::Str, "{\"a\": {x}} C:\\new".to_string())]
+        );
+        // Interpolation never fires, even for identifiers/digits/parens.
+        let toks = sig("`{name} {1} {(a)}`");
+        assert_eq!(toks, vec![(TokenKind::Str, "{name} {1} {(a)}".to_string())]);
+        // Doubled backticks collapse to one literal backtick.
+        let toks = sig("`a``b`");
+        assert_eq!(toks, vec![(TokenKind::Str, "a`b".to_string())]);
+    }
+
+    #[test]
+    fn raw_triple_backtick_dedents_like_triple() {
+        // Multiline raw keeps newlines, dedents on the closing fence,
+        // and never interpolates.
+        let toks = sig("```\n    {\"a\": 1}\n    {x}\n    ```");
+        assert_eq!(toks, vec![(TokenKind::Str, "{\"a\": 1}\n{x}".to_string())]);
+        // Lone and doubled backticks are content; only ``` closes.
+        let toks = sig("```a`b``c```");
+        assert_eq!(toks, vec![(TokenKind::Str, "a`b``c".to_string())]);
+    }
+
+    #[test]
+    fn raw_unterminated_is_error() {
+        let lexed = lex("`abc");
+        assert!(
+            lexed
+                .errors
+                .iter()
+                .any(|e| e.message.contains("a backtick")),
+            "unterminated raw string must name the closer: {:?}",
+            lexed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        // Triple raw names its triple-backtick closer the same way.
+        let lexed = lex("```abc");
+        assert!(
+            lexed
+                .errors
+                .iter()
+                .any(|e| e.message.contains("3 backticks")),
+            "unterminated triple raw must name the closer: {:?}",
+            lexed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unmatched_double_close_stays_literal() {
+        // #402: nested JSON closes (`...}}`) have no preceding `{{`, so
+        // both braces stay literal instead of collapsing to one.
+        let toks = sig("\"{\\\"a\\\": {}}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{\"a\": {}}".to_string())]);
+        let toks = sig("\"x}}y\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "x}}y".to_string())]);
+        // Matched pairs still collapse, even across an interpolation.
+        let toks = sig("\"{{a{x}b}}\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "{a".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "x".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, "b}".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn triple_double_brace_escapes() {
         let toks = sig("\"\"\"a{{b}}c\"\"\"");
         assert_eq!(toks, vec![(TokenKind::Str, "a{b}c".to_string())]);
@@ -1703,6 +2164,48 @@ mod tests {
                 (TokenKind::Str, String::new()),
             ]
         );
+    }
+
+    #[test]
+    fn single_line_interpolation_leading_space() {
+        // #516: `{ n}` is the same interpolation as `{n}` — a leading space
+        // used to be silently literal.
+        let toks = sig("\"a { n} b\"");
+        assert_eq!(
+            toks,
+            vec![
+                (TokenKind::StrFmt, "a ".to_string()),
+                (TokenKind::LBrace, "{".to_string()),
+                (TokenKind::Ident, "n".to_string()),
+                (TokenKind::RBrace, "}".to_string()),
+                (TokenKind::Str, " b".to_string()),
+            ]
+        );
+        // Tabs, digits and parens skip the same way.
+        let toks = sig("\"{\t1 + 2}\"");
+        assert_eq!(toks[0], (TokenKind::StrFmt, String::new()));
+        assert_eq!(toks[1], (TokenKind::LBrace, "{".to_string()));
+        assert_eq!(toks[2], (TokenKind::Int, "1".to_string()));
+        let toks = sig("\"{ (a)}\"");
+        assert_eq!(toks[2], (TokenKind::LParen, "(".to_string()));
+    }
+
+    #[test]
+    fn single_line_space_before_literal_braces() {
+        // A space does not turn a deliberate literal into an interpolation:
+        // JSON-like `{ "k": 1}` and `{ }` stay text (#516).
+        let toks = sig("\"{ \\\"k\\\": 1}\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{ \"k\": 1}".to_string())]);
+        let toks = sig("\"{ }\"");
+        assert_eq!(toks, vec![(TokenKind::Str, "{ }".to_string())]);
+    }
+
+    #[test]
+    fn triple_interpolation_leading_space() {
+        let toks = sig("\"\"\"a { n} b\"\"\"");
+        assert_eq!(toks[0], (TokenKind::StrFmt, "a ".to_string()));
+        assert_eq!(toks[1], (TokenKind::LBrace, "{".to_string()));
+        assert_eq!(toks[2], (TokenKind::Ident, "n".to_string()));
     }
 
     #[test]

@@ -19,6 +19,6 @@ struct ArgsParser {}
 
 impl ArgsParser {
     func new() {
-        args.parser()
+        return args.parser()
     }
 }

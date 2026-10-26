@@ -1,0 +1,11 @@
+// features: comparison, int-arith, locals, print, ranges
+// E2E: bare range values print as s..e with structural equality (#254).
+// The C runtime range used to be a degenerate start-marker (printed
+// s..s) and chunk boxes rendered pointer bits; both backends now share
+// a first-class (start, end, step) value.
+r := 0..5
+println(r)
+println(2..7)
+println((0..5) == (0..5))
+println((0..5) == (0..6))
+println((0..5) == (1..5))

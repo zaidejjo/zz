@@ -72,21 +72,11 @@ fn vm_run(src: &str) -> (i32, String) {
     }
 }
 
-#[allow(dead_code)]
-fn out_path() -> PathBuf {
-    std::env::temp_dir().join(format!("zz-e2e-{}", std::process::id()))
-}
-
 /// Intentional, tracked gaps: stdlib funcs the AOT runtime does not implement
 /// natively. Each entry names the Phase 2 work item / tracked parity fixture
 /// that will remove it. A gap that is no longer missing (the C impl landed)
 /// fails the test so the list cannot rot.
 const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
-    // Phase 2.7 variants — option/result unwrap
-    ("option.unwrap", "option unwrap"),
-    ("option.unwrap_or", "option unwrap_or"),
-    ("result.unwrap", "result unwrap"),
-    ("result.unwrap_or", "result unwrap_or"),
     // Non-reachable from parity fixtures (no fixture uses them):
     ("std.math.matrix_mul", "no fixture; niche math"),
     // Pure-ZZ stdlib functions — run in VM only, no C codegen
@@ -273,6 +263,35 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("csv.stringify_delim", "pure ZZ alias"),
     ("csv.to_json", "pure ZZ alias"),
     ("csv.validate", "pure ZZ alias"),
+    // zz/property
+    ("std.property.seed", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.norm_state", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.step", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.stream", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.int_in", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.pick", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.boolean", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.alpha_char", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.alpha_str", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.shrink_int", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.shrink_str", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.shrink_value", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.check", "pure ZZ; lowered as ZZ fn"),
+    ("std.property.for_all_int", "pure ZZ; lowered as ZZ fn"),
+    ("property.seed", "pure ZZ alias"),
+    ("property.norm_state", "pure ZZ alias"),
+    ("property.step", "pure ZZ alias"),
+    ("property.stream", "pure ZZ alias"),
+    ("property.int_in", "pure ZZ alias"),
+    ("property.pick", "pure ZZ alias"),
+    ("property.boolean", "pure ZZ alias"),
+    ("property.alpha_char", "pure ZZ alias"),
+    ("property.alpha_str", "pure ZZ alias"),
+    ("property.shrink_int", "pure ZZ alias"),
+    ("property.shrink_str", "pure ZZ alias"),
+    ("property.shrink_value", "pure ZZ alias"),
+    ("property.check", "pure ZZ alias"),
+    ("property.for_all_int", "pure ZZ alias"),
     // zz/dec
     ("std.dec.add", "pure ZZ; lowered as ZZ fn"),
     ("std.dec.cmp", "pure ZZ; lowered as ZZ fn"),
@@ -525,29 +544,30 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("http.csrf_check", "pure ZZ alias"),
     ("std.http.request_id", "pure ZZ; no C codegen"),
     ("http.request_id", "pure ZZ alias"),
-    // Phase 2 HTTP natives — VM-only until the P3 AOT HTTP leg lands
-    // (post-middleware chain, prefix static roots, listen limits, test_req).
-    ("std.http.pipe_post", "P3 AOT; post-middleware C impl"),
-    ("http.pipe_post", "P3 AOT; post-middleware C impl"),
-    ("std.http.with_headers", "P3 AOT; response-merge C impl"),
-    ("http.with_headers", "P3 AOT; response-merge C impl"),
-    ("std.http.serve_dir_at", "P3 AOT; prefix-static C impl"),
-    ("http.serve_dir_at", "P3 AOT; prefix-static C impl"),
-    ("std.http.listen_cfg", "P3 AOT; listen-limits C impl"),
-    ("http.listen_cfg", "P3 AOT; listen-limits C impl"),
-    ("std.http.rate_limit", "P3 AOT; token-bucket C impl"),
-    ("http.rate_limit", "P3 AOT; token-bucket C impl"),
-    ("std.http.test_req", "P3 AOT; header-injecting test C impl"),
-    ("std.http.body_bytes", "P3 AOT; request-bytes C impl"),
-    ("http.body_bytes", "P3 AOT; request-bytes C impl"),
-    ("std.http.listen_tls", "P3 AOT; TLS listener C impl"),
-    ("http.listen_tls", "P3 AOT; TLS listener C impl"),
-    ("std.http.listen_tls_cfg", "P3 AOT; TLS listener C impl"),
-    ("http.listen_tls_cfg", "P3 AOT; TLS listener C impl"),
-    ("std.http.fetch_insecure", "P3 AOT; insecure client C impl"),
-    ("http.fetch_insecure", "P3 AOT; insecure client C impl"),
-    ("std.http.hijack", "P3 AOT; upgrade-handoff C impl"),
-    ("http.hijack", "P3 AOT; upgrade-handoff C impl"),
+    // Phase 2/3 HTTP natives — deliberate AOT exclusions (VM-only). Each is
+    // excluded because porting it to the C HTTP runtime needs infrastructure
+    // that does not exist in AOT (rustls TLS, WebSocket handshake + TCP
+    // handoff, insecure curl client, closure-invoking post-middleware, Bytes
+    // request accessor, header-injecting test dispatch, prefix-scoped static
+    // roots). They abort loudly (`zz_unimplemented_native`) on AOT — never
+    // silently lower to unit.
+    ("std.http.pipe_post", "AOT exclusion (VM-only): post-middleware invokes ZZ closures after the handler; AOT dispatch has no post-response closure call"),
+    ("http.pipe_post", "AOT exclusion (VM-only): post-middleware invokes ZZ closures after the handler; AOT dispatch has no post-response closure call"),
+    ("std.http.with_headers", "AOT exclusion (VM-only): response header merge needs C HttpResponse clone + case-insensitive dict merge; not ported"),
+    ("http.with_headers", "AOT exclusion (VM-only): response header merge needs C HttpResponse clone + case-insensitive dict merge; not ported"),
+    ("std.http.serve_dir_at", "AOT exclusion (VM-only): prefix-scoped static roots extend the AOT static-dir table; not ported"),
+    ("http.serve_dir_at", "AOT exclusion (VM-only): prefix-scoped static roots extend the AOT static-dir table; not ported"),
+    ("std.http.test_req", "AOT exclusion (VM-only): header-injecting in-process test dispatch; zz_http_test exists but no header-carrying twin"),
+    ("std.http.body_bytes", "AOT exclusion (VM-only): exact raw request Bytes; C requests carry String bodies; no Bytes request accessor"),
+    ("http.body_bytes", "AOT exclusion (VM-only): exact raw request Bytes; C requests carry String bodies; no Bytes request accessor"),
+    ("std.http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
+    ("http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
+    ("std.http.listen_tls_cfg", "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C"),
+    ("http.listen_tls_cfg", "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C"),
+    ("std.http.fetch_insecure", "AOT exclusion (VM-only): insecure (self-signed) TLS client needs libcurl with verification disabled; no C twin"),
+    ("http.fetch_insecure", "AOT exclusion (VM-only): insecure (self-signed) TLS client needs libcurl with verification disabled; no C twin"),
+    ("std.http.hijack", "AOT exclusion (VM-only): WebSocket upgrade handshake + TCP stream handoff; cleartext-only in AOT"),
+    ("http.hijack", "AOT exclusion (VM-only): WebSocket upgrade handshake + TCP stream handoff; cleartext-only in AOT"),
     // MySQL wire driver — VM-only (no staticlib backend like PG has;
     // AOT lowers these to Unit like time.now_ms).
     ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),
@@ -558,8 +578,6 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // around the closure body); no native C implementation needed.
     ("std.sqlz.transaction", "AOT-inlined; no native C impl"),
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
-    ("std.db.transaction", "AOT-inlined; no native C impl"),
-    ("db.transaction", "AOT-inlined; no native C impl"),
 ];
 
 #[test]
@@ -646,14 +664,14 @@ func fit(cur_w: int, cur_h: int, want_w: int, want_h: int) -> float {
     if sy < sx {
         s = sy
     }
-    s
+    return s
 }
 func pick(a: int, b: int, cond: bool) -> int {
     x := a
     if cond {
         x = b
     }
-    x
+    return x
 }
 println(fit(640, 480, 320, 240))
 println(fit(640, 480, 200, 200))
@@ -691,10 +709,10 @@ if x > 5 {
 fn native_func_calls_match_vm() {
     let src = r#"
 func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 func double(x: int) -> int {
-    x * 2
+    return x * 2
 }
 println(add(2, 3))
 println(double(add(1, 4)))
@@ -707,7 +725,7 @@ println(double(add(1, 4)))
 fn native_recursion_matches_vm() {
     let src = r#"
 func fib(n: int) -> int {
-    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+    return if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
 }
 println(fib(10))
 "#;
@@ -905,8 +923,8 @@ func main() {
 #[test]
 fn native_used_function_kept_unused_pruned() {
     let src = r#"
-func used(x: int) -> int { x + 1 }
-func unused(x: int) -> int { x * 10 }
+func used(x: int) -> int { return x + 1 }
+func unused(x: int) -> int { return x * 10 }
 println(used(1))
 "#;
     let (pruned, reach) = build_reachable(src);
@@ -1013,6 +1031,70 @@ println(p.x)
     assert_eq!(out, "10\n20\n99\n");
 }
 
+/// Issue #557: module-scope binding method call on chunk.
+///
+/// `a := .some(11); b := a.unwrap_or(0)` lowers to
+/// `CallPath ["top2.a", "unwrap_or"]`. The chunk backend must split
+/// this into `("option", "unwrap_or")` and resolve to `zz_option_unwrap_or`,
+/// matching the VM's static method dispatch (#508 pattern extended to
+/// module-scope bindings and match-arm bindings).
+#[test]
+fn native_module_scope_method_call() {
+    let src = r#"
+a := .some(11)
+b := a.unwrap_or(0)
+println(b)
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "11\n");
+}
+
+#[test]
+fn native_module_scope_method_call_none() {
+    let src = r#"
+a := .none
+b := a.unwrap_or(0)
+println(b)
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "0\n");
+}
+
+#[test]
+fn native_match_arm_method_call() {
+    let src = r#"
+func main() {
+    o := .some(.some(5))
+    v := match o {
+        .some(inner) => inner.unwrap_or(0),
+        .none => 0,
+    }
+    println(v)
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn native_method_call_on_value_receiver() {
+    let src = r#"
+func main() {
+    o := .some(.some(5))
+    v := match o {
+        .some(inner) => inner.unwrap_or(0),
+        .none => 0,
+    }
+    println(v)
+    o2 := .none
+    v2 := o2.unwrap_or(99)
+    println(v2)
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "5\n99\n");
+}
+
 #[test]
 fn native_closure_env_capture() {
     // Closures capture by reference (match the VM): mutations through the
@@ -1023,7 +1105,7 @@ func make_counter() {
     count := 0
     inc := |d| { count = count + d; count }
     inc(5)
-    inc(3)
+    return inc(3)
 }
 func nested() {
     x := 1
@@ -1032,14 +1114,14 @@ func nested() {
         inner := |b| x + y + b
         inner(10)
     }
-    mid(100)
+    return mid(100)
 }
 func late() {
     a := 10
     add_a := |x| x + a
     r1 := add_a(5)
     a = 100
-    r1 + add_a(5)
+    return r1 + add_a(5)
 }
 println(make_counter())
 println(nested())
@@ -1089,7 +1171,7 @@ fn native_json_extended_matches_vm() {
     // json.* natives that have C runtime impls (type, len, keys, has,
     // pretty, merge, deep_get, array_push).
     let src = r#"
-j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}}}") ?? json.null()
+j := json.parse("{\"name\": \"test\", \"count\": 42, \"tags\": [\"a\", \"b\"], \"nested\": {\"x\": 1}}") ?? json.null()
 println(json.type(j))
 arr := json.get(j, "tags") ?? json.null()
 println(json.type(arr))
@@ -1351,9 +1433,80 @@ func main() {
 }
 
 #[test]
+fn native_rate_limit_retry_after_rounds_up() {
+    // VM: `wait_ms.div_ceil(1000).max(1)`. A 1500 ms window with one
+    // token must advertise 2 seconds, not truncate to 1 and send the
+    // client back inside the exhausted window.
+    let src = r#"
+import std.http
+
+func main() {
+    s := http.server()
+    s = s.route("GET", "/x", |_req| "x")
+    s = http.rate_limit(s, 1, 1500)
+    r1 := http.test(s, "GET", "/x", "")
+    r2 := http.test(s, "GET", "/x", "")
+    println("{r1.status()}:{r2.status()}:{r2.headers()["Retry-After"]}")
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "200:429:2\n");
+}
+
+#[test]
+fn db_locals_get_scope_cleanup_and_borrow_native_calls() {
+    // AOT has no VM Arc drop for plain C locals: a handler that opens a
+    // DB per request must still close it. DB declarations carry a C
+    // cleanup handler, and the query/exec/close natives borrow the live
+    // local instead of taking an unreleased clone share.
+    let src = r#"
+func touch(d: db) {
+    sqlz.exec(d, "CREATE TABLE t (n INTEGER)")
+}
+
+func open_db() -> db {
+    return sqlz.open(":memory:")
+}
+
+func main() {
+    db := sqlz.open(":memory:")
+    touch(db)
+    rows := open_db().query("SELECT 1")
+    println(len(rows))
+    sqlz.close(db)
+}
+"#;
+    let (pruned, reach) = build_reachable(src);
+    let c = lower_only(&pruned, &reach, "main").source;
+    assert!(
+        c.contains("cleanup(zz_db_value_cleanup)"),
+        "DB local must carry a scope cleanup handler:\n{c}"
+    );
+    let user = c.split("// ---- generated code ----").nth(1).unwrap_or("");
+    assert!(
+        user.lines().any(|line| {
+            line.contains("cleanup(zz_db_value_cleanup)") && line.contains("= args[0];")
+        }),
+        "DB parameter must release the caller's owning clone:\n{user}"
+    );
+    assert!(
+        user.contains("zz_release(&zz_db_arg"),
+        "DB calls must release the borrowed receiver:\n{user}"
+    );
+    assert!(
+        !user.contains("zz_db_exec, zz_clone("),
+        "DB exec must not pass an unreleased clone share:\n{user}"
+    );
+    assert!(
+        user.contains("zz_db_close, v"),
+        "DB close must borrow the live local:\n{user}"
+    );
+}
+
+#[test]
 fn generated_c_contains_arena_in_all_functions() {
     let src = r#"
-func helper(x: int) -> int { x + 1 }
+func helper(x: int) -> int { return x + 1 }
 func main() {
     println(helper(41))
 }
@@ -1481,7 +1634,7 @@ fn native_first_class_func_ref() {
     // behavior by design).
     let src = r#"
 func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 func main() {
     f := add
@@ -1504,10 +1657,10 @@ fn native_indexed_struct_method_receiver() {
 struct Box { v: int }
 impl Box {
     func inc(self, n: int) -> Box {
-        Box{ v: self.v + n }
+        return Box{ v: self.v + n }
     }
     func get(self) -> int {
-        self.v
+        return self.v
     }
 }
 func main() {
@@ -2065,7 +2218,7 @@ func next(r: Rng) -> (int, Rng) {
     return (r.s0 + 1, Rng{ s0: r.s0 + 1, s1: r.s1, s2: r.s2, s3: r.s3 })
 }
 func mid(r: Rng) -> (int, Rng) {
-    next(r)
+    return next(r)
 }
 func main() {
     r := Rng{ s0: 0, s1: 0, s2: 0, s3: 0 }

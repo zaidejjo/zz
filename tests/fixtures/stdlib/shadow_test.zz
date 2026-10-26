@@ -1,0 +1,43 @@
+// features: closures, comparison, func-call, if-else, int-arith, locals, print, return, string-literal, while-loop
+// E2E: closure body calling a captured parameter shadowed by a
+// same-named module function (#437). The call must dispatch through
+// the capture (11), never steal the module-level function (501).
+// Top-level names carry the `shadow_` prefix so batch drivers sharing
+// one native binary cannot collide with other fixtures.
+func shadow_target(n: int) -> int {
+    return n * 100
+}
+
+func shadow_apply(shadow_target: func(int) -> int, x: int) -> int {
+    g := |y: int| {
+        shadow_target(y) + 1
+    }
+    return g(x)
+}
+
+func shadow_loop(n: int) -> int {
+    tot := 0
+    i := 0
+    while i < n {
+        if i == 1 {
+            tot = tot + 10
+        } else {
+            tot = tot + 1
+        }
+        i = i + 1
+    }
+    return tot
+}
+
+func main() {
+    base := |x: int| {
+        x * 2
+    }
+    println("shadow={shadow_apply(base, 5)}")
+    println("shadow_loop={shadow_loop(4)}")
+    // Direct call keeps `shadow_target` reachable: the regression needs
+    // a same-named module function in the binary, otherwise the
+    // fallback has nothing to steal the call with.
+    println("direct={shadow_target(4)}")
+    println("shadow_ok")
+}

@@ -6,7 +6,7 @@ func down(n: int) -> int {
     if n <= 0 {
         return 0
     }
-    down(n - 1) + 1
+    return down(n - 1) + 1
 }
 
 func main() {

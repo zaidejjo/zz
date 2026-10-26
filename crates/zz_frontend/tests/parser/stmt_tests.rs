@@ -247,6 +247,30 @@ fn parses_pub_const_decl() {
 }
 
 #[test]
+fn const_decl_uses_equals_not_colon_eq() {
+    // `const N := 4` — const takes `=`, not `:=`. The diagnostic must name
+    // the supported form and offer a `:=` → `=` replacement.
+    let parsed = zz_frontend::parse("const N := 4");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`const` uses `=`, not `:=`")),
+        "expected const-form error naming `=`, got {:?}",
+        parsed.errors
+    );
+    assert!(
+        parsed.errors.iter().any(|e| {
+            e.fixits
+                .iter()
+                .any(|f| f.message == "replace `:=` with `=`")
+        }),
+        "expected fixit naming the replacement, got {:?}",
+        parsed.errors
+    );
+}
+
+#[test]
 fn plain_decl_is_mutable() {
     let p = parse_ok("x := 10");
     match &p.stmts[0] {
@@ -670,12 +694,113 @@ fn dead_brace_in_template_warns() {
 }
 
 #[test]
+fn space_after_brace_interpolates_without_warning() {
+    // #516: `{ n}` expands like `{n}`, so no dead-brace warning either.
+    let parsed = parse("func main() {\n    n := 5\n    println(\"[{ n}]\")\n}");
+    assert!(
+        parsed.errors.is_empty(),
+        "expected clean parse, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn space_before_json_braces_stays_silent() {
+    // `{ "k": 1}` is still a deliberate JSON-like literal — a space after
+    // `{` must not make it look like a failed interpolation (#516).
+    let parsed = parse("func main() {\n    x := 1\n    println(\"{x} { \\\"k\\\": 1}\")\n}");
+    assert!(
+        parsed.errors.is_empty(),
+        "expected clean parse, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn digit_braces_interpolate_without_warning() {
     // `{1 + 2}` expands now: no dead-brace warning.
     let parsed = parse("func main() {\n    println(\"{1 + 2}\")\n}");
     assert!(
         parsed.errors.is_empty(),
         "expected clean parse, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn discard_assign_is_accepted() {
+    // `_ = expr` evaluates `expr` for effect and drops the value.
+    let p = parse_ok("func f() -> int {\n    _ = compute()\n    return 2\n}");
+    assert_eq!(p.stmts.len(), 1);
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => {
+            assert_eq!(body.stmts.len(), 2);
+            match &body.stmts[0] {
+                zz_frontend::ast::Stmt::Assign { target, value, .. } => {
+                    assert!(
+                        matches!(target, E::Ident { name, .. } if name == "_"),
+                        "expected discard target `_`, got {target:?}"
+                    );
+                    assert!(
+                        matches!(value, E::Call { .. }),
+                        "expected call value, got {value:?}"
+                    );
+                }
+                other => panic!("expected discard assign, got {other:?}"),
+            }
+            assert!(matches!(
+                body.stmts[1],
+                zz_frontend::ast::Stmt::Return { .. }
+            ));
+        }
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn discard_assign_with_call_result_dropped() {
+    // A bare `_ = expr` statement at the top level parses cleanly.
+    let p = parse_ok("_ = compute()");
+    assert_eq!(p.stmts.len(), 1);
+    assert!(
+        matches!(&p.stmts[0], zz_frontend::ast::Stmt::Assign { target, .. }
+            if matches!(target, E::Ident { name, .. } if name == "_"))
+    );
+}
+
+#[test]
+fn bare_discard_wildcard_still_errors() {
+    // `_` used outside of an assignment target is still rejected.
+    let parsed = parse("_");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`_` is only valid in patterns")),
+        "expected '_ is only valid in patterns', got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn discard_assign_only_plain_assign() {
+    // `_ += expr` and `_ == expr` are not discard assignments.
+    let parsed = parse("_ += 1");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`_` is only valid in patterns")),
+        "expected '_ is only valid in patterns' for `_ += 1`, got: {:?}",
+        parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    let parsed = parse("_ == 1");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("`_` is only valid in patterns")),
+        "expected '_ is only valid in patterns' for `_ == 1`, got: {:?}",
         parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }

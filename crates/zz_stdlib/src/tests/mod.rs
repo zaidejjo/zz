@@ -5,8 +5,8 @@ use zz_frontend::parse;
 use zz_runtime::{Interp, Value};
 
 use super::{
-    canonical_module, register_module_namespace, register_wildcard_namespace, stdlib_funcs,
-    stdlib_natives, STDLIB_MODULES,
+    register_module_namespace, register_wildcard_namespace, stdlib_funcs, stdlib_natives,
+    STDLIB_MODULES,
 };
 
 pub(super) fn run(src: &str) -> Result<Value, String> {
@@ -59,7 +59,8 @@ mod types;
 
 /// The per-module member cache (#233) must copy exactly what the old
 /// full-table scan copied: same keys, same values, for every module —
-/// including the `db`→`sqlz` alias and the `sqlz`/`sqlz.postgres` split.
+/// including the deprecated `db`→`sqlz` resolution and the
+/// `sqlz`/`sqlz.postgres` split.
 #[test]
 fn module_namespace_matches_full_scan_oracle() {
     use super::{stdlib_consts_cached, stdlib_funcs_cached, stdlib_natives_cached};
@@ -68,7 +69,7 @@ fn module_namespace_matches_full_scan_oracle() {
     let std_natives = stdlib_natives_cached();
     let std_consts = stdlib_consts_cached();
     for module in STDLIB_MODULES {
-        let canon = canonical_module(module);
+        let canon = module;
         let prefix = format!("std.{canon}.");
         // Oracle: the old scan rules (funcs/natives skip dotted rests;
         // the full-module const copy had no dot filter).
@@ -136,7 +137,7 @@ fn wildcard_namespace_matches_full_scan_oracle() {
     let std_funcs = stdlib_funcs_cached();
     let std_natives = stdlib_natives_cached();
     for module in STDLIB_MODULES {
-        let canon = canonical_module(module);
+        let canon = module;
         let prefix = format!("std.{canon}.");
         let mut want: HashSet<String> = HashSet::new();
         for k in std_funcs.keys().chain(std_natives.keys()) {

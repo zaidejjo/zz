@@ -14,7 +14,7 @@ const MAIN_ZZ: &str = r#"import helper
 startup := "main-init"
 
 func triple(x: int) -> int {
-    x * 3
+    return x * 3
 }
 
 func main() {
@@ -37,26 +37,26 @@ const HELPER_ZZ: &str = r#"pub struct Point {x: int, y: int}
 
 impl Point {
     pub func sum(self) -> int {
-        self.x + self.y
+        return self.x + self.y
     }
 }
 
 pub func greet(name: str) -> str {
-    "hi {name}"
+    return "hi {name}"
 }
 
 pub func add1(x: int) -> int {
-    x + 1
+    return x + 1
 }
 
 greeting := greet("init")
 
 pub func get_greeting() -> str {
-    greeting
+    return greeting
 }
 
 pub func origin() -> Point {
-    Point{x: 3, y: 4}
+    return Point{x: 3, y: 4}
 }
 "#;
 

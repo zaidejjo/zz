@@ -1,6 +1,7 @@
 # Type System
 
-ZZ uses a unification-based type checker with full type inference.
+> Reference (complete). Learning path: [docs/README.md](README.md) →
+> [Value semantics](language/value-semantics.md). This file stays the type-rules source of truth.
 
 ## Primitive Types
 
@@ -55,6 +56,45 @@ a := .ok("success")
 b := .err("failed")
 ```
 
+### User Enums
+
+`enum` declares a tagged union with payload variants. Values erase to
+qualified objects; the type system tracks the enum statically:
+
+```zz
+enum Token {
+    Eof,
+    IntLit(int),
+    Name(str),
+    Pair((int, int)),
+}
+
+b := Token.IntLit(42)
+```
+
+Construction is call-shaped (`Token.IntLit(42)`); matching uses
+dot-prefixed patterns with payload bindings, including nesting:
+
+```zz
+func tag(t: Token) -> str {
+    return match t {
+        .Eof => "eof"
+        .IntLit(_) => "int"
+        .Name(_) => "name"
+        .Pair(_) => "pair"
+    }
+}
+```
+
+Matches over user enums are exhaustiveness-checked: a missing variant
+is a check-time error naming it (`non-exhaustive match: missing
+`.IntLit` (or add a `_` arm)`). Enums support methods (`impl Token`),
+generic parameters (`enum Box<T> { V(T), E }`, inferred from the
+payload), structural equality, `if let` patterns, and nesting inside
+structs, arrays, and other enums. A call to a plain function that
+returns an enum is always a call, never construction — even when the
+enum is declared first in the file.
+
 ## Type Inference Rules
 
 ### Short Declaration (`:=`)
@@ -91,7 +131,7 @@ func add(a: int, b: int) { a + b }
 ### Generic Type Inference
 
 ```zz
-func identity<T>(x: T) -> T { x }
+func identity<T>(x: T) -> T { return x }
 result := identity(42)    // T inferred as int
 ```
 
@@ -207,6 +247,35 @@ struct shapes.Point { x: int, y: int }
 // Accessible as shapes.Point
 ```
 
+### Recursive Types
+
+Structs and enums may reference themselves behind an indirection —
+arrays, options, or dicts — plus mutually recursive pairs:
+
+```zz
+struct Node { n: int, kids: [Node] }
+struct A { b: B, n: int }
+struct B { a: Option<A>, n: int }
+enum R { Null, Int(int), List([R]) }
+```
+
+The checker pre-registers type names, so declaration order never
+matters: enums and helpers may be declared before or after the types
+they use. Both engines share identical semantics; the AOT unbox
+analysis treats any cycle as boxed.
+
+Value semantics apply unchanged: every read or bind of a recursive
+value deep-copies the whole tree, so copying costs O(size) and
+building depth-n trees by wrapping costs O(n²) until move semantics
+(#267) land. Shallow-to-moderate depth is routine (50-deep
+constructs and walks in milliseconds on both engines; 300-deep in
+about a second on VM debug builds). Very deep values (tens of
+thousands) abort the process with a stack-overflow message — never
+silently corrupt, but not a catchable error either; keep recursive
+depth modest and prefer iterative accumulation for large inputs.
+Direct (unindirected) cycles such as `struct V { v: V }` check clean
+but are uninhabited — no finite value exists — and stay boxed.
+
 ## Value Semantics: Copy by Default, Moves Are Invisible
 
 ZZ has value semantics. Every variable binding holds an independent
@@ -272,3 +341,14 @@ fixture corpus must read identically with every optimization on or
 off. If a future analysis ever made a move observable, that would be
 a language change requiring a checker error (use-after-move), not a
 silent optimization.
+
+Backing stores are shared, values are not: on the VM, cloning an
+array, dict, tuple, struct, or string bumps a reference count (O(1))
+instead of duplicating the contents. Any mutation goes through a
+copy-on-write gate — uniquely-owned buffers mutate in place, shared
+ones copy once at the write. Programs cannot observe the sharing
+(equality stays deep, mutation never leaks across bindings).
+
+`clone(v)` pins a fully independent deep copy regardless of sharing:
+use it when a value must survive later mutation of its source, or to
+force a snapshot before handing data to tasks and plugins.

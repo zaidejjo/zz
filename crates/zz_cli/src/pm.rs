@@ -48,6 +48,32 @@ pub fn init(args: &[String]) -> Result<(), String> {
 /// Files support `{{name}}` / `{{Name}}` substitution. Conflicts refuse
 /// unless `--force`. Always `git init -b main` unless `--no-git`.
 pub fn new(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "usage: zz new <name> [--template cli|lib|web|pkg:NAME|URL|PATH] [--force] [--no-git]\n\
+             \n\
+             scaffold a new project (zz.toml, src/main.zz, .gitignore, git init).\n\
+             \n\
+             TEMPLATES:\n  \
+               (default)            cli starter\n  \
+               cli, lib, web        builtin starters\n  \
+               pkg:<registry-name>  registry package template\n  \
+               URL                  git URL template\n  \
+               PATH                 local path template (a `template/` subdir wins)\n\
+             \n\
+             FLAGS:\n  \
+               --template <spec>    template to scaffold from\n  \
+               --force              scaffold into a non-empty directory anyway\n  \
+               --no-git             skip `git init`\n  \
+               -h, --help           show this help\n\
+             \n\
+             EXAMPLES:\n  \
+               zz new myapp\n  \
+               zz new mylib --template lib\n  \
+               zz new myapp --template pkg:starter-web --force"
+        );
+        return Ok(());
+    }
     let template = parse_flag_value(args, "--template");
     let force = args.iter().any(|a| a == "--force");
     let no_git = args.iter().any(|a| a == "--no-git");
@@ -455,6 +481,31 @@ fn clean_in(dir: &Path, with_deps: bool) -> Result<(), String> {
 /// warning for unreachable registries (the dep is still recorded; `zz install`
 /// will retry with a precise error).
 pub fn add(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "usage: zz add <pkg>[@version] [--git URL] [--rev REV] [--path PATH]\n\
+             \n\
+             add a dependency (registry, git, or local path) to zz.toml.\n\
+             \n\
+             FLAGS:\n  \
+               --git <url>          add a git dependency\n  \
+               --rev <rev>          pin a git revision (with --git)\n  \
+               --path <path>        add a local path dependency\n  \
+               -h, --help           show this help\n\
+             \n\
+             EXAMPLES:\n  \
+               zz add redis\n  \
+               zz add redis@0.1.1\n  \
+               zz add mylib --path ../mylib"
+        );
+        return Ok(());
+    }
+    // Keep the original argv for the install leg (it consumes
+    // `--features` itself); parse specs from a stripped view so a feature
+    // value never looks like the package name.
+    let install_args: Vec<String> = args.to_vec();
+    let (_, add_args) = crate::extract_feature_flags(args)?;
+    let args = add_args.as_slice();
     let spec = args
         .iter()
         .find(|a| !a.starts_with('-'))
@@ -472,14 +523,14 @@ pub fn add(args: &[String]) -> Result<(), String> {
 
     // Build the dep spec
     let dep_spec = if let Some(p) = path_dep {
-        zz_pm::manifest::DepSpec::Path(zz_pm::manifest::PathDep { path: p })
+        zz_pm::manifest::DepSpec::Path(zz_pm::manifest::PathDep::new(p))
     } else if let Some(url) = git_url {
         let rev = git_rev.unwrap_or_else(|| "main".to_string());
-        zz_pm::manifest::DepSpec::Git(zz_pm::manifest::GitDep {
-            version: version.clone().unwrap_or_else(|| "*".into()),
-            git: url,
+        zz_pm::manifest::DepSpec::Git(zz_pm::manifest::GitDep::new(
+            version.clone().unwrap_or_else(|| "*".into()),
+            url,
             rev,
-        })
+        ))
     } else {
         // Bare name: consult the local registry before falling back to a
         // remote registry version.
@@ -497,7 +548,7 @@ pub fn add(args: &[String]) -> Result<(), String> {
                 }
                 None => resolve_latest_req(&pkg_name, registry_base_from(args))?,
             };
-            zz_pm::manifest::DepSpec::Version(req)
+            zz_pm::manifest::DepSpec::Version(req.into())
         }
     };
 
@@ -533,7 +584,7 @@ pub fn add(args: &[String]) -> Result<(), String> {
 
     // `add` installs immediately: resolve, fetch into vendor/, write zz.lock.
     // Same flags apply (`--registry` flows through to the install leg).
-    install(args)
+    install(&install_args)
 }
 
 /// Bare `zz add <pkg>`: resolve the latest published version and return it
@@ -675,6 +726,23 @@ pub fn info(args: &[String]) -> Result<(), String> {
             println!("    {dep} = {req}");
         }
     }
+    // Feature gates published with the latest version (#488): prefer the
+    // per-version detail, fall back to the package-level list for servers
+    // that only keep one copy. Legacy metadata has neither.
+    let published_features: &[zz_pm::remote::FeatureDetail] = m
+        .version_details
+        .get(&m.latest)
+        .map(|d| d.features.as_slice())
+        .filter(|f| !f.is_empty())
+        .unwrap_or(m.features.as_slice());
+    if !published_features.is_empty() {
+        println!("  features of {}:", m.latest);
+        let mut features: Vec<&zz_pm::remote::FeatureDetail> = published_features.iter().collect();
+        features.sort_by(|a, b| a.name.cmp(&b.name));
+        for feature in features {
+            println!("    {}", feature_line(feature));
+        }
+    }
     if !pkg.readme.is_empty() {
         println!();
         // First 20 lines — enough to recognize the package.
@@ -787,8 +855,28 @@ pub fn install(args: &[String]) -> Result<(), String> {
     }
 
     let manifest = zz_pm::manifest::Manifest::load(&toml_path)?;
+    // Feature gates (#488): `--features` / `--all-features` narrow which
+    // optional deps install. Unknown names fail before any network work.
+    let features = crate::extract_feature_flags(args)?.0;
+    manifest.resolve_features(&features)?;
 
     if manifest.dependencies.is_empty() {
+        // No declared deps: the lock must not keep orphaned (transitive)
+        // pins and vendor/ must not keep stale links (#420 lifecycle).
+        // Reset both so a removal is fully reconciled, not just unlisted.
+        let lock_path = dir.join("zz.lock");
+        if let Ok(mut lock) = zz_pm::lock::Lockfile::load(&lock_path) {
+            if !lock.deps.is_empty() {
+                lock.deps.clear();
+                lock.set_manifest_deps_hash(manifest.deps_hash());
+                lock.set_features_hash(features.fingerprint());
+                let _ = lock.save(&lock_path);
+            }
+        }
+        let vendor_dir = dir.join("vendor");
+        if vendor_dir.exists() {
+            let _ = std::fs::remove_dir_all(&vendor_dir);
+        }
         println!("no dependencies to install");
         return Ok(());
     }
@@ -799,20 +887,29 @@ pub fn install(args: &[String]) -> Result<(), String> {
 
     // Amendment 3: Check path-dep staleness even if deps_match() is true
     let deps_hash = manifest.deps_hash();
+    let features_hash = features.fingerprint();
     if let Some(ref lock) = existing_lock {
-        if lock.deps_match(&deps_hash) {
-            // Declaration hashes match — but path deps might have changed content
-            if zz_pm::resolve::path_deps_stale(&manifest, Some(lock), &dir)
+        if lock.deps_match(&deps_hash) && lock.features_match(&features_hash) {
+            // Declaration hashes match — but path deps might have changed
+            // content, or upstream manifests might have changed transitive
+            // requirements (#420), so both close over the full closure.
+            if zz_pm::resolve::path_deps_stale_with_features(&manifest, Some(lock), &dir, &features)
                 .map_err(|e| e.to_string())?
             {
                 println!("path dependency content changed, re-resolving...");
-            } else if !zz_pm::link::links_valid(&dir, &manifest, lock) {
+            } else if zz_pm::resolve::transitive_reqs_stale_with_features(
+                &manifest, lock, &dir, &features,
+            )
+            .map_err(|e| e.to_string())?
+            {
+                println!("transitive requirements changed, re-resolving...");
+            } else if !zz_pm::link::links_valid_with_features(&dir, &manifest, lock, &features) {
                 // #323: resolved but not materialized (fresh clone, wiped
                 // vendor/, GC'd CAS) — fall through to fetch + link.
                 println!("vendor links missing or stale, fetching and linking...");
             } else {
                 println!("dependencies unchanged (lockfile is up to date)");
-                crate::prewarm_run_cache(&dir);
+                crate::prewarm_run_cache(&dir, &features);
                 return Ok(());
             }
         }
@@ -825,7 +922,8 @@ pub fn install(args: &[String]) -> Result<(), String> {
     crate::ui::step(1, 4, "Resolving versions");
 
     // Use the resolver to resolve all dependencies (registry-aware).
-    let opts = zz_pm::resolve::ResolveOptions::remote(&registry_base_from(args));
+    let opts = zz_pm::resolve::ResolveOptions::remote(&registry_base_from(args))
+        .with_features(features.clone());
     let resolved = zz_pm::resolve::resolve_with(&manifest, existing_lock.as_ref(), &dir, &opts)
         .map_err(|e| e.to_string())?;
     // #266: surface manifest-wins source decisions (stale cross-source pins).
@@ -852,6 +950,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     }
 
     lock.set_manifest_deps_hash(deps_hash);
+    lock.set_features_hash(features_hash);
     lock.save(&lock_path)?;
 
     // Fetch git deps into CAS
@@ -906,9 +1005,14 @@ pub fn install(args: &[String]) -> Result<(), String> {
 
     // Link into project
     crate::ui::step(3, 4, "Linking into vendor/");
-    let linked =
-        zz_pm::link::link_project(&dir, &manifest, &lock, zz_pm::link::LinkStrategy::Symlink)
-            .map_err(|e| format!("link failed: {e}"))?;
+    let linked = zz_pm::link::link_project_with_features(
+        &dir,
+        &manifest,
+        &lock,
+        zz_pm::link::LinkStrategy::Symlink,
+        &features,
+    )
+    .map_err(|e| format!("link failed: {e}"))?;
     let linked_count = linked.len();
 
     // Register this project for safe GC (best-effort, don't fail install on registry errors)
@@ -944,6 +1048,23 @@ pub fn install(args: &[String]) -> Result<(), String> {
                 .map_err(|e| format!("cannot install dependency `{dep_name}`: {e}"))?;
         }
     }
+    // Transitive pins (#420) get the same compiler check through their
+    // vendor/ links (a transitive dep can require a newer zz, too).
+    for dep in lock
+        .deps
+        .iter()
+        .filter(|d| !manifest.dependencies.contains_key(&d.name))
+    {
+        let dep_toml = dir.join("vendor").join(&dep.name).join("zz.toml");
+        if !dep_toml.exists() {
+            continue;
+        }
+        if let Ok(dep_manifest) = zz_pm::manifest::Manifest::load(&dep_toml) {
+            dep_manifest
+                .check_zz_version(crate::VERSION)
+                .map_err(|e| format!("cannot install dependency `{}`: {e}", dep.name))?;
+        }
+    }
     // Native plugins: build now so `zz run` works without a prior
     // `zz build` (registry tarballs exclude build outputs). Declarative
     // failures and gate violations fail the install; allowed legacy
@@ -967,7 +1088,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     // Cargo-style: compile the entry now so the first `zz run` hits the
     // run cache instead of paying parse+check+compile (even-cold speed).
     // Best-effort and silent when warm; never fails the install.
-    crate::prewarm_run_cache(&dir);
+    crate::prewarm_run_cache(&dir, &features);
     Ok(())
 }
 
@@ -1438,8 +1559,28 @@ pub fn publish(args: &[String]) -> Result<(), String> {
     let tarball = zz_pm::publish::pack(&dir, &manifest).map_err(|e| e.to_string())?;
     println!("created: {}", tarball.display());
 
+    // Long-form docs + language mix for the publish payload (#395).
+    let docs_md = zz_pm::publish::docs_md_for(&dir);
+    let languages = zz_pm::publish::languages_for(&tarball);
+
     if args.iter().any(|a| a == "--dry-run") {
         println!("dry run: skipping upload");
+        match &docs_md {
+            Some(docs) => println!("docs: {} bytes from {}", docs.len(), docs_source(&dir)),
+            None => println!("docs: none (no DOCS.md or docs/**/*.md)"),
+        }
+        if languages.is_empty() {
+            println!("languages: none");
+        } else {
+            let mut mix: Vec<(&String, &f64)> = languages.iter().collect();
+            mix.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let mix = mix
+                .iter()
+                .map(|(l, p)| format!("{l} {p:.0}%"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("languages: {mix}");
+        }
         return Ok(());
     }
 
@@ -1456,6 +1597,8 @@ pub fn publish(args: &[String]) -> Result<(), String> {
         tarball_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
         tarball_sha256: sha256,
         readme_md: std::fs::read_to_string(dir.join("README.md")).ok(),
+        docs_md,
+        languages,
         deps: manifest
             .dependencies
             .iter()
@@ -1471,6 +1614,7 @@ pub fn publish(args: &[String]) -> Result<(), String> {
             .map(|c| c.to_lowercase())
             .unwrap_or_default(),
         keywords: manifest.package.keywords.clone(),
+        features: publish_features(&manifest),
     };
 
     println!("uploading {}@{} to {base}...", req.name, req.version);
@@ -1528,9 +1672,74 @@ fn resolve_publish_token(base: &str) -> Result<String, String> {
 }
 
 /// Stringify a dep spec for the registry `deps` table.
+/// Where `--dry-run` docs came from (#395): mirrors
+/// `publish::docs_md_for` without rereading contents.
+fn docs_source(dir: &std::path::Path) -> String {
+    if dir.join("DOCS.md").is_file() {
+        "DOCS.md".to_string()
+    } else {
+        "docs/**/*.md bundle".to_string()
+    }
+}
+
+/// Publish payload for `[features]` (#488): one entry per declared
+/// feature, keeping the list/table shape distinguishable via its fields.
+fn publish_features(manifest: &zz_pm::manifest::Manifest) -> Vec<zz_pm::remote::FeatureDetail> {
+    manifest
+        .features
+        .iter()
+        .map(|(name, spec)| zz_pm::remote::FeatureDetail {
+            name: name.clone(),
+            modules: spec.modules().to_vec(),
+            enables: spec.feature_refs().to_vec(),
+            deps: spec.dep_refs().to_vec(),
+        })
+        .collect()
+}
+
+/// One-line `zz info` rendering of a published feature gate.
+fn feature_line(feature: &zz_pm::remote::FeatureDetail) -> String {
+    if feature.modules.is_empty() && feature.deps.is_empty() {
+        return format!(
+            "{} = [{}]",
+            feature.name,
+            feature
+                .enables
+                .iter()
+                .map(|e| format!("\"{e}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if !feature.modules.is_empty() {
+        parts.push(format!(
+            "modules = [{}]",
+            feature
+                .modules
+                .iter()
+                .map(|m| format!("\"{m}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !feature.deps.is_empty() {
+        parts.push(format!(
+            "deps = [{}]",
+            feature
+                .deps
+                .iter()
+                .map(|d| format!("\"{d}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    format!("{} = {{ {} }}", feature.name, parts.join(", "))
+}
+
 fn dep_spec_string(spec: &zz_pm::manifest::DepSpec) -> String {
     match spec {
-        zz_pm::manifest::DepSpec::Version(v) => v.clone(),
+        zz_pm::manifest::DepSpec::Version(v) => v.version.clone(),
         zz_pm::manifest::DepSpec::Git(g) => format!("git+{}#{}", g.git, g.rev),
         zz_pm::manifest::DepSpec::Path(p) => format!("path:{}", p.path),
     }
@@ -1717,11 +1926,20 @@ fn locked_dep_manifest(
     dep: &zz_pm::lock::LockedDep,
 ) -> Option<zz_pm::manifest::Manifest> {
     if dep.source == "path" {
-        let rel = match manifest.dependencies.get(&dep.name)? {
-            zz_pm::manifest::DepSpec::Path(p) => p.path.clone(),
-            _ => return None,
+        // Direct path deps resolve against the manifest; transitive path
+        // pins (#420) resolve through their vendor/ link.
+        let rel = match manifest.dependencies.get(&dep.name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => dir.join(&p.path),
+            _ => {
+                let linked = dir.join("vendor").join(&dep.name);
+                if linked.exists() {
+                    linked
+                } else {
+                    return None;
+                }
+            }
         };
-        return zz_pm::manifest::Manifest::load(&dir.join(&rel).join("zz.toml")).ok();
+        return zz_pm::manifest::Manifest::load(&rel.join("zz.toml")).ok();
     }
     if dep.source.starts_with("registry+") {
         if dep.hash.is_empty() {
@@ -1758,6 +1976,119 @@ fn outdated_status(locked: &str, wanted_ver: &str, latest: &str) -> &'static str
     }
 }
 
+/// Handle `zz generate-wrapper [--check] [pkg-dir]` (#235): emit
+/// `src/<pkg>.zz` from `plugin.zzi` — one `pub` wrapper per manifest
+/// function, calling through the C-symbol alias (`bytehash.sum` →
+/// `bytehash_sum`, the only spelling that resolves inside the defining
+/// module). Output is deterministic (sorted, trailing newline) so
+/// `--check` fails loudly on drift: re-run the command, never hand-edit
+/// (hand edits lose the marker check only — the file stays valid code).
+/// Refuses to overwrite a file without the generated marker.
+pub fn generate_wrapper(args: &[String]) -> Result<(), String> {
+    let check = args.iter().any(|a| a == "--check");
+    let dir_arg = args.iter().find(|a| !a.starts_with('-')).map(PathBuf::from);
+    let dir = match dir_arg {
+        Some(d) => d,
+        None => std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?,
+    };
+    let manifest = zz_pm::manifest::Manifest::load(&dir.join("zz.toml")).map_err(|e| {
+        format!(
+            "cannot load package manifest `{}`: {e}",
+            dir.join("zz.toml").display()
+        )
+    })?;
+    let pkg = manifest.package.name.clone();
+    let plugin = zz_plugin::load_manifest(&dir.join("plugin.zzi")).map_err(|e| {
+        format!(
+            "cannot load plugin manifest `{}`: {e}",
+            dir.join("plugin.zzi").display()
+        )
+    })?;
+    let mut names: Vec<&String> = plugin.funcs.keys().collect();
+    names.sort();
+    let mut out = String::from(
+        "// GENERATED by `zz generate-wrapper` — do not edit by hand.\n\
+         // Source: plugin.zzi — regenerate after manifest changes\n\
+         // (`zz generate-wrapper --check` fails on drift).\n\n",
+    );
+    for name in names {
+        let sig = &plugin.funcs[name];
+        let leaf = name.rsplit('.').next().unwrap_or(name);
+        let alias = sig.c_symbol(name);
+        if !crate::loader::is_zz_ident(&alias) {
+            out.push_str(&format!(
+                "// skipped `{name}`: no callable C-symbol spelling\n"
+            ));
+            continue;
+        }
+        let params: Vec<String> = sig
+            .params
+            .iter()
+            .map(|(n, t)| format!("{n}: {t}"))
+            .collect();
+        let args: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
+        let ret = match &sig.ret {
+            zz_checker::Type::Unit | zz_checker::Type::Void => String::new(),
+            t => format!(" -> {t}"),
+        };
+        let call = format!("{alias}({})", args.join(", "));
+        let body = if ret.is_empty() {
+            format!("    {call}\n")
+        } else {
+            format!("    return {call}\n")
+        };
+        out.push_str(&format!(
+            "// `{name}` via `{alias}`.\n\
+             pub func {leaf}({}){ret} {{\n\
+             {body}}}\n\n",
+            params.join(", ")
+        ));
+    }
+    let dest = dir.join("src").join(format!("{pkg}.zz"));
+    if check {
+        let current = std::fs::read_to_string(&dest).map_err(|e| {
+            format!(
+                "cannot read generated wrapper `{}`: {e}\n\
+                 hint: run `zz generate-wrapper` first",
+                dest.display()
+            )
+        })?;
+        if current != out {
+            let line = current
+                .lines()
+                .zip(out.lines())
+                .position(|(a, b)| a != b)
+                .map(|i| i + 1)
+                .unwrap_or_else(|| current.lines().count().min(out.lines().count()) + 1);
+            return Err(format!(
+                "generated wrapper `{}` is stale (first diff at line {line})\n\
+                 hint: re-run `zz generate-wrapper`",
+                dest.display()
+            ));
+        }
+        println!("wrapper up to date: {}", dest.display());
+        return Ok(());
+    }
+    if dest.exists() {
+        let current = std::fs::read_to_string(&dest)
+            .map_err(|e| format!("cannot read `{}`: {e}", dest.display()))?;
+        if !current.starts_with("// GENERATED by `zz generate-wrapper`") {
+            return Err(format!(
+                "refusing to overwrite hand-written `{}`\n\
+                 hint: move it aside or delete it first",
+                dest.display()
+            ));
+        }
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create `{}`: {e}", parent.display()))?;
+    }
+    std::fs::write(&dest, &out).map_err(|e| format!("cannot write `{}`: {e}", dest.display()))?;
+    println!("wrote {}", dest.display());
+    Ok(())
+}
+
 /// Handle `zz outdated`: locked vs wanted vs latest per registry dep.
 pub fn outdated(args: &[String]) -> Result<(), String> {
     let (_dir, manifest, lock) = load_manifest_and_lock()?;
@@ -1770,7 +2101,7 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
         .dependencies
         .iter()
         .filter_map(|(name, spec)| match spec {
-            zz_pm::manifest::DepSpec::Version(req) => Some((name, req)),
+            zz_pm::manifest::DepSpec::Version(req) => Some((name, &req.version)),
             _ => None,
         })
         .collect();
@@ -2090,10 +2421,12 @@ fn deps_why(target: &str) -> Result<(), String> {
 }
 
 /// Handle `zz audit`: integrity of locked pins (published? hash matches?
-/// licensed? content present?). This is tamper/rot detection — not
-/// vulnerability scanning (the registry publishes no advisory feed).
+/// licensed? content present?) plus the native closure (backend identity,
+/// compiler/pkg-config drift, source tampering, hook detection). This is
+/// tamper/rot detection — not vulnerability scanning (the registry
+/// publishes no advisory feed).
 pub fn audit(args: &[String]) -> Result<(), String> {
-    let (_dir, _manifest, lock) = load_manifest_and_lock()?;
+    let (dir, manifest, lock) = load_manifest_and_lock()?;
     let lock = lock.ok_or_else(|| {
         "no zz.lock found\n\
           hint: run `zz install` first"
@@ -2104,63 +2437,69 @@ pub fn audit(args: &[String]) -> Result<(), String> {
         .iter()
         .filter(|d| d.source.starts_with("registry+"))
         .collect();
-    if locked.is_empty() {
-        println!("no registry pins to audit");
-        return Ok(());
-    }
-    let base = registry_base_from(args);
-    let client = zz_pm::remote::RegistryClient::new(&base);
-    crate::ui::header(&format!("auditing {} pins on {base}", locked.len()));
     let mut errors = 0u32;
     let mut warnings = 0u32;
-    for (i, dep) in locked.iter().enumerate() {
-        crate::ui::progress(i + 1, locked.len(), &dep.name);
-        let Some((_, name, version)) = zz_pm::remote::parse_registry_source(&dep.source) else {
-            crate::ui::warn(&format!("{}: unreadable lockfile source", dep.name));
-            warnings += 1;
-            continue;
-        };
-        let info = match client.fetch_metadata(&name) {
-            Ok(info) => info,
-            Err(e) => {
-                crate::ui::warn(&format!("{}: cannot verify ({e})", dep.name));
+    if locked.is_empty() {
+        println!("no registry pins to audit");
+    } else {
+        let base = registry_base_from(args);
+        let client = zz_pm::remote::RegistryClient::new(&base);
+        crate::ui::header(&format!("auditing {} pins on {base}", locked.len()));
+        for (i, dep) in locked.iter().enumerate() {
+            crate::ui::progress(i + 1, locked.len(), &dep.name);
+            let Some((_, name, version)) = zz_pm::remote::parse_registry_source(&dep.source) else {
+                crate::ui::warn(&format!("{}: unreadable lockfile source", dep.name));
                 warnings += 1;
                 continue;
+            };
+            let info = match client.fetch_metadata(&name) {
+                Ok(info) => info,
+                Err(e) => {
+                    crate::ui::warn(&format!("{}: cannot verify ({e})", dep.name));
+                    warnings += 1;
+                    continue;
+                }
+            };
+            if !info.metadata.versions.contains(&version) {
+                crate::ui::warn(&format!("{}@{version}: no longer published!", dep.name));
+                errors += 1;
+                continue;
             }
-        };
-        if !info.metadata.versions.contains(&version) {
-            crate::ui::warn(&format!("{}@{version}: no longer published!", dep.name));
-            errors += 1;
-            continue;
-        }
-        let expected = zz_pm::remote::expected_sha(&info, &version);
-        if !expected.is_empty() && expected != dep.hash {
-            crate::ui::warn(&format!(
-                "{}@{version}: lockfile hash does not match registry!",
-                dep.name
-            ));
-            errors += 1;
-            continue;
-        }
-        let licensed = info
-            .metadata
-            .version_details
-            .get(&version)
-            .map(|d| !d.license.is_empty())
-            .unwrap_or(false)
-            || !info.metadata.license.is_empty();
-        if !licensed {
-            crate::ui::warn(&format!("{}@{version}: no license metadata", dep.name));
-            warnings += 1;
-        }
-        if !dep.hash.is_empty() && !zz_pm::paths::cas_entry(&dep.hash).exists() {
-            crate::ui::warn(&format!(
-                "{}@{version}: content missing locally (run `zz install`)",
-                dep.name
-            ));
-            warnings += 1;
+            let expected = zz_pm::remote::expected_sha(&info, &version);
+            if !expected.is_empty() && expected != dep.hash {
+                crate::ui::warn(&format!(
+                    "{}@{version}: lockfile hash does not match registry!",
+                    dep.name
+                ));
+                errors += 1;
+                continue;
+            }
+            let licensed = info
+                .metadata
+                .version_details
+                .get(&version)
+                .map(|d| !d.license.is_empty())
+                .unwrap_or(false)
+                || !info.metadata.license.is_empty();
+            if !licensed {
+                crate::ui::warn(&format!("{}@{version}: no license metadata", dep.name));
+                warnings += 1;
+            }
+            if !dep.hash.is_empty() && !zz_pm::paths::cas_entry(&dep.hash).exists() {
+                crate::ui::warn(&format!(
+                    "{}@{version}: content missing locally (run `zz install`)",
+                    dep.name
+                ));
+                warnings += 1;
+            }
         }
     }
+    // ---- native closure -------------------------------------------------
+    // Everything that becomes machine code inside the user's process:
+    // backend identity, compiler/pkg-config drift, source tampering, and
+    // hook detection (integrity + identity — not vulnerability scanning).
+    let native_count =
+        audit_native_closure(&dir, &manifest, &lock, args, &mut errors, &mut warnings);
     if errors > 0 {
         return Err(format!(
             "audit failed: {errors} error(s), {warnings} warning(s)\n\
@@ -2170,9 +2509,338 @@ pub fn audit(args: &[String]) -> Result<(), String> {
     if warnings > 0 {
         println!("audit passed with {warnings} warning(s)");
     } else {
-        println!("audit passed: {} pins verified", locked.len());
+        println!(
+            "audit passed: {} registry pin(s), {} native dep(s) verified",
+            locked.len(),
+            native_count
+        );
     }
     Ok(())
+}
+
+/// Audit the native closure (#265): for every locked dep whose own
+/// manifest declares `[native]`, surface the build record from `zz.lock`
+/// and verify it against the current machine.
+///
+/// Per dep:
+/// - hook backend: fails unless `--allow-hooks` (same rule as install).
+/// - `cc` drift: host tag, `cc --version`, and resolved `pkg-config`
+///   versions must match the lock (drift = error, `zz install` re-pins).
+/// - source tampering: path-dep content re-hash must match the lock
+///   (build outputs excluded from hashing, same as install).
+/// - license: a missing package license warns (mirrors the registry
+///   license check).
+///
+/// Offline: never touches the network; unavailable content is a warning.
+#[allow(clippy::too_many_lines)]
+fn audit_native_closure(
+    dir: &std::path::Path,
+    manifest: &zz_pm::manifest::Manifest,
+    lock: &zz_pm::lock::Lockfile,
+    args: &[String],
+    errors: &mut u32,
+    warnings: &mut u32,
+) -> usize {
+    use zz_pm::lock::LockedDep;
+    let allow_hooks = args.iter().any(|a| a == "--allow-hooks");
+    // (dep, own manifest, content dir): `None` when the content is not
+    // available locally — warned about by the registry section above for
+    // registry pins; skipped quietly otherwise.
+    let mut native: Vec<(&LockedDep, zz_pm::manifest::Manifest)> = Vec::new();
+    for dep in &lock.deps {
+        if let Some(dep_manifest) = locked_dep_manifest(dir, manifest, dep) {
+            if dep_manifest.native.is_some() {
+                native.push((dep, dep_manifest));
+            }
+        }
+    }
+    if native.is_empty() {
+        return 0;
+    }
+    crate::ui::header(&format!("auditing {} native dep(s)", native.len()));
+    for (dep, dep_manifest) in &native {
+        let spec = dep_manifest.native.as_ref().unwrap();
+        let rec = dep.native.as_ref();
+        let is_hook = spec.build.is_some();
+        if is_hook {
+            if !allow_hooks {
+                crate::ui::warn(&format!(
+                    "{}: uses legacy [native] build hook (audit refuses hooks)\n\
+                     hint: re-run with --allow-hooks to acknowledge, or ask the maintainer to migrate to [native.build-cc]",
+                    dep.name
+                ));
+                *errors += 1;
+                continue;
+            }
+            crate::ui::warn(&format!(
+                "{}: legacy [native] hook acknowledged via --allow-hooks",
+                dep.name
+            ));
+            *warnings += 1;
+        }
+        match rec.map(|r| r.backend.as_str()) {
+            Some("cc") => {
+                let r = rec.unwrap();
+                let cc = if r.compiler.is_empty() {
+                    "-".to_string()
+                } else {
+                    r.compiler.clone()
+                };
+                let pkg = if r.pkg_config_resolved.is_empty() {
+                    "-".to_string()
+                } else {
+                    r.pkg_config_resolved.clone()
+                };
+                println!(
+                    "  {}@{}: backend=cc tag={} cc={cc} pkg-config={pkg}",
+                    dep.name, dep.version, r.tag
+                );
+                // Host/compiler/pkg-config drift against the live machine.
+                let modules = spec
+                    .build_cc
+                    .as_ref()
+                    .map(|b| b.pkg_config.clone())
+                    .unwrap_or_default();
+                let drift = zz_pm::native_build::check_native_drift(&dep.name, r, &modules);
+                for e in drift.errors {
+                    crate::ui::warn(&e);
+                    *errors += 1;
+                }
+                for w in drift.warnings {
+                    crate::ui::warn(&w);
+                    *warnings += 1;
+                }
+            }
+            Some("rust") => {
+                let r = rec.unwrap();
+                let rustc = if r.compiler.is_empty() {
+                    "-".to_string()
+                } else {
+                    r.compiler.clone()
+                };
+                let vendor = if r.vendor_key.is_empty() {
+                    "-".to_string()
+                } else {
+                    short_hash(&r.vendor_key)
+                };
+                println!(
+                    "  {}@{}: backend=rust tag={} rustc={rustc} vendor={vendor}",
+                    dep.name, dep.version, r.tag
+                );
+                // Host/rustc drift against the live machine.
+                let drift = zz_pm::native_build::check_native_drift(&dep.name, r, &[]);
+                for e in drift.errors {
+                    crate::ui::warn(&e);
+                    *errors += 1;
+                }
+                for w in drift.warnings {
+                    crate::ui::warn(&w);
+                    *warnings += 1;
+                }
+                let Some(rust) = spec.build_rust.as_ref() else {
+                    crate::ui::warn(&format!(
+                        "{}: zz.lock records backend=rust but zz.toml has no [native.build-rust]",
+                        dep.name
+                    ));
+                    *errors += 1;
+                    continue;
+                };
+                // Compatibility range against the live toolchain.
+                match zz_pm::native_build::probe_rust_toolchain() {
+                    Ok(tc) => {
+                        if let Err(e) = zz_pm::native_build::check_rustc_range(
+                            rust.rustc_req(),
+                            &tc.rustc_semver,
+                        ) {
+                            crate::ui::warn(&format!("{}: {e}", dep.name));
+                            *errors += 1;
+                        }
+                    }
+                    Err(e) => {
+                        crate::ui::warn(&format!(
+                            "{}: cannot check rustc_range offline ({e})",
+                            dep.name
+                        ));
+                        *warnings += 1;
+                    }
+                }
+                let Some(dep_dir) = locked_dep_dir(dir, manifest, dep) else {
+                    crate::ui::warn(&format!(
+                        "{}: Rust crate sources are not available locally (run `zz install`)",
+                        dep.name
+                    ));
+                    *warnings += 1;
+                    continue;
+                };
+                let crate_dir = match zz_pm::rust_lock::crate_dir_for(&dep_dir, &rust.crate_path) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        crate::ui::warn(&format!("{}: {e}", dep.name));
+                        *errors += 1;
+                        continue;
+                    }
+                };
+                // Source/manifest tampering: the content key is derived
+                // from the committed crate tree + spec, so a mismatch
+                // means the lock record is stale.
+                match zz_pm::native_build::rust_vendor_key(&crate_dir, rust) {
+                    Ok(current) if !r.vendor_key.is_empty() && current != r.vendor_key => {
+                        crate::ui::warn(&format!(
+                            "{}: Rust closure key changed (lock `{}`, now `{}`) (re-run `zz install`)",
+                            dep.name,
+                            short_hash(&r.vendor_key),
+                            short_hash(&current),
+                        ));
+                        *errors += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        crate::ui::warn(&format!("{}: cannot verify Rust closure ({e})", dep.name));
+                        *errors += 1;
+                    }
+                }
+                match zz_pm::native_build::audit_rust_plugin(&crate_dir, rust) {
+                    Ok(audit) => {
+                        for c in &audit.crates {
+                            let checksum = c
+                                .checksum
+                                .as_deref()
+                                .map(short_hash)
+                                .unwrap_or_else(|| "-".to_string());
+                            let license = c.license.as_deref().unwrap_or("-");
+                            println!(
+                                "    {}@{} source={} checksum={checksum} license={license}",
+                                c.name, c.version, c.source
+                            );
+                        }
+                        for e in audit.errors {
+                            crate::ui::warn(&format!("{}: {e}", dep.name));
+                            *errors += 1;
+                        }
+                        for w in audit.warnings {
+                            crate::ui::warn(&format!("{}: {w}", dep.name));
+                            *warnings += 1;
+                        }
+                    }
+                    Err(e) => {
+                        crate::ui::warn(&format!("{}: Rust closure audit failed ({e})", dep.name));
+                        *errors += 1;
+                    }
+                }
+            }
+            Some("prebuilt") => {
+                let r = rec.unwrap();
+                println!(
+                    "  {}@{}: backend=prebuilt tag={} sha256={}",
+                    dep.name,
+                    dep.version,
+                    r.tag,
+                    short_hash(&r.artifact_sha256),
+                );
+                // Host drift via the shared checker (compiler/pkg-config
+                // are empty by design for prebuilt artifacts, so only
+                // the tag is compared).
+                let drift = zz_pm::native_build::check_native_drift(&dep.name, r, &[]);
+                for e in drift.errors {
+                    crate::ui::warn(&e);
+                    *errors += 1;
+                }
+                for w in drift.warnings {
+                    crate::ui::warn(&w);
+                    *warnings += 1;
+                }
+            }
+            Some(other) => {
+                crate::ui::warn(&format!(
+                    "{}: unknown native backend `{other}` in zz.lock",
+                    dep.name
+                ));
+                *warnings += 1;
+            }
+            None if !is_hook => {
+                crate::ui::warn(&format!(
+                    "{}: declares [native] but zz.lock has no build record (run `zz install`)",
+                    dep.name
+                ));
+                *warnings += 1;
+            }
+            None => {}
+        }
+        // Source tampering: path deps re-hash against the lock.
+        if dep.source == "path" {
+            if let Some(dep_dir) = locked_dep_dir(dir, manifest, dep) {
+                match zz_pm::hash::hash_dir(&dep_dir, &zz_pm::hash::HashOptions::default()) {
+                    Ok(current) if current != dep.hash => {
+                        crate::ui::warn(&format!(
+                            "{}: content changed (lock `{}`, now `{}`) (re-run `zz install`)",
+                            dep.name,
+                            short_hash(&dep.hash),
+                            short_hash(&current),
+                        ));
+                        *errors += 1;
+                    }
+                    Err(e) => {
+                        crate::ui::warn(&format!("{}: cannot re-hash content ({e})", dep.name));
+                        *warnings += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // License surface: flag missing package licenses.
+        if dep_manifest
+            .package
+            .license
+            .as_ref()
+            .is_none_or(|l| l.is_empty())
+        {
+            crate::ui::warn(&format!("{}: no license metadata", dep.name));
+            *warnings += 1;
+        }
+    }
+    native.len()
+}
+
+/// First 12 hex chars for log lines (full values stay in `zz.lock`).
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// Content dir of a locked dep (offline): path deps from disk (direct
+/// path or `vendor/` link), registry/git deps from the CAS. Mirrors
+/// [`locked_dep_manifest`] but returns the dir instead of the manifest.
+fn locked_dep_dir(
+    dir: &std::path::Path,
+    manifest: &zz_pm::manifest::Manifest,
+    dep: &zz_pm::lock::LockedDep,
+) -> Option<std::path::PathBuf> {
+    if dep.source == "path" {
+        let rel = match manifest.dependencies.get(&dep.name) {
+            Some(zz_pm::manifest::DepSpec::Path(p)) => dir.join(&p.path),
+            _ => {
+                let linked = dir.join("vendor").join(&dep.name);
+                if linked.exists() {
+                    linked
+                } else {
+                    return None;
+                }
+            }
+        };
+        return rel.exists().then_some(rel);
+    }
+    if dep.source.starts_with("registry+") {
+        if dep.hash.is_empty() {
+            return None;
+        }
+        let entry = zz_pm::paths::cas_entry(&dep.hash);
+        return entry.exists().then_some(entry);
+    }
+    if dep.source.starts_with("git+") {
+        let commit = dep.commit.as_deref()?;
+        let entry = zz_pm::paths::cas_entry(commit);
+        return entry.exists().then_some(entry);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2261,6 +2929,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn publish_metadata_keeps_both_feature_shapes() {
+        let manifest = zz_pm::manifest::Manifest::parse(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [dependencies]\n\
+             faker = { version = \"1.0\", optional = true }\n\
+             \n\
+             [features]\n\
+             default = [\"std\"]\n\
+             std = []\n\
+             locales-ar = { modules = [\"locales/ar\"], deps = [\"faker\"] }\n",
+        )
+        .unwrap();
+        let features = publish_features(&manifest);
+        assert_eq!(features.len(), 3);
+        assert_eq!(features[0].name, "default");
+        assert_eq!(features[0].enables, vec!["std".to_string()]);
+        assert_eq!(features[1].name, "locales-ar");
+        assert_eq!(features[1].modules, vec!["locales/ar".to_string()]);
+        assert_eq!(features[1].deps, vec!["faker".to_string()]);
+
+        assert_eq!(feature_line(&features[0]), "default = [\"std\"]");
+        let table = feature_line(&features[1]);
+        assert!(table.contains("modules = [\"locales/ar\"]"), "{table}");
+        assert!(table.contains("deps = [\"faker\"]"), "{table}");
+    }
+
+    #[test]
+    fn new_help_short_circuits_without_name() {
+        // #418: `--help` prints usage (Ok) instead of erroring about the
+        // missing name. No filesystem side effects on this path.
+        assert!(super::new(&["--help".to_string()]).is_ok());
+        assert!(super::new(&["-h".to_string()]).is_ok());
+        assert!(super::new(&[]).is_err());
+    }
+
+    #[test]
+    fn add_help_short_circuits_without_spec() {
+        // Same missing-help class as `new --help`.
+        assert!(super::add(&["--help".to_string()]).is_ok());
+        assert!(super::add(&["-h".to_string()]).is_ok());
+        assert!(super::add(&[]).is_err());
     }
 
     #[test]

@@ -1,0 +1,13 @@
+import std.time
+
+func main() {
+    s := "hello world, hello world"
+    t0 := time.now_ms()
+    total := 0
+    for i in 0..50000 {
+        t := s[1:5]
+        total = total + len(t)
+    }
+    t1 := time.now_ms()
+    println("str_slice_len: {t1 - t0}ms result={total}")
+}

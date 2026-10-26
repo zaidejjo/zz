@@ -1,0 +1,61 @@
+// features: break-continue, bytes, closures, comparison, elvis, for-loop, func-call, imports, int-arith, locals, match, option-result, print, ranges, slicing, std-env, std-fs, std-net, std-process, std-str, std-task, string-literal, string-ops
+// tests/fixtures/stdlib/net_write_after_close_test.zz — write-after-close
+// must surface EPIPE as a Result error, never SIGPIPE-kill (#424).
+// Server accepts then closes; client drains FIN, then writes until the
+// first error. Only aggregates print (per-iteration timing differs
+// across engines, but an error within budget is deterministic).
+// Bind port derives from (pid, sweep task) like net_tcp_test so
+// parallel runners never share it.
+import std.env
+import std.fs
+import std.net
+import std.process(pid)
+import std.str
+import std.task
+
+func main() -> Result<int, str> {
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    base_port := 24000 + pid() % 20000 + tok_num % 20000
+    listen_addr := "127.0.0.1:{base_port}"
+    l := net.tcp_listen(listen_addr)?
+    h := task.spawn(|_| {
+        match net.tcp_accept(l) {
+            .ok(c) => match c.close() {
+                .ok(_) => 0
+                .err(_) => 1
+            }
+            .err(_) => 2
+        }
+    })
+    s := net.tcp_connect(listen_addr, 5000)?
+    s.set_read_timeout(2000)?
+    s.set_write_timeout(2000)?
+    // Drain the FIN: closed either way (EOF now, timeout if slow).
+    // Both arms print identically — which fires is timing-dependent
+    // but the outcome (no data, no death) is not.
+    match s.read_line() {
+        .ok(_) => println("read-done")
+        .err(_e) => println("read-done")
+    }
+    blob := fs.read_bytes("tests/fixtures/stdlib/data/sample.tar")?
+    chunk := blob[0:1024]
+    errs := 0
+    for _i in 0..30 {
+        q := s.write_bytes(chunk)
+        if let .err(_e) = q {
+            errs = errs + 1
+            break
+        }
+    }
+    println("write-err-seen:{errs > 0}")
+    task.join(h)
+    // Final close can itself report ENOTCONN on a reset socket —
+    // either outcome is fine; the point (no death) already held.
+    match s.close() {
+        .ok(_) => println("close-done")
+        .err(_e) => println("close-done")
+    }
+    println("net_write_after_close_ok")
+    return .ok(0)
+}

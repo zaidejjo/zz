@@ -22,7 +22,7 @@ println(1 << 64)
 
 // rotate-left building block (Xoshiro-style)
 func rotl(x: int, k: int) -> int {
-    (x << k) | (x >> (64 - k))
+    return (x << k) | (x >> (64 - k))
 }
 println(rotl(1, 1))
 println(rotl(-1, 17))

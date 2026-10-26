@@ -8,10 +8,10 @@ import std.env
 func main() -> Result<int, str> {
     root := "{env.temp_dir()}/zz_static_p2"
     fs.mkdir_all(root)?
-    fs.write_file("{root}/hello.txt", "hello static")?
-    fs.write_file("{root}/app.js", "console.log(1)")?
-    fs.write_file("{root}/index.html", "<h1>hi</h1>")?
-    fs.write_file("{root}/data.bin", "0123456789")?
+    fs.write("{root}/hello.txt", "hello static")?
+    fs.write("{root}/app.js", "console.log(1)")?
+    fs.write("{root}/index.html", "<h1>hi</h1>")?
+    fs.write("{root}/data.bin", "0123456789")?
 
     s := http.server()
     s = http.serve_dir(s, root)
@@ -41,5 +41,5 @@ func main() -> Result<int, str> {
     println("index: {r7.status()}:{r7.text()}")
 
     println("http_static_p2_ok")
-    .ok(0)
+    return .ok(0)
 }

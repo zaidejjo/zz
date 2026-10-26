@@ -1,0 +1,49 @@
+// features: assert, comparison, func-call, int-arith, locals, string-literal, zz-test
+// E2E: doc-tests — /// ```zz fences run as tests on both engines.
+
+/// Shared setup for the fences below.
+///
+/// ```zz,prelude
+/// base := 20
+/// ```
+
+/// Double a number.
+///
+/// ```zz
+/// assert_eq(double(base + 1), 42)
+/// ```
+///
+/// ```zz,ignore
+/// assert_eq(double(0), 999)
+/// ```
+func double(n: int) -> int {
+    return n * 2
+}
+
+/// Always true.
+///
+/// ```zz
+/// assert(true)
+/// ```
+///
+/// ```zz,no_run
+/// assert_eq(double(1), 2)
+/// ```
+///
+/// ```zz,compile_fail
+/// assert_eq(double("nope"), 0)
+/// ```
+///
+/// ```zz,compile_fail
+/// assert_eq(missing_fn(1), 2)
+/// ```
+
+func truthy() -> bool {
+    return true
+}
+
+@test
+func test_double() {
+    assert_eq(double(2), 4)
+    assert(truthy())
+}

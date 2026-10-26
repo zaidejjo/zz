@@ -1,0 +1,12 @@
+// features: assert, func-call, imports, locals, print, string-literal, arrays, comparison
+// E2E: test.black_box identity across types (bare + test.* spellings).
+import std.test
+
+func main() {
+    assert_eq(black_box(41), 41)
+    assert_eq(black_box("hi"), "hi")
+    assert_eq(black_box([1, 2]), [1, 2])
+    assert_eq(test.black_box(1.5), 1.5)
+    assert_eq(test.black_box(true), true)
+    println("test_black_box_ok")
+}

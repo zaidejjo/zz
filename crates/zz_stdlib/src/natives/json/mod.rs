@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use crate::natives::{arg, expect_str};
-use zz_runtime::json::{parse_json, to_json_string, to_json_string_pretty, JsonValue};
+use zz_runtime::json::{parse_json, to_json_string, to_json_string_pretty, JsonObject, JsonValue};
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 pub(crate) fn json_parse(
@@ -9,7 +11,7 @@ pub(crate) fn json_parse(
 ) -> Result<Value, EvalError> {
     let s = expect_str(args, 0, "std.json.parse")?;
     match parse_json(&s) {
-        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(j)))))),
+        Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Json(Arc::new(j)))))),
         Err(msg) => Ok(Value::Result(Box::new(Err(Value::Str(
             format!("invalid JSON: {msg}").into(),
         ))))),
@@ -25,6 +27,12 @@ pub(crate) fn json_stringify(
         .first()
         .cloned()
         .ok_or_else(|| EvalError::new("missing argument for std.json.stringify", _span))?;
+    // Serialize a JSON value directly without cloning the document.
+    if let Value::Json(j) = &v {
+        return Ok(Value::Result(Box::new(Ok(Value::Str(
+            to_json_string(j.as_ref()).into(),
+        )))));
+    }
     match value_to_json(&v) {
         Ok(j) => Ok(Value::Result(Box::new(Ok(Value::Str(
             to_json_string(&j).into(),
@@ -33,23 +41,54 @@ pub(crate) fn json_stringify(
     }
 }
 
+/// Borrow a JSON argument without cloning the document.  Read-only natives
+/// use this so `json.get(obj, k)` no longer deep-clones the whole object on
+/// every call.
+fn expect_json_ref(args: &[Value], i: usize, name: &str) -> Result<Arc<JsonValue>, EvalError> {
+    match args.get(i) {
+        Some(Value::Json(j)) => Ok(Arc::clone(j)),
+        Some(other) => Err(EvalError::new(
+            format!("`{name}` expects a JSON value, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+        None => Err(EvalError::new(
+            format!("missing argument for `{name}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+/// Owned clone of a JSON argument (used by mutating ops such as merge /
+/// array_push that copy once on write).
+fn expect_json_owned(args: &mut Vec<Value>, i: usize, name: &str) -> Result<JsonValue, EvalError> {
+    match arg(args, i, name)? {
+        Value::Json(j) => Ok((**j).clone()),
+        other => Err(EvalError::new(
+            format!("`{name}` expects a JSON value, found `{other}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
 pub(crate) fn json_get(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.get")?;
+    let j = expect_json_ref(args, 0, "std.json.get")?;
     let key = expect_str(args, 1, "std.json.get")?;
-    match j {
-        JsonValue::Obj(entries) => match entries.into_iter().find(|(k, _)| *k == key) {
-            Some((_, v)) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(v)))))),
+    match j.as_ref() {
+        JsonValue::Obj(obj) => match obj.get(&key) {
+            Some(v) => Ok(Value::Result(Box::new(Ok(Value::Json(Arc::new(
+                v.clone(),
+            )))))),
             None => Ok(Value::Result(Box::new(Err(Value::Str(
                 format!("key `{key}` not found").into(),
             ))))),
         },
         JsonValue::Arr(items) => match key.parse::<usize>() {
             Ok(idx) => match items.get(idx) {
-                Some(v) => Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(
+                Some(v) => Ok(Value::Result(Box::new(Ok(Value::Json(Arc::new(
                     v.clone(),
                 )))))),
                 None => Ok(Value::Result(Box::new(Err(Value::Str(
@@ -71,8 +110,8 @@ pub(crate) fn json_as_str(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    match expect_json(args, 0, "std.json.as_str")? {
-        JsonValue::Str(s) => Ok(Value::Str(s.into())),
+    match expect_json_ref(args, 0, "std.json.as_str")?.as_ref() {
+        JsonValue::Str(s) => Ok(Value::Str(s.clone().into())),
         other => Err(EvalError::new(
             format!("std.json.as_str: expected a string, found `{other}`"),
             span,
@@ -85,8 +124,8 @@ pub(crate) fn json_as_int(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    match expect_json(args, 0, "std.json.as_int")? {
-        JsonValue::Num(n) if n.fract() == 0.0 && n.is_finite() => Ok(Value::Int(n as i64)),
+    match expect_json_ref(args, 0, "std.json.as_int")?.as_ref() {
+        JsonValue::Num(n) if n.fract() == 0.0 && n.is_finite() => Ok(Value::Int(*n as i64)),
         other => Err(EvalError::new(
             format!("std.json.as_int: expected an integer, found `{other}`"),
             span,
@@ -99,8 +138,8 @@ pub(crate) fn json_as_float(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    match expect_json(args, 0, "std.json.as_float")? {
-        JsonValue::Num(n) => Ok(Value::Float(n)),
+    match expect_json_ref(args, 0, "std.json.as_float")?.as_ref() {
+        JsonValue::Num(n) => Ok(Value::Float(*n)),
         other => Err(EvalError::new(
             format!("std.json.as_float: expected a number, found `{other}`"),
             span,
@@ -113,8 +152,8 @@ pub(crate) fn json_as_bool(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    match expect_json(args, 0, "std.json.as_bool")? {
-        JsonValue::Bool(b) => Ok(Value::Bool(b)),
+    match expect_json_ref(args, 0, "std.json.as_bool")?.as_ref() {
+        JsonValue::Bool(b) => Ok(Value::Bool(*b)),
         other => Err(EvalError::new(
             format!("std.json.as_bool: expected a boolean, found `{other}`"),
             span,
@@ -127,7 +166,7 @@ pub(crate) fn json_null(
     _args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    Ok(Value::Json(Box::new(JsonValue::Null)))
+    Ok(Value::Json(Arc::new(JsonValue::Null)))
 }
 
 pub(crate) fn json_pretty(
@@ -135,8 +174,8 @@ pub(crate) fn json_pretty(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.pretty")?;
-    Ok(Value::Str(to_json_string_pretty(&j).into()))
+    let j = expect_json_ref(args, 0, "std.json.pretty")?;
+    Ok(Value::Str(to_json_string_pretty(j.as_ref()).into()))
 }
 
 pub(crate) fn json_type(
@@ -144,9 +183,11 @@ pub(crate) fn json_type(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.type")?;
+    let j = expect_json_ref(args, 0, "std.json.type")?;
     Ok(Value::Str(
-        zz_runtime::json::json_type_name(&j).to_string().into(),
+        zz_runtime::json::json_type_name(j.as_ref())
+            .to_string()
+            .into(),
     ))
 }
 
@@ -155,8 +196,8 @@ pub(crate) fn json_len(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.len")?;
-    Ok(Value::Int(zz_runtime::json::json_len(&j) as i64))
+    let j = expect_json_ref(args, 0, "std.json.len")?;
+    Ok(Value::Int(zz_runtime::json::json_len(j.as_ref()) as i64))
 }
 
 pub(crate) fn json_keys(
@@ -164,10 +205,10 @@ pub(crate) fn json_keys(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.keys")?;
-    let keys = zz_runtime::json::json_keys(&j);
+    let j = expect_json_ref(args, 0, "std.json.keys")?;
+    let keys = zz_runtime::json::json_keys(j.as_ref());
     let arr: Vec<Value> = keys.into_iter().map(|k| Value::Str(k.into())).collect();
-    Ok(Value::Array(Box::new(arr)))
+    Ok(Value::Array(std::sync::Arc::new(arr)))
 }
 
 pub(crate) fn json_has(
@@ -175,9 +216,9 @@ pub(crate) fn json_has(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.has")?;
+    let j = expect_json_ref(args, 0, "std.json.has")?;
     let key = expect_str(args, 1, "std.json.has")?;
-    Ok(Value::Bool(zz_runtime::json::json_has(&j, &key)))
+    Ok(Value::Bool(zz_runtime::json::json_has(j.as_ref(), &key)))
 }
 
 pub(crate) fn json_merge(
@@ -185,9 +226,9 @@ pub(crate) fn json_merge(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let a = expect_json(args, 0, "std.json.merge")?;
-    let b = expect_json(args, 1, "std.json.merge")?;
-    Ok(Value::Json(Box::new(zz_runtime::json::json_merge(&a, &b))))
+    let a = expect_json_owned(args, 0, "std.json.merge")?;
+    let b = expect_json_owned(args, 1, "std.json.merge")?;
+    Ok(Value::Json(Arc::new(zz_runtime::json::json_merge(&a, &b))))
 }
 
 pub(crate) fn json_deep_get(
@@ -195,16 +236,16 @@ pub(crate) fn json_deep_get(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.deep_get")?;
+    let j = expect_json_ref(args, 0, "std.json.deep_get")?;
     let path = expect_str(args, 1, "std.json.deep_get")?;
-    let mut current = j;
+    let mut current = Arc::clone(&j);
     for seg in path.split('.') {
         if seg.is_empty() {
             continue;
         }
-        current = match current {
-            JsonValue::Obj(entries) => match entries.into_iter().find(|(k, _)| k == seg) {
-                Some((_, v)) => v,
+        current = match current.as_ref() {
+            JsonValue::Obj(obj) => match obj.get(seg) {
+                Some(v) => Arc::new((*v).clone()),
                 None => {
                     return Ok(Value::Result(Box::new(Err(Value::Str(
                         format!("key `{seg}` not found in path").into(),
@@ -213,7 +254,7 @@ pub(crate) fn json_deep_get(
             },
             JsonValue::Arr(items) => match seg.parse::<usize>() {
                 Ok(idx) => match items.get(idx) {
-                    Some(v) => v.clone(),
+                    Some(v) => Arc::new((*v).clone()),
                     None => {
                         return Ok(Value::Result(Box::new(Err(Value::Str(
                             format!("index {idx} out of bounds in path").into(),
@@ -230,14 +271,14 @@ pub(crate) fn json_deep_get(
                 return Ok(Value::Result(Box::new(Err(Value::Str(
                     format!(
                         "cannot traverse into `{}` in path",
-                        zz_runtime::json::json_type_name(&current)
+                        zz_runtime::json::json_type_name(current.as_ref())
                     )
                     .into(),
                 )))));
             }
         };
     }
-    Ok(Value::Result(Box::new(Ok(Value::Json(Box::new(current))))))
+    Ok(Value::Result(Box::new(Ok(Value::Json(current)))))
 }
 
 pub(crate) fn json_array_push(
@@ -245,7 +286,7 @@ pub(crate) fn json_array_push(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json(args, 0, "std.json.array_push")?;
+    let j = expect_json_owned(args, 0, "std.json.array_push")?;
     let val = match arg(args, 1, "std.json.array_push")? {
         Value::Json(j) => (**j).clone(),
         other => value_to_json(other)?,
@@ -253,7 +294,7 @@ pub(crate) fn json_array_push(
     match j {
         JsonValue::Arr(mut items) => {
             items.push(val);
-            Ok(Value::Json(Box::new(JsonValue::Arr(items))))
+            Ok(Value::Json(Arc::new(JsonValue::Arr(items))))
         }
         other => Err(EvalError::new(
             format!(
@@ -261,20 +302,6 @@ pub(crate) fn json_array_push(
                 zz_runtime::json::json_type_name(&other)
             ),
             _span,
-        )),
-    }
-}
-
-pub(crate) fn expect_json(
-    args: &mut Vec<Value>,
-    i: usize,
-    name: &str,
-) -> Result<JsonValue, EvalError> {
-    match arg(args, i, name)? {
-        Value::Json(j) => Ok((**j).clone()),
-        other => Err(EvalError::new(
-            format!("`{name}` expects a JSON value, found `{other}`"),
-            zz_runtime::Span::new(0, 0),
         )),
     }
 }
@@ -317,14 +344,14 @@ pub(crate) fn value_to_json(v: &Value) -> Result<JsonValue, EvalError> {
         )),
         Value::Dict(entries) => {
             let mut out = Vec::with_capacity(entries.len());
-            for (k, val) in &**entries {
+            for (k, val) in entries.iter() {
                 let key = match k {
                     Value::Str(s) => s.clone(),
                     other => return Err(err(&format!("a non-string key (`{other}`)"))),
                 };
                 out.push(((*key).clone(), value_to_json(val)?));
             }
-            Ok(JsonValue::Obj(out))
+            Ok(JsonValue::Obj(JsonObject::from_entries(out)))
         }
         Value::Func(_) | Value::Native(_) => Err(err("a function")),
         Value::Json(j) => Ok((**j).clone()),

@@ -1,0 +1,21 @@
+// features: func-call, locals, option-result, print, string-literal
+// E2E: option/result `.unwrap()` + `.unwrap_or()` must match byte-for-byte
+// on VM and AOT (#452: native had no lowering and failed with
+// `undefined reference to zz_fn_result__unwrap`). Success paths only;
+// error paths abort loudly on both engines (covered by error fixtures).
+opt_some := .some(42)
+println("{opt_some.unwrap()}")
+println("{opt_some.unwrap_or(0)}")
+opt_none:Option<int> = .none
+println("{opt_none.unwrap_or(99)}")
+res_ok := .ok(7)
+println("{res_ok.unwrap()}")
+println("{res_ok.unwrap_or(0)}")
+res_err:Result<int, str> = .err("boom")
+println("{res_err.unwrap_or(99)}")
+// Chained through a call result, like `test.temp_dir("x").unwrap()`.
+func maybe_ok() -> Result<str, str> {
+    return .ok("chained")
+}
+println("{maybe_ok().unwrap()}")
+println("option_result_unwrap_ok")

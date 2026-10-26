@@ -308,6 +308,11 @@ pub fn scan_project_refs(project_dir: &Path) -> HashSet<String> {
                     if let Some(commit) = &dep.commit {
                         refs.insert(commit.clone());
                     }
+                    if let Some(native) = &dep.native {
+                        if !native.vendor_key.is_empty() {
+                            refs.insert(native.vendor_key.clone());
+                        }
+                    }
                 }
             }
         }

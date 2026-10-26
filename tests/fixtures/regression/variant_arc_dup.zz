@@ -1,0 +1,62 @@
+// features: arrays, dicts, elvis, for-loop, fstrings, func-call, int-arith, locals, match, option-result, print, ranges, std-str, std-vec, string-literal, string-ops, vec-push
+// Variant payload boxes are reference counted (#507): the same Option/
+// Result value may be stored in more than one container slot, iterated,
+// matched, and unwrapped without a double free on the AOT backends.
+// Regression for `o := .some(x); a := [o, o]` freeing the shared 16-byte
+// payload box once per element.
+func describe(v: Option<str>) -> str {
+    return match v {
+        .some(x) => "some:{x}"
+        .none => "none"
+    }
+}
+
+func main() {
+    o := .some("heap payload")
+    // Three owners of one box.
+    a := [o, o, o]
+    for v in a {
+        println(v)
+    }
+    println(len(a))
+    // Dict slots share the same box.
+    d := {"k1": o, "k2": o}
+    println(d["k1"])
+    println(d["k2"])
+    println(describe(o))
+    // `??` clones the winner out of an owned temporary, then drops it.
+    println(o ?? "never")
+    // Distinct payloads stay independent.
+    p := .some("first")
+    q := .some("second")
+    both := [p, q, p, q]
+    for v in both {
+        println(v)
+    }
+    // Nested payload (a variant holding an array) duplicated in a container.
+    n := .some([1, 2, 3])
+    nested := [n, n]
+    for v in nested {
+        println(v)
+    }
+    println(len(nested))
+    // Result wrappers through match and elvis.
+    r := .ok("ok payload")
+    match r {
+        .ok(x) => println("ok:{x}")
+        .err(e) => println("err:{e}")
+    }
+    println(r ?? "never")
+    // Variant built inside a loop (loop arena) and stored twice.
+    acc := []
+    for i in 0..3 {
+        v := .some(str(i))
+        acc = vec.push(acc, v)
+        acc = vec.push(acc, v)
+    }
+    println(len(acc))
+    for v in acc {
+        println(v)
+    }
+    println("variant_arc_dup_ok")
+}

@@ -297,3 +297,66 @@ fn fmt_directory_check_reports_multiple() {
     let _ = std::fs::remove_file(&file_b);
     let _ = std::fs::remove_dir(&dir);
 }
+
+// ── `#587`: comments inside literals and field lists ───────────────────────
+
+/// A file with a comment inside a literal, a struct literal or a field
+/// list used to be rejected outright (`verification failed: comment
+/// dropped`), so it could not be formatted at all.
+#[test]
+fn fmt_keeps_comments_inside_literals_and_field_lists() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "field_list",
+            "struct S {\n    a: int, // trailing field comment\n    b: str,\n}\n\nfunc main() {\n    s := S{a: 1, b: \"x\"}\n    println(s.a)\n}\n",
+        ),
+        (
+            "struct_literal",
+            "func main() {\n    s := S{\n        a: 1, // why one\n        b: \"x\", // why two\n    }\n    println(s.a)\n}\n\nstruct S {\n    a: int,\n    b: str,\n}\n",
+        ),
+        (
+            "array_literal",
+            "func main() {\n    xs := [\n        1, // first\n        2, // second\n    ]\n    println(xs)\n}\n",
+        ),
+    ];
+    for (name, content) in cases {
+        let path = setup_temp_file(name, content);
+        let path_str = path.display().to_string();
+
+        // `--check` must accept the file (exit 0): the file is already
+        // canonical, comments included.
+        let (exit, _stdout, stderr) = run_zz_fmt(&["fmt", "-c", &path_str], None);
+        assert_eq!(exit, 0, "`zz fmt -c` must accept {name}, stderr: {stderr}");
+
+        // Formatting in place keeps every comment.
+        let (exit, _stdout, stderr) = run_zz_fmt(&["fmt", &path_str], None);
+        assert_eq!(
+            exit, 0,
+            "`zz fmt` must succeed for {name}, stderr: {stderr}"
+        );
+        let formatted = std::fs::read_to_string(&path).expect("read formatted file");
+        for comment in [
+            "// trailing field comment",
+            "// why one",
+            "// why two",
+            "// first",
+        ] {
+            if content.contains(comment) {
+                assert!(
+                    formatted.contains(comment),
+                    "comment {comment:?} was dropped for {name}: {formatted}"
+                );
+            }
+        }
+
+        // The formatted file is stable.
+        let (exit, _stdout, stderr) = run_zz_fmt(&["fmt", "-c", &path_str], None);
+        assert_eq!(
+            exit, 0,
+            "formatting must be idempotent for {name}: {stderr}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+}

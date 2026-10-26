@@ -1,0 +1,35 @@
+name: docs
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    paths:
+      - "docs/**"
+      - "scripts/check-docs.py"
+      - "scripts/gen-stdlib-ref.py"
+      - "scripts/test-doc-fences.py"
+      - "crates/zz_stdlib/src/funcs.rs"
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build zz binary for fence tests
+        run: cargo install --path crates/zz_cli --root ~/.cargo --force --quiet
+      - name: Links, fences, stdlib coverage
+        run: python3 scripts/check-docs.py
+      - name: Generated stdlib reference is fresh
+        run: python3 scripts/gen-stdlib-ref.py --check
+      - name: Doc fences check clean with real checker
+        run: python3 scripts/test-doc-fences.py --strict
+      - name: No task markers
+        run: "! rg -n 'TODO:|FIXME:|XXX:|TBD:' docs scripts"
+      - name: fmt clean
+        run: cargo fmt --check

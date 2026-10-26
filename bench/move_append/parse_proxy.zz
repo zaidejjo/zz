@@ -22,7 +22,7 @@ struct Doc {
 }
 
 func new_doc() -> Doc {
-    Doc{
+    return Doc{
         kinds: [],
         keys: [],
         vals: [],
@@ -43,7 +43,7 @@ func push_key(doc: Doc, k: str, v: str) -> Doc {
     doc.vals = vec.push(doc.vals, v)
     doc.t_tbl = vec.push(doc.t_tbl, 0)
     doc.t_keys = vec.push(doc.t_keys, k)
-    doc
+    return doc
 }
 
 func push_table(doc: Doc, name: str) -> Doc {
@@ -54,7 +54,7 @@ func push_table(doc: Doc, name: str) -> Doc {
     doc.t_keys = vec.push(doc.t_keys, name)
     doc.t_kids = vec.push(doc.t_kids, len(doc.kinds))
     doc.flags = vec.push(doc.flags, 1)
-    doc
+    return doc
 }
 
 func push_aot(doc: Doc, name: str) -> Doc {
@@ -64,12 +64,12 @@ func push_aot(doc: Doc, name: str) -> Doc {
     doc.a_tbl = vec.push(doc.a_tbl, 0)
     doc.a_kids = vec.push(doc.a_kids, len(doc.kinds))
     doc.flags = vec.push(doc.flags, 8)
-    doc
+    return doc
 }
 
 func run(path: str) -> int {
     t := fs.read_to_string(path)
-    match t {
+    return match t {
         .ok(text) => {
             lines := str.split(text, "\n")
             doc := new_doc()

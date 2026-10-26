@@ -230,6 +230,31 @@ fn missing_close_bracket_reports_error() {
     assert_eq!(parsed.errors.len(), 1);
 }
 
+#[test]
+fn list_comprehension_wrong_order_names_postfix_form() {
+    // `[for x in iter: body]` is the wrong order; ZZ writes the body first:
+    // `[body for x in iter]`. The diagnostic must name the supported form.
+    let parsed = zz_frontend::parse("[for x in 0..5: x * x]");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("body comes first")),
+        "expected comprehension-form error, got {:?}",
+        parsed.errors
+    );
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("[expr for x in iter]")),
+        "expected postfix-form example, got {:?}",
+        parsed.errors
+    );
+    // Exactly one diagnostic: no cascade.
+    assert_eq!(parsed.errors.len(), 1);
+}
+
 // --- pipeline -----------------------------------------------------------
 
 #[test]

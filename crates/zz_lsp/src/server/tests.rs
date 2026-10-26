@@ -410,6 +410,562 @@ async fn references_missing_doc_returns_none() {
     assert!(refs.is_none());
 }
 
+fn watched_tmp(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("zz-lsp-watch-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn watched_change_reindexes_and_rechecks_dependents() {
+    let (service, state) = setup();
+    let dir = watched_tmp("reindex");
+    let dep_path = dir.join("dep.zz");
+    std::fs::write(&dep_path, "pub func answer() -> int {\n    return 1\n}\n").unwrap();
+    let dep_uri = Url::from_file_path(&dep_path).unwrap();
+    state.set_root(dir.clone());
+
+    let main_src = "import dep(answer)\nfunc main() {\n    println(answer())\n}\n";
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &main_uri, main_src);
+    state.record_dependency(dep_uri.clone(), main_uri.clone());
+    // Wipe main's result: the watched change must restore it.
+    state.documents.get_mut(&main_uri).unwrap().check_result = None;
+
+    std::fs::write(&dep_path, "pub func answer() -> int {\n    return 2\n}\n").unwrap();
+    service
+        .inner()
+        .did_change_watched_files(DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: dep_uri.clone(),
+                typ: FileChangeType::CHANGED,
+            }],
+        })
+        .await;
+
+    assert!(
+        state
+            .module_index
+            .read()
+            .unwrap()
+            .entries
+            .contains_key(&dep_uri),
+        "changed file re-indexed"
+    );
+    assert!(
+        state
+            .documents
+            .get(&main_uri)
+            .unwrap()
+            .check_result
+            .is_some(),
+        "open dependent rechecked"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn watched_delete_forgets_file() {
+    let (service, state) = setup();
+    let dir = watched_tmp("delete");
+    let dep_path = dir.join("dep.zz");
+    std::fs::write(&dep_path, "pub func answer() -> int {\n    return 1\n}\n").unwrap();
+    let dep_uri = Url::from_file_path(&dep_path).unwrap();
+    state.set_root(dir.clone());
+    index_test_file(
+        &state,
+        &dep_uri,
+        "dep",
+        "pub func answer() -> int {\n    return 1\n}\n",
+    );
+    std::fs::remove_file(&dep_path).unwrap();
+
+    service
+        .inner()
+        .did_change_watched_files(DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: dep_uri.clone(),
+                typ: FileChangeType::DELETED,
+            }],
+        })
+        .await;
+
+    assert!(
+        !state
+            .module_index
+            .read()
+            .unwrap()
+            .entries
+            .contains_key(&dep_uri),
+        "deleted file forgotten"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn save_rechecks_open_dependents() {
+    let (service, state) = setup();
+    let dep_uri: Url = "file:///dep.zz".parse().unwrap();
+    open_and_check(
+        &state,
+        &dep_uri,
+        "pub func answer() -> int {\n    return 1\n}\n",
+    );
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &main_uri, "func main() {\n    println(1)\n}\n");
+    state.record_dependency(dep_uri.clone(), main_uri.clone());
+    state.documents.get_mut(&main_uri).unwrap().check_result = None;
+
+    service
+        .inner()
+        .did_save(DidSaveTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: dep_uri.clone(),
+            },
+            text: None,
+        })
+        .await;
+
+    assert!(
+        state
+            .documents
+            .get(&dep_uri)
+            .unwrap()
+            .check_result
+            .is_some(),
+        "saved file rechecked"
+    );
+    assert!(
+        state
+            .documents
+            .get(&main_uri)
+            .unwrap()
+            .check_result
+            .is_some(),
+        "open dependent rechecked on save"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn code_lens_lists_tests() {
+    let (service, state) = setup();
+    let uri: Url = "file:///tests.zz".parse().unwrap();
+    let src = "@test\nfunc adds() {\n    assert_eq(1 + 1, 2)\n}\nfunc helper() -> int {\n    return 1\n}\n";
+    open_and_check(&state, &uri, src);
+
+    let lenses = service
+        .inner()
+        .code_lens(CodeLensParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("lenses");
+    assert_eq!(lenses.len(), 1, "one lens per @test");
+    let command = lenses[0].command.clone().expect("command");
+    assert_eq!(command.command, "zz.runTest");
+    assert_eq!(lenses[0].range.start.line, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_unknown_command_rejected() {
+    let (service, _) = setup();
+    let err = service
+        .inner()
+        .execute_command(ExecuteCommandParams {
+            command: "zz.nope".to_string(),
+            arguments: vec![],
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect_err("unknown command rejected");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::MethodNotFound);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn goto_selective_member_jumps_to_def() {
+    let (service, state) = setup();
+    let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+    let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+    open_and_check(&state, &lib_uri, lib_src);
+    index_test_file(&state, &lib_uri, "lib", lib_src);
+
+    let main_src = "import lib(circle)\nfunc main() {\n    y := circle(1.0)\n    println(y)\n}\n";
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &main_uri, main_src);
+
+    let def = service
+        .inner()
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: main_uri },
+                position: Position {
+                    line: 0,
+                    character: 13,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("selective member resolves");
+    match def {
+        GotoDefinitionResponse::Scalar(loc) => {
+            assert_eq!(loc.uri, lib_uri);
+            assert_eq!(loc.range.start.line, 0, "lands on the def");
+        }
+        _ => panic!("expected scalar location"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn goto_dep_path_jumps_to_package_entry() {
+    let (service, state) = setup();
+    let dir = watched_tmp("gotodep");
+    std::fs::create_dir_all(dir.join("vendor/tiny/src")).unwrap();
+    std::fs::write(
+        dir.join("zz.toml"),
+        "[package]\nname = \"proj\"\nversion = \"0.1.0\"\n\n[dependencies]\ntiny = \"^0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("vendor/tiny/src/tiny.zz"),
+        "pub func shout(name: str) -> str {\n    return \"Hey {name}!\"\n}\n",
+    )
+    .unwrap();
+    state.set_root(dir.clone());
+
+    let main_uri = Url::from_file_path(dir.join("main.zz")).unwrap();
+    let main_src = "import tiny\nfunc main() {\n    println(tiny.shout(\"a\"))\n}\n";
+    open_and_check(&state, &main_uri, main_src);
+
+    let def = service
+        .inner()
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: main_uri },
+                position: Position {
+                    line: 0,
+                    character: 9,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("dep path resolves");
+    let tiny_uri = Url::from_file_path(dir.join("vendor/tiny/src/tiny.zz")).unwrap();
+    match def {
+        GotoDefinitionResponse::Scalar(loc) => {
+            assert_eq!(loc.uri, tiny_uri);
+        }
+        _ => panic!("expected scalar location"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_onto_existing_name_blocked() {
+    let (service, state) = setup();
+    let uri: Url = "file:///test.zz".parse().unwrap();
+    open_and_check(&state, &uri, "a := 1\nb := 2\nc := a + b\n");
+
+    let err = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            new_name: "b".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect_err("collision must fail");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_to_same_name_is_noop() {
+    let (service, state) = setup();
+    let uri: Url = "file:///test.zz".parse().unwrap();
+    open_and_check(&state, &uri, "a := 1\nb := a + 1\n");
+
+    let edit = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            new_name: "a".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap();
+    assert!(edit.is_none(), "same-name rename is a no-op");
+}
+
+fn undefined_diag_for(message: &str) -> Diagnostic {
+    let raw = zz_frontend::diag::RawDiag {
+        severity: zz_frontend::diag::Severity::Error,
+        message: message.to_string(),
+        span: Some(zz_frontend::span::Span::new(0, 1)),
+        notes: vec![],
+        fixits: vec![],
+        secondary: None,
+    };
+    Diagnostic {
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 5,
+            },
+        },
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: None,
+        code_description: None,
+        source: Some("zz".to_string()),
+        message: message.to_string(),
+        related_information: None,
+        tags: None,
+        data: Some(serde_json::to_value(raw).unwrap()),
+    }
+}
+
+fn import_action_titles(actions: &[CodeActionOrCommand]) -> Vec<String> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(a) => Some(a.title.clone()),
+            _ => None,
+        })
+        .filter(|t| t.starts_with("add import"))
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_import_silent_for_member_typo() {
+    // `lib.squre` with `lib` imported is a member error, not a missing
+    // import — no matter what the workspace contains.
+    let (service, state) = setup();
+    let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+    let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+    open_and_check(&state, &lib_uri, lib_src);
+    index_test_file(&state, &lib_uri, "lib", lib_src);
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    let main_src = "import lib\nfunc main() {\n    y := lib.squre(1.0)\n    println(y)\n}\n";
+    open_and_check(&state, &main_uri, main_src);
+
+    let actions = service
+        .inner()
+        .code_action(CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: main_uri },
+            range: Range {
+                start: Position {
+                    line: 2,
+                    character: 0,
+                },
+                end: Position {
+                    line: 2,
+                    character: 20,
+                },
+            },
+            context: CodeActionContext {
+                trigger_kind: None,
+                diagnostics: vec![undefined_diag_for("undefined variable `lib.squre`")],
+                only: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        import_action_titles(&actions).is_empty(),
+        "member typos must not offer imports"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_import_silent_for_local_typo() {
+    // `prntln` matches no provider anywhere: silence, not guesses.
+    let (service, state) = setup();
+    let uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &uri, "func main() {\n    prntln(\"hi\")\n}\n");
+
+    let actions = service
+        .inner()
+        .code_action(CodeActionParams {
+            text_document: TextDocumentIdentifier { uri },
+            range: Range {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 14,
+                },
+            },
+            context: CodeActionContext {
+                trigger_kind: None,
+                diagnostics: vec![undefined_diag_for("undefined variable `prntln`")],
+                only: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        import_action_titles(&actions).is_empty(),
+        "unresolvable names must not offer imports"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_field_renames_def_label_and_typed_usages() {
+    let (service, state) = setup();
+    let uri: Url = "file:///lib.zz".parse().unwrap();
+    let src = "struct Point {\n    x: int,\n    y: int,\n}\nstruct Other {\n    x: int,\n}\np := Point{x: 1, y: 2}\nq := Other{x: 3}\na := p.x\nb := q.x\n";
+    open_and_check(&state, &uri, src);
+
+    let edit = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position {
+                    line: 1,
+                    character: 4,
+                },
+            },
+            new_name: "z".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("field rename produces edits");
+    let changes = edit.changes.expect("changes");
+    assert_eq!(changes.len(), 1, "single file touched");
+    let edits = &changes[&uri];
+    // Def site + literal label + typed usage; sibling struct untouched.
+    assert_eq!(edits.len(), 3, "def + label + usage, got: {edits:?}");
+    assert!(edits.iter().all(|e| e.new_text == "z"));
+    let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
+    assert!(lines.contains(&1), "def site renamed");
+    assert!(lines.contains(&7), "literal label renamed");
+    assert!(lines.contains(&9), "typed usage renamed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_field_collision_blocked() {
+    // `Other.y` blocks renaming `Point.x` to `y`, same file.
+    let (service, state) = setup();
+    let uri: Url = "file:///lib.zz".parse().unwrap();
+    open_and_check(
+        &state,
+        &uri,
+        "struct Point {\n    x: int,\n}\nstruct Other {\n    y: int,\n}\n",
+    );
+
+    let err = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 1,
+                    character: 4,
+                },
+            },
+            new_name: "y".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .expect_err("field collision must fail");
+    assert_eq!(err.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
+}
+
+fn index_test_file(state: &GlobalState, uri: &Url, module: &str, src: &str) {
+    let entry =
+        crate::cross_file::parse_file_entry(uri.clone(), src.to_string(), module.to_string());
+    let mut index = state.module_index.write().unwrap();
+    index.module_to_uri.insert(module.to_string(), uri.clone());
+    index.uri_to_module.insert(uri.clone(), module.to_string());
+    index.entries.insert(uri.clone(), entry);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rename_reaches_importing_file_not_unrelated() {
+    let (service, state) = setup();
+    let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
+    let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+    open_and_check(&state, &lib_uri, lib_src);
+    index_test_file(&state, &lib_uri, "lib", lib_src);
+
+    let main_src = "import lib(circle)\nfunc main() {\n    y := circle(1.0)\n    println(y)\n}\n";
+    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    open_and_check(&state, &main_uri, main_src);
+
+    // Same name, no import: must not be touched.
+    let other_src = "func circle() -> int {\n    return 1\n}\nc := circle()\n";
+    let other_uri: Url = "file:///other.zz".parse().unwrap();
+    open_and_check(&state, &other_uri, other_src);
+
+    let edit = service
+        .inner()
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: main_uri.clone(),
+                },
+                position: Position {
+                    line: 2,
+                    character: 10,
+                },
+            },
+            new_name: "round".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("rename should produce edits");
+    let changes = edit.changes.expect("changes");
+    assert!(changes.contains_key(&lib_uri), "defining file edited");
+    assert!(changes.contains_key(&main_uri), "importing file edited");
+    assert!(
+        !changes.contains_key(&other_uri),
+        "unrelated same-name file untouched"
+    );
+    // Member edit in main covers exactly `circle` in `circle(1.0)`.
+    let main_edits = &changes[&main_uri];
+    assert!(
+        main_edits
+            .iter()
+            .any(|e| e.range.start == Position::new(2, 9) && e.range.end == Position::new(2, 15)),
+        "usage range exact: {main_edits:?}"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_rename_on_symbol() {
     let (service, state) = setup();
@@ -687,17 +1243,28 @@ async fn code_action_missing_doc_returns_none() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn code_action_empty_range_returns_none() {
+async fn code_action_blank_position_returns_none() {
     let (service, state) = setup();
     let uri: Url = "file:///test.zz".parse().unwrap();
     let src = "x := 1\n";
     open_and_check(&state, &uri, src);
 
+    // Position (0, 2) sits on `:=`: no diagnostic, no symbol, no
+    // statement range — nothing to offer (a cursor *on* `x` would offer
+    // inline/remove refactors).
+    let pos = Position {
+        line: 0,
+        character: 2,
+    };
+    let range = Range {
+        start: pos,
+        end: pos,
+    };
     let actions = service
         .inner()
         .code_action(CodeActionParams {
             text_document: TextDocumentIdentifier { uri },
-            range: Range::default(),
+            range,
             context: CodeActionContext {
                 diagnostics: vec![],
                 only: None,
@@ -814,6 +1381,116 @@ async fn goto_definition_cross_file_import() {
         }
         _ => panic!("expected scalar location"),
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn goto_definition_collection_member_string() {
+    let (service, state) = setup();
+    let root = std::env::temp_dir().join(format!("zz_lsp_goto_collection_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("commands")).unwrap();
+    std::fs::write(
+        root.join("zz.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+         [collect.commands]\ndir = \"commands\"\nsig = \"func([str]) -> int\"\n",
+    )
+    .unwrap();
+    let member_path = root.join("commands/greet.zz");
+    std::fs::write(
+        &member_path,
+        "pub func run(args: [str]) -> int { return 0 }\n",
+    )
+    .unwrap();
+    let main_path = root.join("src/main.zz");
+    let main_src = "import collect.commands\ncommands.get(\"greet\")\n";
+    std::fs::write(&main_path, main_src).unwrap();
+
+    let main_uri = Url::from_file_path(&main_path).unwrap();
+    let member_uri = Url::from_file_path(&member_path).unwrap();
+    open_and_check(&state, &main_uri, main_src);
+
+    let def = service
+        .inner()
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: main_uri.clone(),
+                },
+                position: Position {
+                    line: 1,
+                    character: 16,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap();
+
+    match def.expect("member string resolves to its file") {
+        GotoDefinitionResponse::Scalar(loc) => {
+            assert_eq!(loc.uri, member_uri);
+            assert_eq!(loc.range.start.line, 0);
+        }
+        _ => panic!("expected scalar location"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn goto_definition_collection_import() {
+    let (service, state) = setup();
+    let root = std::env::temp_dir().join(format!(
+        "zz_lsp_goto_collection_import_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("commands")).unwrap();
+    std::fs::write(
+        root.join("zz.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+         [collect.commands]\ndir = \"commands\"\nsig = \"func([str]) -> int\"\n",
+    )
+    .unwrap();
+    let member_path = root.join("commands/greet.zz");
+    std::fs::write(
+        &member_path,
+        "pub func run(args: [str]) -> int { return 0 }\n",
+    )
+    .unwrap();
+    let main_path = root.join("src/main.zz");
+    let main_src = "import collect.commands\ncommands.all()\n";
+    std::fs::write(&main_path, main_src).unwrap();
+
+    let main_uri = Url::from_file_path(&main_path).unwrap();
+    let member_uri = Url::from_file_path(&member_path).unwrap();
+    open_and_check(&state, &main_uri, main_src);
+
+    let def = service
+        .inner()
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: main_uri },
+                position: Position {
+                    line: 0,
+                    character: 18,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap();
+
+    match def.expect("collection import resolves to first member") {
+        GotoDefinitionResponse::Scalar(loc) => {
+            assert_eq!(loc.uri, member_uri);
+        }
+        _ => panic!("expected scalar location"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test(flavor = "current_thread")]

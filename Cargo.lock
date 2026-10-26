@@ -3579,6 +3579,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
+name = "zz-dap"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zz_frontend",
+ "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_arena"
 version = "0.3.0"
 
@@ -3684,12 +3695,15 @@ dependencies = [
  "dashmap 6.2.1",
  "env_logger",
  "log",
+ "serde",
  "serde_json",
  "tokio",
+ "toml",
  "tower-lsp",
  "zz_checker",
  "zz_fmt",
  "zz_frontend",
+ "zz_pm",
  "zz_runtime",
  "zz_stdlib",
 ]
@@ -3751,6 +3765,7 @@ dependencies = [
  "tar",
  "toml",
  "ureq",
+ "zz_frontend",
 ]
 
 [[package]]

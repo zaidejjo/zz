@@ -75,7 +75,7 @@ pub fn analyze(tp: &TypedProgram) -> EscapeResult {
                     func_name: &fname,
                     escaped_names: captured,
                 };
-                analyze_block_impl(body, tp, &mut ctx, &mut result, true);
+                analyze_block_impl(body, tp, &mut ctx, &mut result);
                 // Propagate escaping to initializer expressions of escaped variables.
                 propagate_escaped(body, &ctx.escaped_names, tp, ctx.func_name, &mut result);
             }
@@ -126,42 +126,17 @@ struct FuncCtx<'a> {
     escaped_names: HashSet<String>,
 }
 
-/// Analyze a block's statements. When `is_func_body` is true, the last
-/// expression is treated as an implicit return (tail expression).
+/// Analyze a block's statements. Named functions have no tail value (a
+/// value leaves only through `return`, which `analyze_stmt` handles), so
+/// every statement is analyzed in discard position.
 fn analyze_block_impl(
     block: &crate::Block,
     tp: &TypedProgram,
     ctx: &mut FuncCtx<'_>,
     result: &mut EscapeResult,
-    is_func_body: bool,
 ) {
-    let n = block.stmts.len();
-    for (i, stmt) in block.stmts.iter().enumerate() {
-        let is_tail = is_func_body && i == n - 1;
-        if is_tail {
-            if let Stmt::Expr(e) = stmt {
-                // Tail expression = implicit return.
-                mark_escaping_recursive(e, tp, ctx.func_name, result);
-                match e {
-                    Expr::Ident { name, .. } => {
-                        ctx.escaped_names.insert(name.clone());
-                    }
-                    Expr::Path { parts, .. } => {
-                        if let Some(first) = parts.first() {
-                            ctx.escaped_names.insert(first.clone());
-                        }
-                    }
-                    _ => {}
-                }
-                // Still analyze sub-expressions in the tail.
-                analyze_stmt(stmt, tp, ctx, result);
-            } else {
-                // Non-expression tail (e.g., for loop) — analyze normally.
-                analyze_stmt(stmt, tp, ctx, result);
-            }
-        } else {
-            analyze_stmt(stmt, tp, ctx, result);
-        }
+    for stmt in &block.stmts {
+        analyze_stmt(stmt, tp, ctx, result);
     }
 }
 
@@ -171,16 +146,25 @@ fn analyze_block(
     ctx: &mut FuncCtx<'_>,
     result: &mut EscapeResult,
 ) {
-    analyze_block_impl(block, tp, ctx, result, false);
+    analyze_block_impl(block, tp, ctx, result);
 }
 
 fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut EscapeResult) {
     match stmt {
-        Stmt::Decl { value, .. } => {
-            let cls = classify_expr(value, tp, ctx);
-            result.classes.insert(value.span(), cls);
-            // Also classify sub-expressions within the initializer.
-            analyze_expr(value, tp, ctx, result);
+        Stmt::Decl { name, value, .. } => {
+            // Top-level bindings live in `zz_global_*` past every frame:
+            // their initializers escape by definition (#421: a const
+            // array lowered as a stack temporary dangles once `zz_main`
+            // returns). Same for any binding shadowing a global name
+            // (conservative: over-marking only costs an allocation).
+            if ctx.func_name == TOP || ctx.global_names.contains(&name.name) {
+                mark_escaping_recursive(value, tp, ctx.func_name, result);
+            } else {
+                let cls = classify_expr(value, tp, ctx);
+                result.classes.insert(value.span(), cls);
+                // Also classify sub-expressions within the initializer.
+                analyze_expr(value, tp, ctx, result);
+            }
         }
         Stmt::Assign { target, value, .. } => {
             // Assignment to a global name = escaping.
@@ -670,7 +654,7 @@ func main() {
         let src = r#"
 func make() -> array {
     arr := [1, 2, 3]
-    arr
+    return arr
 }
 func main() {
     x := make()
@@ -681,6 +665,27 @@ func main() {
         // The returned arr should be marked escaping.
         let has_escaping = result.classes.values().any(|c| *c == AllocClass::Escaping);
         assert!(has_escaping, "returned value should be marked escaping");
+    }
+
+    #[test]
+    fn global_array_escapes() {
+        // #421: top-level bindings outlive every frame (`zz_global_*`),
+        // so their initializers must never lower as stack temporaries.
+        let src = "const CBOUNDS = [0, 54, 102, 146]\nfunc main() {\n    println(1)\n}\n";
+        let tp = build_tp(src);
+        let result = analyze(&tp);
+        assert!(
+            !result.classes.is_empty(),
+            "expected classified initializers, got none"
+        );
+        for cls in result.classes.values() {
+            assert_eq!(
+                *cls,
+                AllocClass::Escaping,
+                "top-level initializer must escape, got: {:?}",
+                result.classes
+            );
+        }
     }
 
     #[test]

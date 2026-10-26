@@ -1,0 +1,17 @@
+// features: bool-logic, locals, match, print
+// E2E: Match on bool with true/false arms generates valid C (issue #562 Bug 2)
+func main() {
+    b := true
+    r := match b {
+        true => 1,
+        false => 0,
+    }
+    println(r)
+    b = false
+    r = match b {
+        true => 1,
+        false => 0,
+    }
+    println(r)
+    println("bool_match_ok")
+}

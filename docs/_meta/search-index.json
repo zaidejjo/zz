@@ -1,0 +1,525 @@
+{
+  "version": 2,
+  "generated_for": "website search + offline lookup",
+  "pages": [
+    {
+      "path": "getting-started/install.md",
+      "title": "Install",
+      "keywords": [
+        "install",
+        "toolchain",
+        "doctor",
+        "upgrade",
+        "zig",
+        "clang"
+      ],
+      "excerpt": "curl -fsSL https://zz-lang.pages.dev/install.sh | sh"
+    },
+    {
+      "path": "getting-started/quick-start.md",
+      "title": "Quick start",
+      "keywords": [
+        "hello",
+        "run",
+        "build",
+        "check",
+        "fmt",
+        "eval"
+      ],
+      "excerpt": "Create `hello.zz`:"
+    },
+    {
+      "path": "getting-started/project-layout.md",
+      "title": "Project layout",
+      "keywords": [
+        "zz.toml",
+        "src/main",
+        "tests",
+        "bench",
+        "vendor",
+        "embed"
+      ],
+      "excerpt": "Minimal project:"
+    },
+    {
+      "path": "getting-started/repl-tour.md",
+      "title": "REPL tour",
+      "keywords": [
+        "repl",
+        "type",
+        "clear",
+        "eval"
+      ],
+      "excerpt": "zz"
+    },
+    {
+      "path": "language/overview.md",
+      "title": "Language overview",
+      "keywords": [
+        "mental model",
+        "values",
+        "pipeline",
+        "parity"
+      ],
+      "excerpt": "ZZ is a small systems language for services, CLIs, and data pipelines."
+    },
+    {
+      "path": "language/variables-functions.md",
+      "title": "Variables and functions",
+      "keywords": [
+        "let",
+        "generics",
+        "closures",
+        "methods"
+      ],
+      "excerpt": "x := 42            // inferred: int"
+    },
+    {
+      "path": "language/control-flow.md",
+      "title": "Control flow",
+      "keywords": [
+        "if",
+        "while",
+        "for",
+        "defer",
+        "try",
+        "elvis"
+      ],
+      "excerpt": "if age < 18 {"
+    },
+    {
+      "path": "language/strings.md",
+      "title": "Strings",
+      "keywords": [
+        "interpolation",
+        "raw",
+        "backtick",
+        "format"
+      ],
+      "excerpt": "`{...}` runs inside `\"...\"` and `\"\"\"...\"\"\"` when `{` is followed by"
+    },
+    {
+      "path": "language/collections.md",
+      "title": "Collections",
+      "keywords": [
+        "array",
+        "dict",
+        "tuple",
+        "slice",
+        "comprehension"
+      ],
+      "excerpt": "nums := [1, 2, 3]"
+    },
+    {
+      "path": "language/structs-enums.md",
+      "title": "Structs and enums",
+      "keywords": [
+        "embedding",
+        "impl",
+        "generic",
+        "recursive"
+      ],
+      "excerpt": "struct Point { x: int, y: int }"
+    },
+    {
+      "path": "language/pattern-matching.md",
+      "title": "Pattern matching",
+      "keywords": [
+        "match",
+        "guard",
+        "exhaustive",
+        "Option",
+        "Result"
+      ],
+      "excerpt": "x := .some(5)"
+    },
+    {
+      "path": "language/modules.md",
+      "title": "Modules",
+      "keywords": [
+        "import",
+        "package",
+        "circular"
+      ],
+      "excerpt": "import std.math"
+    },
+    {
+      "path": "language/operators.md",
+      "title": "Operators",
+      "keywords": [
+        "precedence",
+        "bitwise",
+        "pipeline",
+        "assign"
+      ],
+      "excerpt": "One page for every operator. When in doubt, parenthesize."
+    },
+    {
+      "path": "language/value-semantics.md",
+      "title": "Value semantics",
+      "keywords": [
+        "copy",
+        "CoW",
+        "clone",
+        "aliasing"
+      ],
+      "excerpt": "Every binding holds an independent value. After `y := x`, mutating one side"
+    },
+    {
+      "path": "stdlib/overview.md",
+      "title": "Stdlib overview",
+      "keywords": [
+        "modules",
+        "namespace",
+        "Result"
+      ],
+      "excerpt": "Batteries included: HTTP, JSON, fs, math, SQL, crypto, regexp, concurrency."
+    },
+    {
+      "path": "stdlib/builtins.md",
+      "title": "Built-ins",
+      "keywords": [
+        "println",
+        "len",
+        "range",
+        "map",
+        "unwrap"
+      ],
+      "excerpt": "println(\"hello\")"
+    },
+    {
+      "path": "stdlib/str-vec.md",
+      "title": "Strings and arrays",
+      "keywords": [
+        "str",
+        "vec",
+        "bytes",
+        "builder"
+      ],
+      "excerpt": "import std.str"
+    },
+    {
+      "path": "stdlib/data.md",
+      "title": "Data helpers",
+      "keywords": [
+        "map",
+        "set",
+        "dec",
+        "json",
+        "csv",
+        "property"
+      ],
+      "excerpt": "Dicts are `{K: V}`, insertion-ordered, O(n) lookup. API is stable so a hashed"
+    },
+    {
+      "path": "stdlib/fs-bytes.md",
+      "title": "Filesystem and bytes",
+      "keywords": [
+        "fs",
+        "memfs",
+        "tarfs",
+        "embedfs",
+        "bytes"
+      ],
+      "excerpt": "import std.fs"
+    },
+    {
+      "path": "stdlib/http.md",
+      "title": "HTTP",
+      "keywords": [
+        "server",
+        "routing",
+        "middleware",
+        "TLS",
+        "client"
+      ],
+      "excerpt": "import std.http"
+    },
+    {
+      "path": "stdlib/net.md",
+      "title": "Networking",
+      "keywords": [
+        "tcp",
+        "timeout",
+        "bytes"
+      ],
+      "excerpt": "import std.net"
+    },
+    {
+      "path": "stdlib/env-process.md",
+      "title": "Env and processes",
+      "keywords": [
+        "env",
+        "args",
+        "process",
+        "log"
+      ],
+      "excerpt": "import std.env"
+    },
+    {
+      "path": "stdlib/math-time.md",
+      "title": "Math and time",
+      "keywords": [
+        "math",
+        "random",
+        "date",
+        "rfc3339"
+      ],
+      "excerpt": "import std.math"
+    },
+    {
+      "path": "stdlib/terminal.md",
+      "title": "Terminal",
+      "keywords": [
+        "term",
+        "raw",
+        "colors",
+        "ANSI"
+      ],
+      "excerpt": "import std.term"
+    },
+    {
+      "path": "stdlib/encoding-crypto.md",
+      "title": "Encoding and crypto",
+      "keywords": [
+        "base64",
+        "sha",
+        "argon2",
+        "jwt",
+        "uuid"
+      ],
+      "excerpt": "import std.encoding"
+    },
+    {
+      "path": "stdlib/regexp.md",
+      "title": "Regexp",
+      "keywords": [
+        "regex",
+        "compile",
+        "captures"
+      ],
+      "excerpt": "Compiled patterns are opaque `\"regexp\"` handles, so method syntax works."
+    },
+    {
+      "path": "stdlib/sql-db.md",
+      "title": "Databases",
+      "keywords": [
+        "sqlite",
+        "postgres",
+        "mysql",
+        "sqlz"
+      ],
+      "excerpt": "Canonical module is `std.sqlz`. There is no `std.db`/`db.*` \u2014 `sqlz` only."
+    },
+    {
+      "path": "stdlib/concurrency.md",
+      "title": "Concurrency",
+      "keywords": [
+        "chan",
+        "task",
+        "cell",
+        "spawn"
+      ],
+      "excerpt": "Green threads: `task.spawn` builds a task in microseconds; the executor (one"
+    },
+    {
+      "path": "stdlib/cell-path-sys.md",
+      "title": "System slots",
+      "keywords": [
+        "cell",
+        "path",
+        "sys",
+        "args",
+        "tls",
+        "toml"
+      ],
+      "excerpt": "Small modules that glue ZZ to the OS. All fallible ops are `Result<_, str>`."
+    },
+    {
+      "path": "stdlib/testing-lib.md",
+      "title": "Test helpers",
+      "keywords": [
+        "assert",
+        "snapshot",
+        "doctest"
+      ],
+      "excerpt": "`@test` needs no import. All asserts work bare and as `std.test.*`."
+    },
+    {
+      "path": "tooling/cli.md",
+      "title": "CLI",
+      "keywords": [
+        "run",
+        "build",
+        "watch",
+        "toolchain"
+      ],
+      "excerpt": "VM by default (no artifacts). `--native` builds via cached Clang pipeline and runs."
+    },
+    {
+      "path": "tooling/cli-reference.md",
+      "title": "CLI reference",
+      "keywords": [
+        "eval",
+        "dis",
+        "profile",
+        "cover",
+        "packages"
+      ],
+      "excerpt": "Source of truth is `crates/zz_cli/src/main.rs` dispatch + per-command modules."
+    },
+    {
+      "path": "tooling/check-fmt.md",
+      "title": "Check fix format",
+      "keywords": [
+        "check",
+        "fix",
+        "fmt",
+        "diagnostics"
+      ],
+      "excerpt": "zz check"
+    },
+    {
+      "path": "tooling/test-bench.md",
+      "title": "Test and bench",
+      "keywords": [
+        "test",
+        "bench",
+        "snapshot",
+        "coverage"
+      ],
+      "excerpt": "Zero-config: no path uses `./tests/` when it holds `.zz`, else `.`. No `zz.toml` needed."
+    },
+    {
+      "path": "tooling/packages.md",
+      "title": "Packages",
+      "keywords": [
+        "zz.toml",
+        "registry",
+        "vendor",
+        "publish"
+      ],
+      "excerpt": "[package]"
+    },
+    {
+      "path": "tooling/plugins.md",
+      "title": "Plugins",
+      "keywords": [
+        "C ABI",
+        "plugin.zzi",
+        "native"
+      ],
+      "excerpt": "ZZ plugins speak C ABI (`plugin.zzi`). Rust crates can back plugins, but the ZZ"
+    },
+    {
+      "path": "tooling/editors-debug.md",
+      "title": "Editors and debugging",
+      "keywords": [
+        "LSP",
+        "DAP",
+        "VS Code",
+        "Neovim"
+      ],
+      "excerpt": "Diagnostics, completion, hover, go-to-def, references, rename, code actions,"
+    },
+    {
+      "path": "tooling/perf.md",
+      "title": "Performance",
+      "keywords": [
+        "PGO",
+        "bench",
+        "profile",
+        "CoW"
+      ],
+      "excerpt": "- `zz check` cold p50 \u22640.5s on 10k lines, warm \u226450ms/file (`--stats` to verify)."
+    },
+    {
+      "path": "compiler/architecture.md",
+      "title": "Compiler architecture",
+      "keywords": [
+        "frontend",
+        "checker",
+        "HIR",
+        "IR",
+        "codegen"
+      ],
+      "excerpt": "Linear pipeline:"
+    },
+    {
+      "path": "compiler/checker.md",
+      "title": "Checker",
+      "keywords": [
+        "unification",
+        "inference",
+        "errors"
+      ],
+      "excerpt": "`zz_checker` is a unification type checker with full inference and spans everywhere."
+    },
+    {
+      "path": "compiler/runtime-codegen.md",
+      "title": "Runtime and codegen",
+      "keywords": [
+        "VM",
+        "AOT",
+        "CoW",
+        "DCE"
+      ],
+      "excerpt": "`zz run` leaves no artifacts. `zz run --native` publishes to the same destination"
+    },
+    {
+      "path": "guides/cookbook.md",
+      "title": "Cookbook",
+      "keywords": [
+        "recipes",
+        "API",
+        "CLI",
+        "CSV",
+        "pool"
+      ],
+      "excerpt": "import std.http"
+    },
+    {
+      "path": "guides/errors.md",
+      "title": "Error catalog",
+      "keywords": [
+        "mismatch",
+        "undefined",
+        "exhaustive",
+        "Result"
+      ],
+      "excerpt": "x: int = \"hello\"  // expected int, found str"
+    },
+    {
+      "path": "guides/parity.md",
+      "title": "VM vs native parity",
+      "keywords": [
+        "parity",
+        "AOT",
+        "VM"
+      ],
+      "excerpt": "VM (`zz run`) and AOT (`zz build` / `zz run --native` / `zz test --engine native`)"
+    },
+    {
+      "path": "guides/docker.md",
+      "title": "Docker and production AOT",
+      "keywords": [
+        "docker",
+        "AOT",
+        "builder",
+        "runtime",
+        "production"
+      ],
+      "excerpt": "FROM ghcr.io/zaidejjo/zz:<version>-builder AS build"
+    },
+    {
+      "path": "guides/faq-glossary.md",
+      "title": "FAQ and glossary",
+      "keywords": [
+        "faq",
+        "glossary",
+        "Rust"
+      ],
+      "excerpt": "**How is ZZ different from Rust?**"
+    }
+  ]
+}

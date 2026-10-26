@@ -1,0 +1,16 @@
+[package]
+name = "fnv"
+version = "0.1.0"
+description = "FNV-1a hash native plugin built by zz's hermetic Rust backend"
+license = "MIT"
+
+[native]
+backend = "rust"
+
+[native.build-rust]
+crate = "native"
+# Optional knobs (defaults shown):
+# cargo_features = []
+# target = "x86_64-unknown-linux-gnu"
+# rustc_range = ">=1.75, <2"
+# profile = "release"

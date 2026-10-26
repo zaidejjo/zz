@@ -4,14 +4,17 @@
 #include "runtime.h"
 
 // ---- arena healing -------------------------------------------------------
-// Retaining stores (array/dict/object slots, `zz_assign`) must never alias
-// arena-owned values: the per-iteration `zz_arena_reset` reuses the buffer,
-// so a stored alias reads back garbage on the next iteration — the nested
-// `[[str]]` first-element corruption + SIGSEGV class (loop-built inner
-// arrays stored into an outer array, then the arena reset overwrote them).
-// Strings already heal via `zz_str_heal_arena`; arrays and dicts need the
-// same treatment (deep: nested arena values copied recursively, heap
-// elements shared via `zz_clone`).
+// Retaining stores (array/dict/object slots, `zz_assign`, `std.cell`
+// pool) must never alias arena-owned values: the per-iteration
+// `zz_arena_reset` reuses the buffer, so a stored alias reads back
+// garbage on the next iteration — the nested `[[str]]` first-element
+// corruption + SIGSEGV class (loop-built inner arrays stored into an
+// outer array, then the arena reset overwrote them), and the `std.cell`
+// variant (loop-built values stored into cells, then read back across
+// iterations — garbage data, garbage `len` → wild free, issue #410).
+// Strings already heal via `zz_str_heal_arena`; arrays, dicts and boxed
+// structs need the same treatment (deep: nested arena values copied
+// recursively, heap elements shared via `zz_clone`).
 //
 // Two flavors, mirroring the string path:
 //   - `zz_clone_for_store` (share convention, callers pass borrowed):
@@ -38,10 +41,14 @@ int zz_dict_is_arena(const zz_dict *d) {
 }
 
 // True when storing `v` must copy instead of share: top-level arena
-// ownership, or a variant/tuple wrapper around a value that does.
+// ownership, a boxed struct transitively containing one, or a
+// variant/tuple wrapper around a value that does.
 // Heap-rooted arrays/dicts are guaranteed clean (every ingress path
 // heals), so no deep element walk is needed — O(1) for containers,
-// O(wrapper depth) otherwise.
+// O(wrapper depth) otherwise. Objects walk their fields: a struct is
+// heap-allocated itself, but its field slots may alias arena values
+// (e.g. `Outer{inner: Slot{val: arena_arr}}` or a `TT` struct stored
+// into a cell), and the loop-arena reset would corrupt those aliases.
 static int value_needs_heal(zz_value v, int depth) {
     if (depth > ZZ_HEAL_MAX_DEPTH) return 0;
     switch (v.tag) {
@@ -51,6 +58,13 @@ static int value_needs_heal(zz_value v, int depth) {
         return v.arr && zz_array_is_arena(v.arr);
     case ZZ_DICT:
         return v.dict && zz_dict_is_arena(v.dict);
+    case ZZ_OBJECT: {
+        if (!v.obj) return 0;
+        for (size_t i = 0; i < v.obj->len * 2; i++) {
+            if (value_needs_heal(v.obj->fields[i], depth + 1)) return 1;
+        }
+        return 0;
+    }
     case ZZ_TUPLE:
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
@@ -85,30 +99,62 @@ static zz_value heal_deep_copy(zz_value v, int depth) {
         if (!v.dict || !zz_dict_is_arena(v.dict)) return zz_clone(v);
         zz_value out = zz_dict_new();
         for (size_t i = 0; i < v.dict->len; i++) {
-            zz_value k = heal_deep_copy((zz_value){ZZ_STR, {.s = v.dict->entries[i].key}}, depth + 1);
+            zz_value k = heal_deep_copy(v.dict->entries[i].key, depth + 1);
             zz_value val = heal_deep_copy(v.dict->entries[i].val, depth + 1);
-            // `zz_dict_set` adopts the value as-is (move convention) but
-            // shares the key (`refs++`), so drop our key temp only: the
-            // dict keeps exactly one share of each.
+            // `zz_dict_set` adopts the value as-is (move convention) and
+            // retains the key, so drop our key temp only: the dict keeps
+            // exactly one share of each.
             zz_dict_set(out.dict, k, val);
             zz_release(&k);
         }
         return out;
     }
-    case ZZ_TUPLE:
-    case ZZ_OPTION_SOME:
-    case ZZ_RESULT_OK:
-    case ZZ_RESULT_ERR:
-    case ZZ_JSON: {
+    case ZZ_TUPLE: {
         if (!v.payload) return v;
-        // Clean payloads stay shared (no rebuild churn); only
-        // arena-containing payloads get a fresh wrapper + healed inner.
+        // Tuple boxes predate the payload refcount: `ZZ_TUPLE` has no
+        // clone/release arms (they leak rather than double-free), so they
+        // keep the plain allocation here.
         if (!value_needs_heal(*v.payload, depth + 1)) return zz_clone(v);
         zz_value *slot = (zz_value *)malloc(sizeof(zz_value));
         if (!slot) return zz_clone(v);
         *slot = heal_deep_copy(*v.payload, depth + 1);
         zz_value out = v;
         out.payload = slot;
+        return out;
+    }
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON: {
+        if (!v.payload) return v;
+        // Clean payloads stay shared (no rebuild churn); only
+        // arena-containing payloads get a fresh box + healed inner.
+        if (!value_needs_heal(*v.payload, depth + 1)) return zz_clone(v);
+        zz_value *slot = zz_vbox_new(heal_deep_copy(*v.payload, depth + 1));
+        if (!slot) return zz_clone(v);
+        zz_value out = v;
+        out.payload = slot;
+        return out;
+    }
+    case ZZ_OBJECT: {
+        if (!v.obj) return v;
+        // Clean structs stay shared (header bump only). Only structs
+        // transitively containing arena values get a fresh header with
+        // healed fields — otherwise a struct stored into a cell (or a
+        // container slot) would dangle its inner aliases past the reset.
+        if (!value_needs_heal(v, depth)) return zz_clone(v);
+        size_t n = v.obj->len;
+        zz_object *o = (zz_object *)malloc(sizeof(zz_object) + n * 2 * sizeof(zz_value));
+        if (!o) return zz_clone(v);
+        o->refs = 1;
+        o->type_name = v.obj->type_name; // static C string: share
+        o->len = n;
+        for (size_t i = 0; i < n * 2; i++) {
+            o->fields[i] = heal_deep_copy(v.obj->fields[i], depth + 1);
+        }
+        zz_value out;
+        out.tag = ZZ_OBJECT;
+        out.obj = o;
         return out;
     }
     default:
@@ -122,10 +168,10 @@ zz_value zz_heal_for_move(zz_value v) {
 }
 
 // Ownership-sharing store of a value into a container slot: arena-owned
-// values (strings, arrays, dicts, wrappers around them) are healed to
-// independent heap copies (else the loop-arena reset corrupts the stored
-// element); every other value is shared via zz_clone.
-static zz_value zz_clone_for_store(zz_value v) {
+// values (strings, arrays, dicts, arena-containing structs/wrappers)
+// are healed to independent heap copies (else the loop-arena reset
+// corrupts the stored element); every other value is shared via zz_clone.
+zz_value zz_clone_for_store(zz_value v) {
     if (value_needs_heal(v, 0)) return heal_deep_copy(v, 0);
     return zz_clone(v);
 }
@@ -402,6 +448,147 @@ void zz_release_bytes(zz_bytes *b) {
     }
 }
 
+// ---- dict key index ------------------------------------------------------
+// The VM keeps a dict as an insertion-ordered entry list plus a lazy
+// `HashMap<DictKey, usize>` (int/bool/str keys only). The C twin mirrors
+// that shape: `idx` caches entry positions, entries stay authoritative.
+// Keys outside that set are never indexed, so they always take the linear
+// lane — same lookup result, just without the acceleration.
+
+static size_t zz_dict_cap_for(size_t len) {
+    size_t cap = 16;
+    // Load factor <= 3/4 keeps linear probing short.
+    while (cap - (cap >> 2) < len) {
+        cap <<= 1;
+    }
+    return cap;
+}
+
+// 1 when the key can be indexed (VM `DictKey`: int, bool, str), 0 otherwise.
+static int zz_dict_key_hash(zz_value key, size_t *out) {
+    uint64_t h;
+    switch (key.tag) {
+    case ZZ_INT:
+        h = (uint64_t)key.i;
+        break;
+    case ZZ_BOOL:
+        h = (uint64_t)(key.b ? 1 : 0);
+        break;
+    case ZZ_STR: {
+        if (!key.s) return 0;
+        const unsigned char *p = (const unsigned char *)zz_str_cptr(key.s);
+        size_t n = key.s->len;
+        h = 1469598103934665603ULL;  // FNV-1a
+        for (size_t i = 0; i < n; i++) {
+            h ^= p[i];
+            h *= 1099511628211ULL;
+        }
+        break;
+    }
+    default:
+        return 0;
+    }
+    // splitmix64 finalizer: sequential int keys must not collide on the
+    // low bits used for probing.
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebULL;
+    h ^= h >> 31;
+    *out = (size_t)h;
+    return 1;
+}
+
+// Place entry `j` in the index (no-op for a non-indexed key or no index).
+// The first occurrence of a key wins, matching the linear scan's `find`.
+static void zz_dict_idx_place(zz_dict *d, size_t j) {
+    size_t h;
+    if (!d->idx || !zz_dict_key_hash(d->entries[j].key, &h)) return;
+    size_t mask = d->idx_cap - 1;
+    size_t p = h & mask;
+    while (d->idx[p] != 0) {
+        if (zz_key_eq(d->entries[d->idx[p] - 1].key, d->entries[j].key)) return;
+        p = (p + 1) & mask;
+    }
+    d->idx[p] = j + 1;
+}
+
+// Allocate an index of `cap` slots from the arena (dies at reset) or the
+// heap, then index every entry placed so far.
+static void zz_dict_idx_build(zz_dict *d, zz_arena *arena, size_t cap) {
+    if (cap == 0) return;
+    size_t bytes = cap * sizeof(size_t);
+    size_t *slots = arena ? (size_t *)zz_arena_alloc(arena, bytes, 8)
+                          : (size_t *)calloc(1, bytes);
+    if (!slots) return;
+    if (arena) memset(slots, 0, bytes);
+    d->idx = slots;
+    d->idx_cap = cap;
+    for (size_t j = 0; j < d->len; j++) {
+        zz_dict_idx_place(d, j);
+    }
+}
+
+// Keep the cache in step with a freshly appended entry.
+static void zz_dict_idx_insert(zz_dict *d, size_t i) {
+    size_t h;
+    if (!zz_dict_key_hash(d->entries[i].key, &h)) return;  // unindexed key
+    if (!d->idx) {
+        // Linear lane until the dict outgrows the VM's threshold.
+        if (d->len <= ZZ_DICT_INDEX_THRESHOLD) return;
+        zz_dict_idx_build(d, NULL, zz_dict_cap_for(d->len));
+        return;
+    }
+    if (d->len * 4 > d->idx_cap * 3) {
+        // Arena-sized caches are fixed-capacity (bump-allocated): drop the
+        // cache instead of growing it. Entries remain authoritative, so the
+        // dict just falls back to the linear scan.
+        if (d->refs == ZZ_DICT_ARENA_MAGIC) {
+            d->idx = NULL;
+            d->idx_cap = 0;
+            return;
+        }
+        size_t cap = d->idx_cap << 1;
+        size_t *fresh = (size_t *)calloc(1, cap * sizeof(size_t));
+        if (!fresh) return;
+        free(d->idx);
+        d->idx = fresh;
+        d->idx_cap = cap;
+        for (size_t j = 0; j < d->len; j++) {
+            zz_dict_idx_place(d, j);
+        }
+        return;
+    }
+    zz_dict_idx_place(d, i);
+}
+
+// First entry whose key equals `key`. Indexed keys probe the cache, every
+// other key (and every small dict) takes the linear scan — the same result
+// either way, since only int/bool/str keys ever enter the cache.
+int zz_dict_find(const zz_dict *d, zz_value key, size_t *out) {
+    size_t h;
+    if (d->idx && zz_dict_key_hash(key, &h)) {
+        size_t mask = d->idx_cap - 1;
+        size_t p = h & mask;
+        while (d->idx[p] != 0) {
+            size_t j = d->idx[p] - 1;
+            if (zz_key_eq(d->entries[j].key, key)) {
+                *out = j;
+                return 1;
+            }
+            p = (p + 1) & mask;
+        }
+        return 0;
+    }
+    for (size_t i = 0; i < d->len; i++) {
+        if (zz_key_eq(d->entries[i].key, key)) {
+            *out = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // ---- dicts ---------------------------------------------------------------
 zz_value zz_dict_new(void) {
     zz_dict *d = (zz_dict *)calloc(1, sizeof(zz_dict));
@@ -447,12 +634,22 @@ zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint) {
         } else {
             d->entries = NULL;
         }
+        // The entries buffer is fixed-capacity, so pre-size the key index to
+        // the same hint (both live on the arena and die with it).
+        if (hint > ZZ_DICT_INDEX_THRESHOLD) {
+            zz_dict_idx_build(d, arena, zz_dict_cap_for(hint));
+        }
     } else {
         d = (zz_dict *)calloc(1, sizeof(zz_dict));
         d->refs = 1;
         if (hint > 0) {
             d->cap = hint;
             d->entries = (zz_dict_entry *)malloc(hint * sizeof(zz_dict_entry));
+        }
+        // Literals and dict copies know their size up front: allocate the
+        // index now so the inserts never rebuild it.
+        if (hint > ZZ_DICT_INDEX_THRESHOLD) {
+            zz_dict_idx_build(d, NULL, zz_dict_cap_for(hint));
         }
     }
     zz_value v;
@@ -543,12 +740,12 @@ zz_value zz_dict_dup_value(const zz_dict *d) {
     zz_value out = zz_dict_new_sized(d->len);
     if (!out.dict) return zz_unit();
     for (size_t i = 0; i < d->len; i++) {
-        if (!d->entries[i].key) continue; // corrupt entry: skip, never crash
-        zz_value k;
-        k.tag = ZZ_STR;
-        k.s = d->entries[i].key;
+        // Keys are borrowed (the setter takes its own share); values are
+        // cloned shares handed over per the setter's move convention. The
+        // setter also heals arena-backed keys/values to heap, so the copy
+        // outlives the arena that built the original.
         zz_value v = zz_clone(d->entries[i].val);
-        zz_dict_set(out.dict, k, v);
+        zz_dict_set(out.dict, d->entries[i].key, v);
     }
     return out;
 }
@@ -604,15 +801,13 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
 }
 
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
-    if (key.tag != ZZ_STR)
+    if (!d) return;
+    size_t pos;
+    if (zz_dict_find(d, key, &pos)) {
+        // First occurrence wins on the key, the value is replaced
+        // (mirrors the VM's `DictData::insert`).
+        zz_assign(&d->entries[pos].val, val);
         return;
-    for (size_t i = 0; i < d->len; i++) {
-        zz_dict_entry *e = &d->entries[i];
-        if (e->key->len == key.s->len &&
-            memcmp(zz_str_cptr(e->key), zz_str_cptr(key.s), key.s->len) == 0) {
-            zz_assign(&e->val, val);
-            return;
-        }
     }
     if (d->len == d->cap) {
         if (d->refs == ZZ_DICT_ARENA_MAGIC) {
@@ -625,23 +820,31 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
         d->cap = nc;
     }
     zz_dict_entry *e = &d->entries[d->len++];
-    if (key.s && !key.s->interned && key.s->refs == 0) {
-        // Arena-owned key: duplicate to heap. The `refs++` adoption below
-        // would claim arena memory as heap-owned (reset corruption, then a
-        // wild free when the entry releases).
-        zz_str *k = str_alloc(key.s->len);
-        memcpy(zz_str_ptr(k), zz_str_cptr(key.s), key.s->len);
-        zz_str_ptr(k)[key.s->len] = '\0';
-        e->key = k;
-    } else {
-        e->key = key.s;
-        key.s->refs++;
-    }
-    // Move convention (callers transfer ownership): arena-owned values
-    // heal to heap copies so the stored element survives the loop-arena
+    // Keys use the share convention: callers keep their own share (borrowed
+    // keys are common — interned field names, another dict's entry), so store
+    // an independent share. `zz_clone_for_store` also heals arena-backed
+    // keys to heap copies, else the loop-arena reset would corrupt the slot.
+    e->key = zz_clone_for_store(key);
+    // Values use the move convention (callers transfer ownership): arena-owned
+    // values heal to heap copies so the stored element survives the loop-arena
     // reset; heap values are adopted as-is (no bump — same as the old
     // `zz_str_heal_arena` passthrough, extended to containers).
     e->val = zz_heal_for_move(val);
+    zz_dict_idx_insert(d, d->len - 1);
+}
+
+zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
+    *err = 0;
+    if (!d) {
+        *err = 1;
+        return zz_unit();
+    }
+    size_t pos;
+    if (zz_dict_find(d, key, &pos)) {
+        return zz_clone(d->entries[pos].val);
+    }
+    *err = 1;
+    return zz_unit();
 }
 
 size_t zz_dict_len(const zz_dict *d) {
@@ -771,33 +974,40 @@ zz_value zz_range3(zz_value a, zz_value b, zz_value c, int *err) {
 }
 
 // ---- variant constructors (Option / Result) ---------------------------
-// Store the inner value on the heap so match can extract it via payload pointer.
+// Store the inner value in a reference-counted box (see `zz_vbox`) so
+// every owner of the wrapper shares one box safely; `match` and friends
+// extract the inner through the payload pointer.
 
 zz_value zz_variant_some(zz_value inner) {
-    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-    *p = inner;
-    return (zz_value){ZZ_OPTION_SOME, {.payload = p}};
+    return (zz_value){ZZ_OPTION_SOME, {.payload = zz_vbox_new(inner)}};
 }
 
 zz_value zz_variant_ok(zz_value inner) {
-    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-    *p = inner;
-    return (zz_value){ZZ_RESULT_OK, {.payload = p}};
+    return (zz_value){ZZ_RESULT_OK, {.payload = zz_vbox_new(inner)}};
 }
 
 zz_value zz_variant_err(zz_value inner) {
-    zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-    *p = inner;
-    return (zz_value){ZZ_RESULT_ERR, {.payload = p}};
+    return (zz_value){ZZ_RESULT_ERR, {.payload = zz_vbox_new(inner)}};
 }
 
-// Release helper for variant payloads.
-void zz_release_variant(zz_value *v) {
-    if (v->payload) {
-        zz_release(v->payload);
-        free(v->payload);
-        v->payload = NULL;
+// Drop one owner of a variant payload: the box releases the inner it owns
+// and is freed once the last owner goes away. `zz_vbox_release` lives out
+// of line (next to this function) because it needs `zz_release`.
+void zz_vbox_release(zz_value *payload) {
+    if (!payload) {
+        return;
     }
+    zz_vbox *b = zz_vbox_of(payload);
+    if (__atomic_sub_fetch(&b->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        zz_release(&b->inner);
+        free(b);
+    }
+}
+
+// Release helper for variant payloads (drop our owner reference).
+void zz_release_variant(zz_value *v) {
+    zz_vbox_release(v->payload);
+    v->payload = NULL;
 }
 
 // ---- boxed struct (object) constructors and accessors --------------------
@@ -992,48 +1202,41 @@ int zz_object_is_enum_shape(const zz_object *o) {
     return fname->tag == ZZ_STR && fname->s && strcmp(zz_str_cptr(fname->s), "value") == 0;
 }
 zz_value zz_range_build(zz_value start, zz_value end) {
-    (void)end;
-    // Represent a range inline; used in `for`. Return an int start marker
-    // (codegen for `for` emits two-path C loop directly, so this is mostly
-    // unused).
-    zz_value v = {ZZ_RANGE, {0}};
-    v.i = start.tag == ZZ_INT ? start.i : 0;
+    return zz_range_build_step(start, end, zz_int(1));
+}
+
+// First-class range value: heap-allocated (start, end, step) shared by
+// both AOT backends (#254). Bounds must be ints (mirrors the VM, which
+// rejects non-int bounds); non-int inputs degrade to `0..0`, same as
+// the old degenerate marker. Step 0 normalizes to 1 (a zero step can
+// never advance iteration).
+zz_value zz_range_build_step(zz_value start, zz_value end, zz_value step) {
+    int64_t s = start.tag == ZZ_INT ? start.i : 0;
+    int64_t e = end.tag == ZZ_INT ? end.i : 0;
+    int64_t st = step.tag == ZZ_INT ? step.i : 1;
+    if (st == 0) st = 1;
+    zz_range *r = (zz_range *)malloc(sizeof(zz_range));
+    if (!r) {
+        fprintf(stderr, "zz error: out of memory (range)\n");
+        exit(1);
+    }
+    r->refs = 1;
+    r->start = s;
+    r->end = e;
+    r->step = st;
+    zz_value v;
+    v.tag = ZZ_RANGE;
+    v.range = r;
     return v;
 }
 
-// Release an owned temporary WITHOUT freeing variant/JSON payload boxes.
+// Release an owned temporary variant/JSON wrapper.
 //
-// Background: `zz_clone` on Option/Result/JSON wrappers is a shallow share
-// — it bumps the refcounted leaves but shares the payload BOX (boxes carry
-// no refcount; they are immortal while any owner lives). `zz_release` /
-// `zz_release_variant` frees the box, so clone-then-release use-after-frees
-// anyone else sharing it (e.g. `zz_elvis` cloning the winner out of `left`
-// and then releasing `left` freed the box the winner still points to).
-//
-// This helper balances the leaf refcounts (so 1MB `read_to_string`
-// payloads don't accumulate per `??`) while leaking the 16-byte boxes
-// exactly as the old never-release behavior did — strictly less leaking,
-// no new frees, no UAF.
-static void zz_release_shared(zz_value *v) {
-    switch (v->tag) {
-    case ZZ_OPTION_SOME:
-    case ZZ_RESULT_OK:
-    case ZZ_RESULT_ERR:
-    case ZZ_JSON:
-        if (v->payload) zz_release_shared(v->payload);
-        break;
-    default:
-        zz_release(v);
-        break;
-    }
-}
-
-// zz_elvis(left, right) — unwrap Option/Result on the left, else return right.
-// Mirrors the VM's `??` operator which unwraps .some(v) and .ok(v).
-// Consume semantics (mirrors zz_binop_cat): both inputs are owned
-// temporaries. Inputs are released via zz_release_shared (leaf-balanced,
-// box-preserving — see above), so `fs.read_to_string(p) ?? ""` no longer
-// retains the whole Result payload per evaluation (~1.5MB/pass growth).
+// Boxes are reference counted now (`zz_vbox`), so the plain release is
+// correct: it drops this owner's box reference, and the box releases the
+// inner it owns once the last owner goes away. This used to need a
+// box-leaking special case (`zz_release_shared`), because
+// `zz_release_variant` freed a box other owners still pointed at (#507).
 zz_value zz_elvis(zz_value left, zz_value right) {
     zz_value out;
     if (left.tag == ZZ_OPTION_SOME && left.payload)
@@ -1049,8 +1252,8 @@ zz_value zz_elvis(zz_value left, zz_value right) {
         out = zz_clone(left);
     else
         out = zz_clone(right);
-    zz_release_shared(&left);
-    zz_release_shared(&right);
+    zz_release(&left);
+    zz_release(&right);
     return out;
 }
 // =====================================================================
@@ -1339,28 +1542,395 @@ zz_value zz_vec_contains(zz_value arr, zz_value item, int *err) {
     return (zz_value){ZZ_BOOL, {.b = false}};
 }
 
+// ---- vec.sort -------------------------------------------------------------
+// Ordering mirrors the VM (`natives/vec_mod::vec_sort`): type name first,
+// then the value within a type, and *stably* (equal elements keep their
+// input order). qsort is not stable, so the generic lane breaks ties on the
+// original index; the scalar lanes need no tie-break because equal scalars
+// are indistinguishable, so any permutation is the same array.
+static const char *zz_sort_type_name(zz_value v) {
+    switch (v.tag) {
+    case ZZ_UNIT: return "unit";
+    case ZZ_INT: return "int";
+    case ZZ_FLOAT: return "float";
+    case ZZ_BOOL: return "bool";
+    case ZZ_STR: return "str";
+    case ZZ_ARRAY: return "array";
+    case ZZ_DICT: return "dict";
+    case ZZ_FUNC: return "func";
+    case ZZ_NATIVE: return "native";
+    case ZZ_OPTION_SOME:
+    case ZZ_OPTION_NONE: return "option";
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR: return "result";
+    case ZZ_RANGE: return "range";
+    case ZZ_JSON: return "json";
+    case ZZ_TCP_STREAM: return "tcp.stream";
+    case ZZ_TCP_LISTENER: return "tcp.listener";
+    case ZZ_BYTES: return "bytes";
+    case ZZ_TUPLE: return "tuple";
+    case ZZ_OBJECT:
+        return (v.obj && v.obj->type_name) ? v.obj->type_name : "object";
+    default: return "unknown";
+    }
+}
+
+typedef struct {
+    zz_value v;
+    zz_value k;   // sort key (sort_key only; unset for sort_by)
+    size_t idx;
+} zz_sort_pair;
+
+static int zz_sort_cmp_i64(const void *pa, const void *pb) {
+    int64_t a = *(const int64_t *)pa, b = *(const int64_t *)pb;
+    return (a > b) - (a < b);
+}
+
+static int zz_sort_cmp_f64(const void *pa, const void *pb) {
+    // NaN compares equal to everything, like the VM's
+    // `partial_cmp(..).unwrap_or(Ordering::Equal)`.
+    double a = *(const double *)pa, b = *(const double *)pb;
+    return (a > b) - (a < b);
+}
+
+// Lexicographic byte order, then length — `String::cmp` on the VM side.
+static int zz_sort_cmp_str(const void *pa, const void *pb) {
+    zz_str *a = ((const zz_value *)pa)->s;
+    zz_str *b = ((const zz_value *)pb)->s;
+    if (a == b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    size_t m = a->len < b->len ? a->len : b->len;
+    int c = m ? memcmp(zz_str_cptr(a), zz_str_cptr(b), m) : 0;
+    if (c) return c;
+    return (a->len > b->len) - (a->len < b->len);
+}
+
+static int zz_sort_cmp_value(const void *pa, const void *pb) {
+    const zz_sort_pair *a = (const zz_sort_pair *)pa;
+    const zz_sort_pair *b = (const zz_sort_pair *)pb;
+    const char *ta = zz_sort_type_name(a->v);
+    const char *tb = zz_sort_type_name(b->v);
+    int c = ta == tb ? 0 : strcmp(ta, tb);
+    if (c == 0 && a->v.tag == b->v.tag) {
+        switch (a->v.tag) {
+        case ZZ_INT:
+            c = (a->v.i > b->v.i) - (a->v.i < b->v.i);
+            break;
+        case ZZ_FLOAT:
+            c = (a->v.f > b->v.f) - (a->v.f < b->v.f);
+            break;
+        case ZZ_BOOL: {
+            int x = a->v.b ? 1 : 0, y = b->v.b ? 1 : 0;
+            c = (x > y) - (x < y);
+            break;
+        }
+        case ZZ_STR:
+            c = zz_sort_cmp_str(&a->v, &b->v);
+            break;
+        default:
+            // The VM orders other same-type values `Equal`; the index
+            // tie-break below keeps their input order (stability).
+            break;
+        }
+    }
+    if (c == 0) c = (a->idx > b->idx) - (a->idx < b->idx);
+    return c;
+}
+
 // vec.sort(arr) → sorted array (new array, original unchanged)
 zz_value zz_vec_sort(zz_value arr, int *err) {
     (void)err;
     if (arr.tag != ZZ_ARRAY || !arr.arr) return arr;
     size_t n = arr.arr->len;
     if (n <= 1) return zz_clone(arr);
-    // Create a new array with cloned elements.
+    // Fresh array with one share of each element: the caller's array is
+    // untouched (value semantics). `zz_array_push` shares (it stores its own
+    // clone), so the elements stay borrowed here.
     zz_value sorted = zz_array_new();
+    if (sorted.tag != ZZ_ARRAY || !sorted.arr) return zz_unit();
     for (size_t i = 0; i < n; i++) {
-        zz_array_push(sorted.arr, zz_clone(arr.arr->items[i]));
+        zz_array_push(sorted.arr, arr.arr->items[i]);
     }
-    // Simple insertion sort (fine for small arrays; larger ones use qsort).
-    for (size_t i = 1; i < n; i++) {
-        zz_value key = sorted.arr->items[i];
-        size_t j = i;
-        while (j > 0 && zz_truthy(zz_binop(ZZOP_LT, zz_clone(key), zz_clone(sorted.arr->items[j-1])))) {
-            sorted.arr->items[j] = sorted.arr->items[j-1];
-            j--;
+    zz_value *items = sorted.arr->items;
+
+    // Scalar lanes: no pair array and no key boxing. Homogeneity is the
+    // common case (typed arrays) and removes every type check from the
+    // comparator.
+    unsigned char tag = items[0].tag;
+    int homo = tag == ZZ_INT || tag == ZZ_FLOAT || tag == ZZ_BOOL || tag == ZZ_STR;
+    for (size_t i = 1; homo && i < n; i++) {
+        if (items[i].tag != tag) homo = 0;
+    }
+    if (homo && tag == ZZ_INT) {
+        int64_t *keys = (int64_t *)malloc(n * sizeof *keys);
+        if (!keys) return sorted;
+        for (size_t i = 0; i < n; i++) keys[i] = items[i].i;
+        qsort(keys, n, sizeof *keys, zz_sort_cmp_i64);
+        for (size_t i = 0; i < n; i++) items[i].i = keys[i];
+        free(keys);
+        return sorted;
+    }
+    if (homo && tag == ZZ_FLOAT) {
+        double *keys = (double *)malloc(n * sizeof *keys);
+        if (!keys) return sorted;
+        for (size_t i = 0; i < n; i++) keys[i] = items[i].f;
+        qsort(keys, n, sizeof *keys, zz_sort_cmp_f64);
+        for (size_t i = 0; i < n; i++) items[i].f = keys[i];
+        free(keys);
+        return sorted;
+    }
+    if (homo && tag == ZZ_BOOL) {
+        // Only two values: counting beats every comparison sort.
+        size_t falses = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (!items[i].b) falses++;
         }
-        sorted.arr->items[j] = key;
+        for (size_t i = 0; i < n; i++) items[i].b = i >= falses;
+        return sorted;
     }
+    if (homo && tag == ZZ_STR) {
+        qsort(items, n, sizeof *items, zz_sort_cmp_str);
+        return sorted;
+    }
+
+    // Mixed tags (or a single non-scalar tag): decorate with the input
+    // position so ties stay stable, sort, undecorate.
+    zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs) return sorted;
+    for (size_t i = 0; i < n; i++) {
+        pairs[i].v = items[i];
+        pairs[i].idx = i;
+    }
+    qsort(pairs, n, sizeof *pairs, zz_sort_cmp_value);
+    for (size_t i = 0; i < n; i++) items[i] = pairs[i].v;
+    free(pairs);
     return sorted;
+}
+
+// vec.sort_by(arr, cmp) — sort array using a |T, T| -> int comparator.
+// Mergesort (stable, O(n log n)) with a closure comparator called via the C ABI.
+// negative/zero/positive from the comparator maps to Less/Equal/Greater.
+typedef struct {
+    zz_dispatch_fn fn;
+    void **env;
+    size_t nenv;
+} sort_by_ctx;
+
+static int sort_by_cmp(void *thunk, const zz_sort_pair *a, const zz_sort_pair *b) {
+    sort_by_ctx *ctx = (sort_by_ctx *)thunk;
+    zz_value argv[] = { a->v, b->v };
+    zz_value r = ctx->fn(argv, 2, ctx->env, ctx->nenv);
+    int ord;
+    if (r.tag == ZZ_INT) ord = (r.i > 0) - (r.i < 0);
+    else if (r.tag == ZZ_FLOAT) ord = (r.f > 0.0) - (r.f < 0.0);
+    else if (r.tag == ZZ_BOOL) ord = r.b ? 1 : -1;
+    else ord = 0;
+    zz_release(&r);
+    return ord;
+}
+
+// Mergesort over zz_sort_pair using a comparator with context.
+// Stable (takes left element when equal) and O(n log n).
+static void merge_sort_ctx(zz_sort_pair *pairs, zz_sort_pair *tmp, size_t n,
+                           int (*cmp)(void *, const zz_sort_pair *, const zz_sort_pair *),
+                           void *thunk) {
+    if (n <= 1) return;
+    size_t mid = n / 2;
+    merge_sort_ctx(pairs, tmp, mid, cmp, thunk);
+    merge_sort_ctx(pairs + mid, tmp + mid, n - mid, cmp, thunk);
+    size_t i = 0, j = mid, k = 0;
+    while (i < mid && j < n) {
+        // Stable: take left element when equal (cmp <= 0 means left <= right).
+        if (cmp(thunk, &pairs[i], &pairs[j]) <= 0) {
+            tmp[k++] = pairs[i++];
+        } else {
+            tmp[k++] = pairs[j++];
+        }
+    }
+    while (i < mid) tmp[k++] = pairs[i++];
+    while (j < n) tmp[k++] = pairs[j++];
+    for (size_t t = 0; t < n; t++) pairs[t] = tmp[t];
+}
+
+zz_value zz_vec_sort_by(zz_value arr, zz_value cmp, int *err) {
+    *err = 0;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return zz_clone(arr);
+    size_t n = arr.arr->len;
+    if (n <= 1) return zz_clone(arr);
+    zz_dispatch_fn fn = zz_closure_target(cmp);
+    size_t nenv = 0;
+    void **env = zz_closure_env(cmp, &nenv);
+    if (!fn) return zz_clone(arr);
+    zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    zz_sort_pair *tmp = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs || !tmp) {
+        free(pairs);
+        free(tmp);
+        return zz_clone(arr);
+    }
+    for (size_t i = 0; i < n; i++) {
+        pairs[i].v = zz_clone(arr.arr->items[i]);
+        pairs[i].k = (zz_value){ZZ_UNIT, {0}};
+        pairs[i].idx = i;
+    }
+    // Sync-call hygiene: closures run outside the trampoline.
+    zz_task_frame *saved_fr = zz_green_frame();
+    zz_green_frame_set(NULL);
+    sort_by_ctx ctx = { fn, env, nenv };
+    merge_sort_ctx(pairs, tmp, n, sort_by_cmp, &ctx);
+    zz_green_frame_set(saved_fr);
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < n; i++) {
+        zz_array_push(out.arr, pairs[i].v);
+        zz_release(&pairs[i].v);
+        zz_release(&pairs[i].k);
+    }
+    free(pairs);
+    free(tmp);
+    return out;
+}
+
+// vec.sort_by_desc(arr, cmp) — like sort_by but reverses the comparator.
+typedef struct {
+    zz_dispatch_fn fn;
+    void **env;
+    size_t nenv;
+} sort_by_desc_ctx;
+
+static int sort_by_desc_cmp(void *thunk, const zz_sort_pair *a, const zz_sort_pair *b) {
+    sort_by_desc_ctx *ctx = (sort_by_desc_ctx *)thunk;
+    zz_value argv[] = { a->v, b->v };
+    zz_value r = ctx->fn(argv, 2, ctx->env, ctx->nenv);
+    int ord;
+    if (r.tag == ZZ_INT) ord = (r.i > 0) - (r.i < 0);
+    else if (r.tag == ZZ_FLOAT) ord = (r.f > 0.0) - (r.f < 0.0);
+    else if (r.tag == ZZ_BOOL) ord = r.b ? 1 : -1;
+    else ord = 0;
+    zz_release(&r);
+    return -ord;
+}
+
+zz_value zz_vec_sort_by_desc(zz_value arr, zz_value cmp, int *err) {
+    *err = 0;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return zz_clone(arr);
+    size_t n = arr.arr->len;
+    if (n <= 1) return zz_clone(arr);
+    zz_dispatch_fn fn = zz_closure_target(cmp);
+    size_t nenv = 0;
+    void **env = zz_closure_env(cmp, &nenv);
+    if (!fn) return zz_clone(arr);
+    zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    zz_sort_pair *tmp = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs || !tmp) {
+        free(pairs);
+        free(tmp);
+        return zz_clone(arr);
+    }
+    for (size_t i = 0; i < n; i++) {
+        pairs[i].v = zz_clone(arr.arr->items[i]);
+        pairs[i].k = (zz_value){ZZ_UNIT, {0}};
+        pairs[i].idx = i;
+    }
+    zz_task_frame *saved_fr = zz_green_frame();
+    zz_green_frame_set(NULL);
+    sort_by_desc_ctx ctx = { fn, env, nenv };
+    merge_sort_ctx(pairs, tmp, n, sort_by_desc_cmp, &ctx);
+    zz_green_frame_set(saved_fr);
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < n; i++) {
+        zz_array_push(out.arr, pairs[i].v);
+        zz_release(&pairs[i].v);
+        zz_release(&pairs[i].k);
+    }
+    free(pairs);
+    free(tmp);
+    return out;
+}
+
+// vec.sort_key(arr, key) — sort array by |T| -> K key (stable, O(n) key calls).
+typedef struct {
+    zz_dispatch_fn fn;
+    void **env;
+    size_t nenv;
+} sort_key_ctx;
+
+// Key comparison (no context needed — keys are precomputed in pairs[i].k).
+static int sort_key_cmp(const zz_sort_pair *a, const zz_sort_pair *b) {
+    // Compare keys by tag then value.
+    int ord;
+    if (a->k.tag == ZZ_INT && b->k.tag == ZZ_INT) {
+        ord = (a->k.i > b->k.i) - (a->k.i < b->k.i);
+    } else if (a->k.tag == ZZ_FLOAT && b->k.tag == ZZ_FLOAT) {
+        ord = (a->k.f > b->k.f) - (a->k.f < b->k.f);
+    } else if (a->k.tag == ZZ_STR && b->k.tag == ZZ_STR) {
+        ord = strcmp(zz_str_cptr(a->k.s), zz_str_cptr(b->k.s));
+    } else if (a->k.tag == ZZ_BOOL && b->k.tag == ZZ_BOOL) {
+        ord = a->k.b - b->k.b;
+    } else {
+        ord = (int)(a->k.tag - b->k.tag);
+    }
+    if (ord == 0) ord = (a->idx > b->idx) - (a->idx < b->idx);
+    return ord;
+}
+
+// Mergesort using sort_key_cmp (no context). Stable and O(n log n).
+static void merge_sort_key(zz_sort_pair *pairs, zz_sort_pair *tmp, size_t n) {
+    if (n <= 1) return;
+    size_t mid = n / 2;
+    merge_sort_key(pairs, tmp, mid);
+    merge_sort_key(pairs + mid, tmp + mid, n - mid);
+    size_t i = 0, j = mid, k = 0;
+    while (i < mid && j < n) {
+        if (sort_key_cmp(&pairs[i], &pairs[j]) <= 0) {
+            tmp[k++] = pairs[i++];
+        } else {
+            tmp[k++] = pairs[j++];
+        }
+    }
+    while (i < mid) tmp[k++] = pairs[i++];
+    while (j < n) tmp[k++] = pairs[j++];
+    for (size_t t = 0; t < n; t++) pairs[t] = tmp[t];
+}
+
+zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err) {
+    *err = 0;
+    if (arr.tag != ZZ_ARRAY || !arr.arr) return zz_clone(arr);
+    size_t n = arr.arr->len;
+    if (n <= 1) return zz_clone(arr);
+    zz_dispatch_fn fn = zz_closure_target(key);
+    size_t nenv = 0;
+    void **env = zz_closure_env(key, &nenv);
+    if (!fn) return zz_clone(arr);
+    zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    zz_sort_pair *tmp = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs || !tmp) {
+        free(pairs);
+        free(tmp);
+        return zz_clone(arr);
+    }
+    // Decorate: compute key for each element once.
+    for (size_t i = 0; i < n; i++) {
+        pairs[i].v = zz_clone(arr.arr->items[i]);
+        pairs[i].idx = i;
+        zz_value argv[] = { pairs[i].v };
+        zz_value k = fn(argv, 1, env, nenv);
+        pairs[i].k = zz_clone(k);
+        zz_release(&k);
+    }
+    zz_task_frame *saved_fr = zz_green_frame();
+    zz_green_frame_set(NULL);
+    merge_sort_key(pairs, tmp, n);
+    zz_green_frame_set(saved_fr);
+    zz_value out = zz_array_new();
+    for (size_t i = 0; i < n; i++) {
+        zz_array_push(out.arr, pairs[i].v);
+        zz_release(&pairs[i].v);
+        zz_release(&pairs[i].k);
+    }
+    free(pairs);
+    free(tmp);
+    return out;
 }
 
 // vec.reverse(arr) → reversed array (new array, original unchanged)
@@ -1388,7 +1958,7 @@ zz_value zz_dict_keys(zz_value d, int *err) {
     zz_value arr = zz_array_new();
     for (size_t i = 0; i < d.dict->len; i++) {
         int sub_err = 0;
-        zz_vec_append(arr, (zz_value){ZZ_STR, {.s = d.dict->entries[i].key}}, &sub_err);
+        zz_vec_append(arr, d.dict->entries[i].key, &sub_err);
     }
     return arr;
 }
@@ -1396,12 +1966,9 @@ zz_value zz_dict_keys(zz_value d, int *err) {
 // dict.has(d, key)
 zz_value zz_dict_has(zz_value d, zz_value key, int *err) {
     (void)err;
-    if (d.tag != ZZ_DICT || key.tag != ZZ_STR) return (zz_value){ZZ_BOOL, {.b = false}};
-    for (size_t i = 0; i < d.dict->len; i++) {
-        if (strcmp(zz_str_cptr(d.dict->entries[i].key), zz_str_cptr(key.s)) == 0)
-            return (zz_value){ZZ_BOOL, {.b = true}};
-    }
-    return (zz_value){ZZ_BOOL, {.b = false}};
+    if (d.tag != ZZ_DICT) return (zz_value){ZZ_BOOL, {.b = false}};
+    size_t pos;
+    return (zz_value){ZZ_BOOL, {.b = zz_dict_find(d.dict, key, &pos) != 0}};
 }
 
 // option.expect(opt, msg) — unwrap .some(v) or panic with msg
@@ -1430,6 +1997,59 @@ zz_value zz_result_expect(zz_value res, zz_value msg, int *err) {
         fprintf(stderr, "error: %s\n",
                 (msg.tag == ZZ_STR) ? zz_str_cptr(msg.s) : "expect failed");
     }
+    exit(1);
+}
+
+// option.unwrap(opt) — unwrap .some(v) or abort like the VM's
+// `called unwrap on .none` EvalError (native: `error:` + exit 1,
+// matching `zz_option_expect`).
+zz_value zz_option_unwrap(zz_value opt, int *err) {
+    (void)err;
+    if (opt.tag == ZZ_OPTION_SOME && opt.payload)
+        return zz_clone(*opt.payload);
+    if (opt.tag == ZZ_OPTION_NONE) {
+        fprintf(stderr, "error: called unwrap on .none\n");
+        exit(1);
+    }
+    fprintf(stderr, "error: option.unwrap: expected an option\n");
+    exit(1);
+}
+
+// option.unwrap_or(opt, def) — `.some(v)` yields v, `.none` yields def.
+zz_value zz_option_unwrap_or(zz_value opt, zz_value def, int *err) {
+    (void)err;
+    if (opt.tag == ZZ_OPTION_SOME && opt.payload)
+        return zz_clone(*opt.payload);
+    if (opt.tag == ZZ_OPTION_NONE)
+        return zz_clone(def);
+    fprintf(stderr, "error: option.unwrap_or: expected an option\n");
+    exit(1);
+}
+
+// result.unwrap(res) — unwrap .ok(v) or abort like the VM's
+// `result.unwrap: called unwrap on .err(e)` EvalError.
+zz_value zz_result_unwrap(zz_value res, int *err) {
+    (void)err;
+    if (res.tag == ZZ_RESULT_OK && res.payload)
+        return zz_clone(*res.payload);
+    if (res.tag == ZZ_RESULT_ERR && res.payload) {
+        char *estr = zz_value_to_string(res.payload);
+        fprintf(stderr, "error: result.unwrap: called unwrap on .err(%s)\n", estr);
+        free(estr);
+    } else {
+        fprintf(stderr, "error: result.unwrap: expected a result\n");
+    }
+    exit(1);
+}
+
+// result.unwrap_or(res, def) — `.ok(v)` yields v, `.err(_)` yields def.
+zz_value zz_result_unwrap_or(zz_value res, zz_value def, int *err) {
+    (void)err;
+    if (res.tag == ZZ_RESULT_OK && res.payload)
+        return zz_clone(*res.payload);
+    if (res.tag == ZZ_RESULT_ERR)
+        return zz_clone(def);
+    fprintf(stderr, "error: result.unwrap_or: expected a result\n");
     exit(1);
 }
 

@@ -83,6 +83,7 @@ typedef struct zz_value zz_value;
 typedef struct zz_array zz_array;
 typedef struct zz_dict zz_dict;
 typedef struct zz_dict_entry zz_dict_entry;
+typedef struct zz_range zz_range;
 typedef struct zz_chan zz_chan;
 typedef struct zz_task_join zz_task_join;
 typedef struct zz_object zz_object;
@@ -158,6 +159,7 @@ struct zz_value {
         zz_chan *chan;
         zz_task_join *task;
         zz_value *payload;   // Option/Result inner value (heap-allocated)
+        zz_range *range;     // integer range (heap-allocated, refcounted)
         zz_object *obj;      // boxed struct instance
         zz_tcp *net;         // TCP stream or listener (ZZ_TCP_STREAM/LISTENER)
         void *db;            // opaque sqlite3* handle (ZZ_DB)
@@ -216,16 +218,67 @@ struct zz_array {
 // but skips free(header) since the header stays on the arena.
 #define ZZ_ARRAY_ARENA_MAGIC ((size_t)0xB3B4B5B6B7B8B9B0ULL)
 
+// Dicts switch from a linear scan to a key index once they outgrow this
+// many entries — the VM's `DICT_INDEX_THRESHOLD` (`DictData` in
+// `zz_runtime::value`), so both engines index at the same size.
+#define ZZ_DICT_INDEX_THRESHOLD 8
+
 struct zz_dict {
     size_t refs;     // atomic reference count (ARC)
     size_t len;
     size_t cap;
     zz_dict_entry *entries;
+    // Key index: a pure cache over `entries` (open addressing with linear
+    // probing, slot value = entry index + 1, 0 = empty; `idx_cap` is a
+    // power of two). Only int/bool/str keys are indexed — the VM's
+    // `DictKey` — so `idx == NULL` means "linear scan only", which is both
+    // the small-dict lane and the answer for dicts keyed by other tags.
+    // Entries stay the source of truth for order, length and iteration.
+    size_t *idx;
+    size_t idx_cap;
 };
 
+// Dict keys are full values, not strings: `{int: int}`, `{bool: str}` and
+// `{float: _}` are legal ZZ dict types, and the VM keys on the value itself
+// (`DictData::entries` is `Vec<(Value, Value)>`). Key ownership follows the
+// ordinary value rules — `zz_assign` on insert (healing arena strings),
+// `zz_release` on drop. Entries are kept in insertion order; the first
+// occurrence of a key wins (VM parity).
 struct zz_dict_entry {
-    zz_str *key;
+    zz_value key;
     zz_value val;
+};
+
+// Borrow an entry's STRING key, or NULL when the key is some other type.
+// Helpers whose parameter type is `{str: _}` (HTTP headers, JSON objects,
+// env maps) use this to skip entries a `{int: _}`/`{bool: _}` dict can hold.
+static inline zz_str *zz_dict_key_str(const zz_dict_entry *e) {
+    return e->key.tag == ZZ_STR ? e->key.s : NULL;
+}
+
+// Deep structural equality over every value tag (defined in core.c; shared
+// by `==` and by dict key matching). Numeric comparison coerces int/float,
+// matching `==`.
+int zz_values_equal(zz_value a, zz_value b);
+
+// Dict key equality: the VM's `Value: PartialEq` requires identical tags,
+// so `1` and `1.0` are *different* keys even though `1 == 1.0` is true.
+static inline int zz_key_eq(zz_value a, zz_value b) {
+    if (a.tag != b.tag) return 0;
+    return zz_values_equal(a, b);
+}
+
+// First-class integer range `start..end` (+ `step`, always 1 from ZZ
+// source today; carried for VM iteration parity and future step
+// syntax). Immutable after creation: clones share via the refcount,
+// stores never mutate in place. Replaces the old degenerate
+// start-marker (bare `.i`) and the chunk backend's immortal
+// `zz_crange` boxes (#254).
+struct zz_range {
+    size_t refs; // atomic reference count (ARC)
+    int64_t start;
+    int64_t end;
+    int64_t step;
 };
 
 // Boxed struct instance (reference-counted).
@@ -504,6 +557,7 @@ void zz_release_func(zz_func *f);
 void zz_release_variant(zz_value *v);
 void zz_release_object(zz_value *v);
 void zz_str_header_free(zz_str *s);
+void zz_vbox_release(zz_value *payload);
 
 // Retain one reference on a boxed struct object (mirrors the release in
 // `zz_release_object`: clones share ownership, so every clone must bump).
@@ -512,6 +566,59 @@ static inline void zz_retain_object(zz_object *o) {
         __atomic_add_fetch(&o->refs, 1, __ATOMIC_RELAXED);
     }
 }
+
+// ---- variant / JSON payload boxes (ARC) --------------------------------
+// An Option/Result/JSON wrapper is a 16-byte value; its inner value lives
+// in a heap box. Cloning a wrapper is a shallow share, so the box must
+// outlive *every* owner and therefore carries its own refcount (the same
+// model as strings/arrays/dicts).
+//
+// This box used to be a bare `malloc(sizeof(zz_value))` with no refcount,
+// which made `zz_release_variant` free a box that another owner still
+// pointed at: `o := .some("x"); a := [o, o]` double-freed on the second
+// element's release (#507). The old workaround was to leak the box
+// (`zz_release_shared`).
+//
+// `payload` deliberately keeps pointing at the box's `inner` field, so
+// every payload reader (`*v.payload`) stays valid; the header is recovered
+// with `zz_vbox_of`. Boxes are only ever created by `zz_vbox_new`, and are
+// only freed by `zz_vbox_release` / `zz_vbox_take`.
+//
+// `refs` is a plain `int64_t` touched only through `__atomic_*` builtins
+// (the convention shared with `zz_str`/`zz_object`/`zz_range`), so the box
+// header is safe to hand across threads (spawn captures, channel sends).
+typedef struct {
+    int64_t refs;
+    zz_value inner;
+} zz_vbox;
+
+static inline zz_vbox *zz_vbox_of(zz_value *payload) {
+    return (zz_vbox *)((char *)payload - offsetof(zz_vbox, inner));
+}
+
+// Allocate a box owning one reference to `inner`; returns the payload
+// pointer to store in the wrapper (NULL if the allocation failed).
+static inline zz_value *zz_vbox_new(zz_value inner) {
+    zz_vbox *b = (zz_vbox *)malloc(sizeof(zz_vbox));
+    if (!b) {
+        return NULL;
+    }
+    b->refs = 1;
+    b->inner = inner;
+    return &b->inner;
+}
+
+static inline void zz_vbox_retain(zz_value *payload) {
+    if (payload) {
+        __atomic_add_fetch(&zz_vbox_of(payload)->refs, 1, __ATOMIC_RELAXED);
+    }
+}
+
+// ZZ_DB owns a live sqlite/Postgres connection; the full handle type
+// lives in core.c. These hooks keep the inline ARC switches below
+// backend-agnostic and close the connection on the last release.
+void zz_db_retain_handle(void *db);
+void zz_db_release_handle(void *db);
 
 static inline void zz_retain(zz_value *v) {
     switch (v->tag) {
@@ -532,6 +639,11 @@ static inline void zz_retain(zz_value *v) {
     case ZZ_FUNC:
         zz_retain_func(v->fn);
         break;
+    case ZZ_RANGE:
+        if (v->range) {
+            __atomic_add_fetch(&v->range->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
     case ZZ_OBJECT:
         zz_retain_object(v->obj);
         break;
@@ -539,7 +651,10 @@ static inline void zz_retain(zz_value *v) {
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
-        if (v->payload) zz_retain(v->payload);
+        zz_vbox_retain(v->payload);
+        break;
+    case ZZ_DB:
+        if (v->db) zz_db_retain_handle(v->db);
         break;
     default:
         break;
@@ -580,12 +695,38 @@ static inline void zz_release(zz_value *v) {
     case ZZ_JSON:
         zz_release_variant(v);
         break;
+    case ZZ_RANGE:
+        if (v->range) {
+            if (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                free(v->range);
+            }
+        }
+        break;
     case ZZ_OBJECT:
         zz_release_object(v);
+        break;
+    case ZZ_DB:
+        if (v->db) {
+            // Clear the slot before releasing so a C cleanup handler
+            // attached to a DB local cannot double-release, and a
+            // later stale read degrades to the closed tombstone.
+            void *db = v->db;
+            v->db = NULL;
+            zz_db_release_handle(db);
+        }
         break;
     default:
         break;
     }
+}
+
+// `__attribute__((cleanup))` endpoint for DB locals: function-scope
+// locals in generated C are not otherwise released, so an AOT handler
+// that opens a connection per request would leak it. Release is
+// idempotent (the DB case above nulls the slot), so an explicit
+// `sqlz.close`/loop release followed by cleanup is safe.
+static inline void zz_db_value_cleanup(zz_value *v) {
+    zz_release(v);
 }
 
 // Forward: defined in strings.c (same translation unit once the runtime
@@ -607,6 +748,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
     if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
         dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
+        dst->tag == ZZ_RANGE || dst->tag == ZZ_DB ||
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
         zz_release(dst);
@@ -628,7 +770,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     *dst = src;
     // Retain the new value for refcounted types.
     if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
-        src.tag == ZZ_OBJECT ||
+        src.tag == ZZ_OBJECT || src.tag == ZZ_RANGE || src.tag == ZZ_DB ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
         src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON)) {
         zz_retain(dst);
@@ -662,16 +804,42 @@ static inline zz_value zz_clone(zz_value v) {
         // other owners still reference it.
         zz_retain_object(v.obj);
         break;
+    case ZZ_RANGE:
+        if (v.range) {
+            __atomic_add_fetch(&v.range->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
     case ZZ_JSON:
-        if (v.payload) zz_retain(v.payload);
+        zz_vbox_retain(v.payload);
+        break;
+    case ZZ_DB:
+        if (v.db) zz_db_retain_handle(v.db);
         break;
     default:
         break;
     }
     return v;
+}
+
+// Move the inner value out of a box this owner holds exclusively: the
+// caller takes over the inner's references and the box is freed without
+// releasing them. A shared box cannot be moved out of, so its owner gets
+// a clone of the inner instead (the box keeps its other owners' copy).
+// Defined here because it needs `zz_clone`; the `zz_vbox` type and the
+// other helpers are above `zz_retain`.
+static inline zz_value zz_vbox_take(zz_value *payload) {
+    zz_vbox *b = zz_vbox_of(payload);
+    if (__atomic_load_n(&b->refs, __ATOMIC_ACQUIRE) == 1) {
+        zz_value inner = b->inner;
+        free(b);
+        return inner;
+    }
+    zz_value inner = zz_clone(b->inner);
+    zz_vbox_release(payload);
+    return inner;
 }
 
 // ---- binaries ----------------------------------------------------------
@@ -782,6 +950,20 @@ zz_value zz_assert_eq(zz_value a, zz_value b, int *err);
 zz_value zz_assert_ne(zz_value a, zz_value b, int *err);
 zz_value zz_assert_approx_eq(zz_value a, zz_value b, zz_value eps, int *err);
 zz_value zz_fail(zz_value v, int *err);
+zz_value zz_assert_contains(zz_value hay, zz_value needle, int *err);
+zz_value zz_assert_starts_with(zz_value s, zz_value prefix, int *err);
+zz_value zz_assert_ends_with(zz_value s, zz_value suffix, int *err);
+zz_value zz_assert_len(zz_value v, zz_value n, int *err);
+zz_value zz_assert_gt(zz_value a, zz_value b, int *err);
+zz_value zz_assert_lt(zz_value a, zz_value b, int *err);
+zz_value zz_assert_is_some(zz_value v, int *err);
+zz_value zz_assert_is_none(zz_value v, int *err);
+zz_value zz_assert_is_ok(zz_value v, int *err);
+zz_value zz_assert_is_err(zz_value v, int *err);
+zz_value zz_test_temp_dir(zz_value prefix, int *err);
+zz_value zz_test_free_port(zz_value unused, int *err);
+zz_value zz_assert_snapshot(zz_value actual, zz_value name, int *err);
+zz_value zz_black_box(zz_value v, int *err);
 zz_value zz_math_abs(zz_value v, int *err);
 zz_value zz_math_sqrt(zz_value v, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);
@@ -830,6 +1012,7 @@ zz_value zz_time_sleep_ms(zz_value ms, int *err);
 
 // ---- type casts ---------------------------------------------------------
 zz_value zz_typeof(zz_value v, int *err);
+zz_value zz_clone_deep(zz_value v, int *err);
 zz_value zz_int_cast(zz_value v, int *err);
 zz_value zz_float_cast(zz_value v, int *err);
 zz_value zz_bool_cast(zz_value v, int *err);
@@ -958,7 +1141,6 @@ zz_value zz_tcp_accept(zz_value listener, int *err);
 zz_value zz_tcp_write(zz_value stream, zz_value data, int *err);
 zz_value zz_tcp_read(zz_value stream, zz_value max_bytes, int *err);
 zz_value zz_tcp_readline(zz_value stream, int *err);
-zz_value zz_tcp_close(zz_value stream, int *err);
 zz_value zz_tcp_read_bytes(zz_value stream, zz_value max_bytes, int *err);
 zz_value zz_tcp_read_exact(zz_value stream, zz_value n, int *err);
 zz_value zz_tcp_write_bytes(zz_value stream, zz_value data, int *err);
@@ -993,7 +1175,9 @@ zz_value zz_http_route_delete_fast(zz_value server, zz_value path, zz_value hand
 zz_value zz_http_route_fast(zz_value server, zz_value method, zz_value path, zz_value handler, int *err);
 zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err);  // 2 args
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
+zz_value zz_http_rate_limit(zz_value server, zz_value max_requests, zz_value window_ms, int *err);  // 3 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
+zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *err);  // 3 args
 zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *err);  // 3 args
@@ -1017,6 +1201,7 @@ zz_value zz_http_response_headers(zz_value resp, int *err);
 // Opaque handle: a heap `zz_db_handle` recording the backend (sqlite3*
 // or staticlib pool id) boxed as ZZ_DB. `sqlz.open` sniffs the scheme
 // once (postgres:// → PG); query/exec/close dispatch on the handle.
+// The handle is refcounted: the last reference closes the backend.
 // query/exec take a static SQL template (with ?N placeholders; the PG
 // path rewrites to $N) plus bound zz_values.
 // Native call convention: (args..., int *err) so codegen can route via
@@ -1039,6 +1224,10 @@ int  zz_tx_has_error(void);
 // ---- option / result ----------------------------------------------------
 zz_value zz_option_expect(zz_value opt, zz_value msg, int *err);
 zz_value zz_result_expect(zz_value res, zz_value msg, int *err);
+zz_value zz_option_unwrap(zz_value opt, int *err);
+zz_value zz_option_unwrap_or(zz_value opt, zz_value def, int *err);
+zz_value zz_result_unwrap(zz_value res, int *err);
+zz_value zz_result_unwrap_or(zz_value res, zz_value def, int *err);
 
 // ---- runtime glue ------------------------------------------------------
 // Generated code calls zz_main (top-level statements) then zz_call_main.

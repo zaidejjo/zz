@@ -5,7 +5,7 @@ struct ErrB { msg: str }
 
 impl ErrA {
     func convert_to_ErrB(self) -> ErrB {
-        ErrB{msg: self.msg}
+        return ErrB{msg: self.msg}
     }
     func convert_to_ErrB2(self) -> ErrB {
         ErrB{msg: self.msg}

@@ -29,6 +29,8 @@ struct PkgVersion {
     tarball: Vec<u8>,
     sha256: String,
     license: String,
+    docs_md: String,
+    languages: HashMap<String, f64>,
 }
 
 struct MockState {
@@ -39,7 +41,10 @@ struct MockState {
 
 impl MockState {
     fn seeded() -> Self {
-        let tarball = make_tarball(&[("zz.toml", "[package]\nname = \"widget\"\n")]);
+        let tarball = make_tarball(&[(
+            "zz.toml",
+            "[package]\nname = \"widget\"\nversion = \"1.0.0\"\n",
+        )]);
         let sha256 = zz_pm::hash::hash_bytes(&tarball);
         let mut meta = HashMap::new();
         meta.insert(
@@ -58,6 +63,8 @@ impl MockState {
                 tarball,
                 sha256,
                 license: "MIT".to_string(),
+                docs_md: String::new(),
+                languages: HashMap::new(),
             },
         );
         Self { meta, versions }
@@ -301,6 +308,15 @@ fn serve_mock(state: Arc<Mutex<MockState>>, done: Arc<std::sync::atomic::AtomicB
                         tarball: bytes,
                         sha256: actual.clone(),
                         license: v["license"].as_str().unwrap_or("").to_string(),
+                        docs_md: v["docs_md"].as_str().unwrap_or("").to_string(),
+                        languages: v["languages"]
+                            .as_object()
+                            .map(|o| {
+                                o.iter()
+                                    .filter_map(|(k, val)| val.as_f64().map(|f| (k.clone(), f)))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     },
                 );
                 st.meta.entry(name.clone()).or_insert((
@@ -437,7 +453,10 @@ fn start() -> (
 }
 
 fn publish_fixture(client: &RegistryClient, name: &str, version: &str) -> String {
-    let tarball = make_tarball(&[("zz.toml", &format!("[package]\nname = \"{name}\"\n"))]);
+    let tarball = make_tarball(&[(
+        "zz.toml",
+        &format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n"),
+    )]);
     let sha = zz_pm::hash::hash_bytes(&tarball);
     use base64::Engine as _;
     let req = PublishRequest {
@@ -446,12 +465,15 @@ fn publish_fixture(client: &RegistryClient, name: &str, version: &str) -> String
         tarball_b64: base64::engine::general_purpose::STANDARD.encode(&tarball),
         tarball_sha256: sha.clone(),
         readme_md: Some(format!("# {name}\n")),
+        docs_md: Some(format!("# {name} docs\n")),
+        languages: [("ZZ".to_string(), 100.0)].into_iter().collect(),
         deps: HashMap::new(),
         description: format!("{name} package"),
         repo: String::new(),
         license: "MIT".to_string(),
         category: "utilities".to_string(),
         keywords: vec!["fixture".to_string()],
+        features: Vec::new(),
     };
     let resp = client
         .publish(MOCK_TOKEN, &req)
@@ -536,13 +558,29 @@ fn publish_round_trip_then_visible_everywhere() {
     let mut manifest = zz_pm::manifest::Manifest::default();
     manifest.dependencies.insert(
         "gadget".to_string(),
-        zz_pm::manifest::DepSpec::Version("^0.2".to_string()),
+        zz_pm::manifest::DepSpec::Version("^0.2".into()),
     );
     let dir = std::env::temp_dir();
     let resolved = resolve_with(&manifest, None, &dir, &ResolveOptions::remote(&base)).unwrap();
     assert_eq!(resolved.locked.len(), 1);
     assert_eq!(resolved.locked[0].hash, sha);
     assert!(resolved.locked[0].source.starts_with("registry+"));
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn publish_captures_docs_and_languages() {
+    // #395: the mock records docs_md + languages from the payload.
+    let (base, st, done) = start();
+    let client = RegistryClient::new(&base);
+    publish_fixture(&client, "docspkg", "0.1.0");
+    let st = st.lock().unwrap();
+    let pv = st
+        .versions
+        .get(&("docspkg".to_string(), "0.1.0".to_string()))
+        .expect("published version recorded");
+    assert_eq!(pv.docs_md, "# docspkg docs\n");
+    assert_eq!(pv.languages.get("ZZ"), Some(&100.0));
     done.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -559,12 +597,15 @@ fn republish_same_version_conflicts() {
         tarball_b64: base64::engine::general_purpose::STANDARD.encode(&tarball),
         tarball_sha256: zz_pm::hash::hash_bytes(&tarball),
         readme_md: None,
+        docs_md: None,
+        languages: HashMap::new(),
         deps: HashMap::new(),
         description: String::new(),
         repo: String::new(),
         license: String::new(),
         category: String::new(),
         keywords: Vec::new(),
+        features: Vec::new(),
     };
     let err = client.publish(MOCK_TOKEN, &req).unwrap_err();
     assert!(matches!(err, RemoteError::Conflict(_)), "{err:?}");
@@ -583,12 +624,15 @@ fn bad_token_is_unauthorized() {
         tarball_b64: base64::engine::general_purpose::STANDARD.encode(&tarball),
         tarball_sha256: zz_pm::hash::hash_bytes(&tarball),
         readme_md: None,
+        docs_md: None,
+        languages: HashMap::new(),
         deps: HashMap::new(),
         description: String::new(),
         repo: String::new(),
         license: String::new(),
         category: String::new(),
         keywords: Vec::new(),
+        features: Vec::new(),
     };
     let err = client.publish("zz_pat_wrong", &req).unwrap_err();
     assert!(matches!(err, RemoteError::Unauthorized), "{err:?}");
@@ -630,7 +674,7 @@ fn locked_registry_dep_resolves_offline() {
     let mut manifest = zz_pm::manifest::Manifest::default();
     manifest.dependencies.insert(
         "widget".to_string(),
-        zz_pm::manifest::DepSpec::Version("^1.0".to_string()),
+        zz_pm::manifest::DepSpec::Version("^1.0".into()),
     );
     let dir = std::env::temp_dir();
     // First resolve hits the network and pins the hash.

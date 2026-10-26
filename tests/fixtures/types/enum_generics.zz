@@ -7,13 +7,13 @@ enum Box<T> {
 
 impl Box<T> {
     func get_or(self, d: T) -> T {
-        match self {
+        return match self {
             .V(v) => v
             .E => d
         }
     }
     func is_void(self) -> bool {
-        match self {
+        return match self {
             .V(_) => false
             .E => true
         }

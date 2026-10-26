@@ -5,7 +5,7 @@
 pub struct Flags { verbose: bool, count: int, ratio: float, name: str }
 
 pub func make(v: bool, n: int) -> Flags {
-    Flags{ verbose: v, count: n, ratio: 1.5, name: "x" }
+    return Flags{ verbose: v, count: n, ratio: 1.5, name: "x" }
 }
 
 func main() {

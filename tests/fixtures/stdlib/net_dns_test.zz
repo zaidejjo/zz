@@ -1,0 +1,50 @@
+// features: comparison, elvis, func-call, imports, int-arith, locals, match, option-result, print, std-env, std-net, std-process, std-str, string-literal, string-ops
+// tests/fixtures/stdlib/net_dns_test.zz — hostname + localhost connects
+// (#426, #425). Loopback-only: no external DNS. `localhost` exercises
+// system resolution (getaddrinfo) on both engines; the listener is
+// IPv4-only so an IPv6-first `localhost` must fall through to 127.0.0.1.
+// Only fixed markers print (resolved IPs differ across engines).
+// Bind port derives from (pid, sweep task) like net_tcp_test so
+// parallel runners never share it.
+import std.env
+import std.net
+import std.process(pid)
+import std.str
+
+func netdns_roundtrip(label: str, addr: str) -> Result<int, str> {
+    c := net.tcp_connect(addr, 5000)?
+    c.write("ping\n")?
+    c.close()?
+    println("{label}_ok")
+    return .ok(0)
+}
+
+func main() -> Result<int, str> {
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    base_port := 26000 + pid() % 20000 + tok_num % 20000
+    listen_addr := "127.0.0.1:{base_port}"
+    host_addr := "localhost:{base_port}"
+    l := net.tcp_listen(listen_addr)?
+    // Hostname path (#426): `localhost` must resolve and connect.
+    netdns_roundtrip("host", host_addr)?
+    s1 := l.accept()?
+    d1 := s1.read_line()?
+    r1 := d1 == "ping"
+    println("host_read_ok:{r1}")
+    s1.close()?
+    // Literal path still works.
+    netdns_roundtrip("literal", listen_addr)?
+    s2 := l.accept()?
+    d2 := s2.read_line()?
+    r2 := d2 == "ping"
+    println("literal_read_ok:{r2}")
+    s2.close()?
+    // Malformed address fails fast without resolving.
+    match net.tcp_connect("no-colon-here", 1000) {
+        .ok(_) => println("ERROR: should have failed")
+        .err(_e) => println("bad_addr_ok")
+    }
+    println("net_dns_test_ok")
+    return .ok(0)
+}

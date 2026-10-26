@@ -1,0 +1,38 @@
+// features: arrays, comparison, func-call, if-else, int-arith, locals, print, return, std-vec, string-literal, vec-push, while-loop
+// E2E: statement-position if/else with push in both arms (#427).
+// Arms must lower in void context (in-place push); the value-position
+// temp join used to discard copy-on-write results, emptying the array
+// natively while the VM was correct.
+func ifpush_labels(n: int) -> [str] {
+    out:[str] = []
+    i := 0
+    while i < n {
+        if i == 1 {
+            out.push("one")
+        } else {
+            out.push("other")
+        }
+        i = i + 1
+    }
+    return out
+}
+
+func ifpush_first(n: int) -> [str] {
+    out:[str] = []
+    i := 0
+    while i < n {
+        if i == 0 {
+            out.push("zero")
+        } else {
+            out.push("nz")
+        }
+        i = i + 1
+    }
+    return out
+}
+
+func main() {
+    println(ifpush_labels(4))
+    println(ifpush_first(3))
+    println("ifpush_ok")
+}

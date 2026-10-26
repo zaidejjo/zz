@@ -257,11 +257,14 @@ fn ast_to_c_type(t: &zz_frontend::ast::Ty) -> Type {
             inner: Box::new(ast_to_c_type(inner)),
         },
         TyKind::Array(inner) => Type::Array(Box::new(ast_to_c_type(inner))),
+        // Borrowed byte views (#234): spelled `bytes` in the manifest.
+        TyKind::Named(name, _) if name == "bytes" => Type::Bytes,
         _ => Type::Void, // unknown/non-C types map to Void for C ABI check
     }
 }
 
-/// Check if a type is C-ABI-compatible (scalar, string, pointer, void, or unit).
+/// Check if a type is C-ABI-compatible (scalar, string, bytes view,
+/// pointer, void, or unit).
 fn is_c_abi_type(t: &Type) -> bool {
     matches!(
         t,
@@ -269,6 +272,7 @@ fn is_c_abi_type(t: &Type) -> bool {
             | Type::Float
             | Type::Bool
             | Type::Str
+            | Type::Bytes
             | Type::Void
             | Type::Unit
             | Type::Ptr { .. }

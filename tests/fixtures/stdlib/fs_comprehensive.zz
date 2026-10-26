@@ -1,8 +1,8 @@
 // features: bytes, closures, comparison, elvis, func-call, imports, locals, match, option-result, print, selective-import, std-env, std-fs, std-process, std-task, string-literal, vec-push
 // E2E: std.fs comprehensive — non-blocking filesystem across VM + AOT.
 //
-// Covers: write/read_to_string, read_bytes, append, copy, move,
-// remove_file, mkdir/mkdir_all, read_dir, remove_dir_all, walk_dir,
+// covers: write/read, read_bytes, append, copy, move,
+// remove, mkdir/mkdir_all, read_dir, remove_dir_all, walk_dir,
 // exists/is_file/is_dir, stat, streaming File handles (open, read_chunk,
 // write_chunk, seek, flush, close), unified error diagnostics, and FS I/O
 // inside green-thread tasks (yield to the I/O pool, never block the
@@ -21,7 +21,6 @@ func main() {
         .ok(_) => println("mkdir_all_ok")
         .err(e) => println("mkdir_all_err: {e}")
     }
-
     // Basic write + read.
     match fs.write("{base}/a.txt", "hello") {
         .ok(_) => println("write_ok")
@@ -31,17 +30,15 @@ func main() {
         .ok(_) => println("append_ok")
         .err(e) => println("append_err: {e}")
     }
-    match fs.read_to_string("{base}/a.txt") {
+    match fs.read("{base}/a.txt") {
         .ok(c) => println("content: {c}")
         .err(e) => println("read_err: {e}")
     }
-
     // Byte-level read.
     match fs.read_bytes("{base}/a.txt") {
         .ok(b) => println("bytes_len: {len(b)}")
         .err(e) => println("bytes_err: {e}")
     }
-
     // Copy + move.
     match fs.copy("{base}/a.txt", "{base}/b.txt") {
         .ok(_) => println("copy_ok")
@@ -51,14 +48,12 @@ func main() {
         .ok(_) => println("move_ok")
         .err(e) => println("move_err: {e}")
     }
-
     // Predicates.
     println(fs.exists("{base}/a.txt"))
     println(fs.exists("{base}/missing.txt"))
     println(fs.is_file("{base}/a.txt"))
     println(fs.is_dir("{base}/sub"))
     println(fs.is_dir("{base}/a.txt"))
-
     // Directory listing (sorted basenames) + recursive walk.
     match fs.read_dir("{base}") {
         .ok(entries) => println("readdir: {entries}")
@@ -72,14 +67,12 @@ func main() {
         .ok(paths) => println("walk_n: {len(paths)}")
         .err(e) => println("walk_err: {e}")
     }
-
     // Metadata (values escaped: timestamps vary per run, so only the
     // shape + deterministic size are asserted here).
     match fs.stat("{base}/a.txt") {
         .ok(st) => println("stat_size: {st["size"]}")
         .err(e) => println("stat_err: {e}")
     }
-
     // Streaming write handle (free-function form `fs.*(f, …)` keeps AOT
     // dispatch unambiguous — see lower/expr.rs method fallback notes).
     match File.open("{base}/stream.txt", "w") {
@@ -103,7 +96,6 @@ func main() {
         }
         .err(e) => println("open_err: {e}")
     }
-
     // Streaming read handle with seek.
     match File.open("{base}/stream.txt", "r") {
         .ok(f) => {
@@ -124,9 +116,8 @@ func main() {
         }
         .err(e) => println("open_err: {e}")
     }
-
     // Unified error diagnostics (identical in VM and AOT).
-    match fs.read_to_string("{base}/missing.txt") {
+    match fs.read("{base}/missing.txt") {
         .ok(_) => println("unexpected_ok")
         .err(e) => println("notfound: {e}")
     }
@@ -134,7 +125,7 @@ func main() {
         .ok(_) => println("unexpected_open_ok")
         .err(e) => println("open_missing: {e}")
     }
-    match fs.remove_file("{base}/missing.txt") {
+    match fs.remove("{base}/missing.txt") {
         .ok(_) => println("unexpected_remove_ok")
         .err(e) => println("remove_missing: {e}")
     }
@@ -152,11 +143,10 @@ func main() {
         }
         .err(e) => println("closed_open_err: {e}")
     }
-
     // Green-thread I/O: FS inside spawned tasks yields to the I/O pool
     // instead of blocking the scheduler.
     h1 := task.spawn(|_| {
-        match fs.read_to_string("{base}/a.txt") {
+        match fs.read("{base}/a.txt") {
             .ok(c) => "t1: {c}"
             .err(e) => "t1_err: {e}"
         }
@@ -167,21 +157,19 @@ func main() {
             .err(e) => "t2_err: {e}"
         }
     })
-    r1: str = task.join(h1)
-    r2: str = task.join(h2)
+    r1:str = task.join(h1)
+    r2:str = task.join(h2)
     println(r1)
     println(r2)
-    match fs.read_to_string("{base}/from_task.txt") {
+    match fs.read("{base}/from_task.txt") {
         .ok(content) => println("verify: {content}")
         .err(e) => println("verify_err: {e}")
     }
-
     // Cleanup.
     match fs.remove_dir_all("{base}") {
         .ok(_) => println("cleanup_ok")
         .err(e) => println("cleanup_err: {e}")
     }
     println(fs.exists("{base}"))
-
     println("fs_comprehensive_ok")
 }

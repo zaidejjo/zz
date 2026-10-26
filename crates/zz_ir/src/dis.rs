@@ -117,6 +117,22 @@ fn op_text(module: &Module, op: &Op) -> String {
                 str_text(module, *field)
             )
         }
+        Op::StoreIndexTake {
+            home_slot,
+            home_var,
+        } => {
+            format!("storeindextake {}", home_text(home_slot, home_var, module))
+        }
+        Op::CompoundIndexTake {
+            home_slot,
+            home_var,
+            op,
+        } => {
+            format!(
+                "compoundindextake {} {op:?}",
+                home_text(home_slot, home_var, module)
+            )
+        }
         Op::FieldBinopTake {
             home_slot,
             home_var,
@@ -151,6 +167,44 @@ fn op_text(module: &Module, op: &Op) -> String {
                 str_text(module, *field)
             )
         }
+        Op::GetFieldSlotIdx {
+            home_slot,
+            home_var,
+            idx,
+            dst,
+        } => {
+            format!(
+                "getfieldslotidx {} idx={idx} dst={dst}",
+                home_text(home_slot, home_var, module)
+            )
+        }
+        Op::IndexIntSlot { arr, idx, dst } => {
+            format!("indexintslot {arr} {idx} -> {dst}")
+        }
+        Op::IndexDictInt { dict, key, dst } => {
+            format!("indexdictint {dict} {key} -> {dst}")
+        }
+        Op::SlotAddInt { dst, src } => format!("slotaddint {dst} {src}"),
+        Op::SlotInc { slot } => format!("slotinc {slot}"),
+        Op::SlotAddIntImm { dst, imm } => format!("slotaddintimm {dst} {imm}"),
+        Op::SlotSubIntImm { dst, imm } => format!("slotsubintimm {dst} {imm}"),
+        Op::SlotMulIntImm { dst, imm } => format!("slotmulintimm {dst} {imm}"),
+        Op::SlotLessIntSlot { a, b } => format!("slotlessintslot {a} {b}"),
+        Op::SlotLessIntImm { a, imm } => format!("slotlessintimm {a} {imm}"),
+        Op::SlotCmpIntSlot { a, b, op } => format!("slotcmpintslot {a} {b} {op:?}"),
+        Op::SlotCmpIntImm { a, imm, op } => format!("slotcmpintimm {a} {imm} {op:?}"),
+        Op::SlotCmpConst { a, k, op } => format!("slotcmpconst {a} c{} {op:?}", k.0),
+        Op::PushSlotIntImm { a, imm, op } => format!("pushslotintimm {a} {imm} {op:?}"),
+        Op::JumpIfFalseSlotCmpIntImm { a, imm, op, target } => {
+            format!("jfslotcmpi {a} {imm} {op:?} -> {target}")
+        }
+        Op::JumpIfFalseSlotCmpIntSlot { a, b, op, target } => {
+            format!("jfslotcmps {a} {b} {op:?} -> {target}")
+        }
+        Op::SlotBinaryInt { dst, lhs, rhs, op } => format!("slotbinint {dst} {lhs} {rhs} {op:?}"),
+        Op::SlotBinaryIntImm { dst, lhs, imm, op } => {
+            format!("slotbinintimm {dst} {lhs} {imm} {op:?}")
+        }
         Op::IntAdd => "iadd".to_string(),
         Op::IntSub => "isub".to_string(),
         Op::IntMul => "imul".to_string(),
@@ -171,9 +225,17 @@ fn op_text(module: &Module, op: &Op) -> String {
         } => {
             format!("forsetup exit={exit} header={header} vars={num_vars}")
         }
-        Op::ForNext { vars, exit, in_env } => {
+        Op::ForNext {
+            vars,
+            exit,
+            body,
+            in_env,
+        } => {
             let v: Vec<String> = vars.iter().map(|x| str_text(module, *x)).collect();
-            format!("fornext [{}] exit={exit} env={in_env}", v.join(", "))
+            format!(
+                "fornext [{}] exit={exit} body={body} env={in_env}",
+                v.join(", ")
+            )
         }
         Op::WhileSetup { exit, header } => format!("whilesetup exit={exit} header={header}"),
         Op::WhileCond { exit } => format!("whilecond exit={exit}"),

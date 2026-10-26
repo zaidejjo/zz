@@ -6,7 +6,7 @@ func f2(p3: int) -> int {
     if p3 < 0 {
         return 100
     }
-    42
+    return 42
 }
 cl4 := |d5: int| v1 + d5
 println(cl4(1))

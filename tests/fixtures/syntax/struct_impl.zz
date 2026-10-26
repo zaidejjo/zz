@@ -4,13 +4,13 @@ struct Point {x: int, y: int}
 
 impl Point {
     func dist(self) -> int {
-        self.x + self.y
+        return self.x + self.y
     }
     func scale(self, f: int) -> Point {
-        Point{x: self.x * f, y: self.y * f}
+        return Point{x: self.x * f, y: self.y * f}
     }
     func describe(self) -> str {
-        "Point({self.x}, {self.y})"
+        return "Point({self.x}, {self.y})"
     }
 }
 
@@ -24,7 +24,7 @@ println("scaled = {s.describe()}")
 
 // Associated function (factory-like)
 func Point.zero() -> Point {
-    Point{x: 0, y: 0}
+    return Point{x: 0, y: 0}
 }
 
 z := Point.zero()

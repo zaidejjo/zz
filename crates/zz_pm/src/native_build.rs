@@ -16,7 +16,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::manifest::{validate_cflag, validate_pkg_config_token, BuildCcSpec};
+use crate::manifest::{validate_cflag, validate_pkg_config_token, BuildCcSpec, BuildRustSpec};
+use crate::rust_lock;
 
 /// Fixed build timestamp for reproducibility (recorded in the lock;
 /// bit-for-bit across toolchains is explicitly out of v1 scope).
@@ -149,6 +150,31 @@ pub fn llvm_triple_for_tag(tag: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Rust target triple for a platform tag (`cargo --target`).
+///
+/// Centralized mapping: every supported tag maps to the triple whose
+/// std/core artifacts cargo needs. Linux keeps its libc split (gnu vs
+/// musl); macOS uses Apple's ABI; Windows maps to MSVC (the only
+/// first-class Rust Windows target, AOT-only in v1). Unsupported tags
+/// fail with the tag and the accepted set — never a silent host build.
+pub fn rust_triple_for_tag(tag: &str) -> Result<&'static str, String> {
+    let parts: Vec<&str> = tag.split('-').collect();
+    match parts.as_slice() {
+        ["linux", "x86_64", "gnu", _] => Ok("x86_64-unknown-linux-gnu"),
+        ["linux", "aarch64", "gnu", _] => Ok("aarch64-unknown-linux-gnu"),
+        ["linux", "x86_64", "musl"] => Ok("x86_64-unknown-linux-musl"),
+        ["linux", "aarch64", "musl"] => Ok("aarch64-unknown-linux-musl"),
+        ["macos", "arm64", _] => Ok("aarch64-apple-darwin"),
+        ["macos", "x86_64", _] => Ok("x86_64-apple-darwin"),
+        ["windows", "x86_64", "msvc"] => Ok("x86_64-pc-windows-msvc"),
+        _ => Err(format!(
+            "no Rust target triple for platform tag `{tag}`\n\
+             hint: supported tags are linux-{{x86_64,aarch64}}-{{gnu-glibc*,musl}}, \
+             macos-{{arm64,x86_64}}-min*, windows-x86_64-msvc"
+        )),
+    }
+}
+
 /// Shared-library suffix for a platform tag.
 pub fn shared_suffix_for_tag(tag: &str) -> &'static str {
     if tag.starts_with("macos-") {
@@ -252,6 +278,74 @@ pub fn pkg_config_flags(modules: &[String]) -> Result<(Vec<String>, Vec<String>)
         libs.push(tok);
     }
     Ok((cflags, libs))
+}
+
+/// Audit verdict for one locked native build record (#265): `errors`
+/// fail `zz audit` (drift = re-run `zz install`), `warnings` do not.
+/// Probes the live machine (host tag, compiler, pkg-config) and diffs
+/// against the lock. `modules` are the manifest's `pkg_config` modules.
+pub struct NativeDrift {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+pub fn check_native_drift(
+    name: &str,
+    rec: &crate::lock::LockedNative,
+    modules: &[String],
+) -> NativeDrift {
+    let mut out = NativeDrift {
+        errors: Vec::new(),
+        warnings: Vec::new(),
+    };
+    match host_tag() {
+        Ok(host) if host != rec.tag => {
+            out.errors.push(format!(
+                "{name}: recorded for `{}` but host is `{host}` (re-run `zz install`)",
+                rec.tag
+            ));
+        }
+        Err(e) => out
+            .warnings
+            .push(format!("{name}: cannot probe host tag ({e})")),
+        _ => {}
+    }
+    if rec.backend == "rust" {
+        match probe_rust_toolchain() {
+            Ok(tc) if tc.rustc_version != rec.compiler => {
+                out.errors.push(format!(
+                    "{name}: rustc drift (lock `{}`, now `{}`) (re-run `zz install`)",
+                    rec.compiler, tc.rustc_version
+                ));
+            }
+            Err(e) => out
+                .warnings
+                .push(format!("{name}: cannot probe Rust toolchain ({e})")),
+            _ => {}
+        }
+    }
+    if rec.backend == "cc" {
+        match probe_cc() {
+            Ok(cc) if cc.version != rec.compiler => {
+                out.errors.push(format!(
+                    "{name}: compiler drift (lock `{}`, now `{}`) (re-run `zz install`)",
+                    rec.compiler, cc.version
+                ));
+            }
+            Err(e) => out
+                .warnings
+                .push(format!("{name}: cannot probe compiler ({e})")),
+            _ => {}
+        }
+        let now = pkg_config_versions(modules);
+        if now != rec.pkg_config_resolved {
+            out.errors.push(format!(
+                "{name}: pkg-config drift (lock `{}`, now `{now}`) (re-run `zz install`)",
+                rec.pkg_config_resolved
+            ));
+        }
+    }
+    out
 }
 
 /// Resolved `pkg-config` module versions for the lock audit record:
@@ -370,12 +464,13 @@ pub fn expected_c_symbols(zzi_path: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Defined global symbols of an object/archive/shared lib
-/// (`nm -g --defined-only`), as a set.
-fn defined_symbols(path: &Path, tmpdir: &Path) -> Result<HashSet<String>, String> {
+/// (`nm -g --defined-only`), preserving multiplicity so the ABI stamp can
+/// be required exactly once.
+fn defined_symbols(path: &Path, tmpdir: &Path) -> Result<Vec<String>, String> {
     let mut cmd = Command::new("nm");
     cmd.arg("-g").arg("--defined-only").arg(path);
     let out = run_hermetic(cmd, tmpdir, &format!("nm {}", path.display()))?;
-    let mut set = HashSet::new();
+    let mut symbols = Vec::new();
     for line in String::from_utf8_lossy(&out).lines() {
         let line = line.trim();
         if line.is_empty() || line.ends_with(':') {
@@ -384,10 +479,18 @@ fn defined_symbols(path: &Path, tmpdir: &Path) -> Result<HashSet<String>, String
         // `addr TYPE name` or `TYPE name` or bare `name`.
         let cols: Vec<&str> = line.split_whitespace().collect();
         if let Some(name) = cols.last() {
-            set.insert(name.to_string());
+            symbols.push(name.to_string());
         }
     }
-    Ok(set)
+    Ok(symbols)
+}
+
+/// Count the ABI version stamp across both accepted spellings.
+fn abi_stamp_count(symbols: &[String]) -> usize {
+    symbols
+        .iter()
+        .filter(|s| s.as_str() == C_ABI_STAMP || s.as_str() == RUST_ABI_STAMP)
+        .count()
 }
 
 /// Declarative source build for one package.
@@ -589,7 +692,596 @@ pub fn ensure_cc(
     })
 }
 
-/// Verify AOT/VM parity for built OR unpacked artifacts: every
+/// Output of a hermetic Rust crate build (all paths absolute).
+#[derive(Debug, Clone)]
+pub struct RustBuildOutput {
+    /// Static archive (`build/lib<name>.a`) — AOT link input.
+    pub archive: PathBuf,
+    /// Shared library (`build/lib<name>.so|.dylib|.dll`) — VM dlopen input.
+    pub shared: PathBuf,
+    /// `build/cflags.txt` path (cache-key input).
+    pub cflags_path: PathBuf,
+    /// `build/ldflags.txt` path (link args for AOT).
+    pub ldflags_path: PathBuf,
+    /// Resolved platform tag.
+    pub tag: String,
+    /// `rustc --version` first line (audit record).
+    pub compiler: String,
+    /// `cargo --version` first line (audit record).
+    pub cargo: String,
+    /// Content key of the vendored closure (empty when no deps).
+    pub vendor_key: String,
+    /// Rust target triple passed to cargo.
+    pub triple: String,
+    /// Isolated cargo target directory under `<package>/build/`.
+    pub target_dir: PathBuf,
+    /// Cargo profile directory (`release` or `debug`).
+    pub profile: String,
+}
+
+/// Environment variables a cargo child may inherit under the hermetic
+/// allowlist. `HOME`/`RUSTUP_HOME` are needed only so a rustup shim can
+/// locate its toolchain; `CARGO_HOME` is always replaced with a scratch
+/// directory so user cargo config/registry state cannot leak in.
+pub const RUST_ENV_ALLOWLIST: &[&str] = &["PATH", "HOME", "RUSTUP_HOME"];
+
+/// A fully specified child process: program + argv + cleared environment.
+///
+/// Planning is pure so tests can assert the exact command (offline,
+/// locked, explicit target, isolated target dir) without spawning cargo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildPlan {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
+impl ChildPlan {
+    /// Materialize the plan as a `Command` (always `env_clear` first).
+    pub fn to_command(&self) -> Command {
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&self.args)
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(self.env.iter().cloned());
+        cmd
+    }
+
+    /// Human/audit rendering (one line, never executed through a shell).
+    pub fn display_line(&self) -> String {
+        let mut parts = vec![self.program.clone()];
+        parts.extend(self.args.iter().cloned());
+        parts.join(" ")
+    }
+}
+
+/// Base hermetic environment for cargo: allowlisted inheritance, scratch
+/// `CARGO_HOME`, isolated `TMPDIR`, fixed timestamp, and an explicit
+/// offline switch for build (vendor fetch keeps it false).
+fn rust_hermetic_env(cargo_home: &Path, tmpdir: &Path, offline: bool) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    for key in RUST_ENV_ALLOWLIST {
+        if let Ok(value) = std::env::var(key) {
+            env.push(((*key).to_string(), value));
+        }
+    }
+    env.push((
+        "CARGO_HOME".to_string(),
+        cargo_home.to_string_lossy().into_owned(),
+    ));
+    env.push(("TMPDIR".to_string(), tmpdir.to_string_lossy().into_owned()));
+    env.push((
+        "SOURCE_DATE_EPOCH".to_string(),
+        SOURCE_DATE_EPOCH.to_string(),
+    ));
+    env.push(("CARGO_TERM_COLOR".to_string(), "never".to_string()));
+    env.push(("CARGO_INCREMENTAL".to_string(), "0".to_string()));
+    env.push((
+        "CARGO_NET_OFFLINE".to_string(),
+        if offline { "true" } else { "false" }.to_string(),
+    ));
+    env
+}
+
+/// Plan the hermetic build command:
+/// `cargo build --offline --locked --target <triple> --manifest-path … --target-dir …`.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_cargo_build(
+    cargo: &str,
+    manifest_path: &Path,
+    target_dir: &Path,
+    cwd: &Path,
+    cargo_home: &Path,
+    tmpdir: &Path,
+    triple: &str,
+    profile: crate::manifest::RustProfile,
+    features: &[String],
+) -> ChildPlan {
+    let mut args: Vec<String> = vec!["build".to_string()];
+    args.extend(profile.cargo_args().iter().map(|s| (*s).to_string()));
+    args.extend([
+        "--offline".to_string(),
+        "--locked".to_string(),
+        "--target".to_string(),
+        triple.to_string(),
+        "--manifest-path".to_string(),
+        manifest_path.to_string_lossy().into_owned(),
+        "--target-dir".to_string(),
+        target_dir.to_string_lossy().into_owned(),
+    ]);
+    if !features.is_empty() {
+        args.push("--features".to_string());
+        args.push(features.join(","));
+    }
+    ChildPlan {
+        program: cargo.to_string(),
+        args,
+        cwd: cwd.to_path_buf(),
+        env: rust_hermetic_env(cargo_home, tmpdir, true),
+    }
+}
+
+/// Plan the closure vendor fetch (`cargo vendor --locked`). This is the
+/// only Rust step allowed to touch the network; the resulting sources are
+/// stored content-addressed and every later build is `--offline`.
+pub fn plan_cargo_vendor(
+    cargo: &str,
+    manifest_path: &Path,
+    vendor_out: &Path,
+    cwd: &Path,
+    cargo_home: &Path,
+    tmpdir: &Path,
+) -> ChildPlan {
+    ChildPlan {
+        program: cargo.to_string(),
+        args: vec![
+            "vendor".to_string(),
+            "--locked".to_string(),
+            "--manifest-path".to_string(),
+            manifest_path.to_string_lossy().into_owned(),
+            vendor_out.to_string_lossy().into_owned(),
+        ],
+        cwd: cwd.to_path_buf(),
+        env: rust_hermetic_env(cargo_home, tmpdir, false),
+    }
+}
+
+/// Run a planned child and return stdout, with a loud stderr-carrying
+/// error. Never goes through a shell.
+fn run_plan(plan: &ChildPlan, what: &str) -> Result<Vec<u8>, String> {
+    let out = plan
+        .to_command()
+        .output()
+        .map_err(|e| format!("{what} failed to spawn `{}`: {e}", plan.program))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "{what} failed (`{}`)\n{}",
+            plan.display_line(),
+            stderr.trim()
+        ));
+    }
+    Ok(out.stdout)
+}
+
+/// Probed Rust toolchain (paths are command names resolved from `PATH`).
+#[derive(Debug, Clone)]
+pub struct RustToolchain {
+    pub cargo: String,
+    pub cargo_version: String,
+    pub rustc_version: String,
+    pub rustc_semver: semver::Version,
+}
+
+/// Probe `cargo` + `rustc`. Absence is a hard, actionable error — the
+/// Rust backend never falls back to a shell hook.
+pub fn probe_rust_toolchain() -> Result<RustToolchain, String> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let cargo_out = Command::new(&cargo)
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            format!(
+                "cargo not found (`{cargo}`): {e}\n\
+                 hint: install a Rust toolchain (https://rustup.rs); \
+                 [native.build-rust] requires cargo and rustc, and never falls back to build hooks"
+            )
+        })?;
+    if !cargo_out.status.success() {
+        return Err(format!(
+            "`{cargo} --version` failed: {}",
+            String::from_utf8_lossy(&cargo_out.stderr).trim()
+        ));
+    }
+    let cargo_version = String::from_utf8_lossy(&cargo_out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("cargo (unknown)")
+        .trim()
+        .to_string();
+
+    let rustc_out = Command::new("rustc")
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            format!(
+                "rustc not found: {e}\n\
+             hint: install a Rust toolchain (https://rustup.rs); \
+             [native.build-rust] requires cargo and rustc, and never falls back to build hooks"
+            )
+        })?;
+    if !rustc_out.status.success() {
+        return Err(format!(
+            "`rustc --version` failed: {}",
+            String::from_utf8_lossy(&rustc_out.stderr).trim()
+        ));
+    }
+    let rustc_version = String::from_utf8_lossy(&rustc_out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("rustc (unknown)")
+        .trim()
+        .to_string();
+    // `rustc 1.85.0 (4d91de4e4 2025-02-17)` → 1.85.0
+    let raw = rustc_version
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| format!("cannot parse rustc version from `{rustc_version}`"))?;
+    let rustc_semver = semver::Version::parse(raw)
+        .map_err(|e| format!("cannot parse rustc version `{raw}`: {e}"))?;
+    Ok(RustToolchain {
+        cargo,
+        cargo_version,
+        rustc_version,
+        rustc_semver,
+    })
+}
+
+/// Enforce a rustc compatibility range against the running toolchain.
+pub fn check_rustc_range(req: &str, version: &semver::Version) -> Result<(), String> {
+    let parsed =
+        semver::VersionReq::parse(req).map_err(|e| format!("invalid rustc_range `{req}`: {e}"))?;
+    if parsed.matches(version) {
+        Ok(())
+    } else {
+        Err(format!(
+            "rustc {version} does not satisfy [native.build-rust] rustc_range `{req}`\n\
+             hint: upgrade/downgrade the toolchain, or widen rustc_range"
+        ))
+    }
+}
+
+/// Content key of the vendored closure for a spec (lock + manifest +
+/// crate sources + spec fingerprint).
+pub fn rust_vendor_key(crate_dir: &Path, spec: &BuildRustSpec) -> Result<String, String> {
+    let fingerprint = toml::to_string(spec)
+        .map_err(|e| format!("cannot fingerprint [native.build-rust]: {e}"))?;
+    rust_lock::vendor_key(crate_dir, &fingerprint)
+}
+
+/// Audit a Rust plugin's vendored closure: pins, checksums, licenses.
+pub fn audit_rust_plugin(
+    crate_dir: &Path,
+    spec: &BuildRustSpec,
+) -> Result<rust_lock::RustClosureAudit, String> {
+    let (_manifest, closure) = rust_lock::load_validated(crate_dir)?;
+    let key = rust_vendor_key(crate_dir, spec)?;
+    let vendor_dir = crate::paths::cas_entry(&key);
+    Ok(rust_lock::audit_closure(
+        &closure,
+        closure.needs_vendor().then_some(vendor_dir.as_path()),
+    ))
+}
+
+/// Hermetic Rust crate build: validate, stage, vendor (CAS), then drive
+/// `cargo build --offline --locked` and copy both engine artifacts into
+/// the package `build/` directory.
+///
+/// No shell, no package scripts (`build.sh`/`build.rs` banned), no
+/// network during the build (the closure is vendored beforehand).
+pub fn ensure_rust(
+    pkg_dir: &Path,
+    pkg_name: &str,
+    spec: &BuildRustSpec,
+    target_tag: Option<&str>,
+) -> Result<RustBuildOutput, String> {
+    let pkg_dir = std::fs::canonicalize(pkg_dir)
+        .map_err(|e| format!("cannot resolve {}: {e}", pkg_dir.display()))?;
+    let crate_dir = rust_lock::crate_dir_for(&pkg_dir, &spec.crate_path)?;
+    let (_crate_manifest, closure) = rust_lock::load_validated(&crate_dir)?;
+
+    // Defensive re-validation (callers may hand us an unvalidated spec).
+    let profile = spec.rust_profile()?;
+    semver::VersionReq::parse(spec.rustc_req())
+        .map_err(|e| format!("invalid [native.build-rust] rustc_range: {e}"))?;
+    if let Some(target) = &spec.target {
+        if target.is_empty()
+            || !target
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(format!(
+                "invalid [native.build-rust] target `{target}` (must be a Rust target triple)"
+            ));
+        }
+    }
+
+    let host = host_tag()?;
+    let tag = target_tag.unwrap_or(&host).to_string();
+    let triple = match &spec.target {
+        Some(t) => t.clone(),
+        None => rust_triple_for_tag(&tag)?.to_string(),
+    };
+
+    let toolchain = probe_rust_toolchain()?;
+    check_rustc_range(spec.rustc_req(), &toolchain.rustc_semver)?;
+
+    let stem: String = pkg_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let build_dir = pkg_dir.join("build");
+    std::fs::create_dir_all(&build_dir)
+        .map_err(|e| format!("cannot create {}: {e}", build_dir.display()))?;
+    let tmpdir = build_dir.join(".zz-tmp-rust");
+    let cargo_home = build_dir.join("rust-cargo-home");
+    let cwd = build_dir.join("rust-cwd");
+    let target_dir = build_dir.join("rust-target");
+    for dir in [&tmpdir, &cargo_home, &cwd, &target_dir] {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+
+    // Content key: lock + manifest + sources + spec. Same key reuses the
+    // staged tree (stable mtimes for cargo fingerprints) and CAS closure.
+    let content_key = rust_vendor_key(&crate_dir, spec)?;
+    let key_stamp = build_dir.join(".rust-src-key");
+    let staged = build_dir.join("rust-src");
+    let staged_manifest = staged.join("Cargo.toml");
+    let stage_current = std::fs::read_to_string(&key_stamp).ok().as_deref()
+        == Some(content_key.as_str())
+        && staged_manifest.is_file();
+    if !stage_current {
+        let _ = std::fs::remove_dir_all(&staged);
+        rust_lock::copy_crate_tree(&crate_dir, &staged)?;
+        rust_lock::detach_workspace(&staged_manifest)?;
+        std::fs::write(&key_stamp, &content_key)
+            .map_err(|e| format!("cannot write {}: {e}", key_stamp.display()))?;
+    }
+
+    // Closure: reuse CAS when warm (offline after first fetch); otherwise
+    // `cargo vendor` once, then store content-addressed.
+    let mut vendor_key = String::new();
+    if closure.needs_vendor() {
+        vendor_key = content_key;
+        let cas = crate::paths::cas_entry(&vendor_key);
+        if !cas.exists() {
+            eprintln!(
+                "zz: vendoring Rust closure for `{pkg_name}` (one-time network fetch, then offline)"
+            );
+            let vox_out = build_dir.join("rust-vendor-fetch");
+            let _ = std::fs::remove_dir_all(&vox_out);
+            let plan = plan_cargo_vendor(
+                &toolchain.cargo,
+                &staged_manifest,
+                &vox_out,
+                &cwd,
+                &cargo_home,
+                &tmpdir,
+            );
+            run_plan(&plan, "cargo vendor")?;
+            validate_vendor_dir(&vox_out, pkg_name)?;
+            let opts = crate::cas::CasStoreOptions {
+                source_url: format!("rust-vendor:{vendor_key}"),
+                version: pkg_name.to_string(),
+                ..Default::default()
+            };
+            crate::cas::store_dir_at_key(&vox_out, &vendor_key, &opts)?;
+            let _ = std::fs::remove_dir_all(&vox_out);
+        }
+        let cas = crate::paths::cas_entry(&vendor_key);
+        if !cas.exists() {
+            return Err(format!(
+                "vendored Rust closure for `{pkg_name}` is missing after fetch ({}); re-run `zz install`",
+                cas.display()
+            ));
+        }
+        // Cargo needs a writable directory source; hardlink/copy out of
+        // read-only CAS into build/.
+        let local = build_dir.join("rust-vendor");
+        let vendor_stamp = build_dir.join(".rust-vendor-key");
+        let local_current = std::fs::read_to_string(&vendor_stamp).ok().as_deref()
+            == Some(vendor_key.as_str())
+            && local.is_dir();
+        if !local_current {
+            let _ = std::fs::remove_dir_all(&local);
+            copy_dir_writable(&cas, &local)?;
+            std::fs::write(&vendor_stamp, &vendor_key)
+                .map_err(|e| format!("cannot write {}: {e}", vendor_stamp.display()))?;
+        }
+        write_cargo_source_config(&cargo_home, &local)?;
+    } else {
+        // Defensive: a stale config from a previous dependency set must
+        // not redirect this dependency-free build.
+        let config = cargo_home.join("config.toml");
+        let _ = std::fs::remove_file(config);
+    }
+
+    let plan = plan_cargo_build(
+        &toolchain.cargo,
+        &staged_manifest,
+        &target_dir,
+        &cwd,
+        &cargo_home,
+        &tmpdir,
+        &triple,
+        profile,
+        &spec.cargo_features,
+    );
+    eprintln!(
+        "zz: building plugin `{pkg_name}` (hermetic cargo: {} {} {})",
+        triple,
+        profile.dir_name(),
+        plan.display_line()
+    );
+    run_plan(&plan, "cargo build")?;
+
+    // Cargo output layout: <target-dir>/<triple>/<profile>/lib<lib>.{a,so}
+    // (MSVC emits `<lib>.lib`/`<lib>.dll` without the `lib` prefix).
+    let lib_dir = target_dir.join(&triple).join(profile.dir_name());
+    let lib_name = _crate_manifest.lib_name;
+    let suffix = shared_suffix_for_tag(&tag);
+    let windows = tag.starts_with("windows-");
+    let built_archive = if windows {
+        lib_dir.join(format!("{lib_name}.lib"))
+    } else {
+        lib_dir.join(format!("lib{lib_name}.a"))
+    };
+    let built_shared = if windows {
+        lib_dir.join(format!("{lib_name}.dll"))
+    } else {
+        lib_dir.join(format!("lib{lib_name}.{suffix}"))
+    };
+    if !built_archive.is_file() {
+        return Err(format!(
+            "cargo build for `{pkg_name}` produced no staticlib at {}\n\
+             hint: [lib] crate-type must include \"staticlib\"",
+            built_archive.display()
+        ));
+    }
+    if !windows && !built_shared.is_file() {
+        return Err(format!(
+            "cargo build for `{pkg_name}` produced no cdylib at {}\n\
+             hint: [lib] crate-type must include \"cdylib\"",
+            built_shared.display()
+        ));
+    }
+
+    let archive = build_dir.join(format!("lib{stem}.a"));
+    let shared = build_dir.join(format!("lib{stem}.{suffix}"));
+    copy_replace(&built_archive, &archive)?;
+    if !windows {
+        copy_replace(&built_shared, &shared)?;
+    }
+
+    let mut cflag_record = vec![format!("--target={triple}")];
+    if !spec.cargo_features.is_empty() {
+        cflag_record.push(format!("--features={}", spec.cargo_features.join(",")));
+    }
+    cflag_record.push(format!("--profile={}", profile.dir_name()));
+    let cflags_path = build_dir.join("cflags.txt");
+    let ldflags_path = build_dir.join("ldflags.txt");
+    std::fs::write(&cflags_path, cflag_record.join(" "))
+        .map_err(|e| format!("cannot write {}: {e}", cflags_path.display()))?;
+    // Rust std's staticlib needs the platform's threading/dl/math libs.
+    // `zz` dedupes flags at link time, so overlap with the runtime is safe.
+    let link_libs = "-lpthread -ldl -lm";
+    std::fs::write(&ldflags_path, link_libs)
+        .map_err(|e| format!("cannot write {}: {e}", ldflags_path.display()))?;
+
+    // Engine-parity verification: same contract as the C backend.
+    let zzi_path = pkg_dir.join("plugin.zzi");
+    verify_engine_parity(
+        pkg_name,
+        std::slice::from_ref(&archive),
+        &shared,
+        &zzi_path,
+        &tag,
+        &build_dir,
+    )?;
+    let _ = std::fs::remove_dir_all(&tmpdir);
+    let _ = std::fs::remove_dir_all(&cwd);
+
+    Ok(RustBuildOutput {
+        archive,
+        shared,
+        cflags_path,
+        ldflags_path,
+        tag,
+        compiler: toolchain.rustc_version,
+        cargo: toolchain.cargo_version,
+        vendor_key,
+        triple,
+        target_dir,
+        profile: profile.dir_name().to_string(),
+    })
+}
+
+/// A `cargo vendor` output must be a directory of crate dirs, each with a
+/// `Cargo.toml` (a failed/empty fetch must never enter CAS).
+fn validate_vendor_dir(dir: &Path, pkg_name: &str) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("cargo vendor for `{pkg_name}` produced no directory: {e}"))?;
+    let mut crates = 0usize;
+    for entry in entries.flatten() {
+        if entry.path().is_dir() && entry.path().join("Cargo.toml").is_file() {
+            crates += 1;
+        }
+    }
+    if crates == 0 {
+        return Err(format!(
+            "cargo vendor for `{pkg_name}` produced no crate sources in {}",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Copy a tree with writable permissions (CAS files are 0444).
+fn copy_dir_writable(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("cannot create {}: {e}", dst.display()))?;
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let dest = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_writable(&path, &dest)?;
+        } else if path.is_file() {
+            std::fs::copy(&path, &dest)
+                .map_err(|e| format!("cannot copy {}: {e}", path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_replace(src: &Path, dst: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_file(dst);
+    std::fs::copy(src, dst).map_err(|e| {
+        format!(
+            "cannot install Rust artifact {} -> {}: {e}",
+            src.display(),
+            dst.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Point cargo at the local vendored directory source and force offline.
+fn write_cargo_source_config(cargo_home: &Path, vendor_dir: &Path) -> Result<(), String> {
+    let dir = toml::Value::String(vendor_dir.to_string_lossy().into_owned()).to_string();
+    let config = format!(
+        "[source.crates-io]\nreplace-with = \"zz-vendored\"\n\n\
+         [source.zz-vendored]\ndirectory = {dir}\n\n\
+         [net]\noffline = true\n"
+    );
+    let path = cargo_home.join("config.toml");
+    std::fs::write(&path, config)
+        .map_err(|e| format!("cannot write cargo config {}: {e}", path.display()))
+}
+
 /// `plugin.zzi` symbol resolves in the archive set (AOT) and in the
 /// shared lib (VM), with exactly one ABI stamp in the shared lib.
 /// Windows tags waive the shared check with a loud note (AOT-only).
@@ -602,19 +1294,27 @@ fn verify_engine_parity(
     probe_tmp: &Path,
 ) -> Result<(), String> {
     let expected = expected_c_symbols(zzi_path)?;
-    let mut arch_syms = HashSet::new();
+    let mut arch_syms: HashSet<String> = HashSet::new();
+    let mut arch_stamps = 0usize;
     for archive in archives {
         let set = defined_symbols(archive, probe_tmp)
             .map_err(|e| format!("static verification failed for `{pkg_name}`: {e}"))?;
+        arch_stamps += abi_stamp_count(&set);
         arch_syms.extend(set);
     }
     for s in &expected {
         if !arch_syms.contains(s) {
             return Err(format!(
                 "static verification failed for `{pkg_name}`: symbol `{s}` missing from archives\n\
-                 hint: the C sources do not implement every plugin.zzi function"
+                 hint: the sources do not implement every plugin.zzi function"
             ));
         }
+    }
+    if arch_stamps != 1 {
+        return Err(format!(
+            "static verification failed for `{pkg_name}`: expected exactly one ABI stamp ({C_ABI_STAMP} or {RUST_ABI_STAMP}) in the archives, found {arch_stamps}\n\
+             hint: export the stamp exactly once (see docs/plugin-author-guide.md §11)"
+        ));
     }
     if tag.starts_with("windows-") {
         eprintln!("note: `{pkg_name}` on windows is AOT-only (VM dlopen deferred)");
@@ -631,10 +1331,11 @@ fn verify_engine_parity(
             ));
         }
     }
-    if !(shared_syms.contains(C_ABI_STAMP) || shared_syms.contains(RUST_ABI_STAMP)) {
+    let shared_stamps = abi_stamp_count(&shared_syms);
+    if shared_stamps != 1 {
         return Err(format!(
-            "shared verification failed for `{pkg_name}`: neither {C_ABI_STAMP} nor {RUST_ABI_STAMP} in {}\n\
-             hint: export the ABI version stamp (see docs/plugin-author-guide.md §11)",
+            "shared verification failed for `{pkg_name}`: expected exactly one ABI stamp ({C_ABI_STAMP} or {RUST_ABI_STAMP}) in {}, found {shared_stamps}\n\
+             hint: export the stamp exactly once (see docs/plugin-author-guide.md §11)",
             shared.display()
         ));
     }
@@ -1047,6 +1748,68 @@ mod tests {
         }
     }
 
+    /// Build a `cc` record matching the live machine (no drift expected).
+    fn live_cc_record() -> crate::lock::LockedNative {
+        crate::lock::LockedNative {
+            backend: "cc".to_string(),
+            tag: host_tag().unwrap_or_default(),
+            compiler: probe_cc().map(|c| c.version).unwrap_or_default(),
+            artifact_sha256: String::new(),
+            pkg_config_resolved: pkg_config_versions(&[]),
+            vendor_key: String::new(),
+        }
+    }
+
+    #[test]
+    fn drift_clean_record_passes() {
+        let rec = live_cc_record();
+        let verdict = check_native_drift("toy", &rec, &[]);
+        assert!(
+            verdict.errors.is_empty(),
+            "unexpected drift errors: {:?}",
+            verdict.errors
+        );
+    }
+
+    #[test]
+    fn drift_compiler_tag_and_pkg_config_fail() {
+        let mut rec = live_cc_record();
+        rec.compiler = "cc-tampered (audit test)".to_string();
+        rec.tag = "plan9-arm64-none".to_string();
+        rec.pkg_config_resolved = "vips=9.9.9".to_string();
+        let verdict = check_native_drift("toy", &rec, &[]);
+        let joined = verdict.errors.join("\n");
+        // Compiler assertion needs a live compiler (CI and the C-plugin
+        // e2e both require one; without it the checker warns, not errors).
+        if probe_cc().is_ok() {
+            assert!(
+                joined.contains("compiler drift"),
+                "missing compiler drift: {joined}"
+            );
+        }
+        assert!(
+            joined.contains("recorded for `plan9-arm64-none`"),
+            "missing tag drift: {joined}"
+        );
+        assert!(
+            joined.contains("pkg-config drift"),
+            "missing pkg-config drift: {joined}"
+        );
+    }
+
+    #[test]
+    fn drift_prebuilt_skips_compiler_and_pkg_config() {
+        let mut rec = live_cc_record();
+        rec.backend = "prebuilt".to_string();
+        rec.compiler = String::new();
+        let verdict = check_native_drift("toy", &rec, &[]);
+        assert!(
+            verdict.errors.is_empty(),
+            "prebuilt must not check compiler/pkg-config: {:?}",
+            verdict.errors
+        );
+    }
+
     #[test]
     fn compat_same_tag() {
         assert!(tags_compatible(
@@ -1355,5 +2118,233 @@ mod tests {
         std::fs::write(&bad2, b"x").unwrap();
         assert!(verify_artifact_file(&bad2, &d, "my").is_err());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- hermetic Rust backend -------------------------------------------
+
+    fn rust_scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "zz_rust_build_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn rust_spec() -> crate::manifest::BuildRustSpec {
+        crate::manifest::BuildRustSpec {
+            crate_path: "native".to_string(),
+            cargo_features: Vec::new(),
+            target: None,
+            rustc_range: None,
+            profile: None,
+        }
+    }
+
+    fn write_no_dep_crate(pkg: &Path) {
+        let native = pkg.join("native");
+        std::fs::create_dir_all(native.join("src")).unwrap();
+        std::fs::write(
+            native.join("Cargo.toml"),
+            r#"[package]
+name = "rplug"
+version = "0.1.0"
+license = "MIT"
+edition = "2021"
+
+[lib]
+name = "rplug"
+crate-type = ["cdylib", "staticlib"]
+
+[workspace]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            native.join("Cargo.lock"),
+            "version = 3\n\n[[package]]\nname = \"rplug\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            native.join("src/lib.rs"),
+            r#"#[no_mangle]
+pub static ZZ_PLUGIN_ABI_VERSION: u32 = 1;
+
+#[no_mangle]
+pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
+    a + b
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("plugin.zzi"),
+            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    func rplug.add(a: int, b: int) -> int\n}\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rust_target_mapping_covers_supported_tags() {
+        assert_eq!(
+            rust_triple_for_tag("linux-x86_64-gnu-glibc2.28").unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            rust_triple_for_tag("linux-aarch64-musl").unwrap(),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            rust_triple_for_tag("macos-arm64-min12.0").unwrap(),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            rust_triple_for_tag("windows-x86_64-msvc").unwrap(),
+            "x86_64-pc-windows-msvc"
+        );
+        let err = rust_triple_for_tag("plan9-arm64-none").unwrap_err();
+        assert!(err.contains("no Rust target triple"), "{err}");
+    }
+
+    #[test]
+    fn rust_build_plan_is_offline_locked_and_targeted() {
+        let plan = plan_cargo_build(
+            "cargo",
+            Path::new("/pkg/build/rust-src/Cargo.toml"),
+            Path::new("/pkg/build/rust-target"),
+            Path::new("/pkg/build/rust-cwd"),
+            Path::new("/pkg/build/rust-cargo-home"),
+            Path::new("/pkg/build/.zz-tmp-rust"),
+            "x86_64-unknown-linux-gnu",
+            crate::manifest::RustProfile::Release,
+            &["feat-a".to_string()],
+        );
+        assert_eq!(plan.program, "cargo");
+        assert_eq!(plan.args[0], "build");
+        assert!(plan.args.iter().any(|a| a == "--offline"));
+        assert!(plan.args.iter().any(|a| a == "--locked"));
+        assert!(plan.args.iter().any(|a| a == "--release"));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|w| w == ["--target", "x86_64-unknown-linux-gnu"]));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|w| w == ["--manifest-path", "/pkg/build/rust-src/Cargo.toml"]));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|w| w == ["--target-dir", "/pkg/build/rust-target"]));
+        assert!(plan.args.windows(2).any(|w| w == ["--features", "feat-a"]));
+        // No shell, ever; only the allowlisted environment is inherited.
+        assert!(!plan.display_line().contains("sh -c"));
+        assert_eq!(
+            plan.env
+                .iter()
+                .find(|(k, _)| k == "CARGO_NET_OFFLINE")
+                .map(|(_, v)| v.as_str()),
+            Some("true")
+        );
+        for (k, _) in &plan.env {
+            assert!(
+                RUST_ENV_ALLOWLIST.contains(&k.as_str())
+                    || matches!(
+                        k.as_str(),
+                        "CARGO_HOME"
+                            | "TMPDIR"
+                            | "SOURCE_DATE_EPOCH"
+                            | "CARGO_TERM_COLOR"
+                            | "CARGO_INCREMENTAL"
+                            | "CARGO_NET_OFFLINE"
+                    ),
+                "unexpected inherited env `{k}`"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_vendor_plan_is_locked_and_fetch_only() {
+        let plan = plan_cargo_vendor(
+            "cargo",
+            Path::new("/pkg/build/rust-src/Cargo.toml"),
+            Path::new("/pkg/build/vendor"),
+            Path::new("/pkg/build/rust-cwd"),
+            Path::new("/pkg/build/rust-cargo-home"),
+            Path::new("/pkg/build/.zz-tmp-rust"),
+        );
+        assert_eq!(plan.args[0], "vendor");
+        assert!(plan.args.iter().any(|a| a == "--locked"));
+        assert!(!plan.args.iter().any(|a| a == "--offline"));
+        assert_eq!(
+            plan.env
+                .iter()
+                .find(|(k, _)| k == "CARGO_NET_OFFLINE")
+                .map(|(_, v)| v.as_str()),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn rustc_range_is_enforced() {
+        let v = semver::Version::parse("1.85.0").unwrap();
+        assert!(check_rustc_range(crate::manifest::DEFAULT_RUSTC_RANGE, &v).is_ok());
+        assert!(check_rustc_range(">=1.90", &v).is_err());
+        assert!(check_rustc_range("not a range", &v).is_err());
+    }
+
+    #[test]
+    fn rust_ensure_builds_both_engines_runtime_gated() {
+        if probe_rust_toolchain().is_err() {
+            eprintln!("skipping: cargo/rustc unavailable");
+            return;
+        }
+        let pkg = rust_scratch("no_deps");
+        write_no_dep_crate(&pkg);
+        let spec = rust_spec();
+        let tag = host_tag().expect("host tag");
+        let out = ensure_rust(&pkg, "rplug", &spec, Some(&tag)).expect("hermetic rust build");
+        assert!(out.archive.is_file(), "staticlib missing");
+        assert!(out.shared.is_file(), "cdylib missing");
+        assert!(out.cflags_path.is_file());
+        assert_eq!(out.triple, rust_triple_for_tag(&tag).unwrap());
+        assert_eq!(out.profile, "release");
+        assert!(out.vendor_key.is_empty(), "no deps means no vendor key");
+        // Artifacts live in the package build dir, never the crate tree.
+        assert!(out.archive.starts_with(pkg.join("build")));
+        let _ = std::fs::remove_dir_all(&pkg);
+    }
+
+    #[test]
+    fn rust_ensure_rejects_build_rs_runtime_gated() {
+        if probe_rust_toolchain().is_err() {
+            eprintln!("skipping: cargo/rustc unavailable");
+            return;
+        }
+        let pkg = rust_scratch("build_rs");
+        write_no_dep_crate(&pkg);
+        std::fs::write(pkg.join("native/build.rs"), "fn main() {}\n").unwrap();
+        let err = ensure_rust(&pkg, "rplug", &rust_spec(), None).unwrap_err();
+        assert!(err.contains("build.rs"), "{err}");
+        let _ = std::fs::remove_dir_all(&pkg);
+    }
+
+    #[test]
+    fn abi_stamp_count_requires_exactly_one() {
+        let one = vec![C_ABI_STAMP.to_string(), "other".to_string()];
+        assert_eq!(abi_stamp_count(&one), 1);
+        let none = vec!["other".to_string()];
+        assert_eq!(abi_stamp_count(&none), 0);
+        let mixed = vec![
+            C_ABI_STAMP.to_string(),
+            RUST_ABI_STAMP.to_string(),
+            C_ABI_STAMP.to_string(),
+        ];
+        assert_eq!(abi_stamp_count(&mixed), 3);
     }
 }

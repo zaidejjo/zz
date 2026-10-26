@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_frontend::ast::{Program, Stmt, Ty};
-use zz_frontend::diag::RawDiag;
+use zz_frontend::diag::{warning_at, FixIt, RawDiag};
 use zz_frontend::span::Span;
 
 use crate::type_::Type;
@@ -117,6 +117,23 @@ pub struct ConvertImpl {
     pub to_name: String,
     pub func_name: String,
     pub span: Span,
+}
+
+/// A `:=` declaration whose initializer is being checked, while probing
+/// whether it reads the binding the declaration shadows (#518).
+#[derive(Debug, Clone)]
+pub struct ShadowProbe {
+    /// Declared name.
+    pub name: String,
+    /// Where the declaration binds (`x` in `x := …`) — the warning points here.
+    pub span: Span,
+    /// Index of the scope the declaration binds into. A read resolving to a
+    /// *shallower* scope hit the shadowed outer binding; one at the same or
+    /// deeper index is a binder inside the initializer (closure parameter,
+    /// nested block), which is not shadowing.
+    pub depth: usize,
+    /// Set once such an outer read is seen.
+    pub referenced: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -306,13 +323,46 @@ fn check_program_impl(
         checker.shadow_roots.insert(module_ns.to_string());
     }
     for stmt in &program.stmts {
-        if let Stmt::Import { path, alias, .. } = stmt {
+        if let Stmt::Import {
+            path,
+            alias,
+            items,
+            span,
+            ..
+        } = stmt
+        {
             let head = alias
                 .clone()
                 .or_else(|| path.last().cloned())
                 .unwrap_or_default();
             if !head.is_empty() {
-                checker.shadow_roots.insert(head);
+                checker.shadow_roots.insert(head.clone());
+                // Warn only when the import actually binds the std module head
+                // name. A full module import (`import std.str`) binds `head`;
+                // a selective import (`import std.str(split)`) binds only the
+                // named items, so no namespace collision exists and the warning
+                // would be a false positive (#630). Only enforced for
+                // loader-checked user modules (non-empty owner); stdlib
+                // internals, the REPL, and merged HIR programs pass an empty
+                // owner and skip it.
+                if items.is_empty()
+                    && !module_ns.is_empty()
+                    && crate::checker::is_std_module_head(&head)
+                {
+                    let diag = warning_at(
+                        format!(
+                            "import binds `{head}`, shadowing the std module `{head}` — `std.{head}.*` will resolve to your binding at runtime",
+                        ),
+                        *span,
+                    )
+                    .with_note("alias it: `import <pkg>.<head> as <name>`".to_string())
+                    .with_fixit(FixIt::safe(
+                        *span,
+                        format!("import {} as {}_mod", path.join("."), head),
+                        "alias the import to avoid the collision",
+                    ));
+                    checker.errors.push(diag);
+                }
             }
         }
     }
@@ -385,37 +435,12 @@ fn check_program_impl(
         }
     }
 
-    // Pass 1: register struct definitions (fields are resolved against the
-    // struct registry, so structs may reference earlier structs). Structs
-    // must be registered before functions so `func f(p: Point)` resolves.
-    let mut seen_structs = HashMap::new();
-    for stmt in &program.stmts {
-        if let Stmt::Struct {
-            name, span, pub_, ..
-        } = stmt
-        {
-            let full_name = name.join(".");
-            if let Some(prev) = seen_structs.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
-                    format!("duplicate definition of struct `{}`", full_name),
-                    *span,
-                ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
-            }
-            checker.collect_struct(stmt);
-            if *pub_ {
-                pub_structs_set.insert(full_name);
-            }
-        }
-    }
-
     // Pass 1a: register type aliases. Raw targets are recorded first so
     // aliases may reference structs regardless of order; conversion to
     // resolved types happens after (nested aliases expand recursively
-    // with cycle detection in `convert_alias`).
+    // with cycle detection in `convert_alias`). Registered before struct
+    // collection so struct fields can reference aliases (e.g. `run: F`
+    // where `type F = func(int) -> int`).
     let mut seen_aliases = HashMap::new();
     for stmt in &program.stmts {
         if let Stmt::TypeAlias {
@@ -467,6 +492,35 @@ fn check_program_impl(
                 .insert(full_name.clone(), (gen_names, target.clone()));
             if *pub_ {
                 pub_aliases_set.insert(full_name);
+            }
+        }
+    }
+
+    // Pass 1: register struct definitions (fields are resolved against the
+    // struct registry, so structs may reference earlier structs). Structs
+    // must be registered before functions so `func f(p: Point)` resolves.
+    // Aliases are already registered (Pass 1a) so struct fields may
+    // reference alias types.
+    let mut seen_structs = HashMap::new();
+    for stmt in &program.stmts {
+        if let Stmt::Struct {
+            name, span, pub_, ..
+        } = stmt
+        {
+            let full_name = name.join(".");
+            if let Some(prev) = seen_structs.insert(full_name.clone(), *span) {
+                checker.errors.push(zz_frontend::diag::error_at(
+                    format!("duplicate definition of struct `{}`", full_name),
+                    *span,
+                ));
+                checker.errors.push(zz_frontend::diag::error_at(
+                    "previous definition here",
+                    prev,
+                ));
+            }
+            checker.collect_struct(stmt);
+            if *pub_ {
+                pub_structs_set.insert(full_name);
             }
         }
     }
@@ -552,7 +606,13 @@ fn check_program_impl(
             }
         }
     }
-    let alias_names: Vec<String> = checker.alias_asts.keys().cloned().collect();
+    let mut alias_names: Vec<String> = checker.alias_asts.keys().cloned().collect();
+    // Deterministic order: HashMap iteration is random per process, and
+    // whichever alias converts first names the cycle (`A -> B` vs
+    // `B -> A`). Sorting pins one spelling across runs, processes, and
+    // consumers (CLI, LSP, build cache) — the parity gate (#264) caught
+    // this flapping between runs.
+    alias_names.sort();
     for alias_name in alias_names {
         checker.convert_alias(&alias_name);
     }
@@ -798,7 +858,13 @@ fn check_program_impl(
                     } else {
                         // Builtin-wins: an extension colliding with an existing
                         // inherent/stdlib method is an error naming the origin.
-                        if checker.funcs.contains_key(&full_name) {
+                        // Seeds are canonical (`std.*` only), so check the
+                        // canonical spelling too (`str.length` collides with
+                        // `std.str.length`).
+                        if checker.funcs.contains_key(&full_name)
+                            || canonical_std_name(&full_name)
+                                .is_some_and(|c| checker.funcs.contains_key(&c))
+                        {
                             let origin = if Checker::is_stdlib_method(&full_name) {
                                 "defined in the standard library"
                             } else {
@@ -983,9 +1049,28 @@ fn check_program_impl(
     // Deep-resolve the recorded span types now that all unification is done.
     // Skip any that still contain inference variables (unresolvable at
     // compile time — the node lowers dynamically).
+    //
+    // Variant constructors are the exception: default their unconstrained
+    // payload parameters to `unit` first, the same rule that validates
+    // annotated declarations (`.ok(42)` is `Result<int, unit>`, `.none` is
+    // `Option<unit>`). The outer constructor is what method dispatch needs —
+    // `.ok(42).unwrap_or(0)` has to resolve `result.unwrap_or`, not the
+    // same-named `option` twin — and dropping the entry because the *payload*
+    // position was unconstrained lost exactly that: the AOT fell back to its
+    // arity-based namespace guess (`option` precedes `result`) and called
+    // `option.unwrap_or` on a `Result` value, while the VM dispatched on the
+    // value and printed the answer (#505). Variant payloads erase to
+    // `zz_value`, so defaulting matches the runtime representation. Arrays and
+    // dicts keep the drop: their element types select the unboxed
+    // representation, which cannot be guessed.
     let mut span_types: std::collections::HashMap<SpanKey, Type> = std::collections::HashMap::new();
     for (key, ty) in &checker.span_types {
-        let rt = checker.unifier.resolve_deep(ty);
+        let mut rt = checker.unifier.resolve_deep(ty);
+        if inference::contains_var(&rt)
+            && matches!(rt, Type::Option(_) | Type::Result(_, _) | Type::Enum(_, _))
+        {
+            inference::default_variant_vars(&mut rt);
+        }
         if !inference::contains_var(&rt) {
             span_types.insert(key.clone(), rt);
         }
@@ -1059,6 +1144,18 @@ struct CheckerOutcome {
     span_types: std::collections::HashMap<SpanKey, Type>,
 }
 
+/// One binding recorded for unused-variable warnings.
+///
+/// `warn_unused` is `false` for bindings whose existence is dictated by
+/// an external signature rather than by the author's choice — closure
+/// parameters, which the callee calls positionally and which cannot be
+/// removed without changing the closure's arity.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DefinedBinding {
+    pub(crate) span: zz_frontend::span::Span,
+    pub(crate) warn_unused: bool,
+}
+
 pub(crate) struct Checker {
     pub(crate) unifier: crate::unify::Unifier,
     pub(crate) errors: Vec<zz_frontend::diag::RawDiag>,
@@ -1099,13 +1196,26 @@ pub(crate) struct Checker {
     pub(crate) current_bounds: HashMap<String, Vec<zz_frontend::ast::TraitBound>>,
     /// Nesting depth of `for`/`while` loops (for `break`/`continue`).
     pub(crate) loop_depth: usize,
-    /// Names that were used (looked up) — for unused-variable warnings.
+    /// Names that were used (looked up) — for unused-import warnings and
+    /// module/type usage. Binding-level usage lives in `used_bindings`.
     pub(crate) used_names: std::collections::HashSet<String>,
+    /// Bindings actually read, keyed by `(scope index, name)`.
+    ///
+    /// Name-only tracking was too coarse: an unused `x` in one function was
+    /// silenced whenever any other function read a *different* `x`, and a
+    /// shadowed binding inherited its shadow's reads. The scope index (the
+    /// position in `env`) is stable for a scope's lifetime, so a use marked
+    /// while the scope is live is seen by that scope's `pop_scope`.
+    pub(crate) used_bindings: std::collections::HashSet<(usize, String)>,
+    /// Declarations whose initializer is being checked right now, probing
+    /// whether it reads the very binding the declaration shadows from an
+    /// enclosing scope (#518). Innermost last — see `begin_shadow_probe`.
+    pub(crate) shadow_probes: Vec<ShadowProbe>,
     /// Top-level names marked `pub` — should not emit unused warnings.
     pub(crate) pub_names: std::collections::HashSet<String>,
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
-    pub(crate) defined_names: Vec<HashMap<String, zz_frontend::span::Span>>,
+    pub(crate) defined_names: Vec<HashMap<String, DefinedBinding>>,
     /// Tracks whether the most recent `lookup()` produced an "undefined
     /// variable" error.  Used by `check_call` to suppress the secondary
     /// "cannot call a value of type unit" cascading error.
@@ -1117,6 +1227,12 @@ pub(crate) struct Checker {
     /// with tail position, so `-> Result` tails never warn while loop
     /// tails that drop errors do. Saved/restored across nested blocks.
     pub(crate) tail_is_value: bool,
+    /// Span and resolved type of the last statement of the most recently
+    /// checked block. `check_block` sets it *after* any nested block has
+    /// been checked, so after a named function body it holds that body's
+    /// tail. The missing-return diagnostic uses it to avoid an insertion
+    /// fixit before a tail that yields `unit`.
+    pub(crate) last_block_tail: Option<(Span, Type)>,
     /// Whether the statement currently being checked directly discards
     /// a `match` value (`match ...` as a bare statement/defer, not the
     /// tail). `check_match` uses this to warn on bare `Result`/`Option`
@@ -1199,10 +1315,13 @@ impl Checker {
             current_bounds: HashMap::new(),
             loop_depth: 0,
             used_names: std::collections::HashSet::new(),
+            used_bindings: std::collections::HashSet::new(),
+            shadow_probes: Vec::new(),
             pub_names: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             tail_is_value: false,
+            last_block_tail: None,
             direct_discard: false,
             imports: Vec::new(),
             import_aliases: HashMap::new(),
@@ -1301,7 +1420,6 @@ impl Checker {
                     | "process"
                     | "uuid"
                     | "sqlz"
-                    | "db"
                     | "option"
                     | "result"
             )
@@ -1309,6 +1427,98 @@ impl Checker {
             false
         }
     }
+}
+
+/// Canonical std module list (dotted; nested modules included).
+/// SINGLE SOURCE for all module-name tables: `zz_stdlib::STDLIB_MODULES`
+/// re-exports this, and the helpers below derive from it — there is no
+/// second list to drift. Method-only namespaces (`option`, `result`,
+/// `file`, …) and type constructors (`ArgsParser`, `Regexp`) are absent
+/// on purpose — they were never duplicated and stay bare.
+pub const STD_MODULES: &[&str] = &[
+    "str",
+    "vec",
+    "json",
+    "http",
+    "fs",
+    "path",
+    "env",
+    "math",
+    "time",
+    "encoding",
+    "net",
+    "chan",
+    "task",
+    "regexp",
+    "crypto",
+    "log",
+    "sys",
+    "args",
+    "process",
+    "uuid",
+    "sqlz",
+    "sqlz.postgres",
+    "sqlz.mysql",
+    "colors",
+    "term",
+    "test",
+    "map",
+    "set",
+    "dec",
+    "bytes",
+    "csv",
+    "property",
+    "cell",
+    "unix",
+    "tls",
+    "tls_listener",
+    "unix_listener",
+];
+
+/// True when `head` is a top-level std module (`sqlz` in
+/// `sqlz.postgres.query`). Derives from [`STD_MODULES`] — no parallel
+/// list. Used by import suggestions and canonical resolution alike.
+pub fn is_std_module_head(head: &str) -> bool {
+    STD_MODULES
+        .iter()
+        .any(|m| m.split('.').next() == Some(head))
+}
+
+/// Look up a stdlib registry entry by either spelling: the name as-written
+/// first (covers orphans like `option.unwrap` and import-copied `ns.*`
+/// keys, which have no canonical form), then the canonical `std.*`
+/// spelling. Single choke point for the canonical-seeds-only tables —
+/// callers must use this instead of raw `HashMap::get` for stdlib names.
+pub fn lookup_std<'a, V>(
+    map: &'a std::collections::HashMap<String, V>,
+    name: &str,
+) -> Option<&'a V> {
+    map.get(name)
+        .or_else(|| canonical_std_name(name).and_then(|c| map.get(&c)))
+}
+
+/// Membership twin of [`lookup_std`] for precomputed name sets
+/// (`native_names`, seed-key sets, completion snapshots).
+pub fn contains_std(set: &std::collections::HashSet<String>, name: &str) -> bool {
+    set.contains(name) || canonical_std_name(name).is_some_and(|c| set.contains(&c))
+}
+
+/// Resolve a bare `module.func` name to its canonical `std.module.func`
+/// spelling: the single source of truth for the std alias (replaces the
+/// old per-crate inline copies). Returns `None` for already-canonical
+/// `std.*` names, bare builtins, unknown heads, and non-module
+/// namespaces. Nested modules compose (`sqlz.postgres.query` →
+/// `std.sqlz.postgres.query`). Callers gate on module position (a local
+/// binding with the same head always wins) before applying this.
+pub fn canonical_std_name(name: &str) -> Option<String> {
+    if name.starts_with("std.") || !name.contains('.') {
+        return None;
+    }
+    let head = name.split('.').next().unwrap_or(name);
+    if is_std_module_head(head) {
+        return Some(format!("std.{name}"));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1322,8 +1532,8 @@ mod span_scope_tests {
     // the other's type; scoped keys keep both.
     #[test]
     fn same_span_different_functions_keep_types() {
-        let a = zz_frontend::parse("func f() -> int {\n    v :=  1234\n    v\n}\n");
-        let b = zz_frontend::parse("func g() -> bool {\n    v := true\n    v\n}\n");
+        let a = zz_frontend::parse("func f() -> int {\n    v :=  1234\n    return v\n}\n");
+        let b = zz_frontend::parse("func g() -> bool {\n    v := true\n    return v\n}\n");
         assert!(a.errors.is_empty(), "parse a: {:?}", a.errors);
         assert!(b.errors.is_empty(), "parse b: {:?}", b.errors);
         let mut stmts = Vec::new();

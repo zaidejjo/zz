@@ -10,16 +10,16 @@ struct User {Base, age: int}
 
 impl Base {
     func area(self) -> int {
-        self.id * 2
+        return self.id * 2
     }
     func who(self) -> str {
-        "base"
+        return "base"
     }
 }
 
 impl User {
     func who(self) -> str {
-        "user"
+        return "user"
     }
 }
 

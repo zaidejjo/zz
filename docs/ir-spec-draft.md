@@ -212,7 +212,7 @@ its own number rendering on both engines; float→int saturation is §5.
 
 ## 8. The `.zzc` format (M1 implementation target)
 
-- Little-endian. Magic `ZZC1`, `u32` version (this spec = 2),
+- Little-endian. Magic `ZZC1`, `u32` version (this spec = 3),
   section table: `TYPES`, `STRINGS` (interned names), `CONSTS` (value pool),
   `FUNCS` (name, arity, signature, locals type table, entry block),
   `CODE` (blocks + typed ops),
@@ -221,7 +221,40 @@ its own number rendering on both engines; float→int saturation is §5.
   (params seeded from the signature; conflicts widen to the "unknown"
   top). Types are mandatory semantics, NOT annotations — the verifier
   checks every store/call/return against them, and `dis` shows them.
+  The table always covers the parameter list, even when the body never
+  reads a parameter (an unread param emits no slot op but still owns a
+  frame slot).
   The v2 decoder rejects v1 files (re-emit with `zz build --emit-ir`).
+- v3 carries the VM's fused slot fast paths as ops — `SlotAddInt`,
+  `SlotInc`, `SlotAddIntImm`, `SlotLessIntSlot`, `SlotLessIntImm`,
+  `SlotBinaryInt`, `SlotBinaryIntImm` (and, appended since, the
+  generalized condition compares `SlotCmpIntSlot` / `SlotCmpIntImm`,
+  which carry the operator so `if i > 0` fuses like `if i < n`, plus
+  `SlotCmpConst` for non-`int` literals, which live in the constant
+  pool, and `PushSlotIntImm` for value-position arithmetic such as the
+  `n - 1` argument of `fib`, which has no destination slot to fuse into,
+  plus the fused conditional jumps `JumpIfFalseSlotCmpIntImm` /
+  `JumpIfFalseSlotCmpIntSlot`, which absorb the compare into an `if`
+  guard's branch) —
+  instead of desugaring them.
+  They are pure sugar: each op's doc names the exact core sequence it
+  stands for, `raise` maps it one to one, and the interpreter takes the
+  native fast path (with the generic fallback the op already carries, so
+  no type information is involved). Desugaring them cost the cached-run
+  steady state three extra stack ops per iteration of an `x = x + 1`
+  loop body — the interpreter ran the expanded form on every cache hit.
+  Backends that re-specialize hand-written streams (`chunk→C`'s
+  int-twin/peel/cond-fuse passes) call `lower::expand_fused` first, so
+  their input is byte-identical to v2 lowering.
+  The v3 decoder rejects older files.
+- v4 rotates `for` loops: `ForNext` carries `body` — its target on a live
+  iteration — and is the loop's last op, so the body is entered from the
+  test instead of falling into it. A live iteration costs one dispatch
+  (`ForNext`) instead of the test plus an unconditional back-edge `Jump`.
+  Backends that pattern-match the historical layout (the `chunk→C`
+  int-twin / peel / cond-fuse passes) call `lower::derotate_loops` first:
+  a position-preserving swap that restores the pre-v4 stream exactly.
+  The v4 decoder rejects older files.
 - Constants pool holds all literals (including string-literal
   markers for `print` — the M2 subset needs no string machinery
   beyond this).

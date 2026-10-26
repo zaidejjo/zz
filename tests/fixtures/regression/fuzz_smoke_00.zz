@@ -7,7 +7,7 @@ func f4(p5: int) -> int {
     if p5 < 0 {
         return (-12 - 29)
     }
-    p5
+    return p5
 }
 if true {
     (b2, _s6) := (a1, 1)

@@ -51,6 +51,16 @@ jobs:
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: 'docker smoke fixture (AOT compile + run)'
+        if: runner.os != 'Windows'
+        # docker-publish compiles this exact file inside the published
+        # builder image. Running it here too means a language change that
+        # breaks the fixture fails a normal PR, not the release.
+        run: |
+          cargo run -q -p zz_cli -- build -p docker/smoke/hello.zz -o /tmp/zz-docker-smoke
+          out=$(/tmp/zz-docker-smoke)
+          echo "$out"
+          echo "$out" | grep -qx 'smoke-ok'
       - name: 'test (PR: fast suite — VM legs only)'
         if: runner.os != 'Windows' && github.event_name == 'pull_request'
         # PR signal in minutes: unit + e2e (VM) + VM-only parity.
@@ -100,3 +110,17 @@ jobs:
         # arch-dependent breakage (e.g. c_char signedness) x86_64 can
         # never see. No linking, no tests: pure type gate, stays fast.
         run: cargo check --workspace --all-targets
+
+  lsp-parity:
+    name: lsp-parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build zz binary (check side of the gate)
+        # The gate shells out to a freshly built `zz check`; the LSP
+        # side runs in-process. Check-only: no clang, no native deps.
+        run: cargo build -p zz_cli
+      - name: lsp-vs-check diagnostic parity gate (#264)
+        run: cargo test -p zz_lsp --test check_parity

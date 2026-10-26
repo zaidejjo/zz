@@ -33,6 +33,7 @@ pub(crate) mod result_mod;
 pub(crate) mod str_mod;
 pub(crate) mod sys;
 pub(crate) mod term;
+pub(crate) mod test_helpers;
 pub(crate) mod time;
 pub(crate) mod uuid;
 pub(crate) mod vec_mod;
@@ -116,6 +117,29 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: assert::assert_approx_eq_fn,
         },
     );
+    // std.test pro assertions (P1): bare builtins + `std.test.*` aliases.
+    for (name, arity, func) in [
+        (
+            "assert_contains",
+            2,
+            assert::assert_contains_fn as zz_runtime::NativeFn,
+        ),
+        ("assert_starts_with", 2, assert::assert_starts_with_fn),
+        ("assert_ends_with", 2, assert::assert_ends_with_fn),
+        ("assert_len", 2, assert::assert_len_fn),
+        ("assert_gt", 2, assert::assert_gt_fn),
+        ("assert_lt", 2, assert::assert_lt_fn),
+        ("assert_is_some", 1, assert::assert_is_some_fn),
+        ("assert_is_none", 1, assert::assert_is_none_fn),
+        ("assert_is_ok", 1, assert::assert_is_ok_fn),
+        ("assert_is_err", 1, assert::assert_is_err_fn),
+        ("temp_dir", 1, test_helpers::test_temp_dir),
+        ("free_port", 0, test_helpers::test_free_port),
+        ("assert_snapshot", 2, assert::assert_snapshot_fn),
+        ("black_box", 1, test_helpers::test_black_box),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
     m.insert(
         "fail".into(),
         NativeEntry {
@@ -142,6 +166,24 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.test.assert_approx_eq", 3, assert::assert_approx_eq_fn),
         ("std.test.fail", 1, assert::fail_fn),
         ("std.test.panic", 1, assert::fail_fn),
+        ("std.test.assert_contains", 2, assert::assert_contains_fn),
+        (
+            "std.test.assert_starts_with",
+            2,
+            assert::assert_starts_with_fn,
+        ),
+        ("std.test.assert_ends_with", 2, assert::assert_ends_with_fn),
+        ("std.test.assert_len", 2, assert::assert_len_fn),
+        ("std.test.assert_gt", 2, assert::assert_gt_fn),
+        ("std.test.assert_lt", 2, assert::assert_lt_fn),
+        ("std.test.assert_is_some", 1, assert::assert_is_some_fn),
+        ("std.test.assert_is_none", 1, assert::assert_is_none_fn),
+        ("std.test.assert_is_ok", 1, assert::assert_is_ok_fn),
+        ("std.test.assert_is_err", 1, assert::assert_is_err_fn),
+        ("std.test.temp_dir", 1, test_helpers::test_temp_dir),
+        ("std.test.free_port", 0, test_helpers::test_free_port),
+        ("std.test.assert_snapshot", 2, assert::assert_snapshot_fn),
+        ("std.test.black_box", 1, test_helpers::test_black_box),
     ] {
         m.insert(short.into(), NativeEntry { arity, f: func });
     }
@@ -177,69 +219,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     // bytes.* methods (for method dispatch: `b.len()` on byte buffers).
-    m.insert(
-        "bytes.len".into(),
-        NativeEntry {
-            arity: 1,
-            f: iterators::len,
-        },
-    );
-    m.insert(
-        "str.bytes".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_bytes,
-        },
-    );
-    m.insert(
-        "str.byte_len".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_byte_len,
-        },
-    );
-    m.insert(
-        "str.ord".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_ord,
-        },
-    );
-    m.insert(
-        "str.chr".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_chr,
-        },
-    );
-    m.insert(
-        "str.classify".into(),
-        NativeEntry {
-            arity: 6,
-            f: str_mod::str_classify,
-        },
-    );
-    m.insert(
-        "bytes.to_str".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::bytes_to_str,
-        },
-    );
-    m.insert(
-        "bytes.to_ints".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::bytes_to_ints,
-        },
-    );
-    m.insert(
-        "bytes.finish".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::bytes_finish,
-        },
-    );
     m.insert(
         "std.bytes.len".into(),
         NativeEntry {
@@ -332,14 +311,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: cell::cell_drop,
         },
     );
-    for (name, arity, func) in [
-        ("new", 1_usize, cell::cell_new as zz_runtime::NativeFn),
-        ("get", 1, cell::cell_get),
-        ("set", 2, cell::cell_set),
-        ("drop", 1, cell::cell_drop),
-    ] {
-        m.insert(format!("cell.{name}"), NativeEntry { arity, f: func });
-    }
+    // NOTE: no bare `cell.*` natives — `std.cell.*` is canonical;
+    // the bare spellings resolve via fallback.
     m.insert(
         "map".into(),
         NativeEntry {
@@ -413,27 +386,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "std.str.starts_with_at".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_starts_with_at,
-        },
-    );
-    m.insert(
-        "std.str.ends_with_at".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_ends_with_at,
-        },
-    );
-    m.insert(
-        "std.str.trim_span".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_trim_span,
-        },
-    );
-    m.insert(
         "std.str.find_in".into(),
         NativeEntry {
             arity: 4,
@@ -475,9 +427,10 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: str_mod::str_trim_span,
         },
     );
-    // Canonical `std.str.*` twins of the method-dispatch entries below.
-    // Same implementations, qualified names — keeps selective imports
-    // (`import std.str(trim)`) and the runtime registry in lockstep.
+    // Canonical `std.str.*` entries: the single seeds behind both the
+    // qualified calls (`std.str.trim(s)`) and — via fallback — the bare
+    // (`str.trim(s)`) and method (`s.trim()`) spellings. Signatures live
+    // here exactly once; see `canonical_std_name`.
     m.insert(
         "std.str.trim".into(),
         NativeEntry {
@@ -542,174 +495,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     // str.* methods (for method dispatch: "hello".trim())
-    m.insert(
-        "str.length".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_length,
-        },
-    );
-    m.insert(
-        "str.trim".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_trim,
-        },
-    );
-    m.insert(
-        "str.to_upper".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_to_upper,
-        },
-    );
-    m.insert(
-        "str.to_lower".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_to_lower,
-        },
-    );
-    m.insert(
-        "str.split".into(),
-        NativeEntry {
-            arity: 2,
-            f: str_mod::str_split,
-        },
-    );
-    m.insert(
-        "str.contains".into(),
-        NativeEntry {
-            arity: 2,
-            f: str_mod::str_contains,
-        },
-    );
-    m.insert(
-        "str.count".into(),
-        NativeEntry {
-            arity: 2,
-            f: str_mod::str_count,
-        },
-    );
-    m.insert(
-        "str.find".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_find,
-        },
-    );
-    m.insert(
-        "str.rfind".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_rfind,
-        },
-    );
-    m.insert(
-        "str.starts_with_at".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_starts_with_at,
-        },
-    );
-    m.insert(
-        "str.ends_with_at".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_ends_with_at,
-        },
-    );
-    m.insert(
-        "str.trim_span".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_trim_span,
-        },
-    );
-    m.insert(
-        "str.find_in".into(),
-        NativeEntry {
-            arity: 4,
-            f: str_mod::str_find_in,
-        },
-    );
-    m.insert(
-        "str.rfind_in".into(),
-        NativeEntry {
-            arity: 4,
-            f: str_mod::str_rfind_in,
-        },
-    );
-    m.insert(
-        "str.count_in".into(),
-        NativeEntry {
-            arity: 4,
-            f: str_mod::str_count_in,
-        },
-    );
-    m.insert(
-        "str.starts_with_at".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_starts_with_at,
-        },
-    );
-    m.insert(
-        "str.ends_with_at".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_ends_with_at,
-        },
-    );
-    m.insert(
-        "str.trim_span".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_trim_span,
-        },
-    );
-    m.insert(
-        "str.replace".into(),
-        NativeEntry {
-            arity: 3,
-            f: str_mod::str_replace,
-        },
-    );
-    m.insert(
-        "str.starts_with".into(),
-        NativeEntry {
-            arity: 2,
-            f: str_mod::str_starts_with,
-        },
-    );
-    m.insert(
-        "str.ends_with".into(),
-        NativeEntry {
-            arity: 2,
-            f: str_mod::str_ends_with,
-        },
-    );
-    m.insert(
-        "str.join".into(),
-        NativeEntry {
-            arity: 2,
-            f: str_mod::str_join,
-        },
-    );
-    m.insert(
-        "str.trim_start".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_trim_start,
-        },
-    );
-    m.insert(
-        "str.trim_end".into(),
-        NativeEntry {
-            arity: 1,
-            f: str_mod::str_trim_end,
-        },
-    );
 
     // std.vec
     m.insert(
@@ -735,84 +520,71 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     // vec.* methods (for method dispatch: [1,2].push(3))
     m.insert(
-        "vec.len".into(),
-        NativeEntry {
-            arity: 1,
-            f: vec_mod::vec_len,
-        },
-    );
-    m.insert(
-        "vec.push".into(),
-        NativeEntry {
-            arity: 2,
-            f: vec_mod::vec_push,
-        },
-    );
-    m.insert(
-        "vec.pop".into(),
-        NativeEntry {
-            arity: 1,
-            f: vec_mod::vec_pop,
-        },
-    );
-    m.insert(
-        "vec.reverse".into(),
+        "std.vec.reverse".into(),
         NativeEntry {
             arity: 1,
             f: vec_mod::vec_reverse,
         },
     );
     m.insert(
-        "vec.join".into(),
+        "std.vec.join".into(),
         NativeEntry {
             arity: 2,
             f: vec_mod::vec_join,
         },
     );
     m.insert(
-        "vec.contains".into(),
+        "std.vec.contains".into(),
         NativeEntry {
             arity: 2,
             f: vec_mod::vec_contains,
         },
     );
     m.insert(
-        "vec.sort".into(),
+        "std.vec.sort".into(),
         NativeEntry {
             arity: 1,
             f: vec_mod::vec_sort,
         },
     );
     m.insert(
-        "vec.insert".into(),
+        "std.vec.sort_by".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_mod::vec_sort_by,
+        },
+    );
+    m.insert(
+        "std.vec.sort_by_desc".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_mod::vec_sort_by_desc,
+        },
+    );
+    m.insert(
+        "std.vec.sort_key".into(),
+        NativeEntry {
+            arity: 2,
+            f: vec_mod::vec_sort_key,
+        },
+    );
+    m.insert(
+        "std.vec.insert".into(),
         NativeEntry {
             arity: 3,
             f: vec_mod::vec_insert,
         },
     );
     m.insert(
-        "vec.remove".into(),
+        "std.vec.remove".into(),
         NativeEntry {
             arity: 2,
             f: vec_mod::vec_remove,
         },
     );
-    // vec.append — alias for vec.push, same semantics
-    m.insert(
-        "vec.append".into(),
-        NativeEntry {
-            arity: 2,
-            f: vec_mod::vec_push,
-        },
-    );
+    // NOTE: `vec.append` was removed — canonical spelling is `vec.push`
+    // plus the method form `xs.push(x)`. No bare `push`/`append` builtin.
     // vec.enumerate / std.vec.enumerate — method spellings of `enumerate`.
-    m.insert(
-        "vec.enumerate".into(),
-        NativeEntry {
-            arity: 1,
-            f: iterators::enumerate,
-        },
-    );
     m.insert(
         "std.vec.enumerate".into(),
         NativeEntry {
@@ -926,118 +698,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     // json.* short-form (for pure-ZZ and import-free use)
     m.insert(
-        "json.parse".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_parse,
-        },
-    );
-    m.insert(
-        "json.stringify".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_stringify,
-        },
-    );
-    m.insert(
-        "json.get".into(),
-        NativeEntry {
-            arity: 2,
-            f: json::json_get,
-        },
-    );
-    m.insert(
-        "json.null".into(),
-        NativeEntry {
-            arity: 0,
-            f: json::json_null,
-        },
-    );
-    m.insert(
-        "json.as_str".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_as_str,
-        },
-    );
-    m.insert(
-        "json.as_int".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_as_int,
-        },
-    );
-    m.insert(
-        "json.as_float".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_as_float,
-        },
-    );
-    m.insert(
-        "json.as_bool".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_as_bool,
-        },
-    );
-    m.insert(
-        "json.pretty".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_pretty,
-        },
-    );
-    m.insert(
-        "json.type".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_type,
-        },
-    );
-    m.insert(
-        "json.len".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_len,
-        },
-    );
-    m.insert(
-        "json.keys".into(),
-        NativeEntry {
-            arity: 1,
-            f: json::json_keys,
-        },
-    );
-    m.insert(
-        "json.has".into(),
-        NativeEntry {
-            arity: 2,
-            f: json::json_has,
-        },
-    );
-    m.insert(
-        "json.merge".into(),
-        NativeEntry {
-            arity: 2,
-            f: json::json_merge,
-        },
-    );
-    m.insert(
-        "json.deep_get".into(),
-        NativeEntry {
-            arity: 2,
-            f: json::json_deep_get,
-        },
-    );
-    m.insert(
-        "json.array_push".into(),
-        NativeEntry {
-            arity: 2,
-            f: json::json_array_push,
-        },
-    );
-    m.insert(
         "std.json.pretty".into(),
         NativeEntry {
             arity: 1,
@@ -1133,41 +793,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: regexp::regexp_captures,
         },
     );
-    m.insert(
-        "regexp.compile".into(),
-        NativeEntry {
-            arity: 1,
-            f: regexp::regexp_compile,
-        },
-    );
-    m.insert(
-        "regexp.is_match".into(),
-        NativeEntry {
-            arity: 2,
-            f: regexp::regexp_is_match,
-        },
-    );
-    m.insert(
-        "regexp.find".into(),
-        NativeEntry {
-            arity: 2,
-            f: regexp::regexp_find,
-        },
-    );
-    m.insert(
-        "regexp.replace_all".into(),
-        NativeEntry {
-            arity: 3,
-            f: regexp::regexp_replace_all,
-        },
-    );
-    m.insert(
-        "regexp.captures".into(),
-        NativeEntry {
-            arity: 2,
-            f: regexp::regexp_captures,
-        },
-    );
 
     // std.crypto — digests (hex), HMAC, CSPRNG, constant-time equality.
     // Both spellings registered (like `std.json.*` / `json.*`).
@@ -1214,48 +839,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "crypto.sha256".into(),
-        NativeEntry {
-            arity: 1,
-            f: crypto::crypto_sha256,
-        },
-    );
-    m.insert(
-        "crypto.sha256_bytes".into(),
-        NativeEntry {
-            arity: 1,
-            f: crypto::crypto_sha256_bytes,
-        },
-    );
-    m.insert(
-        "crypto.sha512".into(),
-        NativeEntry {
-            arity: 1,
-            f: crypto::crypto_sha512,
-        },
-    );
-    m.insert(
-        "crypto.hmac_sha256".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_hmac_sha256,
-        },
-    );
-    m.insert(
-        "crypto.random_bytes".into(),
-        NativeEntry {
-            arity: 1,
-            f: crypto::crypto_random_bytes,
-        },
-    );
-    m.insert(
-        "crypto.ct_eq".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_ct_eq,
-        },
-    );
-    m.insert(
         "std.crypto.argon2_hash".into(),
         NativeEntry {
             arity: 1,
@@ -1278,34 +861,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     m.insert(
         "std.crypto.bcrypt_verify".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_bcrypt_verify,
-        },
-    );
-    m.insert(
-        "crypto.argon2_hash".into(),
-        NativeEntry {
-            arity: 1,
-            f: crypto::crypto_argon2_hash,
-        },
-    );
-    m.insert(
-        "crypto.argon2_verify".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_argon2_verify,
-        },
-    );
-    m.insert(
-        "crypto.bcrypt_hash".into(),
-        NativeEntry {
-            arity: 1,
-            f: crypto::crypto_bcrypt_hash,
-        },
-    );
-    m.insert(
-        "crypto.bcrypt_verify".into(),
         NativeEntry {
             arity: 2,
             f: crypto::crypto_bcrypt_verify,
@@ -1377,76 +932,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     m.insert(
         "std.crypto.jwt_decode_ed".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_jwt_decode_ed,
-        },
-    );
-    m.insert(
-        "crypto.ed25519_keypair".into(),
-        NativeEntry {
-            arity: 0,
-            f: crypto::crypto_ed25519_keypair,
-        },
-    );
-    m.insert(
-        "crypto.ed25519_sign".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_ed25519_sign,
-        },
-    );
-    m.insert(
-        "crypto.ed25519_verify".into(),
-        NativeEntry {
-            arity: 3,
-            f: crypto::crypto_ed25519_verify,
-        },
-    );
-    m.insert(
-        "crypto.rsa_keypair".into(),
-        NativeEntry {
-            arity: 0,
-            f: crypto::crypto_rsa_keypair,
-        },
-    );
-    m.insert(
-        "crypto.rsa_sign".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_rsa_sign,
-        },
-    );
-    m.insert(
-        "crypto.rsa_verify".into(),
-        NativeEntry {
-            arity: 3,
-            f: crypto::crypto_rsa_verify,
-        },
-    );
-    m.insert(
-        "crypto.jwt_encode".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_jwt_encode,
-        },
-    );
-    m.insert(
-        "crypto.jwt_decode".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_jwt_decode,
-        },
-    );
-    m.insert(
-        "crypto.jwt_encode_ed".into(),
-        NativeEntry {
-            arity: 2,
-            f: crypto::crypto_jwt_encode_ed,
-        },
-    );
-    m.insert(
-        "crypto.jwt_decode_ed".into(),
         NativeEntry {
             arity: 2,
             f: crypto::crypto_jwt_decode_ed,
@@ -1538,83 +1023,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: log::span_end,
         },
     );
-    m.insert(
-        "log.set_level".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_set_level,
-        },
-    );
-    m.insert(
-        "log.get_level".into(),
-        NativeEntry {
-            arity: 0,
-            f: log::log_get_level,
-        },
-    );
-    m.insert(
-        "log.set_format".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_set_format,
-        },
-    );
-    m.insert(
-        "log.to_file".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_to_file,
-        },
-    );
-    m.insert(
-        "log.to_stderr".into(),
-        NativeEntry {
-            arity: 0,
-            f: log::log_to_stderr,
-        },
-    );
-    m.insert(
-        "log.trace".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_trace,
-        },
-    );
-    m.insert(
-        "log.debug".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_debug,
-        },
-    );
-    m.insert(
-        "log.info".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_info,
-        },
-    );
-    m.insert(
-        "log.warn".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_warn,
-        },
-    );
-    m.insert(
-        "log.error".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_error,
-        },
-    );
-    m.insert(
-        "log.span_begin".into(),
-        NativeEntry {
-            arity: 1,
-            f: log::log_span_begin,
-        },
-    );
+    // NOTE: bare `span.end` keeps its seed (see funcs.rs): `span` is not
+    // an importable module, so no canonical fallback can produce it.
     m.insert(
         "span.end".into(),
         NativeEntry {
@@ -1711,21 +1121,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "http.fetch".into(),
-        NativeEntry {
-            arity: 5,
-            f: http::http_fetch,
-        },
-    );
-    m.insert(
         "std.http.fetch_insecure".into(),
-        NativeEntry {
-            arity: 5,
-            f: http::http_fetch_insecure,
-        },
-    );
-    m.insert(
-        "http.fetch_insecure".into(),
         NativeEntry {
             arity: 5,
             f: http::http_fetch_insecure,
@@ -1738,38 +1134,31 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: http::http_post_json,
         },
     );
-    m.insert(
-        "http.post_json".into(),
-        NativeEntry {
-            arity: 3,
-            f: http::http_post_json,
-        },
-    );
 
     // std.http — Response methods (dispatched via method_namespace "http")
     m.insert(
-        "http.status".into(),
+        "std.http.status".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_status,
         },
     );
     m.insert(
-        "http.text".into(),
+        "std.http.text".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_text,
         },
     );
     m.insert(
-        "http.json".into(),
+        "std.http.json".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_json,
         },
     );
     m.insert(
-        "http.headers".into(),
+        "std.http.headers".into(),
         NativeEntry {
             arity: 1,
             f: http::http_response_headers,
@@ -1820,13 +1209,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "http.route".into(),
-        NativeEntry {
-            arity: 4,
-            f: http::http_route_any,
-        },
-    );
-    m.insert(
         "std.http.handle".into(),
         NativeEntry {
             arity: 4,
@@ -1848,13 +1230,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "http.listen_cfg".into(),
-        NativeEntry {
-            arity: 3,
-            f: http::http_listen_cfg,
-        },
-    );
-    m.insert(
         "std.http.listen_tls".into(),
         NativeEntry {
             arity: 4,
@@ -1862,21 +1237,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "http.listen_tls".into(),
-        NativeEntry {
-            arity: 4,
-            f: http::http_listen_tls,
-        },
-    );
-    m.insert(
         "std.http.listen_tls_cfg".into(),
-        NativeEntry {
-            arity: 5,
-            f: http::http_listen_tls_cfg,
-        },
-    );
-    m.insert(
-        "http.listen_tls_cfg".into(),
         NativeEntry {
             arity: 5,
             f: http::http_listen_tls_cfg,
@@ -1892,21 +1253,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "http.log".into(),
-        NativeEntry {
-            arity: 2,
-            f: http::http_log,
-        },
-    );
-    m.insert(
         "std.http.pipe".into(),
-        NativeEntry {
-            arity: 2,
-            f: http::http_pipe,
-        },
-    );
-    m.insert(
-        "http.pipe".into(),
         NativeEntry {
             arity: 2,
             f: http::http_pipe,
@@ -1920,21 +1267,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "http.serve_dir".into(),
-        NativeEntry {
-            arity: 2,
-            f: http::http_serve_dir,
-        },
-    );
-    m.insert(
         "std.http.serve_dir_at".into(),
-        NativeEntry {
-            arity: 3,
-            f: http::http_serve_dir_at,
-        },
-    );
-    m.insert(
-        "http.serve_dir_at".into(),
         NativeEntry {
             arity: 3,
             f: http::http_serve_dir_at,
@@ -1948,21 +1281,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "http.pipe_post".into(),
-        NativeEntry {
-            arity: 2,
-            f: http::http_pipe_post,
-        },
-    );
-    m.insert(
         "std.http.hijack".into(),
-        NativeEntry {
-            arity: 3,
-            f: http::http_hijack,
-        },
-    );
-    m.insert(
-        "http.hijack".into(),
         NativeEntry {
             arity: 3,
             f: http::http_hijack,
@@ -1976,21 +1295,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     m.insert(
-        "http.rate_limit".into(),
-        NativeEntry {
-            arity: 3,
-            f: http::http_rate_limit,
-        },
-    );
-    m.insert(
         "std.http.with_headers".into(),
-        NativeEntry {
-            arity: 2,
-            f: http::http_with_headers,
-        },
-    );
-    m.insert(
-        "http.with_headers".into(),
         NativeEntry {
             arity: 2,
             f: http::http_with_headers,
@@ -2059,42 +1364,30 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: http::http_body_bytes,
         },
     );
-    m.insert(
-        "http.body_bytes".into(),
-        NativeEntry {
-            arity: 1,
-            f: http::http_body_bytes,
-        },
-    );
 
     // std.fs — comprehensive non-blocking filesystem (see
-    // `natives/fs/mod.rs` for the I/O pool + yield protocol). Legacy
-    // aliases (`read_file`/`write_file`/`read`/`remove`) are kept so
-    // existing fixtures keep working.
+    // `natives/fs/mod.rs` for the I/O pool + yield protocol). One
+    // spelling per op: `read`/`write`/`remove` (the `read_file`,
+    // `read_to_string`, `write_file`, `remove_file` aliases were removed).
     for (name, arity, func) in [
         (
-            "std.fs.read_file",
+            "std.fs.read",
             1_usize,
             fs::fs_read_file as zz_runtime::NativeFn,
         ),
-        ("std.fs.read", 1, fs::fs_read_file),
-        ("std.fs.read_to_string", 1, fs::fs_read_file),
         ("std.fs.read_bytes", 1, fs::fs_read_bytes),
-        ("std.fs.write_file", 2, fs::fs_write_file),
         ("std.fs.write", 2, fs::fs_write_file),
         ("std.fs.append", 2, fs::fs_append),
         ("std.fs.copy", 2, fs::fs_copy),
         ("std.fs.move", 2, fs::fs_move),
-        ("std.fs.rename", 2, fs::fs_move),
+        // NOTE: `std.fs.rename` was removed (identical to `move`).
         ("std.fs.exists", 1, fs::fs_exists),
         ("std.fs.is_file", 1, fs::fs_is_file),
         ("std.fs.is_dir", 1, fs::fs_is_dir),
-        ("std.fs.remove_file", 1, fs::fs_remove_file),
         ("std.fs.remove", 1, fs::fs_remove_file),
         ("std.fs.mkdir", 1, fs::fs_mkdir),
         ("std.fs.mkdir_all", 1, fs::fs_mkdir_all),
         ("std.fs.read_dir", 1, fs::fs_read_dir),
-        ("std.fs.readdir", 1, fs::fs_read_dir),
         ("std.fs.remove_dir_all", 1, fs::fs_remove_dir_all),
         ("std.fs.walk_dir", 1, fs::fs_walk_dir),
         ("std.fs.stat", 1, fs::fs_stat),
@@ -2172,7 +1465,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.env.get", 1_usize, env::env_get as zz_runtime::NativeFn),
         ("std.env.set", 2, env::env_set),
         ("std.env.remove", 1, env::env_remove),
-        ("std.env.unset", 1, env::env_remove),
+        // NOTE: `std.env.unset` was removed — one spelling: `std.env.remove`.
         ("std.env.vars", 0, env::env_vars),
         ("std.env.cwd", 0, env::env_cwd),
         ("std.env.set_cwd", 1, env::env_set_cwd),
@@ -2510,48 +1803,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     // Bare `time.*` aliases (mirror the `std.time.*` natives).
-    m.insert(
-        "time.now_ms".into(),
-        NativeEntry {
-            arity: 0,
-            f: time::time_now_ms,
-        },
-    );
-    m.insert(
-        "time.sleep_ms".into(),
-        NativeEntry {
-            arity: 1,
-            f: time::time_sleep_ms,
-        },
-    );
-    m.insert(
-        "time.now_nanos".into(),
-        NativeEntry {
-            arity: 0,
-            f: time::time_now_nanos,
-        },
-    );
-    m.insert(
-        "time.now_micros".into(),
-        NativeEntry {
-            arity: 0,
-            f: time::time_now_micros,
-        },
-    );
-    m.insert(
-        "time.monotonic_nanos".into(),
-        NativeEntry {
-            arity: 0,
-            f: time::time_monotonic_nanos,
-        },
-    );
-    m.insert(
-        "time.sleep_micros".into(),
-        NativeEntry {
-            arity: 1,
-            f: time::time_sleep_micros,
-        },
-    );
 
     // std.sys — system information (both spellings each).
     m.insert(
@@ -2596,48 +1847,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: sys::sys_avail_mem,
         },
     );
-    m.insert(
-        "sys.os".into(),
-        NativeEntry {
-            arity: 0,
-            f: sys::sys_os,
-        },
-    );
-    m.insert(
-        "sys.arch".into(),
-        NativeEntry {
-            arity: 0,
-            f: sys::sys_arch,
-        },
-    );
-    m.insert(
-        "sys.cpu_count".into(),
-        NativeEntry {
-            arity: 0,
-            f: sys::sys_cpu_count,
-        },
-    );
-    m.insert(
-        "sys.hostname".into(),
-        NativeEntry {
-            arity: 0,
-            f: sys::sys_hostname,
-        },
-    );
-    m.insert(
-        "sys.total_mem".into(),
-        NativeEntry {
-            arity: 0,
-            f: sys::sys_total_mem,
-        },
-    );
-    m.insert(
-        "sys.avail_mem".into(),
-        NativeEntry {
-            arity: 0,
-            f: sys::sys_avail_mem,
-        },
-    );
 
     // std.term — terminal control: raw mode, single-key reads, size
     // (both spellings each). Fallible ops return Result so non-TTY
@@ -2654,13 +1863,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("std.term.get_size", 0, term::term_get_size),
         ("std.term.is_tty", 0, term::term_is_tty),
         ("std.term.flush", 0, term::term_flush),
-        ("term.enable_raw", 0, term::term_enable_raw),
-        ("term.disable_raw", 0, term::term_disable_raw),
-        ("term.read_key", 0, term::term_read_key),
-        ("term.poll", 1, term::term_poll),
-        ("term.get_size", 0, term::term_get_size),
-        ("term.is_tty", 0, term::term_is_tty),
-        ("term.flush", 0, term::term_flush),
     ] {
         m.insert(name.into(), NativeEntry { arity, f: func });
     }
@@ -2764,104 +1966,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: args::args_was_help,
         },
     );
-    m.insert(
-        "args.get_raw".into(),
-        NativeEntry {
-            arity: 0,
-            f: args::args_get_raw,
-        },
-    );
-    m.insert(
-        "args.parser".into(),
-        NativeEntry {
-            arity: 0,
-            f: args::args_parser,
-        },
-    );
-    m.insert(
-        "args.str_flag".into(),
-        NativeEntry {
-            arity: 3,
-            f: args::args_str_flag,
-        },
-    );
-    m.insert(
-        "args.int_flag".into(),
-        NativeEntry {
-            arity: 3,
-            f: args::args_int_flag,
-        },
-    );
-    m.insert(
-        "args.bool_flag".into(),
-        NativeEntry {
-            arity: 2,
-            f: args::args_bool_flag,
-        },
-    );
-    m.insert(
-        "args.parse".into(),
-        NativeEntry {
-            arity: 2,
-            f: args::args_parse,
-        },
-    );
-    m.insert(
-        "args.get_str".into(),
-        NativeEntry {
-            arity: 2,
-            f: args::args_get_str,
-        },
-    );
-    m.insert(
-        "args.get_int".into(),
-        NativeEntry {
-            arity: 2,
-            f: args::args_get_int,
-        },
-    );
-    m.insert(
-        "args.get_bool".into(),
-        NativeEntry {
-            arity: 2,
-            f: args::args_get_bool,
-        },
-    );
-    m.insert(
-        "args.positional".into(),
-        NativeEntry {
-            arity: 2,
-            f: args::args_positional,
-        },
-    );
-    m.insert(
-        "args.subcommand".into(),
-        NativeEntry {
-            arity: 1,
-            f: args::args_subcommand,
-        },
-    );
-    m.insert(
-        "args.help".into(),
-        NativeEntry {
-            arity: 2,
-            f: args::args_help,
-        },
-    );
-    m.insert(
-        "args.error".into(),
-        NativeEntry {
-            arity: 1,
-            f: args::args_error,
-        },
-    );
-    m.insert(
-        "args.was_help".into(),
-        NativeEntry {
-            arity: 1,
-            f: args::args_was_help,
-        },
-    );
 
     // std.process — run/spawn/wait/exit/pid (both spellings each).
     m.insert(
@@ -2906,48 +2010,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: process::process_pid,
         },
     );
-    m.insert(
-        "process.run".into(),
-        NativeEntry {
-            arity: 2,
-            f: process::process_run,
-        },
-    );
-    m.insert(
-        "process.run_with_env".into(),
-        NativeEntry {
-            arity: 3,
-            f: process::process_run_with_env,
-        },
-    );
-    m.insert(
-        "process.spawn".into(),
-        NativeEntry {
-            arity: 2,
-            f: process::process_spawn,
-        },
-    );
-    m.insert(
-        "process.wait".into(),
-        NativeEntry {
-            arity: 1,
-            f: process::process_wait,
-        },
-    );
-    m.insert(
-        "process.exit".into(),
-        NativeEntry {
-            arity: 1,
-            f: process::process_exit,
-        },
-    );
-    m.insert(
-        "process.pid".into(),
-        NativeEntry {
-            arity: 0,
-            f: process::process_pid,
-        },
-    );
 
     // std.uuid — v4/v7 generation, parse, validation (both spellings).
     m.insert(
@@ -2973,34 +2035,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     m.insert(
         "std.uuid.is_valid".into(),
-        NativeEntry {
-            arity: 1,
-            f: uuid::uuid_is_valid,
-        },
-    );
-    m.insert(
-        "uuid.v4".into(),
-        NativeEntry {
-            arity: 0,
-            f: uuid::uuid_v4,
-        },
-    );
-    m.insert(
-        "uuid.v7".into(),
-        NativeEntry {
-            arity: 0,
-            f: uuid::uuid_v7,
-        },
-    );
-    m.insert(
-        "uuid.parse".into(),
-        NativeEntry {
-            arity: 1,
-            f: uuid::uuid_parse,
-        },
-    );
-    m.insert(
-        "uuid.is_valid".into(),
         NativeEntry {
             arity: 1,
             f: uuid::uuid_is_valid,
@@ -3103,13 +2137,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: net::tcp_readline,
         },
     );
-    m.insert(
-        "std.net.tcp_close".into(),
-        NativeEntry {
-            arity: 1,
-            f: net::tcp_close,
-        },
-    );
+    // NOTE: `std.net.tcp_close` (legacy no-op) was removed — `close` /
+    // `shutdown` perform a real shutdown.
     m.insert(
         "std.net.tcp_read_bytes".into(),
         NativeEntry {
@@ -3133,8 +2162,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     // Ergonomic aliases: same implementations, short `net.*` method names
     // (plus `std.net.*` twins so qualified calls work import-free).
-    // `close`/`shutdown` perform a real shutdown; legacy `tcp_close`
-    // stays a no-op.
+    // `close`/`shutdown` perform a real shutdown.
     for (name, arity, func) in [
         ("accept", 1_usize, net::tcp_accept as zz_runtime::NativeFn),
         ("read", 2, net::tcp_read),
@@ -3151,7 +2179,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("set_write_timeout", 2, net::set_write_timeout),
     ] {
         m.insert(format!("std.net.{name}"), NativeEntry { arity, f: func });
-        m.insert(format!("net.{name}"), NativeEntry { arity, f: func });
     }
     m.insert(
         "std.net.peer_addr".into(),
@@ -3237,7 +2264,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("unix_shutdown", 1, net::unix::unix_close),
     ] {
         m.insert(format!("std.net.{name}"), NativeEntry { arity, f: func });
-        m.insert(format!("net.{name}"), NativeEntry { arity, f: func });
     }
     for (name, arity, func) in [
         (
@@ -3255,7 +2281,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("close", 1, net::unix::unix_close),
         ("shutdown", 1, net::unix::unix_close),
     ] {
-        m.insert(format!("unix.{name}"), NativeEntry { arity, f: func });
         m.insert(format!("std.unix.{name}"), NativeEntry { arity, f: func });
     }
     for (name, arity, func) in [
@@ -3266,10 +2291,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ),
         ("close", 1, net::unix::unix_listener_close),
     ] {
-        m.insert(
-            format!("unix_listener.{name}"),
-            NativeEntry { arity, f: func },
-        );
         m.insert(
             format!("std.unix_listener.{name}"),
             NativeEntry { arity, f: func },
@@ -3304,10 +2325,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ),
         ("close", 1, net::tls::tls_listener_close),
     ] {
-        m.insert(
-            format!("tls_listener.{name}"),
-            NativeEntry { arity, f: func },
-        );
         m.insert(
             format!("std.tls_listener.{name}"),
             NativeEntry { arity, f: func },
@@ -3354,7 +2371,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("tls_peer_addr", 1, net::tls::tls_peer_addr),
     ] {
         m.insert(format!("std.net.{name}"), NativeEntry { arity, f: func });
-        m.insert(format!("net.{name}"), NativeEntry { arity, f: func });
     }
     // `tls.*` method namespace (tag dispatch for Opaque("tls")).
     for (name, arity, func) in [
@@ -3374,7 +2390,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("shutdown", 1, net::tls::tls_close),
         ("peer_addr", 1, net::tls::tls_peer_addr),
     ] {
-        m.insert(format!("tls.{name}"), NativeEntry { arity, f: func });
         m.insert(format!("std.tls.{name}"), NativeEntry { arity, f: func });
     }
     for (name, arity, func) in [
@@ -3385,16 +2400,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ),
         ("connect_insecure", 3, net::tls::tls_connect_insecure),
     ] {
-        m.insert(format!("tls.{name}"), NativeEntry { arity, f: func });
         m.insert(format!("std.tls.{name}"), NativeEntry { arity, f: func });
     }
-    m.insert(
-        "tls.connect_with_ca".into(),
-        NativeEntry {
-            arity: 4,
-            f: net::tls::tls_connect_with_ca,
-        },
-    );
     m.insert(
         "std.tls.connect_with_ca".into(),
         NativeEntry {
@@ -3407,7 +2414,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // `query`/`exec` take (db, template, ...bound_params); the VM's DbQuery
     // op splits the interpolated SQL into template + params so values are
     // bound via prepared statements, never concatenated.
-    // `std.db` / `db.*` below are zero-overhead aliases (same fn pointers).
+    // NOTE: no `std.db` / `db.*` seeds exist — `sqlz` only.
     m.insert(
         "std.sqlz.open".into(),
         NativeEntry {
@@ -3437,92 +2444,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     // Method-dispatch aliases (`sqlz.open(...)` after `import std.sqlz`).
-    m.insert(
-        "sqlz.open".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_open,
-        },
-    );
-    m.insert(
-        "sqlz.exec".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_exec,
-        },
-    );
-    m.insert(
-        "sqlz.query".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_query,
-        },
-    );
-    m.insert(
-        "sqlz.close".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_close,
-        },
-    );
-    // Alias: `std.db` / `db.*` point directly at the `std.sqlz` impls.
-    m.insert(
-        "std.db.open".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_open,
-        },
-    );
-    m.insert(
-        "std.db.exec".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_exec,
-        },
-    );
-    m.insert(
-        "std.db.query".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_query,
-        },
-    );
-    m.insert(
-        "std.db.close".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_close,
-        },
-    );
-    // Method-dispatch aliases (`db.open(...)` after `import std.db`).
-    m.insert(
-        "db.open".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_open,
-        },
-    );
-    m.insert(
-        "db.exec".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_exec,
-        },
-    );
-    m.insert(
-        "db.query".into(),
-        NativeEntry {
-            arity: 3,
-            f: db::db_query,
-        },
-    );
-    m.insert(
-        "db.close".into(),
-        NativeEntry {
-            arity: 1,
-            f: db::db_close,
-        },
-    );
 
     // std.sqlz.postgres — wire-protocol driver. Import as
     // `import std.sqlz.postgres as pg`; the namespace copies below happen
@@ -3598,27 +2519,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: db::db_transaction,
         },
     );
-    m.insert(
-        "sqlz.transaction".into(),
-        NativeEntry {
-            arity: 2,
-            f: db::db_transaction,
-        },
-    );
-    m.insert(
-        "std.db.transaction".into(),
-        NativeEntry {
-            arity: 2,
-            f: db::db_transaction,
-        },
-    );
-    m.insert(
-        "db.transaction".into(),
-        NativeEntry {
-            arity: 2,
-            f: db::db_transaction,
-        },
-    );
 
     // Built-in: `typeof(v)` — the runtime type name of any value.
     m.insert(
@@ -3626,6 +2526,15 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 1,
             f: builtins::typeof_fn,
+        },
+    );
+
+    // Built-in: `clone(v)` — deep copy, fully independent value (#267).
+    m.insert(
+        "clone".into(),
+        NativeEntry {
+            arity: 1,
+            f: builtins::clone_fn,
         },
     );
 
@@ -3652,14 +2561,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
-    // Built-in: `append(arr, val)` — mutates array in-place, returns unit.
-    m.insert(
-        "append".into(),
-        NativeEntry {
-            arity: 2,
-            f: builtins::append_fn,
-        },
-    );
+    // NOTE: the bare `append(arr, val)` builtin was removed. Push is
+    // `vec.push(v, x)` plus the method form `xs.push(x)`.
 
     // Built-in: `dbg(v)` — debug print preserving Option wrappers,
     // returns `v` unchanged. The only display path that keeps
@@ -3717,7 +2620,7 @@ pub(crate) fn expect_array(
 
 pub(crate) fn expect_func(args: &mut Vec<Value>, i: usize, name: &str) -> Result<Value, EvalError> {
     match arg(args, i, name)? {
-        Value::Func(f) => Ok(Value::Func(Box::new((**f).clone()))),
+        Value::Func(f) => Ok(Value::Func(std::rc::Rc::new((**f).clone()))),
         Value::Native(n) => Ok(Value::Native(Box::new((**n).clone()))),
         other => Err(EvalError::new(
             format!("`{name}` expects a function, found `{other}`"),
@@ -3736,5 +2639,6 @@ pub(crate) fn expect_int(args: &mut Vec<Value>, i: usize, name: &str) -> Result<
     }
 }
 
+#[cfg(test)]
 #[cfg(test)]
 mod tests;

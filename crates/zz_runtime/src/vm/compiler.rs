@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Param, Pattern, Program, Stmt};
 use zz_frontend::move_elide::{
-    classify_self_assign_vm, count_refs, has_closure_or_spawn, has_early_exit, unqualify_expr,
-    MoveKind,
+    classify_self_assign, count_refs, has_call, has_closure_or_spawn, has_early_exit,
+    unqualify_expr, MoveKind,
 };
 use zz_frontend::span::Span;
 
@@ -15,10 +15,47 @@ use crate::value::Value;
 
 /// Extract an integer literal from an expression, if it is one.
 fn int_literal(e: &Expr) -> Option<i64> {
-    match e {
+    match unparen(e) {
         Expr::Int { value, .. } => Some(*value),
         _ => None,
     }
+}
+
+/// Non-`Int` literal as a runtime value, for the constant-pool fusion.
+///
+/// `Int` literals go through [`int_literal`] (inline immediate) and `None`
+/// literals (`nil`/`none`) through the generic path.
+fn const_literal(e: &Expr) -> Option<Value> {
+    match unparen(e) {
+        Expr::Str { value, .. } => Some(Value::Str(value.clone().into())),
+        Expr::Float { value, .. } => Some(Value::Float(*value)),
+        Expr::Bool { value, .. } => Some(Value::Bool(*value)),
+        _ => None,
+    }
+}
+
+/// Strip redundant `(...)` wrappers. The parser keeps them so spans stay
+/// attached; fusion analyses look through them.
+fn unparen(e: &Expr) -> &Expr {
+    match e {
+        Expr::Paren { expr, .. } => unparen(expr),
+        other => other,
+    }
+}
+
+/// Mirror a comparison so its operands can swap sides: `N < x` is `x > N`.
+///
+/// `Eq`/`Ne` are symmetric; `None` for anything that is not a comparison.
+fn flip_compare(op: BinOp) -> Option<BinOp> {
+    Some(match op {
+        BinOp::Lt => BinOp::Gt,
+        BinOp::Gt => BinOp::Lt,
+        BinOp::Le => BinOp::Ge,
+        BinOp::Ge => BinOp::Le,
+        BinOp::Eq => BinOp::Eq,
+        BinOp::Ne => BinOp::Ne,
+        _ => return None,
+    })
 }
 
 /// A compile-time-resolved local variable.
@@ -87,8 +124,11 @@ pub struct Compiler {
     structs: Option<HashMap<String, zz_checker::StructSig>>,
     /// Known native function names, for direct native call dispatch.
     native_names: Option<Arc<std::collections::HashSet<String>>>,
-    /// True while compiling the SQL argument of `sqlz.query`/`sqlz.exec`
-    /// (`db.*` alias included):
+    /// User enum signatures, keyed by fully-qualified name. Lets the
+    /// call compiler verify the trailing path component is really a
+    /// variant before treating an enum-typed call as construction.
+    enums: Option<HashMap<String, zz_checker::EnumSig>>,
+    /// True while compiling the SQL argument of `sqlz.query`/`sqlz.exec`:
     /// the Fmt lowers to template + bound params (DbQuery) instead of
     /// string concatenation.
     in_db_query: bool,
@@ -100,6 +140,10 @@ pub struct Compiler {
     /// function bodies can normalize module-global references the same way
     /// the top level does.
     top_globals: std::collections::HashSet<String>,
+    /// `Type.method` names defined by an `impl` block in this compilation
+    /// unit. A struct-typed receiver can then be resolved at compile time
+    /// (see `resolved_method`) instead of through the dynamic call op.
+    impl_methods: std::collections::HashSet<String>,
 }
 
 enum JumpKind {
@@ -118,6 +162,17 @@ enum StmtValue {
     Discard,
     /// Nothing on the stack.
     None,
+}
+
+/// What a compiled block body left on the stack, reported to its caller.
+///
+/// A live body leaves its result value (settled by the caller's
+/// `SetLoopResult`/use); a dead body leaves nothing at all.
+struct BodyTail {
+    /// The body's final statement left slot storage that `PopN` consumed:
+    /// a loop caller's `SetLoopResult` pops one more value, so it must then
+    /// emit a `Unit` top-up to stay balanced.
+    needs_result_unit: bool,
 }
 
 impl Default for Compiler {
@@ -141,10 +196,30 @@ impl Compiler {
             types: None,
             structs: None,
             native_names: None,
+            enums: None,
             in_db_query: false,
             move_take: None,
             top_globals: std::collections::HashSet::new(),
+            impl_methods: std::collections::HashSet::new(),
             type_scope: zz_checker::TOP_SCOPE.to_string(),
+        }
+    }
+
+    /// Record every `impl` method this program defines, before anything is
+    /// compiled: call sites may appear above the `impl` block (forward
+    /// references), and `Stmt::Impl` bodies are compiled in source order.
+    fn collect_impl_methods(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            let Stmt::Impl { name, methods, .. } = stmt else {
+                continue;
+            };
+            let type_name = name.join(".");
+            for method in methods {
+                if let Stmt::Func { name: mname, .. } = method {
+                    self.impl_methods
+                        .insert(format!("{type_name}.{}", mname.join(".")));
+                }
+            }
         }
     }
 
@@ -172,6 +247,7 @@ impl Compiler {
         let mut c = Compiler::new();
         c.is_main = true;
         c.native_names = native_names;
+        c.collect_impl_methods(&program.stmts);
         // Collect top-level declared names (post-rewrite, so namespaced).
         let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &program.stmts {
@@ -224,6 +300,14 @@ impl Compiler {
             }
         }
         c.captured_at_top = captured;
+        // Names referenced from nested bodies must resolve through the
+        // environment wherever they are bound — including bindings that are
+        // not top-level declarations: loop variables and block locals in
+        // inline top-level code (`for i in 0..3 { f := |x| x + i }`). Inside
+        // a function the same set comes from `scan_block_captured`; at the
+        // top level the scan's `free` set *is* that set, because only nested
+        // bodies contribute (`nested = false` for the inline statements).
+        c.captured = free.clone();
         for stmt in &program.stmts {
             if let Stmt::Func { name, params, .. } = stmt {
                 let full = name.join(".");
@@ -268,7 +352,9 @@ impl Compiler {
             })
             .collect();
         for (i, stmt) in program.stmts.iter().enumerate() {
-            let v = c.compile_stmt(stmt);
+            // Every statement but the last is discarded by the `Op::Pop`
+            // below, so tell the compiler its value is already dead.
+            let v = c.compile_stmt(stmt, i < program.stmts.len() - 1);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
                 c.emit(Op::Pop);
             }
@@ -297,22 +383,20 @@ impl Compiler {
     /// type map and struct definitions from the HIR into the compiler and all
     /// sub-compilers (functions, closures). The type map enables type-driven
     /// optimizations in future phases.
-    /// Compile with HIR type info. `enums` is accepted for call-shape
-    /// uniformity with `run_typed` (the typed enum paths resolve through
-    /// `types`, and untyped paths through the runtime table, so the seed
-    /// itself is intentionally unused).
     pub fn compile_program_typed(
         program: &Program,
         types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
         structs: HashMap<String, zz_checker::StructSig>,
-        _enums: HashMap<String, zz_checker::EnumSig>,
+        enums: HashMap<String, zz_checker::EnumSig>,
         native_names: Arc<std::collections::HashSet<String>>,
     ) -> Chunk {
         let mut c = Compiler::new();
         c.is_main = true;
         c.types = Some(types);
         c.structs = Some(structs);
+        c.enums = Some(enums);
         c.native_names = Some(native_names);
+        c.collect_impl_methods(&program.stmts);
         // Collect top-level declared names (post-rewrite, so namespaced).
         let mut top_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &program.stmts {
@@ -355,6 +439,14 @@ impl Compiler {
             }
         }
         c.captured_at_top = captured;
+        // Names referenced from nested bodies must resolve through the
+        // environment wherever they are bound — including bindings that are
+        // not top-level declarations: loop variables and block locals in
+        // inline top-level code (`for i in 0..3 { f := |x| x + i }`). Inside
+        // a function the same set comes from `scan_block_captured`; at the
+        // top level the scan's `free` set *is* that set, because only nested
+        // bodies contribute (`nested = false` for the inline statements).
+        c.captured = free.clone();
         for stmt in &program.stmts {
             if let Stmt::Func { name, params, .. } = stmt {
                 let full = name.join(".");
@@ -395,7 +487,9 @@ impl Compiler {
             })
             .collect();
         for (i, stmt) in program.stmts.iter().enumerate() {
-            let v = c.compile_stmt(stmt);
+            // Every statement but the last is discarded by the `Op::Pop`
+            // below, so tell the compiler its value is already dead.
+            let v = c.compile_stmt(stmt, i < program.stmts.len() - 1);
             if i < program.stmts.len() - 1 && matches!(v, StmtValue::Discard) {
                 c.emit(Op::Pop);
             }
@@ -421,15 +515,26 @@ impl Compiler {
             | Op::IntDiv(span)
             | Op::IntRem(span)
             | Op::IntNeg(span)
+            | Op::IntLt(span)
+            | Op::IntGt(span)
+            | Op::IntLe(span)
+            | Op::IntGe(span)
+            | Op::IntEq(span)
+            | Op::IntNe(span)
             | Op::BinOp(_, span)
             | Op::UnOp(_, span) => *span,
             Op::LoadVar(_, span) | Op::StoreVar(_, span) => *span,
+            Op::PushSlotIntImm { span, .. } => *span,
+            Op::JumpIfFalseSlotCmpIntImm { span, .. }
+            | Op::JumpIfFalseSlotCmpIntSlot { span, .. } => *span,
             Op::TakeVar(_, span)
             | Op::VecPush { span, .. }
             | Op::VecPushField { span, .. }
             | Op::VecPushMethod { span, .. }
             | Op::SetFieldTake { span, .. }
             | Op::SetFieldIndexTake { span, .. }
+            | Op::StoreIndexTake { span, .. }
+            | Op::CompoundIndexTake { span, .. }
             | Op::FieldBinopTake { span, .. }
             | Op::GetFieldIndex { span, .. }
             | Op::LenField { span, .. } => *span,
@@ -475,21 +580,42 @@ impl Compiler {
             Op::VecPush { .. } | Op::VecPushField { .. } | Op::VecPushMethod { .. } => -1,
             Op::SetFieldTake { .. } | Op::FieldBinopTake { .. } => -1,
             Op::SetFieldIndexTake { .. } => -2,
+            Op::StoreIndexTake { .. } => -2,
+            Op::CompoundIndexTake { .. } => -2,
             Op::GetFieldIndex { .. } => 0,
+            Op::GetFieldSlotIdx { .. } => 0,
             Op::LenField { .. } => 1,
             Op::SlotAddInt { .. } => 0,
             Op::SlotInc { .. } => 0,
             Op::SlotAddIntImm { .. } => 0,
-            Op::SlotLessIntSlot { .. } | Op::SlotLessIntImm { .. } => 1,
+            Op::SlotSubIntImm { .. } => 0,
+            Op::SlotMulIntImm { .. } => 0,
+            Op::SlotLessIntSlot { .. }
+            | Op::SlotLessIntImm { .. }
+            | Op::SlotCmpIntSlot { .. }
+            | Op::SlotCmpIntImm { .. }
+            | Op::SlotCmpConst { .. }
+            | Op::PushSlotIntImm { .. } => 1,
+            // The fused conditional jumps read slots and branch: net 0, the
+            // same as the compare (+1) plus `jfb` (-1) they replace.
+            Op::JumpIfFalseSlotCmpIntImm { .. } | Op::JumpIfFalseSlotCmpIntSlot { .. } => 0,
             Op::SlotBinaryInt { .. } | Op::SlotBinaryIntImm { .. } => 0,
             Op::MakeFunc { .. }
             | Op::RegisterStruct { .. }
             | Op::RegisterEnum { .. }
             | Op::MakeClosure { .. } => 1,
             Op::SpawnClosure { .. } => 1,
-            Op::IntAdd(..) | Op::IntSub(..) | Op::IntMul(..) | Op::IntDiv(..) | Op::IntRem(..) => {
-                -1
-            }
+            Op::IntAdd(..)
+            | Op::IntSub(..)
+            | Op::IntMul(..)
+            | Op::IntDiv(..)
+            | Op::IntRem(..)
+            | Op::IntLt(..)
+            | Op::IntGt(..)
+            | Op::IntLe(..)
+            | Op::IntGe(..)
+            | Op::IntEq(..)
+            | Op::IntNe(..) => -1,
             Op::IntNeg(..) => 0,
             Op::BinOp(..) => -1,
             Op::UnOp(..) => 0,
@@ -508,6 +634,8 @@ impl Compiler {
             Op::ArrayPush(_) => -1,
             Op::MakeDict(n) => 1 - 2 * *n as i64,
             Op::IndexOp(_) => -1,
+            Op::IndexIntSlot { .. } => 0,
+            Op::IndexDictInt { .. } => 0,
             Op::StoreIndexOp(_) => -2,
             Op::CompoundIndexOp { .. } => -2,
             Op::SliceOp(_) => -2,
@@ -590,6 +718,119 @@ impl Compiler {
         self.types
             .as_ref()
             .and_then(|t| t.get(&zz_checker::SpanKey::new(self.type_scope.as_str(), span)))
+    }
+
+    /// Variant methods with a canonical `<ns>.<method>` native *and* an
+    /// AOT C twin (`option.*` / `result.*`, see `zz_stdlib` and
+    /// `zz_codegen::lower::native_impl`). Restricting static resolution to
+    /// this family keeps the emitter close to the runtime's method table.
+    const VARIANT_METHODS: &'static [&'static str] = &["unwrap", "unwrap_or", "expect"];
+
+    /// Method namespace of a variant receiver, or `None` for every other
+    /// type (including unresolved inference variables).
+    fn variant_ns(ty: &zz_checker::Type) -> Option<&'static str> {
+        match ty {
+            zz_checker::Type::Option(_) => Some("option"),
+            zz_checker::Type::Result(_, _) => Some("result"),
+            _ => None,
+        }
+    }
+
+    /// Resolve `<ns>.<method>` for a variant method call statically, or
+    /// `None` to keep the dynamic `CallMethod`.
+    ///
+    /// The VM's `CallMethod` dispatch is receiver-value driven: struct
+    /// field, then a bare free function, then the receiver's method
+    /// namespace. A variant has no fields, and this bails whenever a
+    /// same-named function exists, so the namespace step is exactly what
+    /// the call would take at run time. Emitting it as `CallNative` is
+    /// behaviour-identical for the VM and makes the call visible to the
+    /// AOT backends, which have no run-time method table (#508).
+    fn variant_method_native(&self, ns: &str, method: &str) -> Option<String> {
+        if !Self::VARIANT_METHODS.contains(&method) {
+            return None;
+        }
+        // `lookup_method_recv` tries a bare free function before the
+        // namespace; keep the dynamic path whenever one could exist.
+        let suffix = format!(".{method}");
+        if self
+            .func_info
+            .keys()
+            .any(|k| k == method || k.ends_with(&suffix))
+        {
+            return None;
+        }
+        let dotted = format!("{ns}.{method}");
+        self.native_names
+            .as_ref()
+            .filter(|natives| natives.contains(&dotted))
+            .map(|_| dotted)
+    }
+
+    /// Statically resolved `Type.method` target for a method call, or `None`
+    /// to keep the dynamic op.
+    ///
+    /// `lookup_method_recv`'s order is: a field of that name, then a field
+    /// promoted from an embedded struct, then `Type.method`. A plain struct
+    /// receiver with neither of the first two — the struct has no field of
+    /// that name and no embedded-shaped field at all — plus an `impl`
+    /// compiled in this unit can therefore only reach `Type.method`. The call
+    /// then compiles as the path call `Type.method(recv, ...)`, which
+    /// `Op::CallPath` enters through `try_enter_direct_call`: no
+    /// `"Type.method"` key allocation, no `Value::Func` boxing, no generic
+    /// dispatch.
+    ///
+    /// Deliberately conservative — a wrong answer would change which function
+    /// runs — so it bails on anything it cannot prove: non-struct types,
+    /// unknown structs (cross-module), any embedded-shaped field, and any
+    /// `impl` that was not compiled in this unit.
+    fn resolved_method(
+        &self,
+        ty: Option<&zz_checker::Type>,
+        method: &str,
+    ) -> Option<(String, String)> {
+        let structs = self.structs.as_ref()?;
+        // A struct instance type is `Struct(name, args)`; the name is the
+        // same one `Op::MakeStruct`/`RegisterStruct` and `impl` blocks use.
+        let zz_checker::Type::Struct(type_name, _) = ty? else {
+            return None;
+        };
+        let sig = structs.get(type_name.as_str())?;
+        let shadowed = sig.fields.iter().any(|(fname, fty)| {
+            fname.as_str() == method
+                || match fty {
+                    // Runtime promotion (`is_embedded_value`) promotes a
+                    // field whose value's type name ends in the field name;
+                    // this is the static twin. Present at all = bail.
+                    zz_checker::Type::Struct(n, _) => {
+                        n.rsplit('.').next().unwrap_or(n.as_str()) == fname
+                    }
+                    _ => false,
+                }
+        });
+        if shadowed {
+            return None;
+        }
+        let joined = format!("{type_name}.{method}");
+        if !self.impl_methods.contains(&joined) {
+            return None;
+        }
+        Some((type_name.clone(), joined))
+    }
+
+    /// Receiver's checker type, preferring the slot table for named
+    /// bindings (recorded for every binding, independent of span coverage)
+    /// and falling back to the span map for compound receivers such as
+    /// `.some(1).unwrap_or(0)`.
+    fn receiver_type(&self, recv: &Expr) -> Option<&zz_checker::Type> {
+        if let Expr::Ident { name, .. } = recv {
+            if let Resolved::Slot(slot) = self.resolve(name) {
+                if let Some(Some(ty)) = self.chunk.slot_types.get(slot) {
+                    return Some(ty);
+                }
+            }
+        }
+        self.type_of(recv.span())
     }
 
     /// Record a named slot's declared type (see `Chunk::slot_types`).
@@ -715,7 +956,7 @@ impl Compiler {
     // reusing the owned `Vec`, store back): zero clones on the steady path.
     // `x = f(x, ...)` sets `move_take` so the single `x` load takes instead
     // of cloning. Static eligibility comes from
-    // `zz_frontend::move_elide::classify_self_assign_vm`; the gates here
+    // `zz_frontend::move_elide::classify_self_assign`; the gates here
     // are VM-specific (see each helper).
 
     /// A move-take home: frame slot or env binding name.
@@ -742,27 +983,63 @@ impl Compiler {
             && (self.locals.iter().any(|l| l.name == key) || self.top_globals.contains(key))
     }
 
-    /// Canonical free push/append callee resolving to the real native (not
+    /// `func_info` membership with canonical fallback: seeds hold
+    /// `std.*` only, so a bare `module.func` spelling checks its
+    /// canonical form too (orphans like `option.unwrap` hit directly).
+    fn func_info_contains(&self, name: &str) -> bool {
+        zz_checker::lookup_std(&self.func_info, name).is_some()
+    }
+
+    /// `func_info` lookup with canonical fallback (see above).
+    fn func_info_get(&self, name: &str) -> Option<FuncInfo> {
+        zz_checker::lookup_std(&self.func_info, name).cloned()
+    }
+
+    /// True when a bare `name` call must dispatch straight to the stdlib
+    /// native registry via [`Op::CallNative`].
+    ///
+    /// Mirrors [`Compiler::len_native_spelling`]'s guard set — user
+    /// functions (through `func_info`, including the unique `*.name`
+    /// suffix form) and local bindings shadow the native — plus the
+    /// top-level declaration tables the main compiler owns, so a
+    /// promoted or captured top-level binding also keeps the generic
+    /// `LoadVar` + `Call` path. Any shadow means exact name resolution
+    /// must happen at runtime.
+    fn direct_native_call(&self, name: &str) -> bool {
+        if self.func_info.contains_key(name)
+            || self.promoted_slots.contains_key(name)
+            || self.captured_at_top.contains(name)
+            || self.locals.iter().any(|l| l.name == name)
+        {
+            return false;
+        }
+        self.native_names
+            .as_ref()
+            .is_some_and(|n| zz_checker::contains_std(n, name))
+    }
+
+    /// Canonical free push callee resolving to the real native (not
     /// shadowed by a user func, registered). Returns the spelling.
+    /// (`vec.push` plus the method form `xs.push(x)` is the only spelling —
+    /// `vec.append` and the bare `append` builtin were removed.)
     fn move_push_native(&self, callee: &Expr) -> Option<String> {
         let spelling = match callee {
             Expr::Ident { name, .. } => name.clone(),
             Expr::Path { parts, .. } => parts.join("."),
             _ => return None,
         };
-        if !matches!(
-            spelling.as_str(),
-            "vec.push" | "std.vec.push" | "vec.append" | "std.vec.append" | "append"
-        ) {
+        if !matches!(spelling.as_str(), "vec.push" | "std.vec.push") {
             return None;
         }
+        // Exact match only: user shadowing is by source spelling;
+        // canonical seeds must not count as shadowing.
         if self.func_info.contains_key(&spelling) {
             return None;
         }
         if !self
             .native_names
             .as_ref()
-            .is_some_and(|n| n.contains(&spelling))
+            .is_some_and(|n| zz_checker::contains_std(n, &spelling))
         {
             return None;
         }
@@ -803,7 +1080,7 @@ impl Compiler {
         unqualify_expr(value, &is_global)
     }
 
-    /// Fused `x = vec.push(x, e)` / `x = vec.append(x, e)` for an Ident
+    /// Fused `x = vec.push(x, e)` for an Ident
     /// target. Returns true when emitted (caller pushes the statement
     /// value and returns).
     fn try_emit_move_push_ident(&mut self, name: &str, span: Span, value: &Expr) -> bool {
@@ -814,7 +1091,7 @@ impl Compiler {
             span,
         };
         if !matches!(
-            classify_self_assign_vm(&target, v2),
+            classify_self_assign(&target, v2),
             Some(MoveKind::VecPush(_))
         ) {
             return false;
@@ -853,7 +1130,7 @@ impl Compiler {
             span: Span::default(),
         };
         if !matches!(
-            classify_self_assign_vm(&target, v2),
+            classify_self_assign(&target, v2),
             Some(MoveKind::ThreadCall(_))
         ) {
             return None;
@@ -912,7 +1189,7 @@ impl Compiler {
             name: parts[1].clone(),
             span,
         };
-        match classify_self_assign_vm(&target, v2) {
+        match classify_self_assign(&target, v2) {
             Some(MoveKind::ThreadCall(var)) if var == parts[1] => {
                 // The single occurrence must spell the target exactly
                 // (bare or identically qualified): a differently-spelled
@@ -966,24 +1243,23 @@ impl Compiler {
         }
     }
 
-    /// Method name for method takes (`push`/`append` on the VM, where both
-    /// return the new array).
+    /// Method name for method takes (`push` on the VM, which returns the
+    /// new array).
     fn method_push_name(callee: &Expr) -> Option<String> {
         match callee {
             Expr::Path { parts, .. } if parts.len() == 2 => {
-                if parts[1] == "push" || parts[1] == "append" {
+                if parts[1] == "push" {
                     Some(parts[1].clone())
                 } else {
                     None
                 }
             }
-            Expr::Field { name, .. } if name == "push" || name == "append" => Some(name.clone()),
+            Expr::Field { name, .. } if name == "push" => Some(name.clone()),
             _ => None,
         }
     }
 
-    /// Fused method push/append-assign (`x = x.push(e)`, `ns.b =
-    /// ns.b.append(e)`): runtime-checked receiver (arrays go in place,
+    /// Fused method push-assign (`x = x.push(e)`): runtime-checked receiver (arrays go in place,
     /// anything else takes the generic call with write-back). Needs no
     /// capture guards — the home is restored before any user code runs.
     /// Returns true when emitted.
@@ -1029,7 +1305,11 @@ impl Compiler {
             },
             _ => None,
         };
-        if joined.is_some_and(|j| self.native_names.as_ref().is_some_and(|n| n.contains(&j))) {
+        if joined.is_some_and(|j| {
+            self.native_names
+                .as_ref()
+                .is_some_and(|n| zz_checker::contains_std(n, &j))
+        }) {
             return false;
         }
         self.compile_expr(&args[0]);
@@ -1203,6 +1483,54 @@ impl Compiler {
         true
     }
 
+    /// Take-restore plain index stores (`a[i] = v`): the base is a direct
+    /// home and neither operand can observe or rebind it, so the write can
+    /// reach a container with refcount 1 and mutate it in place. Without
+    /// this, `set_index` runs `Arc::make_mut` against a value shared with
+    /// the slot on every element write, deep-copying the array/dict
+    /// (O(n²) fills).
+    ///
+    /// The strict `move_window_clean` window is what keeps semantics
+    /// identical to the generic path: a self-referential store
+    /// (`a[0] = a`) must still store a *copy*, which is exactly what the
+    /// shared clone produces.
+    ///
+    /// A frame slot is unreachable from the operands (locals captured by a
+    /// closure live in the env instead, so `move_home_of` reports `Env`
+    /// for them) — no call can rebind it. An env home *can* be rebound by
+    /// a call in the window, and the take happens after both operands
+    /// evaluate, so those stay generic unless the window is call-free.
+    fn try_emit_set_index_take(
+        &mut self,
+        obj: &Expr,
+        index: &Expr,
+        value: &Expr,
+        span: Span,
+        op: Option<BinOp>,
+    ) -> bool {
+        let name = match obj {
+            Expr::Ident { name, .. } => name.as_str(),
+            _ => return false,
+        };
+        if !self.move_window_clean(index, name) || !self.move_window_clean(value, name) {
+            return false;
+        }
+        let home = match self.move_home_of(name) {
+            Some(home) => home,
+            None => return false,
+        };
+        if !matches!(home, TakeHome::Slot(_)) && (has_call(index) || has_call(value)) {
+            return false;
+        }
+        self.compile_expr(index);
+        self.compile_expr(value);
+        match op {
+            Some(op) => self.emit(Op::CompoundIndexTake { home, op, span }),
+            None => self.emit(Op::StoreIndexTake { home, span }),
+        }
+        true
+    }
+
     /// Canonical `len` callee spelling resolving to the real native
     /// (not shadowed by a user func or local): mirrors
     /// `move_push_native` discipline.
@@ -1218,13 +1546,15 @@ impl Compiler {
         ) {
             return None;
         }
+        // Exact match only: user shadowing is by source spelling;
+        // canonical seeds must not count as shadowing.
         if self.func_info.contains_key(&spelling) {
             return None;
         }
         if !self
             .native_names
             .as_ref()
-            .is_some_and(|n| n.contains(&spelling))
+            .is_some_and(|n| zz_checker::contains_std(n, &spelling))
         {
             return None;
         }
@@ -1303,11 +1633,114 @@ impl Compiler {
         true
     }
 
-    /// Fused push/append statement (`x.push(e)`, `x.append(e)`,
-    /// `append(x, e)`): take the home, push reusing the owned `Vec`, store
-    /// back. Method homes go through the runtime-checked op (arrays in
-    /// place, anything else the generic call); the free `append` spelling
-    /// is name-gated like the assign path. Returns true when emitted.
+    /// `dst = home.field` where home resolves to a slot/env and the field
+    /// index is known at compile time: copies the field straight into dst
+    /// with no container clone and no stack traffic.
+    /// Returns the op to emit, or None to fall back to the generic path.
+    fn try_emit_get_field_slot_idx(
+        &mut self,
+        obj: &Expr,
+        field_name: &str,
+        dst_slot: u16,
+        span: Span,
+    ) -> Option<Op> {
+        let home_name = match obj {
+            Expr::Ident { name, .. } => name.as_str(),
+            _ => return None,
+        };
+        let home = self.move_home_of(home_name)?;
+        // Resolve field index from the struct signature.
+        let struct_name = match self.type_of(obj.span()) {
+            Some(zz_checker::Type::Struct(name, _)) => name.clone(),
+            _ => return None,
+        };
+        let sig = self.structs.as_ref().and_then(|s| s.get(&struct_name))?;
+        let field_idx = sig
+            .fields
+            .iter()
+            .position(|(n, _)| n == field_name)
+            .map(|i| i as u16)?;
+        Some(Op::GetFieldSlotIdx {
+            home,
+            idx: field_idx,
+            dst: dst_slot,
+            span,
+        })
+    }
+
+    /// `dst = arr[idx]` where both operands resolve to slots: single bounds
+    /// check, no `normalize_index` call, no `Value` tag loop.
+    /// Returns the op to emit, or None to fall back to the generic path.
+    fn try_emit_index_int_slot(
+        &mut self,
+        arr: &Expr,
+        idx: &Expr,
+        dst_slot: u16,
+        span: Span,
+    ) -> Option<Op> {
+        let arr_slot = self.resolve_expr_slot(arr)?;
+        let idx_slot = self.resolve_expr_slot(idx)?;
+        // Only fuse for indexable types: Array, Tuple, Str, Bytes, Dict.
+        // Other types (Int, Float, Bool, Unit, etc.) fall back to IndexOp
+        // which gives the proper runtime type error.
+        let ty = self.type_of(arr.span())?;
+        if !matches!(
+            ty,
+            zz_checker::Type::Array(_)
+                | zz_checker::Type::Tuple(_)
+                | zz_checker::Type::Str
+                | zz_checker::Type::Bytes
+                | zz_checker::Type::Dict(_, _)
+        ) {
+            return None;
+        }
+        // Array/tuple/str/bytes need an Int index (matches get_index).
+        // Dicts accept any key type.
+        if !matches!(ty, zz_checker::Type::Dict(_, _)) {
+            let idx_ty = self.type_of(idx.span())?;
+            if !matches!(idx_ty, zz_checker::Type::Int) {
+                return None;
+            }
+        }
+        Some(Op::IndexIntSlot {
+            arr: arr_slot,
+            idx: idx_slot,
+            dst: dst_slot,
+            span,
+        })
+    }
+
+    /// `dst = dict[key]` where key is an int slot: probes DictData with a
+    /// precomputed hash + open-addressed table.
+    /// Returns the op to emit, or None to fall back to the generic path.
+    fn try_emit_index_dict_int(
+        &mut self,
+        dict: &Expr,
+        key: &Expr,
+        dst_slot: u16,
+        span: Span,
+    ) -> Option<Op> {
+        let dict_slot = self.resolve_expr_slot(dict)?;
+        let key_slot = self.resolve_expr_slot(key)?;
+        // Only fuse for int-keyed dicts.
+        let Some(zz_checker::Type::Dict(kt, _)) = self.type_of(dict.span()) else {
+            return None;
+        };
+        if !matches!(kt.as_ref(), zz_checker::Type::Int) {
+            return None;
+        }
+        Some(Op::IndexDictInt {
+            dict: dict_slot,
+            key: key_slot,
+            dst: dst_slot,
+            span,
+        })
+    }
+
+    /// Fused push statement (`x.push(e)`): take the home, push reusing the
+    /// owned `Vec`, store back. Method homes go through the runtime-checked
+    /// op (arrays in place, anything else the generic call).
+    /// Returns true when emitted.
     fn try_emit_move_push_stmt(&mut self, e: &Expr) -> bool {
         let Expr::Call {
             callee,
@@ -1322,28 +1755,9 @@ impl Compiler {
             return false;
         }
         let span = e.span();
-        // Bare `append(x, e)` (statement write-back shape).
-        if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-            if fname == "append" && args.len() == 2 {
-                let home_key = match &args[0] {
-                    Expr::Ident { name, .. } => name.clone(),
-                    Expr::Path { parts, .. } if parts.len() == 2 => parts.join("."),
-                    _ => return false,
-                };
-                if self.move_push_native(callee).is_none() {
-                    return false;
-                }
-                let home = match self.move_home_of(&home_key) {
-                    Some(h) => h,
-                    None => return false,
-                };
-                self.compile_expr(&args[1]);
-                self.emit(Op::VecPush { home, span });
-                return true;
-            }
-            return false;
-        }
-        // Method shape (`rx.push(e)` / `rx.append(e)`, Path or Field callee).
+        // NOTE: the bare `append(x, e)` statement spelling was removed with
+        // the builtin — push is `vec.push(x, e)` or the method `x.push(e)`.
+        // Method shape (`rx.push(e)`, Path or Field callee).
         if args.len() != 1 {
             return false;
         }
@@ -1360,7 +1774,7 @@ impl Compiler {
                 && self
                     .native_names
                     .as_ref()
-                    .is_some_and(|n| n.contains(&parts.join(".")))
+                    .is_some_and(|n| zz_checker::contains_std(n, &parts.join(".")))
             {
                 return false;
             }
@@ -1371,7 +1785,7 @@ impl Compiler {
                 if self
                     .native_names
                     .as_ref()
-                    .is_some_and(|n| n.contains(&joined))
+                    .is_some_and(|n| zz_checker::contains_std(n, &joined))
                 {
                     return false;
                 }
@@ -1404,7 +1818,7 @@ impl Compiler {
                 name: parts[1].clone(),
                 span,
             };
-            let Some(MoveKind::VecPush(var)) = classify_self_assign_vm(&bare, v2) else {
+            let Some(MoveKind::VecPush(var)) = classify_self_assign(&bare, v2) else {
                 return false;
             };
             if var != parts[1] {
@@ -1453,7 +1867,7 @@ impl Compiler {
         let v2 = nv.as_ref().unwrap_or(value);
         // ThreadCall never applies to path targets (globals are readable
         // by same-module callees).
-        match classify_self_assign_vm(&target, v2) {
+        match classify_self_assign(&target, v2) {
             Some(MoveKind::FieldPush { obj, field }) => {
                 // Receiver spelling must equal the target spelling.
                 let receiver_ok = match value {
@@ -1520,6 +1934,37 @@ impl Compiler {
                 return Some(Op::SlotAddIntImm { dst, imm });
             }
         }
+        // `x = x - 1` -> SlotSubIntImm(1)
+        if *binop == zz_frontend::ast::BinOp::Sub {
+            let (l, r) = (left.as_ref(), right.as_ref());
+            let is_one = |e: &Expr| matches!(e, Expr::Int { value: 1, .. });
+            if (matches!(l, Expr::Ident { name, .. } if name == target) && is_one(r))
+                || (matches!(r, Expr::Ident { name, .. } if name == target) && is_one(l))
+            {
+                return Some(Op::SlotSubIntImm { dst, imm: 1 });
+            }
+            // `x = x - N` -> SlotSubIntImm
+            let imm = match (l, r) {
+                (Expr::Ident { name, .. }, e) if name == target => int_literal(e),
+                (e, Expr::Ident { name, .. }) if name == target => int_literal(e),
+                _ => None,
+            };
+            if let Some(imm) = imm {
+                return Some(Op::SlotSubIntImm { dst, imm });
+            }
+        }
+        // `x = x * N` -> SlotMulIntImm
+        if *binop == zz_frontend::ast::BinOp::Mul {
+            let (l, r) = (left.as_ref(), right.as_ref());
+            let imm = match (l, r) {
+                (Expr::Ident { name, .. }, e) if name == target => int_literal(e),
+                (e, Expr::Ident { name, .. }) if name == target => int_literal(e),
+                _ => None,
+            };
+            if let Some(imm) = imm {
+                return Some(Op::SlotMulIntImm { dst, imm });
+            }
+        }
         // `x = x + y` -> SlotAddInt (existing)
         if let Some((d, s)) = self.try_slot_add(target, value) {
             return Some(Op::SlotAddInt { dst: d, src: s });
@@ -1583,6 +2028,89 @@ impl Compiler {
             }
         }
         None
+    }
+
+    /// Fused chain for a nested **left spine**: `x = ((x op a) op b) op c`.
+    ///
+    /// [`Compiler::try_slot_binop`] fuses one level only: every operand must
+    /// resolve directly to a slot or literal, so `s = (s + i) % 7` falls back
+    /// to six generic ops (`LoadSlot LoadSlot IntAdd PushConst IntRem
+    /// StoreSlot`). A scratch slot would cover the general case; this covers
+    /// the common one without it: when the target is read exactly once (the
+    /// innermost step) the half-built value can live **in the target slot
+    /// itself**, because every fused op reads both operands before writing
+    /// `dst`. If a later step could read the target — `x = (x + i) + x` —
+    /// `count_refs` is 2 and the chain is rejected, since that read must see
+    /// the *old* value.
+    ///
+    /// Returns the ops to emit in order, or `None` to fall back to the
+    /// generic expression path (nothing is emitted speculatively).
+    fn try_slot_binop_chain(&self, target: &str, value: &Expr) -> Option<Vec<Op>> {
+        // Flatten the left spine: `(((x op a) op b) op c)` -> [c, b, a] steps.
+        let mut spine: Vec<(BinOp, &Expr, Span)> = Vec::new();
+        let mut cur = unparen(value);
+        while let Expr::Binary {
+            op,
+            left,
+            right,
+            span,
+            ..
+        } = cur
+        {
+            spine.push((*op, unparen(right), *span));
+            cur = unparen(left);
+        }
+        if spine.len() < 2 {
+            return None;
+        }
+        // The innermost left operand must be the target itself.
+        let Expr::Ident { name, .. } = cur else {
+            return None;
+        };
+        if name != target {
+            return None;
+        }
+        // The target must be read exactly once across the whole RHS: every
+        // later read would observe the half-built value.
+        if count_refs(value, target) != 1 {
+            return None;
+        }
+        let dst = match self.resolve(target) {
+            Resolved::Slot(slot) => slot as u16,
+            Resolved::Env => return None,
+        };
+        // Innermost first: op 1 consumes the old target, each later op
+        // consumes the value the previous one left in `dst`.
+        spine.reverse();
+        let mut ops = Vec::with_capacity(spine.len());
+        for (op, right, span) in spine {
+            // Same demand as the flat peephole: the step must be statically
+            // Int, or the int fast path would be a guess.
+            if !matches!(self.type_of(span), Some(zz_checker::Type::Int)) {
+                return None;
+            }
+            if let Some(rhs) = self.resolve_expr_slot(right) {
+                ops.push(Op::SlotBinaryInt {
+                    dst,
+                    lhs: dst,
+                    rhs,
+                    op,
+                });
+                continue;
+            }
+            let imm = int_literal(right)?;
+            if op == BinOp::Add && imm == 1 {
+                ops.push(Op::SlotInc { slot: dst });
+            } else {
+                ops.push(Op::SlotBinaryIntImm {
+                    dst,
+                    lhs: dst,
+                    imm,
+                    op,
+                });
+            }
+        }
+        Some(ops)
     }
 
     fn resolve_expr_slot(&self, e: &Expr) -> Option<u16> {
@@ -1667,10 +2195,25 @@ impl Compiler {
         None
     }
 
-    /// Peephole for `while`-style conditions: `a < b` / `a < N` where both
-    /// sides resolve to local slots (or one is an int literal) and the
-    /// expression is typed Int. Also handles `a > b` by swapping operands.
-    fn try_slot_compare(&self, value: &Expr) -> Option<Op> {
+    /// Peephole for `if`/`while` conditions: a comparison whose operands
+    /// resolve to local slots (one side may be an int literal) and whose
+    /// left operand is typed Int.
+    ///
+    /// `<` keeps the slightly cheaper `SlotLessInt*` pair; the other five
+    /// operators use the generalized `SlotCmpInt*` pair. Literal-on-the-left
+    /// shapes are normalized by mirroring the operator (`N < x` == `x > N`),
+    /// so `0 < x` fuses as well as `x > 0`.
+    fn try_slot_compare(&mut self, value: &Expr) -> Option<Op> {
+        self.slot_compare(value, true)
+    }
+
+    /// Shared body of [`try_slot_compare`](Self::try_slot_compare).
+    ///
+    /// `allow_const` gates the constant-pool form (`SlotCmpConst`), which
+    /// pushes a constant as a side effect. A caller that may discard the
+    /// result — the branch fusion, for non-`Int` literals — passes `false`
+    /// so it does not leave an unreferenced entry in the pool.
+    fn slot_compare(&mut self, value: &Expr, allow_const: bool) -> Option<Op> {
         let Expr::Binary {
             op: binop,
             left,
@@ -1680,10 +2223,19 @@ impl Compiler {
         else {
             return None;
         };
-        // Type guard: at least the left operand must be typed Int.
-        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int)) {
-            return None;
-        }
+        // Fusion looks through redundant parens; spans stay on the AST.
+        let left = unparen(left);
+        let right = unparen(right);
+        // Comparison guard: `if a + b` / `if a and b` keep the generic path
+        // (the fused ops would push the right value, but `and`/`or` owe
+        // short-circuiting, which a two-operand compare does not express).
+        let flipped = flip_compare(*binop)?;
+        // Any slot-vs-slot / slot-vs-`Int` shape stays behind the `Int` type
+        // guard (the fused ops are integer fast paths). The constant-pool
+        // form below is also what string/float literals use, so it doubles
+        // as the `Eq`/`Ne` fusion for non-`Int` slots — those two are total,
+        // so the generic fallback can never fail on them.
+        let left_int = matches!(self.type_of(left.span()), Some(zz_checker::Type::Int));
         let slot_of = |e: &Expr| match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => Some(slot as u16),
@@ -1695,29 +2247,161 @@ impl Compiler {
             },
             _ => None,
         };
-        let imm_of = |e: &Expr| int_literal(e);
-        match *binop {
-            BinOp::Lt => {
-                if let (Some(a), Some(b)) = (slot_of(left.as_ref()), slot_of(right.as_ref())) {
-                    Some(Op::SlotLessIntSlot { a, b })
-                } else if let (Some(a), Some(imm)) =
-                    (slot_of(left.as_ref()), imm_of(right.as_ref()))
-                {
-                    Some(Op::SlotLessIntImm { a, imm })
-                } else {
-                    None
-                }
+        let imm_of = int_literal;
+
+        // `a op b`, both in slots.
+        if left_int {
+            if let (Some(a), Some(b)) = (slot_of(left), slot_of(right)) {
+                return Some(match *binop {
+                    BinOp::Lt => Op::SlotLessIntSlot { a, b },
+                    // `a > b` is equivalent to `b < a`.
+                    BinOp::Gt => Op::SlotLessIntSlot { a: b, b: a },
+                    op => Op::SlotCmpIntSlot { a, b, op },
+                });
             }
-            // `a > b` is equivalent to `b < a` — swap operands.
-            BinOp::Gt => {
-                if let (Some(b), Some(a)) = (slot_of(left.as_ref()), slot_of(right.as_ref())) {
-                    Some(Op::SlotLessIntSlot { a, b })
-                } else {
-                    None
-                }
+            // `a op N`, literal on the right.
+            if let (Some(a), Some(imm)) = (slot_of(left), imm_of(right)) {
+                return Some(match *binop {
+                    BinOp::Lt => Op::SlotLessIntImm { a, imm },
+                    op => Op::SlotCmpIntImm { a, imm, op },
+                });
             }
+            // `N op a`, literal on the left: mirror into `a flipped(op) N`.
+            if let (Some(imm), Some(a)) = (imm_of(left), slot_of(right)) {
+                return Some(match flipped {
+                    BinOp::Lt => Op::SlotLessIntImm { a, imm },
+                    op => Op::SlotCmpIntImm { a, imm, op },
+                });
+            }
+        }
+        // `a op c` / `c op a` with a non-`Int` literal (string, float,
+        // bool): the value lives in the constant pool, so the comparison can
+        // still be one op instead of `LoadSlot PushConst BinOp`.
+        if !allow_const {
+            return None;
+        }
+        let total = matches!(binop, BinOp::Eq | BinOp::Ne);
+        if !left_int && !total && !self.comparable_pair(left, right) {
+            return None;
+        }
+        let (a, lit, op) = match (slot_of(left), const_literal(right)) {
+            (Some(a), Some(lit)) => (a, lit, *binop),
+            _ => match (const_literal(left), slot_of(right)) {
+                (Some(lit), Some(a)) => (a, lit, flipped),
+                _ => return None,
+            },
+        };
+        let k = self.push_const(lit);
+        Some(Op::SlotCmpConst { a, k, op })
+    }
+
+    /// Jump form of [`try_slot_compare`](Self::try_slot_compare): the same
+    /// resolution, emitted as a single conditional branch.
+    ///
+    /// `SlotLessInt*` are the `<` specialisations of the general compares, so
+    /// they fold into the same ops with `op: Lt`. Non-`Int` literals
+    /// (`SlotCmpConst`) keep the two-op shape: their constant would have to
+    /// ride along in the jump.
+    fn try_slot_compare_jump(&mut self, cond: &Expr, span: Span) -> Option<Op> {
+        let int_op = |a: u16, imm: i64, op: BinOp| Op::JumpIfFalseSlotCmpIntImm {
+            a,
+            imm,
+            op,
+            target: 0,
+            span,
+        };
+        match self.slot_compare(cond, false)? {
+            Op::SlotCmpIntImm { a, imm, op } => Some(int_op(a, imm, op)),
+            Op::SlotCmpIntSlot { a, b, op } => Some(Op::JumpIfFalseSlotCmpIntSlot {
+                a,
+                b,
+                op,
+                target: 0,
+                span,
+            }),
+            Op::SlotLessIntImm { a, imm } => Some(int_op(a, imm, BinOp::Lt)),
+            Op::SlotLessIntSlot { a, b } => Some(Op::JumpIfFalseSlotCmpIntSlot {
+                a,
+                b,
+                op: BinOp::Lt,
+                target: 0,
+                span,
+            }),
             _ => None,
         }
+    }
+
+    /// Compile a condition that branches when it is false, returning the
+    /// jump's pc for [`patch_jump`](Self::patch_jump).
+    ///
+    /// A slot comparison fuses into the branch when the shape allows it
+    /// (`if i < n` in a hot loop); everything else keeps the
+    /// compare-then-`jfb` shape.
+    fn emit_cond_jump(&mut self, cond: &Expr, span: Span) -> usize {
+        if let Some(op) = self.try_slot_compare_jump(cond, span) {
+            let pos = self.chunk.code.len();
+            // Net 0: the fused branch reads its slots directly, replacing
+            // the compare (+1) and the `jfb` (-1) it stands for.
+            self.chunk.spans.push(span);
+            self.chunk.code.push(op);
+            return pos;
+        }
+        if let Some(op) = self.try_slot_compare(cond) {
+            self.emit(op);
+        } else {
+            self.compile_expr(cond);
+        }
+        self.emit_jump(JumpKind::IfFalseBool(span))
+    }
+
+    /// Peephole for integer arithmetic in *value* position: `slot op Int`
+    /// pushes the result in one dispatch instead of `LoadSlot PushConst
+    /// IntOp`.
+    ///
+    /// [`SlotBinaryIntImm`](Op::SlotBinaryIntImm) covers assignments (it
+    /// needs a destination slot); arguments, initialisers and `return`
+    /// discard the destination, so before this every argument of
+    /// `fib(n - 1)` cost three ops.
+    fn try_push_slot_int(&mut self, value: &Expr) -> Option<Op> {
+        let Expr::Binary {
+            op: binop,
+            left,
+            right,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        if !matches!(
+            binop,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+        ) {
+            return None;
+        }
+        let left = unparen(left);
+        let right = unparen(right);
+        // Same `Int` guard as the other fused ops: the fast path is only
+        // sound when the checker typed the operand.
+        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int)) {
+            return None;
+        }
+        let a = match left {
+            Expr::Ident { name, .. } => match self.resolve(name) {
+                Resolved::Slot(slot) => slot as u16,
+                Resolved::Env => return None,
+            },
+            Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
+                Resolved::Slot(slot) => slot as u16,
+                Resolved::Env => return None,
+            },
+            _ => return None,
+        };
+        Some(Op::PushSlotIntImm {
+            a,
+            imm: int_literal(right)?,
+            op: *binop,
+            span: value.span(),
+        })
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
@@ -1792,6 +2476,32 @@ impl Compiler {
         })
     }
 
+    /// Are both operands of a *non-total* comparison statically ordered?
+    ///
+    /// `Eq`/`Ne` are total, so the const-pool fusion needs no evidence. `Lt`
+    /// and friends can raise (mixed or opaque operands) and the fused op
+    /// falls back with `Span::default()`, so only pairs whose types the
+    /// checker can order (`int`/`float`/`str` — the same set the generic
+    /// path compares) take the fused form.
+    fn comparable_pair(&self, left: &Expr, right: &Expr) -> bool {
+        use zz_checker::Type::*;
+        matches!(
+            (self.type_of(left.span()), self.type_of(right.span())),
+            (Some(Int), Some(Int | Float))
+                | (Some(Float), Some(Int | Float))
+                | (Some(Str), Some(Str))
+        )
+    }
+
+    /// Is `e` statically `Bool`? Used to skip the `Truthy` coercion when the
+    /// value already is the branch condition.
+    fn is_bool(&self, e: &Expr) -> bool {
+        matches!(
+            self.type_of(unparen(e).span()),
+            Some(zz_checker::Type::Bool)
+        )
+    }
+
     fn push_const(&mut self, v: Value) -> u32 {
         self.chunk.constants.push(v);
         (self.chunk.constants.len() - 1) as u32
@@ -1800,6 +2510,31 @@ impl Compiler {
     fn emit_const(&mut self, v: Value) {
         let idx = self.push_const(v);
         self.emit(Op::PushConst(idx));
+    }
+
+    /// The `Unit` a value-producing statement leaves as its *statement* value.
+    ///
+    /// Assignments and compound assignments push a placeholder `Unit` nobody
+    /// ever reads. Whatever owns the statement consumes it: a container pops
+    /// it (`Op::Pop` for `StmtValue::Discard`), a loop drops it as its result.
+    /// When the owner has already said the value is dead (`value_discarded`),
+    /// pushing it is pure work — skip the push and report `None`, which tells
+    /// the container no `Op::Pop` is owed. Both ops vanish together, so
+    /// `stack_height` and the runtime stack stay balanced.
+    ///
+    /// Deciding here, *before* the statement's ops exist, is what makes this
+    /// safe. An op-stream peephole that deletes an already-emitted `PushConst`
+    /// can be aimed at by a forward branch (`jmp`/`jfb` patched to that
+    /// position) and silently unbalance the other arm; a decision here changes
+    /// the emission itself, so every later jump target is patched knowing the
+    /// final layout.
+    fn stmt_unit(&mut self, value_discarded: bool) -> StmtValue {
+        if value_discarded {
+            StmtValue::None
+        } else {
+            self.emit_const(Value::Unit);
+            StmtValue::Discard
+        }
     }
 
     fn emit_jump(&mut self, kind: JumpKind) -> usize {
@@ -1832,23 +2567,48 @@ impl Compiler {
             Op::JumpIfTrue(_) => Op::JumpIfTrue(target),
             Op::JumpIfFalseBool(_, span) => Op::JumpIfFalseBool(target, span),
             Op::ForNext {
-                vars, in_env, span, ..
+                vars,
+                body,
+                in_env,
+                span,
+                ..
             } => Op::ForNext {
                 vars,
                 exit: target,
+                body,
                 in_env,
                 span,
             },
             Op::WhileCond { span, .. } => Op::WhileCond { exit: target, span },
+            Op::JumpIfFalseSlotCmpIntImm {
+                a, imm, op, span, ..
+            } => Op::JumpIfFalseSlotCmpIntImm {
+                a,
+                imm,
+                op,
+                target,
+                span,
+            },
+            Op::JumpIfFalseSlotCmpIntSlot { a, b, op, span, .. } => Op::JumpIfFalseSlotCmpIntSlot {
+                a,
+                b,
+                op,
+                target,
+                span,
+            },
             other => panic!("patch_jump on non-jump op: {other:?}"),
         };
     }
 
-    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool, span: Span) -> usize {
+    /// Emit the loop test/back-edge (`ForNext`) at the current position
+    /// and return its pc so the caller can patch the exit. `body` is the
+    /// rotated loop's body entry.
+    fn emit_for_next(&mut self, vars: Vec<String>, in_env: bool, body: usize, span: Span) -> usize {
         let pos = self.chunk.code.len();
         self.emit(Op::ForNext {
             vars,
             exit: 0,
+            body,
             in_env,
             span,
         });
@@ -1951,7 +2711,13 @@ impl Compiler {
         }
     }
 
-    fn compile_stmt(&mut self, stmt: &Stmt) -> StmtValue {
+    /// Compile one statement.
+    ///
+    /// `value_discarded` is `true` when the caller drops this statement's
+    /// value (it emits `Op::Pop` for `StmtValue::Discard`): a value-producing
+    /// statement can then skip bookkeeping nothing reads. See the
+    /// `Stmt::For` arm.
+    fn compile_stmt(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
         match stmt {
             Stmt::Decl { name, value, .. } => {
                 self.compile_expr(value);
@@ -2025,8 +2791,12 @@ impl Compiler {
                 });
                 StmtValue::Discard
             }
-            // Aliases erase at check time: no ops to emit.
-            Stmt::TypeAlias { .. } => StmtValue::Discard,
+            // Aliases erase at check time: no ops to emit, so the statement
+            // owns no value. `Discard` here would make the owning container
+            // emit a `Pop` for a value that was never pushed, shifting every
+            // later slot by one — `type A = int` followed by `x := 1` used to
+            // panic in `StoreSlot`.
+            Stmt::TypeAlias { .. } => StmtValue::None,
             // Enums register their variant names so qualified
             // construction (`Token.IntLit(1)`) resolves at runtime.
             // Values are plain `Object`s — no other state needed.
@@ -2081,14 +2851,22 @@ impl Compiler {
                     span: *span,
                     num_vars: num_vars_u8,
                 });
-                let header = self.chunk.code.len();
-                // Safepoint at the header (not the back-edge) so `continue`
-                // cannot skip the cooperative yield check.
-                self.emit(Op::Safepoint);
+                // Rotated loop: enter at the test (emitted after the body),
+                // so a non-exhausted `ForNext` jumps straight into the body.
+                // That makes `ForNext` the back-edge as well as the test —
+                // one dispatch per iteration instead of two — while
+                // `continue` still targets it (the loop frame's header).
+                let entry_pos = self.chunk.code.len();
+                self.emit(Op::Jump(0));
+                let body_start = self.chunk.code.len();
+                // No standalone `Safepoint` here: the cooperative yield check
+                // is charged to `ForNext` instead. `ForNext` runs once per
+                // iteration and is the header target for both the back-edge
+                // and `continue`, so the check still cannot be skipped — at
+                // one dispatch less per iteration.
                 // Determine if any var is captured by an inner closure
                 let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
                 let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
-                let j = self.emit_for_next(var_names.clone(), any_captured, *span);
                 // Push locals for each var — last var at highest slot,
                 // first at lowest
                 let num_vars = vars.len();
@@ -2114,36 +2892,56 @@ impl Compiler {
                 // Loop-var slots for the IR vartab, in var order
                 // (`u16::MAX` = env-captured, no slot): lets AOT peels
                 // address the pushed values without re-deriving positions.
-                self.chunk.fornext_slots.push(
-                    (0..num_vars)
-                        .map(|i| {
-                            let v = &vars[i];
-                            if self.captured.contains(&v.name) {
-                                u16::MAX
-                            } else {
-                                (self.stack_height - num_vars + i) as u16
-                            }
-                        })
-                        .collect(),
-                );
+                // Pushed after the `ForNext` is emitted (below): vartab
+                // entries pair with `ForNext` ops in chunk order, and a
+                // nested loop in the body emits its op first.
+                let vartab_slots: Vec<u16> = (0..num_vars)
+                    .map(|i| {
+                        let v = &vars[i];
+                        if self.captured.contains(&v.name) {
+                            u16::MAX
+                        } else {
+                            (self.stack_height - num_vars + i) as u16
+                        }
+                    })
+                    .collect();
                 let body_needs_env = self.scope_declares_captured(body);
+                // The loop's result slot is written before `ForSetup` and only
+                // read by a caller that keeps the loop's value. When the caller
+                // drops it, nothing reads it — and then nothing reads the
+                // body's own trailing value either, so the body is told that
+                // up front (see `compile_block_body`'s `trailing_value_dead`).
+                let dead_result = value_discarded && !body_needs_env;
                 if body_needs_env {
                     self.emit(Op::EnterScope);
                 }
                 self.scope_depth += 1;
-                if self.compile_block_body(body, true) {
-                    // Trailing slot declaration (see `compile_block_body`):
-                    // supply the loop-result value `SetLoopResult` pops.
-                    self.emit_const(Value::Unit);
-                }
+                let body_tail = self.compile_block_body(body, true, dead_result);
                 self.scope_depth -= 1;
                 if body_needs_env {
                     self.emit(Op::ExitScope);
                 }
-                self.emit(Op::SetLoopResult);
-                self.emit(Op::Jump(header));
-                self.patch_jump(j);
+                if !dead_result {
+                    if body_tail.needs_result_unit {
+                        // Trailing slot declaration (see `compile_block_body`):
+                        // supply the loop-result value `SetLoopResult` pops.
+                        self.emit_const(Value::Unit);
+                    }
+                    self.emit(Op::SetLoopResult);
+                }
+                // A dead-result body leaves nothing behind (see
+                // `compile_block_body`), so there is no tail value to settle.
+                // Either way the loop's own slot keeps the `Unit` placeholder
+                // written before `ForSetup`, which the caller's `Op::Pop`
+                // removes.
+                // Test + back-edge last (rotated layout): `patch_jump` fills
+                // the exit, then the entry jump and the setup header point at
+                // it.
+                let header = self.emit_for_next(var_names, any_captured, body_start, *span);
+                self.patch_jump(header);
                 let exit = self.chunk.code.len();
+                self.chunk.fornext_slots.push(vartab_slots);
+                self.chunk.code[entry_pos] = Op::Jump(header);
                 self.chunk.code[setup_pos] = Op::ForSetup {
                     exit,
                     header,
@@ -2186,16 +2984,65 @@ impl Compiler {
                 StmtValue::None
             }
             Stmt::Assign { target, value, .. } => match target {
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // There is no storage for `_`, so just compile the RHS and
+                // let the caller discard the result.
+                Expr::Ident { name, .. } if name == "_" => {
+                    self.compile_expr(value);
+                    StmtValue::Discard
+                }
                 Expr::Ident { name, span } => {
                     // Fast path: `x = x + y` / `x = x + 1` / `x = x + N` with
                     // operands resolving to local slots -> single fused op.
-                    if let Some(op) = self.try_slot_binop(name, value) {
+                    // Nested left spines (`x = (x + y) % 7`) fuse into a short
+                    // chain that reuses the target slot as scratch.
+                    if let Some(ops) = self.try_slot_binop_chain(name, value) {
+                        for op in ops {
+                            self.emit(op);
+                        }
+                        self.stmt_unit(value_discarded)
+                    } else if let Some(op) = self.try_slot_binop(name, value) {
                         self.emit(op);
-                        self.emit_const(Value::Unit);
-                        StmtValue::Discard
+                        self.stmt_unit(value_discarded)
                     } else if self.try_emit_move_push_ident(name, *span, value) {
-                        self.emit_const(Value::Unit);
-                        StmtValue::Discard
+                        self.stmt_unit(value_discarded)
+                    } else if let Resolved::Slot(dst_slot) = self.resolve(name) {
+                        // `x = s.f` -> GetFieldSlotIdx: copy field straight
+                        // into dst slot, no container clone, no stack traffic.
+                        if let Expr::Field {
+                            obj, name: field, ..
+                        } = value
+                        {
+                            if let Some(op) =
+                                self.try_emit_get_field_slot_idx(obj, field, dst_slot as u16, *span)
+                            {
+                                self.emit(op);
+                                return self.stmt_unit(value_discarded);
+                            }
+                        }
+                        // `x = arr[i]` -> IndexIntSlot: single bounds check,
+                        // no tag loop.
+                        if let Expr::Index { obj, index, .. } = value {
+                            if let Some(op) =
+                                self.try_emit_index_int_slot(obj, index, dst_slot as u16, *span)
+                            {
+                                self.emit(op);
+                                return self.stmt_unit(value_discarded);
+                            }
+                            // `x = dict[key]` -> IndexDictInt: int-keyed dict
+                            // fast path.
+                            if let Some(op) =
+                                self.try_emit_index_dict_int(obj, index, dst_slot as u16, *span)
+                            {
+                                self.emit(op);
+                                return self.stmt_unit(value_discarded);
+                            }
+                        }
+                        // Fall through to generic store below.
+                        self.compile_expr(value);
+                        self.move_take = None;
+                        self.emit(Op::StoreSlot(dst_slot as u16));
+                        self.stmt_unit(value_discarded)
                     } else {
                         // Move-take for `x = f(x, ...)`: the flag makes the
                         // single `x` load take; cleared after the RHS either
@@ -2210,16 +3057,14 @@ impl Compiler {
                             Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                             Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
                         }
-                        self.emit_const(Value::Unit);
-                        StmtValue::Discard
+                        self.stmt_unit(value_discarded)
                     }
                 }
                 Expr::Path { parts, span } => {
                     // Move-take: fused push/field takes (locals and
                     // module-global homes).
                     if parts.len() == 2 && self.try_emit_move_path(parts, *span, value) {
-                        self.emit_const(Value::Unit);
-                        return StmtValue::Discard;
+                        return self.stmt_unit(value_discarded);
                     }
                     // Move-take for `ns.x = f(ns.x, ...)`: thread the
                     // global through the call instead of cloning it
@@ -2232,8 +3077,7 @@ impl Compiler {
                             self.compile_expr(value);
                             self.move_take = None;
                             self.compile_path_store(parts, *span);
-                            self.emit_const(Value::Unit);
-                            return StmtValue::Discard;
+                            return self.stmt_unit(value_discarded);
                         }
                     }
                     let full = parts.join(".");
@@ -2245,24 +3089,27 @@ impl Compiler {
                         && (self.try_emit_field_binop_take(&parts[0], &parts[1], value, *span)
                             || self.try_emit_set_field_take(&parts[0], &parts[1], value, *span))
                     {
-                        self.emit_const(Value::Unit);
-                        return StmtValue::Discard;
+                        return self.stmt_unit(value_discarded);
                     }
                     // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
                     // resolves to a direct slot when the full name is a local.
                     if let Resolved::Slot(_) = self.resolve(&full) {
                         if let Some(op) = self.try_slot_binop_path(parts, value) {
                             self.emit(op);
-                            self.emit_const(Value::Unit);
-                            return StmtValue::Discard;
+                            return self.stmt_unit(value_discarded);
                         }
                     }
                     self.compile_expr(value);
                     self.compile_path_store(parts, *span);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 Expr::Index { obj, index, span } => {
+                    // Take-restore plain index stores (`a[i] = v`): keeps
+                    // the container uniquely owned so the element write
+                    // mutates in place instead of deep-copying it.
+                    if self.try_emit_set_index_take(obj, index, value, *span, None) {
+                        return self.stmt_unit(value_discarded);
+                    }
                     // Take-restore indexed field stores (#242): `s.f[i]`
                     // and path-spelled equivalents.
                     let home_field: Option<(&str, &str)> = match obj.as_ref() {
@@ -2278,8 +3125,7 @@ impl Compiler {
                     };
                     if let Some((home, field)) = home_field {
                         if self.try_emit_set_field_index_take(home, field, index, value, *span) {
-                            self.emit_const(Value::Unit);
-                            return StmtValue::Discard;
+                            return self.stmt_unit(value_discarded);
                         }
                     }
                     // Source order: base, index, value (spec §7). The
@@ -2290,8 +3136,7 @@ impl Compiler {
                     self.compile_expr(value);
                     self.emit(Op::StoreIndexOp(*span));
                     self.compile_write_back(obj);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 Expr::Field { obj, name, span } => {
                     // Move-take for simple field homes (`s.f = ...`).
@@ -2303,7 +3148,7 @@ impl Compiler {
                         let nv = self.normalize_move_value(value);
                         let v2 = nv.as_ref().unwrap_or(value);
                         if let Some(MoveKind::FieldPush { obj: o, field: f }) =
-                            classify_self_assign_vm(&target, v2)
+                            classify_self_assign(&target, v2)
                         {
                             // Receiver must spell the target exactly (a
                             // differently-spelled occurrence names another
@@ -2322,8 +3167,7 @@ impl Compiler {
                                 && receiver_ok
                                 && self.try_emit_move_field(&o, &f, value, *span)
                             {
-                                self.emit_const(Value::Unit);
-                                return StmtValue::Discard;
+                                return self.stmt_unit(value_discarded);
                             }
                         }
                     }
@@ -2333,8 +3177,7 @@ impl Compiler {
                         if self.try_emit_field_binop_take(obj_name, name, value, *span)
                             || self.try_emit_set_field_take(obj_name, name, value, *span)
                         {
-                            self.emit_const(Value::Unit);
-                            return StmtValue::Discard;
+                            return self.stmt_unit(value_discarded);
                         }
                     }
                     // Source order: base, then value (spec §7). `Swap`
@@ -2349,15 +3192,13 @@ impl Compiler {
                             if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
                                 self.emit(Op::SetFieldIdx(idx as u16, *span));
                                 self.compile_write_back(obj);
-                                self.emit_const(Value::Unit);
-                                return StmtValue::Discard;
+                                return self.stmt_unit(value_discarded);
                             }
                         }
                     }
                     self.emit(Op::SetField(name.clone(), *span));
                     self.compile_write_back(obj);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 _ => unreachable!("unhandled assignment target"),
             },
@@ -2405,9 +3246,16 @@ impl Compiler {
                         },
                         span: *span,
                     };
-                    self.compile_stmt(&synthetic)
+                    self.compile_stmt(&synthetic, value_discarded)
                 }
                 Expr::Index { obj, index, .. } => {
+                    // Take-restore compound index stores (`a[i] += v`): same
+                    // win as the plain store, and the sharper case in
+                    // practice (counting loops). The rhs is evaluated before
+                    // the take, so `a[i] += a[j]` still stays generic.
+                    if self.try_emit_set_index_take(obj, index, value, *span, Some(*op)) {
+                        return self.stmt_unit(value_discarded);
+                    }
                     // Receiver first (same order as the tree-walker),
                     // each evaluated exactly once.
                     self.compile_expr(obj);
@@ -2418,8 +3266,7 @@ impl Compiler {
                         span: *span,
                     });
                     self.compile_write_back(obj);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 Expr::Field { obj, name, .. } => {
                     self.compile_expr(obj);
@@ -2430,12 +3277,36 @@ impl Compiler {
                         span: *span,
                     });
                     self.compile_write_back(obj);
-                    self.emit_const(Value::Unit);
-                    StmtValue::Discard
+                    self.stmt_unit(value_discarded)
                 }
                 _ => unreachable!("unhandled compound assignment target"),
             },
             Stmt::Expr(e) => {
+                // A discarded `if` needs no value: compile it as a statement,
+                // which drops the missing-else arm's `const unit`, the `jmp`
+                // over it and the caller's `Pop` — three ops out of every
+                // statement-position `if` in a loop body. Only when the value
+                // is dead; a trailing `if` whose value is read keeps the
+                // value-producing shape.
+                if value_discarded {
+                    if let Expr::If {
+                        cond,
+                        then,
+                        els,
+                        span,
+                    } = e
+                    {
+                        self.compile_if_stmt(cond, then, els, *span);
+                        return StmtValue::None;
+                    }
+                    // A discarded `while` needs no loop-result value: the
+                    // per-iteration `SetLoopResult` and the unit it popped
+                    // only ever fed a caller that read the value.
+                    if let Expr::While { cond, body, span } = e {
+                        self.compile_while(cond, body, *span, true);
+                        return StmtValue::None;
+                    }
+                }
                 // Move-take: fused `x.push(e)` / `x.append(e)` /
                 // `append(x, e)` statements (take, push reusing the owned
                 // `Vec`, store back — the existing write-back below stays
@@ -2456,9 +3327,8 @@ impl Compiler {
                 } = e
                 {
                     // Known mutating array methods that return the modified array.
-                    const MUTATING_METHODS: &[&str] = &[
-                        "push", "pop", "insert", "remove", "reverse", "sort", "append",
-                    ];
+                    const MUTATING_METHODS: &[&str] =
+                        &["push", "pop", "insert", "remove", "reverse", "sort"];
 
                     // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
                     if let Expr::Path { parts, .. } = callee.as_ref() {
@@ -2474,7 +3344,7 @@ impl Compiler {
                             let is_native = self
                                 .native_names
                                 .as_ref()
-                                .is_some_and(|n| n.contains(&dotted));
+                                .is_some_and(|n| zz_checker::contains_std(n, &dotted));
                             if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
                                 let obj_name = &parts[0];
                                 // Compile: LoadVar(obj) + args + CallMethod(method)
@@ -2518,7 +3388,7 @@ impl Compiler {
                             let is_native = self
                                 .native_names
                                 .as_ref()
-                                .is_some_and(|n| n.contains(&dotted));
+                                .is_some_and(|n| zz_checker::contains_std(n, &dotted));
                             if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
                                 let recv_parts = parts[..parts.len() - 1].to_vec();
                                 self.compile_path_load(&recv_parts, e.span());
@@ -2568,34 +3438,8 @@ impl Compiler {
                         }
                     }
                 }
-                // Built-in `append(arr, val)` write-back: same as method call.
-                // append returns the mutated array; store it back to arr.
-                if let Expr::Call {
-                    callee,
-                    args,
-                    named,
-                    ..
-                } = e
-                {
-                    if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-                        if fname == "append" && args.len() == 2 && named.is_empty() {
-                            if let Expr::Ident {
-                                name: arr_name,
-                                span,
-                            } = &args[0]
-                            {
-                                self.compile_expr(e);
-                                match self.resolve(arr_name) {
-                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
-                                    Resolved::Env => {
-                                        self.emit(Op::StoreVar(arr_name.clone(), *span))
-                                    }
-                                }
-                                return StmtValue::None;
-                            }
-                        }
-                    }
-                }
+                // NOTE: the bare `append(arr, val)` builtin was removed — push
+                // is `vec.push(x, e)` or the method `x.push(e)`.
                 self.compile_expr(e);
                 StmtValue::Discard
             }
@@ -2608,35 +3452,170 @@ impl Compiler {
             self.emit(Op::EnterScope);
         }
         self.scope_depth += 1;
-        self.compile_block_body(block, false);
+        self.compile_block_body(block, false, false);
         self.scope_depth -= 1;
         if needs_env {
             self.emit(Op::ExitScope);
         }
     }
 
-    /// Compile a block body, cleaning up its locals. Returns `true` when the
-    /// body's final statement left slot storage that `PopN` consumed: loop
-    /// callers (`for`/`while`, which pop one more value via `SetLoopResult`
-    /// for the loop result) must then emit a `Unit` to stay balanced.
-    /// Other callers (plain blocks, function bodies) ignore the return.
+    /// Compile a block whose value nobody reads (statement position): the
+    /// trailing statement is told its value is unused, so it does not push
+    /// one, and a trailing slot declaration — whose value doubles as the
+    /// block's result and is left behind by `PopN(n - 1)` — is dropped here
+    /// instead of by a caller that does not exist.
+    fn compile_block_stmt(&mut self, block: &Block) {
+        let needs_env = self.scope_declares_captured(block);
+        if needs_env {
+            self.emit(Op::EnterScope);
+        }
+        self.scope_depth += 1;
+        let _ = self.compile_block_body(block, false, true);
+        self.scope_depth -= 1;
+        if needs_env {
+            self.emit(Op::ExitScope);
+        }
+    }
+
+    /// Statement-position `if`: no arm produces a value, so there is no
+    /// `const unit` in the missing-else arm, no `jmp` over it, and no `Pop`
+    /// at the caller. Every path leaves the stack where it started — `jfb`
+    /// pops the condition, each arm is compiled with its trailing value dead.
+    fn compile_if_stmt(&mut self, cond: &Expr, then: &Block, els: &Option<Box<Expr>>, span: Span) {
+        let pre = self.stack_height;
+        let j = self.emit_cond_jump(cond, span);
+        self.compile_block_stmt(then);
+        match els.as_deref() {
+            // `else if` chains recurse so no arm materializes a value.
+            Some(Expr::If {
+                cond,
+                then,
+                els,
+                span,
+            }) => {
+                let j2 = self.emit_jump(JumpKind::Always);
+                self.patch_jump(j);
+                self.compile_if_stmt(cond, then, els, *span);
+                self.patch_jump(j2);
+            }
+            Some(Expr::Block(b)) => {
+                let j2 = self.emit_jump(JumpKind::Always);
+                self.patch_jump(j);
+                self.compile_block_stmt(b);
+                self.patch_jump(j2);
+            }
+            Some(other) => {
+                let j2 = self.emit_jump(JumpKind::Always);
+                self.patch_jump(j);
+                self.compile_expr(other);
+                self.emit(Op::Pop);
+                self.patch_jump(j2);
+            }
+            None => self.patch_jump(j),
+        }
+        debug_assert_eq!(self.stack_height, pre);
+    }
+
+    /// Compile a `while` loop.
+    ///
+    /// `dead` means the loop's value is discarded (statement position): then
+    /// no `SetLoopResult` runs per iteration, the body is told its trailing
+    /// value is dead, and the result placeholder — the slot the runtime's
+    /// `stack_base + 1` truncation keeps — is dropped once on exit.
+    ///
+    /// The cooperative yield check lives in `WhileCond` rather than a
+    /// standalone `Safepoint`: the op is reached once per test (entry,
+    /// back-edge and `continue` all land on the condition), so the check
+    /// cannot be skipped, at one dispatch less per iteration.
+    fn compile_while(&mut self, cond: &Expr, body: &Block, span: Span, dead: bool) {
+        let pre = self.stack_height;
+        let setup_pos = self.chunk.code.len();
+        self.emit(Op::WhileSetup { exit: 0, header: 0 });
+        self.emit_const(Value::Unit);
+        let header = self.chunk.code.len();
+        // Fast path: `a < b` / `a < N` on local slots -> single fused
+        // comparison op instead of LoadSlot/LoadSlot/BinOp.
+        if let Some(op) = self.try_slot_compare(cond) {
+            self.emit(op);
+        } else {
+            self.compile_expr(cond);
+        }
+        let j = self.emit_while_cond(span);
+        let body_needs_env = self.scope_declares_captured(body);
+        if body_needs_env {
+            self.emit(Op::EnterScope);
+        }
+        self.scope_depth += 1;
+        // Same shape as the `for` arm: an env-captured body keeps the
+        // value-producing path (its trailing `DefineVar` is the result).
+        let dead_result = dead && !body_needs_env;
+        let body_tail = self.compile_block_body(body, true, dead_result);
+        self.scope_depth -= 1;
+        if body_needs_env {
+            self.emit(Op::ExitScope);
+        }
+        if !dead_result {
+            if body_tail.needs_result_unit {
+                // Trailing slot declaration (see `compile_block_body`):
+                // supply the loop-result value `SetLoopResult` pops.
+                self.emit_const(Value::Unit);
+            }
+            self.emit(Op::SetLoopResult);
+        }
+        // Dead bodies (`dead_result`) leave nothing behind: their cleanup
+        // dropped every local and any trailing value, so there is nothing
+        // to pop before the back-edge (and nothing to store as a result).
+        self.emit(Op::Jump(header));
+        // Exit label: `break` and the falsy test both land here. In the dead
+        // form it starts with the `Pop` that drops the result placeholder,
+        // so neither path can leave it behind. Patched before that `Pop` is
+        // emitted so the label is its own position, not the next op's.
+        let exit = self.chunk.code.len();
+        self.patch_jump(j);
+        if dead {
+            self.emit(Op::Pop);
+        }
+        self.chunk.code[setup_pos] = Op::WhileSetup { exit, header };
+        self.stack_height = pre + usize::from(!dead);
+    }
+    /// Compile a block body, cleaning up its locals.
     ///
     /// `is_loop_body`: loop bodies sit above live loop-var slots, so their
     /// cleanup keeps the full `PopN(n)` count (the result lands in the top
     /// var slot — the `SetLoopResult` dance below). Plain blocks with a
     /// trailing slot declaration instead hold only n values (the result IS
     /// the last local) and need `PopN(n - 1)`.
-    fn compile_block_body(&mut self, block: &Block, is_loop_body: bool) -> bool {
+    ///
+    /// `trailing_value_dead`: nothing reads this body's value — not even the
+    /// caller (a `for` whose own value is discarded, a statement-position
+    /// block, a named function body that returns through `return`). The
+    /// trailing statement is then compiled knowing its value is dead, and the
+    /// cleanup leaves **no** result on the stack, so the caller owes no settle
+    /// `Pop` and a statement-shaped tail stays a pure statement (`if`, `for`,
+    /// `return`) instead of growing a placeholder `Unit`.
+    fn compile_block_body(
+        &mut self,
+        block: &Block,
+        is_loop_body: bool,
+        trailing_value_dead: bool,
+    ) -> BodyTail {
         let scope_base = self.locals.len();
+        let stmt_count = block.stmts.len();
         let mut last = StmtValue::None;
         for (i, stmt) in block.stmts.iter().enumerate() {
-            last = self.compile_stmt(stmt);
-            if i < block.stmts.len() - 1 && matches!(last, StmtValue::Discard) {
+            let is_last = i == stmt_count - 1;
+            // A non-final statement's value is always dropped, here or by the
+            // caller; a final one too when the caller said so.
+            last = self.compile_stmt(stmt, !is_last || trailing_value_dead);
+            if !is_last && matches!(last, StmtValue::Discard) {
                 self.emit(Op::Pop);
             }
         }
-        if block.stmts.is_empty() || matches!(last, StmtValue::None) {
+        let value_expected = !trailing_value_dead;
+        if value_expected && (block.stmts.is_empty() || matches!(last, StmtValue::None)) {
+            // The body must still produce a value for whoever reads it.
             self.emit_const(Value::Unit);
+            last = StmtValue::Discard;
         }
         let n = self.locals[scope_base..]
             .iter()
@@ -2647,15 +3626,31 @@ impl Compiler {
         // loop frame (the `ForNext on non-iterable` misalignment). An
         // env-captured (`in_env`) trailing declaration instead leaves its
         // `DefineVar` value behind, which already serves as the result.
-        let trailing_slot_decl = matches!(last, StmtValue::Keep)
+        let trailing_slot_decl = value_expected
+            && matches!(last, StmtValue::Keep)
             && self.locals[scope_base..].last().is_some_and(|l| !l.in_env);
-        if n > 0 {
+        if !value_expected {
+            // Dead value: drop every local plus a pushed tail value.
+            // `PopN { n }` drops `n + 1` values but keeps the top one as its
+            // result, so settle that placeholder with a plain `Pop`.
+            let values = n + usize::from(matches!(last, StmtValue::Discard));
+            if values == 1 {
+                // Common case (no locals, one tail value): one `Pop`.
+                self.emit(Op::Pop);
+            } else if values > 1 {
+                self.emit(Op::PopN {
+                    n: (values - 1) as u16,
+                    span: block.span,
+                });
+                self.emit(Op::Pop);
+            }
+        } else {
             // Trailing slot declaration in a plain block: the stack holds
             // n values (the result IS the last local), not n+1 — PopN(n-1).
             // Otherwise the cleanup underflows (or corrupts silently in
             // release). Loop bodies keep PopN(n): see `is_loop_body`.
             let drop = if trailing_slot_decl && !is_loop_body {
-                n - 1
+                n.saturating_sub(1)
             } else {
                 n
             };
@@ -2666,9 +3661,10 @@ impl Compiler {
                 });
             }
         }
-        let need_result_unit = trailing_slot_decl;
         self.locals.truncate(scope_base);
-        need_result_unit
+        BodyTail {
+            needs_result_unit: trailing_slot_decl,
+        }
     }
 
     fn compile_func_body(&mut self, scope: &str, block: &Block, params: &[Param]) -> Arc<Chunk> {
@@ -2678,6 +3674,9 @@ impl Compiler {
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
+        sub.func_info = self.func_info.clone();
+        sub.enums = self.enums.clone();
+        sub.impl_methods = self.impl_methods.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_block_captured(block, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name))
@@ -2707,23 +3706,17 @@ impl Compiler {
             }
         }
         sub.stack_height = params.len();
-        // Tail-take: a function ending in `return x` / bare `x` moves the
-        // local out of its slot instead of deep-cloning it. The frame dies
-        // on return, so the vacated slot (Unit) is never observed — this
-        // is the NRVO-equivalent for threaded accumulators
-        // (`doc = push_node(doc, x)`): without it the final `doc`
-        // costs a full O(n) deep clone per key (quadratic overall).
-        // Only frame locals qualify (params or block-declared names):
-        // an outer/global binding must keep the cloning load so the
-        // owner still holds its value after the call.
+        // Tail-take: a function ending in `return x` moves the local out of
+        // its slot instead of deep-cloning it. Only an explicit `return`
+        // qualifies: a bare trailing expression is discarded (named
+        // functions return values only through `return`), so there is no
+        // value to move.
         if let Some(last) = block.stmts.last() {
             let tail_name: Option<String> = match last {
                 Stmt::Return {
                     value: Some(Expr::Ident { name, .. }),
                     ..
                 } => Some(name.clone()),
-                Stmt::Return { .. } => None,
-                Stmt::Expr(Expr::Ident { name, .. }) => Some(name.clone()),
                 _ => None,
             };
             if let Some(name) = tail_name {
@@ -2767,7 +3760,7 @@ impl Compiler {
                     let scope_base = sub.locals.len();
                     let n = block.stmts.len();
                     for stmt in &block.stmts[..n - 1] {
-                        let v = sub.compile_stmt(stmt);
+                        let v = sub.compile_stmt(stmt, true);
                         if matches!(v, StmtValue::Discard) {
                             sub.emit(Op::Pop);
                         }
@@ -2814,10 +3807,14 @@ impl Compiler {
                 }
             }
         }
-        sub.compile_block_body(block, false);
+        // No `return` tail: the body's trailing expression is discarded and
+        // the frame falls off with `unit`. This is the only way a named
+        // function returns without an explicit `return`.
+        sub.compile_block_body(block, false, true);
         if needs_env {
             sub.emit(Op::ExitScope);
         }
+        sub.emit_const(Value::Unit);
         Arc::new(sub.chunk)
     }
 
@@ -2827,7 +3824,7 @@ impl Compiler {
         args: &[Expr],
         named: &[(zz_frontend::ast::Ident, Expr)],
     ) {
-        let info = match self.func_info.get(func_name) {
+        let info = match self.func_info_get(func_name) {
             Some(fi) => fi.clone(),
             None => {
                 for a in args {
@@ -2877,8 +3874,7 @@ impl Compiler {
         }
     }
 
-    /// Total native argc for a `sqlz.query`/`sqlz.exec` call site
-    /// (`db.*` alias included):
+    /// Total native argc for a `sqlz.query`/`sqlz.exec` call site:
     /// receiver + template + bound params (+1 struct marker for query
     /// when the checker resolved an `[Struct]` element type).
     fn db_call_argc(&self, args: &[Expr], span: Span) -> usize {
@@ -2895,7 +3891,6 @@ impl Compiler {
     }
 
     /// Resolve the `[Struct]` element type for a `sqlz.query` call site
-    /// (`db.*` alias included)
     /// from the checker's span map (the call's own span carries the
     /// unified return type, which includes the `let x: [User]` annotation).
     fn db_query_struct(&self, span: Span) -> Option<String> {
@@ -2984,9 +3979,9 @@ impl Compiler {
     }
 
     /// True when a Path-form call `recv.method` targets a db handle:
-    /// either the module-qualified `sqlz.query`/`std.sqlz.query` (or the
-    /// `db.*`/`std.db.*` alias, receiver is the module namespace) or a
-    /// method on a local whose checker type is `Db`. Falls back to
+    /// either the module-qualified `sqlz.query`/`std.sqlz.query`
+    /// (receiver is the module namespace) or a method on a local whose
+    /// checker type is `Db`. There is no `db` module anymore. Falls back to
     /// name-only match when type info is absent (untyped
     /// `compile_program` path, e.g. tests/REPL snippets).
     fn is_db_path(&self, parts: &[String]) -> bool {
@@ -2996,7 +3991,7 @@ impl Compiler {
         if !matches!(parts[1].as_str(), "query" | "exec" | "close" | "open") {
             return false;
         }
-        if parts[0] == "sqlz" || parts[0] == "db" || parts[0] == "std" {
+        if parts[0] == "sqlz" || parts[0] == "std" {
             return true;
         }
         // Type-driven: receiver local resolved to Db by the checker.
@@ -3008,8 +4003,7 @@ impl Compiler {
             return true;
         }
         // Untyped path: accept query/exec/close on any receiver; the
-        // runtime `lookup_method` will resolve `sqlz.*` (or the `db.*`
-        // alias) or error clearly.
+        // runtime `lookup_method` will resolve `sqlz.*` or error clearly.
         true
     }
 
@@ -3020,6 +4014,9 @@ impl Compiler {
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
+        sub.func_info = self.func_info.clone();
+        sub.enums = self.enums.clone();
+        sub.impl_methods = self.impl_methods.clone();
         sub.chunk.params = params.to_vec();
         sub.captured = scan_closure_captured(body, params);
         let needs_env = params.iter().any(|p| sub.captured.contains(&p.name.name));
@@ -3150,7 +4147,12 @@ impl Compiler {
                     self.compile_expr(left);
                     let j = self.emit_jump(JumpKind::IfFalse);
                     self.compile_expr(right);
-                    self.emit(Op::Truthy);
+                    // A statically `Bool` operand already is the branch
+                    // value: `Truthy` is pure dispatch tax (one per `&&`/
+                    // `||` operand in every comparison chain).
+                    if !self.is_bool(right) {
+                        self.emit(Op::Truthy);
+                    }
                     let j2 = self.emit_jump(JumpKind::Always);
                     self.patch_jump(j);
                     self.stack_height = pre;
@@ -3163,7 +4165,9 @@ impl Compiler {
                     self.compile_expr(left);
                     let j = self.emit_jump(JumpKind::IfTrue);
                     self.compile_expr(right);
-                    self.emit(Op::Truthy);
+                    if !self.is_bool(right) {
+                        self.emit(Op::Truthy);
+                    }
                     let j2 = self.emit_jump(JumpKind::Always);
                     self.patch_jump(j);
                     self.stack_height = pre;
@@ -3177,6 +4181,22 @@ impl Compiler {
                     self.emit(Op::ElvisResult);
                 }
                 _ => {
+                    // Comparisons fuse in value position too: a disjunct of
+                    // `c == "a" || c == "e" || ...` reaches here through the
+                    // generic walk (only the whole condition goes through
+                    // `try_slot_compare`), and the fused ops push the same
+                    // `Bool` — one dispatch instead of `LoadSlot PushConst
+                    // BinOp` per operand.
+                    if let Some(fused) = self.try_slot_compare(expr) {
+                        self.emit(fused);
+                        return;
+                    }
+                    // Integer arithmetic with a literal RHS (`fib(n - 1)`,
+                    // `x := n + 1`) is one fused push.
+                    if let Some(fused) = self.try_push_slot_int(expr) {
+                        self.emit(fused);
+                        return;
+                    }
                     // Type-driven fast path: if both operands are Int,
                     // emit unboxed integer ops that skip generic dispatch.
                     if matches!(self.type_of(left.span()), Some(zz_checker::Type::Int))
@@ -3190,8 +4210,14 @@ impl Compiler {
                             BinOp::Mul => self.emit(Op::IntMul(*span)),
                             BinOp::Div => self.emit(Op::IntDiv(*span)),
                             BinOp::Rem => self.emit(Op::IntRem(*span)),
+                            BinOp::Lt => self.emit(Op::IntLt(*span)),
+                            BinOp::Gt => self.emit(Op::IntGt(*span)),
+                            BinOp::Le => self.emit(Op::IntLe(*span)),
+                            BinOp::Ge => self.emit(Op::IntGe(*span)),
+                            BinOp::Eq => self.emit(Op::IntEq(*span)),
+                            BinOp::Ne => self.emit(Op::IntNe(*span)),
                             _ => {
-                                // Comparisons, Pow, etc. fall through to generic.
+                                // Pow, etc. fall through to generic.
                                 self.emit(Op::BinOp(*op, *span));
                             }
                         }
@@ -3209,7 +4235,39 @@ impl Compiler {
                 span,
             } => match callee.as_ref() {
                 Expr::Path { parts, span: pspan } => {
-                    let func_name = parts.join(".");
+                    let raw_name = parts.join(".");
+                    // Canonical `std.*` seeds only (single source:
+                    // `zz_checker::canonical_std_name`): prefer the
+                    // as-written spelling when it is registered (orphans
+                    // like `vec.reverse`, user definitions, import
+                    // copies), else the canonical spelling when the head
+                    // is the module namespace. A local with the same head
+                    // keeps its spelling (`resolve` returns `Env` only
+                    // with no local binding).
+                    let raw_known = self.func_info.contains_key(&raw_name)
+                        || self
+                            .native_names
+                            .as_ref()
+                            .is_some_and(|n| n.contains(&raw_name));
+                    let func_name: String = if !raw_known
+                        && !raw_name.starts_with("std.")
+                        && matches!(self.resolve(&parts[0]), Resolved::Env)
+                    {
+                        match zz_checker::canonical_std_name(&raw_name) {
+                            Some(canon)
+                                if self.func_info.contains_key(&canon)
+                                    || self
+                                        .native_names
+                                        .as_ref()
+                                        .is_some_and(|n| n.contains(&canon)) =>
+                            {
+                                canon
+                            }
+                            _ => raw_name,
+                        }
+                    } else {
+                        raw_name
+                    };
                     // Enum construction (`Token.IntLit(1)`) builds a
                     // qualified `Object`, not a call. Type-driven: the
                     // checker resolved this call to `Type::Enum`, so no
@@ -3220,23 +4278,57 @@ impl Compiler {
                         if let Some(zz_checker::Type::Enum(enum_name, _)) =
                             self.type_of(*span).cloned()
                         {
+                            // Real functions keep their meaning: a call
+                            // whose path names a known function (e.g. an
+                            // enum-typed helper declared after the enum)
+                            // is a call, never construction — even when
+                            // its inferred type is that enum. Likewise the
+                            // trailing component must really be a variant
+                            // of that enum (locals holding enum-typed
+                            // closures are invisible here; they keep the
+                            // runtime CallPath fallback below). Mirrors
+                            // the checker's and tree-walker's miss-only
+                            // rules.
                             let variant = parts.last().cloned().unwrap_or_default();
-                            for a in args {
-                                self.compile_expr(a);
+                            let known_func = self.func_info_contains(&func_name)
+                                || {
+                                    let suffix = format!(".{func_name}");
+                                    let mut hits: Vec<&String> = self
+                                        .func_info
+                                        .keys()
+                                        .filter(|k| k.ends_with(suffix.as_str()))
+                                        .collect();
+                                    hits.sort_unstable();
+                                    hits.dedup();
+                                    hits.len() == 1
+                                }
+                                || self
+                                    .native_names
+                                    .as_ref()
+                                    .is_some_and(|n| zz_checker::contains_std(n, &func_name));
+                            let is_variant = self
+                                .enums
+                                .as_ref()
+                                .and_then(|t| t.get(&enum_name))
+                                .is_some_and(|sig| sig.variants.iter().any(|(v, _)| v == &variant));
+                            if !known_func && is_variant {
+                                for a in args {
+                                    self.compile_expr(a);
+                                }
+                                // Named args are a checker error; compile
+                                // positionally so codegen never drops values
+                                // silently on unchecked paths.
+                                for (_, v) in named {
+                                    self.compile_expr(v);
+                                }
+                                self.emit(Op::MakeEnum {
+                                    enum_name,
+                                    variant,
+                                    argc: (args.len() + named.len()) as u16,
+                                    span: *span,
+                                });
+                                return;
                             }
-                            // Named args are a checker error; compile
-                            // positionally so codegen never drops values
-                            // silently on unchecked paths.
-                            for (_, v) in named {
-                                self.compile_expr(v);
-                            }
-                            self.emit(Op::MakeEnum {
-                                enum_name,
-                                variant,
-                                argc: (args.len() + named.len()) as u16,
-                                span: *span,
-                            });
-                            return;
                         }
                     }
                     // Untyped compiles intentionally fall through to the
@@ -3268,13 +4360,13 @@ impl Compiler {
                     // in DbQuery mode (template + bound params).
                     //
                     // A leading component that resolves to a slot/env LOCAL
-                    // is a receiver; a module namespace (`sqlz`, `db`,
-                    // `pg`, `postgres`, `my`, `mysql`, `std`) takes the
+                    // is a receiver; a module namespace (`sqlz`, `pg`,
+                    // `postgres`, `my`, `mysql`, `std`) takes the
                     // free-function branch below (`is_module_db_call`).
                     let leading_is_module_ns =
                         matches!(
                             parts[0].as_str(),
-                            "sqlz" | "db" | "pg" | "postgres" | "my" | "mysql" | "std"
+                            "sqlz" | "pg" | "postgres" | "my" | "mysql" | "std"
                         ) && matches!(self.resolve(&parts[0]), Resolved::Env);
                     let is_db_call = parts.len() == 2
                         && matches!(parts[1].as_str(), "query" | "exec")
@@ -3283,7 +4375,7 @@ impl Compiler {
                         && !self
                             .native_names
                             .as_ref()
-                            .is_some_and(|n| n.contains(&parts.join(".")));
+                            .is_some_and(|n| zz_checker::contains_std(n, &parts.join(".")));
                     // Free-function form with explicit receiver:
                     // `pg.query(db, sql)`, `my.exec(db, sql)`,
                     // `sqlz.query(db, sql)`,
@@ -3302,8 +4394,6 @@ impl Compiler {
                         db_module_prefix.as_str(),
                         "sqlz"
                             | "std.sqlz"
-                            | "db"
-                            | "std.db"
                             | "pg"
                             | "postgres"
                             | "std.sqlz.postgres"
@@ -3411,11 +4501,51 @@ impl Compiler {
                         if is_input {
                             self.emit_const(Value::Str(String::new().into()));
                         }
-                        self.emit(Op::CallMethod {
-                            name: parts.last().unwrap().clone(),
-                            argc: argc as u16,
-                            span: *span,
-                        });
+                        // Ident receiver, plain call: the slot table already
+                        // carries its declared type, so a variant method can
+                        // take the static native form (see
+                        // `variant_method_native`). Paths with field access
+                        // (`a.b.unwrap_or(0)`) keep the dynamic op.
+                        let recv_ty = self.chunk.slot_types.get(slot).and_then(Option::as_ref);
+                        let static_form = parts.len() == 2
+                            && named.is_empty()
+                            && !is_range
+                            && !has_named_or_defaults;
+                        let native = if static_form {
+                            recv_ty
+                                .and_then(Self::variant_ns)
+                                .and_then(|ns| self.variant_method_native(ns, &parts[1]))
+                        } else {
+                            None
+                        };
+                        // Struct receiver + provable `Type.method` target:
+                        // take the path-call frame entry (see
+                        // `resolved_method`).
+                        let resolved = if static_form {
+                            self.resolved_method(recv_ty, &parts[1])
+                        } else {
+                            None
+                        };
+                        match (native, resolved) {
+                            (Some(native), _) => self.emit(Op::CallNative {
+                                name: native,
+                                // Receiver first, then the call's arguments.
+                                argc: (args.len() + 1) as u16,
+                                span: *span,
+                            }),
+                            (None, Some((type_name, joined))) => self.emit(Op::CallPath {
+                                parts: vec![type_name, parts[1].clone()],
+                                joined,
+                                argc: (args.len() + 1) as u16,
+                                span: *span,
+                                pspan: *pspan,
+                            }),
+                            (None, None) => self.emit(Op::CallMethod {
+                                name: parts.last().unwrap().clone(),
+                                argc: argc as u16,
+                                span: *span,
+                            }),
+                        }
                     } else {
                         // Env-path receiver (e.g. top-level `mydb` lives in
                         // env, not a slot). Method-form db calls need
@@ -3446,7 +4576,7 @@ impl Compiler {
                             if self
                                 .native_names
                                 .as_ref()
-                                .is_some_and(|n| n.contains(&func_name))
+                                .is_some_and(|n| zz_checker::contains_std(n, &func_name))
                             {
                                 self.emit(Op::CallNative {
                                     name: func_name.clone(),
@@ -3498,7 +4628,7 @@ impl Compiler {
                             && self
                                 .native_names
                                 .as_ref()
-                                .is_some_and(|n| n.contains(&func_name))
+                                .is_some_and(|n| zz_checker::contains_std(n, &func_name))
                         {
                             self.emit(Op::CallNative {
                                 name: func_name,
@@ -3555,11 +4685,46 @@ impl Compiler {
                     for (_, val) in named {
                         self.compile_expr(val);
                     }
-                    self.emit(Op::CallMethod {
-                        name: name.clone(),
-                        argc: (args.len() + named.len()) as u16,
-                        span: *span,
-                    });
+                    // Named args are reordered for the *dynamic* callee, so
+                    // they are not eligible for the static native form.
+                    let native = if named.is_empty() {
+                        self.receiver_type(obj)
+                            .and_then(Self::variant_ns)
+                            .and_then(|ns| self.variant_method_native(ns, name))
+                    } else {
+                        None
+                    };
+                    // Same compile-time proof as the path form, restricted to
+                    // identifier receivers: their type comes from the slot
+                    // table (or, for a global, its recorded span type), not
+                    // from an inferred compound expression.
+                    let resolved = if named.is_empty() && matches!(obj.as_ref(), Expr::Ident { .. })
+                    {
+                        self.resolved_method(self.receiver_type(obj), name)
+                    } else {
+                        None
+                    };
+                    match (native, resolved) {
+                        (Some(native), _) => self.emit(Op::CallNative {
+                            name: native,
+                            // Receives the receiver as its first argument;
+                            // `CallNative` pops the whole list.
+                            argc: (args.len() + 1) as u16,
+                            span: *span,
+                        }),
+                        (None, Some((type_name, joined))) => self.emit(Op::CallPath {
+                            parts: vec![type_name, name.clone()],
+                            joined,
+                            argc: (args.len() + 1) as u16,
+                            span: *span,
+                            pspan: obj.span(),
+                        }),
+                        (None, None) => self.emit(Op::CallMethod {
+                            name: name.clone(),
+                            argc: (args.len() + named.len()) as u16,
+                            span: *span,
+                        }),
+                    }
                 }
                 _ => {
                     let is_input = matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "input")
@@ -3579,7 +4744,7 @@ impl Compiler {
                     // `main.g`). Exact match first, then a unique
                     // `*.name` suffix (mirrors the AOT owned-fallback).
                     let info_key: Option<String> = callee_name.and_then(|cn| {
-                        if self.func_info.contains_key(cn) {
+                        if self.func_info_contains(cn) {
                             Some(cn.to_string())
                         } else {
                             let suffix = format!(".{cn}");
@@ -3605,6 +4770,30 @@ impl Compiler {
                                 .is_some_and(|fi| fi.has_default.iter().any(|&d| d))
                     });
 
+                    // Bare native dispatch (mirrors the dotted `Expr::Path`
+                    // form above): a call to a registered stdlib native
+                    // compiles to one `CallNative` instead of `LoadVar` +
+                    // `Call`. The generic shape materialises a throwaway
+                    // `Value::Native` (name `String` + box) per invocation
+                    // and pays the full dynamic call plumbing — argument
+                    // buffer round-trip, callee match, `call_value` — while
+                    // `CallNative` resolves the registry entry in place.
+                    // Any user shadow keeps the generic path (see
+                    // `direct_native_call`).
+                    let direct_native: Option<String> =
+                        if named.is_empty() && info_key.is_none() && !is_input && !is_range {
+                            match callee.as_ref() {
+                                Expr::Ident { name: cname, .. }
+                                    if self.direct_native_call(cname) =>
+                                {
+                                    Some(cname.clone())
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+
                     let argc = if is_input {
                         1
                     } else if is_range {
@@ -3612,13 +4801,15 @@ impl Compiler {
                     } else if has_named_or_defaults {
                         info_key
                             .as_ref()
-                            .and_then(|k| self.func_info.get(k))
+                            .and_then(|k| self.func_info_get(k))
                             .map_or(args.len() + named.len(), |fi| fi.param_names.len())
                     } else {
                         args.len() + named.len()
                     };
 
-                    self.compile_expr(callee);
+                    if direct_native.is_none() {
+                        self.compile_expr(callee);
+                    }
                     if is_range {
                         if args.len() == 1 {
                             self.emit_const(Value::Int(0));
@@ -3643,10 +4834,17 @@ impl Compiler {
                     if is_input {
                         self.emit_const(Value::Str(String::new().into()));
                     }
-                    self.emit(Op::Call {
-                        argc: argc as u16,
-                        span: *span,
-                    });
+                    match direct_native {
+                        Some(name) => self.emit(Op::CallNative {
+                            name,
+                            argc: argc as u16,
+                            span: *span,
+                        }),
+                        None => self.emit(Op::Call {
+                            argc: argc as u16,
+                            span: *span,
+                        }),
+                    }
                 }
             },
             Expr::If {
@@ -3656,8 +4854,11 @@ impl Compiler {
                 span,
             } => {
                 let pre = self.stack_height;
-                self.compile_expr(cond);
-                let j = self.emit_jump(JumpKind::IfFalseBool(*span));
+                // Fast path: `a < b` / `a < N` on local slots -> one fused
+                // comparison instead of LoadSlot/LoadSlot/BinOp — the same
+                // peephole `while` conditions get. `if` is the shape hot
+                // loop guards are written in (`if i < n { ... }`).
+                let j = self.emit_cond_jump(cond, *span);
                 self.compile_block(then);
                 let j2 = self.emit_jump(JumpKind::Always);
                 self.patch_jump(j);
@@ -3671,7 +4872,7 @@ impl Compiler {
             Expr::Block(b) => self.compile_block(b),
             Expr::Fmt { parts, .. } => {
                 // sqlz context: when this Fmt is the SQL arg of
-                // `sqlz.query`/`sqlz.exec` (+ `db.*` alias), emit DbQuery
+                // `sqlz.query`/`sqlz.exec`, emit DbQuery
                 // so the template and
                 // bound values stay separate (prepared-statement binding,
                 // never string concatenation). Otherwise normal Concat.
@@ -3721,42 +4922,7 @@ impl Compiler {
                 self.emit(Op::Concat(n));
             }
             Expr::While { cond, body, span } => {
-                let pre = self.stack_height;
-                let setup_pos = self.chunk.code.len();
-                self.emit(Op::WhileSetup { exit: 0, header: 0 });
-                self.emit_const(Value::Unit);
-                let header = self.chunk.code.len();
-                // Safepoint at the header (not the back-edge) so `continue`
-                // cannot skip the cooperative yield check.
-                self.emit(Op::Safepoint);
-                // Fast path: `a < b` / `a < N` on local slots -> single
-                // fused comparison op instead of LoadSlot/LoadSlot/BinOp.
-                if let Some(op) = self.try_slot_compare(cond) {
-                    self.emit(op);
-                } else {
-                    self.compile_expr(cond);
-                }
-                let j = self.emit_while_cond(*span);
-                let body_needs_env = self.scope_declares_captured(body);
-                if body_needs_env {
-                    self.emit(Op::EnterScope);
-                }
-                self.scope_depth += 1;
-                if self.compile_block_body(body, true) {
-                    // Trailing slot declaration (see `compile_block_body`):
-                    // supply the loop-result value `SetLoopResult` pops.
-                    self.emit_const(Value::Unit);
-                }
-                self.scope_depth -= 1;
-                if body_needs_env {
-                    self.emit(Op::ExitScope);
-                }
-                self.emit(Op::SetLoopResult);
-                self.emit(Op::Jump(header));
-                self.patch_jump(j);
-                let exit = self.chunk.code.len();
-                self.chunk.code[setup_pos] = Op::WhileSetup { exit, header };
-                self.stack_height = pre + 1;
+                self.compile_while(cond, body, *span, false);
             }
             Expr::Array { elems, .. } => {
                 for e in elems {
@@ -3789,37 +4955,43 @@ impl Compiler {
                     span: *span,
                     num_vars: 1,
                 });
-                let header = self.chunk.code.len();
+                // Rotated loop (see the `for` site above): the test is
+                // emitted last, so the entry and the filter's skip both jump
+                // forward to it.
+                let entry_pos = self.chunk.code.len();
+                self.emit(Op::Jump(0));
+                let body_start = self.chunk.code.len();
                 let in_env = self.captured.contains(&var.name);
-                let j = self.emit_for_next(vec![var.name.clone()], in_env, *span);
                 self.locals.push(Local {
                     name: var.name.clone(),
                     slot: self.stack_height - 1,
                     in_env,
                 });
                 // vartab entry (see the `for` site above): single var.
-                self.chunk.fornext_slots.push(vec![if in_env {
+                let vartab_slots = vec![if in_env {
                     u16::MAX
                 } else {
                     (self.stack_height - 1) as u16
-                }]);
+                }];
+                // Filter skip, patched to the test once it is emitted.
+                let mut skip: Option<usize> = None;
                 if let Some(f) = filter {
                     self.compile_expr(f);
-                    self.emit(Op::JumpIfFalse(header));
-                    self.emit(Op::LoadSlot(result_slot as u16));
-                    self.compile_expr(body);
-                    self.emit(Op::ArrayPush(*span));
-                    self.emit(Op::StoreSlot(result_slot as u16));
-                    self.emit(Op::Jump(header));
-                } else {
-                    self.emit(Op::LoadSlot(result_slot as u16));
-                    self.compile_expr(body);
-                    self.emit(Op::ArrayPush(*span));
-                    self.emit(Op::StoreSlot(result_slot as u16));
-                    self.emit(Op::Jump(header));
+                    skip = Some(self.chunk.code.len());
+                    self.emit(Op::JumpIfFalse(0));
                 }
-                self.patch_jump(j);
+                self.emit(Op::LoadSlot(result_slot as u16));
+                self.compile_expr(body);
+                self.emit(Op::ArrayPush(*span));
+                self.emit(Op::StoreSlot(result_slot as u16));
+                let header = self.emit_for_next(vec![var.name.clone()], in_env, body_start, *span);
+                self.patch_jump(header);
                 let exit = self.chunk.code.len();
+                self.chunk.code[entry_pos] = Op::Jump(header);
+                if let Some(pos) = skip {
+                    self.chunk.code[pos] = Op::JumpIfFalse(header);
+                }
+                self.chunk.fornext_slots.push(vartab_slots);
                 self.chunk.code[setup_pos] = Op::ForSetup {
                     exit,
                     header,
@@ -3861,7 +5033,10 @@ impl Compiler {
                 }
                 self.emit(Op::MakeStruct {
                     name: name.clone(),
-                    field_names: fields.iter().map(|(n, _)| n.clone()).collect(),
+                    field_names: fields
+                        .iter()
+                        .map(|(n, _)| std::sync::Arc::from(n.as_str()))
+                        .collect(),
                     span: *span,
                 });
             }

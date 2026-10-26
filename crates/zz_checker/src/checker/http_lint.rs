@@ -195,6 +195,93 @@ fn parse_segments(pattern: &str) -> Option<Vec<Seg>> {
     Some(out)
 }
 
+/// Precedence score mirroring the runtime router
+/// (`zz_stdlib/.../http/router.rs::match_score`): more literals wins,
+/// params beat wildcards. First-registered wins ties, so an earlier
+/// route shadows a later one exactly when every path the later route
+/// matches is also matched by the earlier one AND the earlier score is
+/// greater or equal.
+fn route_score(pattern: &str) -> (usize, usize, usize) {
+    if pattern == "*" {
+        return (0, 0, 1);
+    }
+    let Some(segs) = parse_segments(pattern) else {
+        // Unvalidated here only if the caller skipped validation; sort
+        // lowest so it can never shadow (shapes_collide is false first).
+        return (0, 0, 0);
+    };
+    let mut literals = 0;
+    let mut params = 0;
+    let mut wildcards = 0;
+    for seg in &segs {
+        match seg {
+            Seg::Lit(_) => literals += 1,
+            Seg::Param => params += 1,
+            Seg::Wild => wildcards += 1,
+        }
+    }
+    (literals, params, wildcards)
+}
+
+/// True when every request path `later` matches is also matched by
+/// `earlier` (both validated patterns or whole-pattern `*`).
+/// Segment compatibility mirrors `router.rs::match_pattern`: a literal
+/// accepts only itself, a param accepts any single segment, a greedy
+/// tail (or `*`) accepts anything from its position on.
+fn matches_subset(later: &str, earlier: &str) -> bool {
+    if earlier == "*" {
+        return true;
+    }
+    if later == "*" {
+        return false; // `earlier` is not `*` here
+    }
+    let (Some(el), Some(ll)) = (parse_segments(earlier), parse_segments(later)) else {
+        return false;
+    };
+    let e_wild = matches!(el.last(), Some(Seg::Wild));
+    let l_wild = matches!(ll.last(), Some(Seg::Wild));
+    // Length-set inclusion: fixed patterns match one arity, a greedy
+    // tail matches its prefix length and above.
+    let lens_ok = match (l_wild, e_wild) {
+        (false, false) => ll.len() == el.len(),
+        (false, true) => ll.len() >= el.len() - 1,
+        (true, false) => false,
+        (true, true) => ll.len() >= el.len(),
+    };
+    if !lens_ok {
+        return false;
+    }
+    // Every fixed position of `earlier` must accept `later`'s language
+    // there; a greedy tail absorbs the rest unconditionally.
+    let fixed = if e_wild { el.len() - 1 } else { el.len() };
+    for (i, e) in el.iter().take(fixed).enumerate() {
+        match e {
+            Seg::Lit(x) => {
+                if !matches!(ll.get(i), Some(Seg::Lit(y)) if y == x) {
+                    return false;
+                }
+            }
+            Seg::Param => {
+                if !matches!(ll.get(i), Some(Seg::Lit(_)) | Some(Seg::Param)) {
+                    return false;
+                }
+            }
+            Seg::Wild => {}
+        }
+    }
+    true
+}
+
+/// True when `prev` (registered earlier, same method) genuinely shadows
+/// `pattern` under runtime dispatch: the shapes overlap, every path
+/// `pattern` matches is also matched by `prev`, and `prev` wins or ties
+/// there — so `pattern` can never serve a request.
+fn shadows(prev: &str, pattern: &str) -> bool {
+    shapes_collide(prev, pattern)
+        && matches_subset(pattern, prev)
+        && route_score(prev) >= route_score(pattern)
+}
+
 /// Do two validated patterns potentially match the same request path?
 /// Literals must agree per position; params match any single segment;
 /// a greedy tail absorbs the rest. Whole-pattern `*` hits everything.
@@ -264,10 +351,11 @@ impl HttpLintState {
             }
             // Same colliding shape, different patterns (`/:a` vs `/:b`):
             // the first wins every request, so the second is dead — warn.
-            if prev.method == method
-                && prev.pattern != pattern
-                && shapes_collide(&prev.pattern, pattern)
-            {
+            // Precedence-aware (#490): only when the earlier route
+            // genuinely shadows the later one under runtime dispatch
+            // (`shadows`), not across exact/param/wildcard classes where
+            // both routes stay live.
+            if prev.method == method && prev.pattern != pattern && shadows(&prev.pattern, pattern) {
                 push_diag(
                     warning_at(
                         format!(
@@ -635,6 +723,60 @@ mod tests {
         assert!(!shapes_collide("/a/:x", "/a/b/c"));
         assert!(!shapes_collide("/", "/a"));
         assert!(!shapes_collide("/a/:x", "/a"));
+    }
+
+    #[test]
+    fn shadows_mirrors_runtime_precedence() {
+        // True shadowing: same match set, earlier wins ties.
+        assert!(shadows("/:a", "/:b"));
+        assert!(shadows("/a/:x...", "/a/:y..."));
+        assert!(shadows("/a/b", "/a/b")); // dup-shaped (dup itself errors first)
+                                          // #490 false positives: exact vs param, either order — the exact
+                                          // route wins its path by score, the param route serves the rest.
+        assert!(!shadows("/api/pkg/search", "/api/pkg/:name"));
+        assert!(!shadows("/api/pkg/:name", "/api/pkg/search"));
+        // Param vs greedy tail and catch-alls stay live.
+        assert!(!shadows("/files/:p...", "/files/a/b"));
+        assert!(!shadows("/files/a/b", "/files/:p..."));
+        assert!(!shadows("*", "/a/b"));
+        assert!(!shadows("/a/b", "*"));
+        assert!(!shadows("/a/:x", "*"));
+        // Disjoint shapes never shadow.
+        assert!(!shadows("/a/:x", "/b/:x"));
+        assert!(!shadows("/a/:x", "/a/b/c"));
+        // A longer fixed pattern is not shadowed by a shorter prefix.
+        assert!(!shadows("/a", "/a/b"));
+    }
+
+    #[test]
+    fn record_warns_only_on_true_shadow() {
+        fn warnings_for(patterns: &[&str]) -> Vec<String> {
+            let mut state = HttpLintState::default();
+            let mut out = Vec::new();
+            for p in patterns {
+                state.record(
+                    Some("s".to_string()),
+                    "GET",
+                    p,
+                    Vec::new(),
+                    Span::new(0, 0),
+                    &mut |d| out.push(d.message),
+                );
+            }
+            out
+        }
+        // Issue #490 repro: exact, param, catch-all coexist silently.
+        assert_eq!(
+            warnings_for(&["/api/pkg/search", "/api/pkg/:name", "*"]),
+            Vec::<String>::new()
+        );
+        // Genuine shadow still warns and names both routes.
+        let warns = warnings_for(&["/:a", "/:b"]);
+        assert_eq!(warns.len(), 1);
+        assert!(
+            warns[0].contains("/:b") && warns[0].contains("/:a"),
+            "{warns:?}"
+        );
     }
 
     #[test]

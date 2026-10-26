@@ -1,6 +1,8 @@
 # Syntax Reference
 
-Complete grammar and syntax guide for the ZZ language.
+> Reference (complete). Learning path: [docs/README.md](README.md) →
+> [Language overview](language/overview.md). New pages distill this file and link back;
+> this file stays the grammar source of truth.
 
 ## Lexical Structure
 
@@ -82,6 +84,35 @@ pi: float = 3.14
 scores: [int] = [1, 2, 3]
 ```
 
+### Shadowing and Assignment
+
+Both declaration forms bind a **new** name scoped to the block they appear in.
+Inside a loop body or an inner block that means a declaration does not update
+an outer binding — it shadows it:
+
+```zz
+x := 0
+i := 0
+while i < 3 {
+    x := x + 1     // warning: shadows the outer `x`
+    println(x)     // 1, 1, 1 — every pass reads the untouched outer 0
+    i = i + 1
+}
+println(x)         // 0
+
+while i < 6 {
+    x = x + 1      // `=` updates the outer binding
+    i = i + 1
+}
+println(x)         // 3
+```
+
+`zz check` warns when a declaration's initializer reads the very binding it
+shadows (`x := x + 1`, `one, b := f(b)`), because that shape is almost always a
+mistyped assignment; it offers `=` as a fix when the declaration is neither
+typed nor `const`. Shadowing with a fresh value (`x := 5`) is deliberate and
+stays silent. Assignment to an inner declaration never reaches the outer one.
+
 ### Type Aliases
 
 ```zz
@@ -157,7 +188,7 @@ match x {
 
 ```zz
 func add(a: int, b: int) -> int {
-    a + b
+    return a + b
 }
 ```
 
@@ -194,7 +225,7 @@ create_user("Alice", age: 30, active: true)
 
 ```zz
 func identity<T>(x: T) -> T {
-    x
+    return x
 }
 ```
 
@@ -216,6 +247,7 @@ square := |x: int| {
 ```zz
 func shapes.distance(p1: Point, p2: Point) -> float {
     // ...
+    return 0.0
 }
 ```
 
@@ -370,9 +402,19 @@ println("bin = {n:b}")      // 11111111
 println("dec = {n:d}")      // 255
 ```
 
-Literal braces use doubled escapes — `{{` renders `{`, `}}`
-renders `}` — in both `"..."` and `"""..."""` strings. This is the
-preferred way to emit JSON, CSS, or template syntax:
+Spaces and tabs right after `{` are insignificant, so `{ n}` is the same
+interpolation as `{n}` (a trailing space was always fine):
+
+```zz
+n := 5
+pi := 3.14159
+println("n is { n}")        // n is 5
+println("pi = { pi:.2f}")   // pi = 3.14
+```
+
+Literal braces use doubled escapes — `{{` renders `{`, and a `}}`
+that closes a `{{` pair renders `}` — in both `"..."` and `"""..."""`
+strings. This is the preferred way to emit CSS or template syntax:
 
 ```zz
 println("{{name}}")        // {name} (no interpolation)
@@ -385,8 +427,55 @@ css := """
     """
 ```
 
+An unmatched `}}` (no preceding `{{` in the same string) stays two
+literal braces, so nested JSON needs no escaping at all:
+
+```zz
+println("{\"a\": {}}") // {"a": {}} — both closes preserved
+```
+
 `\{` / `\}` remain accepted for backwards compatibility and mean
-the same as `{{` / `}}`, but prefer the doubled form.
+the same as `{{` / a matched `}}`, but prefer the doubled form.
+
+#### Raw strings
+
+Backtick strings are fully literal — no interpolation, no `\`
+escapes, no brace collapsing. Braces, quotes, and backslashes stay
+exactly as typed, which makes them the right home for JSON, regex,
+and Windows paths:
+
+```zz
+j := json.parse(`{"Club": {"g": 3}}`)
+pat := `^[0-9a-f]{8}$`   // matches 8 hex digits, no doubling
+win := `C:\new\test`
+```
+
+A doubled backtick is the only escape, yielding one literal
+backtick (same doubling philosophy as `{{` / `}}`):
+
+```zz
+println(`a``b`)   // a`b
+```
+
+Two limits to know: inside triple-backtick strings a lone or
+doubled backtick is plain content — only ``` closes — so a
+triple-backtick fence itself cannot appear inside one (split the
+string or use single-line raw there). And ``` `` ``` means one
+backtick in single-line raw but two in triple raw: each form keeps
+exactly one way to spell a literal backtick.
+
+Triple-backtick strings span lines and dedent exactly like
+`"""..."""`, without any interpolation or escapes:
+
+```zz
+q := ```
+    {"x": 1}
+    {"y": [1, 2]}
+    """
+```
+
+Brace-heavy payloads with no interpolation belong in backticks;
+keep `{{` / `}}` for literal braces *inside* interpolated strings.
 
 #### What `{...}` expands
 
@@ -405,11 +494,13 @@ double the braces for a literal `{`:
 println("{{1 + 2}}") // {1 + 2} (no interpolation)
 ```
 
-The same rule covers regular-expression quantifiers, which must be
-doubled like in Python f-strings or Rust `format!`:
+Regular-expression quantifiers inside `"..."` must still be
+doubled like in Python f-strings or Rust `format!` — or sidestep
+the issue with a raw string:
 
 ```zz
 pat := "^[0-9a-f]{{8}}$"   // matches 8 hex digits
+pat := `^[0-9a-f]{8}$`    // same, preferred
 ```
 
 When a string DOES interpolate elsewhere, a bare `{` that cannot expand
@@ -522,7 +613,7 @@ struct Counter { n: int }
 
 func bump(c: Counter) -> int {
     c.n += 100   // mutates only the local copy
-    c.n
+    return c.n
 }
 
 c := Counter{ n: 10 }
@@ -574,8 +665,8 @@ val := 42 ?? 0                       // 42
 Passes the left value as the first argument to the right function:
 
 ```zz
-func inc(n: int) -> int { n + 1 }
-func dbl(n: int) -> int { n * 2 }
+func inc(n: int) -> int { return n + 1 }
+func dbl(n: int) -> int { return n * 2 }
 
 5 |> inc |> dbl    // dbl(inc(5)) = dbl(6) = 12
 
@@ -634,7 +725,7 @@ struct Base { id: int, name: str }
 struct User { Base, age: int }   // embeds Base
 
 impl Base {
-    func area(self) -> int { self.id * 2 }
+    func area(self) -> int { return self.id * 2 }
 }
 
 zaid := User{ id: 1, name: "Zaid Ajo", age: 19 }  // flat init nests into Base
@@ -660,7 +751,7 @@ struct Box<T> { v: T }
 
 impl Box<T> {
     func get(self) -> T {
-        self.v
+        return self.v
     }
 }
 
@@ -692,19 +783,30 @@ Method calls desugar to function calls with the receiver as the first argument:
 
 ```zz
 struct Point { x: int, y: int }
-func dist(p: Point) -> int { p.x + p.y }
+func dist(p: Point) -> int { return p.x + p.y }
 
 p := Point{ x: 3, y: 4 }
 dist(p)       // function call
 p.dist()      // method call equivalent
 ```
 
+Resolution order for `value.name(...)`:
+
+1. the receiver's own `impl` method — `impl W { func get(self) }` registers
+   `W.get`, and `w.get()` reaches it even when a free `get(w)` exists;
+2. a free function `name`, with the receiver as the first argument
+   (`p.dist()` ≡ `dist(p)`), when the receiver's type has no such method;
+3. the receiver-typed stdlib namespace (`str.`, `vec.`, `dict.`, `option.`, …).
+
+Both forms stay reachable, so a same-named `impl` method and free function can
+coexist: `w.get()` calls `W.get`, `get(w)` calls the free function.
+
 ### Try Operator (`?`)
 
 Unwraps a variant, propagating `.none`/`.err` upward on failure:
 
 ```zz
-func process(input: str) -> Option<int> { val := int(input)?; .some(val + 1) }
+func process(input: str) -> Option<int> { val := int(input)?; return .some(val + 1) }
 ```
 
 Note: `?` joins with the next line. Use `match` for branching across lines:
@@ -868,7 +970,8 @@ rewrite through it, so values and types keep one identity. Two
 
 ## Blocks as Expressions
 
-Blocks evaluate to their last expression:
+Blocks evaluate to their last expression (closures and block expressions
+keep this; named `func` bodies return only through `return`):
 
 ```zz
 result := {
@@ -884,6 +987,10 @@ Functions without a return type return `unit`:
 
 ```zz
 func do_nothing() {
-    // returns unit implicitly
+    // returns unit implicitly (no `return`, no value)
+}
+
+func double(x: int) -> int {
+    return x * 2   // named functions need an explicit `return`
 }
 ```

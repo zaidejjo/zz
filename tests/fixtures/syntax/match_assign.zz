@@ -10,7 +10,7 @@ func classify(n: int) -> str {
         .some(_v) => out = "some"
         .none => out = "none"
     }
-    out
+    return out
 }
 
 func first_or_zero(n: int) -> int {
@@ -20,7 +20,7 @@ func first_or_zero(n: int) -> int {
         1 => v = 10
         _ => v = n * 2
     }
-    v
+    return v
 }
 
 func main() {

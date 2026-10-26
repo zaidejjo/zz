@@ -3,6 +3,8 @@
 use crate::checker::Checker;
 use crate::type_::Type;
 use zz_frontend::ast::{Block, Expr, Stmt};
+use zz_frontend::diag::{error_at, warning_at, FixIt};
+use zz_frontend::span::Span;
 
 impl Checker {
     pub(crate) fn collect_func(&mut self, stmt: &Stmt) {
@@ -68,7 +70,7 @@ impl Checker {
                     if !Self::is_c_abi_type(&ct) {
                         self.errors.push(zz_frontend::diag::error_at(
                             format!(
-                                "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, str, *const T, *mut T, void, ())",
+                                "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, str, bytes, *const T, *mut T, void, ())",
                                 name.name, p.name.name, ct
                             ),
                             p.span,
@@ -103,7 +105,7 @@ impl Checker {
                 } else if !Self::is_c_abi_type(&ct) {
                     self.errors.push(zz_frontend::diag::error_at(
                         format!(
-                            "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, str, *const T, *mut T, void, ())",
+                            "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, str, bytes, *const T, *mut T, void, ())",
                             name.name, ct
                         ),
                         t.span,
@@ -138,6 +140,8 @@ impl Checker {
         match ty {
             Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void | Type::Error => true,
             Type::Str => true,
+            // Borrowed byte views (#234).
+            Type::Bytes => true,
             Type::Ptr { inner, .. } => Self::is_c_abi_scalar(inner),
             _ => false,
         }
@@ -173,7 +177,7 @@ impl Checker {
             &mut self.current_bounds,
             sig.bounds.iter().cloned().collect(),
         );
-        let body_t = self.check_fn_body_block(body);
+        let body_t = self.check_named_fn_body(body);
         self.current_ret = prev_ret;
         self.current_generics = prev_gen;
         self.current_bounds = prev_bounds;
@@ -183,29 +187,146 @@ impl Checker {
         // it sees the final program even when type errors exist.
         super::value_lint::lint_dead_param_mutation(&sig.params, body, &mut self.errors);
         let _ = name;
-        // The body's fall-through type must match the declared return
-        // type. Divergent arms contribute `Never`, which vanishes from
-        // joins, so a body that always returns/diverges checks against
-        // anything — while any value path must produce `sig.ret`. There
-        // is deliberately no `block_has_return` bypass here: skipping the
-        // check whenever a `return` exists masked genuine mismatches
-        // (e.g. an `else { "hi" }` fall-through in a `-> int` function)
-        // and missing-return paths (`if c { return 1 }` with no else,
-        // which falls through with unit).
-        if let Err(e) = self.unifier.unify(&body_t, &sig.ret) {
-            // Sherlock: unwrapped Result at the tail value gets a
-            // value-site error with fixes instead of the generic
-            // return-type-span mismatch (#245).
-            let tail_span = body.stmts.last().map(|s| s.span()).unwrap_or(body.span);
-            let resolved_body = self.unifier.resolve(&body_t);
-            let resolved_ret = self.unifier.resolve(&sig.ret);
-            if !self.report_result_return_hint(&resolved_body, &resolved_ret, tail_span) {
-                self.report_mismatch(e, body.span);
-            }
+        // A named function yields a value only through `return`, so its
+        // fall-through type is `unit` unless every path diverges (`Never`,
+        // e.g. ending in `if c { return 1 } else { return 2 }`). The body's
+        // tail expression type is irrelevant here: it was discarded.
+        //
+        // A non-unit signature plus a fall-through is the missing-`return`
+        // error — with an insertion fixit so `zz fix` can migrate the
+        // corpus. An unresolved return (no annotation) is not "non-unit":
+        // unifying it with `unit` is how the signature becomes `unit`.
+        let resolved_body = self.unifier.resolve(&body_t);
+        if matches!(resolved_body, Type::Error) {
+            // The body already reported a type error: don't cascade a
+            // return-type complaint on top of it.
+            let _ = self.unifier.unify(&body_t, &sig.ret);
+            return;
+        }
+        let resolved_ret = self.unifier.resolve(&sig.ret);
+        // Implicit return type (no `->` annotation): warn when the body's
+        // tail expression has a non-unit type, since it is silently
+        // discarded and the function effectively returns `unit`.
+        if matches!(resolved_ret, Type::Var(_))
+            && !matches!(
+                resolved_body,
+                Type::Unit | Type::Void | Type::Never | Type::Error
+            )
+        {
+            let last = body.stmts.last();
+            let span = last.map(|s| s.span()).unwrap_or(body.span);
+            let body_ty = self.unifier.resolve(&body_t);
+            let diag = warning_at(
+                format!(
+                    "function has no `->` return type but its body yields `{body_ty}`; the last expression is discarded",
+                ),
+                span,
+            )
+            .with_note(
+                "add an explicit `->` return type, or end the body with `return` / `()` to silence this warning",
+            );
+            self.errors.push(diag);
+        }
+        let ret_takes_value = !matches!(
+            resolved_ret,
+            Type::Unit | Type::Void | Type::Error | Type::Var(_)
+        );
+        let diverges = matches!(resolved_body, Type::Never);
+        if ret_takes_value && !diverges {
+            self.report_missing_return(body, &resolved_ret);
+            return;
+        }
+        let fallthrough = if diverges { Type::Never } else { Type::Unit };
+        if let Err(e) = self.unifier.unify(&fallthrough, &sig.ret) {
+            self.report_mismatch(e, body.span);
         }
     }
 
-    /// Recursively check whether a block contains a `return` statement.
+    /// Report a missing-return diagnostic with improved diagnostics:
+    /// - unit-tail functions (println, match, etc.) get the message only, no fixit.
+    /// - annotated non-unit functions that can fall through get error + fixit.
+    /// - fixit is withheld for `if` without `else`, match arms, and `let`
+    ///   bindings whose name is used later (intentional shadowings).
+    fn report_missing_return(&mut self, body: &Block, ret_ty: &Type) {
+        let last = body.stmts.last();
+        let span = last.map(|s| s.span()).unwrap_or(body.span);
+        // --- improved unit-tail detection using self.last_block_tail ---
+        let unit_tail = match &self.last_block_tail {
+            Some((_, ty)) => matches!(self.unifier.resolve(ty), Type::Unit | Type::Void),
+            None => false,
+        };
+        // --- value-tail fixit position ---
+        // withhold fixit for: if without else, match arms, let bindings
+        // whose name is used later (intentional shadowings).
+        let withhold_fixit = unit_tail
+            || match last {
+                Some(Stmt::Expr(Expr::If { els: None, .. })) => true,
+                Some(Stmt::Expr(Expr::Match { .. })) => true,
+                Some(Stmt::Decl { .. }) => {
+                    let outer_names = body
+                        .stmts
+                        .iter()
+                        .take(body.stmts.len() - 1)
+                        .flat_map(Self::extract_names)
+                        .collect::<std::collections::HashSet<_>>();
+                    let let_name = Self::extract_name(last.unwrap());
+                    outer_names.contains(&let_name.unwrap_or_default())
+                }
+                _ => false,
+            };
+        let value_tail = if withhold_fixit {
+            None
+        } else {
+            let s = last.map(|stmt| stmt.span()).unwrap_or(body.span).start;
+            Some(Span::new(s, s))
+        };
+        let mut diag = error_at(
+            format!("function returns `{ret_ty}` but its body can fall through; add `return `"),
+            span,
+        )
+        .with_note("named functions return a value only through `return`; the last expression is discarded");
+        if let Some(insert_at) = value_tail {
+            diag = diag.with_fixit(FixIt::safe(insert_at, "return ", "add `return`"));
+        }
+        self.errors.push(diag);
+    }
+
+    /// Extract an identifier name from a statement or expression for shadow-checking.
+    fn extract_name(stmt: &Stmt) -> Option<String> {
+        match stmt {
+            Stmt::Decl { name, .. } => Some(name.name.clone()),
+            Stmt::Expr(Expr::If { then, .. }) => Self::extract_name_from_block(then),
+            Stmt::Expr(Expr::Match { .. }) => None,
+            Stmt::Return {
+                value: Some(Expr::Ident { name, .. }),
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn extract_name_from_block(block: &Block) -> Option<String> {
+        block.stmts.last().and_then(Self::extract_name)
+    }
+
+    /// Extract all identifier names from a statement (for shadow checking).
+    fn extract_names(stmt: &Stmt) -> Vec<String> {
+        match stmt {
+            Stmt::Decl { name, .. } => vec![name.name.clone()],
+            Stmt::Expr(Expr::If { then, .. }) => Self::extract_names_from_block(then),
+            Stmt::For { body, .. } => Self::extract_names_from_block(body),
+            Stmt::Return {
+                value: Some(Expr::Ident { name, .. }),
+                ..
+            } => vec![name.clone()],
+            _ => vec![],
+        }
+    }
+
+    fn extract_names_from_block(block: &Block) -> Vec<String> {
+        block.stmts.iter().flat_map(Self::extract_names).collect()
+    }
+
     pub(crate) fn block_has_return(block: &Block) -> bool {
         block.stmts.iter().any(Self::stmt_has_return)
     }

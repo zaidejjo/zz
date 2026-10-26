@@ -1,6 +1,7 @@
 # Standard Library
 
-Exhaustive reference of all built-in functions and modules.
+> Reference (complete). Learning path: [Stdlib overview](stdlib/overview.md).
+> Per-module guides distill this file; generated name index: [reference.md](stdlib/reference.md).
 
 ## Built-in Functions
 
@@ -50,6 +51,7 @@ Available without imports:
 | `std.dec` | Exact decimal math on strings |
 | `std.bytes` | Linear string/byte builders |
 | `std.csv` | CSV parsing/serialization |
+| `std.property` | Seeded generators + shrinking for property tests |
 | `std.colors` | ANSI styling: palette, styles, truecolor |
 
 ---
@@ -115,6 +117,8 @@ the clamped position for `find`/`rfind` and never matches for `_at`.
 
 ```zz
 import std.str
+import std.bytes
+import std.encoding
 
 s := "  Hello World  "
 s.trim()                // "Hello World"
@@ -135,7 +139,10 @@ ord("A")                           // 65
 chr(233)                           // "é"
 chr(ord("Z"))                      // "Z"
 bytes.to_str([104, 105])           // .ok("hi")
-bytes.to_ints(b)[0]                // first byte as int
+match encoding.base64_decode_bytes("aGk=") {
+    .ok(raw)  => println(bytes.to_ints(raw)[0]),  // first byte as int
+    .err(e)   => println(e),
+}
 ```
 
 ### Method Call Syntax
@@ -166,8 +173,7 @@ import std.vec
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `vec.len` | `vec.len(v: [T]) -> int` | Array length |
-| `vec.push` | `vec.push(v: [T], x: T) -> [T]` | New array with `x` appended |
-| `vec.append` | `vec.append(v: [T], x: T) -> [T]` | Alias for `vec.push`: new array with `x` appended |
+| `vec.push` | `vec.push(v: [T], x: T) -> [T]` | New array with `x` appended (also the method form `xs.push(x)`) |
 | `vec.pop` | `vec.pop(v: [T]) -> [T]` | New array with last element removed |
 | `vec.reverse` | `vec.reverse(v: [T]) -> [T]` | Reversed copy |
 | `vec.join` | `vec.join(v: [T], sep: str) -> str` | Join as string |
@@ -223,13 +229,14 @@ import std.json
 ```zz
 import std.json
 
-data := json.parse({"name": "Alice", "age": 30})
-name := json.as_str(json.get(data, "name"))   // "Alice"
-age := json.as_int(json.get(data, "age"))     // 30
-
-// Serialize
-person := {"name": "Bob", "age": 25}
-json.stringify(person)  // {"age":25,"name":"Bob"}
+func main() -> Result<int, str> {
+    data := json.parse(`{"name": "Alice", "age": 30}`)?
+    println(json.as_str(json.get(data, "name")?))  // Alice
+    println(json.as_int(json.get(data, "age")?))   // 30
+    person := {"name": "Bob", "age": 25}
+    println(json.stringify(person)?)
+    return .ok(0)
+}
 ```
 
 ---
@@ -412,7 +419,7 @@ func main() -> Result<int, str> {
     res := http.get("https://api.example.com/users")?
     body := res.json()?
     println(json.stringify(body) ?? "{}")
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -449,7 +456,6 @@ import std.net
 | `net.tcp_read_bytes` | `net.tcp_read_bytes(stream, max_bytes) -> Result<bytes, str>` | Binary-safe read (method: `stream.read_bytes()`) |
 | `net.tcp_write_bytes` | `net.tcp_write_bytes(stream, data: bytes) -> Result<int, str>` | Binary-safe write (method: `stream.write_bytes()`) |
 | `net.tcp_shutdown` | `net.tcp_shutdown(stream) -> Result<unit, str>` | Real shutdown, both directions (methods: `stream.close()`, `stream.shutdown()`) |
-| `net.tcp_close` | `net.tcp_close(stream) -> Result<bool, str>` | Legacy no-op (returns true; prefer `close`) |
 | `net.peer_addr` | `net.peer_addr(stream) -> Result<str, str>` | Remote `"ip:port"` |
 | `net.local_addr` | `net.local_addr(stream) -> Result<str, str>` | Local `"ip:port"` |
 | `net.set_read_timeout` | `net.set_read_timeout(stream, ms) -> Result<bool, str>` | Read deadline |
@@ -475,7 +481,7 @@ func main() -> Result<int, str> {
     println("got: {line}")
     client.close()?
     server.close()?
-    .ok(0)
+    return .ok(0)
 }
 ```
 
@@ -489,15 +495,15 @@ import std.fs
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `fs.read_file` | `fs.read_file(path: str)` | Read file contents |
-| `fs.write_file` | `fs.write_file(path: str, contents: str)` | Write file |
+| `fs.read` | `fs.read(path: str)` | Read file contents |
+| `fs.write` | `fs.write(path: str, contents: str)` | Write file |
 | `fs.exists` | `fs.exists(path: str) -> bool` | Check existence |
 | `fs.read_bytes` | `fs.read_bytes(path: str)` | Raw bytes as `bytes` (contiguous, ~1x RSS) |
-| `fs.append` / `fs.copy` / `fs.move` / `fs.rename` | `(…)` | Append, copy, move |
+| `fs.append` / `fs.copy` / `fs.move` | `(…)` | Append, copy, move |
 | `fs.is_file` / `fs.is_dir` | `(path) -> bool` | Type predicates |
-| `fs.remove_file` / `fs.remove` | `(path)` | Delete a file |
+| `fs.remove` | `(path)` | Delete a file |
 | `fs.mkdir` / `fs.mkdir_all` | `(path)` | Create directories |
-| `fs.read_dir` / `fs.readdir` | `(path)` | Child basenames (sorted) |
+| `fs.read_dir` | `(path)` | Child basenames (sorted) |
 | `fs.remove_dir_all` / `fs.walk_dir` | `(path)` | Recursive remove / list |
 | `fs.stat` | `(path)` | Metadata dict |
 | `fs.scan_counts` | `(path, markers, bstart, bend, nested, whole) -> Result<[int]>` | Fused read + NUL-sniff + `str.classify` in one call: `[lines, code, comments, blanks, binary]` (`binary` 1 = NUL present, counts zeroed) |
@@ -521,6 +527,16 @@ All fallible ops return `Result<_, str>` with unified
 `fs:<op>:<code>: <path>` diagnostics (identical in VM and AOT).
 `read_chunk` is text-oriented (lossy on arbitrary bytes by construction);
 use `read_chunk_bytes` for binary streaming.
+
+Reads share a process-wide, stat-validated content cache: repeating
+`fs.read`, `fs.read_bytes`, `fs.scan_counts`, or `fs.is_generated` on an
+unchanged regular file costs one `stat` plus a refcount bump instead of a
+fresh `open`/`read`/allocation, and NUL/UTF-8 checks are memoized. Writes and
+removals through `std.fs` invalidate eagerly; outside writes are detected by
+`len`/`mtime` (plus `ctime`/`ino`/`dev` on Unix). Empty and non-regular files
+are never cached, entries cap at 8 MiB, and the default budget is 96 MiB
+of raw buffers (a lazily built text/bytes view can add one more copy per
+entry; `ZZ_FS_CACHE=0` disables, `ZZ_FS_CACHE_MB=<n>` resizes).
 
 ### `bytes` — contiguous byte buffers
 
@@ -585,13 +601,13 @@ Paths inside a provider live in one `/`-rooted virtual namespace
 import std.fs
 
 // Read
-match fs.read_file("data.txt") {
+match fs.read("data.txt") {
     .ok(content)   => println(content),
     .err(e)        => println("Error: {e}"),
 }
 
 // Write
-match fs.write_file("out.txt", "Hello World") {
+match fs.write("out.txt", "Hello World") {
     .ok(_)         => println("Written"),
     .err(e)        => println("Error: {e}"),
 }
@@ -616,7 +632,7 @@ import std.env
 | `env.get_var` | `env.get_var(name: str)` | Get env var (legacy alias shape) |
 | `env.var` | `env.var(name: str)` | Value or `.err` |
 | `env.set` | `env.set(key: str, val: str)` | Set (`.err` on bad key) |
-| `env.remove` / `env.unset` | `env.remove(key: str)` | Unset (total no-op) |
+| `env.remove` | `env.remove(key: str)` | Remove (total no-op when absent) |
 | `env.vars` | `env.vars() -> map[str]str` | All variables, sorted by key |
 | `env.cwd` | `env.cwd()` | Working directory (`.err` on failure) |
 | `env.set_cwd` | `env.set_cwd(path: str)` | Change directory (`.err` on failure) |
@@ -821,11 +837,12 @@ collect parts and join once. Handles are plain arrays (no definitions
 needed).
 
 ```zz
+import std.str
 import std.bytes
 
 b := str.builder()
 b = str.push_part(b, "hello ")
-b = str.push_part(b, name)
+b = str.push_part(b, "Ada")
 println(str.finish(b))
 
 nums := bytes.builder()
@@ -877,6 +894,48 @@ println(csv.to_json(rows))         // JSON array of objects
 
 TOML is intentionally **not** in the stdlib: use the external `toml`
 package (`~/Projects/toml`, pure-ZZ, versioned separately).
+
+---
+
+## `std.property` -- Property Testing
+
+Seeded generators + shrinking, pure ZZ (no engine support needed).
+Values derive from `(seed, index)` pairs, so a failing seed replays the
+exact same cases. `check`/`for_all_int` abort with the seed and the
+shrunk minimal case:
+
+```zz
+import std.property
+
+func gen_small(seed: int, i: int) -> int {
+    return property.int_in(seed, i, 0, 10)
+}
+
+func small(x: int) -> bool {
+    return x < 100
+}
+
+property.check(gen_small, property.shrink_int, small, 200, 7)
+property.for_all_int(0, 10, small, 200, 7)
+```
+
+| Function | Description |
+|----------|-------------|
+| `property.seed(n)` | Normalize any int into LCG state |
+| `property.int_in(seed, i, lo, hi)` | Uniform int in range (swaps reversed) |
+| `property.pick(seed, i, n)` | Uniform int in `[0, n)` (`0` when `n <= 0`) |
+| `property.boolean(seed, i)` | Uniform bool |
+| `property.alpha_char(seed, i)` | Lowercase letter |
+| `property.alpha_str(seed, i, len)` | Lowercase string of `len` chars |
+| `property.shrink_int(v)` | Simpler ints toward zero |
+| `property.shrink_str(s)` | Shorter prefixes |
+| `property.shrink_value(prop, shrink, v)` | Minimize a falsifying value |
+| `property.check(gen, shrink, prop, iters, seed)` | Assert `prop` over generated cases |
+| `property.for_all_int(lo, hi, prop, iters, seed)` | `check` for int ranges |
+
+Custom generators are plain `func(seed: int, i: int) -> T` values, and
+custom shrinkers plain `func(T) -> [T]` — named functions and `|x| ...`
+closures both work as arguments.
 
 ---
 

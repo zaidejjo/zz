@@ -12,13 +12,43 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::convert::LineIndex;
 use crate::cross_file::ModuleIndex;
 use dashmap::DashMap;
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{Diagnostic, Url};
 use zz_checker::{AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type};
 use zz_frontend::ast::Program;
 use zz_frontend::diag::RawDiag;
 use zz_stdlib::stdlib_funcs;
 
+// ── Incremental-check helpers ────────────────────────────────────────────
+
+/// Stable content hash for skip decisions (non-crypto, in-process only).
+pub fn content_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Does this file need a full `check_program` run? Skips only when a
+/// previous result exists for identical text *and* an identical seed —
+/// dependents with unchanged text still recheck after their seed moves.
+pub fn needs_recheck(
+    last_hash: Option<u64>,
+    last_seed: Option<u32>,
+    hash: u64,
+    seed: u32,
+    has_result: bool,
+) -> bool {
+    if !has_result {
+        return true;
+    }
+    last_hash != Some(hash) || last_seed != Some(seed)
+}
+
 // ── Per-file definition tracking ─────────────────────────────────────────
+
+/// Cached project-check result per file: content hash, seed version,
+/// published diagnostics.
+pub type ProjectCheckEntry = (u64, u32, Vec<Diagnostic>);
 
 /// Names of top-level definitions that a single file contributes to the
 /// global checker seed. Used to prune stale symbols on edit/close.
@@ -73,6 +103,15 @@ pub struct DocumentState {
     pub file_defs: Option<FileDefs>,
     /// Precomputed line-start index for O(log n) position conversion.
     pub line_index: LineIndex,
+    /// Content hash of the source at the last full check (skip identical
+    /// rechecks: save-without-changes, duplicate notifications).
+    pub last_checked_hash: Option<u64>,
+    /// Seed version at the last full check: a dependent whose own text
+    /// is unchanged must still recheck when the seed moved under it.
+    pub last_seed_version: Option<u32>,
+    /// Diagnostics published by the last full check, republished verbatim
+    /// on a skip (no re-derive divergence).
+    pub last_diagnostics: Vec<Diagnostic>,
 }
 
 // ── Global state ─────────────────────────────────────────────────────────
@@ -99,9 +138,21 @@ pub struct GlobalState {
     pub module_index: std::sync::RwLock<ModuleIndex>,
     /// Whether workspace scan has completed (lazy scan).
     pub workspace_scanned: AtomicBool,
+    /// Whether the client applies file-creating workspace edits
+    /// (`documentChanges` + `create` resource op): gates move-to-file.
+    pub create_supported: AtomicBool,
     /// Files that need re-checking after a dependency changes.
     /// Maps file URI → list of dependent URIs that import it.
     pub dependents: DashMap<Url, Vec<Url>>,
+    /// Monotonic seed revision, bumped by every absorb/prune: lets a
+    /// recheck tell "my text is identical but the world moved" (stale
+    /// dependent) from "nothing changed" (skip the checker entirely).
+    pub seed_version: AtomicU32,
+    /// Project-check result cache: file path → (content hash, seed
+    /// version, published diagnostics). Consecutive `zz.checkProject`
+    /// runs only pay for changed files.
+    pub project_cache:
+        std::sync::RwLock<std::collections::HashMap<std::path::PathBuf, ProjectCheckEntry>>,
     /// Harvested project-dependency signatures per project root
     /// (`zz add` packages: `import table` + `table.` members). Refreshed
     /// when dep sources change; see [`crate::deps`].
@@ -134,8 +185,11 @@ impl GlobalState {
             root: std::sync::RwLock::new(None),
             sequence: AtomicU32::new(0),
             module_index: std::sync::RwLock::new(ModuleIndex::default()),
+            create_supported: AtomicBool::new(false),
             workspace_scanned: AtomicBool::new(false),
             dependents: DashMap::new(),
+            seed_version: AtomicU32::new(0),
+            project_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
             dep_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
             ws_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
@@ -149,6 +203,11 @@ impl GlobalState {
     /// Read the current sequence value.
     pub fn current_sequence(&self) -> u32 {
         self.sequence.load(Ordering::SeqCst)
+    }
+
+    /// Read the current seed revision.
+    pub fn seed_version(&self) -> u32 {
+        self.seed_version.load(Ordering::SeqCst)
     }
 
     /// Open or update a document buffer.
@@ -174,6 +233,9 @@ impl GlobalState {
             seed_bindings: None,
             file_defs: None,
             line_index,
+            last_checked_hash: None,
+            last_seed_version: None,
+            last_diagnostics: Vec::new(),
         };
         self.documents.insert(uri, doc);
         (self.bump_sequence(), old_defs)
@@ -281,6 +343,14 @@ impl GlobalState {
                     let Some(file) = crate::deps::resolve_local_import(dir, ip) else {
                         continue;
                     };
+                    // Wire the dependency graph: resolving an import means
+                    // this document observes that file (drives save/watch
+                    // fan-out in BFS order).
+                    if let (Ok(dep_uri), Ok(doc_uri)) =
+                        (Url::from_file_path(&file), Url::from_file_path(path))
+                    {
+                        self.record_dependency(dep_uri, doc_uri);
+                    }
                     let ns = alias
                         .clone()
                         .or_else(|| file.file_stem().map(|x| x.to_string_lossy().into_owned()))
@@ -320,6 +390,7 @@ impl GlobalState {
 
     /// Remove a file's definitions from the global seed.
     pub fn prune_defs(&self, defs: &FileDefs) {
+        self.seed_version.fetch_add(1, Ordering::SeqCst);
         if !defs.bindings.is_empty() {
             let mut bindings = self.bindings.write().unwrap();
             for name in &defs.bindings {
@@ -355,6 +426,7 @@ impl GlobalState {
     /// Merge checker results back into the accumulated seed and store
     /// the file's contribution metadata for future pruning.
     pub fn absorb_result(&self, uri: &Url, result: &CheckResult) {
+        self.seed_version.fetch_add(1, Ordering::SeqCst);
         // Store file_defs for future pruning.
         let file_defs = FileDefs::from_check_result(result);
         if !file_defs.is_empty() {
@@ -434,11 +506,22 @@ impl GlobalState {
     }
 
     /// Record that `dependent` imports from `dependency_uri`.
+    ///
+    /// Wired automatically from resolved local imports during seed
+    /// computation (previously the graph was write-only in production:
+    /// only tests fed it, so save/watch fan-out never fired). Deduped
+    /// and self-edge guarded — seed computation runs per recheck.
     pub fn record_dependency(&self, dependency_uri: Url, dependent: Url) {
-        self.dependents
+        if dependency_uri == dependent {
+            return;
+        }
+        let mut entry = self
+            .dependents
             .entry(dependency_uri)
-            .or_insert_with(Vec::new)
-            .push(dependent);
+            .or_insert_with(Vec::new);
+        if !entry.contains(&dependent) {
+            entry.push(dependent);
+        }
     }
 
     /// Get all files that depend on the given URI.
@@ -447,6 +530,25 @@ impl GlobalState {
             .get(uri)
             .map(|v| v.value().clone())
             .unwrap_or_default()
+    }
+
+    /// Every transitive dependent in breadth-first order (cycle-safe).
+    /// BFS order doubles as check order: each file rechecks after the
+    /// dependency it observes already absorbed its fresh result.
+    pub fn transitive_dependents(&self, uri: &Url) -> Vec<Url> {
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(uri.clone());
+        let mut out = Vec::new();
+        let mut queue = std::collections::VecDeque::from([uri.clone()]);
+        while let Some(current) = queue.pop_front() {
+            for dependent in self.get_dependents(&current) {
+                if seen.insert(dependent.clone()) {
+                    out.push(dependent.clone());
+                    queue.push_back(dependent);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -684,5 +786,87 @@ mod tests {
         // d has no dependents.
         let uri_d: Url = "file:///d.zz".parse().unwrap();
         assert!(state.get_dependents(&uri_d).is_empty());
+    }
+
+    #[test]
+    fn content_hash_stable_and_sensitive() {
+        assert_eq!(content_hash("x := 1\n"), content_hash("x := 1\n"));
+        assert_ne!(content_hash("x := 1\n"), content_hash("x := 2\n"));
+        assert_ne!(content_hash("x := 1\n"), content_hash("x := 1 \n"));
+    }
+
+    #[test]
+    fn needs_recheck_matrix() {
+        let hash = content_hash("x := 1\n");
+        // No prior result: always check.
+        assert!(needs_recheck(None, None, hash, 0, false));
+        assert!(needs_recheck(Some(hash), Some(0), hash, 0, false));
+        // Identical text and seed: skip.
+        assert!(!needs_recheck(Some(hash), Some(3), hash, 3, true));
+        // Text changed: check.
+        assert!(needs_recheck(
+            Some(content_hash("old")),
+            Some(3),
+            hash,
+            3,
+            true
+        ));
+        // Seed moved under identical text: check (stale dependent).
+        assert!(needs_recheck(Some(hash), Some(3), hash, 4, true));
+    }
+
+    #[test]
+    fn record_dependency_dedupes_and_rejects_self() {
+        let state = make_state();
+        let uri_a: Url = "file:///a.zz".parse().unwrap();
+        let uri_b: Url = "file:///b.zz".parse().unwrap();
+        state.record_dependency(uri_a.clone(), uri_b.clone());
+        state.record_dependency(uri_a.clone(), uri_b.clone());
+        state.record_dependency(uri_a.clone(), uri_a.clone());
+        let deps = state.get_dependents(&uri_a);
+        assert_eq!(deps, vec![uri_b]);
+    }
+
+    #[test]
+    fn transitive_dependents_bfs_cycle_safe() {
+        let state = make_state();
+        let uri_a: Url = "file:///a.zz".parse().unwrap();
+        let uri_b: Url = "file:///b.zz".parse().unwrap();
+        let uri_c: Url = "file:///c.zz".parse().unwrap();
+        // b observes a, c observes b, a observes c (import cycle).
+        state.record_dependency(uri_a.clone(), uri_b.clone());
+        state.record_dependency(uri_b.clone(), uri_c.clone());
+        state.record_dependency(uri_c.clone(), uri_a.clone());
+        let walked = state.transitive_dependents(&uri_a);
+        // BFS from a: b first, then c; the root never reappears.
+        assert_eq!(walked, vec![uri_b, uri_c]);
+    }
+
+    #[test]
+    fn seed_version_bumps_on_absorb_and_prune() {
+        let state = make_state();
+        assert_eq!(state.seed_version(), 0);
+        let uri: Url = "file:///test.zz".parse().unwrap();
+        state.update_document(uri.clone(), 1, "x := 1\n".into());
+        let parsed = parse("x := 1\n");
+        let cr = check_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        state.absorb_result(&uri, &cr);
+        assert_eq!(state.seed_version(), 1);
+        let defs = FileDefs {
+            bindings: vec!["x".to_string()],
+            funcs: vec![],
+            structs: vec![],
+            aliases: vec![],
+            enums: vec![],
+        };
+        state.prune_defs(&defs);
+        assert_eq!(state.seed_version(), 2);
     }
 }

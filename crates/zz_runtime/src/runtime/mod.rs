@@ -118,7 +118,9 @@ pub struct RuntimeState {
     pub env: crate::env::EnvLink,
     /// Named functions, kept separate from the environment so recursive
     /// bodies can resolve their own name without circular captured envs.
-    pub funcs: HashMap<String, FuncValue>,
+    /// Entries are `Rc`-shared: resolution bumps a refcount instead of
+    /// deep-cloning the params and the AST body (see `Interp::funcs`).
+    pub funcs: HashMap<String, std::rc::Rc<FuncValue>>,
     /// Native (Rust-backed) functions, e.g. the standard library.
     pub natives: HashMap<String, NativeEntry>,
     /// Struct definitions: name → ordered field names.

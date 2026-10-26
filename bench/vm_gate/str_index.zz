@@ -1,0 +1,13 @@
+import std.time
+
+func main() {
+    s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!?"
+    t0 := time.now_ms()
+    total := 0
+    for i in 0..200000 {
+        c := s[i % 64]
+        total = total + len(c)
+    }
+    t1 := time.now_ms()
+    println("str_index: {t1 - t0}ms result={total}")
+}

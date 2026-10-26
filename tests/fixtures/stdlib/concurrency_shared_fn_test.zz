@@ -1,0 +1,40 @@
+// features: closures, comparison, func-call, if-else, imports, int-arith, locals, option-result, print, std-task, string-literal
+// E2E: two workers calling one module-level function (#398).
+// Frozen parent scopes omit `Func` bindings, so both workers execute
+// their per-spawn detached table copies — never one shared live env
+// (which panicked with RefCell borrow races and hung both joins).
+// Deterministic: blocking joins, fixed fib values, no sleeps.
+import std.task
+
+func fib(n: int) -> int {
+    return if n < 2 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+func main() {
+    h1 := task.spawn(|_| fib(20))
+    h2 := task.spawn(|_| fib(20))
+    // Poll while running: must observe completion, never error.
+    seen := false
+    for _i in 0..100000 {
+        q1 := task.try_join(h1)
+        if let .some(_v1) = q1 {
+            seen = true
+            break
+        }
+        q2 := task.try_join(h2)
+        if let .some(_v2) = q2 {
+            seen = true
+            break
+        }
+    }
+    println("polled:{seen}")
+    r1:int = task.join(h1)
+    println("r1:{r1}")
+    r2:int = task.join(h2)
+    println("r2:{r2}")
+    println("sharedfn_ok")
+}

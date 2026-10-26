@@ -34,7 +34,7 @@ log.set_level("debug")
 log.to_stderr()
 
 empty := ""
-body := fs.read_to_string(logpath) ?? empty
+body := fs.read(logpath) ?? empty
 println("has_info: {str.contains(body, needle_info)}")
 println("has_warn: {str.contains(body, needle_warn)}")
 if str.contains(body, needle_sup) {
@@ -54,7 +54,7 @@ log.to_file(jsonpath)
 log.info(jhello)
 log.to_stderr()
 log.set_format("text")
-jbody := fs.read_to_string(jsonpath) ?? empty
+jbody := fs.read(jsonpath) ?? empty
 println("json_level: {str.contains(jbody, lvl)}")
 println("json_msg: {str.contains(jbody, jmsg)}")
 

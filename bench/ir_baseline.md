@@ -52,3 +52,29 @@ Caveats:
   instead of ZZ codegen (verified: 10M vs 100M both ~3ms).
 - Always diff against a same-machine, same-day current-AOT rebuild —
   never against this table across machines.
+
+## Chunk gate re-measurement (2026-10-21)
+
+First full re-run after the chunk backend grew the `match` slice (#556).
+Same box for both columns (4-core x86_64, shared — load avg ~3.5), release
+builds (`zz build -p`), `taskset`-pinned to one CPU, HIR and chunk runs
+interleaved, 9 runs each, medians. Outputs verified equal on all five.
+
+| bench | HIR→C | chunk→C | chunk/HIR | 5% gate |
+|---|---|---|---|---|
+| `fib35` | 208 ms | 71 ms | 0.34x | pass |
+| `tak` | 24 ms | 11 ms | 0.46x | pass |
+| `arraysum` | 65 ms | 46 ms | 0.71x | pass |
+| `sieve` | 35 ms | 50 ms | 1.43x | **miss** |
+| `strconcat` | 4.3 ms | 5.1 ms | 1.19x | **miss** |
+
+`strconcat` is under timer resolution per run; its row is 20-run batches
+(min-of-5). Relative ratios are stable across reruns; absolute values move
+with machine load, so only the ratio column is comparable.
+
+Verdict: the unboxed int twin and the for-loop peel beat HIR on the
+call-shaped and int-loop benches by 2–3x, and the two remaining misses are
+loop *shapes* the peeler does not reach (a `while` loop in `sieve`, a
+`str`-slot store in `strconcat`) — not a missing IR type pass. Scoped
+follow-up in #558 (move-semantics stores + while/multi-window peeling);
+#252 stays open as the umbrella gate.

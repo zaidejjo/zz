@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use zz_ir::{Const, ConstId, FuncDef, FuncId, IrType, Module, Op, StrId};
+use zz_ir::{Const, ConstId, FuncDef, FuncId, IrType, Module, Op, Pattern, StrId};
 
 use super::lower::mangle;
 
@@ -75,6 +75,17 @@ pub fn supported(op: &Op) -> bool {
             | Op::LoadSlot(_)
             | Op::StoreSlot(_)
             | Op::LoadVar(_)
+            | Op::LoadPath(_)
+            | Op::DefineVar(_)
+            | Op::StoreVar(_)
+            | Op::StorePath(_)
+            | Op::RegisterEnum { .. }
+            | Op::MakeEnum { .. }
+            | Op::MatchArm { .. }
+            | Op::MatchGuard { .. }
+            | Op::MatchError
+            | Op::IfLetMatch { .. }
+            | Op::ExitScope
             | Op::IntAdd
             | Op::IntSub
             | Op::IntMul
@@ -96,9 +107,11 @@ pub fn supported(op: &Op) -> bool {
             | Op::Safepoint
             | Op::MakeArray(_)
             | Op::MakeDict(_)
+            | Op::MakeVariant { .. }
             | Op::ArrayPush
             | Op::IndexOp
             | Op::StoreIndexOp
+            | Op::StoreIndexTake { .. }
             | Op::MakeRange
             | Op::MakeFunc { .. }
             | Op::Call { .. }
@@ -132,11 +145,18 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
                 vec![*t]
             }
             Op::ForNext { exit, .. } | Op::WhileCond { exit } => vec![*exit],
+            Op::MatchArm { next, .. } | Op::MatchGuard { next, .. } => vec![*next],
+            Op::IfLetMatch { els, .. } => vec![*els],
             _ => Vec::new(),
         }
     }
     fn falls(op: &Op) -> bool {
-        !matches!(op, Op::Jump(_) | Op::Return | Op::Break | Op::Continue)
+        // MatchError traps (non-exhaustive match aborts) — never falls
+        // through; a fallthrough edge would feed dead state downstream.
+        !matches!(
+            op,
+            Op::Jump(_) | Op::Return | Op::Break | Op::Continue | Op::MatchError
+        )
     }
     /// Apply `op` to an entry stack, yielding the exit stack.
     /// Exact pop/push counts (net effects lie for calls); unknown
@@ -155,8 +175,18 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Op::PopN(n) => (*n as usize + 1, 1),
             Op::Swap => (0, 0),
             Op::Truthy => (1, 1),
-            Op::LoadSlot(_) | Op::LoadVar(_) => (0, 1),
+            Op::LoadSlot(_) | Op::LoadVar(_) | Op::LoadPath(_) => (0, 1),
             Op::StoreSlot(_) => (1, 0),
+            Op::DefineVar(_) => (1, 1),
+            Op::StoreVar(_) | Op::StorePath(_) => (1, 0),
+            // `MatchArm`/`IfLetMatch` consume the scrutinee on the take
+            // path; the miss path keeps it for the next test (the linear
+            // walk sees the fall-through, exactly like the VM's height
+            // fiction). `MatchGuard` drops the guard value.
+            Op::MatchArm { .. } | Op::MatchGuard { .. } | Op::IfLetMatch { .. } => (1, 0),
+            Op::MatchError | Op::ExitScope => (0, 0),
+            Op::RegisterEnum { .. } => (0, 0),
+            Op::MakeEnum { argc, .. } => (*argc as usize, 1),
             Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => (2, 1),
             Op::IntNeg => (1, 1),
             Op::BinOp(_) => (2, 1),
@@ -173,9 +203,11 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Op::Safepoint => (0, 0),
             Op::MakeArray(n) => (*n as usize, 1),
             Op::MakeDict(n) => (2 * *n as usize, 1),
+            Op::MakeVariant { has_arg, .. } => (usize::from(*has_arg), 1),
             Op::ArrayPush => (2, 1),
             Op::IndexOp => (2, 1),
             Op::StoreIndexOp => (3, 1),
+            Op::StoreIndexTake { .. } => (2, 0),
             Op::MakeRange => (2, 1),
             Op::MakeFunc { .. } => (0, 1),
             Op::Call { argc } => (*argc as usize + 1, 1),
@@ -270,8 +302,19 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Op::ForNext { exit, .. } | Op::WhileCond { exit } => Some(*exit as usize),
             _ => None,
         };
+        // A pattern miss either reloads the scrutinee (`MatchArm` with a
+        // guard scheme) or keeps it on the stack for the next test: those
+        // jump edges carry the *entry* state, not the take path's.
+        let miss_keeps = matches!(
+            &code[pc],
+            Op::MatchArm { restore: true, .. } | Op::IfLetMatch { .. }
+        );
         for s in succs {
-            let mut edge = next.clone();
+            let mut edge = if miss_keeps && s != pc + 1 {
+                out[pc].clone()
+            } else {
+                next.clone()
+            };
             if exit_of == Some(s) {
                 if let Some(want) = exit_lens.get(&s) {
                     edge.truncate(*want);
@@ -788,8 +831,18 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>, HashSet<usize
             Op::PopN(n) => (*n as usize + 1, 1),
             Op::Swap => (0, 0),
             Op::Truthy => (1, 1),
-            Op::LoadSlot(_) | Op::LoadVar(_) => (0, 1),
+            Op::LoadSlot(_) | Op::LoadVar(_) | Op::LoadPath(_) => (0, 1),
             Op::StoreSlot(_) => (1, 0),
+            Op::DefineVar(_) => (1, 1),
+            Op::StoreVar(_) | Op::StorePath(_) => (1, 0),
+            // `MatchArm`/`IfLetMatch` consume the scrutinee on the take
+            // path; the miss path keeps it for the next test (the linear
+            // walk sees the fall-through, exactly like the VM's height
+            // fiction). `MatchGuard` drops the guard value.
+            Op::MatchArm { .. } | Op::MatchGuard { .. } | Op::IfLetMatch { .. } => (1, 0),
+            Op::MatchError | Op::ExitScope => (0, 0),
+            Op::RegisterEnum { .. } => (0, 0),
+            Op::MakeEnum { argc, .. } => (*argc as usize, 1),
             Op::IntAdd | Op::IntSub | Op::IntMul | Op::IntDiv | Op::IntRem => (2, 1),
             Op::IntNeg => (1, 1),
             Op::BinOp(_) => (2, 1),
@@ -804,9 +857,11 @@ fn fuse_scan(code: &[Op]) -> (HashMap<usize, u16>, HashSet<usize>, HashSet<usize
             Op::Safepoint => (0, 0),
             Op::MakeArray(n) => (*n as usize, 1),
             Op::MakeDict(n) => (2 * *n as usize, 1),
+            Op::MakeVariant { has_arg, .. } => (usize::from(*has_arg), 1),
             Op::ArrayPush => (2, 1),
             Op::IndexOp => (2, 1),
             Op::StoreIndexOp => (3, 1),
+            Op::StoreIndexTake { .. } => (2, 0),
             Op::MakeRange => (2, 1),
             Op::MakeFunc { .. } => (0, 1),
             Op::Call { argc } => (*argc as usize + 1, 1),
@@ -1363,9 +1418,308 @@ fn idxread_scan(
     }
     (fused, skip)
 }
+/// Condition fusion: `[int-operand, int-operand, BinOp(cmp),
+/// WhileCond|JumpIfFalse|JumpIfTrue]` compiles to guarded raw compare +
+/// branch — no clones, no `zz_binop` dispatch, no bool box/unwrap (the
+/// dominant cost in `while`-driven loops: sieve's inner loop measured
+/// 4x behind HIR here on `while j < n` alone).
+///
+/// Window shape (all adjacent):
+/// - two int operands: `LoadSlot(s)` with `s` int-typed per `ints`, or
+///   `PushConst` of an int. Arithmetic-nested conditions stay boxed;
+///   loop conditions are overwhelmingly slot-vs-slot and slot-vs-const.
+/// - `BinOp` limited to trapping-free total-order integer comparisons
+///   (`== != < > <= >=`); short-circuiting, float, and div/rem never
+///   match.
+/// - terminator `WhileCond(exit)`, `JumpIfFalse(t)`, or `JumpIfTrue(t)`.
+/// - No jump target in the window interior (the start may be targeted —
+///   the label still emits, then our statement), no overlap with
+///   already-claimed pcs (every existing fusion wins ties).
+///
+/// Guards mirror [`int_fuse`]: each slot load is int-guarded (fail-closed
+/// cold trap); consts render direct. Emission never touches `sp` — no
+/// values are pushed, so the `WhileCond` pop is already accounted for
+/// and the exit protocol is verbatim. Fall-through pushes nothing.
+///
+/// Returns `(fused, skip)`: `fused[start]` describes the window; `skip`
+/// holds the other three pcs.
+#[derive(Debug, Clone, Copy)]
+enum CondTerm {
+    While(u32),
+    JumpFalse(u32),
+    JumpTrue(u32),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CondOperand {
+    Slot(u16),
+    Const(i64),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CondFuse {
+    a: CondOperand,
+    b: CondOperand,
+    cmp: zz_ir::op::BinOp,
+    term: CondTerm,
+}
+
+fn condfuse_scan(
+    code: &[Op],
+    consts: &[Const],
+    ints: &HashSet<u16>,
+    targets: &HashSet<u32>,
+    taken: &HashSet<usize>,
+) -> (HashMap<usize, CondFuse>, HashSet<usize>) {
+    use zz_ir::op::BinOp as B;
+    fn operand(ints: &HashSet<u16>, consts: &[Const], op: &Op) -> Option<CondOperand> {
+        match op {
+            Op::LoadSlot(s) if ints.contains(s) => Some(CondOperand::Slot(*s)),
+            Op::PushConst(c) => match consts.get(c.0 as usize) {
+                Some(Const::Int(k)) => Some(CondOperand::Const(*k)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    let mut fused = HashMap::new();
+    let mut skip = HashSet::new();
+    if code.len() < 4 {
+        return (fused, skip);
+    }
+    let mut pc = 0usize;
+    while pc + 3 < code.len() {
+        if taken.contains(&pc) || skip.contains(&pc) {
+            pc += 1;
+            continue;
+        }
+        // Interior label-free and unclaimed (the start itself may be
+        // targeted — the label emits at `pc`, then our statement).
+        if (pc + 1..=pc + 3).any(|x| targets.contains(&(x as u32)) || taken.contains(&x)) {
+            pc += 1;
+            continue;
+        }
+        let (Some(a), Some(b)) = (
+            operand(ints, consts, &code[pc]),
+            operand(ints, consts, &code[pc + 1]),
+        ) else {
+            pc += 1;
+            continue;
+        };
+        let cmp = match &code[pc + 2] {
+            Op::BinOp(c @ (B::Eq | B::Ne | B::Lt | B::Gt | B::Le | B::Ge)) => *c,
+            _ => {
+                pc += 1;
+                continue;
+            }
+        };
+        let term = match &code[pc + 3] {
+            Op::WhileCond { exit } => CondTerm::While(*exit),
+            Op::JumpIfFalse(t) => CondTerm::JumpFalse(*t),
+            Op::JumpIfTrue(t) => CondTerm::JumpTrue(*t),
+            _ => {
+                pc += 1;
+                continue;
+            }
+        };
+        fused.insert(pc, CondFuse { a, b, cmp, term });
+        for x in pc + 1..=pc + 3 {
+            skip.insert(x);
+        }
+        pc += 4;
+    }
+    (fused, skip)
+}
 /// Coverage verdict for one module: every op supported, no default args
 /// (arity fill needs caller-env evaluation), and every `Call`/`CallPath`
 /// statically resolvable. Fails with the first gap found.
+/// Names bound by one pattern (`match` arms, `if let`), resolved to
+/// printable names through the module's string pool.
+fn pattern_binds(module: &Module, pat: &Pattern, out: &mut Vec<String>) {
+    match pat {
+        Pattern::Binding(id) => {
+            if let Some(name) = module.strings.get(id.0 as usize) {
+                out.push(name.clone());
+            }
+        }
+        Pattern::Variant {
+            arg: Some(inner), ..
+        } => pattern_binds(module, inner, out),
+        Pattern::Tuple(pats) | Pattern::Or(pats) => {
+            for p in pats {
+                pattern_binds(module, p, out);
+            }
+        }
+        Pattern::Wildcard | Pattern::Lit(_) | Pattern::Variant { arg: None, .. } => {}
+    }
+}
+
+/// Function-local env cells: names the VM keeps in the frame environment
+/// — captured function-local decls, `match` arm bindings, and the
+/// compiler's `__match_scrutinee_*` reload temps. Each becomes one
+/// `zz_value` C local instead of an env lookup.
+///
+/// The VM binds `match` arm names in a *child* environment, so a nested
+/// scope that reuses a name shadows the enclosing binding instead of
+/// clobbering it. Cells are therefore named per nesting depth: the
+/// function frame keeps `zz_e_<name>`, a scope at depth `d` uses
+/// `zz_e<d>_<name>`. Sibling scopes at the same depth never overlap in
+/// time (only one arm of a `match` runs, and a block is entered once per
+/// execution), so they may share a cell.
+struct EnvLayout {
+    /// The function frame: captured function-locals and the compiler's
+    /// `__match_scrutinee_*` reload temps. Module globals never appear
+    /// here — `DefineVar` for a global stays the global.
+    base: HashMap<String, String>,
+    /// `MatchArm` / `IfLetMatch` pc -> the cells its pattern binds, innermost
+    /// scope. The emitter pushes this frame for the arm body and the arm's
+    /// trailing `ExitScope` pops it.
+    arm_scopes: HashMap<usize, Vec<(String, String)>>,
+    /// Every cell C local to declare in the prologue.
+    decls: Vec<String>,
+    /// Every IR name that has a cell at any depth (coverage checks).
+    names: Vec<String>,
+}
+
+/// C local for the env cell of `name` in the scope at `depth`.
+fn cell_id(depth: usize, name: &str) -> String {
+    if depth == 0 {
+        format!("zz_e_{}", mangle(name))
+    } else {
+        format!("zz_e{depth}_{}", mangle(name))
+    }
+}
+
+/// Allocate (or find) the cell for `name` in the innermost scope.
+fn bind_cell(
+    frames: &mut [HashMap<String, String>],
+    decls: &mut Vec<String>,
+    names: &mut Vec<String>,
+    name: &str,
+) -> String {
+    let depth = frames.len() - 1;
+    let frame = &mut frames[depth];
+    if let Some(id) = frame.get(name) {
+        return id.clone();
+    }
+    let id = cell_id(depth, name);
+    frame.insert(name.to_string(), id.clone());
+    if !decls.iter().any(|d| d == &id) {
+        decls.push(id.clone());
+    }
+    if !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+    id
+}
+
+/// Walk one function and decide every env cell, mirroring the emitter's
+/// scope discipline (`EnterScope` opens a frame, a binding arm opens one,
+/// `ExitScope` closes either). A scope that does not balance is rejected:
+/// a half-tracked frame would resolve a name to the wrong cell, so this
+/// fails loudly instead.
+fn env_layout(
+    module: &Module,
+    f: &FuncDef,
+    is_global: &dyn Fn(&str) -> bool,
+) -> Result<EnvLayout, ChunkError> {
+    let mut frames: Vec<HashMap<String, String>> = vec![HashMap::new()];
+    let mut arm_scopes: HashMap<usize, Vec<(String, String)>> = HashMap::new();
+    let mut decls: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for (pc, op) in f.code.iter().enumerate() {
+        match op {
+            Op::DefineVar(id) | Op::StoreVar(id) => {
+                let Some(name) = module.strings.get(id.0 as usize) else {
+                    continue;
+                };
+                if is_global(name) {
+                    continue;
+                }
+                let name = name.clone();
+                bind_cell(&mut frames, &mut decls, &mut names, &name);
+            }
+            Op::EnterScope => frames.push(HashMap::new()),
+            Op::ExitScope => {
+                if frames.len() == 1 {
+                    return Err(ChunkError::op("unbalanced env scope"));
+                }
+                frames.pop();
+            }
+            Op::MatchArm { pat, .. } | Op::IfLetMatch { pat, .. } => {
+                // Arm bindings shadow module globals (the VM binds them in
+                // a child env), so they always get their own cell.
+                let mut bound = Vec::new();
+                pattern_binds(module, pat, &mut bound);
+                if bound.is_empty() {
+                    continue;
+                }
+                frames.push(HashMap::new());
+                let mut cells = Vec::new();
+                for name in bound {
+                    let id = bind_cell(&mut frames, &mut decls, &mut names, &name);
+                    cells.push((name, id));
+                }
+                arm_scopes.insert(pc, cells);
+            }
+            _ => {}
+        }
+    }
+    if frames.len() != 1 {
+        return Err(ChunkError::op("unbalanced env scope"));
+    }
+    let base = frames.pop().unwrap_or_default();
+    Ok(EnvLayout {
+        base,
+        arm_scopes,
+        decls,
+        names,
+    })
+}
+
+/// Reject pattern shapes the chunk emitter has no C form for.
+fn pattern_supported(module: &Module, pat: &Pattern) -> bool {
+    match pat {
+        Pattern::Wildcard | Pattern::Binding(_) | Pattern::Lit(_) => true,
+        Pattern::Variant { arg, .. } => arg
+            .as_deref()
+            .map(|p| pattern_supported(module, p))
+            .unwrap_or(true),
+        Pattern::Tuple(pats) => pats.iter().all(|p| pattern_supported(module, p)),
+        Pattern::Or(pats) => {
+            // Alternatives join into one C condition, so only binding-free
+            // alternatives are covered (the VM absorbs a branch's
+            // bindings; the chunk backend has no per-branch block).
+            pats.iter().all(|p| {
+                if !pattern_supported(module, p) {
+                    return false;
+                }
+                let mut names = Vec::new();
+                pattern_binds(module, p, &mut names);
+                names.is_empty()
+            })
+        }
+    }
+}
+
+/// Module-scope bindings the VM keeps in the environment: every name the
+/// top-level function binds with `DefineVar`. The chunk backend has no
+/// run-time environment (and closures are not covered here yet), so these
+/// lower to file-scope C globals that every compiled function can read.
+fn module_globals(module: &Module) -> HashSet<String> {
+    let mut out = HashSet::new();
+    if let Some(top) = module.funcs.get(module.entry.0 as usize) {
+        for op in &top.code {
+            if let Op::DefineVar(id) = op {
+                if let Some(name) = module.strings.get(id.0 as usize) {
+                    out.insert(name.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn coverage(module: &Module) -> Result<(), ChunkError> {
     // Index funcs by dotted name for resolution.
     let mut func_names: HashSet<String> = HashSet::new();
@@ -1394,7 +1748,9 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
         }
         Callee::Unknown
     };
+    let globals = module_globals(module);
     for f in &module.funcs {
+        let env = env_layout(module, f, &|n| globals.contains(n))?;
         for p in &f.params {
             if p.default.is_some() {
                 let name = module
@@ -1413,6 +1769,28 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                     f.name
                 )));
             }
+            if let Op::MatchArm { pat, .. } | Op::IfLetMatch { pat, .. } = op {
+                if !pattern_supported(module, pat) {
+                    return Err(ChunkError::op("or-pattern that binds"));
+                }
+            }
+            if let Op::DefineVar(id) | Op::StoreVar(id) = op {
+                let var = module
+                    .strings
+                    .get(id.0 as usize)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if !globals.contains(var) && !env.names.iter().any(|n| n == var) {
+                    let name = module
+                        .strings
+                        .get(f.name.0 as usize)
+                        .map(String::as_str)
+                        .unwrap_or("?");
+                    return Err(ChunkError::op(&format!(
+                        "runtime binding `{var}` in {name}"
+                    )));
+                }
+            }
         }
         // Resolve every Call's callee origin.
         let org = origins(&f.code, &resolve_load);
@@ -1424,7 +1802,7 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                 // Entry state at the Call: [..., callee, args].
                 let st = &org[pc];
                 if st.len() < (*argc as usize) + 1 {
-                    return Err(ChunkError::op("call stack underflow"));
+                    return Err(ChunkError::op(&format!("call stack underflow at {pc}")));
                 }
                 match &st[st.len() - (*argc as usize) - 1] {
                     Callee::Native(_, lpc) | Callee::Func(_, lpc) => {
@@ -1496,6 +1874,14 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
         // (globals, captures) are rejected outright.
         for (pc, op) in f.code.iter().enumerate() {
             if let Op::LoadVar(id) = op {
+                let var = module
+                    .strings
+                    .get(id.0 as usize)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if globals.contains(var) || env.names.iter().any(|n| n == var) {
+                    continue;
+                }
                 match resolve_load(*id, pc) {
                     Callee::Unknown => {
                         let name = module
@@ -1675,6 +2061,15 @@ fn closable_all(module: &Module) -> HashSet<String> {
 }
 
 /// C integer literal (LL-suffixed; MIN spelled without overflow).
+/// Emit a pattern's arm-cell bindings (take path only).
+fn emit_pat_binds(out: &mut String, binds: &[String]) {
+    for b in binds {
+        out.push_str("    ");
+        out.push_str(b);
+        out.push('\n');
+    }
+}
+
 fn c_int(i: i64) -> String {
     if i == i64::MIN {
         "(-9223372036854775807LL - 1)".to_string()
@@ -1709,6 +2104,19 @@ struct Emitter<'a> {
     module: &'a Module,
     /// Dotted IR name -> C symbol.
     csyms: HashMap<String, String>,
+    /// Module-scope env bindings (`module_globals`): IR name -> C global id.
+    globals: HashMap<String, String>,
+    /// Function-local env scopes of the function being emitted, outermost
+    /// first (index 0 is the function frame): IR name -> C local id. A
+    /// binding arm pushes a frame, so a nested arm that reuses a name
+    /// resolves to its own cell and leaves the enclosing binding intact.
+    env_scopes: Vec<HashMap<String, String>>,
+    /// `MatchArm` / `IfLetMatch` pc -> the cells its pattern binds (see
+    /// [`env_layout`]).
+    arm_scopes: HashMap<usize, Vec<(String, String)>>,
+    /// Qualified unit enum variants (`Token.End`): a path naming one
+    /// constructs the value (`RegisterEnum` supplies the set).
+    unit_enums: HashSet<String>,
     /// Dotted IR names with unboxed twins.
     twins: HashSet<String>,
     /// C-impl natives referenced: (dotted name, C impl, needs Rust staticlib).
@@ -1725,6 +2133,33 @@ impl<'a> Emitter<'a> {
             .get(id.0 as usize)
             .map(String::as_str)
             .unwrap_or("")
+    }
+
+    /// C local of the innermost env cell for `name`, if this function has
+    /// one (arm scopes shadow the function frame).
+    fn env_cell(&self, name: &str) -> Option<&String> {
+        self.env_scopes.iter().rev().find_map(|f| f.get(name))
+    }
+
+    /// Whether `name` can be a call target (mirrors the coverage-side
+    /// `resolve_load` order), i.e. a `LoadVar` of it is a callee
+    /// placeholder rather than a value.
+    fn is_callee_name(&self, name: &str) -> bool {
+        self.csyms.contains_key(name)
+            || super::lower::native_impl(name).is_some()
+            || super::ffi_impl(name).is_some()
+            || super::lower::native_impl(&format!("std.{name}")).is_some()
+            || super::ffi_impl(&format!("std.{name}")).is_some()
+    }
+
+    /// Dotted spelling of a path (`"g2"."count"` -> `g2.count`), which is
+    /// the key module-scope bindings are recorded under.
+    fn join_path(&self, parts: &[StrId]) -> String {
+        parts
+            .iter()
+            .map(|p| self.str(*p))
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     fn csym(&self, dotted: &str) -> String {
@@ -1753,8 +2188,48 @@ impl<'a> Emitter<'a> {
             self.needs_native_rt = true;
             return Ok(CallTarget::CImpl(impl_name, true));
         }
+        // Issue #557: CallPath for module-scope bindings lowers to
+        // `top2.a.unwrap_or` instead of `option.unwrap_or`. When direct
+        // resolution fails, try type-qualified method names so the chunk
+        // backend can lower `.unwrap_or`/`.unwrap`/`.expect` on Option
+        // and Result receivers to their C natives (same shape #508
+        // established for typed receivers inside functions).
+        if let Some((type_ns, method)) = split_method_tail(dotted) {
+            let qualified = format!("{type_ns}.{method}");
+            if let Some(impl_name) = super::lower::native_impl(&qualified) {
+                return Ok(CallTarget::CImpl(impl_name, false));
+            }
+            if let Some(impl_name) = super::ffi_impl(&qualified) {
+                self.needs_native_rt = true;
+                return Ok(CallTarget::CImpl(impl_name, true));
+            }
+        }
         Err(ChunkError::name(&format!("call target {dotted}")))
     }
+}
+
+/// Split `head.method` into `(type_ns, method)` when the head looks like a
+/// variant namespace (`option`, `result`) rather than a value expression.
+///
+/// Issue #557: `a := .some(11); a.unwrap_or(0)` lowers to
+/// `CallPath ["top2.a", "unwrap_or"]`. Direct resolution fails because no
+/// function named `top2.a.unwrap_or` exists. Splitting on `.unwrap_or`
+/// yields `("option", "unwrap_or")`, which resolves to `zz_option_unwrap_or`
+/// through `native_impl` — the same shape #508 established for typed
+/// receivers inside functions, extended to module-scope and match-arm
+/// bindings.
+fn split_method_tail(dotted: &str) -> Option<(&'static str, &'static str)> {
+    for method in ["unwrap", "unwrap_or", "expect"] {
+        if let Some(prefix) = dotted.strip_suffix(&format!(".{method}")) {
+            let ns = match prefix {
+                "option" | "std.option" => Some("option"),
+                "result" | "std.result" => Some("result"),
+                _ => None,
+            }?;
+            return Some((ns, method));
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -1814,6 +2289,159 @@ impl<'a> Emitter<'a> {
     /// Emit fresh-owned construction of a pool constant. Every call
     /// builds an independent value (ownership transfers to the stack);
     /// sharing is unobservable under detach-on-write (spec §1.2).
+    /// C condition plus binding statements for one `match` pattern.
+    ///
+    /// `place` is a C expression of type `zz_value` that is safe to read
+    /// whenever the condition held so far (the scrutinee slot, or a
+    /// dereference of a payload the condition already proved present).
+    /// Returns the condition and the statements that bind arm cells; the
+    /// bindings are emitted only on the take path, and they clone through
+    /// [`zz_cassign`], so a miss touches nothing.
+    fn pat_block(
+        &mut self,
+        pat: &Pattern,
+        place: &str,
+    ) -> Result<(String, Vec<String>), ChunkError> {
+        let mut conds = Vec::new();
+        let mut binds = Vec::new();
+        self.pat_code(pat, place, &mut conds, &mut binds)?;
+        let cond = if conds.is_empty() {
+            "1".to_string()
+        } else {
+            conds.join(" && ")
+        };
+        Ok((cond, binds))
+    }
+
+    /// C expression for a pattern's literal constant.
+    fn pat_lit(&mut self, id: ConstId) -> Result<String, ChunkError> {
+        let c = self
+            .module
+            .consts
+            .get(id.0 as usize)
+            .cloned()
+            .ok_or_else(|| ChunkError::op("pattern const id"))?;
+        Ok(match c {
+            Const::Int(i) => format!("zz_int({})", c_int(i)),
+            Const::Float(f) => {
+                self.needs_float_fmt = true;
+                format!("zz_float({f:?})")
+            }
+            Const::Bool(b) => format!("zz_bool({})", if b { "true" } else { "false" }),
+            // Interned: immortal, so the comparison operand needs no
+            // release (the same value the VM's literal holds).
+            Const::Str(s) => format!("zz_str_static({})", c_str(self.str(s))),
+            _ => return Err(ChunkError::op("non-literal pattern constant")),
+        })
+    }
+
+    /// Emit the C test (and the arm-cell bindings) for one pattern.
+    /// Mirrors the VM's `match_pattern`:
+    ///
+    /// - `some`/`ok`/`err` test the tag; a payload sub-pattern also needs
+    ///   a payload slot, then reads through it.
+    /// - `none` is a tag-only test (a payload form can never match).
+    /// - any other variant name is a user enum: the qualified object type
+    ///   ends in `.<name>` (cross-enum confusion is impossible — the
+    ///   checker pins the scrutinee's type, same as the VM).
+    /// - tuples erase to arrays: tag + length, then element-wise.
+    /// - `|` joins alternatives; every deref sits behind its own guard in
+    ///   the same `&&` chain, so a miss never reads a non-matching value.
+    ///   Binding alternatives are rejected by [`pattern_supported`].
+    fn pat_code(
+        &mut self,
+        pat: &Pattern,
+        place: &str,
+        conds: &mut Vec<String>,
+        binds: &mut Vec<String>,
+    ) -> Result<(), ChunkError> {
+        match pat {
+            Pattern::Wildcard => {}
+            Pattern::Binding(id) => {
+                let name = self.str(*id).to_string();
+                let cell = self.env_cell(&name).cloned().ok_or_else(|| {
+                    ChunkError::op(&format!("binding `{name}` outside an env cell"))
+                })?;
+                binds.push(format!("zz_cassign(&{cell}, {place});"));
+            }
+            Pattern::Lit(cid) => {
+                let lit = self.pat_lit(*cid)?;
+                conds.push(format!("zz_truthy(zz_binop(ZZOP_EQ, {place}, {lit}))"));
+            }
+            Pattern::Variant { name, arg } => {
+                let short = self.str(*name).to_string();
+                match short.as_str() {
+                    "none" => {
+                        if arg.is_some() {
+                            // `.none(x)` can never match (VM: `arg.is_none()`).
+                            conds.push("0".to_string());
+                        } else {
+                            conds.push(format!("({place}).tag == ZZ_OPTION_NONE"));
+                        }
+                    }
+                    "some" | "ok" | "err" => {
+                        let tag = match short.as_str() {
+                            "some" => "ZZ_OPTION_SOME",
+                            "ok" => "ZZ_RESULT_OK",
+                            _ => "ZZ_RESULT_ERR",
+                        };
+                        conds.push(format!("({place}).tag == {tag}"));
+                        if let Some(inner) = arg {
+                            // A payload pattern needs a payload: the VM
+                            // fails the arm when the variant has none.
+                            conds.push(format!("({place}).payload != NULL"));
+                            let inner_place = format!("(*({place}).payload)");
+                            self.pat_code(inner, &inner_place, conds, binds)?;
+                        }
+                    }
+                    _ => {
+                        conds.push(format!("zz_cenum_suffix(&({place}), {})", c_str(&short)));
+                        if let Some(inner) = arg {
+                            conds.push(format!("zz_cfield(&({place}), \"value\") != NULL"));
+                            let inner_place = format!("(*zz_cfield(&({place}), \"value\"))");
+                            self.pat_code(inner, &inner_place, conds, binds)?;
+                        }
+                    }
+                }
+            }
+            Pattern::Tuple(pats) => {
+                conds.push(format!(
+                    "({place}).tag == ZZ_ARRAY && ({place}).arr != NULL && ({place}).arr->len == {}",
+                    pats.len()
+                ));
+                for (i, el) in pats.iter().enumerate() {
+                    conds.push(format!("zz_carr_at(&({place}), {i}) != NULL"));
+                    let el_place = format!("(*zz_carr_at(&({place}), {i}))");
+                    self.pat_code(el, &el_place, conds, binds)?;
+                }
+            }
+            Pattern::Or(pats) => {
+                // The verifier admits an empty alternative list; no
+                // alternative can match, exactly like the VM's loop.
+                if pats.is_empty() {
+                    conds.push("0".to_string());
+                    return Ok(());
+                }
+                let mut alts = Vec::new();
+                for alt in pats {
+                    let mut c = Vec::new();
+                    let mut st = Vec::new();
+                    self.pat_code(alt, place, &mut c, &mut st)?;
+                    if !st.is_empty() {
+                        return Err(ChunkError::op("or-pattern that binds"));
+                    }
+                    alts.push(if c.is_empty() {
+                        "1".to_string()
+                    } else {
+                        c.join(" && ")
+                    });
+                }
+                conds.push(format!("({})", alts.join(" || ")));
+            }
+        }
+        Ok(())
+    }
+
     fn emit_const_new(&mut self, id: ConstId, out: &mut String) -> Result<String, ChunkError> {
         let c = self
             .module
@@ -1885,10 +2513,7 @@ impl<'a> Emitter<'a> {
                 Some(x) => {
                     let e = self.emit_const_new(x, out)?;
                     let tmp = format!("_kc{}", out.len());
-                    out.push_str(&format!(
-                        "    zz_value *_kp{tmp} = malloc(sizeof(zz_value));\n"
-                    ));
-                    out.push_str(&format!("    *_kp{tmp} = {e};\n"));
+                    out.push_str(&format!("    zz_value *_kp{tmp} = zz_vbox_new({e});\n"));
                     Ok(format!(
                         "(zz_value){{ZZ_OPTION_SOME, {{.payload = _kp{tmp}}}}}",
                         tmp = tmp
@@ -1899,10 +2524,7 @@ impl<'a> Emitter<'a> {
                 let e = self.emit_const_new(val, out)?;
                 let tmp = format!("_kc{}", out.len());
                 let tag = if ok { "ZZ_RESULT_OK" } else { "ZZ_RESULT_ERR" };
-                out.push_str(&format!(
-                    "    zz_value *_kp{tmp} = malloc(sizeof(zz_value));\n"
-                ));
-                out.push_str(&format!("    *_kp{tmp} = {e};\n"));
+                out.push_str(&format!("    zz_value *_kp{tmp} = zz_vbox_new({e});\n"));
                 Ok(format!(
                     "(zz_value){{{tag}, {{.payload = _kp{tmp}}}}}",
                     tmp = tmp
@@ -1976,6 +2598,10 @@ impl<'a> Emitter<'a> {
             .cloned()
             .unwrap_or_default();
         let is_twin = self.twins.contains(&dotted);
+        // Function-local env cells (see `env_layout`).
+        let env = env_layout(self.module, f, &|n| self.globals.contains_key(n))?;
+        self.env_scopes = vec![env.base];
+        self.arm_scopes = env.arm_scopes;
         out.push_str(&format!(
             "static zz_value {sym}(zz_value *args, size_t argc) {{\n"
         ));
@@ -2001,6 +2627,9 @@ impl<'a> Emitter<'a> {
         ));
         out.push_str(&format!("    int sp = {nparams};\n"));
         out.push_str("    int _lbase[256];\n    int _ldepth = 0;\n");
+        for id in &env.decls {
+            out.push_str(&format!("    zz_value {id} = zz_unit();\n"));
+        }
         // Int-declared slots eligible for fused windows (see `int_slots`).
         let uint = int_slots(self.module, f);
         if nparams > 0 {
@@ -2060,6 +2689,15 @@ impl<'a> Emitter<'a> {
             idxreads.keys().all(|k| !skip.contains(k)),
             "idxread start in skip set"
         );
+        // Condition fusion (see `condfuse_scan`): same tie discipline —
+        // every earlier fusion wins, so overlapping windows stay boxed.
+        let (condfused, cskip) =
+            condfuse_scan(&f.code, &self.module.consts, &uint, &targets, &skip);
+        skip.extend(cskip);
+        debug_assert!(
+            condfused.keys().all(|k| !skip.contains(k)),
+            "condfuse start in skip set"
+        );
         for (pc, op) in f.code.iter().enumerate() {
             if skip.contains(&pc) {
                 continue;
@@ -2083,6 +2721,7 @@ impl<'a> Emitter<'a> {
                 peel: peels.get(&pc).cloned(),
                 strapp: strapped.get(&pc).copied(),
                 idxread: idxreads.get(&pc).copied(),
+                condfuse: condfused.get(&pc).copied(),
             };
             self.emit_op(id, pc, op, &cx, out)?;
         }
@@ -2258,6 +2897,56 @@ impl<'a> Emitter<'a> {
         out.push_str("    }\n");
         Ok(())
     }
+
+    /// Emit one fused int-compare branch (see [`CondFuse`]): guarded raw
+    /// `int64_t` loads plus the comparison and the terminator's exact
+    /// protocol. No values are pushed, so `sp` is untouched: the
+    /// `WhileCond` pop is already accounted for and the exit edge
+    /// (`_ldepth--; sp = _lbase[...] + 1; goto`) is verbatim. Guards are
+    /// fail-closed cold traps, like [`int_fuse`].
+    fn emit_condfuse(cf: &CondFuse, out: &mut String) -> Result<(), ChunkError> {
+        use zz_ir::op::BinOp as B;
+        fn operand(o: &CondOperand, name: &str, out: &mut String) {
+            match o {
+                CondOperand::Slot(s) => {
+                    out.push_str(&format!(
+                        "      int64_t {name} = 0; {{ zz_value _b{name} = st[{s}]; if (_b{name}.tag != ZZ_INT) {}; {name} = _b{name}.i; }}\n",
+                        ftrap("int slot loaded non-int value")
+                    ));
+                }
+                CondOperand::Const(k) => {
+                    out.push_str(&format!("      int64_t {name} = {};\n", c_int(*k)));
+                }
+            }
+        }
+        let cmp = match cf.cmp {
+            B::Eq => "==",
+            B::Ne => "!=",
+            B::Lt => "<",
+            B::Gt => ">",
+            B::Le => "<=",
+            B::Ge => ">=",
+            _ => return Err(ChunkError::op("condfuse compare")),
+        };
+        out.push_str("    {\n");
+        operand(&cf.a, "_cca", out);
+        operand(&cf.b, "_ccb", out);
+        out.push_str(&format!("      int _cct = (_cca {cmp} _ccb);\n"));
+        match cf.term {
+            CondTerm::While(exit) => {
+                out.push_str(&format!(
+                    "      if (!_cct) {{ _ldepth--; sp = _lbase[_ldepth] + 1; goto L{exit}; }} }}\n"
+                ));
+            }
+            CondTerm::JumpFalse(t) => {
+                out.push_str(&format!("      if (!_cct) goto L{t}; }}\n"));
+            }
+            CondTerm::JumpTrue(t) => {
+                out.push_str(&format!("      if (_cct) goto L{t}; }}\n"));
+            }
+        }
+        Ok(())
+    }
     /// Emit one peeled counted loop (see [`Peel`]): pop the `ForSetup`
     /// placeholders, hoist promoted int slots to C locals (entry-guarded
     /// once), run a raw C loop over the fused body, write promotions back,
@@ -2309,7 +2998,7 @@ impl<'a> Emitter<'a> {
                 // the VM and HIR), so no tag check and a plain
                 // zero-trip-correct `<` loop (rule 5: no guards in
                 // proved code).
-                out.push_str("      zz_crange *_pr = (zz_crange*)_pit.payload;\n");
+                out.push_str("      zz_range *_pr = _pit.range;\n");
                 out.push_str("      for (int64_t _pv = _pr->start; _pv < _pr->end; _pv++) {\n");
                 subs.insert(v, "_pv".to_string());
                 Self::emit_fused_window(
@@ -2687,6 +3376,9 @@ struct OpCx<'x> {
     strapp: Option<(u16, ConstId)>,
     /// Index-read window starting at this pc, if any. See [`idxread_scan`].
     idxread: Option<IdxRead>,
+    /// Fused int-compare branch starting at this pc, if any. See
+    /// [`condfuse_scan`].
+    condfuse: Option<CondFuse>,
 }
 
 /// One fused unboxed-int window: a straight-line int expression over
@@ -2717,6 +3409,23 @@ impl<'a> Emitter<'a> {
         out: &mut String,
     ) -> Result<(), ChunkError> {
         let (callee, fuse_slot, fuse_borrow) = (cx.callee, cx.fuse_slot, cx.fuse_borrow);
+        // A binding arm opens a scope: push its cells before the pattern's
+        // bindings are emitted, so they (and the body's loads) resolve to
+        // the arm's own cells. The arm's trailing `ExitScope` pops it.
+        if let Op::MatchArm { pat, .. } | Op::IfLetMatch { pat, .. } = op {
+            match self.arm_scopes.get(&pc) {
+                Some(cells) => self.env_scopes.push(cells.iter().cloned().collect()),
+                None => {
+                    // `env_layout` records every binding arm; without the
+                    // record the bindings would land in an enclosing cell.
+                    let mut names = Vec::new();
+                    pattern_binds(self.module, pat, &mut names);
+                    if !names.is_empty() {
+                        return Err(ChunkError::op("binding arm without an env scope"));
+                    }
+                }
+            }
+        }
         // Peeled counted loop (see `peel_scan`): raw C loop over the
         // fused body, then the exit edge. The `ForSetup` emission stands
         // (placeholders + `_lbase`), so exit accounting is untouched.
@@ -2773,6 +3482,12 @@ impl<'a> Emitter<'a> {
             Self::emit_idxread(self.module, &f.code, pc, &rd, out)?;
             return Ok(());
         }
+        // Fused int-compare branch (see `condfuse_scan`): guarded raw
+        // compare + terminator protocol, no stack traffic at all.
+        if let Some(cf) = cx.condfuse {
+            Self::emit_condfuse(&cf, out)?;
+            return Ok(());
+        }
         match op {
             Op::PushConst(c) => {
                 let e = self.emit_const_new(*c, out)?;
@@ -2801,13 +3516,181 @@ impl<'a> Emitter<'a> {
                 out.push_str(&format!("    st[sp++] = zz_clone(st[{s}]);\n"));
             }
             Op::StoreSlot(s) => {
-                out.push_str(&format!("    zz_cstore(&st[{s}], st[--sp]);\n"));
+                // Move store: pop the owned value, release the slot's old
+                // value, move the popped value in. Equivalent to zz_cstore
+                // on an owned value minus the clone + source release.
+                out.push_str(&format!(
+                    "    {{ zz_value _v = st[--sp]; zz_release(&st[{s}]); st[{s}] = _v; }}\n"
+                ));
             }
-            // LoadVar pushes a dummy: every covered use resolves its
-            // origin statically and consumes the slot directly (see
-            // `Call`). Unconsumed loads fail coverage first.
-            Op::LoadVar(_) => {
-                out.push_str("    st[sp++] = zz_unit();\n");
+            // A module-scope binding reads its C global and a
+            // function-local env cell (`match` arm binding, captured
+            // local) its C local. Every other LoadVar pushes a dummy:
+            // covered uses resolve their origin statically and consume the
+            // slot directly (see `Call`).
+            Op::LoadVar(id) => {
+                let name = self.str(*id).to_string();
+                let cid = self
+                    .env_cell(&name)
+                    .cloned()
+                    .or_else(|| self.globals.get(&name).cloned());
+                match cid {
+                    Some(cid) => out.push_str(&format!("    st[sp++] = zz_clone({cid});\n")),
+                    // A callee load is a placeholder the following `Call`
+                    // consumes (coverage guarantees it); anything else is a
+                    // name that is not in scope here — refuse rather than
+                    // hand the program a silent `unit`.
+                    None if self.is_callee_name(&name) => {
+                        out.push_str("    st[sp++] = zz_unit();\n")
+                    }
+                    None => {
+                        return Err(ChunkError::op(&format!(
+                            "load `{name}` outside an env cell"
+                        )))
+                    }
+                }
+            }
+            // Dotted path read: a module-scope binding (`{greeting}` in a
+            // template lowers to a path; namespaces are part of the
+            // spelling) or a function-local env cell. Field access stays
+            // loud.
+            Op::LoadPath(parts) => {
+                let joined = self.join_path(parts);
+                let cid = self
+                    .env_cell(&joined)
+                    .cloned()
+                    .or_else(|| self.globals.get(&joined).cloned());
+                if let Some(cid) = cid {
+                    out.push_str(&format!("    st[sp++] = zz_clone({cid});\n"));
+                } else if self.unit_enums.contains(&joined) {
+                    // Unit enum variant used as a value (`Token.End`).
+                    out.push_str(&format!(
+                        "    st[sp++] = zz_object_new({}, NULL, 0);\n",
+                        c_str(&joined)
+                    ));
+                } else {
+                    return Err(ChunkError::op(&format!("dotted path read `{joined}`")));
+                }
+            }
+            // `DefineVar` binds and keeps the value on the stack: the cell
+            // takes a clone, the stack keeps the original.
+            Op::DefineVar(id) => {
+                let name = self.str(*id).to_string();
+                let cid = self
+                    .env_cell(&name)
+                    .cloned()
+                    .or_else(|| self.globals.get(&name).cloned());
+                let Some(cid) = cid else {
+                    return Err(ChunkError::op("define outside an env cell"));
+                };
+                out.push_str(&format!("    zz_cstore(&{cid}, zz_clone(st[sp-1]));\n"));
+            }
+            Op::StoreVar(id) => {
+                let name = self.str(*id).to_string();
+                let cid = self
+                    .env_cell(&name)
+                    .cloned()
+                    .or_else(|| self.globals.get(&name).cloned());
+                let Some(cid) = cid else {
+                    return Err(ChunkError::op("store to a runtime binding"));
+                };
+                out.push_str(&format!("    zz_cstore(&{cid}, st[--sp]);\n"));
+            }
+            // Assignment to a dotted path: a module-scope binding
+            // (`count = count + 1` inside a function) or a function-local
+            // env cell. Namespaces/fields stay loud.
+            Op::StorePath(parts) => {
+                let joined = self.join_path(parts);
+                let cid = self
+                    .env_cell(&joined)
+                    .cloned()
+                    .or_else(|| self.globals.get(&joined).cloned());
+                let Some(cid) = cid else {
+                    return Err(ChunkError::op(&format!("dotted path store `{joined}`")));
+                };
+                out.push_str(&format!("    zz_cstore(&{cid}, st[--sp]);\n"));
+            }
+            // ---- enums --------------------------------------------
+            // Enum metadata is a VM run-time concern (variant validation
+            // and display); chunk values carry the qualified type name on
+            // the object itself.
+            Op::RegisterEnum { .. } => out.push_str("    ;\n"),
+            Op::MakeEnum {
+                enum_name,
+                variant,
+                argc,
+            } => {
+                let qualified = format!("{}.{}", self.str(*enum_name), self.str(*variant));
+                if *argc == 0 {
+                    out.push_str(&format!(
+                        "    st[sp++] = zz_object_new({}, NULL, 0);\n",
+                        c_str(&qualified)
+                    ));
+                } else {
+                    // Checker: at most one positional payload, no named.
+                    out.push_str("    {\n");
+                    out.push_str("        zz_value _pay = st[--sp];\n");
+                    out.push_str("        zz_value _names[1] = {zz_str_static(\"value\")};\n");
+                    out.push_str(&format!(
+                        "        zz_value _obj = zz_object_new({}, _names, 1);\n",
+                        c_str(&qualified)
+                    ));
+                    out.push_str("        zz_object_set_field(&_obj, \"value\", _pay);\n");
+                    out.push_str("        st[sp++] = _obj;\n");
+                    out.push_str("    }\n");
+                }
+            }
+            // ---- match family -------------------------------------
+            // The scrutinee sits on top of the stack. A miss either keeps
+            // it (`restore`, the next arm tests the same value) or drops
+            // it (guarded schemes reload it from their temp).
+            Op::MatchArm {
+                pat,
+                next,
+                has_env: _,
+                restore,
+            } => {
+                let (cond, binds) = self.pat_block(pat, "st[sp-1]")?;
+                out.push_str(&format!("    if (!({cond})) {{\n"));
+                if !restore {
+                    out.push_str("        zz_release(&st[sp-1]); sp--;\n");
+                }
+                out.push_str(&format!("        goto L{next};\n    }}\n"));
+                emit_pat_binds(out, &binds);
+                out.push_str("    zz_release(&st[sp-1]); sp--;\n");
+            }
+            Op::MatchGuard { next, has_env: _ } => {
+                out.push_str(&format!(
+                    "    {{ zz_value _g = st[--sp]; bool _t = zz_truthy(_g); zz_release(&_g); if (!_t) goto L{next}; }}\n"
+                ));
+            }
+            Op::MatchError => {
+                out.push_str("    zz_ftrap(\"non-exhaustive match: no arm matched\");\n");
+            }
+            // On a miss the scrutinee stays for the `else` path (which
+            // starts with `Pop`); on a take it is consumed here.
+            Op::IfLetMatch {
+                pat,
+                els,
+                has_env: _,
+            } => {
+                let (cond, binds) = self.pat_block(pat, "st[sp-1]")?;
+                out.push_str(&format!("    if (!({cond})) goto L{els};\n"));
+                emit_pat_binds(out, &binds);
+                out.push_str("    zz_release(&st[sp-1]); sp--;\n");
+            }
+            // The VM pops the arm's child environment (dropping its
+            // bindings). Here the cells are C locals: pop the compile-time
+            // frame so later loads resolve to the enclosing binding again.
+            Op::ExitScope => {
+                if self.env_scopes.len() > 1 {
+                    self.env_scopes.pop();
+                }
+                out.push_str("    ;\n");
+            }
+            Op::EnterScope => {
+                self.env_scopes.push(HashMap::new());
+                out.push_str("    ;\n");
             }
             Op::IntAdd => {
                 out.push_str(
@@ -2848,7 +3731,7 @@ impl<'a> Emitter<'a> {
                     let eq = matches!(b, zz_ir::op::BinOp::Eq);
                     let op = if eq { "==" } else { "!=" };
                     out.push_str(&format!(
-                        "    {{ zz_value _b = st[--sp]; zz_value _a = st[--sp]; if (_a.tag == ZZ_RANGE && _b.tag == ZZ_RANGE) {{ zz_crange *_x = (zz_crange*)_a.payload; zz_crange *_y = (zz_crange*)_b.payload; int _eq = _x && _y && _x->start == _y->start && _x->end == _y->end && _x->step == _y->step; st[sp++] = zz_bool(_eq {op} 1); }} else {{ st[sp++] = zz_binop({c}, _a, _b); }} zz_release(&_a); zz_release(&_b); }}\n"
+                        "    {{ zz_value _b = st[--sp]; zz_value _a = st[--sp]; if (_a.tag == ZZ_RANGE && _b.tag == ZZ_RANGE) {{ zz_range *_x = _a.range; zz_range *_y = _b.range; int _eq = _x && _y && _x->start == _y->start && _x->end == _y->end && _x->step == _y->step; st[sp++] = zz_bool(_eq {op} 1); }} else {{ st[sp++] = zz_binop({c}, _a, _b); }} zz_release(&_a); zz_release(&_b); }}\n"
                     ));
                 } else if matches!(
                     b,
@@ -2966,14 +3849,18 @@ impl<'a> Emitter<'a> {
                 // modules — `MakeRange` never builds one) falls back
                 // to 0 and traps loudly at the first `ForNext`.
                 out.push_str("      { int64_t _i0 = 0;\n");
-                out.push_str("        if (_it.tag == ZZ_RANGE && _it.payload) { _i0 = ((zz_crange*)_it.payload)->start; }\n");
+                out.push_str(
+                    "        if (_it.tag == ZZ_RANGE && _it.range) { _i0 = _it.range->start; }\n",
+                );
                 out.push_str("        st[sp++] = zz_int(_i0); }\n");
                 for _ in 0..nvars {
                     out.push_str("      st[sp++] = zz_unit();\n");
                 }
                 out.push_str("    }\n");
             }
-            Op::ForNext { vars, exit, in_env } => {
+            Op::ForNext {
+                vars, exit, in_env, ..
+            } => {
                 if *in_env {
                     return Err(ChunkError::op("for loop with captured env vars"));
                 }
@@ -2991,7 +3878,7 @@ impl<'a> Emitter<'a> {
                 out.push_str("      int _done = 0;\n");
                 // Range fast path (chunk-local box: start/end/step).
                 out.push_str("      if (_it.tag == ZZ_RANGE) {\n");
-                out.push_str("        zz_crange *_rg = (zz_crange*)_it.payload;\n");
+                out.push_str("        zz_range *_rg = _it.range;\n");
                 out.push_str("        if (!_rg) ");
                 out.push_str(&format!("{};\n", ctrap("cannot iterate this value")));
                 out.push_str("        int64_t _cur = _idx.i;\n");
@@ -3054,9 +3941,9 @@ impl<'a> Emitter<'a> {
                 out.push_str("        _done = _i < 0 || _i >= _n;\n");
                 out.push_str("        if (!_done) {\n");
                 out.push_str("          zz_dict_entry *_de = &_it.dict->entries[_i];\n");
-                out.push_str(
-                    "          zz_value _k = zz_clone((zz_value){ZZ_STR, {.s = _de->key}});\n",
-                );
+                // Keys are stored as ordinary values, so clone the entry's
+                // key whatever its type (int/bool/float keys are legal).
+                out.push_str("          zz_value _k = zz_clone(_de->key);\n");
                 out.push_str("          zz_value _v0 = zz_clone(_de->val);\n");
                 out.push_str("          zz_value _nx = zz_int(_i + 1);\n");
                 out.push_str("          zz_release(&_idx);\n");
@@ -3098,10 +3985,52 @@ impl<'a> Emitter<'a> {
             }
             Op::SetLoopResult => {
                 out.push_str(
-                    "    { zz_value _v = st[--sp]; zz_cstore(&st[_lbase[_ldepth-1]], _v); }\n",
+                    "    { zz_value _v = st[--sp]; zz_release(&st[_lbase[_ldepth-1]]); \
+                     st[_lbase[_ldepth-1]] = _v; }\n",
                 );
             }
+            Op::MakeVariant { name, has_arg } => {
+                // `.some(x)` / `.ok(x)` / `.err(x)` / `.none`. `zz_variant_*`
+                // is a take convention: `zz_vbox_new` stores the value with
+                // refs == 1, so the popped stack slot's reference moves into
+                // the box — the same call HIR emits for `Expr::Variant`.
+                // Cloning first would strand the stack reference unless it
+                // were released again; `.none` carries no payload, so it
+                // pushes the bare tag (#508).
+                let variant = self.str(*name).to_string();
+                match (variant.as_str(), *has_arg) {
+                    ("some", true) => out.push_str(
+                        "    { zz_value _v = st[--sp]; st[sp++] = zz_variant_some(_v); }\n",
+                    ),
+                    ("ok", true) => out.push_str(
+                        "    { zz_value _v = st[--sp]; st[sp++] = zz_variant_ok(_v); }\n",
+                    ),
+                    ("err", true) => out.push_str(
+                        "    { zz_value _v = st[--sp]; st[sp++] = zz_variant_err(_v); }\n",
+                    ),
+                    ("none", false) => {
+                        out.push_str("    st[sp++] = (zz_value){ZZ_OPTION_NONE, {0}};\n");
+                    }
+                    // The VM rejects these shapes at run time (`.ok` needs
+                    // an argument, `.none` takes none); checked programs
+                    // cannot build them, so fail the build loudly.
+                    _ => {
+                        return Err(ChunkError::op(&format!(
+                            "makevariant {variant} (has_arg={has_arg})"
+                        )))
+                    }
+                }
+            }
             Op::MakeArray(n) => {
+                // Net move per element: the push adopts the clone, then the
+                // stack slot's own reference is dropped. A bare move (push
+                // the slot, skip the release) would leak — `zz_array_push`
+                // heals arena-derived elements into a fresh heap copy, so
+                // the original wrapper's reference still has to go — and
+                // before the box refcount landed (#507) that release freed
+                // the immortal box the array element kept pointing at, i.e.
+                // the double free reproduced in #508. Variants are ordinary
+                // refcounted boxes now, so this pair is the box-aware path.
                 out.push_str(&format!(
                     "    {{ zz_value _a = zz_array_new(); for (int _k = 0; _k < {n}; _k++) {{ zz_value _e = st[sp-{n}+_k]; zz_array_push(_a.arr, zz_clone(_e)); }} for (int _k = 0; _k < {n}; _k++) zz_release(&st[sp-{n}+_k]); sp -= {n}; st[sp++] = _a; }}\n"
                 ));
@@ -3180,19 +4109,58 @@ impl<'a> Emitter<'a> {
                 out.push_str(&format!("{};\n", ctrap("index out of bounds")));
                 out.push_str("    }\n");
             }
+            Op::StoreIndexTake {
+                home_slot,
+                home_var,
+            } => {
+                // Fused `a[i] = v`: the base is the home itself (frame
+                // slot or env cell), so the write reaches the buffer the
+                // binding owns — in place when it is the sole owner, with
+                // the same dup/heal fallback as the generic path. Stack is
+                // [index, value]; the key is borrowed and the value
+                // retained by both write paths, exactly like the
+                // `StoreIndexOp` arm above.
+                let base = match (home_slot, home_var) {
+                    (Some(s), None) => format!("st[{s}]"),
+                    (None, Some(id)) => {
+                        let name = self.str(*id).to_string();
+                        let cid = self
+                            .env_cell(&name)
+                            .cloned()
+                            .or_else(|| self.globals.get(&name).cloned());
+                        match cid {
+                            Some(cid) => cid,
+                            None => {
+                                return Err(ChunkError::op(&format!(
+                                    "storeindextake to a runtime binding `{name}`"
+                                )))
+                            }
+                        }
+                    }
+                    _ => return Err(ChunkError::op("storeindextake without a home")),
+                };
+                out.push_str("    { zz_value _v = st[--sp]; zz_value _ix = st[--sp];\n");
+                out.push_str("      int _e = 0;\n");
+                out.push_str(&format!(
+                    "      if ({base}.tag == ZZ_ARRAY && {base}.arr && {base}.arr->refs == 1 && _ix.tag == ZZ_INT && _ix.i >= 0 && _ix.i < (int64_t){base}.arr->len) {{\n        zz_assign(&{base}.arr->items[(size_t)_ix.i], _v);\n      }} else {{\n        zz_index_set(&{base}, _ix, _v, &_e);\n      }}\n"
+                ));
+                out.push_str("      zz_release(&_ix); zz_release(&_v);\n");
+                out.push_str(&format!(
+                    "      if (_e) {};\n",
+                    ctrap("index out of bounds")
+                ));
+                out.push_str("    }\n");
+            }
             Op::MakeRange => {
                 // Stack holds [start, end]; step is always 1 here.
-                // Ranges box (start, end, step) on the heap via a
-                // chunk-local immortal box: the C runtime's range is a
-                // degenerate start-marker (HIR parity only), which
-                // cannot drive a loop. Boxes are immutable, so sharing
-                // under clone is sound; they are never freed (32B per
-                // MakeRange execution — a designed ownership pass will
-                // intern them (#188.1, #254).
+                // Ranges are first-class refcounted values shared with
+                // the HIR backend (`zz_range_build_step`); the bounds
+                // trap names the failure exactly like the VM (the
+                // constructor itself would only degrade to `0..0`).
                 out.push_str("    { zz_value _e5 = st[--sp]; zz_value _s5 = st[--sp];\n");
                 out.push_str("      if (_s5.tag != ZZ_INT || _e5.tag != ZZ_INT) ");
                 out.push_str(&format!("{};\n", ctrap("range bounds must be integers")));
-                out.push_str("      zz_value _r = zz_crange_new(_s5.i, _e5.i, 1);\n");
+                out.push_str("      zz_value _r = zz_range_build_step(_s5, _e5, zz_int(1));\n");
                 out.push_str("      zz_release(&_s5); zz_release(&_e5);\n");
                 out.push_str("      st[sp++] = _r; }\n");
             }
@@ -3491,21 +4459,51 @@ __attribute__((cold)) static void zz_ftrap(const char *msg) {
     exit(1);
 }
 
-// IR ranges box (start, end, step). The C runtime's range is a
-// degenerate start-marker (enough for HIR's special-cased loops but
-// not for a value-driven loop); boxes are immutable after creation,
-// so clone-sharing is sound. Immortal by design: `zz_clone` shares
-// and `zz_release` ignores them (no UAF, no double-free); each
-// `MakeRange` execution leaks 32 bytes until the ownership pass
-// interns them (#188.1, #254).
-typedef struct { int64_t start, end, step; } zz_crange;
-static inline zz_value zz_crange_new(int64_t s, int64_t e, int64_t st) {
-    zz_crange *b = (zz_crange*)malloc(sizeof(zz_crange));
-    if (!b) { fprintf(stderr, "zz error: out of memory\n"); exit(1); }
-    b->start = s; b->end = e; b->step = st;
-    zz_value v; v.tag = ZZ_RANGE; v.payload = (zz_value*)b;
-    return v;
+// IR ranges use the shared first-class C runtime representation
+// (`zz_range`: refcounted start/end/step, same as the HIR backend —
+// see `zz_range_build_step`). The old chunk-local immortal `zz_crange`
+// boxes are gone: printing a range renders `s..e` through the shared
+// printer instead of box-pointer bits, and boxes free normally (#254).
+
+// ---- match support -----------------------------------------------------
+// Borrow-clone an arm binding into its env cell: the source is read-only
+// (pattern places point into the scrutinee), so the cell takes a clone.
+static inline void zz_cassign(zz_value *dst, zz_value src) {
+    zz_release(dst);
+    *dst = zz_clone(src);
 }
+
+// Borrowed payload of a user-enum/struct value (`value` field), or NULL.
+// Pattern tests read through this, so a miss clones nothing and cannot
+// leave a half-built binding behind.
+static const zz_value *zz_cfield(const zz_value *v, const char *name) {
+    if (!v || v->tag != ZZ_OBJECT || !v->obj) return NULL;
+    for (size_t i = 0; i < v->obj->len; i++) {
+        const zz_value *k = &v->obj->fields[i * 2];
+        if (k->tag == ZZ_STR && k->s && strcmp(zz_str_cptr(k->s), name) == 0) {
+            return &v->obj->fields[i * 2 + 1];
+        }
+    }
+    return NULL;
+}
+
+// Borrowed array element, or NULL (tuples erase to arrays).
+static const zz_value *zz_carr_at(const zz_value *v, size_t i) {
+    if (!v || v->tag != ZZ_ARRAY || !v->arr || i >= v->arr->len) return NULL;
+    return &v->arr->items[i];
+}
+
+// User-enum tag test: a pattern names the variant short (`.IntLit`) while
+// enum values carry the qualified type (`Token.IntLit`), so compare the
+// trailing segment — exactly the VM's rule.
+static int zz_cenum_suffix(const zz_value *v, const char *suffix) {
+    if (!v || v->tag != ZZ_OBJECT || !v->obj || !v->obj->type_name) return 0;
+    const char *t = v->obj->type_name;
+    size_t n = strlen(suffix), m = strlen(t);
+    if (m < n + 1) return 0;
+    return t[m - n - 1] == '.' && memcmp(t + m - n, suffix, n) == 0;
+}
+
 "#;
 
 /// Compile a verified IR module to C source behind the HIR backend's
@@ -3513,16 +4511,33 @@ static inline zz_value zz_crange_new(int64_t s, int64_t e, int64_t st) {
 /// treat both backends uniformly.
 ///
 /// `entry_main` is the dotted main (e.g. `fib35.main`); the module
-/// entry chunk (top-level effects) runs first, then `entry_main`.
-/// Fails cleanly via [`coverage`] before emitting anything.
+/// entry chunk (top-level effects) runs first, then `entry_main`. An
+/// empty `entry_main` means the program has no user `main` (script
+/// style: the entry chunk is the whole program, like the HIR backend's
+/// `zz_main`-only shape). Fails cleanly via [`coverage`] before emitting
+/// anything.
 pub fn build_module(
     module: &Module,
     entry_main: &str,
 ) -> Result<super::lower::LoweredC, ChunkError> {
+    // The format carries the VM's fused slot fast paths (the interpreter
+    // runs them natively) and its rotated `for` layout. Every pass below
+    // analyses and emits the core, unrotated stream — int-twin selection,
+    // peels, cond-fusion — so derotate and expand first: the passes, and
+    // therefore the C output, are exactly the pre-v3/v4 ones.
+    let derotated = zz_ir::lower::derotate_loops(module)
+        .map_err(|e| ChunkError::op(&format!("derotate loops: {e}")))?;
+    let expanded = zz_ir::lower::expand_fused(derotated.as_ref())
+        .map_err(|e| ChunkError::op(&format!("expand fused slot ops: {e}")))?;
+    let module: &Module = expanded.as_ref();
     coverage(module)?;
     let mut em = Emitter {
         module,
         csyms: HashMap::new(),
+        globals: HashMap::new(),
+        env_scopes: vec![HashMap::new()],
+        arm_scopes: HashMap::new(),
+        unit_enums: HashSet::new(),
         twins: closable_all(module),
         used_natives: Vec::new(),
         needs_native_rt: false,
@@ -3535,8 +4550,35 @@ pub fn build_module(
             .ok_or_else(|| ChunkError::op("func name id"))?;
         em.csyms.insert(nm.clone(), em.csym(nm));
     }
-    if !em.csyms.contains_key(entry_main) {
+    // Script-style programs (no user `main`) pass an empty key: the
+    // synthetic top-level chunk already ran in `zz_main`, so the CLI glue
+    // has nothing to call (mirrors the HIR backend's `zz_call_main`).
+    let has_main = !entry_main.is_empty();
+    if has_main && !em.csyms.contains_key(entry_main) {
         return Err(ChunkError::name(&format!("entry {entry_main}")));
+    }
+    for name in module_globals(module) {
+        em.globals
+            .insert(name.clone(), format!("zz_g_{}", mangle(&name)));
+    }
+    // Unit enum variants are values (`Token.End`), not constructors: their
+    // dotted path builds the object directly.
+    for f in &module.funcs {
+        for op in &f.code {
+            if let Op::RegisterEnum { name, variants } = op {
+                let Some(enum_name) = module.strings.get(name.0 as usize) else {
+                    continue;
+                };
+                for (variant, has_payload) in variants {
+                    if *has_payload {
+                        continue;
+                    }
+                    if let Some(vname) = module.strings.get(variant.0 as usize) {
+                        em.unit_enums.insert(format!("{enum_name}.{vname}"));
+                    }
+                }
+            }
+        }
     }
     // Origins per function for `Call` dispatch.
     let mut origins_map: HashMap<usize, Vec<Vec<Callee>>> = HashMap::new();
@@ -3563,6 +4605,13 @@ pub fn build_module(
         origins_map.insert(i, origins(&f.code, &resolve));
     }
     let mut bodies = String::new();
+    // Module-scope env bindings: zero-initialized (`ZZ_UNIT`) file-scope
+    // globals, assigned by the top-level function before `main` runs.
+    let mut gids: Vec<&String> = em.globals.values().collect();
+    gids.sort();
+    for cid in gids {
+        bodies.push_str(&format!("static zz_value {cid};\n"));
+    }
     // Forward declarations (boxed symbols only; twins are static and
     // called after definition order — emit twins first instead).
     for f in &module.funcs {
@@ -3614,7 +4663,9 @@ pub fn build_module(
         })
         .map(|f| f.params.len())
         .unwrap_or(0);
-    let main_call = if main_arity == 0 {
+    let main_call = if !has_main {
+        "zz_unit()".to_string()
+    } else if main_arity == 0 {
         format!("{main_sym}(NULL, 0)")
     } else {
         // `main(cli_args)` receives argv (mirrors the VM + HIR backend).
@@ -3649,4 +4700,125 @@ pub fn build_module(
         needs_curl: crate::ffi::needs_curl_link(&native_names),
         needs_sqlite: crate::ffi::needs_sqlite_link(&native_names),
     })
+}
+
+#[cfg(test)]
+mod condfuse_tests {
+    use super::*;
+    use zz_ir::op::BinOp as B;
+
+    fn ints(slots: &[u16]) -> HashSet<u16> {
+        slots.iter().copied().collect()
+    }
+
+    fn consts() -> Vec<Const> {
+        vec![Const::Int(10)]
+    }
+
+    #[test]
+    fn while_slot_slot_fuses() {
+        // `loadslot 7, loadslot 0, binop Lt, whilecond` (sieve shape).
+        let code = vec![
+            Op::LoadSlot(7),
+            Op::LoadSlot(0),
+            Op::BinOp(B::Lt),
+            Op::WhileCond { exit: 76 },
+        ];
+        let (fused, skip) = condfuse_scan(
+            &code,
+            &consts(),
+            &ints(&[0, 7]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(fused.len(), 1);
+        let cf = &fused[&0];
+        assert!(matches!(cf.term, CondTerm::While(76)));
+        assert!(matches!(cf.cmp, B::Lt));
+        assert_eq!(skip, HashSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn while_slot_const_fuses() {
+        let code = vec![
+            Op::LoadSlot(3),
+            Op::PushConst(ConstId(0)),
+            Op::BinOp(B::Gt),
+            Op::WhileCond { exit: 9 },
+        ];
+        let (fused, _) = condfuse_scan(
+            &code,
+            &consts(),
+            &ints(&[3]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(fused.len(), 1);
+    }
+
+    #[test]
+    fn jump_terminators_fuse() {
+        for (term, ok) in [
+            (Op::JumpIfFalse(5), true),
+            (Op::JumpIfTrue(5), true),
+            (Op::Jump(5), false),
+        ] {
+            let code = vec![Op::LoadSlot(1), Op::LoadSlot(2), Op::BinOp(B::Eq), term];
+            let (fused, _) = condfuse_scan(
+                &code,
+                &consts(),
+                &ints(&[1, 2]),
+                &HashSet::new(),
+                &HashSet::new(),
+            );
+            assert_eq!(!fused.is_empty(), ok);
+        }
+    }
+
+    #[test]
+    fn non_int_operands_and_ops_do_not_fuse() {
+        // Unknown slot stays boxed.
+        let code = vec![
+            Op::LoadSlot(7),
+            Op::LoadSlot(9),
+            Op::BinOp(B::Lt),
+            Op::WhileCond { exit: 1 },
+        ];
+        let (fused, _) = condfuse_scan(
+            &code,
+            &consts(),
+            &ints(&[7]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(fused.is_empty());
+        // Non-comparison BinOp stays boxed.
+        let code = vec![
+            Op::LoadSlot(7),
+            Op::LoadSlot(0),
+            Op::BinOp(B::Add),
+            Op::WhileCond { exit: 1 },
+        ];
+        let (fused, _) = condfuse_scan(
+            &code,
+            &consts(),
+            &ints(&[0, 7]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn interior_jump_target_blocks() {
+        let code = vec![
+            Op::LoadSlot(7),
+            Op::LoadSlot(0),
+            Op::BinOp(B::Lt),
+            Op::WhileCond { exit: 1 },
+        ];
+        let targets = HashSet::from([2u32]);
+        let (fused, _) = condfuse_scan(&code, &consts(), &ints(&[0, 7]), &targets, &HashSet::new());
+        assert!(fused.is_empty());
+    }
 }

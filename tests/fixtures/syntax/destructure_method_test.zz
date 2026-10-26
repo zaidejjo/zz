@@ -1,0 +1,21 @@
+// features: comparison, destructuring, func-call, imports, int-arith, locals, print, std-str, string-literal
+// E2E: method dispatch on destructured bindings (#417).
+// Destructured names lowered without checker types, so multi-namespace
+// methods (`str`/`vec.contains`) fell through to the generic fallback
+// and picked `vec` first — `c.contains` returned false natively while
+// the namespaced form and the VM were correct.
+import std.str
+
+func make_pair() -> (str, int) {
+    return ("Red Works", 7)
+}
+
+func main() {
+    c, n := make_pair()
+    println("method:{c.contains(" ")}")
+    println("ns:{str.contains(c, " ")}")
+    lit := "Red Works"
+    println("lit-method:{lit.contains(" ")}")
+    println("n:{n}")
+    println("destructure_method_ok")
+}

@@ -45,7 +45,11 @@ fn literal_str_method_triple_chain() {
 fn literal_array_method_reverse() {
     assert_eq!(
         run("[1, 2, 3].reverse()").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(3), Value::Int(2), Value::Int(1),]))
+        Value::Array(std::sync::Arc::new(vec![
+            Value::Int(3),
+            Value::Int(2),
+            Value::Int(1),
+        ]))
     );
 }
 
@@ -53,7 +57,11 @@ fn literal_array_method_reverse() {
 fn literal_array_method_sort() {
     assert_eq!(
         run("[3, 1, 2].sort()").unwrap(),
-        Value::Array(Box::new(vec![Value::Int(1), Value::Int(2), Value::Int(3),]))
+        Value::Array(std::sync::Arc::new(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ]))
     );
 }
 
@@ -111,37 +119,4 @@ fn push_struct_array_for_loop() {
     "#)
     .unwrap();
     assert_eq!(result, Value::Str("Alice Bob".to_string().into()));
-}
-
-#[test]
-fn append_mutates_array() {
-    let result = run(r#"
-        arr := [1, 2, 3]
-        append(arr, 4)
-        arr.len()
-    "#)
-    .unwrap();
-    assert_eq!(result, Value::Int(4));
-}
-
-#[test]
-fn append_preserves_elements() {
-    let result = run(r#"
-        arr := [1, 2, 3]
-        append(arr, 4)
-        arr[0] + arr[1] + arr[2] + arr[3]
-    "#)
-    .unwrap();
-    assert_eq!(result, Value::Int(10));
-}
-
-#[test]
-fn append_method_syntax() {
-    let result = run(r#"
-        arr := [1, 2, 3]
-        arr.append(4)
-        arr.len()
-    "#)
-    .unwrap();
-    assert_eq!(result, Value::Int(4));
 }

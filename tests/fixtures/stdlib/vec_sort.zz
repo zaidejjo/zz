@@ -1,0 +1,52 @@
+// features: arrays, for-loop, imports, locals, print, std-vec, string-literal
+// E2E: std.vec.sort — every sortable lane over a size that exposes an
+// O(n^2) implementation. The native backend used to run an insertion sort
+// whose comparisons went through `zz_binop`/`zz_truthy` (200k ints: 34 s,
+// this 5k array: ~1 s); the ordering is the VM's (type name, then value,
+// stably) and the input array is never touched.
+import std.vec
+
+struct A { v: int }
+
+func main() {
+    // 5000 pseudo-random ints (LCG, so the input is identical everywhere)
+    xs:[int] = []
+    seed := 12345
+    for _i in 0..5000 {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        xs.push(seed % 100000)
+    }
+    sorted := vec.sort(xs)
+    println(len(sorted))
+    println(sorted[0])
+    println(sorted[len(sorted) - 1])
+    // non-decreasing?
+    bad := 0
+    prev := sorted[0]
+    for v in sorted {
+        if v < prev {
+            bad = bad + 1
+        }
+        prev = v
+    }
+    println(bad)
+    // value semantics: the input keeps its order and length
+    println(xs[0])
+    println(len(xs))
+    // other lanes
+    println(vec.sort([3.5, 1.25, 2.0]))
+    println(vec.sort([2.5, -0.5, 0.0]))
+    println(vec.sort(["pear", "fig", "apple", "a", "ab", "aa"]))
+    println(vec.sort([true, false, true, false, false]))
+    // stability: elements that compare equal keep their input order. For
+    // the generic (non-scalar) comparator every same-type-name element is
+    // equal — `option` and struct instances have no value order there.
+    println(vec.sort([.some(2), .some(1), .none, .some(3)]))
+    println(vec.sort([A { v: 2 }, A { v: 1 }, A { v: 3 }]))
+    // already sorted / reversed / single element / empty
+    println(vec.sort([1, 2, 3, 4]))
+    println(vec.sort([4, 3, 2, 1]))
+    println(vec.sort([7]))
+    println(vec.sort([0 - 5, 5, 0]))
+    println("vec_sort_ok")
+}

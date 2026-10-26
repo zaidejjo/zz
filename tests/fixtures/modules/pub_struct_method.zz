@@ -3,7 +3,7 @@
 pub struct Point {x: int, y: int}
 
 pub func dist(p: Point) -> int {
-    p.x + p.y
+    return p.x + p.y
 }
 
 func main() {

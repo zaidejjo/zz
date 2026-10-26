@@ -1,5 +1,5 @@
-//! `std.sqlz` — SQLite via rusqlite (bundled). CANONICAL module name;
-//! `std.db` is a zero-overhead alias exposing identical functionality.
+//! `std.sqlz` — SQLite via rusqlite (bundled). CANONICAL and only module
+//! name; there is no `db` module (removed outright).
 //!
 //! Compile-time parameterization contract:
 //! - `sqlz.query(sql)` / `sqlz.exec(sql)` receive an *already-evaluated* SQL
@@ -447,24 +447,24 @@ fn check_arity(fields: &[String], col_count: usize, span: Span) -> Result<(), Ev
 fn build_row_objects(obj_name: &str, fields: &[String], rows: Vec<Vec<Value>>) -> Value {
     let mut out = Vec::with_capacity(rows.len());
     for cols in rows {
-        let flds = if fields.is_empty() {
+        let flds: Vec<(std::sync::Arc<str>, Value)> = if fields.is_empty() {
             cols.into_iter()
                 .enumerate()
-                .map(|(i, v)| (format!("c{i}"), v))
+                .map(|(i, v)| (std::sync::Arc::from(format!("c{i}")), v))
                 .collect()
         } else {
             fields
                 .iter()
-                .cloned()
                 .zip(cols)
-                .collect::<Vec<(String, Value)>>()
+                .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+                .collect()
         };
-        out.push(Value::Object(Box::new(ObjectValue {
+        out.push(Value::Object(std::sync::Arc::new(ObjectValue {
             name: obj_name.to_string(),
             fields: flds,
         })));
     }
-    Value::Array(Box::new(out))
+    Value::Array(std::sync::Arc::new(out))
 }
 
 /// Convert a ZZ bound value to a Postgres text-format parameter.
@@ -999,7 +999,7 @@ pub(crate) fn db_transaction(
     // Never hold the connection lock across the closure body (it would
     // deadlock the body's own queries on the same thread).
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        interp.call(Value::Func(Box::new(closure)), vec![tx], span)
+        interp.call(Value::Func(std::rc::Rc::new(closure)), vec![tx], span)
     }));
     match outcome {
         Ok(Ok(v)) => match tx_commit(&handle, span) {
@@ -1167,10 +1167,10 @@ mod tests {
                 match &rows[0] {
                     Value::Object(o) => {
                         assert_eq!(o.name, "User");
-                        assert_eq!(o.fields[0], ("id".to_string(), Value::Int(7)));
+                        assert_eq!(o.fields[0], ("id".into(), Value::Int(7)));
                         assert_eq!(
                             o.fields[1],
-                            ("name".to_string(), Value::Str("carol".to_string().into()))
+                            ("name".into(), Value::Str("carol".to_string().into()))
                         );
                     }
                     other => panic!("expected object, got {other:?}"),

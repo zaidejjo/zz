@@ -1,0 +1,11 @@
+// features: comparison, error-case, func-call, imports, int-arith
+// E2E: falsified properties abort with seed + minimal case on both engines.
+import std.property
+
+func too_big(x: int) -> bool {
+    return x < 5
+}
+
+func main() {
+    property.for_all_int(0, 100, too_big, 200, 11)
+}

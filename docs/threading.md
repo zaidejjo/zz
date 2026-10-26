@@ -27,14 +27,18 @@ Consequences:
   code references.
 
 The AOT backend mirrors the model in C: channel sends and spawn captures
-are deep copies (`zz_value_dup`), arenas are thread-local, string
-refcounts and the intern table are thread-safe.
+are deep copies (`zz_value_dup`), arenas are thread-local, and heap
+ownership — strings, arrays/dicts, and Option/Result payload boxes
+(`zz_vbox`) — is reference counted with atomic counters, so values shared
+across threads stay safe.
 
 ## Recipes
 
 ```zz
 import std.task
 import std.chan
+
+func risky() -> int { return 1 }
 
 // Fan-out / fan-in.
 c := std.chan()
@@ -45,22 +49,22 @@ for i in 0..8 {
     v: int = std.chan.recv(c)
 }
 
-// Join a single task (panics inside surface as `.err`).
+// Join a single task.
 h := task.spawn(|_| { risky() })
-r: Result<int, str> = task.join(h)
-
-// Non-blocking poll: `.some` when done (repeatable), `.none` while running.
-q := task.try_join(h)
+println(task.join(h))      // 1 (panics inside surface as .err)
+println(task.try_join(h))  // .some(...) when done, .none while running
 ```
 
 ## Cooperative safepoints
 
 Tasks yield only at blocking calls — a pure-CPU loop would hog its
 executor thread forever. Every `for`/`while` therefore carries a
-safepoint at its loop top (VM `Op::Safepoint`, AOT `zz_safepoint()`):
-one counter decrement per iteration, clock read once per 1024, voluntary
-yield past a 1ms quantum. Cost ~0.02ns/iter (unmeasurable); header (not
-back-edge) placement so `continue` cannot skip the check. On the VM the
+safepoint at its loop top: one counter decrement per iteration, clock
+read once per 1024, voluntary yield past a 1ms quantum. Cost
+~0.02ns/iter (unmeasurable). The check rides on the loop's own test op
+(`ForNext` / `WhileCond`) instead of a separate dispatch — every edge,
+including `continue`, goes through that op, so it cannot be skipped.
+AOT uses `zz_safepoint()`. On the VM the
 executor requeues the task; on AOT the task suspends at the next
 blocking call (see below), so the safepoint is only an OS courtesy
 for sibling threads.

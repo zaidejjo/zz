@@ -5,17 +5,17 @@ struct OtherErr { msg: str }
 
 impl MyErr {
     func convert_to_OtherErr(self) -> OtherErr {
-        OtherErr{msg: self.msg}
+        return OtherErr{msg: self.msg}
     }
 }
 
 func fetch() -> Result<int, MyErr> {
-    .ok(7)
+    return .ok(7)
 }
 
 func load() -> Result<int, OtherErr> {
     x := try fetch()
-    .ok(x * 6)
+    return .ok(x * 6)
 }
 
 r := load()

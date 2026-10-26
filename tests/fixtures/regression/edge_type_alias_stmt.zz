@@ -1,0 +1,10 @@
+// features: aliases, print
+// Regression: a type alias statement emits no ops, so it owns no statement
+// value. The owning container used to pop one for it anyway, which shifted
+// every later slot by one — the next declaration then panicked in `StoreSlot`.
+type A = int
+x := 41
+type B = str
+y := 1
+println("{x + y}")
+println("edge_type_alias_stmt_ok")

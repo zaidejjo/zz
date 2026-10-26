@@ -1,0 +1,19 @@
+// features: comparison, func-call, if-else, int-arith, locals, print, string-literal
+// E2E: zz cover reports covered/uncovered lines deterministically.
+func used(n: int) -> int {
+    return n * 2
+}
+
+func unused_fn() -> int {
+    return 999
+}
+
+func main() {
+    x := used(21)
+    println(x)
+    if x > 100 {
+        println("big")
+    } else {
+        println("small")
+    }
+}

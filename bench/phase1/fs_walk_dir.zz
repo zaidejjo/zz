@@ -1,0 +1,26 @@
+// bench/phase1/fs_walk_dir.zz — time fs.walk_dir on a 20k-entry directory.
+// Usage: zz run bench/phase1/fs_walk_dir.zz [DIR]
+import std.env
+import std.fs
+import std.time
+
+func main() -> int {
+    dir := env.args()
+    path := if len(dir) > 0 {
+        dir[0]
+    } else {
+        "/home/zaid/Projects/.zz-targets/bench-read-dir-20k"
+    }
+    t0 := time.now_ms()
+    match fs.walk_dir(path) {
+        .ok(paths) => {
+            t1 := time.now_ms()
+            println("walk_dir n={len(paths)} ms={t1 - t0}")
+            return 0
+        }
+        .err(e) => {
+            println("walk_dir err={e}")
+            return 1
+        }
+    }
+}

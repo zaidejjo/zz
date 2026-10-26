@@ -51,5 +51,5 @@ func main() -> Result<int, str> {
     }
     assert(got == "8:31:255:65")
     println("http_bytes_p3_ok")
-    .ok(0)
+    return .ok(0)
 }

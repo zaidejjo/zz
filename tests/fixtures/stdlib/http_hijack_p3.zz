@@ -68,5 +68,5 @@ func main() -> Result<int, str> {
     }
 
     println("http_hijack_p3_ok")
-    .ok(0)
+    return .ok(0)
 }

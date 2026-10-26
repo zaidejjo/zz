@@ -1,0 +1,16 @@
+[package]
+name = "zz-dap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zz-dap"
+path = "src/main.rs"
+
+[dependencies]
+zz_frontend = { path = "../zz_frontend" }
+zz_runtime  = { path = "../zz_runtime" }
+zz_stdlib   = { path = "../zz_stdlib" }
+serde       = { workspace = true }
+serde_json  = { workspace = true }

@@ -21,15 +21,16 @@ use crate::lookup::resolve_type_of_expr;
 // ── ZZ keywords ──────────────────────────────────────────────────────────
 
 const KEYWORDS: &[&str] = &[
-    "break", "continue", "defer", "else", "false", "for", "func", "if", "import", "match", "none",
-    "return", "struct", "true", "while",
+    "as", "break", "const", "continue", "defer", "else", "enum", "extern", "false", "for", "func",
+    "if", "impl", "import", "in", "match", "mut", "none", "pub", "return", "struct", "true",
+    "type", "while",
 ];
 
-// ── Stdlib module names ──────────────────────────────────────────────────
+/// Primitive type names (`x: int`), always in scope.
+const PRIMITIVE_TYPES: &[&str] = &["bool", "float", "int", "str"];
 
-const STDLIB_MODULES: &[&str] = &[
-    "io", "str", "vec", "json", "http", "fs", "cenv", "math", "time", "sqlz", "db",
-];
+/// Builtin trait bounds (`<T: Num>`), always in scope.
+const BUILTIN_BOUNDS: &[&str] = &["Display", "Eq", "Num", "Ord"];
 
 // ── Completion environment ─────────────────────────────────────────────────
 
@@ -56,7 +57,6 @@ pub fn completions_for_position(
     check_result: Option<&CheckResult>,
     cenv: Option<&CompletionEnv>,
 ) -> Option<CompletionResponse> {
-    let ctx = detect_context(source, offset, cenv)?;
     // Plain-text guarantee: no item ever snippet-expands or carries
     // parens — what you see is exactly what gets inserted. (Stray `()`
     // some users see comes from client-side autopairs confirm hooks, not
@@ -67,13 +67,21 @@ pub fn completions_for_position(
         }
         items
     }
+
+    // Collection member names are string literals (`commands.get("gre|")`),
+    // so they must be recognized before the generic inside-string guard.
+    if let Some(items) = collection_get_completions(program, source, offset, cenv) {
+        return Some(CompletionResponse::Array(plain(items)));
+    }
+
+    let ctx = detect_context(source, offset, cenv)?;
     let items = match ctx {
         CompletionContext::DotAccess {
             obj_name,
             partial_prefix,
         } => dot_access_completions(program, check_result, &obj_name, &partial_prefix, cenv),
         CompletionContext::Scope { partial_prefix } => {
-            scope_completions(program, check_result, &partial_prefix, cenv)
+            scope_completions(program, source, check_result, &partial_prefix, offset, cenv)
         }
         CompletionContext::ImportPath {
             partial_prefix,
@@ -111,7 +119,9 @@ pub fn completions_for_position(
                     &key,
                     &partial_prefix,
                 ),
-                None => scope_completions(program, check_result, &partial_prefix, cenv),
+                None => {
+                    scope_completions(program, source, check_result, &partial_prefix, offset, cenv)
+                }
             }
         }
     };
@@ -124,7 +134,7 @@ pub fn resolve_completion_detail(item: &mut CompletionItem, check_result: Option
         Some(cr) => cr,
         None => return,
     };
-    if let Some(sig) = cr.funcs.get(&item.label) {
+    if let Some(sig) = zz_checker::lookup_std(&cr.funcs, &item.label) {
         item.detail = Some(format_func_sig(&item.label, sig));
         if let Some(docs) = format_func_docs(sig) {
             item.documentation = Some(tower_lsp::lsp_types::Documentation::String(docs));
@@ -343,19 +353,29 @@ fn import_completion_at(
     // Module path: identifier/dot/slash characters only.
     // `std` roots always complete; local paths complete when their first
     // segment resolves beside the document (otherwise `import foo` stays
-    // plain scope — nothing to offer yet).
+    // plain scope — nothing to offer yet). Installed package names count
+    // as resolvable (prefix match: `import mi` may become `mid`).
     // An empty path (`import |`) offers `std` plus local top-level modules.
     let path_ok = after
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '/');
     if path_ok
-        && (after.is_empty() || after == "std" || after.starts_with("std.") || {
-            let first = after.split(['.', '/']).next().unwrap_or("");
-            cenv.and_then(|e| e.doc_dir.clone()).is_some_and(|dir| {
-                !first.is_empty()
-                    && (dir.join(first).with_extension("zz").is_file() || dir.join(first).is_dir())
+        && (after.is_empty()
+            || after == "std"
+            || after.starts_with("std.")
+            || after == "collect"
+            || after.starts_with("collect.")
+            || {
+                let first = after.split(['.', '/']).next().unwrap_or("");
+                cenv.and_then(|e| e.doc_dir.clone()).is_some_and(|dir| {
+                    !first.is_empty()
+                        && (dir.join(first).with_extension("zz").is_file()
+                            || dir.join(first).is_dir()
+                            || installed_deps(&dir)
+                                .iter()
+                                .any(|(n, _)| n.starts_with(first)))
+                })
             })
-        })
     {
         return Some(ImportCompletionKind::Path {
             partial: after.to_string(),
@@ -454,6 +474,133 @@ fn replace_range(source: &str, replace_start: usize, cursor: u32) -> tower_lsp::
     }
 }
 
+// ── Manifest-declared collections ([collect.*]) ──────────────────────────
+
+/// Nearest project manifest, if the document lives inside one.
+fn collection_manifest(
+    dir: &std::path::Path,
+) -> Option<(std::path::PathBuf, zz_pm::manifest::Manifest)> {
+    let root = crate::deps::find_project_root(dir)?;
+    let manifest = zz_pm::manifest::Manifest::load(&root.join("zz.toml")).ok()?;
+    Some((root, manifest))
+}
+
+/// Collection names declared in the document's project manifest.
+fn collection_names(dir: &std::path::Path) -> Vec<String> {
+    collection_manifest(dir)
+        .map(|(_, manifest)| manifest.collections.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Resolve an import namespace to its `[collect.<name>]` spec:
+/// `import collect.commands as c` → `commands` spec for namespace `c`.
+/// Falls back to a manifest key matching the namespace when the import
+/// statement is mid-edit and absent from the parsed program.
+fn collection_for_namespace(
+    program: &Program,
+    ns: &str,
+    cenv: Option<&CompletionEnv>,
+) -> Option<(String, zz_pm::manifest::CollectionSpec)> {
+    let dir = cenv?.doc_dir.as_deref()?;
+    let (_, manifest) = collection_manifest(dir)?;
+    for stmt in &program.stmts {
+        if let Stmt::Import { path, alias, .. } = stmt {
+            if path.len() == 2 && path[0] == "collect" {
+                let imported_ns = alias.as_deref().unwrap_or(path[1].as_str());
+                if imported_ns == ns {
+                    if let Some(spec) = manifest.collections.get(&path[1]) {
+                        return Some((path[1].clone(), spec.clone()));
+                    }
+                }
+            }
+        }
+    }
+    manifest
+        .collections
+        .get(ns)
+        .cloned()
+        .map(|spec| (ns.to_string(), spec))
+}
+
+/// Find the byte offset of the opening quote when the cursor sits inside an
+/// unterminated string literal. `None` outside strings (or after the close).
+fn open_string_quote(text: &str) -> Option<usize> {
+    let mut open = None;
+    let mut escaped = false;
+    for (i, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => open = if open.is_some() { None } else { Some(i) },
+            '\n' => open = None,
+            _ => {}
+        }
+    }
+    open
+}
+
+/// Complete member names inside `commands.get("…")`. Returns `None` when
+/// the cursor is not in a collection lookup string so ordinary string
+/// context stays quiet.
+fn collection_get_completions(
+    program: &Program,
+    source: &str,
+    offset: u32,
+    cenv: Option<&CompletionEnv>,
+) -> Option<Vec<CompletionItem>> {
+    let mut offset = (offset as usize).min(source.len());
+    while offset > 0 && !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &source[..offset];
+    let quote = open_string_quote(before)?;
+    let partial = &before[quote + 1..];
+    if partial.contains('\n') {
+        return None;
+    }
+    let head = before[..quote].trim_end();
+    let dot = head.rfind(".get")?;
+    if head[dot + 4..].trim() != "(" {
+        return None;
+    }
+    let receiver = head[..dot].trim_end();
+    let start = receiver
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '.'))
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let ns = &receiver[start..];
+    if ns.is_empty() || ns.starts_with('.') || ns.ends_with('.') {
+        return None;
+    }
+    let (name, spec) = collection_for_namespace(program, ns, cenv)?;
+    let (root, _) = collection_manifest(cenv?.doc_dir.as_deref()?)?;
+    let members = spec.discover(&root).ok()?;
+    let range = replace_range(source, quote + 1, offset as u32);
+    let mut items: Vec<CompletionItem> = members
+        .into_iter()
+        .filter(|member| member.name.starts_with(partial))
+        .map(|member| CompletionItem {
+            label: member.name.clone(),
+            kind: Some(CompletionItemKind::CONSTANT),
+            detail: Some(format!("collect.{name} member")),
+            text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                tower_lsp::lsp_types::TextEdit {
+                    range,
+                    new_text: member.name,
+                },
+            )),
+            ..Default::default()
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    Some(items)
+}
+
 /// Complete `std.*` module paths inside `import` statements.
 ///
 /// Labels are full dotted paths (`std.math`) with a `textEdit` that replaces
@@ -482,6 +629,16 @@ fn import_path_completions(
         });
         // Local top-level modules beside the document (`utils.zz` → `utils`).
         if let Some(dir) = doc_dir {
+            // Manifest collections: `import collect.commands`.
+            if !collection_names(&dir).is_empty() {
+                items.push(CompletionItem {
+                    label: "collect".to_string(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("zz.toml collections".to_string()),
+                    text_edit: text_edit("collect".to_string()),
+                    ..Default::default()
+                });
+            }
             let mut tops = local_tops(&dir);
             tops.sort();
             for top in tops {
@@ -493,7 +650,38 @@ fn import_path_completions(
                     ..Default::default()
                 });
             }
+            // Installed packages from the enclosing project (`zz.toml`
+            // + locked versions from `zz.lock`).
+            for (name, detail) in installed_deps(&dir) {
+                if !items.iter().any(|i| i.label == name) {
+                    items.push(CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some(detail),
+                        text_edit: text_edit(name),
+                        ..Default::default()
+                    });
+                }
+            }
         }
+        return items;
+    }
+    if partial_prefix == "collect" || partial_prefix.starts_with("collect.") {
+        if let Some(dir) = doc_dir {
+            for name in collection_names(&dir) {
+                let full = format!("collect.{name}");
+                if full.starts_with(partial_prefix) {
+                    items.push(CompletionItem {
+                        label: full.clone(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some("collection (zz.toml)".to_string()),
+                        text_edit: text_edit(full),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
         return items;
     }
     if partial_prefix == "std" || partial_prefix.starts_with("std.") {
@@ -518,13 +706,13 @@ fn import_path_completions(
     // paths; the textEdit swaps the whole typed path so prefixes never
     // double. Only resolvable files are offered — the loader accepts
     // nothing else.
-    if let Some(dir) = doc_dir {
+    if let Some(ref dir) = doc_dir {
         let (parent, last) = match partial_prefix.rsplit_once('.') {
             Some((p, l)) => (p, l),
             None => ("", partial_prefix),
         };
         let parent_dir = if parent.is_empty() {
-            dir
+            dir.clone()
         } else {
             dir.join(parent.replace('.', "/"))
         };
@@ -585,6 +773,23 @@ fn import_path_completions(
                     ..Default::default()
                 });
             }
+            // Installed packages, bare names only (`import mid|` →
+            // `mid`; dotted member paths like `mid.sub` stay future
+            // work — they need dep-source harvesting). Labels already
+            // offered as local modules win the dedupe.
+            if parent.is_empty() {
+                for (name, detail) in installed_deps(dir) {
+                    if name.starts_with(last) && !items.iter().any(|i| i.label == name) {
+                        items.push(CompletionItem {
+                            label: name.clone(),
+                            kind: Some(CompletionItemKind::MODULE),
+                            detail: Some(detail),
+                            text_edit: text_edit(name),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
         }
     }
     items
@@ -604,6 +809,57 @@ fn local_tops(dir: &std::path::Path) -> Vec<String> {
         }
     }
     tops
+}
+
+/// Installed packages visible from `dir`: `(name, detail)` pairs from
+/// the nearest `zz.toml` at or above `dir`, with locked versions from
+/// `zz.lock` when present. Powers dependency-name completion in import
+/// paths (`import mid|` → `mid`); member completion inside a package
+/// (`mid.|`) stays future work (needs dep-source harvesting).
+/// Missing/unreadable manifests yield nothing — never an error.
+fn installed_deps(dir: &std::path::Path) -> Vec<(String, String)> {
+    // Nearest project root at or above the document.
+    let mut root: Option<std::path::PathBuf> = None;
+    let mut cursor = Some(dir.to_path_buf());
+    while let Some(d) = cursor {
+        if d.join("zz.toml").is_file() {
+            root = Some(d);
+            break;
+        }
+        cursor = d.parent().map(|p| p.to_path_buf());
+    }
+    let Some(root) = root else {
+        return Vec::new();
+    };
+    let Ok(manifest) = zz_pm::manifest::Manifest::load(&root.join("zz.toml")) else {
+        return Vec::new();
+    };
+    // Best-effort versions: absent/unreadable locks degrade to the
+    // declared requirement instead of hiding the package.
+    let lock = zz_pm::lock::Lockfile::load(&root.join("zz.lock")).ok();
+    let mut names: Vec<String> = manifest.dependencies.keys().cloned().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let detail = match lock.as_ref().and_then(|l| l.find(&name)) {
+                Some(locked) => format!("dependency {}", locked.version),
+                None => match manifest.dependencies.get(&name) {
+                    Some(zz_pm::manifest::DepSpec::Path(p)) => {
+                        format!("dependency (path {})", p.path)
+                    }
+                    Some(zz_pm::manifest::DepSpec::Git(g)) => {
+                        format!("dependency (git {})", g.rev)
+                    }
+                    Some(zz_pm::manifest::DepSpec::Version(req)) => {
+                        format!("dependency ({req})")
+                    }
+                    None => "dependency".to_string(),
+                },
+            };
+            (name, detail)
+        })
+        .collect()
 }
 
 /// Complete member names inside a selective import list:
@@ -648,7 +904,7 @@ fn selective_member_completions(
             std::collections::HashMap::new();
         if let Some(cr) = check_result {
             for key in cr.funcs.keys() {
-                if let Some(name) = key.strip_prefix(&prefix) {
+                if let Some(name) = strip_member(key, ns) {
                     if !name.contains('.') && name.starts_with(partial_prefix) {
                         members
                             .entry(name.to_string())
@@ -657,7 +913,7 @@ fn selective_member_completions(
                 }
             }
             for key in cr.structs.keys() {
-                if let Some(name) = key.strip_prefix(&prefix) {
+                if let Some(name) = strip_member(key, ns) {
                     if !name.contains('.') && name.starts_with(partial_prefix) {
                         members
                             .entry(name.to_string())
@@ -810,6 +1066,8 @@ fn std_root_completions(partial_prefix: &str) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
     for module in zz_stdlib::STDLIB_MODULES {
+        // Nested `sqlz.postgres` / `sqlz.mysql` stay hidden at root by
+        // design: they complete only under `std.sqlz.*`.
         let top = module.split('.').next().unwrap_or(module);
         if top.starts_with(partial_prefix) && seen.insert(top.to_string()) {
             items.push(CompletionItem {
@@ -823,6 +1081,22 @@ fn std_root_completions(partial_prefix: &str) -> Vec<CompletionItem> {
     }
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+/// Strip a member key for namespace `ns`, accepting the canonical
+/// `std.*` seed spelling as well as the short (import-copied) one.
+/// Seeds hold canonical names only (`std.vec.push`), so an unimported
+/// `vec.` scan must also match `std.vec.`.
+fn strip_member<'a>(key: &'a str, ns: &str) -> Option<&'a str> {
+    if let Some(rest) = key.strip_prefix(&format!("{ns}.")) {
+        return Some(rest);
+    }
+    if !ns.starts_with("std.") {
+        if let Some(rest) = key.strip_prefix(&format!("std.{ns}.")) {
+            return Some(rest);
+        }
+    }
+    None
 }
 
 /// Seeded globals snapshot (`lib.pi` from deps/workspace).
@@ -867,6 +1141,35 @@ fn dot_access_completions(
     if obj_name == "std" {
         return std_root_completions(partial_prefix);
     }
+    // `import collect.commands` binds a synthesized module namespace whose
+    // `get` / `all` functions never live in a struct type.
+    if let Some((name, _spec)) = collection_for_namespace(program, obj_name, cenv) {
+        let mut items = Vec::new();
+        for (label, detail) in [
+            ("get", "func get(name: str) -> Option<Entry>"),
+            ("all", "func all() -> [Entry]"),
+        ] {
+            if label.starts_with(partial_prefix) {
+                items.push(CompletionItem {
+                    label: label.to_string(),
+                    kind: Some(CompletionItemKind::METHOD),
+                    detail: Some(detail.to_string()),
+                    insert_text: Some(label.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+        if partial_prefix.is_empty() || "Entry".starts_with(partial_prefix) {
+            items.push(CompletionItem {
+                label: "Entry".to_string(),
+                kind: Some(CompletionItemKind::STRUCT),
+                detail: Some(format!("collect.{name} entry")),
+                insert_text: Some("Entry".to_string()),
+                ..Default::default()
+            });
+        }
+        return items;
+    }
     let cr = match check_result {
         Some(cr) => cr,
         None => return Vec::new(),
@@ -891,15 +1194,14 @@ fn dot_access_completions(
                 Type::Response | Type::HttpServer | Type::HttpRequest => vec!["http"],
                 Type::TcpStream | Type::TcpListener => vec!["net"],
                 Type::Json => vec!["json"],
-                Type::Db => vec!["sqlz", "db"],
+                Type::Db => vec!["sqlz"],
                 Type::Chan => vec!["chan"],
                 _ => vec![],
             };
             let mut items: Vec<CompletionItem> = Vec::new();
             for ns in nss {
-                let prefix = format!("{ns}.");
                 for k in cr.funcs.keys() {
-                    if let Some(m) = k.strip_prefix(&prefix) {
+                    if let Some(m) = strip_member(k, ns) {
                         if m.starts_with(partial_prefix) && !m.contains('.') {
                             items.push(CompletionItem {
                                 label: m.to_string(),
@@ -952,9 +1254,8 @@ fn struct_items(cr: &CheckResult, struct_name: &str, partial_prefix: &str) -> Ve
         })
         .collect();
     // Struct methods (inherent + extensions, merged in `funcs`).
-    let prefix = format!("{struct_name}.");
     for k in cr.funcs.keys() {
-        if let Some(m) = k.strip_prefix(&prefix) {
+        if let Some(m) = strip_member(k, struct_name) {
             if m.starts_with(partial_prefix) && !m.contains('.') {
                 items.push(CompletionItem {
                     label: m.to_string(),
@@ -1113,7 +1414,7 @@ fn find_stdlib_module_for_alias(program: &Program, alias: &str) -> Option<String
                     return Some(path[1..].join("."));
                 }
                 // Direct import like `import math` — assume it's a stdlib module.
-                if path.len() == 1 && STDLIB_MODULES.contains(&path[0].as_str()) {
+                if path.len() == 1 && zz_stdlib::STDLIB_MODULES.contains(&path[0].as_str()) {
                     return Some(path[0].clone());
                 }
                 fallback = Some(ns);
@@ -1128,8 +1429,8 @@ fn resolve_obj_type(program: &Program, cr: &CheckResult, name: &str) -> Option<T
     if let Some(ty) = cr.bindings.get(name) {
         return Some(ty.clone());
     }
-    // 2. Check function name.
-    if let Some(sig) = cr.funcs.get(name) {
+    // 2. Check function name (canonical fallback: seeds are `std.*` only).
+    if let Some(sig) = zz_checker::lookup_std(&cr.funcs, name) {
         return Some(func_sig_to_type(sig));
     }
     // 3. Check struct name.
@@ -1235,23 +1536,127 @@ fn find_local_in_block(
 
 // ── Scope completions ────────────────────────────────────────────────────
 
+/// Ranking tiers for scope completion (lower serves first). Frequency
+/// within a tier comes from whole-word use counts in the buffer, so a
+/// file's own vocabulary floats above the stdlib without any
+/// persistence or protocol extensions.
+const TIER_LOCAL: u8 = 0;
+const TIER_IMPORTED: u8 = 1;
+const TIER_GLOBAL: u8 = 2;
+const TIER_LANGUAGE: u8 = 3;
+
+/// Sort tiered items by (tier, use frequency, label) and stamp the
+/// protocol `sortText` so every client renders the same order.
+fn rank_scope_items(ranked: Vec<(u8, CompletionItem)>, source: &str) -> Vec<CompletionItem> {
+    // Whole-word counts over identifier characters.
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut current = String::new();
+    for ch in source.chars().chain(std::iter::once(' ')) {
+        if ch.is_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            *counts.entry(std::mem::take(&mut current)).or_insert(0) += 1;
+        }
+    }
+    let mut ranked = ranked;
+    ranked.sort_by(|a, b| {
+        let fa = counts.get(a.1.label.as_str()).copied().unwrap_or(0);
+        let fb = counts.get(b.1.label.as_str()).copied().unwrap_or(0);
+        (a.0, std::cmp::Reverse(fa), &a.1.label).cmp(&(b.0, std::cmp::Reverse(fb), &b.1.label))
+    });
+    ranked
+        .into_iter()
+        .map(|(tier, mut item)| {
+            let freq = counts
+                .get(item.label.as_str())
+                .copied()
+                .unwrap_or(0)
+                .min(9999);
+            item.sort_text = Some(format!("{tier:01}:{:04}:{}", 9999 - freq, item.label));
+            item
+        })
+        .collect()
+}
+
 fn scope_completions(
     program: &Program,
+    source: &str,
     check_result: Option<&CheckResult>,
     partial_prefix: &str,
+    offset: u32,
     cenv: Option<&CompletionEnv>,
 ) -> Vec<CompletionItem> {
-    let mut items = Vec::new();
+    let mut ranked: Vec<(u8, CompletionItem)> = Vec::new();
+    let seen =
+        |ranked: &[(u8, CompletionItem)], label: &str| ranked.iter().any(|(_, i)| i.label == label);
 
     // Keywords.
     for kw in KEYWORDS {
         if kw.starts_with(partial_prefix) {
-            items.push(CompletionItem {
-                label: kw.to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("keyword".to_string()),
-                ..Default::default()
-            });
+            ranked.push((
+                TIER_LANGUAGE,
+                CompletionItem {
+                    label: kw.to_string(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    detail: Some("keyword".to_string()),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    // Primitive types and builtin trait bounds: always in scope, so they
+    // complete in type positions (`x: in|`, `<T: N|`) as well as value
+    // positions (harmless there — the checker rejects misuse).
+    for ty in PRIMITIVE_TYPES {
+        if ty.starts_with(partial_prefix) {
+            ranked.push((
+                TIER_LANGUAGE,
+                CompletionItem {
+                    label: ty.to_string(),
+                    kind: Some(CompletionItemKind::CLASS),
+                    detail: Some("builtin type".to_string()),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    for bound in BUILTIN_BOUNDS {
+        if bound.starts_with(partial_prefix) {
+            ranked.push((
+                TIER_LANGUAGE,
+                CompletionItem {
+                    label: bound.to_string(),
+                    kind: Some(CompletionItemKind::INTERFACE),
+                    detail: Some("builtin bound".to_string()),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    // Generic parameters of the enclosing function (`func min<T: Num>(`
+    // → `T` completes in the body and signature). Span containment on
+    // the cursor offset; innermost wins for nested closures.
+    let mut generic_names: Vec<String> = Vec::new();
+    for stmt in &program.stmts {
+        if let Stmt::Func { generics, span, .. } = stmt {
+            if offset >= span.start && offset <= span.end {
+                generic_names = generics.iter().map(|g| g.name.name.clone()).collect();
+            }
+        }
+    }
+    for name in &generic_names {
+        if name.starts_with(partial_prefix) && !seen(&ranked, name) {
+            ranked.push((
+                TIER_LOCAL,
+                CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::TYPE_PARAMETER),
+                    detail: Some("generic parameter".to_string()),
+                    ..Default::default()
+                },
+            ));
         }
     }
 
@@ -1259,34 +1664,56 @@ fn scope_completions(
         // Global functions.
         for name in cr.funcs.keys() {
             if name.starts_with(partial_prefix) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some(format!("func {name}")),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_GLOBAL,
+                    CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some(format!("func {name}")),
+                        ..Default::default()
+                    },
+                ));
             }
         }
         // Global structs.
         for name in cr.structs.keys() {
             if name.starts_with(partial_prefix) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    detail: Some(format!("struct {name}")),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_GLOBAL,
+                    CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::STRUCT),
+                        detail: Some(format!("struct {name}")),
+                        ..Default::default()
+                    },
+                ));
             }
         }
-        // Global bindings: own-file lets plus seeded dep/workspace globals.
-        for (name, ty) in cr.bindings.iter().chain(env_bindings(cenv)) {
+        // Own-file lets outrank seeded dep/workspace globals.
+        for (name, ty) in cr.bindings.iter() {
             if name.starts_with(partial_prefix) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some(format!("{name}: {ty}")),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_LOCAL,
+                    CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some(format!("{name}: {ty}")),
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+        for (name, ty) in env_bindings(cenv) {
+            if name.starts_with(partial_prefix) && !seen(&ranked, name) {
+                ranked.push((
+                    TIER_IMPORTED,
+                    CompletionItem {
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some(format!("{name}: {ty}")),
+                        ..Default::default()
+                    },
+                ));
             }
         }
     }
@@ -1332,17 +1759,20 @@ fn scope_completions(
                 if !target.starts_with(partial_prefix) {
                     continue;
                 }
-                if items.iter().any(|i| i.label == target) {
+                if seen(&ranked, &target) {
                     continue;
                 }
                 let qualified = format!("{ns}.{name}");
-                if cr.funcs.contains_key(&qualified) {
-                    items.push(CompletionItem {
-                        label: target.clone(),
-                        kind: Some(CompletionItemKind::FUNCTION),
-                        detail: Some(format!("{qualified} (selective)")),
-                        ..Default::default()
-                    });
+                if zz_checker::lookup_std(&cr.funcs, &qualified).is_some() {
+                    ranked.push((
+                        TIER_IMPORTED,
+                        CompletionItem {
+                            label: target.clone(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            detail: Some(format!("{qualified} (selective)")),
+                            ..Default::default()
+                        },
+                    ));
                 }
             }
         }
@@ -1362,12 +1792,15 @@ fn scope_completions(
                 .or_else(|| path.last().cloned())
                 .unwrap_or_default();
             if ns.starts_with(partial_prefix) {
-                items.push(CompletionItem {
-                    label: ns.clone(),
-                    kind: Some(CompletionItemKind::MODULE),
-                    detail: Some(format!("import {}", path.join("."))),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_IMPORTED,
+                    CompletionItem {
+                        label: ns.clone(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some(format!("import {}", path.join("."))),
+                        ..Default::default()
+                    },
+                ));
             }
         }
     }
@@ -1375,30 +1808,33 @@ fn scope_completions(
     // The `std` root itself: typing `st` should discover the stdlib
     // (`std.` then lists modules). Needs no import.
     if "std".starts_with(partial_prefix) {
-        items.push(CompletionItem {
-            label: "std".to_string(),
-            kind: Some(CompletionItemKind::MODULE),
-            detail: Some("stdlib root — `std.<module>`".to_string()),
-            ..Default::default()
-        });
+        ranked.push((
+            TIER_IMPORTED,
+            CompletionItem {
+                label: "std".to_string(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some("stdlib root — `std.<module>`".to_string()),
+                ..Default::default()
+            },
+        ));
     }
 
     // Local names from AST.
-    collect_local_names(program, &mut items, partial_prefix);
+    collect_local_names(program, &mut ranked, partial_prefix);
 
-    // Deduplicate by label.
-    items.sort_by(|a, b| a.label.cmp(&b.label));
-    items.dedup_by(|a, b| a.label == b.label);
-    items
+    // Deduplicate by label, keeping the best (lowest) tier, then rank.
+    ranked.sort_by(|a, b| (a.0, &a.1.label).cmp(&(b.0, &b.1.label)));
+    ranked.dedup_by(|a, b| a.1.label == b.1.label);
+    rank_scope_items(ranked, source)
 }
 
-fn collect_local_names(program: &Program, items: &mut Vec<CompletionItem>, prefix: &str) {
+fn collect_local_names(program: &Program, ranked: &mut Vec<(u8, CompletionItem)>, prefix: &str) {
     for stmt in &program.stmts {
-        collect_locals_in_stmt(stmt, items, prefix);
+        collect_locals_in_stmt(stmt, ranked, prefix);
     }
 }
 
-fn collect_locals_in_stmt(stmt: &Stmt, items: &mut Vec<CompletionItem>, prefix: &str) {
+fn collect_locals_in_stmt(stmt: &Stmt, ranked: &mut Vec<(u8, CompletionItem)>, prefix: &str) {
     match stmt {
         Stmt::Func { params, body, .. } => {
             for param in params {
@@ -1407,78 +1843,87 @@ fn collect_locals_in_stmt(stmt: &Stmt, items: &mut Vec<CompletionItem>, prefix: 
                         Some(ty) => format!("param: {ty:?}"),
                         None => "param".to_string(),
                     };
-                    items.push(CompletionItem {
-                        label: param.name.name.clone(),
-                        kind: Some(CompletionItemKind::VARIABLE),
-                        detail: Some(detail),
-                        insert_text: Some(param.name.name.clone()),
-                        ..Default::default()
-                    });
+                    ranked.push((
+                        TIER_LOCAL,
+                        CompletionItem {
+                            label: param.name.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(detail),
+                            insert_text: Some(param.name.name.clone()),
+                            ..Default::default()
+                        },
+                    ));
                 }
             }
-            collect_locals_in_block(body, items, prefix);
+            collect_locals_in_block(body, ranked, prefix);
         }
         Stmt::Decl { name, .. } => {
             if name.name.starts_with(prefix) {
-                items.push(CompletionItem {
-                    label: name.name.clone(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some(format!("let {}", name.name)),
-                    insert_text: Some(name.name.clone()),
-                    ..Default::default()
-                });
+                ranked.push((
+                    TIER_LOCAL,
+                    CompletionItem {
+                        label: name.name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some(format!("let {}", name.name)),
+                        insert_text: Some(name.name.clone()),
+                        ..Default::default()
+                    },
+                ));
             }
         }
         Stmt::For { vars, body, .. } => {
             for v in vars {
                 if v.name.starts_with(prefix) {
-                    items.push(CompletionItem {
-                        label: v.name.clone(),
-                        kind: Some(CompletionItemKind::VARIABLE),
-                        detail: Some(format!("for var {}", v.name)),
-                        insert_text: Some(v.name.clone()),
-                        ..Default::default()
-                    });
+                    ranked.push((
+                        TIER_LOCAL,
+                        CompletionItem {
+                            label: v.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(format!("for var {}", v.name)),
+                            insert_text: Some(v.name.clone()),
+                            ..Default::default()
+                        },
+                    ));
                 }
             }
-            collect_locals_in_block(body, items, prefix);
+            collect_locals_in_block(body, ranked, prefix);
         }
-        Stmt::Expr(expr) => collect_locals_in_expr(expr, items, prefix),
+        Stmt::Expr(expr) => collect_locals_in_expr(expr, ranked, prefix),
         _ => {}
     }
 }
 
 fn collect_locals_in_block(
     block: &zz_frontend::ast::Block,
-    items: &mut Vec<CompletionItem>,
+    ranked: &mut Vec<(u8, CompletionItem)>,
     prefix: &str,
 ) {
     for stmt in &block.stmts {
-        collect_locals_in_stmt(stmt, items, prefix);
+        collect_locals_in_stmt(stmt, ranked, prefix);
     }
 }
 
-fn collect_locals_in_expr(expr: &Expr, items: &mut Vec<CompletionItem>, prefix: &str) {
+fn collect_locals_in_expr(expr: &Expr, ranked: &mut Vec<(u8, CompletionItem)>, prefix: &str) {
     match expr {
-        Expr::Block(b) => collect_locals_in_block(b, items, prefix),
+        Expr::Block(b) => collect_locals_in_block(b, ranked, prefix),
         Expr::If { then, els, .. } => {
-            collect_locals_in_block(then, items, prefix);
+            collect_locals_in_block(then, ranked, prefix);
             if let Some(Expr::Block(b)) = els.as_deref() {
-                collect_locals_in_block(b, items, prefix);
+                collect_locals_in_block(b, ranked, prefix);
             }
         }
-        Expr::While { body, .. } => collect_locals_in_block(body, items, prefix),
+        Expr::While { body, .. } => collect_locals_in_block(body, ranked, prefix),
         Expr::Match { arms, .. } => {
             for arm in arms {
                 if let Expr::Block(b) = &arm.body {
-                    collect_locals_in_block(b, items, prefix);
+                    collect_locals_in_block(b, ranked, prefix);
                 }
             }
         }
         Expr::IfLet { then, els, .. } => {
-            collect_locals_in_block(then, items, prefix);
+            collect_locals_in_block(then, ranked, prefix);
             if let Some(Expr::Block(b)) = els.as_deref() {
-                collect_locals_in_block(b, items, prefix);
+                collect_locals_in_block(b, ranked, prefix);
             }
         }
         _ => {}
@@ -1658,7 +2103,7 @@ mod tests {
     fn scope_keywords() {
         let src = "x := 1\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "ret", None);
+        let items = scope_completions(&program, src, cr.as_ref(), "ret", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "return"));
         assert!(!items.iter().any(|i| i.label == "func"));
     }
@@ -1667,7 +2112,7 @@ mod tests {
     fn scope_globals() {
         let src = "func add(a: int, b: int) -> int { return a + b }\nx := 1\nxy := 2\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "x", None);
+        let items = scope_completions(&program, src, cr.as_ref(), "x", src.len() as u32, None);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"x"));
         assert!(labels.contains(&"xy"));
@@ -1678,7 +2123,7 @@ mod tests {
     fn scope_local_params() {
         let src = "func f(param_a: int) -> int {\n  let local_b = param_a\n  return local_b\n}\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "par", None);
+        let items = scope_completions(&program, src, cr.as_ref(), "par", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "param_a"));
     }
 
@@ -1686,7 +2131,7 @@ mod tests {
     fn scope_local_let() {
         let src = "alpha := 1\nbeta := 2\n";
         let (program, cr) = check(src);
-        let items = scope_completions(&program, cr.as_ref(), "al", None);
+        let items = scope_completions(&program, src, cr.as_ref(), "al", src.len() as u32, None);
         assert!(items.iter().any(|i| i.label == "alpha"));
         assert!(!items.iter().any(|i| i.label == "beta"));
     }
@@ -1825,6 +2270,102 @@ mod tests {
         };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"math"), "expected 'math' in {labels:?}");
+    }
+
+    // ── Directory collections ([collect.*]) ──────────────────────────
+
+    fn collection_project(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zz_lsp_collection_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("commands")).unwrap();
+        std::fs::write(
+            dir.join("zz.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [collect.commands]\ndir = \"commands\"\nsig = \"func([str]) -> int\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("commands/greet.zz"),
+            "pub func run(args: [str]) -> int { return 0 }\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn collection_env(root: &std::path::Path) -> CompletionEnv {
+        CompletionEnv {
+            doc_dir: Some(root.join("src")),
+            seed_bindings: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn collection_import_path_completion() {
+        let root = collection_project("import");
+        let env = collection_env(&root);
+        let src = "import collect.";
+        let program = parse(src).program;
+        let resp = completions_for_position(&program, src, src.len() as u32, None, Some(&env));
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"collect.commands"),
+            "expected collection module in {labels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collection_root_in_empty_import_completion() {
+        let root = collection_project("import_root");
+        let env = collection_env(&root);
+        let src = "import ";
+        let program = parse(src).program;
+        let resp = completions_for_position(&program, src, src.len() as u32, None, Some(&env));
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        assert!(items.iter().any(|i| i.label == "collect"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collection_get_string_completion() {
+        let root = collection_project("get");
+        let env = collection_env(&root);
+        let src = "import collect.commands\ncommands.get(\"gr";
+        let program = parse(src).program;
+        let resp = completions_for_position(&program, src, src.len() as u32, None, Some(&env));
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["greet"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collection_namespace_dot_completion() {
+        let root = collection_project("dot");
+        let env = collection_env(&root);
+        let src = "import collect.commands\ncommands.";
+        let program = parse(src).program;
+        let resp = completions_for_position(&program, src, src.len() as u32, None, Some(&env));
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"get"), "{labels:?}");
+        assert!(labels.contains(&"all"), "{labels:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -2108,7 +2649,7 @@ mod workspace_audit_tests {
         std::fs::write(path, content).unwrap();
     }
 
-    const LIB_SRC: &str = "pub pi := 3.14159\npub e := 2.71828\npub func circle(r: float) -> float {\n    pi * r * r\n}\npub func twice<T: Num>(x: T) -> T {\n    x * x\n}\npub struct Point {\n    x: float,\n    y: float,\n}\n";
+    const LIB_SRC: &str = "pub pi := 3.14159\npub e := 2.71828\npub func circle(r: float) -> float {\n    return pi * r * r\n}\npub func twice<T: Num>(x: T) -> T {\n    return x * x\n}\npub struct Point {\n    x: float,\n    y: float,\n}\n";
 
     /// Build <tmp>/proj with main_full.zz, main_sel.zz, math_utils/lib.zz.
     fn ws_project(tag: &str) -> std::path::PathBuf {
@@ -2221,6 +2762,244 @@ mod workspace_audit_tests {
             find("Point").and_then(|i| i.kind),
             Some(CompletionItemKind::STRUCT),
             "structs serve"
+        );
+    }
+
+    // ── installed-package import completion ──────────────────────────
+    /// Project root with `zz.toml` declaring a path dep (`mid`) and a
+    /// registry dep (`rand`), `src/main.zz` importing nothing. With
+    /// `locked`, `zz.lock` pins `rand` at 0.4.1 (written through the
+    /// lock API so the checksum verifies).
+    fn dep_project(tag: &str, locked: bool) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("zz-lsp-dep-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("zz.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmid = { path = \"../mid\" }\nrand = \"^0.4.1\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/main.zz"), "func main() {\n}\n").unwrap();
+        if locked {
+            let manifest =
+                zz_pm::manifest::Manifest::load(&root.join("zz.toml")).expect("manifest");
+            let mut lock = zz_pm::lock::Lockfile::new();
+            lock.upsert(zz_pm::lock::LockedDep {
+                name: "rand".to_string(),
+                version: "0.4.1".to_string(),
+                source: "registry+https://example.com/rand#0.4.1".to_string(),
+                hash: "abc123".to_string(),
+                commit: None,
+                native: None,
+            });
+            lock.set_manifest_deps_hash(manifest.deps_hash());
+            lock.save(&root.join("zz.lock")).expect("lock");
+        }
+        root
+    }
+
+    fn import_labels(root: &std::path::Path, src: &str) -> Vec<(String, String)> {
+        let parsed = parse(src);
+        let cenv = CompletionEnv {
+            doc_dir: Some(root.join("src")),
+            seed_bindings: HashMap::new(),
+        };
+        match completions_for_position(&parsed.program, src, src.len() as u32, None, Some(&cenv))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v
+                .into_iter()
+                .map(|i| (i.label, i.detail.unwrap_or_default()))
+                .collect(),
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn dep_names_offered_on_empty_prefix() {
+        let root = dep_project("empty", true);
+        let labels = import_labels(&root, "import ");
+        assert!(
+            labels.iter().any(|(l, d)| l == "mid" && d.contains("path")),
+            "path dep offered: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|(l, d)| l == "rand" && d.contains("0.4.1")),
+            "locked version shown: {labels:?}"
+        );
+        assert!(labels.iter().any(|(l, _)| l == "std"), "std root kept");
+    }
+
+    #[test]
+    fn dep_names_filtered_by_prefix() {
+        let root = dep_project("prefix", true);
+        let labels = import_labels(&root, "import mi");
+        assert!(
+            labels.iter().any(|(l, _)| l == "mid"),
+            "prefix match: {labels:?}"
+        );
+        assert!(
+            labels.iter().all(|(l, _)| l != "rand"),
+            "non-match excluded: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn dep_names_degrade_without_lock() {
+        // No zz.lock: the requirement string stands in for the version.
+        let root = dep_project("unlocked", false);
+        let labels = import_labels(&root, "import ");
+        assert!(
+            labels
+                .iter()
+                .any(|(l, d)| l == "rand" && d.contains("^0.4.1")),
+            "req shown unlocked: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn dep_names_absent_without_project() {
+        let root = std::env::temp_dir().join(format!("zz-lsp-nodep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let labels = import_labels(&root, "import ");
+        assert!(
+            labels.iter().all(|(l, _)| l != "mid" && l != "rand"),
+            "no project, no deps: {labels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dep_name_dedupes_local_module() {
+        // A local `mid.zz` and a `mid` dependency share the label: one
+        // item, local wins.
+        let root = dep_project("dedupe", true);
+        std::fs::write(
+            root.join("src/mid.zz"),
+            "pub func x() -> int { return 1 }\n",
+        )
+        .unwrap();
+        let labels = import_labels(&root, "import mi");
+        let count = labels.iter().filter(|(l, _)| l == "mid").count();
+        assert_eq!(count, 1, "single mid label: {labels:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── installed-package member completion ──────────────────────────
+    /// Project root with a vendored `tiny` package (mirrors the deps.rs
+    /// harvest fixture): `tiny.shout` must complete after `tiny.`.
+    fn dep_member_project(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("zz-lsp-depcomp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("vendor/tiny/src")).unwrap();
+        std::fs::write(
+            root.join("zz.toml"),
+            "[package]\nname = \"proj\"\nversion = \"0.1.0\"\n\n[dependencies]\ntiny = \"^0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("vendor/tiny/zz.toml"),
+            "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("vendor/tiny/src/tiny.zz"),
+            "pub func shout(name: str) -> str {\n    return \"Hey {name}!\"\n}\n",
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn dep_member_completion_serves_harvested_ns() {
+        let root = dep_member_project("member");
+        let state = ws_state();
+        let file = root.join("src/main.zz");
+        let src = "import tiny\nfunc main() {\n    println(tiny.shout(\"a\"))\n}\n";
+        let probe = format!("{src}\nprobe := tiny.");
+        let (program, cr, cenv) = ws_check(&state, &file, &probe);
+        assert!(
+            cr.funcs.contains_key("tiny.shout"),
+            "dep seed merged into check"
+        );
+        let items = match completions_for_position(
+            &program,
+            &probe,
+            probe.len() as u32,
+            Some(&cr),
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            CompletionResponse::Array(v) => v,
+            CompletionResponse::List(_) => panic!("expected array"),
+        };
+        assert!(
+            items.iter().any(|i| i.label == "shout"),
+            "dep member serves: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── ranking ──────────────────────────────────────────────────────
+    fn ranked_labels(src: &str) -> Vec<(String, Option<String>)> {
+        let parsed = parse(src);
+        let cenv = CompletionEnv::default();
+        match completions_for_position(&parsed.program, src, src.len() as u32, None, Some(&cenv))
+            .expect("some")
+        {
+            CompletionResponse::Array(v) => v.into_iter().map(|i| (i.label, i.sort_text)).collect(),
+            CompletionResponse::List(_) => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn locals_rank_before_keywords() {
+        let labels = ranked_labels("func main() {\n    retries := 3\n    ret");
+        let pos = |l: &str| labels.iter().position(|(x, _)| x == l).expect(l);
+        assert!(
+            pos("retries") < pos("return"),
+            "local beats keyword: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn frequency_boosts_within_tier() {
+        let src = "func main() {\n    alpha := 1\n    alpine := 2\n    x := alpha + alpha + alpha\n    al";
+        let labels = ranked_labels(src);
+        let pos = |l: &str| labels.iter().position(|(x, _)| x == l).expect(l);
+        assert!(
+            pos("alpha") < pos("alpine"),
+            "used name floats up: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn every_item_carries_ordered_sort_text() {
+        let labels = ranked_labels("func main() {\n    x := 1\n    ");
+        assert!(!labels.is_empty());
+        let texts: Vec<&str> = labels
+            .iter()
+            .map(|(_, s)| s.as_deref().expect("sort_text set"))
+            .collect();
+        let mut sorted = texts.clone();
+        sorted.sort();
+        assert_eq!(texts, sorted, "vec order matches sortText");
+    }
+
+    #[test]
+    fn imported_namespace_ranks_above_keyword() {
+        let labels = ranked_labels("import math\nfunc main() {\n    ma");
+        let pos = |l: &str| labels.iter().position(|(x, _)| x == l).expect(l);
+        assert!(
+            pos("math") < pos("match"),
+            "imported ns beats keyword: {labels:?}"
         );
     }
 
@@ -2408,7 +3187,7 @@ mod workspace_audit_tests {
         );
         write(
             &root.join("vendor/table2/src/table2.zz"),
-            "pub func render(rows: [[str]]) -> str {\n    rows[0][0]\n}\n",
+            "pub func render(rows: [[str]]) -> str {\n    return rows[0][0]\n}\n",
         );
         let main = root.join("main.zz");
         write(
@@ -2685,5 +3464,103 @@ mod struct_literal_dep_tests {
             .iter()
             .all(|i| i.kind == Some(CompletionItemKind::FIELD)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scope_serves_keywords_builtins_and_types() {
+        // Bare scope: missing lexer keywords (`pub`, `as`, `in`, …),
+        // prelude builtins (`println`, `input`), primitives and bounds.
+        let src = "func main() {\n    ";
+        let parsed = zz_frontend::parse(src);
+        let cenv = CompletionEnv::default();
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            tower_lsp::lsp_types::CompletionResponse::Array(v) => v,
+            tower_lsp::lsp_types::CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let has = |l: &str| items.iter().any(|i| i.label == l);
+        for kw in [
+            "pub", "as", "in", "impl", "const", "extern", "mut", "enum", "type", "struct", "func",
+            "return",
+        ] {
+            assert!(has(kw), "keyword serves: {kw}");
+        }
+        for ty in ["int", "float", "bool", "str"] {
+            assert!(has(ty), "primitive serves: {ty}");
+        }
+        for b in ["Num", "Ord", "Eq", "Display"] {
+            assert!(has(b), "bound serves: {b}");
+        }
+        let state = crate::state::GlobalState::new();
+        let (ib, ifunc, is, ia, ie) = state.checker_seed_for(&parsed.program);
+        let cr = zz_checker::check_program(&parsed.program, ib, ifunc, is, ia, ie);
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            Some(&cr),
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            tower_lsp::lsp_types::CompletionResponse::Array(v) => v,
+            tower_lsp::lsp_types::CompletionResponse::List(_) => panic!("expected array"),
+        };
+        let has = |l: &str| items.iter().any(|i| i.label == l);
+        for b in ["println", "print", "input", "len", "range"] {
+            assert!(has(b), "builtin serves: {b}");
+        }
+    }
+
+    #[test]
+    fn scope_serves_enclosing_generic_params() {
+        let src = "func min<T: Num>(a: T, b: T) -> T {\n    ";
+        let parsed = zz_frontend::parse(src);
+        let cenv = CompletionEnv::default();
+        let items = match completions_for_position(
+            &parsed.program,
+            src,
+            src.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            tower_lsp::lsp_types::CompletionResponse::Array(v) => v,
+            tower_lsp::lsp_types::CompletionResponse::List(_) => panic!("expected array"),
+        };
+        assert!(
+            items.iter().any(|i| i.label == "T"
+                && i.kind == Some(tower_lsp::lsp_types::CompletionItemKind::TYPE_PARAMETER)),
+            "generic param serves"
+        );
+        // Outside any function: no generic params leak in.
+        let src2 = "x := ";
+        let parsed2 = zz_frontend::parse(src2);
+        let items2 = match completions_for_position(
+            &parsed2.program,
+            src2,
+            src2.len() as u32,
+            None,
+            Some(&cenv),
+        )
+        .expect("some")
+        {
+            tower_lsp::lsp_types::CompletionResponse::Array(v) => v,
+            tower_lsp::lsp_types::CompletionResponse::List(_) => panic!("expected array"),
+        };
+        assert!(
+            items2
+                .iter()
+                .all(|i| i.kind != Some(tower_lsp::lsp_types::CompletionItemKind::TYPE_PARAMETER)),
+            "no params at top level"
+        );
     }
 }

@@ -1,11 +1,11 @@
 // features: comparison, float-arith, func-call, if-else, int-arith, print, string-literal
 // E2E: Generic type bounds — Num, Ord, Eq, Display
 func add<T: Num>(x: T, y: T) -> T {
-    x + y
+    return x + y
 }
 
 func min<T: Ord>(a: T, b: T) -> T {
-    if a < b {
+    return if a < b {
         a
     } else {
         b
@@ -13,11 +13,11 @@ func min<T: Ord>(a: T, b: T) -> T {
 }
 
 func same<T: Eq>(a: T, b: T) -> bool {
-    a == b
+    return a == b
 }
 
 func describe<T: Display>(v: T) -> str {
-    "value: {v}"
+    return "value: {v}"
 }
 
 // Num bound: int and float
@@ -39,7 +39,7 @@ println(describe("hi"))
 
 // multi-bound
 func clamp<T: Num + Ord>(v: T, lo: T, hi: T) -> T {
-    if v < lo {
+    return if v < lo {
         lo
     } else {
         if v > hi {

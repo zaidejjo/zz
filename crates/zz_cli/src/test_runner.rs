@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use zz_frontend::ast::Stmt;
 use zz_frontend::diag::{render_to_string, Files};
+use zz_frontend::doctest;
 use zz_frontend::span::Span;
 use zz_frontend::test_attr::{self, TestMeta};
 use zz_runtime::{Interp, Value};
@@ -78,6 +79,8 @@ struct TestConfig {
     native_release: bool,
     allow_source_builds: bool,
     allow_hooks: bool,
+    update_snapshots: bool,
+    no_doctests: bool,
 }
 
 impl TestConfig {
@@ -108,6 +111,8 @@ impl TestConfig {
         let mut native_release = false;
         let mut allow_source_builds = false;
         let mut allow_hooks = false;
+        let mut update_snapshots = defaults.update_snapshots;
+        let mut no_doctests = false;
 
         let mut i = 0;
         while i < args.len() {
@@ -169,6 +174,7 @@ impl TestConfig {
                 "--exact" => exact = true,
                 "--fail-fast" => fail_fast = true,
                 "--fail-on-empty" => fail_on_empty = true,
+                "--no-doctests" => no_doctests = true,
                 "--list" => list_only = true,
                 "--json" => json_output = true,
                 "--native" | "--aot" => {
@@ -240,6 +246,7 @@ impl TestConfig {
                     }
                 }
                 "--changed" => changed = true,
+                "--update-snapshots" => update_snapshots = true,
                 "--nocapture-impl" => {}
                 "--help" | "-h" => {
                     return Err("usage: zz test [file.zz | directory]... [FLAGS]\n\n\
@@ -270,6 +277,8 @@ impl TestConfig {
                            --junit <path>   JUnit XML to file\n  \
                            --repeat N       Run tests N times\n  \
                            --changed        Only run tests for files changed vs git HEAD\n  \
+                           --update-snapshots  Write assert_snapshot goldens instead of comparing\n  \
+                           --no-doctests    Skip `/// ```zz` doc-tests\n  \
                            -h, --help       Show this help\n\n\
                          ENGINES:\n  \
                            VM (default): in-process interpreter, fastest.\n  \
@@ -344,6 +353,8 @@ impl TestConfig {
             native_release,
             allow_source_builds,
             allow_hooks,
+            update_snapshots,
+            no_doctests,
         })
     }
 
@@ -375,6 +386,7 @@ struct TestDefaults {
     seed: Option<u64>,
     repeat: usize,
     engine: TestEngine,
+    update_snapshots: bool,
 }
 
 impl Default for TestDefaults {
@@ -389,6 +401,7 @@ impl Default for TestDefaults {
             seed: None,
             repeat: 1,
             engine: TestEngine::Vm,
+            update_snapshots: false,
         }
     }
 }
@@ -441,6 +454,12 @@ fn load_zz_toml_defaults() -> TestDefaults {
             _ => TestEngine::Vm,
         };
     }
+    if let Some(v) = test_section
+        .get("update-snapshots")
+        .and_then(|v| v.as_bool())
+    {
+        d.update_snapshots = v;
+    }
 
     d
 }
@@ -453,6 +472,69 @@ fn default_test_path() -> String {
         return "tests".to_string();
     }
     ".".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot store env (`assert_snapshot`)
+// ---------------------------------------------------------------------------
+
+/// Env passthrough for snapshot tests. The runner points it at
+/// `<test file parent>/snapshots` per group; `zz run` (no runner) falls
+/// back to `./snapshots`. Update mode writes instead of comparing.
+const SNAPSHOT_ENV_DIR: &str = "ZZ_SNAPSHOTS_DIR";
+const SNAPSHOT_ENV_UPDATE: &str = "ZZ_UPDATE_SNAPSHOTS";
+
+/// Saves the ambient snapshot env on creation, restores it on drop so a
+/// `zz test` process never leaks the per-group settings.
+struct SnapshotEnv {
+    prev_dir: Option<String>,
+    prev_update: Option<String>,
+}
+
+impl SnapshotEnv {
+    fn capture() -> Self {
+        Self {
+            prev_dir: std::env::var(SNAPSHOT_ENV_DIR).ok(),
+            prev_update: std::env::var(SNAPSHOT_ENV_UPDATE).ok(),
+        }
+    }
+}
+
+impl Drop for SnapshotEnv {
+    fn drop(&mut self) {
+        restore_snapshot_env(SNAPSHOT_ENV_DIR, self.prev_dir.take());
+        restore_snapshot_env(SNAPSHOT_ENV_UPDATE, self.prev_update.take());
+    }
+}
+
+fn restore_snapshot_env(key: &str, prev: Option<String>) {
+    // SAFETY: groups run sequentially on this thread; no concurrent
+    // getenv races inside the runner. Same contract as `std.env.set`.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
+/// Point snapshot natives at this group's store for the duration of the
+/// group. AOT children inherit the process env; VM natives read it per
+/// call — both stay consistent because groups run sequentially.
+fn set_snapshot_env_for(file: &Path, config: &TestConfig) {
+    let dir = file
+        .parent()
+        .map(|p| p.join("snapshots"))
+        .unwrap_or_else(|| PathBuf::from("snapshots"));
+    // SAFETY: see `restore_snapshot_env`.
+    unsafe {
+        std::env::set_var(SNAPSHOT_ENV_DIR, dir);
+        if config.update_snapshots {
+            std::env::set_var(SNAPSHOT_ENV_UPDATE, "1");
+        } else {
+            std::env::remove_var(SNAPSHOT_ENV_UPDATE);
+        }
+    }
 }
 
 fn dir_has_zz(dir: &Path) -> bool {
@@ -500,7 +582,7 @@ struct TestResult {
 }
 
 #[derive(Debug, Clone)]
-struct TestInfo {
+pub(crate) struct TestInfo {
     name: String,
     file: PathBuf,
     meta: TestMeta,
@@ -512,6 +594,10 @@ struct TestInfo {
     teardown_fn: Option<String>,
     /// If this is a parameterized case, the runtime values for this invocation.
     case_values: Option<Vec<Value>>,
+    /// Doc-test that must fail to compile or run (inverts every error into
+    /// a pass; a clean pass becomes a failure). Always `false` for
+    /// ordinary tests.
+    expect_compile_fail: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +779,8 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
     let overall_start = Instant::now();
     let use_color = config.use_color();
     let total_files = groups.len();
+    // Snapshot store env (restored on scope exit, even on early returns).
+    let _snap_guard = SnapshotEnv::capture();
 
     for iteration in 0..repeat {
         if repeat > 1 && !config.json_output {
@@ -741,6 +829,9 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
                 eprintln!("Running {}", file.display());
                 eprintln!("running {} tests", tests.len());
             }
+            // Groups run sequentially, so one live snapshot setting is
+            // race-free; AOT children inherit it; VM reads it per call.
+            set_snapshot_env_for(file, &config);
             let file_start = Instant::now();
             let bin = aot_bins.get(file).map(|(_, b)| b.clone());
             // Streams each result test-by-test; the file footer follows.
@@ -1017,6 +1108,12 @@ fn run_group_parallel(
 // ---------------------------------------------------------------------------
 
 fn apply_filters(tests: &mut Vec<TestInfo>, config: &TestConfig) {
+    // `--no-doctests`: drop synthetic doctest entries (grafting still
+    // defines them, inert and never called — but malformed fences still
+    // fail the file at load; see `graft_doctests`).
+    if config.no_doctests {
+        tests.retain(|t| !(t.func_name.len() == 1 && t.func_name[0].starts_with("__zz_doctest_")));
+    }
     if let Some(ref pat) = config.filter {
         if config.exact {
             tests.retain(|t| t.name == *pat || display_name(&t.name, &t.file) == *pat);
@@ -1075,7 +1172,7 @@ fn parse_git_output(stdout: &[u8]) -> Result<Vec<PathBuf>, String> {
 // ---------------------------------------------------------------------------
 
 fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
-    let loaded = loader::load_program(path)?;
+    let mut loaded = loader::load_program(path)?;
 
     let mut errors = false;
     for e in &loaded.errors {
@@ -1092,6 +1189,12 @@ fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
     if errors {
         return Err(format!("failed to load `{}`", path.display()));
     }
+
+    // Doc-tests: graft `/// ```zz` fences as synthetic `@test` funcs.
+    // Deterministic (same source → same funcs), so discovery and the
+    // fresh loads at execution time always agree. Returns func-name →
+    // display-name for the grafted tests.
+    let doctest_names = graft_doctests(&mut loaded, path)?;
 
     // First pass: find @setup / @teardown functions (file-scoped, last wins).
     let mut setup_fn: Option<String> = None;
@@ -1174,7 +1277,271 @@ fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
         }
     }
 
+    // Synthetic doctest funcs get human display names (`doctest stem#n`)
+    // and the compile_fail flag; `func_name` stays the real identifier.
+    for test in tests.iter_mut() {
+        if test.func_name.len() == 1 {
+            if let Some((display, compile_fail)) = doctest_names.get(&test.func_name[0]) {
+                test.name = display.clone();
+                test.expect_compile_fail = *compile_fail;
+            }
+        }
+    }
+
     Ok(tests)
+}
+
+/// Derive the namespacing context for doctest grafting from a loaded
+/// (already rewritten) module: the consensus namespace of dotted top-level
+/// definitions, their bare names, and import alias heads. Returns
+/// `None` namespace for script-mode modules (all bare — no rewriting).
+/// Same-file multi-namespace edges (#380) keep the majority head; alias
+/// heads are left for the rewriter's import set instead.
+fn doctest_rewrite_context(
+    stmts: &[Stmt],
+) -> (
+    Option<String>,
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    let mut heads: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut defs: Vec<String> = Vec::new();
+    let mut decls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut imports = std::collections::HashSet::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Func { name, .. }
+            | Stmt::Struct { name, .. }
+            | Stmt::TypeAlias { name, .. }
+            | Stmt::Enum { name, .. } => {
+                let full = name.join(".");
+                defs.push(full.clone());
+                if let Some((head, _)) = full.split_once('.') {
+                    *heads.entry(head.to_string()).or_insert(0) += 1;
+                }
+            }
+            Stmt::Decl { name, .. } => {
+                defs.push(name.name.clone());
+                decls.insert(name.name.clone());
+                if let Some((head, _)) = name.name.split_once('.') {
+                    *heads.entry(head.to_string()).or_insert(0) += 1;
+                }
+            }
+            Stmt::Import { path, alias, .. } => {
+                if let Some(a) = alias {
+                    imports.insert(a.clone());
+                } else if let Some(last) = path.last() {
+                    imports.insert(last.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let ns_opt = heads.into_iter().max_by_key(|(_, n)| *n).map(|(h, _)| h);
+    let mut top = std::collections::HashSet::new();
+    let mut top_bindings = std::collections::HashSet::new();
+    if let Some(ns) = ns_opt.as_deref() {
+        let prefix = format!("{ns}.");
+        for full in &defs {
+            top.insert(full.strip_prefix(&prefix).unwrap_or(full).to_string());
+        }
+        // Module-scope value bindings are receivers like any local: the
+        // dot-call arm must not qualify their method names (#500). The
+        // loader's `namespace_program` passes the same set.
+        for decl in &decls {
+            top_bindings.insert(decl.strip_prefix(&prefix).unwrap_or(decl).to_string());
+        }
+    } else {
+        top.extend(defs);
+        top_bindings.extend(decls);
+    }
+    (ns_opt, top, top_bindings, imports)
+}
+
+/// Graft doc-test fences as synthetic `@test` functions into every loaded
+/// program. Pure + deterministic: extraction, padded parsing (line-exact
+/// spans), and decorator construction depend only on file text, so the
+/// discovery load and each execution load produce identical funcs.
+/// Returns func-name → display-name for grafted tests. Hard errors
+/// (bad fence, unparseable body) fail the file like load errors.
+fn graft_doctests(
+    loaded: &mut loader::LoadResult,
+    path: &Path,
+) -> Result<std::collections::HashMap<String, (String, bool)>, String> {
+    use zz_frontend::ast::{Block, Decorator, Expr, Ident};
+    use zz_frontend::parser::parse;
+
+    let mut names = std::collections::HashMap::new();
+    for i in 0..loaded.programs.len() {
+        let (name, source) = match loaded.files.get(i) {
+            Some(f) => f.clone(),
+            None => continue,
+        };
+        // Mirror the module's own namespacing for grafted bodies: derive
+        // the namespace + bare top-level names from the loaded (rewritten)
+        // siblings, then run the real rewriter over each synthetic func
+        // body. Without this, bare references to sibling items fail at
+        // runtime — the exact treatment user `@test` bodies received at
+        // load. Script-mode modules (all bare) need no rewriting.
+        let (ns_opt, top, top_bindings, imports) =
+            doctest_rewrite_context(&loaded.programs[i].stmts);
+        let stem = std::path::Path::new(&name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let (docs, mut diags) = doctest::extract(&source, &name);
+        // File preludes (` ```zz,prelude `) compile once and prepend to
+        // every test fence in this file (hidden shared setup). Parsed with
+        // the same line-exact padding as bodies.
+        let mut prelude_stmts = Vec::new();
+        for doc in docs.iter().filter(|d| d.is_prelude) {
+            let parsed = parse(&doc.padded_source());
+            diags.extend(parsed.errors);
+            if diags
+                .iter()
+                .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+            {
+                let mut files = Files::new();
+                let id = files.add(name.clone(), source.clone());
+                eprint!("{}", render_to_string(&files, id, &diags));
+                return Err(format!("failed doctests in `{}`", path.display()));
+            }
+            prelude_stmts.extend(parsed.program.stmts);
+        }
+        // Parse each fence body with newline padding so spans sit on the
+        // original file lines; render against the original source, whose
+        // lines then match exactly.
+        for doc in docs.iter().filter(|d| !d.is_prelude) {
+            let padded = doc.padded_source();
+            let parsed = parse(&padded);
+            diags.extend(parsed.errors);
+            // A `compile_fail` fence is *supposed* to break: a parse
+            // failure becomes a runtime `fail()` stub (raised → inverted
+            // to a pass at execution); anything else is still fatal.
+            let parse_failed = diags
+                .iter()
+                .any(|d| d.severity == zz_frontend::diag::Severity::Error);
+            if parse_failed && !doc.compile_fail {
+                let mut files = Files::new();
+                let id = files.add(name.clone(), source.clone());
+                eprint!("{}", render_to_string(&files, id, &diags));
+                return Err(format!("failed doctests in `{}`", path.display()));
+            }
+            let mut named = Vec::new();
+            if doc.ignore {
+                named.push((
+                    Ident {
+                        name: "ignore".to_string(),
+                        span: doc.header_span,
+                    },
+                    Expr::Bool {
+                        value: true,
+                        span: doc.header_span,
+                    },
+                ));
+            }
+            if doc.should_panic {
+                named.push((
+                    Ident {
+                        name: "should_panic".to_string(),
+                        span: doc.header_span,
+                    },
+                    Expr::Bool {
+                        value: true,
+                        span: doc.header_span,
+                    },
+                ));
+            }
+            if doc.no_run {
+                // Check-only: reuse the ignore machinery (reported with a
+                // reason, never executed) — uniform across VM, AOT, cover.
+                named.push((
+                    Ident {
+                        name: "ignore".to_string(),
+                        span: doc.header_span,
+                    },
+                    Expr::Bool {
+                        value: true,
+                        span: doc.header_span,
+                    },
+                ));
+                named.push((
+                    Ident {
+                        name: "reason".to_string(),
+                        span: doc.header_span,
+                    },
+                    Expr::Str {
+                        value: "no_run doctest".to_string(),
+                        span: doc.header_span,
+                    },
+                ));
+            }
+            let mut stmts = prelude_stmts.clone();
+            if parse_failed {
+                // `compile_fail` body didn't parse: stand in a runtime
+                // failure so execution inverts it into a pass.
+                stmts.push(Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Ident {
+                        name: "fail".to_string(),
+                        span: doc.header_span,
+                    }),
+                    args: vec![Expr::Str {
+                        value: "compile_fail fence".to_string(),
+                        span: doc.header_span,
+                    }],
+                    named: Vec::new(),
+                    span: doc.header_span,
+                }));
+            } else {
+                stmts.extend(parsed.program.stmts);
+            }
+            let block_span = parsed.program.span;
+            let mut func = Stmt::Func {
+                name: vec![doc.func_name()],
+                generics: Vec::new(),
+                params: Vec::new(),
+                ret: None,
+                body: Block {
+                    stmts,
+                    span: block_span,
+                },
+                span: doc.header_span,
+                pub_: false,
+                decorators: vec![Decorator {
+                    path: vec!["test".to_string()],
+                    args: Vec::new(),
+                    named,
+                    span: doc.header_span,
+                }],
+            };
+            // Same namespacing user bodies received: bare sibling references
+            // become qualified paths (locals shadow correctly — the real
+            // rewriter tracks scopes). Script-mode modules skip this.
+            if let Some(ns) = ns_opt.as_deref() {
+                let mut rw = crate::loader::rewrite::Rewriter::new(ns, &top, &top_bindings);
+                rw.imports = imports.clone();
+                rw.push_scope();
+                if let Stmt::Func { body, .. } = &mut func {
+                    rw.rewrite_block(body);
+                }
+                rw.pop_scope();
+            }
+            loaded.programs[i].stmts.push(func);
+            names.insert(doc.func_name(), (doc.display_name(&stem), doc.compile_fail));
+        }
+        if !diags.is_empty() {
+            let mut files = Files::new();
+            let id = files.add(name.clone(), source.clone());
+            eprint!("{}", render_to_string(&files, id, &diags));
+            return Err(format!("failed doctests in `{}`", path.display()));
+        }
+    }
+    Ok(names)
 }
 
 /// Evaluate a literal `Expr` into a runtime `Value`. Returns `None` for
@@ -1249,6 +1616,7 @@ fn discover_in_stmt(stmt: &Stmt, file: &Path, module_index: usize) -> Vec<TestIn
                 setup_fn: None,
                 teardown_fn: None,
                 case_values: None,
+                expect_compile_fail: false,
             }]
         }
         Stmt::Impl {
@@ -1288,6 +1656,7 @@ fn discover_in_stmt(stmt: &Stmt, file: &Path, module_index: usize) -> Vec<TestIn
                         setup_fn: None,
                         teardown_fn: None,
                         case_values: None,
+                        expect_compile_fail: false,
                     });
                 }
             }
@@ -1447,21 +1816,34 @@ fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
     };
 
     match result {
-        Ok(Ok(())) => TestResult {
-            name: test.name.clone(),
-            file: test.file.clone(),
-            passed: true,
-            ignored: false,
-            slow: false,
-            over_budget: false,
-            reason: None,
-            duration: start.elapsed(),
-            error_msg: None,
-            stdout: String::new(),
-            retried: 0,
-        },
+        Ok(Ok(())) => {
+            // A `compile_fail` doctest that compiled AND ran clean is a
+            // failure: the snippet was supposed to break.
+            let passed = !test.expect_compile_fail;
+            let error_msg = if test.expect_compile_fail {
+                if nocapture {
+                    eprintln!("  FAILED: {}: expected compile failure", test.name);
+                }
+                Some("expected compile failure, but the snippet compiled and ran".to_string())
+            } else {
+                None
+            };
+            TestResult {
+                name: test.name.clone(),
+                file: test.file.clone(),
+                passed,
+                ignored: false,
+                slow: false,
+                over_budget: false,
+                reason: None,
+                duration: start.elapsed(),
+                error_msg,
+                stdout: String::new(),
+                retried: 0,
+            }
+        }
         Ok(Err(e)) => {
-            let passed = test.meta.should_panic;
+            let passed = test.meta.should_panic || test.expect_compile_fail;
             let error_msg = Some(e.clone());
             if !passed && nocapture {
                 eprintln!("  FAILED: {}: {e}", test.name);
@@ -1477,6 +1859,8 @@ fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
                 over_budget: false,
                 reason: if test.meta.should_panic {
                     Some("should_panic".to_string())
+                } else if test.expect_compile_fail {
+                    Some("compile_fail".to_string())
                 } else {
                     None
                 },
@@ -1495,7 +1879,7 @@ fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
                 "unknown panic".to_string()
             };
 
-            let passed = test.meta.should_panic;
+            let passed = test.meta.should_panic || test.expect_compile_fail;
             if !passed && nocapture {
                 eprintln!("  FAILED: {}: panic: {msg}", test.name);
             } else if passed && nocapture {
@@ -1511,6 +1895,8 @@ fn run_test_attempt_inner(test: &TestInfo, nocapture: bool) -> TestResult {
                 over_budget: false,
                 reason: if test.meta.should_panic {
                     Some("should_panic".to_string())
+                } else if test.expect_compile_fail {
+                    Some("compile_fail".to_string())
                 } else {
                     None
                 },
@@ -1733,7 +2119,42 @@ fn map_worker_report(
 }
 
 fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
-    let loaded = loader::load_program(&test.file)?;
+    let (mut interp, func_val, args) = setup_test_interp(test, false)?;
+
+    // Call @setup if present.
+    if let Some(ref setup_name) = test.setup_fn {
+        call_named_fn(&mut interp, setup_name, test.meta.span)?;
+    }
+
+    // Call the test function (with case arguments if parameterized).
+    let test_result = match interp.call(func_val, args, test.meta.span) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{e:?}")),
+    };
+
+    // Call @teardown if present (always runs, even on test failure).
+    if let Some(ref teardown_name) = test.teardown_fn {
+        let _ = call_named_fn(&mut interp, teardown_name, test.meta.span);
+    }
+
+    test_result
+}
+
+/// Shared setup for isolated test execution: load, graft doctests,
+/// plugins, HIR build, interpreter seed, stdlib + module execution up to
+/// the test's own module. Returns the interpreter plus the resolved test
+/// function value and its case arguments; callers run setup/test/teardown
+/// calls themselves. With `cover`, the recorder is enabled and every user
+/// module is labeled from `loaded.files` (stdlib runs stay unlabeled).
+fn setup_test_interp(test: &TestInfo, cover: bool) -> Result<(Interp, Value, Vec<Value>), String> {
+    let mut loaded = loader::load_program(&test.file)?;
+
+    // Same doctest graft as discovery (deterministic): without it the
+    // synthetic `__zz_doctest_*` functions would not exist at execution.
+    // Diagnostics were already shown at discovery; discard the names here.
+    // A file whose fences break between discovery and execution fails here
+    // instead of running a stale test list — correct behavior.
+    let _ = graft_doctests(&mut loaded, &test.file)?;
 
     // Native plugins: dlopen each dependency's build/*.so so `@test`
     // functions can call plugin natives — same as `zz run` (previously the
@@ -1778,6 +2199,10 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     let enums = typed.program.enums;
 
     let mut interp = Interp::with_natives(natives);
+
+    if cover {
+        interp.enable_coverage();
+    }
 
     for (key, val) in zz_stdlib::stdlib_consts() {
         interp.env.define(&key, Value::Float(val));
@@ -1826,6 +2251,11 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
     }
 
     for (i, program) in loaded.programs.iter().enumerate() {
+        if cover {
+            if let Some((name, source)) = loaded.files.get(i) {
+                interp.set_coverage_source(name, source);
+            }
+        }
         if let Err(e) = interp.run_typed(program, types.clone(), structs.clone(), enums.clone()) {
             return Err(format!("module error: {e:?}"));
         }
@@ -1840,24 +2270,8 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
         .get(&func_name)
         .ok_or_else(|| format!("test function `{func_name}` not found in environment"))?;
 
-    // Call @setup if present.
-    if let Some(ref setup_name) = test.setup_fn {
-        call_named_fn(&mut interp, setup_name, test.meta.span)?;
-    }
-
-    // Call the test function (with case arguments if parameterized).
     let args = test.case_values.clone().unwrap_or_default();
-    let test_result = match interp.call(func_val, args, test.meta.span) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("{e:?}")),
-    };
-
-    // Call @teardown if present (always runs, even on test failure).
-    if let Some(ref teardown_name) = test.teardown_fn {
-        let _ = call_named_fn(&mut interp, teardown_name, test.meta.span);
-    }
-
-    test_result
+    Ok((interp, func_val, args))
 }
 
 /// Call a named zero-arg function in the interpreter. Returns Err on failure.
@@ -1873,11 +2287,252 @@ fn call_named_fn(interp: &mut Interp, name: &str, span: Span) -> Result<(), Stri
     }
 }
 
+/// Run one test with the coverage recorder enabled, merging-friendly:
+/// returns the test's pass/fail plus its coverage state. Setup and
+/// teardown run exactly like [`run_test_isolated`] (inline — no timeout
+/// worker subprocesses; a hanging test hangs coverage, documented in
+/// `docs/coverage.md`).
+pub(crate) fn run_test_covered(
+    test: &TestInfo,
+) -> Result<(bool, zz_runtime::CoverageState), String> {
+    let (mut interp, func_val, args) = setup_test_interp(test, true)?;
+
+    if let Some(ref setup_name) = test.setup_fn {
+        call_named_fn(&mut interp, setup_name, test.meta.span)?;
+    }
+    let res = interp.call(func_val, args, test.meta.span);
+    if let Some(ref teardown_name) = test.teardown_fn {
+        let _ = call_named_fn(&mut interp, teardown_name, test.meta.span);
+    }
+    // `should_panic` inversion mirrors `run_test_attempt_inner`: an
+    // expected failure still counts the executed lines.
+    let passed = match res {
+        Ok(_) => !test.meta.should_panic,
+        Err(_) => test.meta.should_panic,
+    };
+    let cov = interp
+        .coverage
+        .clone()
+        .ok_or_else(|| "coverage recorder missing after covered run".to_string())?;
+    Ok((passed, cov))
+}
+
+/// Discover every test under `root` (file or directory; `None` selects
+/// the same default as `zz test`) and run each with coverage, merging
+/// all states. Ignored tests are skipped like the runner skips them.
+/// Returns the merged state plus the failing test names (empty = all
+/// passed); failures still contribute their partial coverage.
+pub(crate) fn cover_tests(
+    root: Option<&str>,
+) -> Result<(zz_runtime::CoverageState, Vec<String>), String> {
+    let roots = match root {
+        Some(r) => vec![r.to_string()],
+        None => vec![default_test_path()],
+    };
+    for r in &roots {
+        crate::enforce_project_zz(std::path::Path::new(r))?;
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    for r in &roots {
+        files.extend(collect_zz_files(r)?);
+    }
+    files.sort();
+    files.dedup();
+
+    let mut total = zz_runtime::CoverageState::default();
+    let mut failed = Vec::new();
+    for file in &files {
+        let tests = discover_tests(file)?;
+        for test in &tests {
+            if test.meta.ignore {
+                continue;
+            }
+            match run_test_covered(test) {
+                Ok((passed, cov)) => {
+                    if !passed {
+                        failed.push(test.name.clone());
+                    }
+                    total.merge(&cov);
+                }
+                Err(e) => {
+                    failed.push(format!("{} ({e})", test.name));
+                }
+            }
+        }
+    }
+    Ok((total, failed))
+}
+
 // ---------------------------------------------------------------------------
 // AOT engine: per-file dispatch binary, one process per test
 // ---------------------------------------------------------------------------
 
 /// Compile one dispatch binary for a test file (dev by default, release
+/// Alias bare `*.main` imports in AOT harness sources (#401).
+///
+/// The harness appends its own `func main` entrypoint to the inlined test
+/// file, so a test `import nrepro.main` (bare local name `main`) collides:
+/// value scope shadows the module and `main.answer()` fails to check with
+/// "cannot access field `answer` ...". The VM never injects `func main`,
+/// hence the VM/native split (plus a spurious `unused import` warning).
+///
+/// Fix: rewrite the import with a file-local alias — the documented `as`
+/// workaround, applied by the harness — and retarget qualified `main.`
+/// references through it. Token-span surgery (lexer tokens, edits applied
+/// back-to-front), never string search: strings, comments, and `main(`
+/// call sites are untouched. Imports that already alias, and selective
+/// `import m(sym)` lists (which bind values, never a `main.` qualifier),
+/// are left alone.
+fn alias_main_imports(source: &str) -> String {
+    use zz_frontend::lexer::lex;
+    use zz_frontend::token::TokenKind;
+
+    const ALIAS_BASE: &str = "__zz_harness_main_mod";
+
+    let lexed = lex(source);
+    if !lexed.errors.is_empty() {
+        return source.to_string();
+    }
+    let toks = &lexed.tokens;
+
+    // Significant tokens: everything but statement separators (a `main` /
+    // `.` pair split across lines is still one qualified access — such
+    // code type-checks in the VM today, so the harness must see it too).
+    let sig: Vec<usize> = toks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.kind != TokenKind::StmtEnd)
+        .map(|(i, _)| i)
+        .collect();
+
+    // First pass: locate bare `*.main` imports. Records (a) insertion of
+    // ` as <alias>` after the import path, and (b) the import statement's
+    // token range, whose path idents are never reference candidates.
+    struct ImportEdit {
+        /// Byte offset just past the import path: insert ` as <alias>`.
+        insert_at: usize,
+        /// Token index range of the whole import statement.
+        range: (usize, usize),
+    }
+    let mut imports: Vec<ImportEdit> = Vec::new();
+    let mut s = 0;
+    while s < sig.len() {
+        if toks[sig[s]].kind != TokenKind::Import {
+            s += 1;
+            continue;
+        }
+        // Import path: Ident (Dot Ident)*.
+        let mut p = s + 1;
+        let mut path: Vec<usize> = Vec::new();
+        while p < sig.len() && toks[sig[p]].kind == TokenKind::Ident {
+            path.push(sig[p]);
+            p += 1;
+            if p + 1 < sig.len()
+                && toks[sig[p]].kind == TokenKind::Dot
+                && toks[sig[p + 1]].kind == TokenKind::Ident
+            {
+                p += 1; // consume the Dot, loop takes the Ident
+            } else {
+                break;
+            }
+        }
+        if path.is_empty() {
+            s += 1;
+            continue;
+        }
+        // Optional `as` alias.
+        let mut aliased = false;
+        if p + 1 < sig.len()
+            && toks[sig[p]].kind == TokenKind::As
+            && toks[sig[p + 1]].kind == TokenKind::Ident
+        {
+            aliased = true;
+            p += 2;
+        }
+        // Optional selective list: balanced parens (idents/commas/stars).
+        let mut selective = false;
+        if p < sig.len() && toks[sig[p]].kind == TokenKind::LParen {
+            selective = true;
+            let mut depth = 0usize;
+            while p < sig.len() {
+                match toks[sig[p]].kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            p += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                p += 1;
+            }
+        }
+        let stmt_end = p; // exclusive end of the import statement
+        let last = *path.last().expect("path is non-empty");
+        if !aliased && !selective && toks[last].text == "main" {
+            let insert_at = toks[last].span.end as usize;
+            imports.push(ImportEdit {
+                insert_at,
+                range: (sig[s], sig[stmt_end.saturating_sub(1)]),
+            });
+        }
+        s = stmt_end.max(s + 1);
+    }
+    if imports.is_empty() {
+        return source.to_string();
+    }
+
+    // Collision-free alias: the dunder prefix makes this near-impossible,
+    // but a test file could still declare it — suffix until it is absent.
+    let taken = |cand: &str| {
+        toks.iter()
+            .any(|t| (t.kind == TokenKind::Ident || t.kind == TokenKind::Str) && t.text == cand)
+    };
+    let mut alias = ALIAS_BASE.to_string();
+    let mut n = 2u32;
+    while taken(&alias) {
+        alias = format!("{ALIAS_BASE}_{n}");
+        n += 1;
+    }
+
+    // Second pass: `main` idents followed by `.`, outside import
+    // statements, name the imported module — retarget through the alias.
+    // Everything else (`main(` calls, strings, comments, the import paths
+    // themselves) is byte-identical.
+    let in_import = |idx: usize| {
+        imports
+            .iter()
+            .any(|im| idx >= im.range.0 && idx <= im.range.1)
+    };
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for (k, &ti) in sig.iter().enumerate() {
+        if toks[ti].kind != TokenKind::Ident || toks[ti].text != "main" {
+            continue;
+        }
+        if in_import(ti) {
+            continue;
+        }
+        let is_qualified = k + 1 < sig.len() && toks[sig[k + 1]].kind == TokenKind::Dot;
+        if !is_qualified {
+            continue;
+        }
+        let span = toks[ti].span;
+        edits.push((span.start as usize, span.end as usize, alias.clone()));
+    }
+    for im in &imports {
+        edits.push((im.insert_at, im.insert_at, format!(" as {alias}")));
+    }
+    // Back-to-front so earlier spans stay valid.
+    edits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let mut out = source.to_string();
+    for (start, end, text) in edits {
+        out.replace_range(start..end, &text);
+    }
+    out
+}
+
 /// with `-p/--release`). The harness inlines the test file's source plus a
 /// generated `main(args)` that runs a single test selected by argv[0].
 /// Returns `(harness_source_path, binary_path)`; both are cleaned up by
@@ -1887,15 +2542,63 @@ fn build_aot_harness(
     tests: &[TestInfo],
     config: &TestConfig,
 ) -> Result<(PathBuf, PathBuf), String> {
-    let source = std::fs::read_to_string(file)
+    let raw = std::fs::read_to_string(file)
         .map_err(|e| format!("cannot read test file `{}`: {e}", file.display()))?;
+    // Doc-test source twins, extracted BEFORE main-parking / alias
+    // transforms so the VM graft (parsed ASTs) and this harness text derive
+    // from identical input (same order → same `__zz_doctest_N` names).
+    // Skipped with --no-doctests. Discovery already failed the file on bad
+    // fences; the check here only guards TOCTOU drift.
+    let doctests = if config.no_doctests {
+        Vec::new()
+    } else {
+        let (docs, diags) = doctest::extract(&raw, &file.display().to_string());
+        if diags
+            .iter()
+            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+        {
+            let mut files = Files::new();
+            let id = files.add(file.display().to_string(), raw.clone());
+            eprint!("{}", render_to_string(&files, id, &diags));
+            return Err(format!("failed doctests in `{}`", file.display()));
+        }
+        docs
+    };
     // A test file with its own `func main` would collide with the harness
     // entrypoint; park it aside (it never runs under `zz test`).
-    let source = source
+    let source = raw
         .replace("func main(", "func __zz_user_main(")
         .replace("func main (", "func __zz_user_main (")
         .replace("pub func main(", "pub func __zz_user_main(")
         .replace("pub func main (", "pub func __zz_user_main (");
+    // A bare `*.main` import would collide the same way: the harness
+    // entrypoint occupies value scope as `main`, shadowing the module, so
+    // `main.answer()` fails to check (native only — the VM never injects
+    // `func main`). Retarget such imports through a file-local alias (#401).
+    let source = alias_main_imports(&source);
+    // Append the doctest twins after all transforms (generated code has no
+    // mains or imports to rewrite, and must not be rewritten itself).
+    // File preludes inline at the top of every twin body. `compile_fail`
+    // fences append a `fail()` stub: the real body may not compile, which
+    // would break the whole harness build — and the AOT run path reports
+    // them as ignored before any arm runs, so the stub never executes.
+    let mut source = source;
+    let prelude_text = doctests
+        .iter()
+        .filter(|d| d.is_prelude)
+        .map(|d| d.body_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for doc in doctests.iter().filter(|d| !d.is_prelude) {
+        if doc.compile_fail {
+            source.push_str(&format!(
+                "@test func {}() {{\n    fail(\"compile_fail fence\")\n}}\n",
+                doc.func_name()
+            ));
+        } else {
+            source.push_str(&doc.harness_func(&prelude_text));
+        }
+    }
     let orig_ns = file
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -2072,6 +2775,24 @@ fn run_aot_attempt(
             slow: false,
             over_budget: false,
             reason: test.meta.reason.clone(),
+            duration: start.elapsed(),
+            error_msg: None,
+            stdout: String::new(),
+            retried: 0,
+        };
+    }
+    // `compile_fail` doctests are VM-only: AOT compiles the whole file
+    // upfront, so a negative-compile test cannot be isolated per test.
+    // Reported as ignored (never silently skipped).
+    if test.expect_compile_fail {
+        return TestResult {
+            name: test.name.clone(),
+            file: test.file.clone(),
+            passed: true,
+            ignored: true,
+            slow: false,
+            over_budget: false,
+            reason: Some("compile_fail is VM-only".to_string()),
             duration: start.elapsed(),
             error_msg: None,
             stdout: String::new(),
@@ -2581,14 +3302,22 @@ fn print_json_results(results: &[TestResult]) -> Result<(), String> {
             .unwrap_or_else(|| "null".to_string());
 
         let comma = if i + 1 < results.len() { "," } else { "" };
+        // Doctest identity rides the display-name convention
+        // (`doctest <stem>#<n>`, set at discovery); no struct churn.
+        let kind = if r.name.starts_with("doctest ") {
+            "doctest"
+        } else {
+            "test"
+        };
 
         writeln!(
             stdout,
-            "  {{\"name\": \"{}\", \"file\": \"{}\", \"status\": \"{}\", \
+            "  {{\"name\": \"{}\", \"file\": \"{}\", \"kind\": \"{}\", \"status\": \"{}\", \
              \"duration_ms\": {}, \"attempts\": {}, \"slow\": {}, \
              \"error\": {}, \"reason\": {}, \"stdout\": \"{}\"}}{comma}",
             json_escape(&r.name),
             json_escape(&file),
+            kind,
             status,
             r.duration.as_millis(),
             r.retried + 1,
@@ -2772,5 +3501,54 @@ mod tests {
             assert_eq!(back, f, "roundtrip failed for {lit}");
         }
         assert_eq!(float_literal(f64::INFINITY), "1.0/0.0");
+    }
+
+    #[test]
+    fn alias_main_imports_retargets_qualified_uses() {
+        // #401: bare `*.main` import + qualified use → aliased import +
+        // retargeted uses. Strings, comments, and `main(` calls untouched.
+        let src = "import nrepro.main\n@test\nfunc t() {\n    assert_eq(main.answer(), 42)\n    println(\"main.answer() in a string\")\n    // main.answer() in a comment\n}\n";
+        let out = alias_main_imports(src);
+        assert!(
+            out.contains("import nrepro.main as __zz_harness_main_mod"),
+            "import not aliased: {out}"
+        );
+        assert!(
+            out.contains("assert_eq(__zz_harness_main_mod.answer(), 42)"),
+            "qualified use not retargeted: {out}"
+        );
+        assert!(
+            out.contains("\"main.answer() in a string\""),
+            "string literal rewritten: {out}"
+        );
+        assert!(
+            out.contains("// main.answer() in a comment"),
+            "comment rewritten: {out}"
+        );
+    }
+
+    #[test]
+    fn alias_main_imports_leaves_clean_sources_alone() {
+        // Already-aliased, selective, and unrelated imports are byte-identical.
+        for src in [
+            "import nrepro.main as app\nprintln(app.answer())\n",
+            "import nrepro.main(answer)\nprintln(answer())\n",
+            "import redis.client\nprintln(client.ping())\n",
+            "println(\"no imports here\")\n",
+        ] {
+            assert_eq!(alias_main_imports(src), src, "rewrote clean source: {src}");
+        }
+    }
+
+    #[test]
+    fn alias_main_imports_ignores_main_call_sites() {
+        // `main(` calls name the harness entrypoint, not the module.
+        let src = "import nrepro.main\nfunc t() {\n    main()\n    println(main.answer())\n}\n";
+        let out = alias_main_imports(src);
+        assert!(out.contains("\n    main()\n"), "call site rewritten: {out}");
+        assert!(
+            out.contains("println(__zz_harness_main_mod.answer())"),
+            "qualified use missed: {out}"
+        );
     }
 }

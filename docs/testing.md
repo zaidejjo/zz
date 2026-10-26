@@ -55,6 +55,46 @@ Metadata flags (`@test(...)` named args only):
 
 `cases` requires array literal with literal elements; non-literal errors at compile time. Expansion happens at HIR build — each entry reports individually.
 
+## Doc-tests
+
+`/// ```zz` fences in doc comments run as tests on both engines:
+
+```zz
+/// Double a number.
+///
+/// ```zz
+/// assert_eq(double(21), 42)
+/// ```
+///
+/// ```zz,ignore
+/// assert_eq(double(0), 999)
+/// ```
+func double(n: int) -> int { return n * 2 }
+```
+
+- Only explicit `zz` fences are extracted; plain ``` fences stay prose.
+- The header accepts `,ignore` and `,should_panic` (same meaning as
+  `@test` metadata), plus:
+  - `,compile_fail` — asserts the snippet fails to parse, check, or run
+    (any error inverts into a pass; a clean pass fails). VM-only: AOT
+    compiles whole files upfront, so these report as ignored there.
+  - `,no_run` — type-checks the snippet but never executes it (reported
+    as ignored with reason `no_run doctest`).
+  - `,prelude` — shared setup, prepended to every test fence in the
+    file; never a test itself and takes no other options.
+  Unknown options, `no_run`+`compile_fail`, and unterminated fences are
+  load errors with file positions — never silently skipped.
+- Body lines starting with `#` compile but stay hidden from rendered
+  docs (Rust convention); they occupy their file lines so failure
+  locations stay exact.
+- Fences report as `doctest <file>#<n>` and get the file's
+  `@setup`/`@teardown` like any test. Sibling references resolve
+  identically to `@test` bodies (same namespace rewriting). `--json`
+  carries `"kind": "doctest"` (vs `"test"`).
+- `--no-doctests` skips running/listing them (malformed fences still
+  fail the file at load). Fences inside function bodies are ignored.
+- `zz run`, `zz check`, and `zz fmt` never see synthetic tests.
+
 ## CLI
 
 ```
@@ -86,6 +126,8 @@ zz test --list
 | `--junit <path>` | JUnit XML for CI |
 | `--slow-threshold <ms>` | Mark passing tests slower than threshold as slow |
 | `--changed` | Only tests affected by files changed since last success (content hash, conservative) |
+| `--update-snapshots` | Write `assert_snapshot` goldens instead of comparing |
+| `--no-doctests` | Skip `/// ```zz` doc-tests |
 | `-h/--help` | Help |
 
 ### Engines
@@ -118,13 +160,134 @@ Content-hash manifest `.zz_test_cache` keyed by file mtime+hash plus import grap
 
 ## Assertions & Diffing
 
+`@test` needs no import. All asserts work bare and as `std.test.*`
+(`import std.test` only for the namespaced spelling):
+
 ```zz
-assert(cond, "msg")
+assert(cond)
 assert_eq(left, right)
 assert_ne(left, right)
 assert_approx_eq(a, b, epsilon)
+assert_contains(hay, needle)        // str, empty needle passes
+assert_starts_with(s, prefix)
+assert_ends_with(s, suffix)
+assert_len(val, n)                  // array/str/dict/bytes, chars for str
+assert_gt(a, b)                     // numeric, int+float mixed ok
+assert_lt(a, b)
+assert_is_some(opt)
+assert_is_none(opt)
+assert_is_ok(res)
+assert_is_err(res)
 fail("msg")
 ```
+
+## Test Helpers (`std.test`)
+
+Same rule: bare or `test.*` via `import std.test`. Both return
+`Result<_, str>` so setup failures surface with `?`/match/`unwrap`:
+
+```zz
+import std.test
+import std.fs
+
+@test
+func test_export() {
+    d := ""
+    match test.temp_dir("export") {   // unique 0700 subdir under OS temp
+        .ok(v) => d = v
+        .err(_) => fail("temp_dir failed")
+    }
+    f := "{d}/out.txt"
+    assert_is_ok(fs.write(f, "hi"))
+    assert(fs.exists(f))
+    assert_is_ok(fs.remove_dir_all(d))      // or in @teardown
+}
+
+@test(tag = "serial")   // free_port is TOCTOU: re-bind immediately, retry on collision
+func test_serves() {
+    port := 0
+    match test.free_port() {
+        .ok(v) => port = v
+        .err(_) => fail("free_port failed")
+    }
+    assert_gt(port, 0)
+}
+```
+
+Notes:
+
+- `temp_dir(prefix)` sanitizes the prefix to one path component (`/`, `\`
+  become `_`, `..` collapses, 64-char cap) and never escapes the temp base.
+  Dirs are per-call unique (pid + counter + nanos) so parallel tests never
+  share. Always clean up (`fs.remove_dir_all`, usually in `@teardown`).
+- `free_port()` binds `127.0.0.1:0` and closes the socket before returning.
+  Re-bind immediately; on collision retry or bind `:0` directly.
+- `black_box(val)` returns its argument unchanged and acts as an
+  optimization barrier for benchmarks (see `docs/bench.md`): the AOT C
+  compiler cannot see through it, so measured code is never eliminated
+  as dead code.
+- Env mutation: no new API — use existing `std.env.set/remove` with
+  `@test(tag = "serial")` (process-global, see `docs/test-isolation.md`).
+- HTTP: no wrapper — call `std.http.test(server, method, path, body)` directly.
+
+## Snapshot Testing
+
+`assert_snapshot(actual, name)` compares `actual` against a golden file
+(`<snapshots>/<name>.snap`, exact bytes, `.snap` appended for you):
+
+```zz
+@test
+func test_render() {
+    assert_snapshot(render_page("hi"), "homepage")
+}
+```
+
+- First run fails with `Snapshot missing: "homepage" (run with
+  `--update-snapshots` to create)`. Review, then
+  `zz test --update-snapshots` to write goldens. Re-run green.
+- Mismatch fails with a diff (Myers line diff on VM). Intentional change?
+  re-run with `--update-snapshots`, diff the `*.snap` files in git, commit.
+- Names are single components (`/`, `\`, `..` rejected) so snapshots can
+  never escape their directory.
+- Store: `<test file parent>/snapshots` under `zz test` (per file, so
+  parallel tests in one file share safely; files run sequentially).
+  Outside `zz test` (`zz run`), `$ZZ_SNAPSHOTS_DIR` wins, else `./snapshots`.
+- CI: never pass `--update-snapshots` in CI — a changed rendering must fail.
+
+## Mocks & Fakes
+
+No mock framework — ZZ func values are enough. Inject dependencies as
+function parameters; in tests pass named fakes with canned behavior:
+
+```zz
+func send_all(send: func(str) -> Result<int, str>, msgs: [str]) -> int {
+    n := 0
+    for m in msgs {
+        match send(m) {
+            .ok(_) => n = n + 1
+            .err(_) => n = n
+        }
+    }
+    return n
+}
+
+func fail_on_b(m: str) -> Result<int, str> {
+    out: Result<int, str> = .ok(0)
+    match m {
+        "b" => out = .err("boom")
+        _ => out = .ok(1)
+    }
+    return out
+}
+
+@test
+func test_send_all() {
+    assert_eq(send_all(fail_on_b, ["a", "b", "c"]), 2)
+}
+```
+
+Keep fakes next to the test. For time/random, pass a clock/seed parameter
+instead of calling the ambient source — deterministic tests need no mocks.
 
 Failure output includes `file:line` + source snippet. Structural diffing:
 
@@ -199,13 +362,13 @@ soft-timeout = false   # true = notice-only budget (legacy mode)
 seed = 42
 repeat = 1
 engine = "vm"          # or "native"
+update-snapshots = false  # true = write assert_snapshot goldens (never in CI)
 ```
 
 CLI flags always override file config. No config file is required.
 
 ## Deferred
 
-- **Doctests:** `/// ```zz ... ``` ` extraction → `doctests` category. Design stub: reuse doc-comment trivia, register as synthetic `@test` with `file:line` of fence.
 - **`--isolate` subprocess mode:** per-test child `zz test --run-one` for true segfault isolation *in the VM engine* (AOT already isolates per test).
 - **Precise `--changed`:** cross-file fine-grained dependency hashing.
 
@@ -223,3 +386,29 @@ zz test --json > results.json
 zz test --junit junit.xml
 zz test --changed
 ```
+
+## LSP-vs-check diagnostic parity gate (#264)
+
+Editor truth is a CI property: every `zz check` diagnostic set must
+equal the `zz-lsp` `publishDiagnostics` set for the same file. Run it
+with `cargo test -p zz_lsp --test check_parity`.
+
+How it works: for each corpus file, the harness runs
+`zz check --format json` (same code path as the CLI) and drives the
+server in-process exactly like `didOpen` (`update_document` →
+`checker_seed_for_path` → `check_program` → `absorb_result`,
+collecting what `recheck_and_publish` sends). Both sides normalize to
+`(severity, message, span)` triples — span-less diagnostics dropped
+(the publish path never sends those), loader file-stem qualification
+stripped on the check side — then compare per file.
+
+To add a case: drop a `.zz` file in `tests/fixtures/errors/` (error
+fixtures — e2e discovery mandates they fail at runtime), in
+`tests/fixtures/lsp_parity/` (agreement files that are not errors:
+warning-only or clean programs), or a
+known-clean file in the harness `CLEAN_FILES` list. It joins
+automatically; no registration. If the gate reports a divergence, fix
+the analysis gap; if the divergence is intentional (e.g. partial-program
+recovery), record it in `tests/fixtures/lsp_parity_allowlist.toml`
+with a reason. Allowlisted files that start passing fail loudly
+(`FIXED!`) so the list never goes stale.

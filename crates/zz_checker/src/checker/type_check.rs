@@ -64,8 +64,84 @@ pub(crate) struct MethodCall<'a> {
     pub span: Span,
 }
 
+/// Every name a pattern binds, in source order (#518).
+fn pattern_bindings(pat: &Pattern) -> Vec<(String, Span)> {
+    fn walk(pat: &Pattern, out: &mut Vec<(String, Span)>) {
+        match pat {
+            Pattern::Binding { name } => out.push((name.name.clone(), name.span)),
+            Pattern::Tuple { pats, .. } => pats.iter().for_each(|p| walk(p, out)),
+            Pattern::Variant { arg, .. } => {
+                if let Some(a) = arg {
+                    walk(a, out);
+                }
+            }
+            Pattern::Or { pats, .. } => pats.iter().for_each(|p| walk(p, out)),
+            Pattern::Wildcard { .. } | Pattern::Literal { .. } => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(pat, &mut out);
+    out
+}
+
 impl Checker {
     // --- statements -------------------------------------------------------
+
+    /// Warn when a `:=` initializer read the binding the declaration shadows
+    /// (#518): `x := x + 1` in a loop body re-declares a body-scoped `x` from
+    /// the untouched outer value every pass, so the outer binding never
+    /// advances while `x = x + 1` does. Only the self-referential shape warns:
+    /// shadowing with a fresh value is deliberate and common.
+    fn warn_if_shadowed_decl(
+        &mut self,
+        mark: usize,
+        value: &Expr,
+        annotated: bool,
+        is_const: bool,
+    ) {
+        let Some(probe) = self.finish_shadow_probes(mark).pop() else {
+            return;
+        };
+        let name = probe.name;
+        let mut diag = warning_at(
+            format!("`{name} := …` shadows the outer `{name}` — the outer binding keeps its value"),
+            probe.span,
+        )
+        .with_note(format!(
+            "the declaration is scoped to the surrounding block; each pass re-reads the outer value — `{name} = …` updates it instead"
+        ));
+        // `x := x + 1` → `x = x + 1` is a one-token fix. A `const` binding and
+        // an annotated declaration have no assignment form, so they keep only
+        // the note.
+        if !is_const && !annotated {
+            diag = diag.with_fixit(FixIt::safe(
+                Span::new(probe.span.end, value.span().start),
+                " = ",
+                "assign the outer binding",
+            ));
+        }
+        self.errors.push(diag);
+    }
+
+    /// Warn for destructuring declarations whose initializer read a binding
+    /// they shadow (#518). There is no one-token fix — a pattern cannot become
+    /// an assignment — so the note points at the two-step split instead.
+    fn warn_if_shadowed_destructure(&mut self, mark: usize) {
+        for probe in self.finish_shadow_probes(mark) {
+            let name = probe.name;
+            self.errors.push(
+                warning_at(
+                    format!(
+                        "`{name} := …` shadows the outer `{name}` — the outer binding keeps its value"
+                    ),
+                    probe.span,
+                )
+                .with_note(format!(
+                    "destructuring binds fresh names in this block: keep the result (`p := …`) and assign the outer binding separately (`{name} = p[1]`)"
+                )),
+            );
+        }
+    }
 
     pub(crate) fn check_stmt(&mut self, stmt: &Stmt) -> Type {
         self.had_undefined_var = false;
@@ -78,12 +154,18 @@ impl Checker {
                 pub_: _,
                 is_const,
             } => {
+                // #518: `x := x + 1` inside a nested block declares a *new*
+                // `x` scoped to that block — the outer binding never advances.
+                // The initializer is checked before the new binding exists, so
+                // a read of `name` below resolves to the shadowed binding.
+                let probe = self.begin_shadow_probe(name.name.clone(), name.span);
                 // Pre-bind closures so recursive references resolve.
                 if matches!(value, Expr::Closure { .. }) {
                     let fv = self.unifier.fresh_var();
                     self.define_var_at(&name.name, fv, name.span, *is_const);
                 }
                 let vt = self.check_expr(value);
+                self.warn_if_shadowed_decl(probe, value, ty.is_some(), *is_const);
                 // Phase 2.2: inherit `std.http` route tables across server
                 // builder chains (`s2 := s.route_get(...)`, `s2 := s`).
                 self.propagate_http_routes(&name.name, value);
@@ -211,7 +293,7 @@ impl Checker {
             }
             Stmt::Func { span, .. } => {
                 let fname = Self::func_name(stmt);
-                let sig = match self.funcs.get(&fname) {
+                let sig = match crate::lookup_std(&self.funcs, &fname) {
                     Some(s) => s.clone(),
                     None => {
                         self.errors.push(zz_frontend::diag::error_at(
@@ -251,7 +333,7 @@ impl Checker {
                     if let Stmt::Func { .. } = method {
                         let method_name = Self::func_name(method);
                         let full_name = format!("{}.{}", type_name, method_name);
-                        let sig = self.funcs.get(&full_name).unwrap().clone();
+                        let sig = crate::lookup_std(&self.funcs, &full_name).unwrap().clone();
                         self.scope.push(Arc::from(full_name));
                         self.check_func_body(method, &sig);
                         self.scope.pop();
@@ -511,7 +593,15 @@ impl Checker {
                         pat.span(),
                     ));
                 }
+                // #518: `a, b := f(b)` re-declares the body-scoped `b` from
+                // the untouched outer value every iteration, exactly like the
+                // single-binding form above.
+                let mark = self.shadow_probes.len();
+                for (bound, bound_span) in pattern_bindings(pat) {
+                    self.begin_shadow_probe(bound, bound_span);
+                }
                 let vt = self.check_expr(value);
+                self.warn_if_shadowed_destructure(mark);
                 let vt = self.unifier.resolve(&vt);
                 self.bind_pattern(pat, &vt);
                 Type::Unit
@@ -521,6 +611,17 @@ impl Checker {
                 value,
                 span,
             } => {
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // `_` is never a real binding, so there is nothing to assign
+                // to: type-check the RHS and return unit without const-checking
+                // or unifying against a target type.
+                if let Expr::Ident { name, .. } = target {
+                    if name == "_" {
+                        let _ = self.check_expr(value);
+                        return Type::Unit;
+                    }
+                }
+
                 // Reject assignment to immutable (`const`) variables. The target is an
                 // `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
                 // the loader namespaces top-level bindings.
@@ -784,6 +885,35 @@ impl Checker {
         }
     }
 
+    /// Whether a loop body can leave through a `break` that targets this
+    /// loop. Nested loops capture their own breaks, so they are not
+    /// descended into.
+    fn block_has_break(block: &Block) -> bool {
+        block.stmts.iter().any(|stmt| match stmt {
+            Stmt::Break { .. } => true,
+            Stmt::Expr(expr) => Self::expr_has_break(expr),
+            _ => false,
+        })
+    }
+
+    fn expr_has_break(expr: &Expr) -> bool {
+        match expr {
+            Expr::Break { .. } => true,
+            Expr::If { then, els, .. } | Expr::IfLet { then, els, .. } => {
+                Self::block_has_break(then)
+                    || els
+                        .as_ref()
+                        .is_some_and(|e| Self::expr_has_break(e.as_ref()))
+            }
+            Expr::Match { arms, .. } => arms.iter().any(|arm| Self::expr_has_break(&arm.body)),
+            Expr::Block(block) => Self::block_has_break(block),
+            // A nested `while` owns its breaks; no other expression can
+            // carry a `break` bound to the enclosing loop.
+            Expr::While { .. } => false,
+            _ => false,
+        }
+    }
+
     pub(crate) fn check_block(&mut self, block: &Block) -> Type {
         self.push_scope();
         let mut result = Type::Unit;
@@ -828,6 +958,10 @@ impl Checker {
                 });
             }
         }
+        self.last_block_tail = block
+            .stmts
+            .last()
+            .map(|s| (s.span(), self.unifier.resolve(&result)));
         self.pop_scope();
         result
     }
@@ -841,11 +975,13 @@ impl Checker {
         t
     }
 
-    /// Check a function/closure body: its tail is the return value even
-    /// when nested inside a discarded block (e.g. a `func` declared in
-    /// a loop body).
-    pub(crate) fn check_fn_body_block(&mut self, block: &Block) -> Type {
-        let prev = std::mem::replace(&mut self.tail_is_value, true);
+    /// Check a named function body: its tail expression is **discarded**.
+    /// A named function yields a value only through `return`; block
+    /// expressions and closures keep their tail-value semantics
+    /// (`check_fn_body_block`'s old behaviour). Discarding the tail also
+    /// gives `Result`/`Option` tails the must-use warning they deserve.
+    pub(crate) fn check_named_fn_body(&mut self, block: &Block) -> Type {
+        let prev = std::mem::replace(&mut self.tail_is_value, false);
         let t = self.check_block(block);
         self.tail_is_value = prev;
         t
@@ -897,6 +1033,23 @@ impl Checker {
     /// so the HIR could bindings can be built deterministically afterward.
     /// The key pairs the span with the enclosing top-level item: bare spans
     /// repeat across modules (offsets restart at 0 per file).
+    /// Resolve a named-function value type (`p1.greet` from using a bare
+    /// function name as a value) to its `Func` type so it unifies with
+    /// func-typed positions like struct fields (#385). Generic functions
+    /// stay `Named` (using one as a value errors at lookup).
+    pub(crate) fn resolve_fn_value(&mut self, t: Type) -> Type {
+        match t {
+            Type::Named(ref n) => match crate::lookup_std(&self.funcs, n).cloned() {
+                Some(sig) if sig.generics.is_empty() => {
+                    let (ps, ret, _) = self.instantiate(&sig);
+                    Type::Func(ps, Box::new(ret))
+                }
+                _ => t,
+            },
+            other => other,
+        }
+    }
+
     pub(crate) fn check_expr(&mut self, e: &Expr) -> Type {
         let ty = self.check_expr_impl(e);
         // Unresolved types stay as `Var`s during the walk; the typed map is
@@ -995,7 +1148,9 @@ impl Checker {
                             _ => None,
                         };
                         if let Some(ns) = ns {
-                            if let Some(sig) = self.funcs.get(&format!("{ns}.{method}")).cloned() {
+                            if let Some(sig) =
+                                crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned()
+                            {
                                 let (ps, ret, subs) = self.instantiate(&sig);
                                 if !ps.is_empty() {
                                     if let Err(e) = self.unifier.unify(&other, &ps[0]) {
@@ -1069,6 +1224,7 @@ impl Checker {
                 for (fname, fval) in fields {
                     if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == fname) {
                         let vt = self.check_expr(fval);
+                        let vt = self.resolve_fn_value(vt);
                         let exp = crate::checker::inference::subst(ft, &gen_map);
                         if let Err(e) = self.unifier.unify(&vt, &exp) {
                             self.report_mismatch(e, fval.span());
@@ -1082,6 +1238,7 @@ impl Checker {
                             continue;
                         }
                         let vt = self.check_expr(fval);
+                        let vt = self.resolve_fn_value(vt);
                         if let Err(e) = self.unifier.unify(&vt, &pft) {
                             self.report_mismatch(e, fval.span());
                         }
@@ -1312,7 +1469,16 @@ impl Checker {
                 self.loop_depth += 1;
                 self.check_block_discarded(body);
                 self.loop_depth -= 1;
-                Type::Unit
+                // `while true` without a `break` never leaves the loop, so
+                // a named function whose body ends in one does not fall
+                // through (e.g. `func serve() -> int { while true { ... return } }`).
+                let diverges = matches!(cond.as_ref(), Expr::Bool { value: true, .. })
+                    && !Self::block_has_break(body);
+                if diverges {
+                    Type::Never
+                } else {
+                    Type::Unit
+                }
             }
             Expr::Match {
                 scrutinee,
@@ -1766,6 +1932,38 @@ impl Checker {
                 Type::Int
             }
             (Type::Str, Type::Str) if op == BinOp::Add => Type::Str,
+            // Array concat: `[T] + [T] -> [T]`. Element types must match
+            // exactly ([int] + [str] is a hard error; cast one side first).
+            // An inference-var element (`[]`) unifies with the concrete side.
+            (Type::Array(a), Type::Array(b)) if op == BinOp::Add => {
+                let ea = self.unifier.resolve(a);
+                let eb = self.unifier.resolve(b);
+                match (&ea, &eb) {
+                    (Type::Var(_), Type::Var(_)) => {
+                        // Both sides unknown — can't pin element type yet.
+                        Type::Array(Box::new(self.unifier.fresh_var()))
+                    }
+                    (Type::Var(_), concrete) => {
+                        self.unifier.bind_var(a, concrete.clone());
+                        Type::Array(Box::new(concrete.clone()))
+                    }
+                    (concrete, Type::Var(_)) => {
+                        self.unifier.bind_var(b, concrete.clone());
+                        Type::Array(Box::new(concrete.clone()))
+                    }
+                    (_, _) if ea == eb => Type::Array(Box::new(ea)),
+                    (a2, b2) => {
+                        self.errors.push(error_at(
+                            format!(
+                                "cannot apply `+` to `[{a2}]` and `[{b2}]`: element types differ\n\
+                                 hint: cast one side so both arrays share an element type",
+                            ),
+                            span,
+                        ));
+                        Type::Error
+                    }
+                }
+            }
             (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
                 Type::Float
             }
@@ -1879,7 +2077,7 @@ impl Checker {
         if parts.len() != 2 {
             return false;
         }
-        let Some(sig) = self.funcs.get(&parts.join(".")).cloned() else {
+        let Some(sig) = crate::lookup_std(&self.funcs, &parts.join(".")).cloned() else {
             return false;
         };
         // The head must be a real local binding — module namespaces never
@@ -1918,6 +2116,26 @@ impl Checker {
             .map(|t| self.unifier.resolve(&t));
         let first_t = self.unifier.resolve(&sig.params[0].1);
         recv_t.is_some_and(|r| r == first_t)
+    }
+
+    /// True when a named receiver type carries its own `impl` method
+    /// called `method`. `impl W { func get(self) }` registers `W.get`, so
+    /// this is the dot-call form's own definition: it outranks a
+    /// same-named receiver-implicit free function (`get(w)`), which keeps
+    /// dot syntax from silently binding the free function and leaving the
+    /// method unreachable (#500). The free function stays callable by
+    /// name, so neither form is lost.
+    fn receiver_impl_method(&self, recv: &Type, method: &str) -> bool {
+        // Resolve first: a top-level binding's recorded type can still be a
+        // unification variable at its use site, and reading the raw type
+        // would silently skip the receiver's own method.
+        let recv = self.unifier.resolve_deep(recv);
+        match &recv {
+            Type::Struct(name, _) | Type::Enum(name, _) => {
+                crate::lookup_std(&self.funcs, &format!("{name}.{method}")).is_some()
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn check_call(
@@ -1977,67 +2195,105 @@ impl Checker {
                     // Field-call args exclude the receiver: `req.param(name)`.
                     self.lint_http_param(args.first());
                 }
-                let mut sig = self.funcs.get(&method).cloned();
+                // Dot-call order for a `Field` callee (`makePoint().get()`):
+                // the receiver's own `impl` method (`{Type}.{method}`) wins
+                // over a same-named receiver-implicit free function (#500).
+                // The free signature is restored below when nothing matches,
+                // so its mismatch diagnostics are unchanged.
+                let impl_owned = self.receiver_impl_method(&recv_t, &method);
+                let free_sig = crate::lookup_std(&self.funcs, &method).cloned();
+                let mut sig = if impl_owned { None } else { free_sig.clone() };
                 if sig.is_none() {
                     match &self.unifier.resolve(&recv_t) {
-                        Type::Str => sig = self.funcs.get(&format!("str.{method}")).cloned(),
-                        Type::Array(_) => sig = self.funcs.get(&format!("vec.{method}")).cloned(),
-                        Type::Bytes => sig = self.funcs.get(&format!("bytes.{method}")).cloned(),
+                        Type::Str => {
+                            sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned()
+                        }
+                        Type::Array(_) => {
+                            sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned()
+                        }
+                        Type::Bytes => {
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("bytes.{method}")).cloned()
+                        }
                         Type::Option(_) => {
-                            sig = self.funcs.get(&format!("option.{method}")).cloned()
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("option.{method}")).cloned()
                         }
                         Type::Result(_, _) => {
-                            sig = self.funcs.get(&format!("result.{method}")).cloned()
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("result.{method}")).cloned()
                         }
                         // Scalar extensions (`impl int/float/bool`) live in
                         // the same merged table; no stdlib namespace here.
-                        Type::Int => sig = self.funcs.get(&format!("int.{method}")).cloned(),
-                        Type::Float => sig = self.funcs.get(&format!("float.{method}")).cloned(),
-                        Type::Bool => sig = self.funcs.get(&format!("bool.{method}")).cloned(),
-                        Type::Response => sig = self.funcs.get(&format!("http.{method}")).cloned(),
-                        Type::HttpRequest => {
-                            sig = self.funcs.get(&format!("http.{method}")).cloned()
+                        Type::Int => {
+                            sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned()
                         }
-                        Type::TcpStream => sig = self.funcs.get(&format!("net.{method}")).cloned(),
+                        Type::Float => {
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned()
+                        }
+                        Type::Bool => {
+                            sig = crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned()
+                        }
+                        Type::Response => {
+                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                        }
+                        Type::HttpRequest => {
+                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                        }
+                        Type::TcpStream => {
+                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+                        }
                         Type::TcpListener => {
-                            sig = self.funcs.get(&format!("net.{method}")).cloned()
+                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
                         }
                         Type::HttpServer => {
-                            sig = self.funcs.get(&format!("http.{method}")).cloned()
+                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
                         }
-                        Type::Json => sig = self.funcs.get(&format!("json.{method}")).cloned(),
+                        Type::Json => {
+                            sig = crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned()
+                        }
                         Type::Db => {
-                            // Canonical `sqlz.*` first, `db.*` alias fallback.
-                            sig = self.funcs.get(&format!("sqlz.{method}")).cloned();
-                            if sig.is_none() {
-                                sig = self.funcs.get(&format!("db.{method}")).cloned();
-                            }
+                            // Canonical `sqlz.*` only — the `db` module was
+                            // removed. Handle variables named `db` dispatch
+                            // here silently (method call, not module use).
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
                         }
-                        Type::Chan => sig = self.funcs.get(&format!("chan.{method}")).cloned(),
-                        Type::TaskJoin => sig = self.funcs.get(&format!("task.{method}")).cloned(),
+                        Type::Chan => {
+                            sig = crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned()
+                        }
+                        Type::TaskJoin => {
+                            sig = crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned()
+                        }
                         // Opaque handles dispatch on their module tag, e.g.
                         // an `Opaque("regex")` receiver resolves
                         // `regex.is_match`.
                         Type::Opaque(tag) => {
-                            sig = self.funcs.get(&format!("{tag}.{method}")).cloned()
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned()
                         }
                         Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
-                            sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}"))
+                                .cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                        .cloned();
                                 }
                             }
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
                         Type::Enum(ename, _) => {
-                            sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}"))
+                                .cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                        .cloned();
                                 }
                             }
                         }
@@ -2061,6 +2317,12 @@ impl Checker {
                         }
                     }
                 }
+                // No method matched: restore the free signature so the
+                // call reports a mismatch against it rather than falling
+                // through as an unknown callee.
+                if sig.is_none() {
+                    sig = free_sig;
+                }
                 if let Some(sig) = sig {
                     return self.check_method_call(&MethodCall {
                         sig: &sig,
@@ -2077,6 +2339,204 @@ impl Checker {
             _ => None,
         };
         if let Some(name) = &direct_name {
+            // Removed `db` module: `db.*` / `std.db.*` in module position
+            // is a hard error with a rename hint. Handle variables named
+            // `db` (`db := sqlz.open(..); db.exec(..)`) are method calls
+            // and stay silent — this fires only when the head has no
+            // local binding.
+            if (name.starts_with("std.db.") || name.starts_with("db."))
+                && !self.funcs.contains_key(name)
+            {
+                let head_is_module = match callee {
+                    Expr::Path { parts, .. } => {
+                        parts.len() >= 2 && self.lookup_opt(&parts[0]).is_none()
+                    }
+                    _ => false,
+                };
+                if head_is_module {
+                    for arg in args {
+                        self.check_expr(arg);
+                    }
+                    for (_, val) in named {
+                        self.check_expr(val);
+                    }
+                    self.errors.push(error_at(
+                        "no std module `db` — rename to `sqlz` (`db.open` → `sqlz.open`)",
+                        span,
+                    ));
+                    let ret = match name.rsplit('.').next().unwrap_or("") {
+                        "open" => Type::Db,
+                        "exec" => Type::Int,
+                        "close" => Type::Unit,
+                        "query" => Type::Array(Box::new(self.unifier.fresh_var())),
+                        "transaction" => {
+                            Type::Result(Box::new(self.unifier.fresh_var()), Box::new(Type::Str))
+                        }
+                        _ => Type::Array(Box::new(self.unifier.fresh_var())),
+                    };
+                    return ret;
+                }
+            }
+            // Removed push spellings: `vec.append` / `std.vec.append` and the
+            // bare `append` builtin are gone — `vec.push` plus the method form
+            // `xs.push(x)` is the only spelling. Hard error with a hint
+            // (no silent redirect: the old bare form fused to an in-place
+            // statement op, so a quiet rewrite could change behavior).
+            if !self.funcs.contains_key(name)
+                && (name.as_str() == "vec.append"
+                    || name.as_str() == "std.vec.append"
+                    || name.as_str() == "append")
+            {
+                // Still check the args so nested errors inside them surface,
+                // then stop: the name no longer resolves, and letting lookup
+                // run on would add a confusing second error (e.g. suggesting
+                // `import std.fs` for the unrelated file `fs.append` API).
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    "removed: `append` is gone — use `vec.push(v, x)` or the method form `xs.push(x)`",
+                    span,
+                ));
+                return Type::Array(Box::new(self.unifier.fresh_var()));
+            }
+            // Bare `pg.*` / `my.*` / `postgres.*` / `mysql.*` never resolve:
+            // postgres/mysql live nested inside sqlz. Guide to the import.
+            // (Skipped when the name resolves — e.g. `pg.query` after
+            // `import std.sqlz.postgres as pg` copies real sigs there.)
+            if !self.funcs.contains_key(name)
+                && (name.as_str() == "pg.query"
+                    || name.as_str() == "pg.exec"
+                    || name.as_str() == "postgres.query"
+                    || name.as_str() == "postgres.exec"
+                    || name.as_str() == "my.query"
+                    || name.as_str() == "my.exec"
+                    || name.as_str() == "mysql.query"
+                    || name.as_str() == "mysql.exec")
+            {
+                // Still check the args so nested errors surface, then stop:
+                // these names never resolve (nested modules need an import),
+                // and falling through would add a bare "undefined variable".
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    "unknown module: postgres/mysql live inside `sqlz` — `import std.sqlz.postgres` (optionally `as pg`) or `import std.sqlz.mysql` (`as my`), then call `pg.query(..)` / `my.query(..)`",
+                    span,
+                ));
+                if name.as_str().ends_with(".exec") {
+                    return Type::Int;
+                }
+                return Type::Array(Box::new(self.unifier.fresh_var()));
+            }
+            // Removed stdlib aliases: one spelling per op survived (see
+            // `zz_stdlib`). Each arm checks the args (nested errors
+            // surface), reports a rename hint, and returns the
+            // replacement's type so downstream checking stays quiet.
+            // `std.env.unset` → `std.env.remove` (bare `env.unset` after
+            // `import std.env` routes here too: same dotted name).
+            if !self.funcs.contains_key(name)
+                && (name.as_str() == "std.env.unset" || name.as_str() == "env.unset")
+            {
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    "removed: `env.unset` is gone — use `env.remove(key)`",
+                    span,
+                ));
+                return Type::Unit;
+            }
+            // `std.fs.read_file` / `std.fs.read_to_string` → `std.fs.read`;
+            // `std.fs.write_file` → `std.fs.write`; `std.fs.remove_file` →
+            // `std.fs.remove`; `std.fs.readdir` → `std.fs.read_dir`
+            // (bare `fs.*` spellings after `import std.fs` route here too).
+            if let Some(replacement) = match !self.funcs.contains_key(name) {
+                true => match name.as_str() {
+                    "std.fs.read_file"
+                    | "fs.read_file"
+                    | "std.fs.read_to_string"
+                    | "fs.read_to_string" => Some((
+                        "std.fs.read",
+                        Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+                    )),
+                    "std.fs.write_file" | "fs.write_file" => Some((
+                        "std.fs.write",
+                        Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+                    )),
+                    "std.fs.remove_file" | "fs.remove_file" => Some((
+                        "std.fs.remove",
+                        Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+                    )),
+                    "std.fs.readdir" | "fs.readdir" => Some((
+                        "std.fs.read_dir",
+                        Type::Result(
+                            Box::new(Type::Array(Box::new(Type::Str))),
+                            Box::new(Type::Str),
+                        ),
+                    )),
+                    _ => None,
+                },
+                false => None,
+            } {
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    format!(
+                        "removed: `{name}` is gone — use `{}` instead",
+                        replacement.0
+                    ),
+                    span,
+                ));
+                return replacement.1;
+            }
+            // `std.fs.rename` (identical to `move`) → `std.fs.move`.
+            if !self.funcs.contains_key(name)
+                && (name.as_str() == "std.fs.rename" || name.as_str() == "fs.rename")
+            {
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    "removed: `fs.rename` is gone — use `fs.move(src, dst)`",
+                    span,
+                ));
+                return Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
+            }
+            // `std.net.tcp_close` (legacy no-op) → `close` / `shutdown`.
+            if !self.funcs.contains_key(name)
+                && (name.as_str() == "std.net.tcp_close"
+                    || name.as_str() == "net.tcp_close"
+                    || name.as_str() == "tcp_close")
+            {
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                self.errors.push(error_at(
+                    "removed: `tcp_close` is gone — use `stream.close()` / `stream.shutdown()` for a real shutdown",
+                    span,
+                ));
+                return Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
+            }
             // Math constants are values, not functions: `math.PI()` is
             // always an error — use bare `math.PI`.
             if self.is_math_const(name) && self.funcs.contains_key(name) {
@@ -2096,8 +2556,9 @@ impl Checker {
                 ));
                 return Type::Float;
             }
-            // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` (canonical;
-            // `db.*` / `std.db.*` are zero-overhead aliases) take an
+            // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` (the
+            // `db` module was removed — module-position `db.*` calls hard
+            // error with a rename hint above) take an
             // interpolated SQL string. `{expr}` segments are extracted as
             // bound parameters (never inlined), so verification here is:
             // receiver is `db`, SQL arg is `str`, each bound expr is a
@@ -2131,17 +2592,11 @@ impl Checker {
                 || name == "std.sqlz.query"
                 || name == "sqlz.exec"
                 || name == "std.sqlz.exec"
-                || name == "db.query"
-                || name == "std.db.query"
-                || name == "db.exec"
-                || name == "std.db.exec"
                 || name == "sqlz.transaction"
                 || name == "std.sqlz.transaction"
-                || name == "db.transaction"
-                || name == "std.db.transaction"
                 || is_pg_call
             {
-                if let Some(sig) = self.funcs.get(name).cloned() {
+                if let Some(sig) = crate::lookup_std(&self.funcs, name).cloned() {
                     // Only take this path when the leading component really
                     // is the module namespace (NOT a local variable).
                     // Otherwise fall through to method dispatch.
@@ -2169,10 +2624,8 @@ impl Checker {
                         // `sqlz.query(db, sql)`) carry the SQL second;
                         // the bare method-namespace form carries it first.
                         // Skip for transaction — second arg is a closure, not SQL.
-                        let is_tx_call = name == "sqlz.transaction"
-                            || name == "std.sqlz.transaction"
-                            || name == "db.transaction"
-                            || name == "std.db.transaction";
+                        let is_tx_call =
+                            name == "sqlz.transaction" || name == "std.sqlz.transaction";
                         if !is_tx_call {
                             let sql_idx = if is_pg_call || args.len() >= 2 { 1 } else { 0 };
                             if let Some(sql_arg) = args.get(sql_idx) {
@@ -2199,7 +2652,7 @@ impl Checker {
             // is user code (e.g. a `@route` decorator) — linting it would
             // false-positive (see `syntax/decorators.zz`).
             if !self.method_shadow_call(callee, args, named) {
-                if let Some(sig) = self.funcs.get(name).cloned() {
+                if let Some(sig) = crate::lookup_std(&self.funcs, name).cloned() {
                     self.used_names.insert(name.clone());
                     let (ps, ret, subs) = self.instantiate(&sig);
                     if name == "input" {
@@ -2379,7 +2832,11 @@ impl Checker {
                                     .cloned();
                                 if sig.is_none() {
                                     if let Some((ns, _)) = canonical_head2.rsplit_once('.') {
-                                        sig = self.funcs.get(&format!("{ns}.{method2}")).cloned();
+                                        sig = crate::lookup_std(
+                                            &self.funcs,
+                                            &format!("{ns}.{method2}"),
+                                        )
+                                        .cloned();
                                     }
                                 }
                                 if let Some(sig) = sig {
@@ -2453,7 +2910,9 @@ impl Checker {
                                         return *ret;
                                     }
                                     Type::Named(ref nname) => {
-                                        if let Some(sig) = self.funcs.get(nname).cloned() {
+                                        if let Some(sig) =
+                                            crate::lookup_std(&self.funcs, nname).cloned()
+                                        {
                                             let (ps, ret, subs) = self.instantiate(&sig);
                                             let pnames: Vec<String> =
                                                 sig.params.iter().map(|(n, _)| n.clone()).collect();
@@ -2491,82 +2950,109 @@ impl Checker {
                 }
                 let method = parts.last().unwrap();
                 let recv_t = self.lookup_path(&parts[..parts.len() - 1], *pspan);
-                let mut sig = self.funcs.get(method).cloned();
+                let recv_t_resolved = self.unifier.resolve(&recv_t);
+                // Dot-call order for `recv.method(...)`:
+                //   1. the receiver's own `impl` method (`{Type}.{method}`);
+                //   2. the receiver-implicit free function `method`
+                //      (`p.dist()` ≡ `dist(p)`);
+                //   3. the receiver-typed stdlib namespace (`str.`/`vec.`/…)
+                //      and the cross-module `{ns}.{method}` fallback below.
+                // (1) keeps a same-named free function from silently making
+                // the method unreachable (#500); the free signature is
+                // restored at the end when nothing matches, so its mismatch
+                // diagnostics are unchanged.
+                let impl_owned = self.receiver_impl_method(&recv_t_resolved, method);
+                let free_sig = crate::lookup_std(&self.funcs, method).cloned();
+                let mut sig = if impl_owned { None } else { free_sig.clone() };
                 if sig.is_none() {
-                    let recv_t_resolved = self.unifier.resolve(&recv_t);
                     match &recv_t_resolved {
                         Type::Str => {
-                            sig = self.funcs.get(&format!("str.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned();
                         }
                         Type::Array(_) => {
-                            sig = self.funcs.get(&format!("vec.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned();
                         }
                         Type::Option(_) => {
-                            sig = self.funcs.get(&format!("option.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("option.{method}"))
+                                .cloned();
                         }
                         Type::Result(_, _) => {
-                            sig = self.funcs.get(&format!("result.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("result.{method}"))
+                                .cloned();
                         }
                         Type::Int => {
-                            sig = self.funcs.get(&format!("int.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned();
                         }
                         Type::Float => {
-                            sig = self.funcs.get(&format!("float.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned();
                         }
                         Type::Bool => {
-                            sig = self.funcs.get(&format!("bool.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned();
                         }
                         Type::Response => {
-                            sig = self.funcs.get(&format!("http.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
                         }
                         Type::HttpRequest => {
-                            sig = self.funcs.get(&format!("http.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
                         }
                         Type::TcpStream => {
-                            sig = self.funcs.get(&format!("net.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned();
                         }
                         Type::TcpListener => {
-                            sig = self.funcs.get(&format!("net.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned();
                         }
                         Type::HttpServer => {
-                            sig = self.funcs.get(&format!("http.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
                         }
                         Type::Json => {
-                            sig = self.funcs.get(&format!("json.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned();
                         }
                         Type::Db => {
-                            // Canonical `sqlz.*` first, `db.*` alias fallback.
-                            sig = self.funcs.get(&format!("sqlz.{method}")).cloned();
-                            if sig.is_none() {
-                                sig = self.funcs.get(&format!("db.{method}")).cloned();
-                            }
+                            // Canonical `sqlz.*` only — the `db` module was
+                            // removed. Handle variables named `db` dispatch
+                            // here silently (method call, not module use).
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
                         }
                         Type::Chan => {
-                            sig = self.funcs.get(&format!("chan.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned();
                         }
                         Type::TaskJoin => {
-                            sig = self.funcs.get(&format!("task.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned();
                         }
                         Type::Opaque(tag) => {
-                            sig = self.funcs.get(&format!("{tag}.{method}")).cloned();
+                            sig =
+                                crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned();
                         }
                         Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
-                            sig = self.funcs.get(&format!("{sname}.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}"))
+                                .cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                        .cloned();
                                 }
                             }
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
                         Type::Enum(ename, _) => {
-                            sig = self.funcs.get(&format!("{ename}.{method}")).cloned();
+                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}"))
+                                .cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = self.funcs.get(&format!("{ns}.{method}")).cloned();
+                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                        .cloned();
                                 }
                             }
                         }
@@ -2586,6 +3072,9 @@ impl Checker {
                             sig = Some(psig);
                         }
                     }
+                }
+                if sig.is_none() {
+                    sig = free_sig;
                 }
                 if let Some(sig) = sig {
                     // sqlz method form: `db.exec(sql)`, `db.query(sql)`,
@@ -2694,7 +3183,7 @@ impl Checker {
                 self.check_args_against(None, &pnames, &ps, &[], args, named, span);
                 *ret
             }
-            Type::Named(name) => match self.funcs.get(&name).cloned() {
+            Type::Named(name) => match crate::lookup_std(&self.funcs, &name).cloned() {
                 Some(sig) => {
                     let (ps, ret, subs) = self.instantiate(&sig);
                     let param_names: Vec<String> =
@@ -2983,13 +3472,15 @@ impl Checker {
                     // structural unification applies instead of failing on
                     // `Named` vs `Func`.
                     let at = match (&at, &expected) {
-                        (Type::Named(n), Type::Func(_, _)) => match self.funcs.get(n).cloned() {
-                            Some(sig) => {
-                                let (sps, sret, _) = self.instantiate(&sig);
-                                Type::Func(sps, Box::new(sret))
+                        (Type::Named(n), Type::Func(_, _)) => {
+                            match crate::lookup_std(&self.funcs, n).cloned() {
+                                Some(sig) => {
+                                    let (sps, sret, _) = self.instantiate(&sig);
+                                    Type::Func(sps, Box::new(sret))
+                                }
+                                None => at,
                             }
-                            None => at,
-                        },
+                        }
                         _ => at,
                     };
                     if let Err(e) = self.unifier.unify(&at, &expected) {
@@ -3113,7 +3604,11 @@ impl Checker {
                     }
                 }
             };
-            self.define_at(&p.name.name, ty.clone(), p.name.span);
+            // Closure parameters are dictated by the callee's signature
+            // (`.route(..., |req| ...)`, `map(|x| ...)`): they cannot be
+            // removed, so an unread one is not a mistake worth warning
+            // about. Named-function parameters keep the warning.
+            self.define_binding_at(&p.name.name, ty.clone(), p.name.span, false);
             ptypes.push(ty);
         }
         // Allow `return` inside closures — same semantics as named functions.
@@ -3553,6 +4048,12 @@ impl Checker {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
                 self.define_at(&name.name, ty.clone(), name.span);
+                // Record the binding-site span type: destructured (and
+                // match-arm) names otherwise leave no span entry, so
+                // lowering resolves their method calls untyped and
+                // multi-namespace methods misresolve (#417).
+                self.span_types
+                    .insert(self.scope_key(name.span), ty.clone());
                 // Top-level destructured names are module globals (like
                 // top-level `Decl`): record them for `tp.bindings` so
                 // downstream passes (native globals collection) can type
