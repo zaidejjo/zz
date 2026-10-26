@@ -517,14 +517,14 @@ pub fn add(args: &[String]) -> Result<(), String> {
 
     // Build the dep spec
     let dep_spec = if let Some(p) = path_dep {
-        zz_pm::manifest::DepSpec::Path(zz_pm::manifest::PathDep { path: p })
+        zz_pm::manifest::DepSpec::Path(zz_pm::manifest::PathDep::new(p))
     } else if let Some(url) = git_url {
         let rev = git_rev.unwrap_or_else(|| "main".to_string());
-        zz_pm::manifest::DepSpec::Git(zz_pm::manifest::GitDep {
-            version: version.clone().unwrap_or_else(|| "*".into()),
-            git: url,
+        zz_pm::manifest::DepSpec::Git(zz_pm::manifest::GitDep::new(
+            version.clone().unwrap_or_else(|| "*".into()),
+            url,
             rev,
-        })
+        ))
     } else {
         // Bare name: consult the local registry before falling back to a
         // remote registry version.
@@ -542,7 +542,7 @@ pub fn add(args: &[String]) -> Result<(), String> {
                 }
                 None => resolve_latest_req(&pkg_name, registry_base_from(args))?,
             };
-            zz_pm::manifest::DepSpec::Version(req)
+            zz_pm::manifest::DepSpec::Version(req.into())
         }
     };
 
@@ -1645,7 +1645,7 @@ fn docs_source(dir: &std::path::Path) -> String {
 
 fn dep_spec_string(spec: &zz_pm::manifest::DepSpec) -> String {
     match spec {
-        zz_pm::manifest::DepSpec::Version(v) => v.clone(),
+        zz_pm::manifest::DepSpec::Version(v) => v.version.clone(),
         zz_pm::manifest::DepSpec::Git(g) => format!("git+{}#{}", g.git, g.rev),
         zz_pm::manifest::DepSpec::Path(p) => format!("path:{}", p.path),
     }
@@ -2007,7 +2007,7 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
         .dependencies
         .iter()
         .filter_map(|(name, spec)| match spec {
-            zz_pm::manifest::DepSpec::Version(req) => Some((name, req)),
+            zz_pm::manifest::DepSpec::Version(req) => Some((name, &req.version)),
             _ => None,
         })
         .collect();

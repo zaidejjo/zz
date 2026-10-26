@@ -502,9 +502,7 @@ mod tests {
         manifest.package.version = "1.0.0".to_string();
         manifest.dependencies.insert(
             "local_dep".to_string(),
-            DepSpec::Path(PathDep {
-                path: "../local_dep".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("../local_dep".to_string())),
         );
 
         let err = validate(&manifest).unwrap_err();
@@ -717,11 +715,11 @@ mod tests {
         manifest.package.version = "1.0.0".to_string();
         manifest.dependencies.insert(
             "some_dep".to_string(),
-            DepSpec::Git(crate::manifest::GitDep {
-                version: "^1.0".to_string(),
-                git: "https://github.com/example/repo.git".to_string(),
-                rev: "main".to_string(),
-            }),
+            DepSpec::Git(crate::manifest::GitDep::new(
+                "^1.0".to_string(),
+                "https://github.com/example/repo.git".to_string(),
+                "main".to_string(),
+            )),
         );
 
         // Git deps are fine for publishing

@@ -578,7 +578,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .dependencies
-            .insert("mylib".to_string(), DepSpec::Version("^1.0".to_string()));
+            .insert("mylib".to_string(), DepSpec::Version("^1.0".into()));
 
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {
@@ -618,9 +618,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "mylib".to_string(),
-            DepSpec::Path(crate::manifest::PathDep {
-                path: "../mylib".to_string(),
-            }),
+            DepSpec::Path(crate::manifest::PathDep::new("../mylib".to_string())),
         );
 
         let mut lock = Lockfile::new();
@@ -657,7 +655,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .dependencies
-            .insert("mylib".to_string(), DepSpec::Version("^1.0".to_string()));
+            .insert("mylib".to_string(), DepSpec::Version("^1.0".into()));
 
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {
@@ -707,9 +705,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "mid".to_string(),
-            DepSpec::Path(crate::manifest::PathDep {
-                path: "../mid".to_string(),
-            }),
+            DepSpec::Path(crate::manifest::PathDep::new("../mid".to_string())),
         );
 
         let mut lock = Lockfile::new();
@@ -754,9 +750,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "mid".to_string(),
-            DepSpec::Path(crate::manifest::PathDep {
-                path: "../mid".to_string(),
-            }),
+            DepSpec::Path(crate::manifest::PathDep::new("../mid".to_string())),
         );
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {
@@ -801,7 +795,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .dependencies
-            .insert("mylib".to_string(), DepSpec::Version("^1.0".to_string()));
+            .insert("mylib".to_string(), DepSpec::Version("^1.0".into()));
 
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {

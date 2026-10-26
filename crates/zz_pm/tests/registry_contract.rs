@@ -557,7 +557,7 @@ fn publish_round_trip_then_visible_everywhere() {
     let mut manifest = zz_pm::manifest::Manifest::default();
     manifest.dependencies.insert(
         "gadget".to_string(),
-        zz_pm::manifest::DepSpec::Version("^0.2".to_string()),
+        zz_pm::manifest::DepSpec::Version("^0.2".into()),
     );
     let dir = std::env::temp_dir();
     let resolved = resolve_with(&manifest, None, &dir, &ResolveOptions::remote(&base)).unwrap();
@@ -671,7 +671,7 @@ fn locked_registry_dep_resolves_offline() {
     let mut manifest = zz_pm::manifest::Manifest::default();
     manifest.dependencies.insert(
         "widget".to_string(),
-        zz_pm::manifest::DepSpec::Version("^1.0".to_string()),
+        zz_pm::manifest::DepSpec::Version("^1.0".into()),
     );
     let dir = std::env::temp_dir();
     // First resolve hits the network and pins the hash.
