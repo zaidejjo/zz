@@ -381,20 +381,19 @@ mod tests {
     }
 
     #[test]
-    fn test_c_sig_bytes_return() {
+    fn test_c_sig_bytes_return_rejected() {
         use zz_checker::Type;
         let (params, ret) = sig(vec![("buf", Type::Bytes)], Type::Bytes);
-        let csig = c_sig_of(&params, &ret).unwrap();
-        assert_eq!(csig.params, vec![zz_runtime::c_abi::CParam::Bytes]);
-        assert_eq!(csig.ret, zz_runtime::c_abi::CRet::Bytes);
+        let err = c_sig_of(&params, &ret).unwrap_err();
+        assert!(err.contains("not yet implemented"), "{err}");
     }
 
     #[test]
-    fn test_c_sig_str_return_owned() {
+    fn test_c_sig_str_return_rejected() {
         use zz_checker::Type;
         let (params, ret) = sig(vec![], Type::Str);
-        let csig = c_sig_of(&params, &ret).unwrap();
-        assert_eq!(csig.ret, zz_runtime::c_abi::CRet::Str);
+        let err = c_sig_of(&params, &ret).unwrap_err();
+        assert!(err.contains("not yet implemented"), "{err}");
     }
 
     #[test]
