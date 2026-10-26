@@ -500,6 +500,12 @@ pub fn add(args: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
+    // Keep the original argv for the install leg (it consumes
+    // `--features` itself); parse specs from a stripped view so a feature
+    // value never looks like the package name.
+    let install_args: Vec<String> = args.to_vec();
+    let (_, add_args) = crate::extract_feature_flags(args)?;
+    let args = add_args.as_slice();
     let spec = args
         .iter()
         .find(|a| !a.starts_with('-'))
@@ -578,7 +584,7 @@ pub fn add(args: &[String]) -> Result<(), String> {
 
     // `add` installs immediately: resolve, fetch into vendor/, write zz.lock.
     // Same flags apply (`--registry` flows through to the install leg).
-    install(args)
+    install(&install_args)
 }
 
 /// Bare `zz add <pkg>`: resolve the latest published version and return it
@@ -720,6 +726,23 @@ pub fn info(args: &[String]) -> Result<(), String> {
             println!("    {dep} = {req}");
         }
     }
+    // Feature gates published with the latest version (#488): prefer the
+    // per-version detail, fall back to the package-level list for servers
+    // that only keep one copy. Legacy metadata has neither.
+    let published_features: &[zz_pm::remote::FeatureDetail] = m
+        .version_details
+        .get(&m.latest)
+        .map(|d| d.features.as_slice())
+        .filter(|f| !f.is_empty())
+        .unwrap_or(m.features.as_slice());
+    if !published_features.is_empty() {
+        println!("  features of {}:", m.latest);
+        let mut features: Vec<&zz_pm::remote::FeatureDetail> = published_features.iter().collect();
+        features.sort_by(|a, b| a.name.cmp(&b.name));
+        for feature in features {
+            println!("    {}", feature_line(feature));
+        }
+    }
     if !pkg.readme.is_empty() {
         println!();
         // First 20 lines — enough to recognize the package.
@@ -832,6 +855,10 @@ pub fn install(args: &[String]) -> Result<(), String> {
     }
 
     let manifest = zz_pm::manifest::Manifest::load(&toml_path)?;
+    // Feature gates (#488): `--features` / `--all-features` narrow which
+    // optional deps install. Unknown names fail before any network work.
+    let features = crate::extract_feature_flags(args)?.0;
+    manifest.resolve_features(&features)?;
 
     if manifest.dependencies.is_empty() {
         // No declared deps: the lock must not keep orphaned (transitive)
@@ -842,6 +869,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
             if !lock.deps.is_empty() {
                 lock.deps.clear();
                 lock.set_manifest_deps_hash(manifest.deps_hash());
+                lock.set_features_hash(features.fingerprint());
                 let _ = lock.save(&lock_path);
             }
         }
@@ -859,26 +887,29 @@ pub fn install(args: &[String]) -> Result<(), String> {
 
     // Amendment 3: Check path-dep staleness even if deps_match() is true
     let deps_hash = manifest.deps_hash();
+    let features_hash = features.fingerprint();
     if let Some(ref lock) = existing_lock {
-        if lock.deps_match(&deps_hash) {
+        if lock.deps_match(&deps_hash) && lock.features_match(&features_hash) {
             // Declaration hashes match — but path deps might have changed
             // content, or upstream manifests might have changed transitive
             // requirements (#420), so both close over the full closure.
-            if zz_pm::resolve::path_deps_stale(&manifest, Some(lock), &dir)
+            if zz_pm::resolve::path_deps_stale_with_features(&manifest, Some(lock), &dir, &features)
                 .map_err(|e| e.to_string())?
             {
                 println!("path dependency content changed, re-resolving...");
-            } else if zz_pm::resolve::transitive_reqs_stale(&manifest, lock, &dir)
-                .map_err(|e| e.to_string())?
+            } else if zz_pm::resolve::transitive_reqs_stale_with_features(
+                &manifest, lock, &dir, &features,
+            )
+            .map_err(|e| e.to_string())?
             {
                 println!("transitive requirements changed, re-resolving...");
-            } else if !zz_pm::link::links_valid(&dir, &manifest, lock) {
+            } else if !zz_pm::link::links_valid_with_features(&dir, &manifest, lock, &features) {
                 // #323: resolved but not materialized (fresh clone, wiped
                 // vendor/, GC'd CAS) — fall through to fetch + link.
                 println!("vendor links missing or stale, fetching and linking...");
             } else {
                 println!("dependencies unchanged (lockfile is up to date)");
-                crate::prewarm_run_cache(&dir);
+                crate::prewarm_run_cache(&dir, &features);
                 return Ok(());
             }
         }
@@ -891,7 +922,8 @@ pub fn install(args: &[String]) -> Result<(), String> {
     crate::ui::step(1, 4, "Resolving versions");
 
     // Use the resolver to resolve all dependencies (registry-aware).
-    let opts = zz_pm::resolve::ResolveOptions::remote(&registry_base_from(args));
+    let opts = zz_pm::resolve::ResolveOptions::remote(&registry_base_from(args))
+        .with_features(features.clone());
     let resolved = zz_pm::resolve::resolve_with(&manifest, existing_lock.as_ref(), &dir, &opts)
         .map_err(|e| e.to_string())?;
     // #266: surface manifest-wins source decisions (stale cross-source pins).
@@ -918,6 +950,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     }
 
     lock.set_manifest_deps_hash(deps_hash);
+    lock.set_features_hash(features_hash);
     lock.save(&lock_path)?;
 
     // Fetch git deps into CAS
@@ -972,9 +1005,14 @@ pub fn install(args: &[String]) -> Result<(), String> {
 
     // Link into project
     crate::ui::step(3, 4, "Linking into vendor/");
-    let linked =
-        zz_pm::link::link_project(&dir, &manifest, &lock, zz_pm::link::LinkStrategy::Symlink)
-            .map_err(|e| format!("link failed: {e}"))?;
+    let linked = zz_pm::link::link_project_with_features(
+        &dir,
+        &manifest,
+        &lock,
+        zz_pm::link::LinkStrategy::Symlink,
+        &features,
+    )
+    .map_err(|e| format!("link failed: {e}"))?;
     let linked_count = linked.len();
 
     // Register this project for safe GC (best-effort, don't fail install on registry errors)
@@ -1050,7 +1088,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     // Cargo-style: compile the entry now so the first `zz run` hits the
     // run cache instead of paying parse+check+compile (even-cold speed).
     // Best-effort and silent when warm; never fails the install.
-    crate::prewarm_run_cache(&dir);
+    crate::prewarm_run_cache(&dir, &features);
     Ok(())
 }
 
@@ -1576,6 +1614,7 @@ pub fn publish(args: &[String]) -> Result<(), String> {
             .map(|c| c.to_lowercase())
             .unwrap_or_default(),
         keywords: manifest.package.keywords.clone(),
+        features: publish_features(&manifest),
     };
 
     println!("uploading {}@{} to {base}...", req.name, req.version);
@@ -1641,6 +1680,61 @@ fn docs_source(dir: &std::path::Path) -> String {
     } else {
         "docs/**/*.md bundle".to_string()
     }
+}
+
+/// Publish payload for `[features]` (#488): one entry per declared
+/// feature, keeping the list/table shape distinguishable via its fields.
+fn publish_features(manifest: &zz_pm::manifest::Manifest) -> Vec<zz_pm::remote::FeatureDetail> {
+    manifest
+        .features
+        .iter()
+        .map(|(name, spec)| zz_pm::remote::FeatureDetail {
+            name: name.clone(),
+            modules: spec.modules().to_vec(),
+            enables: spec.feature_refs().to_vec(),
+            deps: spec.dep_refs().to_vec(),
+        })
+        .collect()
+}
+
+/// One-line `zz info` rendering of a published feature gate.
+fn feature_line(feature: &zz_pm::remote::FeatureDetail) -> String {
+    if feature.modules.is_empty() && feature.deps.is_empty() {
+        return format!(
+            "{} = [{}]",
+            feature.name,
+            feature
+                .enables
+                .iter()
+                .map(|e| format!("\"{e}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if !feature.modules.is_empty() {
+        parts.push(format!(
+            "modules = [{}]",
+            feature
+                .modules
+                .iter()
+                .map(|m| format!("\"{m}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !feature.deps.is_empty() {
+        parts.push(format!(
+            "deps = [{}]",
+            feature
+                .deps
+                .iter()
+                .map(|d| format!("\"{d}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    format!("{} = {{ {} }}", feature.name, parts.join(", "))
 }
 
 fn dep_spec_string(spec: &zz_pm::manifest::DepSpec) -> String {
@@ -2835,6 +2929,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn publish_metadata_keeps_both_feature_shapes() {
+        let manifest = zz_pm::manifest::Manifest::parse(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [dependencies]\n\
+             faker = { version = \"1.0\", optional = true }\n\
+             \n\
+             [features]\n\
+             default = [\"std\"]\n\
+             std = []\n\
+             locales-ar = { modules = [\"locales/ar\"], deps = [\"faker\"] }\n",
+        )
+        .unwrap();
+        let features = publish_features(&manifest);
+        assert_eq!(features.len(), 3);
+        assert_eq!(features[0].name, "default");
+        assert_eq!(features[0].enables, vec!["std".to_string()]);
+        assert_eq!(features[1].name, "locales-ar");
+        assert_eq!(features[1].modules, vec!["locales/ar".to_string()]);
+        assert_eq!(features[1].deps, vec!["faker".to_string()]);
+
+        assert_eq!(feature_line(&features[0]), "default = [\"std\"]");
+        let table = feature_line(&features[1]);
+        assert!(table.contains("modules = [\"locales/ar\"]"), "{table}");
+        assert!(table.contains("deps = [\"faker\"]"), "{table}");
     }
 
     #[test]

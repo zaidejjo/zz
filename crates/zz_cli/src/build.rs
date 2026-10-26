@@ -24,6 +24,7 @@ use zz_codegen::{BuildOptions, ClangProvider};
 use zz_frontend::span::Span;
 use zz_hir::TypedProgram;
 use zz_plugin::load_manifest;
+use zz_pm::manifest::FeatureSelection;
 
 use crate::loader;
 
@@ -79,6 +80,10 @@ pub struct ReleaseOptions {
     /// Dual-codegen gate: both paths must agree until full coverage.
     /// Carried into the cache filename so backends never share entries.
     pub chunk: bool,
+    /// `--features` / `--all-features` selection (#488). Excluded from the
+    /// cache key when default (empty fingerprint), so flagless builds keep
+    /// their existing cache entries.
+    pub features: FeatureSelection,
 }
 
 impl ReleaseOptions {
@@ -175,6 +180,7 @@ fn cache_key(
     src: &str,
     opts: &BuildOptions,
     target: Option<&str>,
+    features: &FeatureSelection,
 ) -> Result<String, String> {
     let runtime_mtime = runtime_mtime();
     let build_fingerprint = opts.fingerprint_with(target);
@@ -195,6 +201,12 @@ fn cache_key(
     key.artifact_hash = artifact_hash;
     key.artifact_flags = artifact_flags;
     key.native_build_sig = native_build_sig_for(source_path);
+    // Feature selection changes which modules compile (#488). Default
+    // selection leaves the key untouched (existing caches stay valid).
+    let features_fp = features.fingerprint();
+    if !features_fp.is_empty() {
+        key.artifact_flags = format!("{}+features={features_fp}", key.artifact_flags);
+    }
     Ok(key.to_slug())
 }
 
@@ -847,14 +859,15 @@ fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) {
 fn typed_program_for(
     path: &Path,
     entry_ns: &str,
+    features: &FeatureSelection,
 ) -> Result<(TypedProgram, zz_hir::ReachableSet, String), String> {
     // Discover plugin manifests from installed dependencies and merge their
     // function signatures into the checker's function table.
     let plugin_funcs = discover_plugin_manifests(path);
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program(path)?
+        loader::load_program_with_features(path, features)?
     } else {
-        loader::load_program_with_plugins(path, &plugin_funcs)?
+        loader::load_program_with_plugins_and_features(path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -921,16 +934,19 @@ fn typed_program_for(
 /// Build the unified IR module for `path` (chunk-backend input): load,
 /// check, merge (pure-ZZ stdlib first, mirroring [`typed_program_for`]),
 /// VM-compile, then `lower_typed`. Returns the module + dotted main key.
-fn chunk_module_for(path: &Path) -> Result<(zz_ir::Module, String), String> {
+fn chunk_module_for(
+    path: &Path,
+    features: &FeatureSelection,
+) -> Result<(zz_ir::Module, String), String> {
     let entry_ns = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let plugin_funcs = discover_plugin_manifests(path);
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program(path)?
+        loader::load_program_with_features(path, features)?
     } else {
-        loader::load_program_with_plugins(path, &plugin_funcs)?
+        loader::load_program_with_plugins_and_features(path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -1200,7 +1216,7 @@ pub fn build_release(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let t_front = std::time::Instant::now();
-    let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
+    let (pruned, reach, main_key) = typed_program_for(path, &entry_ns, &rel.features)?;
     if rel.verbose {
         eprintln!(
             "zz: timing load_check_hir_dce={}ms",
@@ -1341,7 +1357,7 @@ pub fn build_release(
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
     let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
-    let key = cache_key(path, &source, &opts, target)?;
+    let key = cache_key(path, &source, &opts, target, &rel.features)?;
     let target_slug = target.unwrap_or("host");
     // The embed tree is content-fingerprinted separately (compact slug
     // addition — asset edits must never reuse a non-embed binary).
@@ -1376,7 +1392,7 @@ pub fn build_release(
     // emitted source with the same option/flag flow as `build_native`.
     if rel.chunk {
         let t_chunk = std::time::Instant::now();
-        let (module, main_key) = chunk_module_for(path)?;
+        let (module, main_key) = chunk_module_for(path, &rel.features)?;
         let lowered =
             zz_codegen::build_chunk_module(&module, &main_key).map_err(|e| e.to_string())?;
         if rel.verbose {
@@ -1613,7 +1629,8 @@ pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Stri
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (pruned, reach, main_key) = typed_program_for(path, &entry_ns)?;
+    let (pruned, reach, main_key) =
+        typed_program_for(path, &entry_ns, &FeatureSelection::default())?;
 
     // Unique per call (pid + process-wide counter): parallel `zz run
     // --native` invocations in one process (e.g. the e2e/parity suites)

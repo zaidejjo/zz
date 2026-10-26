@@ -13,6 +13,8 @@ zz run --native [<file.zz>]     # AOT cached build + exec private staged copy
 zz run --embed <dir> [<file.zz>]        # expose assets (`fs.embedfs()`)
 zz run --native -o <name> [<file.zz>]   # name the published binary
 zz run --watch [<file.zz>] [--clear] [--debounce <ms>] [--watch-ignore <glob>]...
+zz run --features a,b [<file.zz>]       # enable project features (repeatable)
+zz run --all-features [<file.zz>]       # enable every declared feature
 zz eval "<src>"                 # eval string, print result
 zz dis [<file.zzc|file.zz>]     # disassemble bytecode/chunk
 zz dis --vm [--stats] [<file>]  # VM chunk ops (or per-class mix) + source sites
@@ -89,6 +91,8 @@ zz cache clean | zz cache gc
 
 Manifest wins on source; stale lock pins ignored with a note; fresh clones fetch+link.
 `publish` bundles `DOCS.md` else `docs/**/*.md` (max 200KB).
+`--features a,b` / `--all-features` also apply to `build`, `check`, and
+`install`; without `[features]` the flags are a no-op (default selection).
 
 ## System
 

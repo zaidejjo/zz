@@ -473,6 +473,7 @@ fn publish_fixture(client: &RegistryClient, name: &str, version: &str) -> String
         license: "MIT".to_string(),
         category: "utilities".to_string(),
         keywords: vec!["fixture".to_string()],
+        features: Vec::new(),
     };
     let resp = client
         .publish(MOCK_TOKEN, &req)
@@ -604,6 +605,7 @@ fn republish_same_version_conflicts() {
         license: String::new(),
         category: String::new(),
         keywords: Vec::new(),
+        features: Vec::new(),
     };
     let err = client.publish(MOCK_TOKEN, &req).unwrap_err();
     assert!(matches!(err, RemoteError::Conflict(_)), "{err:?}");
@@ -630,6 +632,7 @@ fn bad_token_is_unauthorized() {
         license: String::new(),
         category: String::new(),
         keywords: Vec::new(),
+        features: Vec::new(),
     };
     let err = client.publish("zz_pat_wrong", &req).unwrap_err();
     assert!(matches!(err, RemoteError::Unauthorized), "{err:?}");

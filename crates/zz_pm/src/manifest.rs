@@ -514,6 +514,21 @@ impl FeatureSelection {
     pub fn is_default(&self) -> bool {
         !self.all && self.requested.is_empty()
     }
+
+    /// Stable fingerprint of the explicit selection. Empty for the default
+    /// selection so lockfiles, run caches, and build caches keep their
+    /// existing keys when no feature flags are passed.
+    pub fn fingerprint(&self) -> String {
+        if self.is_default() {
+            return String::new();
+        }
+        let mut salt = String::new();
+        if self.all {
+            salt.push_str("all;");
+        }
+        salt.push_str(&self.names().join(","));
+        crate::hash::hash_bytes(salt.as_bytes())
+    }
 }
 
 /// Parse `--features` values: repeatable flags plus comma-separated names.

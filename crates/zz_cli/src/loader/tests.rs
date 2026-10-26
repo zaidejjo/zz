@@ -43,6 +43,114 @@ fn diag_texts(result: &LoadResult) -> Vec<String> {
 }
 
 #[test]
+fn feature_gated_module_import_names_the_feature() {
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [features]\nlocales-ar = { modules = [\"locales/ar\"] }\n",
+        ),
+        ("src/main.zz", "import locales.ar\nx := ar.hello()"),
+        (
+            "src/locales/ar.zz",
+            "pub func hello() -> str { return \"hi\" }",
+        ),
+    ]);
+    let entry = dir.join("src/main.zz");
+    let disabled = load_program_with_features(&entry, &FeatureSelection::default()).unwrap();
+    assert!(
+        !no_errors(&disabled),
+        "gated module must not load by default"
+    );
+    let text = diag_texts(&disabled).join("\n");
+    assert!(
+        text.contains("module `locales/ar` is provided by feature `locales-ar`"),
+        "needs exact module + feature, got:\n{text}"
+    );
+    assert!(
+        text.contains("--features locales-ar"),
+        "needs the enabling flag hint, got:\n{text}"
+    );
+
+    let enabled =
+        load_program_with_features(&entry, &FeatureSelection::new(["locales-ar"], false)).unwrap();
+    assert!(no_errors(&enabled), "errors: {:?}", enabled.errors);
+    assert_eq!(enabled.programs.len(), 2);
+    assert_eq!(enabled.bindings["main.x"], Type::Str);
+}
+
+#[test]
+fn default_feature_enables_gated_module_without_flags() {
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [features]\ndefault = [\"locales-ar\"]\n\
+             locales-ar = { modules = [\"locales/ar\"] }\n",
+        ),
+        ("src/main.zz", "import locales.ar\nx := ar.hello()"),
+        (
+            "src/locales/ar.zz",
+            "pub func hello() -> str { return \"hi\" }",
+        ),
+    ]);
+    let result =
+        load_program_with_features(&dir.join("src/main.zz"), &FeatureSelection::default()).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.x"], Type::Str);
+}
+
+#[test]
+fn all_features_enables_gated_module() {
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [features]\nlocales-ar = { modules = [\"locales/ar\"] }\n",
+        ),
+        ("src/main.zz", "import locales.ar\nx := ar.hello()"),
+        (
+            "src/locales/ar.zz",
+            "pub func hello() -> str { return \"hi\" }",
+        ),
+    ]);
+    let result = load_program_with_features(
+        &dir.join("src/main.zz"),
+        &FeatureSelection::new(Vec::<String>::new(), true),
+    )
+    .unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn gated_optional_dependency_import_names_the_feature() {
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nextra = { version = \"1.0\", optional = true }\n\n\
+             [features]\nextras = { deps = [\"extra\"] }\n",
+        ),
+        ("src/main.zz", "import extra\nx := 1"),
+    ]);
+    let result =
+        load_program_with_features(&dir.join("src/main.zz"), &FeatureSelection::default()).unwrap();
+    let text = diag_texts(&result).join("\n");
+    assert!(
+        text.contains("`extra`") && text.contains("provided by feature `extras`"),
+        "needs feature-gated dep diagnostic, got:\n{text}"
+    );
+    assert!(
+        text.contains("--features extras"),
+        "needs the enabling flag hint, got:\n{text}"
+    );
+    assert!(
+        !text.contains("not installed"),
+        "must not suggest install for a disabled optional dep, got:\n{text}"
+    );
+}
+
+#[test]
 fn loads_relative_import() {
     let dir = temp_project(&[
         ("main.zz", "import math.utils\nx := utils.double(21)"),
@@ -69,7 +177,7 @@ fn impl_method_keeps_its_key_when_a_free_function_shares_its_name() {
         "struct W { v: int }\n\
          func get(w: W) -> int { return w.v }\n\
          impl W {\n\
-             func get(self) -> str { \"method\" }\n\
+             func get(self) -> str { return \"method\" }\n\
          }\n\
          w := W{ v: 1 }\n\
          r := w.get()\n\
@@ -1545,7 +1653,7 @@ fn check_cache_rechecks_only_dependents() {
         for m in 0..4 {
             owned.push((
                 format!("mod{m:02}.zz"),
-                format!("pub func mod{m:02}_f0(x: int) -> int {{ x + {m} }}"),
+                format!("pub func mod{m:02}_f0(x: int) -> int {{ return x + {m} }}"),
             ));
         }
         let refs: Vec<(&str, &str)> = owned

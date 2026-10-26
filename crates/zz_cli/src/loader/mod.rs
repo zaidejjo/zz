@@ -14,7 +14,7 @@
 //! are rewritten to qualified paths. Imported modules are referenced by their
 //! namespace: `utils.double(6)`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use zz_checker::{
@@ -24,6 +24,7 @@ use zz_frontend::ast::{Block, Expr, ImportItem, Program, Stmt, Ty, TyKind};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
+use zz_pm::manifest::FeatureSelection;
 use zz_runtime::NativeEntry;
 use zz_stdlib::{
     register_module_namespace, register_selective_namespace, register_wildcard_namespace,
@@ -241,6 +242,15 @@ struct Loader {
     /// S1 check-cache outcomes for `--stats` observability (#248).
     cache_hits: usize,
     cache_misses: usize,
+    /// Feature selection from the command line (`--features` /
+    /// `--all-features`, #488) applied to the entry project.
+    feature_selection: FeatureSelection,
+    /// Resolved enabled feature set per project root (cache; cleared when
+    /// a dependency edge adds feature requests for that root).
+    feature_cache: HashMap<PathBuf, BTreeSet<String>>,
+    /// Feature requests contributed by `[dependencies] features = [...]`
+    /// edges, per dependency project root (#488).
+    dep_feature_requests: HashMap<PathBuf, BTreeSet<String>>,
 }
 
 /// Check-pipeline observability for `zz check --stats` (#248): per-load
@@ -262,12 +272,32 @@ pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
     load_program_with_plugins(main_path, &[])
 }
 
+/// Load an entry file with an explicit feature selection (#488).
+/// `--features` / `--all-features` govern which modules of the entry
+/// project are importable; dependencies use their `default` set plus the
+/// `features = [...]` requested by their parent's dependency entry.
+pub fn load_program_with_features(
+    main_path: &Path,
+    features: &FeatureSelection,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, &[], false, features.clone())
+}
+
 /// Load an entry file for `zz check`, with the per-module check cache
 /// enabled (S1 arena-scale): unchanged modules skip re-checking via a
 /// content-addressed on-disk cache. `run`/`build` must use `load_program`
 /// (they need span types and codegen inputs the cache does not store).
+#[allow(dead_code)] // default-selection wrapper; tests + API parity
 pub fn load_program_check(main_path: &Path) -> Result<LoadResult, String> {
-    load_program_impl(main_path, &[], true)
+    load_program_check_with_features(main_path, &FeatureSelection::default())
+}
+
+/// [`load_program_check`] with an explicit feature selection (#488).
+pub fn load_program_check_with_features(
+    main_path: &Path,
+    features: &FeatureSelection,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, &[], true, features.clone())
 }
 
 /// Load an entry file and all of its imports, merging additional function
@@ -280,13 +310,23 @@ pub fn load_program_with_plugins(
     main_path: &Path,
     plugin_funcs: &[(String, FuncSig)],
 ) -> Result<LoadResult, String> {
-    load_program_impl(main_path, plugin_funcs, false)
+    load_program_impl(main_path, plugin_funcs, false, FeatureSelection::default())
+}
+
+/// [`load_program_with_plugins`] with an explicit feature selection (#488).
+pub fn load_program_with_plugins_and_features(
+    main_path: &Path,
+    plugin_funcs: &[(String, FuncSig)],
+    features: &FeatureSelection,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, plugin_funcs, false, features.clone())
 }
 
 fn load_program_impl(
     main_path: &Path,
     plugin_funcs: &[(String, FuncSig)],
     use_cache: bool,
+    features: FeatureSelection,
 ) -> Result<LoadResult, String> {
     let entry = cache::canon(main_path).map_err(|e| {
         format!(
@@ -339,6 +379,9 @@ fn load_program_impl(
         stdlib_wildcards: Vec::new(),
         cache_hits: 0,
         cache_misses: 0,
+        feature_selection: features,
+        feature_cache: HashMap::new(),
+        dep_feature_requests: HashMap::new(),
     };
     // Merge plugin manifest function signatures into the checker's function table.
     for (name, sig) in plugin_funcs {
@@ -349,6 +392,24 @@ fn load_program_impl(
     loader.validate_declared_collections();
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
+}
+
+/// Validate `--features` / `--all-features` against the manifest governing
+/// `entry` (#488). No manifest (standalone file) means nothing to select;
+/// a declared manifest errors on unknown names and cycles up front instead
+/// of waiting for the first gated import.
+pub fn validate_feature_selection(
+    entry: &Path,
+    selection: &FeatureSelection,
+) -> Result<(), String> {
+    let Some(root) = find_project_root(entry) else {
+        return Ok(());
+    };
+    let Some(manifest) = cache::manifest_of(&root) else {
+        return Ok(());
+    };
+    manifest.resolve_features(selection)?;
+    Ok(())
 }
 
 /// Walk up from `start` (a file or directory) to the project root —
@@ -874,6 +935,197 @@ impl Loader {
         self.ns_of.get(dep).cloned().unwrap_or(fallback)
     }
 
+    /// Feature selection governing a project root (#488): the CLI flags
+    /// for the entry project, `default` + parent-requested features for a
+    /// dependency.
+    fn selection_for_root(&self, root: &Path) -> FeatureSelection {
+        if self.root.as_deref() == Some(root) {
+            return self.feature_selection.clone();
+        }
+        let requested = self
+            .dep_feature_requests
+            .get(root)
+            .cloned()
+            .unwrap_or_default();
+        FeatureSelection::new(requested, false)
+    }
+
+    /// Enabled feature names for a project root, cached per root.
+    /// Manifests without `[features]` resolve to an empty set: legacy
+    /// projects behave exactly as before.
+    fn enabled_features_for_root(&mut self, root: &Path) -> Result<BTreeSet<String>, String> {
+        if let Some(cached) = self.feature_cache.get(root) {
+            return Ok(cached.clone());
+        }
+        let Some(manifest) = cache::manifest_of(root) else {
+            return Ok(BTreeSet::new());
+        };
+        let enabled = manifest.resolve_features(&self.selection_for_root(root))?;
+        self.feature_cache
+            .insert(root.to_path_buf(), enabled.clone());
+        Ok(enabled)
+    }
+
+    /// Record `features = [...]` from a dependency edge before loading the
+    /// dependency. A later edge may union in more features; drop the cached
+    /// set so gating sees the updated selection.
+    fn note_dep_features(&mut self, root: &Path, dep_name: &str) {
+        let Some(manifest) = cache::manifest_of(root) else {
+            return;
+        };
+        let Some(spec) = manifest_dep(&manifest, dep_name) else {
+            return;
+        };
+        if spec.features().is_empty() {
+            return;
+        }
+        let entry = self
+            .dep_feature_requests
+            .entry(root.to_path_buf())
+            .or_default();
+        let before = entry.len();
+        entry.extend(spec.features().iter().cloned());
+        if entry.len() != before {
+            self.feature_cache.remove(root);
+        }
+    }
+
+    /// Module-path spellings for `file` inside project `root`: relative to
+    /// `src/` and to the project root, normalized for `[features] modules`.
+    fn module_paths(root: &Path, file: &Path) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for base in [root.join("src"), root.to_path_buf()] {
+            let Ok(rel) = file.strip_prefix(&base) else {
+                continue;
+            };
+            let normalized =
+                zz_pm::manifest::normalize_module_path(&rel.to_string_lossy().replace('\\', "/"));
+            if !normalized.is_empty() && !out.contains(&normalized) {
+                out.push(normalized);
+            }
+        }
+        out
+    }
+
+    /// Helpful diagnostic when `file` belongs to a feature-gated module
+    /// whose feature is not enabled (#488). `None` = importable.
+    fn module_gate_error(&mut self, root: &Path, file: &Path, imp: &[String]) -> Option<String> {
+        let manifest = cache::manifest_of(root)?;
+        let gates = manifest.module_gates();
+        if gates.is_empty() {
+            return None;
+        }
+        let (module, feature_names) = Self::module_paths(root, file)
+            .into_iter()
+            .find_map(|path| gates.get(&path).map(|f| (path, f.clone())))?;
+        let enabled = match self.enabled_features_for_root(root) {
+            Ok(set) => set,
+            Err(error) => return Some(error),
+        };
+        if feature_names.iter().any(|f| enabled.contains(f)) {
+            return None;
+        }
+        let primary = &feature_names[0];
+        let list = feature_names
+            .iter()
+            .map(|f| format!("`{f}`"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let flags = feature_names.join(",");
+        let dep_hint = if self.root.as_deref() == Some(root) {
+            String::new()
+        } else {
+            format!(
+                "\n hint: for a dependency, add `features = [\"{primary}\"]` to its [dependencies] entry"
+            )
+        };
+        Some(format!(
+            "cannot resolve import `{}`: module `{module}` is provided by feature {list}, which is not enabled\n\
+             hint: enable it with --features {flags} (or add it to `default`){dep_hint}",
+            imp.join(".")
+        ))
+    }
+
+    /// Helpful diagnostic when `name` is an optional dependency that the
+    /// active feature set does not enable (#488). `None` = active or not
+    /// declared.
+    fn gated_dep_message(&mut self, root: &Path, name: &str) -> Result<Option<String>, String> {
+        let Some(manifest) = cache::manifest_of(root) else {
+            return Ok(None);
+        };
+        let Some((declared, spec)) = manifest
+            .dependencies
+            .iter()
+            .find(|(n, _)| n.as_str() == name || normalize_pkg(n) == normalize_pkg(name))
+        else {
+            return Ok(None);
+        };
+        if !spec.optional() {
+            return Ok(None);
+        }
+        let enabled = self.enabled_features_for_root(root)?;
+        let active = manifest.enabled_dependencies(&enabled)?;
+        if active.contains(declared) {
+            return Ok(None);
+        }
+        let mut providers: Vec<String> = manifest
+            .features
+            .iter()
+            .filter(|(_, spec)| {
+                spec.dep_refs().iter().any(|d| d == declared)
+                    || spec.feature_refs().iter().any(|d| d == declared)
+            })
+            .map(|(feature, _)| feature.clone())
+            .collect();
+        providers.sort();
+        providers.dedup();
+        let feature = providers.first().cloned().unwrap_or_default();
+        if feature.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "cannot resolve import `{name}`: it is provided by feature `{feature}`, which is not enabled\n\
+             hint: enable it with --features {feature} (or add it to `default` in [features])"
+        )))
+    }
+
+    /// Push a gated-dependency diagnostic at the import site. Returns
+    /// `true` when the import must be skipped.
+    fn report_dep_gate(&mut self, root: &Path, name: &str, importer: &Path, source: &str) -> bool {
+        let message = match self.gated_dep_message(root, name) {
+            Ok(None) => return false,
+            Ok(Some(message)) => message,
+            Err(error) => error,
+        };
+        self.errors.push(LoadError {
+            name: importer.display().to_string(),
+            source: source.to_string(),
+            diags: vec![error_at(message, Span::new(0, 0))],
+        });
+        true
+    }
+
+    /// Push a gated-module diagnostic at the import site. Returns `true`
+    /// when the import must be skipped.
+    fn report_module_gate(
+        &mut self,
+        root: &Path,
+        file: &Path,
+        imp: &[String],
+        importer: &Path,
+        source: &str,
+    ) -> bool {
+        let Some(message) = self.module_gate_error(root, file, imp) else {
+            return false;
+        };
+        self.errors.push(LoadError {
+            name: importer.display().to_string(),
+            source: source.to_string(),
+            diags: vec![error_at(message, Span::new(0, 0))],
+        });
+        true
+    }
+
     /// Record a same-file namespace alias for later reference rewriting
     /// (#380): when this import requests `requested` for a file already
     /// bound under another (canonical) namespace, the importing module
@@ -1287,6 +1539,12 @@ impl Loader {
                         });
                         continue;
                     }
+                    // Feature gate (#488): the file exists but its feature
+                    // is not enabled. Diagnose before loading, naming the
+                    // exact feature and the flag that enables it.
+                    if self.report_module_gate(&root, &candidate, &imp, path, &source) {
+                        continue;
+                    }
                     // Bare `import app` binds `src/main.zz` under the
                     // package name itself (not the `main` file stem) so
                     // selective imports (`import app(x)`) and qualified
@@ -1356,10 +1614,14 @@ impl Loader {
             // names first-wins, mirroring std selective imports (#229).
             if imp.len() == 1 {
                 if let Some(root) = find_project_root(&canon) {
+                    if self.report_dep_gate(&root, &imp[0], path, &source) {
+                        continue;
+                    }
                     if let Some(pkg_dir) = resolve_plugin_pkg(&root, &imp[0]) {
                         // Reverse edge for nested imports (#420), same as
                         // the registry branches.
                         cache::record_dep_consumer(&pkg_dir, &root);
+                        self.note_dep_features(&root, &imp[0]);
                         self.import_plugin(&imp[0], imp_alias.as_deref(), &pkg_dir, path, &source);
                         if !imp_items.is_empty() {
                             let ns = imp_alias.as_deref().unwrap_or(&imp[0]);
@@ -1430,6 +1692,16 @@ impl Loader {
                 // (imported from inside vendor/) resolve against the outer
                 // project lock.
                 {
+                    let mut gated = false;
+                    for root in search_roots(&canon) {
+                        if self.report_dep_gate(&root, &imp[0], path, &source) {
+                            gated = true;
+                            break;
+                        }
+                    }
+                    if gated {
+                        continue;
+                    }
                     let mut resolved: Option<(PathBuf, PathBuf)> = None;
                     for root in search_roots(&canon) {
                         if let Some(entry) = resolve_registry_entry(&root, &imp[0]) {
@@ -1443,6 +1715,7 @@ impl Loader {
                         if let Some(pkg_dir) = pkg_dir_of_entry(&entry) {
                             cache::record_dep_consumer(&pkg_dir, &root);
                         }
+                        self.note_dep_features(&root, &imp[0]);
                         let alias = imp_alias.clone().unwrap_or_else(|| imp[0].clone());
                         self.load_file(&entry, Some(alias.as_str()))?;
                         // S1 dep edge (registry package file).
@@ -1479,11 +1752,28 @@ impl Loader {
             // falls through to legacy relative resolution untouched, so
             // local `a/b.zz` layouts never change meaning.
             if imp.len() > 1 {
+                let mut gated = false;
+                for root in search_roots(&canon) {
+                    if self.report_dep_gate(&root, &imp[0], path, &source) {
+                        gated = true;
+                        break;
+                    }
+                }
+                if gated {
+                    continue;
+                }
                 if let Some((root, candidate)) = resolve_dep_submodule(&canon, &imp) {
                     // Reverse edge for nested imports (#420), same as the
                     // bare-registry branch above.
                     if let Some(pkg_dir) = pkg_dir_of_entry(&candidate) {
                         cache::record_dep_consumer(&pkg_dir, &root);
+                    }
+                    self.note_dep_features(&root, &imp[0]);
+                    // Feature-gated submodule (#488): diagnose against the
+                    // dependency's own manifest/selection.
+                    let gate_root = find_project_root(&candidate).unwrap_or_else(|| root.clone());
+                    if self.report_module_gate(&gate_root, &candidate, &imp, path, &source) {
+                        continue;
                     }
                     // Effective namespace mirrors local imports: the `as`
                     // alias when present, else the last segment
@@ -1587,6 +1877,16 @@ impl Loader {
                     )],
                 });
                 continue;
+            }
+            // Feature-gated local module (#488): the file exists but the
+            // feature that provides it is not enabled. Diagnose before
+            // falling through to a confusing type/name error.
+            if cache::canon(&rel).is_ok() {
+                if let Some(root) = find_project_root(&rel).or_else(|| find_project_root(&canon)) {
+                    if self.report_module_gate(&root, &rel, &imp, path, &source) {
+                        continue;
+                    }
+                }
             }
             // Report cycles at the import site, against the importer's source.
             if let Ok(rel_canon) = cache::canon(&rel) {

@@ -12,6 +12,14 @@ entry = "src/main.zz"   # optional override, must stay inside package
 toml = "1.2.3"                    # registry
 utils = { git = "https://...", rev = "abc123" }
 local = { path = "../local" }
+faker = { version = "1.0", optional = true }
+
+[features]
+# List form: enables other features and/or optional deps.
+default = ["std", "locales-ar"]
+std = []
+# Table form: gates module files and pulls in optional deps.
+locales-ar = { modules = ["locales/ar"], deps = ["faker"] }
 
 [test]
 jobs = 4
@@ -26,6 +34,46 @@ diagnostics.
 
 Same-name deps across workspace members stay unsupported until `[workspace]` —
 keep names unique per workspace.
+
+## Features
+
+`[features]` makes optional dependencies and module files opt-in. Without the
+section nothing changes: every dependency installs and every module imports
+exactly as before.
+
+- A **list** entry (`default = ["std"]`) enables other features. It may also
+  name an `optional = true` dependency directly.
+- A **table** entry (`locales-ar = { modules = [...], deps = [...] }`) gates
+  module files and enables optional dependencies.
+- `modules` paths are relative to the package source root (`src/`), without
+  `.zz`: `"locales/ar"` gates `src/locales/ar.zz`. Absolute paths and `..`
+  are rejected.
+- `deps` must name a declared `optional = true` dependency, and every optional
+  dependency must be reachable from at least one feature (otherwise it can
+  never be enabled).
+- The `default` feature is always active. `--features a,b` (repeatable) adds
+  more; `--all-features` enables every declared feature.
+
+```bash
+zz install                          # only the default feature set
+zz install --features locales-ar    # + locales-ar (and its optional dep)
+zz run --features locales-ar src/main.zz
+zz build --all-features
+zz check --features locales-ar,extras src
+```
+
+Disabled optional dependencies stay out of resolution: no registry metadata,
+lock entry, `vendor/` link, or compile. Importing a gated module or dependency
+names the exact feature:
+
+```
+cannot resolve import `locales.ar`: module `locales/ar` is provided by feature `locales-ar`, which is not enabled
+hint: enable it with --features locales-ar (or add it to `default`)
+```
+
+`zz install` records the feature selection in `zz.lock`; switching features
+re-resolves and relinks. Published packages carry their `[features]` tables in
+the registry metadata, and `zz info <pkg>` prints them.
 
 ## Commands
 
