@@ -267,6 +267,7 @@ fn main() -> ExitCode {
             let rest = run_args.as_slice();
             let native = rest.iter().any(|a| a == "--native");
             let bytecode = rest.iter().any(|a| a == "--bytecode");
+            let walker = rest.iter().any(|a| a == "--tree-walker" || a == "--walker");
             let watching = rest.iter().any(|a| a == "--watch");
             let embed = parse_flag_value(rest, "--embed").map(std::path::PathBuf::from);
             // `-o` / `--output` names the published binary, `--native`
@@ -283,7 +284,7 @@ fn main() -> ExitCode {
             // `--bytecode`, plus `-o <name>` for native) so neither the
             // loader nor the script sees them as paths/args.
             let mut args: Vec<String> = strip_flag_value(rest, "--embed", "--native");
-            args.retain(|a| a != "--bytecode");
+            args.retain(|a| a != "--bytecode" && a != "--tree-walker" && a != "--walker");
             if native {
                 args = strip_output_flag(&args);
             }
@@ -293,11 +294,22 @@ fn main() -> ExitCode {
                 eprintln!("zz: cannot combine `--native` and `--bytecode`");
                 return ExitCode::FAILURE;
             }
+            if native && walker {
+                eprintln!("zz: cannot combine `--native` and `--tree-walker`");
+                return ExitCode::FAILURE;
+            }
+            if bytecode && walker {
+                eprintln!("zz: cannot combine `--bytecode` and `--tree-walker`");
+                return ExitCode::FAILURE;
+            }
             if watching {
-                // Hot reload is a VM-only loop: native rebuilds are minutes,
-                // not milliseconds. Reject loudly instead of slow-looping.
+                // Hot reload is an interpreter loop: native rebuilds are
+                // minutes, not milliseconds. Bytecode is excluded because a
+                // watch child replays a fresh `run` invocation, which would
+                // re-pay the .zzc round trip on every restart. Tree-walker
+                // is allowed (same interpreter class as the VM).
                 if native || bytecode {
-                    eprintln!("zz: `--watch` supports VM runs only, not `--native` / `--bytecode`");
+                    eprintln!("zz: `--watch` supports VM and tree-walker runs only, not `--native` / `--bytecode`");
                     return ExitCode::FAILURE;
                 }
                 let (flags, child_rest) = match watch::parse_watch_flags(&args) {
@@ -354,7 +366,9 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                let result = run_file(file, &script_args, embed, &features);
+                // Default engine: bytecode VM (run_typed) unless
+                // `--tree-walker`/`--walker` forces the Phase 1 walker.
+                let result = run_file(file, &script_args, embed, &features, walker);
                 zz_runtime::vm::stats::dump_if_enabled();
                 match result {
                     Ok(()) => ExitCode::SUCCESS,
@@ -1775,6 +1789,7 @@ fn run_file(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
     features: &zz_pm::manifest::FeatureSelection,
+    walker: bool,
 ) -> Result<(), String> {
     let resolved = resolve_run_entry(
         path,
@@ -1825,6 +1840,31 @@ fn run_file(
         // Miss: full pipeline, then store the compiled IR for next time.
         let mut prep = prepare_run_with_features(path, script_args, embed.clone(), features)?;
         let mut last = Value::Unit;
+        // `--tree-walker` / `--walker`: run each module through the Phase 1
+        // tree-walker interpreter instead of the bytecode VM. Kept for
+        // REPL/debug parity; bytecode VM is the default run engine.
+        if walker {
+            for (i, program) in prep.programs.iter().enumerate() {
+                match prep.interp.run_tree_walker(program) {
+                    Ok(v) => last = v,
+                    Err(e) => {
+                        let (name, source) = prep
+                            .files
+                            .get(i)
+                            .cloned()
+                            .unwrap_or_else(|| (prep.entry_path.clone(), String::new()));
+                        return Err(render_eval_error(&e, &name, &source));
+                    }
+                }
+            }
+            return run_entry_main(
+                &mut prep.interp,
+                last,
+                &prep.entry_path,
+                script_args,
+                &prep.files,
+            );
+        }
         // Compile each module to IR bytes alongside the typed execution
         // (shared with install-time prewarming below).
         let cached_modules = compile_prep(&prep);
@@ -1861,6 +1901,30 @@ fn run_file(
     // Key computation failed (unreadable entry): today's behavior exactly.
     let mut prep = prepare_run_with_features(path, script_args, embed, features)?;
     let mut last = Value::Unit;
+    // `--tree-walker` / `--walker`: run each module through the Phase 1
+    // tree-walker interpreter instead of the bytecode VM.
+    if walker {
+        for (i, program) in prep.programs.iter().enumerate() {
+            match prep.interp.run_tree_walker(program) {
+                Ok(v) => last = v,
+                Err(e) => {
+                    let (name, source) = prep
+                        .files
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| (prep.entry_path.clone(), String::new()));
+                    return Err(render_eval_error(&e, &name, &source));
+                }
+            }
+        }
+        return run_entry_main(
+            &mut prep.interp,
+            last,
+            &prep.entry_path,
+            script_args,
+            &prep.files,
+        );
+    }
     for (i, program) in prep.programs.iter().enumerate() {
         match prep.interp.run_typed(
             program,
@@ -2063,7 +2127,7 @@ fn run_native(
 fn print_run_help() {
     println!(
         "\
-usage: zz run [--native|--bytecode] [--watch] [--embed <dir>] [-o <name>] [--features <list>|--all-features] [<file.zz>]
+usage: zz run [--native|--bytecode|--tree-walker] [--watch] [--embed <dir>] [-o <name>] [--features <list>|--all-features] [<file.zz>]
 
 type-check and run a ZZ source file through the VM (leaving no build
 artifacts), or through the native backend with `--native`. Inside a
@@ -2071,15 +2135,18 @@ project the file defaults to the entry (`src/main.zz`, then `main.zz`).
 
 ENGINES:
   (default)            VM: a warm run cache executes the cached IR in the chunk VM;
-                       a cold one executes the tree walker and refreshes the cache
+                       a cold one compiles to IR and executes the chunk VM.
   --bytecode           always compile to IR and execute the chunk VM (never the
                        walker); accepts a `.zzc` file to load directly
+  --tree-walker        force the Phase 1 tree-walker interpreter (REPL/debug);
+                       identical results to a VM run, slower
+  --walker             alias for `--tree-walker`
   --native             build through the cached Clang pipeline and run the binary
 
 FLAGS:
   --embed <dir>        expose a static asset directory (`fs.embedfs()`)
   -o, --output <name>  name the published binary (`--native` only)
-  --watch              re-check and restart on save (VM only)
+  --watch              re-check and restart on save (VM and tree-walker only)
   --clear              clear the screen per restart (with `--watch`)
   --debounce <ms>      quiet time before a restart (default 150; with `--watch`)
   --watch-ignore <glob>  skip matching paths (repeatable; with `--watch`)
@@ -2089,7 +2156,8 @@ FLAGS:
 
 RUN CACHE:
   Warm runs decode the cached IR for the whole dependency closure and execute it
-  in the chunk VM; cold runs execute the tree walker and cache the IR they compile.
+  in the chunk VM; cold runs execute through the chosen engine (VM by default,
+  tree-walker with `--tree-walker`) and cache the IR they compile.
   Entries live under `~/.zz/cache/run-v2` (LRU, 256 entries); a miss, a corrupt
   entry or any toolchain change falls back to a full recompile.
 
