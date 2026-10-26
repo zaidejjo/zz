@@ -6,8 +6,8 @@ ZZ supports native plugins — packages that expose Rust/C implementations to ZZ
 
 ## Quick Start
 
-1. Create your package with `plugin.zzi` + `zz.toml` + optional native crate
-2. Implement the C wrapper + Rust glue
+1. Create your package with `plugin.zzi` + `zz.toml` + native sources
+2. Implement the C-ABI interface (C sources or a hermetic Rust crate)
 3. Add `[native]` section to `zz.toml`
 4. Users consume via `zz add <your-package>`
 
@@ -50,7 +50,7 @@ The first comment block carries metadata the loader validates:
 // Plugin-version: <semver>            (required, user-facing versioning)
 ```
 
-The `Version` field is the manifest format version. The `Rustc` field records which Rust compiler built the plugin. The loader checks both against expected values before loading.
+The `Version` field is the manifest format version. The `Rustc` field records which Rust compiler built the plugin. The loader checks both against expected values before loading. Pure-C and hermetic Rust plugins (`[native.build-rust]`) use `// C-ABI: 1` instead and export `ZZ_C_PLUGIN_ABI_VERSION`; there is no legacy Rust registration shim in that path.
 
 ### Allowed Types
 
@@ -101,6 +101,23 @@ my-plugin/
     └── main.zz         ZZ ergonomic layer
 ```
 
+### Hermetic Rust Plugin (declarative cargo, no scripts)
+
+```
+my-plugin/
+├── plugin.zzi          Interface declarations (`// C-ABI: 1`)
+├── zz.toml             Package manifest with [native.build-rust]
+├── native/             Rust crate producing both .a and .so/.dylib
+│   ├── Cargo.toml      crate-type = ["cdylib", "staticlib"]
+│   ├── Cargo.lock      committed; no path deps
+│   └── src/
+│       └── lib.rs
+└── src/
+    └── main.zz         ZZ ergonomic layer
+```
+
+See §5. No `build.sh` and no `build.rs` are allowed.
+
 ### Legacy Plugin (Rust crate, hook path — deprecated, see §4)
 
 ```
@@ -121,7 +138,8 @@ my-plugin/
 
 ## 3. `zz.toml` Configuration
 
-Two backends. New plugins use the declarative C backend — no scripts:
+Three backends. New plugins use a declarative backend — C or Rust —
+with no scripts:
 
 ```toml
 [package]
@@ -151,11 +169,25 @@ Tags contain dots (`glibc2.28`), so quote them. Bare triples
 (`x86_64-unknown-linux-gnu`) are rejected — the tag carries the
 libc/ABI floor (see §3.1).
 
+A Rust crate uses the same platform tags plus a crate table (§5):
+
+```toml
+[native]
+backend = "rust"
+
+[native.build-rust]
+crate = "native"              # relative to the package root
+cargo_features = []           # optional bare feature names
+# target = "x86_64-unknown-linux-gnu"  # optional; derived from the tag otherwise
+# rustc_range = ">=1.75, <2"  # optional; default compatibility range
+# profile = "release"         # optional; release (default) or debug
+```
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `backend` | string | no | `cc` (declarative) or `hook` (legacy); inferred from shape when absent, must agree when set |
+| `backend` | string | no | `cc` (declarative C), `rust` (hermetic cargo), or `hook` (legacy); inferred from shape when absent, must agree when set |
 | `manifest` | string | no | Path to interface file, default: `plugin.zzi` |
-| `build` | string | no | Legacy hook script (deprecated; mutually exclusive with `build-cc`) |
+| `build` | string | no | Legacy hook script (deprecated; mutually exclusive with declarative tables) |
 | `pkg_config` | string | no | Legacy system query (deprecated; use the `build-cc` list form) |
 
 ### 3.1 Platform tags
@@ -237,8 +269,9 @@ still bans them so only the resolver can add them).
 Before the result is accepted, `zz` checks every `plugin.zzi`
 symbol resolves in the archive (`nm` check, AOT) AND in the shared
 lib (VM), plus exactly one ABI stamp (`ZZ_C_PLUGIN_ABI_VERSION` or
-`ZZ_PLUGIN_ABI_VERSION`) in the shared lib. Missing either artifact
-class is a hard error (except Windows, AOT-only with a loud note).
+`ZZ_PLUGIN_ABI_VERSION`) in both the archive and the shared lib.
+Missing either artifact class is a hard error (except Windows,
+AOT-only with a loud note).
 
 ### Threat model (read this)
 
@@ -270,10 +303,8 @@ any legitimate change.
 One-release deprecation window only. Direct-dependency hooks run
 behind `zz install/build --allow-hooks` with a warning on every use;
 transitive hooks always error. Then the `bash` path is deleted.
-Rust-crate plugins (`native/` + cargo) stay on the hook until a v2
-`cargo vendor` design lands — or vendor a C shim and go declarative
-today (arbitrary `cargo build` is the same script problem in a
-trench coat).
+Rust-crate plugins should migrate to the hermetic cargo backend in
+§5 — there is no reason to keep a shell hook for cargo.
 
 <details>
 <summary>Legacy <code>build.sh</code> contract (appendix)</summary>
@@ -298,93 +329,162 @@ implementation.
 
 ---
 
-## 5. Rust Native Crate (legacy hook path — v2 will vendor it)
+## 5. Hermetic Rust crate (`[native.build-rust]`)
 
-Pure-C plugins (§4) are the v1 path. Rust-crate plugins stay on the
-deprecated hook until the v2 `cargo vendor` design lands: arbitrary
-`cargo build` at install time is the same script problem in a trench
-coat, so it keeps the `build = "build.sh"` shape behind
-`--allow-hooks` (direct deps only).
+Rust plugins are built by `zz` from a committed, vendored cargo
+closure. There is **no `build.sh` and no `build.rs`**: the package may
+never run its own build code. `zz` drives cargo with structured
+arguments (`cargo vendor` once to fetch, then
+`cargo build --offline --locked`), a scratch `CARGO_HOME`, an isolated
+target directory, and an explicit `--target` derived from the platform
+tag.
 
-### Cargo.toml
+### Package layout
+
+```
+my-plugin/
+├── plugin.zzi
+├── zz.toml
+├── native/
+│   ├── Cargo.toml          # both crate types
+│   ├── Cargo.lock          # committed; no path/hashless deps
+│   └── src/lib.rs
+└── src/main.zz             # optional
+```
+
+`zz.toml`:
+
+```toml
+[native]
+backend = "rust"
+
+[native.build-rust]
+crate = "native"
+# cargo_features = ["simd"]
+# target = "x86_64-unknown-linux-gnu"
+# rustc_range = ">=1.75, <2"
+# profile = "release"
+```
+
+### `Cargo.toml`
 
 ```toml
 [package]
 name = "my_plugin_native"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"          # required for audit
 
 [lib]
+name = "my_plugin_native"
 crate-type = ["cdylib", "staticlib"]
-
-[dependencies]
-# Path to your local zz repo (for development)
-zz_runtime = { path = "/path/to/zz_lang/crates/zz_runtime" }
 ```
 
-The crate must produce both `cdylib` (`.so`/`.dylib`) and `staticlib` (`.a`).
+- **Both crate types are required**: `staticlib` is the AOT link input
+  (`.a`), `cdylib` is the VM dlopen input (`.so`/`.dylib`).
+- **Commit `Cargo.lock`.** Locked builds are mandatory; `--locked`
+  fails rather than resolve a new closure.
+- **No path dependencies.** Every dependency is either a registry
+  package with a sha256 checksum or a git package pinned by commit
+  hash. Anything else fails validation.
+- **No `build.rs` / `[package] build = "..."`.** Codegen must be
+  committed. This keeps the consumed package from executing arbitrary
+  build-time code.
+- Do not depend on `zz_runtime` (or any local path). The Hermetic
+  backend produces a plain C-ABI library; the VM discovers it through
+  the same dlsym path as C plugins.
 
-### `lib.rs` — Registration Entrypoint
+### `lib.rs` — C-ABI exports
+
+Use `// C-ABI: 1` in `plugin.zzi` and export
+`ZZ_C_PLUGIN_ABI_VERSION` (not the legacy Rust registration stamp),
+because there is no Rust shim to register natives:
 
 ```rust
-use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-/// ABI version stamp — must match CURRENT_ABI_VERSION in zz_plugin::loader.
+/// Exactly one ABI stamp, in both the archive and the shared lib.
 #[no_mangle]
-pub static ZZ_PLUGIN_ABI_VERSION: u32 = 1;
+pub static ZZ_C_PLUGIN_ABI_VERSION: u32 = 1;
 
-// C wrapper declarations
-extern "C" {
-    fn my_init() -> i32;
-    fn my_process(handle: *mut std::ffi::c_void, data: i64) -> i32;
-    fn my_release(handle: *mut std::ffi::c_void);
-}
-
-// ZZ-visible native functions
-fn native_my_init(
-    _interp: &mut zz_runtime::eval::Interp,
-    _args: &mut Vec<zz_runtime::Value>,
-    _span: zz_runtime::Span,
-) -> Result<zz_runtime::Value, zz_runtime::EvalError> {
-    let code = unsafe { my_init() };
-    Ok(zz_runtime::Value::Int(code as i64))
-}
-
-// ... other native functions ...
-
-/// Registration callback type (must match zz_plugin::loader).
-type RegisterCallback = extern "C" fn(name: *const i8, arity: usize, f: zz_runtime::NativeFn);
-
-/// Plugin registration entrypoint — called by VM loader.
+/// Symbol name = ZZ name with `.` → `_` (or an explicit `= "..."`).
+///
+/// # Safety
+/// `s` is a borrowed, NUL-terminated string valid for this call only.
 #[no_mangle]
-pub extern "C" fn zz_plugin_register(callback: RegisterCallback) {
-    let name = CString::new("my.init").unwrap();
-    callback(name.as_ptr(), 0, native_my_init);
-
-    let name = CString::new("my.process").unwrap();
-    callback(name.as_ptr(), 2, native_my_process);
-
-    let name = CString::new("my.release").unwrap();
-    callback(name.as_ptr(), 1, native_my_release);
+pub unsafe extern "C" fn my_process(s: *const c_char) -> i64 {
+    if s.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { std::ffi::CStr::from_ptr(s) }.to_bytes();
+    bytes.len() as i64
 }
 ```
 
-### Key Rules
+`plugin.zzi`:
 
-1. **`ZZ_PLUGIN_ABI_VERSION`** — must be a `pub static u32` with `#[no_mangle]`
-2. **`zz_plugin_register`** — must be `extern "C"` with `#[no_mangle]`
-3. **Function pointer types** — all native functions must have signature:
-   ```rust
-   fn(&mut Interp, &mut Vec<Value>, Span) -> Result<Value, EvalError>
-   ```
-4. **No Rust types across FFI** — use `i64`/`f64`/`i32` for scalars, `*mut void` for opaque handles
-5. **Suppress FFI warnings** — add `#[allow(improper_ctypes_definitions)]` to the `RegisterCallback` type and `zz_plugin_register` function (because `NativeFn` is a Rust function pointer, not a C-ABI type, but works in practice)
-6. **Register dotted ZZ names** — the same names declared in `plugin.zzi`
-   (`my.process`, not `my_process`). `zz run` dispatches on them directly;
-   a C-symbol key is aliased automatically when present, but dotted is canonical.
-7. **VM handles stay loaded** — the host retains every loaded `.so` for the
-   process lifetime, so registration-time function pointers stay valid.
+```zz
+// Version: 1
+// C-ABI: 1
+// Plugin-version: 0.1.0
+
+extern "C" {
+    func my_process(s: str) -> int
+}
+```
+
+`str` is borrowed for the call; never retain the pointer. `bytes`
+crosses as `(ptr, len)`. `int` is 64-bit on both engines.
+
+### What `zz` does
+
+1. Validates `Cargo.toml` (both crate types, licence), `Cargo.lock`
+   (root + pinned closure, no path deps), and bans `build.rs`.
+2. Stages the crate under `<package>/build/rust-src`, appending an
+   empty `[workspace]` when absent so a parent workspace cannot capture
+   it.
+3. Computes a content key over `Cargo.toml` + `Cargo.lock` + crate
+   sources + the `[native.build-rust]` spec. On a cold cache it runs
+   `cargo vendor --locked` once and stores the closure in CAS under
+   that key. Every later build is offline and reuses the vendored tree.
+4. Runs `cargo build --offline --locked --target <triple>
+   --target-dir <package>/build/rust-target` with a cleared environment
+   (only `PATH`/`HOME`/`RUSTUP_HOME` inherited; scratch `CARGO_HOME`
+   and `TMPDIR`, fixed `SOURCE_DATE_EPOCH`).
+5. Checks `rustc` against `rustc_range` (default `>=1.75, <2`; the
+   link-time ABI stamp, not the rustc patch level, is the real
+   compatibility check).
+6. Copies `lib<name>.a` + `lib<name>.so|.dylib` into `build/`, writes
+   `cflags.txt`/`ldflags.txt`, and verifies both engines: every
+   `plugin.zzi` symbol in the archive and shared lib, exactly one ABI
+   stamp in each. Windows is AOT-only with a loud note.
+
+Source builds of transitive Rust plugins are gated behind
+`--allow-source-builds`; direct path deps build normally. There is no
+prebuilt path for Rust in v1.
+
+### Audit
+
+`zz audit` prints `backend=rust`, the platform tag, recorded `rustc`,
+and the closure key, then verifies:
+
+- the recomputed closure key matches `zz.lock` (tampered sources or a
+  changed spec fail),
+- every closure crate still has its checksum/commit pin,
+- every vendored crate has a licence,
+- the live `rustc` matches the lock and satisfies `rustc_range`.
+
+The reference example is [`examples/rust-fnv/`](../examples/rust-fnv/):
+FNV-1a in Rust, no scripts, consumed by a `zz` program on both engines.
+
+### Legacy Rust hook (deprecated)
+
+The pre-#236 `build = "build.sh"` + `zz_runtime` registration path still
+exists for one deprecation window behind `--allow-hooks` (direct deps
+only). It is not the recommended shape and cannot be used with
+`[native.build-rust]`. Migrate by deleting the hook and `build.rs`,
+keeping both crate types, committing `Cargo.lock`, and exporting the
+C-ABI symbols above.
 
 ---
 
