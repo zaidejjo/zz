@@ -1,4 +1,4 @@
-// features: bool, locals, match, print
+// features: bool-logic, locals, match, print
 // E2E: Match on bool with true/false arms generates valid C (issue #562 Bug 2)
 func main() {
     b := true

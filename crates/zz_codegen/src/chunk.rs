@@ -3476,7 +3476,12 @@ impl<'a> Emitter<'a> {
                 out.push_str(&format!("    st[sp++] = zz_clone(st[{s}]);\n"));
             }
             Op::StoreSlot(s) => {
-                out.push_str(&format!("    zz_cstore(&st[{s}], st[--sp]);\n"));
+                // Move store: pop the owned value, release the slot's old
+                // value, move the popped value in. Equivalent to zz_cstore
+                // on an owned value minus the clone + source release.
+                out.push_str(&format!(
+                    "    {{ zz_value _v = st[--sp]; zz_release(&st[{s}]); st[{s}] = _v; }}\n"
+                ));
             }
             // A module-scope binding reads its C global and a
             // function-local env cell (`match` arm binding, captured
@@ -3940,7 +3945,8 @@ impl<'a> Emitter<'a> {
             }
             Op::SetLoopResult => {
                 out.push_str(
-                    "    { zz_value _v = st[--sp]; zz_cstore(&st[_lbase[_ldepth-1]], _v); }\n",
+                    "    { zz_value _v = st[--sp]; zz_release(&st[_lbase[_ldepth-1]]); \
+                     st[_lbase[_ldepth-1]] = _v; }\n",
                 );
             }
             Op::MakeVariant { name, has_arg } => {
