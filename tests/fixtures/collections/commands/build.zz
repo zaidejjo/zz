@@ -1,0 +1,3 @@
+pub func run(_args: [str]) -> int {
+    return 1
+}

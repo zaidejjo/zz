@@ -1,0 +1,7 @@
+[package]
+name = "collections-demo"
+version = "0.1.0"
+
+[collect.commands]
+dir = "commands"
+sig = "func(args: [str]) -> int"
