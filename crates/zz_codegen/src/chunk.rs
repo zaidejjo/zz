@@ -2188,8 +2188,48 @@ impl<'a> Emitter<'a> {
             self.needs_native_rt = true;
             return Ok(CallTarget::CImpl(impl_name, true));
         }
+        // Issue #557: CallPath for module-scope bindings lowers to
+        // `top2.a.unwrap_or` instead of `option.unwrap_or`. When direct
+        // resolution fails, try type-qualified method names so the chunk
+        // backend can lower `.unwrap_or`/`.unwrap`/`.expect` on Option
+        // and Result receivers to their C natives (same shape #508
+        // established for typed receivers inside functions).
+        if let Some((type_ns, method)) = split_method_tail(dotted) {
+            let qualified = format!("{type_ns}.{method}");
+            if let Some(impl_name) = super::lower::native_impl(&qualified) {
+                return Ok(CallTarget::CImpl(impl_name, false));
+            }
+            if let Some(impl_name) = super::ffi_impl(&qualified) {
+                self.needs_native_rt = true;
+                return Ok(CallTarget::CImpl(impl_name, true));
+            }
+        }
         Err(ChunkError::name(&format!("call target {dotted}")))
     }
+}
+
+/// Split `head.method` into `(type_ns, method)` when the head looks like a
+/// variant namespace (`option`, `result`) rather than a value expression.
+///
+/// Issue #557: `a := .some(11); a.unwrap_or(0)` lowers to
+/// `CallPath ["top2.a", "unwrap_or"]`. Direct resolution fails because no
+/// function named `top2.a.unwrap_or` exists. Splitting on `.unwrap_or`
+/// yields `("option", "unwrap_or")`, which resolves to `zz_option_unwrap_or`
+/// through `native_impl` — the same shape #508 established for typed
+/// receivers inside functions, extended to module-scope and match-arm
+/// bindings.
+fn split_method_tail(dotted: &str) -> Option<(&'static str, &'static str)> {
+    for method in ["unwrap", "unwrap_or", "expect"] {
+        if let Some(prefix) = dotted.strip_suffix(&format!(".{method}")) {
+            let ns = match prefix {
+                "option" | "std.option" => Some("option"),
+                "result" | "std.result" => Some("result"),
+                _ => None,
+            }?;
+            return Some((ns, method));
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
