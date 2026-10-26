@@ -2287,6 +2287,264 @@ fn missing_bare_import_hints_uninstalled_declaration() {
     );
 }
 
+// ── Directory collections ([collect.*]) ─────────────────────────────
+
+const COLLECTION_MANIFEST: &str = "[package]\n\
+name = \"demo\"\n\
+version = \"0.1.0\"\n\
+[collect.commands]\n\
+dir = \"commands\"\n\
+sig = \"func([str]) -> int\"\n";
+
+fn collection_project(files: &[(&str, &str)]) -> PathBuf {
+    let mut all = vec![("zz.toml", COLLECTION_MANIFEST)];
+    all.extend_from_slice(files);
+    all.push(("commands/.keep", ""));
+    temp_project(&all)
+}
+
+fn collection_source(result: &LoadResult) -> String {
+    result
+        .files
+        .iter()
+        .find(|(_, src)| src.contains("Generated from [collect."))
+        .map(|(_, src)| src.clone())
+        .expect("synthesized collection source present")
+}
+
+#[test]
+fn invalid_declared_collection_fails_even_when_unused() {
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [collect.commands]\ndir = \"missing\"\nsig = \"func([str]) -> int\"\n",
+        ),
+        ("src/main.zz", "x := 1\n"),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    let joined = diag_texts(&result).join("\n");
+    assert!(
+        joined.contains("collection `commands` in zz.toml is invalid"),
+        "{joined}"
+    );
+    assert!(joined.contains("does not exist"), "{joined}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_custom_export_name() {
+    let dir = temp_project(&[
+        (
+            "zz.toml",
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [collect.commands]\ndir = \"commands\"\nsig = \"func([str]) -> int\"\nexport = \"main\"\n",
+        ),
+        ("src/main.zz", "import collect.commands\ncommands.all()\n"),
+        (
+            "commands/greet.zz",
+            "pub func main(args: [str]) -> int { return args.len() }\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    let src = collection_source(&result);
+    assert!(src.contains("    main: func([str]) -> int\n"), "{src}");
+    assert!(src.contains("main: __collect_commands_greet.main"), "{src}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_loads_and_exposes_get_and_all() {
+    let dir = collection_project(&[
+        (
+            "src/main.zz",
+            "import collect.commands\n\
+             entries := commands.all()\n\
+             hit := commands.get(\"greet\")\n",
+        ),
+        (
+            "commands/greet.zz",
+            "pub func run(args: [str]) -> int { return args.len() }\n",
+        ),
+        (
+            "commands/build.zz",
+            "pub func run(args: [str]) -> int { return args.len() + 1 }\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert!(matches!(result.bindings["main.entries"], Type::Array(_)));
+    assert!(matches!(result.bindings["main.hit"], Type::Option(_)));
+    assert!(result.funcs.contains_key("commands.all"));
+    assert!(result.funcs.contains_key("commands.get"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_members_are_deterministically_ordered() {
+    let dir = collection_project(&[
+        ("src/main.zz", "import collect.commands\ncommands.all()\n"),
+        (
+            "commands/zeta.zz",
+            "pub func run(args: [str]) -> int { return 0 }\n",
+        ),
+        (
+            "commands/alpha.zz",
+            "pub func run(args: [str]) -> int { return 0 }\n",
+        ),
+        (
+            "commands/mid.zz",
+            "pub func run(args: [str]) -> int { return 0 }\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    let src = collection_source(&result);
+    let alpha = src.find("name: \"alpha\"").unwrap();
+    let mid = src.find("name: \"mid\"").unwrap();
+    let zeta = src.find("name: \"zeta\"").unwrap();
+    assert!(alpha < mid && mid < zeta, "got:\n{src}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn empty_collection_is_valid() {
+    let dir = collection_project(&[(
+        "src/main.zz",
+        "import collect.commands\nn := commands.all().len()\n",
+    )]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.n"], Type::Int);
+    assert!(collection_source(&result).contains("pub const ALL: [Entry] = [\n]"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_alias_import_works() {
+    let dir = collection_project(&[
+        (
+            "src/main.zz",
+            "import collect.commands as cmds\nn := cmds.all().len()\n",
+        ),
+        (
+            "commands/greet.zz",
+            "pub func run(args: [str]) -> int { return 1 }\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&result), "errors: {:?}", result.errors);
+    assert_eq!(result.bindings["main.n"], Type::Int);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_signature_mismatch_reports_expected_and_found() {
+    let dir = collection_project(&[
+        ("src/main.zz", "import collect.commands\ncommands.all()\n"),
+        (
+            "commands/bad.zz",
+            "pub func run(args: [str]) -> str { return \"nope\" }\n",
+        ),
+        (
+            "commands/good.zz",
+            "pub func run(args: [str]) -> int { return 1 }\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    let joined = diag_texts(&result).join("\n");
+    assert!(
+        joined.contains("does not match collection `commands`"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("expected: func run(args: [str]) -> int"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("found:    func run(args: [str]) -> str"),
+        "{joined}"
+    );
+    let src = collection_source(&result);
+    assert!(src.contains("name: \"good\""), "{src}");
+    assert!(
+        !src.contains("name: \"bad\""),
+        "invalid member kept:\n{src}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_missing_export_is_reported_at_member() {
+    let dir = collection_project(&[
+        ("src/main.zz", "import collect.commands\ncommands.all()\n"),
+        (
+            "commands/other.zz",
+            "pub func other(args: [str]) -> int { return 0 }\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    let joined = diag_texts(&result).join("\n");
+    assert!(joined.contains("is missing"), "{joined}");
+    assert!(joined.contains("hint: add `pub run("), "{joined}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_name_collision_is_loud() {
+    let dir = collection_project(&[
+        ("src/main.zz", "import collect.commands\ncommands.all()\n"),
+        (
+            "commands/foo-bar.zz",
+            "pub func run(args: [str]) -> int { return 0 }\n",
+        ),
+        (
+            "commands/foo_bar.zz",
+            "pub func run(args: [str]) -> int { return 0 }\n",
+        ),
+    ]);
+    let result = load_program(&dir.join("src/main.zz")).unwrap();
+    let joined = diag_texts(&result).join("\n");
+    assert!(joined.contains("both map to member `foo_bar`"), "{joined}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_sees_files_added_and_removed_between_loads() {
+    let dir = collection_project(&[
+        ("src/main.zz", "import collect.commands\ncommands.all()\n"),
+        (
+            "commands/greet.zz",
+            "pub func run(args: [str]) -> int { return 0 }\n",
+        ),
+    ]);
+    let first = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&first), "errors: {:?}", first.errors);
+    let src = collection_source(&first);
+    assert!(src.contains("name: \"greet\""));
+    assert!(!src.contains("name: \"build\""));
+
+    fs::write(
+        dir.join("commands/build.zz"),
+        "pub func run(args: [str]) -> int { return 0 }\n",
+    )
+    .unwrap();
+    let second = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&second), "errors: {:?}", second.errors);
+    let src = collection_source(&second);
+    assert!(src.contains("name: \"build\""));
+    assert!(src.contains("name: \"greet\""));
+
+    fs::remove_file(dir.join("commands/greet.zz")).unwrap();
+    let third = load_program(&dir.join("src/main.zz")).unwrap();
+    assert!(no_errors(&third), "errors: {:?}", third.errors);
+    let src = collection_source(&third);
+    assert!(src.contains("name: \"build\""));
+    assert!(!src.contains("name: \"greet\""));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Whether `chunk`, or any function/closure chunk nested inside it, holds
 /// an `Op::CallPath`.
 fn has_callpath(chunk: &zz_runtime::vm::Chunk) -> bool {

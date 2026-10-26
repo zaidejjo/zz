@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use zz_checker::{
     check_program_with_module_ns, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type,
 };
-use zz_frontend::ast::{Block, Expr, ImportItem, Program, Stmt};
+use zz_frontend::ast::{Block, Expr, ImportItem, Program, Stmt, Ty, TyKind};
 use zz_frontend::diag::{error_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
@@ -105,6 +105,40 @@ pub struct LoadResult {
     pub stdlib_wildcards: Vec<String>,
 }
 
+/// One discovered member of a `[collect.<name>]` registry.
+#[derive(Debug, Clone)]
+struct CollectionMember {
+    /// Member name as used by `get("<name>")`.
+    name: String,
+    /// Internal module namespace (`__collect_<collection>_<member>`).
+    ns: String,
+    /// Canonical member file path.
+    path: PathBuf,
+    /// File name as written on disk, for diagnostics.
+    file: String,
+    /// Span of the exported function definition (0..0 when absent).
+    run_span: Span,
+    /// Source text, for member-local diagnostics.
+    source: String,
+}
+
+/// A synthesized collection module, kept until the check pass so member
+/// signatures can be validated against the real checked types before the
+/// final AST is generated.
+#[derive(Debug, Clone)]
+struct CollectionModule {
+    name: String,
+    /// Namespace bound to the synthesized module (`commands`, or an alias).
+    ns: String,
+    /// Required exported function name (`run` by default).
+    export: String,
+    /// Parsed signature type (function type).
+    sig_ty: Ty,
+    /// Canonical source spelling of `sig` (`func([str]) -> int`).
+    sig_source: String,
+    members: Vec<CollectionMember>,
+}
+
 struct Loader {
     sources: HashMap<PathBuf, String>,
     programs: HashMap<PathBuf, Program>,
@@ -138,6 +172,12 @@ struct Loader {
     /// (`import app.x` → `<root>/src/x.zz`, issue #288) without
     /// re-parsing the manifest per import.
     pkg_cache: HashMap<PathBuf, Option<(String, PathBuf)>>,
+    /// Synthesized collection modules, keyed by their synthetic path.
+    collections: HashMap<PathBuf, CollectionModule>,
+    /// Declared collections that failed manifest validation; the error was
+    /// reported once up front, so a later import is skipped instead of
+    /// repeating it.
+    invalid_collections: HashSet<String>,
     /// Plugin function names, for the cache genesis hash.
     plugin_names: Vec<String>,
     /// File dependency edges (importer → imported canonical paths) for S1
@@ -276,6 +316,8 @@ fn load_program_impl(
         contributed_seeds: false,
         use_cache,
         pkg_cache: HashMap::new(),
+        collections: HashMap::new(),
+        invalid_collections: HashSet::new(),
         plugin_names: Vec::new(),
         dep_edges: HashMap::new(),
         ns_aliases: HashMap::new(),
@@ -304,6 +346,7 @@ fn load_program_impl(
         loader.seed_func_keys.insert(name.clone());
         loader.plugin_names.push(name.clone());
     }
+    loader.validate_declared_collections();
     loader.load_file(main_path, None)?;
     Ok(loader.finish())
 }
@@ -1122,6 +1165,97 @@ impl Loader {
                 }
                 continue;
             }
+            // Declared collection (`import collect.commands`): synthesize
+            // the registry module. Only the root package's own collections
+            // are supported in v1 — a dependency importing its collection
+            // gets a targeted diagnostic instead of silent misbehavior.
+            if imp.first().map(String::as_str) == Some("collect") {
+                let importer_root = find_project_root(&canon);
+                let collection_name = imp.get(1).cloned().unwrap_or_default();
+                if let Some(ir) = importer_root.as_deref() {
+                    if self.root.as_deref() != Some(ir) {
+                        let declares = cache::manifest_of(ir)
+                            .map(|m| m.collections.contains_key(&collection_name))
+                            .unwrap_or(false);
+                        if declares {
+                            self.errors.push(LoadError {
+                                name: path.display().to_string(),
+                                source: source.clone(),
+                                diags: vec![error_at(
+                                    format!(
+                                        "collection `collect.{collection_name}` is declared in dependency `{}`, which is not supported yet\n\
+                                         hint: collections are root-package-only in v1; declare `[collect.{collection_name}]` in the root package's zz.toml",
+                                        ir.display()
+                                    ),
+                                    Span::new(0, 0),
+                                )],
+                            });
+                            continue;
+                        }
+                    }
+                }
+                let root = self.root.clone();
+                let root_manifest = root.as_deref().and_then(cache::manifest_of);
+                let declared = root_manifest
+                    .as_ref()
+                    .and_then(|m| m.collections.get(&collection_name))
+                    .cloned();
+                if let Some(spec) = declared {
+                    if imp.len() != 2 {
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(
+                                format!(
+                                    "`collect.{collection_name}` takes no submodules\n\
+                                     hint: v1 collections are single-level; import `collect.{collection_name}`"
+                                ),
+                                Span::new(0, 0),
+                            )],
+                        });
+                        continue;
+                    }
+                    if !zz_pm::manifest::is_identifier(&collection_name) {
+                        self.errors.push(LoadError {
+                            name: path.display().to_string(),
+                            source: source.clone(),
+                            diags: vec![error_at(
+                                format!(
+                                    "collection name `{collection_name}` is not a valid identifier"
+                                ),
+                                Span::new(0, 0),
+                            )],
+                        });
+                        continue;
+                    }
+                    let ok = self.load_collection(
+                        &collection_name,
+                        &spec,
+                        &canon,
+                        &source,
+                        imp_alias.as_deref(),
+                    );
+                    if ok {
+                        let synth = PathBuf::from(format!("collect.{collection_name}"));
+                        Self::record_edge(
+                            &mut self.dep_edges,
+                            &canon,
+                            &cache::canon(&synth).unwrap_or_else(|_| synth.clone()),
+                        );
+                        if is_selective {
+                            let sel_path =
+                                self.canonical_sel_path(&imp, imp_alias.as_deref(), Some(&synth));
+                            self.selective_imports.push((
+                                canon.clone(),
+                                sel_path,
+                                imp_items.clone(),
+                                false,
+                            ));
+                        }
+                    }
+                    continue;
+                }
+            }
             // Implicit package mapping (`import app.math`, issue #288):
             // the first segment matches `package.name` in the nearest
             // `zz.toml` → `<root>/src/...`. Precedence: std (above) >
@@ -1527,6 +1661,349 @@ impl Loader {
         Ok(())
     }
 
+    /// Validate every `[collect.*]` declared by the root manifest, even
+    /// when nothing imports it yet. This keeps `zz check` honest about a
+    /// broken registry and lets the import path skip a repeat diagnostic.
+    fn validate_declared_collections(&mut self) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let Some(manifest) = cache::manifest_of(&root) else {
+            return;
+        };
+        if manifest.collections.is_empty() {
+            return;
+        }
+        let toml = root.join("zz.toml");
+        let source = std::fs::read_to_string(&toml).unwrap_or_default();
+        for (name, spec) in &manifest.collections {
+            let err = if !zz_pm::manifest::is_identifier(name) {
+                Some(format!(
+                    "collection name `{name}` is not a valid identifier"
+                ))
+            } else {
+                spec.validate(&root)
+                    .err()
+                    .or_else(|| spec.discover(&root).err())
+            };
+            if let Some(err) = err {
+                self.invalid_collections.insert(name.clone());
+                self.errors.push(LoadError {
+                    name: toml.display().to_string(),
+                    source: source.clone(),
+                    diags: vec![error_at(
+                        format!("collection `{name}` in zz.toml is invalid: {err}"),
+                        Span::new(0, 0),
+                    )],
+                });
+            }
+        }
+    }
+
+    /// Load a declared `[collect.<name>]` registry as a synthesized module.
+    ///
+    /// Members are loaded first (under internal namespaces) so their `run`
+    /// signatures seed the checker before the generated module is checked.
+    /// The final AST is built in [`Loader::prepare_collection`] during the
+    /// check pass, once each member's real checked signature is available.
+    fn load_collection(
+        &mut self,
+        name: &str,
+        spec: &zz_pm::manifest::CollectionSpec,
+        importer: &Path,
+        source: &str,
+        alias: Option<&str>,
+    ) -> bool {
+        let Some(root) = self.root.clone() else {
+            self.errors.push(LoadError {
+                name: importer.display().to_string(),
+                source: source.to_string(),
+                diags: vec![error_at(
+                    format!(
+                        "cannot import collection `collect.{name}`: no project (zz.toml) found\n\
+                         hint: collections are declared in the root package's zz.toml"
+                    ),
+                    Span::new(0, 0),
+                )],
+            });
+            return false;
+        };
+        let synth = PathBuf::from(format!("collect.{name}"));
+        let ns = alias.unwrap_or(name).to_string();
+        if !zz_pm::manifest::is_identifier(&ns) {
+            self.errors.push(LoadError {
+                name: importer.display().to_string(),
+                source: source.to_string(),
+                diags: vec![error_at(
+                    format!("collection namespace `{ns}` is not a valid identifier"),
+                    Span::new(0, 0),
+                )],
+            });
+            return false;
+        }
+        // Manifest validation already reported this collection; don't
+        // repeat the same error at every import site.
+        if self.invalid_collections.contains(name) {
+            return false;
+        }
+        if self.done.contains(&synth) {
+            self.record_ns_alias(importer, &ns, &synth);
+            return true;
+        }
+        if self.visiting.contains(&synth) {
+            self.errors.push(LoadError {
+                name: importer.display().to_string(),
+                source: source.to_string(),
+                diags: vec![error_at(
+                    format!(
+                        "circular collection import: `collect.{name}` is imported while the collection is still loading"
+                    ),
+                    Span::new(0, 0),
+                )],
+            });
+            return false;
+        }
+        if let Err(e) = spec.validate(&root) {
+            self.errors.push(LoadError {
+                name: importer.display().to_string(),
+                source: source.to_string(),
+                diags: vec![error_at(
+                    format!("collection `{name}` in zz.toml is invalid: {e}"),
+                    Span::new(0, 0),
+                )],
+            });
+            return false;
+        }
+        let members = match spec.discover(&root) {
+            Ok(members) => members,
+            Err(e) => {
+                self.errors.push(LoadError {
+                    name: importer.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!("collection `{name}`: {e}"),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+        };
+        let (sig_ty, sig_source) = match spec.parsed_signature_with_source() {
+            Ok(v) => v,
+            Err(e) => {
+                self.errors.push(LoadError {
+                    name: importer.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!("collection `{name}` has an invalid signature: {e}"),
+                        Span::new(0, 0),
+                    )],
+                });
+                return false;
+            }
+        };
+
+        self.visiting.insert(synth.clone());
+        let mut loaded = Vec::new();
+        for member in members {
+            let member_ns = format!("__collect_{name}_{}", member.name);
+            if let Err(e) = self.load_file(&member.path, Some(&member_ns)) {
+                self.errors.push(LoadError {
+                    name: importer.display().to_string(),
+                    source: source.to_string(),
+                    diags: vec![error_at(
+                        format!(
+                            "cannot load collection member `{}`: {e}",
+                            member.path.display()
+                        ),
+                        Span::new(0, 0),
+                    )],
+                });
+                continue;
+            }
+            let canon = cache::canon(&member.path).unwrap_or_else(|_| member.path.clone());
+            Self::record_edge(&mut self.dep_edges, &synth, &canon);
+            let member_source = self.sources.get(&canon).cloned().unwrap_or_default();
+            let run_span = self
+                .programs
+                .get(&canon)
+                .and_then(|p| {
+                    p.stmts.iter().find_map(|s| match s {
+                        Stmt::Func {
+                            name,
+                            pub_: true,
+                            span,
+                            ..
+                        } if name.last().map(String::as_str) == Some(spec.export.as_str()) => {
+                            Some(*span)
+                        }
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| Span::new(0, 0));
+            loaded.push(CollectionMember {
+                name: member.name,
+                ns: member_ns,
+                path: canon,
+                file: member.file,
+                run_span,
+                source: member_source,
+            });
+        }
+        self.visiting.remove(&synth);
+        self.done.insert(synth.clone());
+
+        if !self.register_ns(&ns, &synth, importer, source) {
+            return false;
+        }
+        self.sources.insert(
+            synth.clone(),
+            format!(
+                "// synthesized collection `collect.{name}`\n\
+                 dir = \"{}\"\n\
+                 sig = \"{}\"\n\
+                 name = \"{}\"\n\
+                 export = \"{}\"\n",
+                spec.dir, spec.sig, spec.name, spec.export
+            ),
+        );
+        self.programs.insert(
+            synth.clone(),
+            Program {
+                stmts: Vec::new(),
+                span: Span::new(0, 0),
+            },
+        );
+        self.order.push(synth.clone());
+        self.collections.insert(
+            synth,
+            CollectionModule {
+                name: name.to_string(),
+                ns,
+                export: spec.export.clone(),
+                sig_ty,
+                sig_source,
+                members: loaded,
+            },
+        );
+        true
+    }
+
+    /// Validate members against the declared signature and synthesize the
+    /// collection AST. Called during the check pass, after every member
+    /// module has been checked and its `pub run` signature seeded.
+    ///
+    /// Returns the generated source (also stored in `files` for diagnostic
+    /// rendering). Invalid members are reported at their own file/line and
+    /// omitted from the generated `ALL` array; the collection then contains
+    /// only valid members, exactly as the failing build would suggest.
+    fn prepare_collection(&mut self, path: &Path, failed_ns: &HashSet<String>) -> String {
+        let Some(info) = self.collections.get(path).cloned() else {
+            return String::new();
+        };
+        let expected = self.collection_expected_type(&info.sig_ty);
+        let mut valid = Vec::new();
+        for member in &info.members {
+            let key = format!("{}.{}", member.ns, info.export);
+            let Some(sig) = self.funcs.get(&key).cloned() else {
+                // A failed member module already reported its own error;
+                // don't bury it under a collection cascade.
+                if failed_ns.contains(&member.ns) {
+                    continue;
+                }
+                let rel = member
+                    .path
+                    .strip_prefix(self.root.as_deref().unwrap_or(Path::new("")))
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| member.path.display().to_string());
+                let expected_text = format_expected_sig(&info.export, &expected);
+                self.errors.push(LoadError {
+                    name: member.path.display().to_string(),
+                    source: member.source.clone(),
+                    diags: vec![error_at(
+                        format!(
+                            "{rel} does not match collection `{}`\n\
+                             expected: {expected_text}\n\
+                             found:    `pub {export}` is missing",
+                            info.name,
+                            export = info.export
+                        ),
+                        member.run_span,
+                    )
+                    .with_note(format!(
+                        "hint: add `pub {}({}) -> {}` to `{}`",
+                        info.export,
+                        expected_param_list(&expected),
+                        expected_ret(&expected),
+                        member.file
+                    ))],
+                });
+                continue;
+            };
+            let actual = Type::Func(
+                sig.params.iter().map(|(_, t)| t.clone()).collect(),
+                Box::new(sig.ret.clone()),
+            );
+            if actual == expected {
+                valid.push(member.clone());
+                continue;
+            }
+            let rel = member
+                .path
+                .strip_prefix(self.root.as_deref().unwrap_or(Path::new("")))
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| member.path.display().to_string());
+            let expected_text = format_expected_sig(&info.export, &expected);
+            let found_text = format_found_sig(&info.export, &sig);
+            self.errors.push(LoadError {
+                name: member.path.display().to_string(),
+                source: member.source.clone(),
+                diags: vec![error_at(
+                    format!(
+                        "{rel} does not match collection `{}`\n\
+                         expected: {expected_text}\n\
+                         found:    {found_text}",
+                        info.name
+                    ),
+                    member.run_span,
+                )
+                .with_note(format!(
+                    "hint: change `{}` in `{}` to `{expected_text}`",
+                    info.export, member.file
+                ))],
+            });
+        }
+        let source = render_collection_source(&info, &valid);
+        let parsed = parse(&source);
+        if let Some(diag) = parsed
+            .errors
+            .iter()
+            .find(|d| d.severity == zz_frontend::diag::Severity::Error)
+            .cloned()
+        {
+            // A synthesized module must always parse; surface a bug loudly
+            // rather than silently dropping the collection.
+            self.errors.push(LoadError {
+                name: path.display().to_string(),
+                source: source.clone(),
+                diags: vec![diag],
+            });
+            return source;
+        }
+        let mut program = parsed.program;
+        let aliases = HashMap::new();
+        namespace_program(&mut program, &info.ns, &aliases);
+        self.programs.insert(path.to_path_buf(), program);
+        source
+    }
+
+    /// Convert a parsed signature `Ty` to the checker's `Type`, resolving
+    /// local aliases/structs/enums so member signatures compare like for
+    /// like. Mirrors the checker's own table precedence.
+    fn collection_expected_type(&self, ty: &Ty) -> Type {
+        ty_to_checker_type(ty, &self.structs, &self.aliases, &self.enums)
+    }
+
     /// Import a plugin dependency (`import zimg`): merge its manifest
     /// signatures under their declared ZZ names. With an alias
     /// (`import zimg as z`), names under the `<dep>.` prefix are also
@@ -1851,10 +2328,23 @@ impl Loader {
         // importers are processed and their cascade noise can be collapsed
         // to one targeted error each.
         let mut failed_ns: HashSet<String> = HashSet::new();
-        for path in &self.order {
+        let order = self.order.clone();
+        for path in &order {
             let name = path.display().to_string();
             let source = self.sources.remove(path).unwrap_or_default();
             files.push((name.clone(), source.clone()));
+
+            // Collection modules are materialized here: member modules
+            // have been checked (dependency-first order), so their real
+            // signatures are available for validation and the generated
+            // `ALL`/`get`/`all` AST can be built exactly once, before the
+            // check that both engines consume.
+            if self.collections.contains_key(path) {
+                let generated = self.prepare_collection(path, &failed_ns);
+                if let Some(last) = files.last_mut() {
+                    last.1 = generated;
+                }
+            }
 
             // Process selective/wildcard imports for this module before
             // type-checking, so imported symbols are in the seed.
@@ -2812,6 +3302,170 @@ impl Loader {
             stdlib_wildcards: self.stdlib_wildcards,
         }
     }
+}
+
+/// Convert an AST type annotation to a checker [`Type`], resolving aliases,
+/// structs, and enums from the current seed tables. Used to compare a
+/// collection signature against each member's checked `pub run` type.
+fn ty_to_checker_type(
+    ty: &Ty,
+    structs: &HashMap<String, StructSig>,
+    aliases: &HashMap<String, AliasSig>,
+    enums: &HashMap<String, EnumSig>,
+) -> Type {
+    match &ty.kind {
+        TyKind::Int => Type::Int,
+        TyKind::Float => Type::Float,
+        TyKind::Bool => Type::Bool,
+        TyKind::Str => Type::Str,
+        TyKind::Unit => Type::Unit,
+        TyKind::Void => Type::Void,
+        TyKind::Ptr { mutable, inner } => Type::Ptr {
+            mutable: *mutable,
+            inner: Box::new(ty_to_checker_type(inner, structs, aliases, enums)),
+        },
+        TyKind::Tuple(ts) => Type::Tuple(
+            ts.iter()
+                .map(|t| ty_to_checker_type(t, structs, aliases, enums))
+                .collect(),
+        ),
+        TyKind::Option(t) => Type::Option(Box::new(ty_to_checker_type(t, structs, aliases, enums))),
+        TyKind::Result(a, b) => Type::Result(
+            Box::new(ty_to_checker_type(a, structs, aliases, enums)),
+            Box::new(ty_to_checker_type(b, structs, aliases, enums)),
+        ),
+        TyKind::Func(ps, ret) => Type::Func(
+            ps.iter()
+                .map(|t| ty_to_checker_type(t, structs, aliases, enums))
+                .collect(),
+            Box::new(ty_to_checker_type(ret, structs, aliases, enums)),
+        ),
+        TyKind::Array(t) => Type::Array(Box::new(ty_to_checker_type(t, structs, aliases, enums))),
+        TyKind::Dict(k, v) => Type::Dict(
+            Box::new(ty_to_checker_type(k, structs, aliases, enums)),
+            Box::new(ty_to_checker_type(v, structs, aliases, enums)),
+        ),
+        TyKind::Union(ts) => Type::Union(
+            ts.iter()
+                .map(|t| ty_to_checker_type(t, structs, aliases, enums))
+                .collect(),
+        ),
+        TyKind::Named(name, args) => {
+            let converted_args: Vec<Type> = args
+                .iter()
+                .map(|t| ty_to_checker_type(t, structs, aliases, enums))
+                .collect();
+            if name == "bytes" && args.is_empty() {
+                return Type::Bytes;
+            }
+            if let Some(key) = find_named_key(aliases.keys(), name) {
+                let alias = &aliases[&key];
+                if alias.generics.len() == converted_args.len() {
+                    let subs: HashMap<String, Type> =
+                        alias.generics.iter().cloned().zip(converted_args).collect();
+                    return zz_checker::subst_type(&alias.target, &subs);
+                }
+                return alias.target.clone();
+            }
+            if let Some(key) = find_named_key(structs.keys(), name) {
+                return Type::Struct(key, converted_args);
+            }
+            if let Some(key) = find_named_key(enums.keys(), name) {
+                return Type::Enum(key, converted_args);
+            }
+            Type::Named(name.clone())
+        }
+    }
+}
+
+/// Exact key, else a unique `*.name` suffix match (mirrors the checker's
+/// canonical-name lookup for unqualified struct/enum/alias spellings).
+fn find_named_key<'a>(keys: impl Iterator<Item = &'a String>, name: &str) -> Option<String> {
+    let suffix = format!(".{name}");
+    let mut unique: Option<String> = None;
+    for key in keys {
+        if key == name {
+            return Some(key.clone());
+        }
+        if key.ends_with(&suffix) {
+            if unique.is_some() {
+                return None;
+            }
+            unique = Some(key.clone());
+        }
+    }
+    unique
+}
+
+fn expected_param_list(ty: &Type) -> String {
+    let Type::Func(params, _) = ty else {
+        return ty.to_string();
+    };
+    let names: Vec<String> = if params.len() == 1 {
+        vec!["args".to_string()]
+    } else {
+        (0..params.len()).map(|i| format!("a{i}")).collect()
+    };
+    params
+        .iter()
+        .zip(names)
+        .map(|(t, n)| format!("{n}: {t}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn expected_ret(ty: &Type) -> String {
+    match ty {
+        Type::Func(_, ret) => ret.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn format_expected_sig(export: &str, ty: &Type) -> String {
+    format!(
+        "func {export}({}) -> {}",
+        expected_param_list(ty),
+        expected_ret(ty)
+    )
+}
+
+fn format_found_sig(export: &str, sig: &FuncSig) -> String {
+    let params = sig
+        .params
+        .iter()
+        .map(|(n, t)| format!("{n}: {t}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("func {export}({params}) -> {}", sig.ret)
+}
+
+/// Render the synthesized collection module. Members are already sorted
+/// by name and filtered to signature-matching entries.
+fn render_collection_source(info: &CollectionModule, members: &[CollectionMember]) -> String {
+    let export = &info.export;
+    let mut out = String::new();
+    out.push_str("// Generated from [collect.");
+    out.push_str(&info.name);
+    out.push_str("] in zz.toml. Do not edit.\n");
+    out.push_str(&format!(
+        "pub struct Entry {{\n    name: str,\n    {export}: {}\n}}\n\n",
+        info.sig_source
+    ));
+    out.push_str("pub const ALL: [Entry] = [\n");
+    for member in members {
+        out.push_str(&format!(
+            "    Entry {{ name: \"{}\", {export}: {}.{export} }},\n",
+            member.name, member.ns
+        ));
+    }
+    out.push_str("]\n\n");
+    out.push_str("pub func all() -> [Entry] {\n    return ALL\n}\n\n");
+    out.push_str("pub func get(name: str) -> Option<Entry> {\n");
+    out.push_str("    for entry in ALL {\n");
+    out.push_str("        if entry.name == name {\n");
+    out.push_str("            return .some(entry)\n");
+    out.push_str("        }\n    }\n    return .none\n}\n");
+    out
 }
 
 /// Collect bare→qualified selective-import aliases from every module's
