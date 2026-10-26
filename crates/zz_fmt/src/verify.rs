@@ -896,9 +896,12 @@ fn normalize_named_arg_sep(seq: &[String]) -> Vec<String> {
 }
 
 /// Comma is "arm-start" when the next token begins a match arm or closes a
-/// container: `_`, `.variant`, literal, string, or a closing delimiter.
+/// container: `_`, `.variant`, literal, string, bool literal, or a closing
+/// delimiter. Bool literals (`true`/`false`) are valid match-arm patterns,
+/// so a comma before one is an arm separator the emitter drops; normalize it
+/// away symmetrically on input and formatted output.
 fn arm_start(tok: &str) -> bool {
-    matches!(tok, ")" | "]" | "}" | "_" | "(")
+    matches!(tok, ")" | "]" | "}" | "_" | "(" | "true" | "false")
         || tok.starts_with('.')
         || tok.starts_with('"')
         || tok.chars().next().is_some_and(|c| c.is_ascii_digit())
