@@ -1709,7 +1709,7 @@ zz_value zz_vec_sort(zz_value arr, int *err) {
 }
 
 // vec.sort_by(arr, cmp) — sort array using a |T, T| -> int comparator.
-// Insertion sort (stable) with a closure comparator called via the C ABI.
+// Mergesort (stable, O(n log n)) with a closure comparator called via the C ABI.
 // negative/zero/positive from the comparator maps to Less/Equal/Greater.
 typedef struct {
     zz_dispatch_fn fn;
@@ -1730,20 +1730,27 @@ static int sort_by_cmp(void *thunk, const zz_sort_pair *a, const zz_sort_pair *b
     return ord;
 }
 
-// Insertion sort over zz_sort_pair using a comparator with context.
-// Stable by construction (only swaps when strictly greater).
-static void insertion_sort_ctx(zz_sort_pair *pairs, size_t n,
-                               int (*cmp)(void *, const zz_sort_pair *, const zz_sort_pair *),
-                               void *thunk) {
-    for (size_t i = 1; i < n; i++) {
-        zz_sort_pair key = pairs[i];
-        size_t j = i;
-        while (j > 0 && cmp(thunk, &pairs[j - 1], &key) > 0) {
-            pairs[j] = pairs[j - 1];
-            j--;
+// Mergesort over zz_sort_pair using a comparator with context.
+// Stable (takes left element when equal) and O(n log n).
+static void merge_sort_ctx(zz_sort_pair *pairs, zz_sort_pair *tmp, size_t n,
+                           int (*cmp)(void *, const zz_sort_pair *, const zz_sort_pair *),
+                           void *thunk) {
+    if (n <= 1) return;
+    size_t mid = n / 2;
+    merge_sort_ctx(pairs, tmp, mid, cmp, thunk);
+    merge_sort_ctx(pairs + mid, tmp + mid, n - mid, cmp, thunk);
+    size_t i = 0, j = mid, k = 0;
+    while (i < mid && j < n) {
+        // Stable: take left element when equal (cmp <= 0 means left <= right).
+        if (cmp(thunk, &pairs[i], &pairs[j]) <= 0) {
+            tmp[k++] = pairs[i++];
+        } else {
+            tmp[k++] = pairs[j++];
         }
-        pairs[j] = key;
     }
+    while (i < mid) tmp[k++] = pairs[i++];
+    while (j < n) tmp[k++] = pairs[j++];
+    for (size_t t = 0; t < n; t++) pairs[t] = tmp[t];
 }
 
 zz_value zz_vec_sort_by(zz_value arr, zz_value cmp, int *err) {
@@ -1756,7 +1763,12 @@ zz_value zz_vec_sort_by(zz_value arr, zz_value cmp, int *err) {
     void **env = zz_closure_env(cmp, &nenv);
     if (!fn) return zz_clone(arr);
     zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
-    if (!pairs) return zz_clone(arr);
+    zz_sort_pair *tmp = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs || !tmp) {
+        free(pairs);
+        free(tmp);
+        return zz_clone(arr);
+    }
     for (size_t i = 0; i < n; i++) {
         pairs[i].v = zz_clone(arr.arr->items[i]);
         pairs[i].k = (zz_value){ZZ_UNIT, {0}};
@@ -1766,7 +1778,7 @@ zz_value zz_vec_sort_by(zz_value arr, zz_value cmp, int *err) {
     zz_task_frame *saved_fr = zz_green_frame();
     zz_green_frame_set(NULL);
     sort_by_ctx ctx = { fn, env, nenv };
-    insertion_sort_ctx(pairs, n, sort_by_cmp, &ctx);
+    merge_sort_ctx(pairs, tmp, n, sort_by_cmp, &ctx);
     zz_green_frame_set(saved_fr);
     zz_value out = zz_array_new();
     for (size_t i = 0; i < n; i++) {
@@ -1775,6 +1787,7 @@ zz_value zz_vec_sort_by(zz_value arr, zz_value cmp, int *err) {
         zz_release(&pairs[i].k);
     }
     free(pairs);
+    free(tmp);
     return out;
 }
 
@@ -1808,7 +1821,12 @@ zz_value zz_vec_sort_by_desc(zz_value arr, zz_value cmp, int *err) {
     void **env = zz_closure_env(cmp, &nenv);
     if (!fn) return zz_clone(arr);
     zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
-    if (!pairs) return zz_clone(arr);
+    zz_sort_pair *tmp = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs || !tmp) {
+        free(pairs);
+        free(tmp);
+        return zz_clone(arr);
+    }
     for (size_t i = 0; i < n; i++) {
         pairs[i].v = zz_clone(arr.arr->items[i]);
         pairs[i].k = (zz_value){ZZ_UNIT, {0}};
@@ -1817,7 +1835,7 @@ zz_value zz_vec_sort_by_desc(zz_value arr, zz_value cmp, int *err) {
     zz_task_frame *saved_fr = zz_green_frame();
     zz_green_frame_set(NULL);
     sort_by_desc_ctx ctx = { fn, env, nenv };
-    insertion_sort_ctx(pairs, n, sort_by_desc_cmp, &ctx);
+    merge_sort_ctx(pairs, tmp, n, sort_by_desc_cmp, &ctx);
     zz_green_frame_set(saved_fr);
     zz_value out = zz_array_new();
     for (size_t i = 0; i < n; i++) {
@@ -1826,6 +1844,7 @@ zz_value zz_vec_sort_by_desc(zz_value arr, zz_value cmp, int *err) {
         zz_release(&pairs[i].k);
     }
     free(pairs);
+    free(tmp);
     return out;
 }
 
@@ -1855,17 +1874,23 @@ static int sort_key_cmp(const zz_sort_pair *a, const zz_sort_pair *b) {
     return ord;
 }
 
-// Insertion sort using sort_key_cmp (no context).
-static void insertion_sort_key(zz_sort_pair *pairs, size_t n) {
-    for (size_t i = 1; i < n; i++) {
-        zz_sort_pair key = pairs[i];
-        size_t j = i;
-        while (j > 0 && sort_key_cmp(&pairs[j - 1], &key) > 0) {
-            pairs[j] = pairs[j - 1];
-            j--;
+// Mergesort using sort_key_cmp (no context). Stable and O(n log n).
+static void merge_sort_key(zz_sort_pair *pairs, zz_sort_pair *tmp, size_t n) {
+    if (n <= 1) return;
+    size_t mid = n / 2;
+    merge_sort_key(pairs, tmp, mid);
+    merge_sort_key(pairs + mid, tmp + mid, n - mid);
+    size_t i = 0, j = mid, k = 0;
+    while (i < mid && j < n) {
+        if (sort_key_cmp(&pairs[i], &pairs[j]) <= 0) {
+            tmp[k++] = pairs[i++];
+        } else {
+            tmp[k++] = pairs[j++];
         }
-        pairs[j] = key;
     }
+    while (i < mid) tmp[k++] = pairs[i++];
+    while (j < n) tmp[k++] = pairs[j++];
+    for (size_t t = 0; t < n; t++) pairs[t] = tmp[t];
 }
 
 zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err) {
@@ -1878,7 +1903,12 @@ zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err) {
     void **env = zz_closure_env(key, &nenv);
     if (!fn) return zz_clone(arr);
     zz_sort_pair *pairs = (zz_sort_pair *)malloc(n * sizeof *pairs);
-    if (!pairs) return zz_clone(arr);
+    zz_sort_pair *tmp = (zz_sort_pair *)malloc(n * sizeof *pairs);
+    if (!pairs || !tmp) {
+        free(pairs);
+        free(tmp);
+        return zz_clone(arr);
+    }
     // Decorate: compute key for each element once.
     for (size_t i = 0; i < n; i++) {
         pairs[i].v = zz_clone(arr.arr->items[i]);
@@ -1890,7 +1920,7 @@ zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err) {
     }
     zz_task_frame *saved_fr = zz_green_frame();
     zz_green_frame_set(NULL);
-    insertion_sort_key(pairs, n);
+    merge_sort_key(pairs, tmp, n);
     zz_green_frame_set(saved_fr);
     zz_value out = zz_array_new();
     for (size_t i = 0; i < n; i++) {
@@ -1899,6 +1929,7 @@ zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err) {
         zz_release(&pairs[i].k);
     }
     free(pairs);
+    free(tmp);
     return out;
 }
 
