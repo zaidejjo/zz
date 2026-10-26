@@ -1254,7 +1254,7 @@ impl Vm {
                         }
                     };
                     Self::restore_home(self, interp, home, taken);
-                    self.stack[*dst as usize] = elem;
+                    self.stack[cached_base + *dst as usize] = elem;
                 }
                 Op::LenField { home, field, span } => {
                     let Some(taken) = Self::take_home(self, interp, home) else {
@@ -2387,8 +2387,8 @@ impl Vm {
                     dst,
                     span,
                 } => {
-                    let ov = self.stack[*arr as usize].clone();
-                    let iv = self.stack[*idx as usize].clone();
+                    let ov = self.stack[cached_base + *arr as usize].clone();
+                    let iv = self.stack[cached_base + *idx as usize].clone();
                     let v = match (&ov, &iv) {
                         (Value::Array(items), Value::Int(i)) => {
                             let ix = normalize_index(*i, items.len(), *span)?;
@@ -2429,7 +2429,7 @@ impl Vm {
                             ));
                         }
                     };
-                    self.stack[*dst as usize] = v;
+                    self.stack[cached_base + *dst as usize] = v;
                 }
                 // Read `dict[key]` where key is an int: probe DictData with
                 // a precomputed hash + open-addressed table.
@@ -2439,8 +2439,8 @@ impl Vm {
                     dst,
                     span,
                 } => {
-                    let ov = self.stack[*dict as usize].clone();
-                    let iv = self.stack[*key as usize].clone();
+                    let ov = self.stack[cached_base + *dict as usize].clone();
+                    let iv = self.stack[cached_base + *key as usize].clone();
                     let v = match (&ov, &iv) {
                         (Value::Dict(dict), key) => match dict.get_cloned(key) {
                             Some(v) => v,
@@ -2456,7 +2456,7 @@ impl Vm {
                             );
                         }
                     };
-                    self.stack[*dst as usize] = v;
+                    self.stack[cached_base + *dst as usize] = v;
                 }
                 Op::StoreIndexOp(span) => {
                     // Stack layout is evaluation order: [object, index,
