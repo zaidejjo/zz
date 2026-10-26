@@ -568,6 +568,7 @@ pub(crate) fn build_native_deps(
                                 compiler: String::new(),
                                 artifact_sha256: artifact.sha256.clone(),
                                 pkg_config_resolved: String::new(),
+                                vendor_key: String::new(),
                             },
                         ));
                         continue;
@@ -614,6 +615,39 @@ pub(crate) fn build_native_deps(
                     pkg_config_resolved: zz_pm::native_build::pkg_config_versions(
                         &cc_spec.pkg_config,
                     ),
+                    vendor_key: String::new(),
+                },
+            ));
+            continue;
+        }
+        // Hermetic Rust backend: vendored closure, cargo driven by zz.
+        if let Some(rust_spec) = native.build_rust.as_ref() {
+            if !direct && !opts.allow_source_builds {
+                return Err(format!(
+                    "plugin `{}` is a Rust source plugin (no prebuilt artifacts); transitive source builds need --allow-source-builds",
+                    dep.name
+                ));
+            }
+            if direct {
+                eprintln!(
+                    "zz: plugin `{}` builds from its vendored Rust closure (no prebuilt artifacts)",
+                    dep.name
+                );
+            }
+            eprintln!("zz: building plugin `{}` (hermetic rust)...", dep.name);
+            let out = zz_pm::native_build::ensure_rust(&pkg_dir, &dep.name, rust_spec, None)
+                .map_err(|e| format!("plugin `{}` hermetic Rust build failed: {e}", dep.name))?;
+            artifacts.push(out.archive);
+            collect_link_args(&out.ldflags_path, &mut link_args);
+            audits.push((
+                dep.name.clone(),
+                zz_pm::lock::LockedNative {
+                    backend: "rust".to_string(),
+                    tag: out.tag,
+                    compiler: out.compiler,
+                    artifact_sha256: String::new(),
+                    pkg_config_resolved: String::new(),
+                    vendor_key: out.vendor_key,
                 },
             ));
             continue;
