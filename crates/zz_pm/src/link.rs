@@ -79,6 +79,27 @@ pub fn link_project(
     lockfile: &Lockfile,
     strategy: LinkStrategy,
 ) -> Result<Vec<PathBuf>, LinkError> {
+    link_project_with_features(
+        project_dir,
+        manifest,
+        lockfile,
+        strategy,
+        &crate::manifest::FeatureSelection::default(),
+    )
+}
+
+/// [`link_project`] with an explicit feature selection (#488). Disabled
+/// optional deps are not linked (and stale links for them are pruned).
+pub fn link_project_with_features(
+    project_dir: &Path,
+    manifest: &Manifest,
+    lockfile: &Lockfile,
+    strategy: LinkStrategy,
+    selection: &crate::manifest::FeatureSelection,
+) -> Result<Vec<PathBuf>, LinkError> {
+    let active = manifest
+        .active_dependency_names(selection)
+        .map_err(LinkError::Io)?;
     let vendor_dir = project_dir.join("vendor");
     std::fs::create_dir_all(&vendor_dir)
         .map_err(|e| LinkError::Io(format!("cannot create vendor/: {e}")))?;
@@ -86,6 +107,9 @@ pub fn link_project(
     let mut linked = Vec::new();
 
     for (name, spec) in &manifest.dependencies {
+        if !active.contains(name) {
+            continue;
+        }
         let locked = match lockfile.find(name) {
             Some(l) => l,
             None => continue, // Path deps don't appear in lockfile
@@ -131,10 +155,11 @@ pub fn link_project(
     // Transitive layer (#420): lock pins outside the manifest link from
     // their content dirs (path pins) or CAS entries, exactly like direct
     // deps, so `import <transitive>` resolves without `zz add`.
-    let closure_dirs = crate::resolve::closure(manifest, lockfile, project_dir)
-        .map_err(|e| LinkError::Io(e.to_string()))?;
+    let closure_dirs =
+        crate::resolve::closure_with_features(manifest, lockfile, project_dir, selection)
+            .map_err(|e| LinkError::Io(e.to_string()))?;
     for dep in &lockfile.deps {
-        if manifest.dependencies.contains_key(&dep.name) {
+        if active.contains(&dep.name) {
             continue; // direct layer handled above
         }
         let Some(dir) = closure_dirs.get(&dep.name) else {
@@ -173,7 +198,7 @@ pub fn link_project(
     if let Ok(entries) = std::fs::read_dir(&vendor_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if closure_dirs.contains_key(&name) || manifest.dependencies.contains_key(&name) {
+            if closure_dirs.contains_key(&name) || active.contains(&name) {
                 continue;
             }
             let path = entry.path();
@@ -202,8 +227,30 @@ pub fn link_project(
 /// vendor entry outside the live closure, or a lock pin the closure no
 /// longer reaches, reads as not-valid so the next install re-resolves.
 pub fn links_valid(project_dir: &Path, manifest: &Manifest, lockfile: &Lockfile) -> bool {
+    links_valid_with_features(
+        project_dir,
+        manifest,
+        lockfile,
+        &crate::manifest::FeatureSelection::default(),
+    )
+}
+
+/// [`links_valid`] with an explicit feature selection (#488).
+pub fn links_valid_with_features(
+    project_dir: &Path,
+    manifest: &Manifest,
+    lockfile: &Lockfile,
+    selection: &crate::manifest::FeatureSelection,
+) -> bool {
+    let active = match manifest.active_dependency_names(selection) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
     let vendor_dir = project_dir.join("vendor");
     for (name, spec) in &manifest.dependencies {
+        if !active.contains(name) {
+            continue;
+        }
         let locked = match lockfile.find(name) {
             Some(l) => l,
             None => return false,
@@ -229,12 +276,13 @@ pub fn links_valid(project_dir: &Path, manifest: &Manifest, lockfile: &Lockfile)
     // Transitive layer: the closure must resolve (all content fetched),
     // every closure entry must be linked, and no managed vendor entry
     // may sit outside the closure.
-    let dirs = match crate::resolve::closure(manifest, lockfile, project_dir) {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
+    let dirs =
+        match crate::resolve::closure_with_features(manifest, lockfile, project_dir, selection) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
     for (name, dir) in &dirs {
-        if manifest.dependencies.contains_key(name) {
+        if active.contains(name) {
             continue; // checked above (non-canonical join targets)
         }
         let locked = match lockfile.find(name) {
