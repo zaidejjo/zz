@@ -4015,7 +4015,7 @@ fn import_std_module_head_shadows_warns() {
         .map(|e| e.message.clone())
         .collect();
     assert!(
-        warns.iter().any(|m| m.contains("shadows the std module")),
+        warns.iter().any(|m| m.contains("shadowing the std module")),
         "expected std-module shadow warning, got: {warns:?}"
     );
 }
@@ -4031,7 +4031,7 @@ fn import_std_module_head_with_alias_no_warn() {
         .map(|e| e.message.clone())
         .collect();
     assert!(
-        !warns.iter().any(|m| m.contains("shadows the std module")),
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
         "aliased import should not warn: {warns:?}"
     );
 }
@@ -4047,7 +4047,7 @@ fn import_non_std_module_head_no_warn() {
         .map(|e| e.message.clone())
         .collect();
     assert!(
-        !warns.iter().any(|m| m.contains("shadows the std module")),
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
         "non-std module import should not warn: {warns:?}"
     );
 }
@@ -4063,9 +4063,49 @@ fn import_std_head_no_module_ns_no_warn() {
         .map(|e| e.message.clone())
         .collect();
     assert!(
-        !warns.iter().any(|m| m.contains("shadows the std module")),
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
         "no module_ns should not warn: {warns:?}"
     );
+}
+
+#[test]
+fn import_std_head_selective_no_warn() {
+    // Selective import binds only the named items, not the head: no shadow
+    // warning (#630).
+    let r = check_src_with_module_ns("import std.str(split)", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
+        "selective import should not warn: {warns:?}"
+    );
+}
+
+#[test]
+fn import_std_head_full_warns_with_fixit() {
+    // Full import binds the head: warn + auto-applicable alias fixit (#630).
+    let r = check_src_with_module_ns("import std.str", "mypkg");
+    let warns: Vec<String> = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Warning)
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(
+        warns.iter().any(|m| m.contains("shadowing the std module")),
+        "expected std-module shadow warning, got: {warns:?}"
+    );
+    let fixit = r
+        .errors
+        .iter()
+        .flat_map(|d| d.fixits.iter())
+        .find(|f| f.replacement == "import std.str as str_mod")
+        .expect("expected safe alias fixit");
+    assert_eq!(fixit.safety, zz_frontend::diag::FixSafety::Safe);
 }
 
 #[test]
