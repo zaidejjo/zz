@@ -28,7 +28,8 @@
 //! - `remote` — HTTP client for the hosted registry (search/info/download/publish)
 //!
 //! Native build modules:
-//! - `native_build` — declarative C plugin builds (no shell, no network)
+//! - `native_build` — declarative C/Rust plugin builds (no shell, no scripts)
+//! - `rust_lock` — focused Cargo manifest/lockfile model for Rust plugins
 
 pub mod auth;
 pub mod build_cache;
@@ -46,3 +47,4 @@ pub mod publish;
 pub mod registry;
 pub mod remote;
 pub mod resolve;
+pub mod rust_lock;

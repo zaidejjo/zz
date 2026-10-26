@@ -1,0 +1,14 @@
+[package]
+name = "fnv_native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "fnv_native"
+crate-type = ["cdylib", "staticlib"]
+
+# Keep this crate standalone: zz stages it under the package build dir,
+# and an empty workspace table stops cargo adopting any parent workspace.
+[workspace]

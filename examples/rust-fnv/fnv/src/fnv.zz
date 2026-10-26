@@ -1,0 +1,17 @@
+// Ergonomic ZZ surface. The raw manifest names are flat (`fnv_hash`),
+// so consumers only ever see `fnv.hash` after `import fnv`.
+
+pub func hash(s: str) -> int {
+    return fnv_hash(s)
+}
+
+pub func seed() -> int {
+    return fnv_seed()
+}
+
+/// Pure-ZZ value-add over FFI: fold each hash before scaling so the
+/// multiply cannot overflow i64.
+
+pub func combine(a: str, b: str) -> int {
+    return (fnv_hash(a) % 1000) * 31 + (fnv_hash(b) % 1000)
+}

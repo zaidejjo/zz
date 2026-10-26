@@ -146,6 +146,55 @@ pub fn store_in_cas(source_dir: &Path, opts: &CasStoreOptions) -> Result<PathBuf
     Ok(cas_base)
 }
 
+/// Store an already-fetched directory at an explicit content key.
+///
+/// Used by the hermetic Rust backend: `cargo vendor` produces a closure
+/// whose key is the content hash of the crate sources + lockfile, not
+/// the vendor tree itself. The tree is copied through a scratch sibling,
+/// given the usual CAS manifest, and made read-only before staging.
+pub fn store_dir_at_key(
+    source_dir: &Path,
+    key: &str,
+    opts: &CasStoreOptions,
+) -> Result<PathBuf, String> {
+    if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "invalid CAS key `{key}`: expected 64 hex characters"
+        ));
+    }
+    let cas_base = paths::cas_entry(key);
+    if cas_base.exists() {
+        return Ok(cas_base);
+    }
+    if let Some(parent) = cas_base.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create CAS parent {}: {e}", parent.display()))?;
+    }
+    let tmp = scratch_sibling(&cas_base, "dir");
+    std::fs::create_dir_all(&tmp)
+        .map_err(|e| format!("cannot create CAS scratch {}: {e}", tmp.display()))?;
+    let result = (|| -> Result<(), String> {
+        copy_dir_complete(source_dir, &tmp)?;
+        let manifest = CasManifest {
+            source_url: opts.source_url.clone(),
+            version: opts.version.clone(),
+            algorithm: opts.algorithm.clone(),
+            content_hash: key.to_string(),
+        };
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("cannot serialize manifest: {e}"))?;
+        std::fs::write(tmp.join("manifest.json"), manifest_json)
+            .map_err(|e| format!("cannot write manifest: {e}"))?;
+        set_readonly_complete(&tmp)?;
+        stage_dir(&tmp, &cas_base)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    result?;
+    Ok(cas_base)
+}
+
 /// Link CAS content into a project directory.
 ///
 /// Fallback chain: hardlink → symlink → copy (with warning).
@@ -277,6 +326,44 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
                 .map_err(|e| format!("cannot create dir {}: {e}", parent.display()))?;
         }
         std::fs::copy(file, &dest).map_err(|e| format!("cannot copy {}: {e}", file.display()))?;
+    }
+    Ok(())
+}
+
+/// Copy a directory recursively without filtering build-artifact names.
+///
+/// The package CAS keeps its skip list (build/target/vendor), but a
+/// `cargo vendor` closure may legitimately contain directories with
+/// those names inside crate sources. Dropping them would silently
+/// corrupt the vendored tree.
+fn copy_dir_complete(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("cannot create {}: {e}", dst.display()))?;
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let dest = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_complete(&path, &dest)?;
+        } else if path.is_file() {
+            std::fs::copy(&path, &dest)
+                .map_err(|e| format!("cannot copy {}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Read-only pass that visits the complete tree (no skip list).
+fn set_readonly_complete(dir: &Path) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            set_readonly_complete(&path)?;
+        } else if path.is_file() {
+            set_readonly(&path)?;
+        }
     }
     Ok(())
 }
@@ -641,6 +728,56 @@ mod tests {
         assert!(!src.exists());
         assert!(dest.join("a.zz").exists());
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn store_dir_at_key_preserves_full_tree_and_readonly() {
+        let src = tmp_dir("store_key_src");
+        fs::create_dir_all(src.join("crate-1.0/build")).unwrap();
+        fs::write(src.join("crate-1.0/Cargo.toml"), "name=\"x\"\n").unwrap();
+        fs::write(src.join("crate-1.0/build/generated.rs"), "// codegen\n").unwrap();
+        let key = hash::hash_bytes(
+            format!(
+                "store_dir_at_key_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )
+            .as_bytes(),
+        );
+        let opts = CasStoreOptions {
+            source_url: "test://vendor".into(),
+            version: "x".into(),
+            ..Default::default()
+        };
+        let cas_path = store_dir_at_key(&src, &key, &opts).unwrap();
+        assert!(cas_path.join("crate-1.0/Cargo.toml").exists());
+        assert!(
+            cas_path.join("crate-1.0/build/generated.rs").exists(),
+            "nested `build/` must not be filtered out of a vendored closure"
+        );
+        assert!(cas_path.join("manifest.json").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::metadata(cas_path.join("crate-1.0/build/generated.rs"))
+                .unwrap()
+                .permissions();
+            assert_eq!(perms.mode() & 0o777, 0o444);
+        }
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&cas_path);
+    }
+
+    #[test]
+    fn store_dir_at_key_rejects_bad_key() {
+        let src = tmp_dir("store_bad_key_src");
+        fs::write(src.join("x"), "x").unwrap();
+        let err = store_dir_at_key(&src, "../escape", &CasStoreOptions::default()).unwrap_err();
+        assert!(err.contains("invalid CAS key"), "{err}");
+        let _ = fs::remove_dir_all(&src);
     }
 
     #[test]

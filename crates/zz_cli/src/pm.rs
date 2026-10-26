@@ -2517,6 +2517,123 @@ fn audit_native_closure(
                     *warnings += 1;
                 }
             }
+            Some("rust") => {
+                let r = rec.unwrap();
+                let rustc = if r.compiler.is_empty() {
+                    "-".to_string()
+                } else {
+                    r.compiler.clone()
+                };
+                let vendor = if r.vendor_key.is_empty() {
+                    "-".to_string()
+                } else {
+                    short_hash(&r.vendor_key)
+                };
+                println!(
+                    "  {}@{}: backend=rust tag={} rustc={rustc} vendor={vendor}",
+                    dep.name, dep.version, r.tag
+                );
+                // Host/rustc drift against the live machine.
+                let drift = zz_pm::native_build::check_native_drift(&dep.name, r, &[]);
+                for e in drift.errors {
+                    crate::ui::warn(&e);
+                    *errors += 1;
+                }
+                for w in drift.warnings {
+                    crate::ui::warn(&w);
+                    *warnings += 1;
+                }
+                let Some(rust) = spec.build_rust.as_ref() else {
+                    crate::ui::warn(&format!(
+                        "{}: zz.lock records backend=rust but zz.toml has no [native.build-rust]",
+                        dep.name
+                    ));
+                    *errors += 1;
+                    continue;
+                };
+                // Compatibility range against the live toolchain.
+                match zz_pm::native_build::probe_rust_toolchain() {
+                    Ok(tc) => {
+                        if let Err(e) = zz_pm::native_build::check_rustc_range(
+                            rust.rustc_req(),
+                            &tc.rustc_semver,
+                        ) {
+                            crate::ui::warn(&format!("{}: {e}", dep.name));
+                            *errors += 1;
+                        }
+                    }
+                    Err(e) => {
+                        crate::ui::warn(&format!(
+                            "{}: cannot check rustc_range offline ({e})",
+                            dep.name
+                        ));
+                        *warnings += 1;
+                    }
+                }
+                let Some(dep_dir) = locked_dep_dir(dir, manifest, dep) else {
+                    crate::ui::warn(&format!(
+                        "{}: Rust crate sources are not available locally (run `zz install`)",
+                        dep.name
+                    ));
+                    *warnings += 1;
+                    continue;
+                };
+                let crate_dir = match zz_pm::rust_lock::crate_dir_for(&dep_dir, &rust.crate_path) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        crate::ui::warn(&format!("{}: {e}", dep.name));
+                        *errors += 1;
+                        continue;
+                    }
+                };
+                // Source/manifest tampering: the content key is derived
+                // from the committed crate tree + spec, so a mismatch
+                // means the lock record is stale.
+                match zz_pm::native_build::rust_vendor_key(&crate_dir, rust) {
+                    Ok(current) if !r.vendor_key.is_empty() && current != r.vendor_key => {
+                        crate::ui::warn(&format!(
+                            "{}: Rust closure key changed (lock `{}`, now `{}`) (re-run `zz install`)",
+                            dep.name,
+                            short_hash(&r.vendor_key),
+                            short_hash(&current),
+                        ));
+                        *errors += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        crate::ui::warn(&format!("{}: cannot verify Rust closure ({e})", dep.name));
+                        *errors += 1;
+                    }
+                }
+                match zz_pm::native_build::audit_rust_plugin(&crate_dir, rust) {
+                    Ok(audit) => {
+                        for c in &audit.crates {
+                            let checksum = c
+                                .checksum
+                                .as_deref()
+                                .map(short_hash)
+                                .unwrap_or_else(|| "-".to_string());
+                            let license = c.license.as_deref().unwrap_or("-");
+                            println!(
+                                "    {}@{} source={} checksum={checksum} license={license}",
+                                c.name, c.version, c.source
+                            );
+                        }
+                        for e in audit.errors {
+                            crate::ui::warn(&format!("{}: {e}", dep.name));
+                            *errors += 1;
+                        }
+                        for w in audit.warnings {
+                            crate::ui::warn(&format!("{}: {w}", dep.name));
+                            *warnings += 1;
+                        }
+                    }
+                    Err(e) => {
+                        crate::ui::warn(&format!("{}: Rust closure audit failed ({e})", dep.name));
+                        *errors += 1;
+                    }
+                }
+            }
             Some("prebuilt") => {
                 let r = rec.unwrap();
                 println!(

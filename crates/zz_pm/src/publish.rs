@@ -630,6 +630,7 @@ mod tests {
             manifest: None,
             build: None,
             build_cc: None,
+            build_rust: None,
             prebuilt: None,
             pkg_config: None,
         });
@@ -662,6 +663,7 @@ mod tests {
             manifest: None,
             build: Some("build.sh".to_string()),
             build_cc: None,
+            build_rust: None,
             prebuilt: None,
             pkg_config: None,
         });

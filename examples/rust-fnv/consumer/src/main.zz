@@ -1,0 +1,8 @@
+import fnv
+
+func main() {
+    println(fnv.hash("hello"))
+    println(fnv.seed())
+    println(fnv.combine("a", "b"))
+    println("fnv_ok")
+}

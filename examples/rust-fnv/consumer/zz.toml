@@ -1,0 +1,6 @@
+[package]
+name = "fnvcheck"
+version = "0.1.0"
+
+[dependencies.fnv]
+path = "../fnv"

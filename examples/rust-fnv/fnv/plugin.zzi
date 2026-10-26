@@ -1,0 +1,8 @@
+// Version: 1
+// C-ABI: 1
+// Plugin-version: 0.1.0
+
+extern "C" {
+    func fnv_hash(s: str) -> int
+    func fnv_seed() -> int
+}

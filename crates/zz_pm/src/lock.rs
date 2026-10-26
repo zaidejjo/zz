@@ -84,6 +84,10 @@ pub struct LockedNative {
     /// sorted). Empty when no `pkg_config` declared.
     #[serde(default)]
     pub pkg_config_resolved: String,
+    /// Content key of the vendored Rust closure. Empty for non-Rust
+    /// backends; GC keeps the CAS entry alive while a project references it.
+    #[serde(default)]
+    pub vendor_key: String,
 }
 
 impl Default for Lockfile {
@@ -431,6 +435,7 @@ mod tests {
                 compiler: "cc (GCC) 16.2.1".into(),
                 artifact_sha256: String::new(),
                 pkg_config_resolved: "vips=8.18.7".into(),
+                vendor_key: String::new(),
             }),
         });
         let d = tmp_dir("native_rt");

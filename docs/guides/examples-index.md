@@ -1,13 +1,15 @@
 # Examples index — curated map (examples/ is gitignored scratch)
 
-`examples/` is local scratch (`/.gitignore` → `/examples`) holding 79 files:
-curated recipes, benchmarks, and legacy regression snapshots (`bk_*`,
-`thing.zz`, `play.zz`, historical spellings `packges/`, `performace_check/`).
+`examples/` is local scratch (`/.gitignore` → `/examples/*`, except the
+tracked `rust-fnv/` reference) holding 79 files: curated recipes,
+benchmarks, and legacy regression snapshots (`bk_*`, `thing.zz`,
+`play.zz`, historical spellings `packges/`, `performace_check/`).
 `e2e.rs` / `dual_engine_parity.rs` reference those paths, so renames need test
 updates. Use this map; do not browse blind.
 
 ## Start here (curated, referenced from docs)
 
+- `rust-fnv/` → tracked hermetic Rust plugin, no scripts or `build.rs` ([guide §5](../plugin-author-guide.md#5-hermetic-rust-crate-nativebuild-rust))
 - `server.zz`, `users-web.zz`, `v2-users-web.zz`, `http_static.zz`, `static_serve.zz` → [HTTP](../stdlib/http.md)
 - `parallel_worker_pool.zz` → [Concurrency](../stdlib/concurrency.md)
 - `regexp_email_demo/extract_emails.zz` → [Regexp](../stdlib/regexp.md)
