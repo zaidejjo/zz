@@ -1384,6 +1384,116 @@ async fn goto_definition_cross_file_import() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn goto_definition_collection_member_string() {
+    let (service, state) = setup();
+    let root = std::env::temp_dir().join(format!("zz_lsp_goto_collection_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("commands")).unwrap();
+    std::fs::write(
+        root.join("zz.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+         [collect.commands]\ndir = \"commands\"\nsig = \"func([str]) -> int\"\n",
+    )
+    .unwrap();
+    let member_path = root.join("commands/greet.zz");
+    std::fs::write(
+        &member_path,
+        "pub func run(args: [str]) -> int { return 0 }\n",
+    )
+    .unwrap();
+    let main_path = root.join("src/main.zz");
+    let main_src = "import collect.commands\ncommands.get(\"greet\")\n";
+    std::fs::write(&main_path, main_src).unwrap();
+
+    let main_uri = Url::from_file_path(&main_path).unwrap();
+    let member_uri = Url::from_file_path(&member_path).unwrap();
+    open_and_check(&state, &main_uri, main_src);
+
+    let def = service
+        .inner()
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: main_uri.clone(),
+                },
+                position: Position {
+                    line: 1,
+                    character: 16,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap();
+
+    match def.expect("member string resolves to its file") {
+        GotoDefinitionResponse::Scalar(loc) => {
+            assert_eq!(loc.uri, member_uri);
+            assert_eq!(loc.range.start.line, 0);
+        }
+        _ => panic!("expected scalar location"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn goto_definition_collection_import() {
+    let (service, state) = setup();
+    let root = std::env::temp_dir().join(format!(
+        "zz_lsp_goto_collection_import_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("commands")).unwrap();
+    std::fs::write(
+        root.join("zz.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+         [collect.commands]\ndir = \"commands\"\nsig = \"func([str]) -> int\"\n",
+    )
+    .unwrap();
+    let member_path = root.join("commands/greet.zz");
+    std::fs::write(
+        &member_path,
+        "pub func run(args: [str]) -> int { return 0 }\n",
+    )
+    .unwrap();
+    let main_path = root.join("src/main.zz");
+    let main_src = "import collect.commands\ncommands.all()\n";
+    std::fs::write(&main_path, main_src).unwrap();
+
+    let main_uri = Url::from_file_path(&main_path).unwrap();
+    let member_uri = Url::from_file_path(&member_path).unwrap();
+    open_and_check(&state, &main_uri, main_src);
+
+    let def = service
+        .inner()
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: main_uri },
+                position: Position {
+                    line: 0,
+                    character: 18,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .unwrap();
+
+    match def.expect("collection import resolves to first member") {
+        GotoDefinitionResponse::Scalar(loc) => {
+            assert_eq!(loc.uri, member_uri);
+        }
+        _ => panic!("expected scalar location"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn references_cross_file() {
     let (service, state) = setup();
 

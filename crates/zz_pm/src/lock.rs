@@ -337,6 +337,7 @@ mod tests {
             },
             dependencies: deps,
             native: None,
+            collections: std::collections::BTreeMap::new(),
         };
 
         let manifest_hash = manifest.deps_hash();

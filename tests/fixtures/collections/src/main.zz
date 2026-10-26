@@ -1,0 +1,18 @@
+// features: fstrings, for-loop, func-call, imports, locals, match, option-result, print, string-literal
+import collect.commands
+
+func main() {
+    entries := commands.all()
+    println("collection_ok")
+    for entry in entries {
+        println("member {entry.name}")
+    }
+    match commands.get("greet") {
+        .some(entry) => println("get {entry.name}")
+        .none => println("get none")
+    }
+    match commands.get("nope") {
+        .some(entry) => println("unexpected {entry.name}")
+        .none => println("none")
+    }
+}

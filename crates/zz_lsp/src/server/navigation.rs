@@ -24,6 +24,9 @@ pub(crate) async fn handle_goto_definition(
     };
 
     let offset = doc.line_index.position_to_offset(&doc.source, pos);
+    if let Some(resp) = collection_member_definition(backend, uri, program, &doc.source, offset) {
+        return Ok(Some(resp));
+    }
     let node = crate::lookup::find_node_at(program, &doc.source, offset);
 
     if let Some(Stmt::Import { path, items, .. }) = node.stmt {
@@ -119,6 +122,11 @@ fn import_definition(
     path: &[String],
     items: &[ImportItem],
 ) -> Option<GotoDefinitionResponse> {
+    // `import collect.<name>`: module names don't map to files on disk.
+    // Land on the first member's exported function instead.
+    if path.len() == 2 && path[0] == "collect" {
+        return collection_import_definition(backend, uri, &path[1]);
+    }
     let target_uri = resolve_import_target(backend, uri, path)?;
     let (target_program, target_source) = load_target_program(backend, &target_uri)?;
 
@@ -157,6 +165,161 @@ fn import_definition(
             .map(|def| line_index.span_to_range(&target_source, def.span))
             .unwrap_or_default()
     };
+    Some(GotoDefinitionResponse::Scalar(Location {
+        uri: target_uri,
+        range,
+    }))
+}
+
+// ── Directory collections ([collect.*]) ─────────────────────────────────
+
+/// Nearest `zz.toml` for the document and its parsed manifest.
+fn manifest_for_uri(uri: &Url) -> Option<(std::path::PathBuf, zz_pm::manifest::Manifest)> {
+    let path = uri.to_file_path().ok()?;
+    let root = crate::deps::find_project_root(&path)?;
+    let manifest = zz_pm::manifest::Manifest::load(&root.join("zz.toml")).ok()?;
+    Some((root, manifest))
+}
+
+/// Map a namespace (`commands`, or an alias) back to its manifest key.
+fn collection_name_for_ns(
+    program: &zz_frontend::ast::Program,
+    manifest: &zz_pm::manifest::Manifest,
+    ns: &str,
+) -> Option<String> {
+    for stmt in &program.stmts {
+        if let Stmt::Import { path, alias, .. } = stmt {
+            if path.len() == 2 && path[0] == "collect" {
+                let imported_ns = alias.as_deref().unwrap_or(path[1].as_str());
+                if imported_ns == ns && manifest.collections.contains_key(&path[1]) {
+                    return Some(path[1].clone());
+                }
+            }
+        }
+    }
+    manifest
+        .collections
+        .contains_key(ns)
+        .then(|| ns.to_string())
+}
+
+/// True when the quote at `index` opens a string (an even number of
+/// unescaped quotes precede it).
+fn quote_opens_string(source: &str, index: usize) -> bool {
+    let mut count = 0;
+    let mut escaped = false;
+    for ch in source[..index].chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => count += 1,
+            _ => {}
+        }
+    }
+    count % 2 == 0
+}
+
+/// Extract `(namespace, member)` when the cursor sits on the string in
+/// `<ns>.get("<member>")`.
+fn collection_member_at(source: &str, offset: u32) -> Option<(String, String)> {
+    let offset = (offset as usize).min(source.len());
+    let open = source[..offset].rfind('"')?;
+    if !quote_opens_string(source, open) {
+        return None;
+    }
+    let rest = &source[open + 1..];
+    let close = open + 1 + rest.find('"')?;
+    if offset > close || rest[..close - open - 1].contains('\n') {
+        return None;
+    }
+    let member = &source[open + 1..close];
+    if member.is_empty()
+        || !member
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        || !member
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let head = source[..open].trim_end();
+    let dot = head.rfind(".get")?;
+    if head[dot + 4..].trim() != "(" {
+        return None;
+    }
+    let receiver = head[..dot].trim_end();
+    let start = receiver
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '.'))
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let ns = &receiver[start..];
+    if ns.is_empty() || ns.starts_with('.') || ns.ends_with('.') {
+        return None;
+    }
+    Some((ns.to_string(), member.to_string()))
+}
+
+/// Go-to-definition for `commands.get("greet")`: jump to `greet.zz`'s
+/// exported function (or the file start when it is missing).
+fn collection_member_definition(
+    backend: &Backend,
+    uri: &Url,
+    program: &zz_frontend::ast::Program,
+    source: &str,
+    offset: u32,
+) -> Option<GotoDefinitionResponse> {
+    let (ns, member) = collection_member_at(source, offset)?;
+    let (root, manifest) = manifest_for_uri(uri)?;
+    let collection = collection_name_for_ns(program, &manifest, &ns)?;
+    let spec = manifest.collections.get(&collection)?;
+    let members = spec.discover(&root).ok()?;
+    let hit = members.iter().find(|m| m.name == member)?;
+    member_location(backend, &hit.path, &spec.export)
+}
+
+/// Go-to-definition for `import collect.<name>`: the first member file.
+fn collection_import_definition(
+    backend: &Backend,
+    uri: &Url,
+    collection: &str,
+) -> Option<GotoDefinitionResponse> {
+    let (root, manifest) = manifest_for_uri(uri)?;
+    let spec = manifest.collections.get(collection)?;
+    let members = spec.discover(&root).ok()?;
+    let first = members.first()?;
+    member_location(backend, &first.path, &spec.export)
+}
+
+/// Location of `pub <export>` inside a member file (file start as fallback).
+fn member_location(
+    backend: &Backend,
+    path: &std::path::Path,
+    export: &str,
+) -> Option<GotoDefinitionResponse> {
+    let target_uri = Url::from_file_path(path).ok()?;
+    let (program, source) = load_target_program(backend, &target_uri)?;
+    let line_index = LineIndex::new(&source);
+    let range = program
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Func {
+                name,
+                pub_: true,
+                span,
+                ..
+            } if name.last().map(String::as_str) == Some(export) => Some(*span),
+            _ => None,
+        })
+        .map(|span| line_index.span_to_range(&source, span))
+        .unwrap_or_default();
     Some(GotoDefinitionResponse::Scalar(Location {
         uri: target_uri,
         range,

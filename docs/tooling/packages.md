@@ -15,7 +15,14 @@ local = { path = "../local" }
 
 [test]
 jobs = 4
+
+[collect.commands]        # directory-based typed registry
+dir = "commands"
+sig = "func(args: [str]) -> int"
 ```
+
+See [Collections](collections.md) for member discovery, ordering, and
+diagnostics.
 
 Same-name deps across workspace members stay unsupported until `[workspace]` —
 keep names unique per workspace.

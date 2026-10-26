@@ -271,6 +271,12 @@ fn hash_zz_sources(project_dir: &Path) -> String {
         }
     }
     walk(project_dir, project_dir, &mut files, 0);
+    // The manifest participates: `[collect.*]` changes the synthesized
+    // module (signature/export/name) without touching any `.zz` file, and
+    // dependency edits must bust build/run caches too.
+    if let Ok(bytes) = std::fs::read(project_dir.join("zz.toml")) {
+        files.push(("zz.toml".to_string(), bytes));
+    }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut h = std::collections::hash_map::DefaultHasher::new();
     files.len().hash(&mut h);

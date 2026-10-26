@@ -1,0 +1,6 @@
+
+# zz: fetched deps, native build outputs, compiled binaries
+vendor/
+build/
+bin/
+src/bin/

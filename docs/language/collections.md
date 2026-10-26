@@ -76,4 +76,10 @@ Prefer `std.vec.*` in new code; bare forms stay until 0.3.
 `0..5` is `0,1,2,3,4`. `range(stop)` / `range(start, stop)` / `range(start, stop, step)`.
 `len` works on arrays, tuples, bytes, strings, dicts, ranges.
 
+## Directory collections
+
+The value types above are unrelated to `[collect.<name>]` registries, which
+turn a directory of `.zz` files into a typed module with `get` / `all`.
+See [Collections](../tooling/collections.md).
+
 Next: [Structs and enums](structs-enums.md).
