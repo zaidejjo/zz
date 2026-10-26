@@ -1,3 +1,4 @@
+// features: fstrings, for-loop, func-call, imports, locals, match, option-result, print, string-literal
 import collect.commands
 
 func main() {

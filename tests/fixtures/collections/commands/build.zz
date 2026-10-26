@@ -1,3 +1,4 @@
+// features: int-arith, pub-visibility, return
 pub func run(_args: [str]) -> int {
     return 1
 }
