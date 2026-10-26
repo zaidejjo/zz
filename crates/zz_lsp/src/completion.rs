@@ -57,7 +57,6 @@ pub fn completions_for_position(
     check_result: Option<&CheckResult>,
     cenv: Option<&CompletionEnv>,
 ) -> Option<CompletionResponse> {
-    let ctx = detect_context(source, offset, cenv)?;
     // Plain-text guarantee: no item ever snippet-expands or carries
     // parens — what you see is exactly what gets inserted. (Stray `()`
     // some users see comes from client-side autopairs confirm hooks, not
@@ -68,6 +67,14 @@ pub fn completions_for_position(
         }
         items
     }
+
+    // Collection member names are string literals (`commands.get("gre|")`),
+    // so they must be recognized before the generic inside-string guard.
+    if let Some(items) = collection_get_completions(program, source, offset, cenv) {
+        return Some(CompletionResponse::Array(plain(items)));
+    }
+
+    let ctx = detect_context(source, offset, cenv)?;
     let items = match ctx {
         CompletionContext::DotAccess {
             obj_name,
@@ -353,17 +360,22 @@ fn import_completion_at(
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '/');
     if path_ok
-        && (after.is_empty() || after == "std" || after.starts_with("std.") || {
-            let first = after.split(['.', '/']).next().unwrap_or("");
-            cenv.and_then(|e| e.doc_dir.clone()).is_some_and(|dir| {
-                !first.is_empty()
-                    && (dir.join(first).with_extension("zz").is_file()
-                        || dir.join(first).is_dir()
-                        || installed_deps(&dir)
-                            .iter()
-                            .any(|(n, _)| n.starts_with(first)))
+        && (after.is_empty()
+            || after == "std"
+            || after.starts_with("std.")
+            || after == "collect"
+            || after.starts_with("collect.")
+            || {
+                let first = after.split(['.', '/']).next().unwrap_or("");
+                cenv.and_then(|e| e.doc_dir.clone()).is_some_and(|dir| {
+                    !first.is_empty()
+                        && (dir.join(first).with_extension("zz").is_file()
+                            || dir.join(first).is_dir()
+                            || installed_deps(&dir)
+                                .iter()
+                                .any(|(n, _)| n.starts_with(first)))
+                })
             })
-        })
     {
         return Some(ImportCompletionKind::Path {
             partial: after.to_string(),
@@ -462,6 +474,133 @@ fn replace_range(source: &str, replace_start: usize, cursor: u32) -> tower_lsp::
     }
 }
 
+// ── Manifest-declared collections ([collect.*]) ──────────────────────────
+
+/// Nearest project manifest, if the document lives inside one.
+fn collection_manifest(
+    dir: &std::path::Path,
+) -> Option<(std::path::PathBuf, zz_pm::manifest::Manifest)> {
+    let root = crate::deps::find_project_root(dir)?;
+    let manifest = zz_pm::manifest::Manifest::load(&root.join("zz.toml")).ok()?;
+    Some((root, manifest))
+}
+
+/// Collection names declared in the document's project manifest.
+fn collection_names(dir: &std::path::Path) -> Vec<String> {
+    collection_manifest(dir)
+        .map(|(_, manifest)| manifest.collections.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Resolve an import namespace to its `[collect.<name>]` spec:
+/// `import collect.commands as c` → `commands` spec for namespace `c`.
+/// Falls back to a manifest key matching the namespace when the import
+/// statement is mid-edit and absent from the parsed program.
+fn collection_for_namespace(
+    program: &Program,
+    ns: &str,
+    cenv: Option<&CompletionEnv>,
+) -> Option<(String, zz_pm::manifest::CollectionSpec)> {
+    let dir = cenv?.doc_dir.as_deref()?;
+    let (_, manifest) = collection_manifest(dir)?;
+    for stmt in &program.stmts {
+        if let Stmt::Import { path, alias, .. } = stmt {
+            if path.len() == 2 && path[0] == "collect" {
+                let imported_ns = alias.as_deref().unwrap_or(path[1].as_str());
+                if imported_ns == ns {
+                    if let Some(spec) = manifest.collections.get(&path[1]) {
+                        return Some((path[1].clone(), spec.clone()));
+                    }
+                }
+            }
+        }
+    }
+    manifest
+        .collections
+        .get(ns)
+        .cloned()
+        .map(|spec| (ns.to_string(), spec))
+}
+
+/// Find the byte offset of the opening quote when the cursor sits inside an
+/// unterminated string literal. `None` outside strings (or after the close).
+fn open_string_quote(text: &str) -> Option<usize> {
+    let mut open = None;
+    let mut escaped = false;
+    for (i, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => open = if open.is_some() { None } else { Some(i) },
+            '\n' => open = None,
+            _ => {}
+        }
+    }
+    open
+}
+
+/// Complete member names inside `commands.get("…")`. Returns `None` when
+/// the cursor is not in a collection lookup string so ordinary string
+/// context stays quiet.
+fn collection_get_completions(
+    program: &Program,
+    source: &str,
+    offset: u32,
+    cenv: Option<&CompletionEnv>,
+) -> Option<Vec<CompletionItem>> {
+    let mut offset = (offset as usize).min(source.len());
+    while offset > 0 && !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &source[..offset];
+    let quote = open_string_quote(before)?;
+    let partial = &before[quote + 1..];
+    if partial.contains('\n') {
+        return None;
+    }
+    let head = before[..quote].trim_end();
+    let dot = head.rfind(".get")?;
+    if head[dot + 4..].trim() != "(" {
+        return None;
+    }
+    let receiver = head[..dot].trim_end();
+    let start = receiver
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '.'))
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let ns = &receiver[start..];
+    if ns.is_empty() || ns.starts_with('.') || ns.ends_with('.') {
+        return None;
+    }
+    let (name, spec) = collection_for_namespace(program, ns, cenv)?;
+    let (root, _) = collection_manifest(cenv?.doc_dir.as_deref()?)?;
+    let members = spec.discover(&root).ok()?;
+    let range = replace_range(source, quote + 1, offset as u32);
+    let mut items: Vec<CompletionItem> = members
+        .into_iter()
+        .filter(|member| member.name.starts_with(partial))
+        .map(|member| CompletionItem {
+            label: member.name.clone(),
+            kind: Some(CompletionItemKind::CONSTANT),
+            detail: Some(format!("collect.{name} member")),
+            text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                tower_lsp::lsp_types::TextEdit {
+                    range,
+                    new_text: member.name,
+                },
+            )),
+            ..Default::default()
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    Some(items)
+}
+
 /// Complete `std.*` module paths inside `import` statements.
 ///
 /// Labels are full dotted paths (`std.math`) with a `textEdit` that replaces
@@ -490,6 +629,16 @@ fn import_path_completions(
         });
         // Local top-level modules beside the document (`utils.zz` → `utils`).
         if let Some(dir) = doc_dir {
+            // Manifest collections: `import collect.commands`.
+            if !collection_names(&dir).is_empty() {
+                items.push(CompletionItem {
+                    label: "collect".to_string(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("zz.toml collections".to_string()),
+                    text_edit: text_edit("collect".to_string()),
+                    ..Default::default()
+                });
+            }
             let mut tops = local_tops(&dir);
             tops.sort();
             for top in tops {
@@ -515,6 +664,24 @@ fn import_path_completions(
                 }
             }
         }
+        return items;
+    }
+    if partial_prefix == "collect" || partial_prefix.starts_with("collect.") {
+        if let Some(dir) = doc_dir {
+            for name in collection_names(&dir) {
+                let full = format!("collect.{name}");
+                if full.starts_with(partial_prefix) {
+                    items.push(CompletionItem {
+                        label: full.clone(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some("collection (zz.toml)".to_string()),
+                        text_edit: text_edit(full),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
         return items;
     }
     if partial_prefix == "std" || partial_prefix.starts_with("std.") {
@@ -973,6 +1140,35 @@ fn dot_access_completions(
     // binds the `std` namespace, so the alias lookup below cannot serve it.
     if obj_name == "std" {
         return std_root_completions(partial_prefix);
+    }
+    // `import collect.commands` binds a synthesized module namespace whose
+    // `get` / `all` functions never live in a struct type.
+    if let Some((name, _spec)) = collection_for_namespace(program, obj_name, cenv) {
+        let mut items = Vec::new();
+        for (label, detail) in [
+            ("get", "func get(name: str) -> Option<Entry>"),
+            ("all", "func all() -> [Entry]"),
+        ] {
+            if label.starts_with(partial_prefix) {
+                items.push(CompletionItem {
+                    label: label.to_string(),
+                    kind: Some(CompletionItemKind::METHOD),
+                    detail: Some(detail.to_string()),
+                    insert_text: Some(label.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+        if partial_prefix.is_empty() || "Entry".starts_with(partial_prefix) {
+            items.push(CompletionItem {
+                label: "Entry".to_string(),
+                kind: Some(CompletionItemKind::STRUCT),
+                detail: Some(format!("collect.{name} entry")),
+                insert_text: Some("Entry".to_string()),
+                ..Default::default()
+            });
+        }
+        return items;
     }
     let cr = match check_result {
         Some(cr) => cr,
@@ -2074,6 +2270,102 @@ mod tests {
         };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"math"), "expected 'math' in {labels:?}");
+    }
+
+    // ── Directory collections ([collect.*]) ──────────────────────────
+
+    fn collection_project(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zz_lsp_collection_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("commands")).unwrap();
+        std::fs::write(
+            dir.join("zz.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [collect.commands]\ndir = \"commands\"\nsig = \"func([str]) -> int\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("commands/greet.zz"),
+            "pub func run(args: [str]) -> int { return 0 }\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn collection_env(root: &std::path::Path) -> CompletionEnv {
+        CompletionEnv {
+            doc_dir: Some(root.join("src")),
+            seed_bindings: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn collection_import_path_completion() {
+        let root = collection_project("import");
+        let env = collection_env(&root);
+        let src = "import collect.";
+        let program = parse(src).program;
+        let resp = completions_for_position(&program, src, src.len() as u32, None, Some(&env));
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"collect.commands"),
+            "expected collection module in {labels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collection_root_in_empty_import_completion() {
+        let root = collection_project("import_root");
+        let env = collection_env(&root);
+        let src = "import ";
+        let program = parse(src).program;
+        let resp = completions_for_position(&program, src, src.len() as u32, None, Some(&env));
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        assert!(items.iter().any(|i| i.label == "collect"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collection_get_string_completion() {
+        let root = collection_project("get");
+        let env = collection_env(&root);
+        let src = "import collect.commands\ncommands.get(\"gr";
+        let program = parse(src).program;
+        let resp = completions_for_position(&program, src, src.len() as u32, None, Some(&env));
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["greet"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collection_namespace_dot_completion() {
+        let root = collection_project("dot");
+        let env = collection_env(&root);
+        let src = "import collect.commands\ncommands.";
+        let program = parse(src).program;
+        let resp = completions_for_position(&program, src, src.len() as u32, None, Some(&env));
+        let items = match resp {
+            Some(CompletionResponse::Array(v)) => v,
+            _ => panic!("expected array response"),
+        };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"get"), "{labels:?}");
+        assert!(labels.contains(&"all"), "{labels:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
