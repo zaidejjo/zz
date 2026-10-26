@@ -52,6 +52,11 @@ Getting started):
 zz run hello.zz
 ```
 
+Inside a project with `[features]`, select optional features with
+`--features a,b` (repeatable) or `--all-features`; the manifest's `default`
+feature is always active. `zz build`, `zz check`, and `zz install` accept the
+same flags. A gated import names the exact feature and how to enable it.
+
 ### `zz eval <source>`
 
 Evaluate a source string and print the result:

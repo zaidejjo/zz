@@ -18,13 +18,22 @@
 //! [collect.commands]
 //! dir = "commands"
 //! sig = "func(args: [str]) -> int"
+//! locales-ar = { version = "1.0", optional = true }
+//!
+//! [features]
+//! default = ["std"]
+//! std = ["locales-ar"]
+//! locales-ar = { modules = ["locales/ar"], deps = ["locales-ar"] }
 //! ```
 //!
 //! The `authors`, `description`, `license`, and `repository` keys are
 //! optional: manifests written before they existed still parse, and
 //! `save()` omits them while empty so diffs stay minimal.
+//!
+//! `[features]` is optional too. A manifest without it behaves exactly
+//! as before: every dependency is active and no module is gated.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -69,6 +78,10 @@ pub struct Manifest {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub collections: BTreeMap<String, CollectionSpec>,
+    /// Feature gates (#488). Absent means today's behavior: no optional
+    /// dependencies and no gated modules.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: BTreeMap<String, FeatureSpec>,
 }
 
 impl Default for Manifest {
@@ -89,6 +102,7 @@ impl Default for Manifest {
             dependencies: HashMap::new(),
             native: None,
             collections: BTreeMap::new(),
+            features: BTreeMap::new(),
         }
     }
 }
@@ -403,6 +417,182 @@ pub fn is_identifier(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// One `[features]` entry. Two shapes are accepted:
+///
+/// ```toml
+/// default = ["std", "locales-ar"]              # bare list
+/// locales-ar = { modules = ["locales/ar"], deps = ["faker_locales_ar"] }
+/// ```
+///
+/// The list form enables other features (transitively) and may also name
+/// an optional dependency directly. The table form gates module files
+/// (`modules`) and pulls in optional dependencies (`deps`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum FeatureSpec {
+    /// `name = ["other_feature", ...]`
+    List(Vec<String>),
+    /// `name = { modules = [...], deps = [...] }`
+    Table(FeatureTable),
+}
+
+/// Table form of a feature gate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeatureTable {
+    /// Module paths (relative to the package source root, no `.zz`, no
+    /// `..`) gated by this feature. e.g. `["locales/ar"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
+    /// Optional dependency names enabled by this feature. Every entry
+    /// must name a declared `optional = true` dependency.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
+}
+
+impl FeatureSpec {
+    /// Feature names this entry enables transitively (list form only).
+    pub fn feature_refs(&self) -> &[String] {
+        match self {
+            FeatureSpec::List(items) => items,
+            FeatureSpec::Table(_) => &[],
+        }
+    }
+
+    /// Optional dependency names enabled by this entry.
+    pub fn dep_refs(&self) -> &[String] {
+        match self {
+            FeatureSpec::List(_) => &[],
+            FeatureSpec::Table(table) => &table.deps,
+        }
+    }
+
+    /// Gated module paths (table form only).
+    pub fn modules(&self) -> &[String] {
+        match self {
+            FeatureSpec::List(_) => &[],
+            FeatureSpec::Table(table) => &table.modules,
+        }
+    }
+}
+
+/// Feature selection from the command line: `--features a,b` plus
+/// `--all-features`. The implicit `default` set is always included.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FeatureSelection {
+    /// Explicitly requested names (`--features`, repeatable).
+    pub requested: BTreeSet<String>,
+    /// `--all-features`: enable every declared feature.
+    pub all: bool,
+}
+
+impl FeatureSelection {
+    /// Build a selection from explicit names.
+    pub fn new<I, S>(requested: I, all: bool) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            requested: requested.into_iter().map(Into::into).collect(),
+            all,
+        }
+    }
+
+    /// No explicit flags: only the manifest's `default` set.
+    pub fn default_set() -> Self {
+        Self::default()
+    }
+
+    /// Explicit names as a sorted slice-like iterator.
+    pub fn names(&self) -> Vec<String> {
+        self.requested.iter().cloned().collect()
+    }
+
+    /// True when no feature flags were given (default selection).
+    pub fn is_default(&self) -> bool {
+        !self.all && self.requested.is_empty()
+    }
+
+    /// Stable fingerprint of the explicit selection. Empty for the default
+    /// selection so lockfiles, run caches, and build caches keep their
+    /// existing keys when no feature flags are passed.
+    pub fn fingerprint(&self) -> String {
+        if self.is_default() {
+            return String::new();
+        }
+        let mut salt = String::new();
+        if self.all {
+            salt.push_str("all;");
+        }
+        salt.push_str(&self.names().join(","));
+        crate::hash::hash_bytes(salt.as_bytes())
+    }
+}
+
+/// Parse `--features` values: repeatable flags plus comma-separated names.
+/// `--all-features` is handled by the caller (it is a boolean flag).
+pub fn parse_feature_list(values: &[String]) -> BTreeSet<String> {
+    values
+        .iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Normalize a module path for `[features] modules` comparisons:
+/// backslashes become `/`, a leading `./` and a trailing `.zz` are
+/// stripped. Callers compare import paths through this.
+pub fn normalize_module_path(path: &str) -> String {
+    let mut p = path.replace('\\', "/");
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest.to_string();
+    }
+    if let Some(rest) = p.strip_suffix(".zz") {
+        p = rest.to_string();
+    }
+    p
+}
+
+/// Feature names are identifiers/kebab strings so they survive import
+/// diagnostics and CLI flag parsing without quoting.
+fn is_valid_feature_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Module paths in `[features]` are relative to the package source root
+/// and may not escape it.
+fn validate_feature_module(feature: &str, module: &str) -> Result<(), String> {
+    let bad = |why: &str| {
+        format!(
+            "invalid module `{module}` in feature `{feature}`: {why}\n\
+             hint: use a relative path like \"locales/ar\" (no `..`, no leading `/`)"
+        )
+    };
+    if module.trim().is_empty() {
+        return Err(bad("must not be empty"));
+    }
+    let p = Path::new(module);
+    if p.is_absolute()
+        || p.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(bad("must be relative and stay inside the package"));
+    }
+    Ok(())
 }
 
 /// Package metadata.
@@ -1095,10 +1285,11 @@ fn parse_dotted(s: &str) -> Option<(u32, u32)> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum DepSpec {
-    /// Simple version range: `"^1.2.0"`, or the table form
-    /// `{ version = "^1.2.0" }` (#419: `[dependencies.x]` tables and
-    /// Cargo-style inline tables spell the same registry dep).
-    Version(#[serde(deserialize_with = "version_or_table")] String),
+    /// Registry version range: `"^1.2.0"`, or the table form
+    /// `{ version = "^1.2.0", optional = true, features = ["x"] }`
+    /// (#419: `[dependencies.x]` tables and Cargo-style inline tables
+    /// spell the same registry dep).
+    Version(VersionDep),
     /// Git dependency with version constraint.
     Git(GitDep),
     /// Path dependency (local filesystem).
@@ -1111,53 +1302,167 @@ pub enum DepSpec {
     Path(PathDep),
 }
 
-/// `{ version = "x" }` table with unknown keys denied: extras (a `git`
-/// without `rev`, a stray `features`) must stay loud errors rather than
-/// silently degrading to a registry dep.
+impl DepSpec {
+    /// `optional = true` on any variant. Optional deps are active only
+    /// when an enabled feature names them in `deps` (or, for the list
+    /// form, directly).
+    pub fn optional(&self) -> bool {
+        match self {
+            DepSpec::Version(v) => v.optional,
+            DepSpec::Git(g) => g.optional,
+            DepSpec::Path(p) => p.optional,
+        }
+    }
+
+    /// Features requested from this dependency's own `[features]` section.
+    pub fn features(&self) -> &[String] {
+        match self {
+            DepSpec::Version(v) => &v.features,
+            DepSpec::Git(g) => &g.features,
+            DepSpec::Path(p) => &p.features,
+        }
+    }
+
+    /// Version requirement for registry/git deps.
+    pub fn version_req(&self) -> Option<&str> {
+        match self {
+            DepSpec::Version(v) => Some(&v.version),
+            DepSpec::Git(g) => Some(&g.version),
+            DepSpec::Path(_) => None,
+        }
+    }
+}
+
+/// Registry dependency: bare version string, or a table adding optional
+/// dependency flags. Serialization stays canonical — a dep with no flags
+/// emits a plain string, so old manifests round-trip byte-for-byte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionDep {
+    pub version: String,
+    pub optional: bool,
+    pub features: Vec<String>,
+}
+
+impl VersionDep {
+    /// Plain (non-optional, no requested features) version dep.
+    pub fn new(version: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+            optional: false,
+            features: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for VersionDep {
+    fn from(v: &str) -> Self {
+        Self::new(v)
+    }
+}
+
+impl From<String> for VersionDep {
+    fn from(v: String) -> Self {
+        Self::new(v)
+    }
+}
+
+impl std::fmt::Display for VersionDep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.version)
+    }
+}
+
+impl std::ops::Deref for VersionDep {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.version
+    }
+}
+
+fn bool_is_false(v: &bool) -> bool {
+    !*v
+}
+
+impl Serialize for VersionDep {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !self.optional && self.features.is_empty() {
+            return serializer.serialize_str(&self.version);
+        }
+        #[derive(Serialize)]
+        struct Table<'a> {
+            version: &'a str,
+            #[serde(skip_serializing_if = "bool_is_false")]
+            optional: bool,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            features: &'a Vec<String>,
+        }
+        Table {
+            version: &self.version,
+            optional: self.optional,
+            features: &self.features,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Table form of a registry dep with unknown keys denied: extras (a `git`
+/// without `rev`, a typo) must stay loud errors rather than silently
+/// degrading to a registry dep.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VersionTable {
     version: String,
+    #[serde(default)]
+    optional: bool,
+    #[serde(default)]
+    features: Vec<String>,
 }
 
-/// Accept a bare version string or its table form for `DepSpec::Version`.
-/// Serialization stays canonical (plain string); only parsing widens.
-fn version_or_table<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct VersionOrTable;
-    impl<'de> serde::de::Visitor<'de> for VersionOrTable {
-        type Value = String;
+impl<'de> Deserialize<'de> for VersionDep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct VersionOrTable;
+        impl<'de> serde::de::Visitor<'de> for VersionOrTable {
+            type Value = VersionDep;
 
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a version string or `{ version = \"...\" }`")
-        }
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a version string or a table with `version`, `optional`, `features`")
+            }
 
-        fn visit_str<E>(self, v: &str) -> Result<String, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v.to_string())
-        }
+            fn visit_str<E>(self, v: &str) -> Result<VersionDep, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(VersionDep::new(v))
+            }
 
-        fn visit_string<E>(self, v: String) -> Result<String, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v)
-        }
+            fn visit_string<E>(self, v: String) -> Result<VersionDep, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(VersionDep::new(v))
+            }
 
-        fn visit_map<A>(self, map: A) -> Result<String, A::Error>
-        where
-            A: serde::de::MapAccess<'de>,
-        {
-            let table =
-                VersionTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-            Ok(table.version)
+            fn visit_map<A>(self, map: A) -> Result<VersionDep, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let table =
+                    VersionTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(VersionDep {
+                    version: table.version,
+                    optional: table.optional,
+                    features: table.features,
+                })
+            }
         }
+        deserializer.deserialize_any(VersionOrTable)
     }
-    deserializer.deserialize_any(VersionOrTable)
 }
 
 /// Git dependency spec.
@@ -1166,12 +1471,48 @@ pub struct GitDep {
     pub version: String,
     pub git: String,
     pub rev: String,
+    /// Optional dependency, enabled by a feature's `deps` list.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub optional: bool,
+    /// Features requested from the dependency's own `[features]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 /// Path dependency spec.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PathDep {
     pub path: String,
+    /// Optional dependency, enabled by a feature's `deps` list.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub optional: bool,
+    /// Features requested from the dependency's own `[features]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+impl PathDep {
+    /// Plain non-optional path dep.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            optional: false,
+            features: Vec::new(),
+        }
+    }
+}
+
+impl GitDep {
+    /// Plain non-optional git dep.
+    pub fn new(version: impl Into<String>, git: impl Into<String>, rev: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+            git: git.into(),
+            rev: rev.into(),
+            optional: false,
+            features: Vec::new(),
+        }
+    }
 }
 
 impl Manifest {
@@ -1183,8 +1524,14 @@ impl Manifest {
     }
 
     /// Parse a manifest from a string.
+    ///
+    /// Feature cross-references are validated here, so every caller
+    /// (including dependency manifests loaded transitively) gets the same
+    /// loud errors. A manifest without `[features]` is untouched.
     pub fn parse(s: &str) -> Result<Self, String> {
-        toml::from_str(s).map_err(|e| format!("invalid zz.toml: {e}"))
+        let manifest: Manifest = toml::from_str(s).map_err(|e| format!("invalid zz.toml: {e}"))?;
+        manifest.validate_features()?;
+        Ok(manifest)
     }
 
     /// Save the manifest to a file.
@@ -1220,6 +1567,251 @@ impl Manifest {
             Some(req) => check_compiler_req(req, compiler_version)
                 .map_err(|e| format!("{} requires {e}", self.package.name)),
         }
+    }
+
+    /// Validate `[features]`: names, module paths, and cross-references.
+    ///
+    /// - Feature names are identifiers/kebab strings (`^[A-Za-z][A-Za-z0-9_-]*$`).
+    /// - Module paths are relative, non-empty, and never escape the root (`..`).
+    /// - Every `deps` entry names a declared `optional = true` dependency.
+    /// - Every `optional = true` dependency is referenced by at least one
+    ///   feature (otherwise it can never be enabled).
+    /// - Bare-list entries name a feature or an optional dependency.
+    ///
+    /// Cycles are detected by [`Manifest::enabled_features`], not here:
+    /// an unreachable cycle is harmless until someone selects it.
+    pub fn validate_features(&self) -> Result<(), String> {
+        for (name, spec) in &self.features {
+            if !is_valid_feature_name(name) {
+                return Err(format!(
+                    "invalid feature name `{name}` in [features]\n\
+                     hint: use letters, digits, `-`, or `_`, starting with a letter (e.g. `locales-ar`)"
+                ));
+            }
+            for module in spec.modules() {
+                validate_feature_module(name, module)?;
+            }
+            for dep in spec.dep_refs() {
+                if !self.dependencies.contains_key(dep) {
+                    return Err(format!(
+                        "feature `{name}` enables undeclared dependency `{dep}`\n\
+                         hint: declare it under [dependencies] (e.g. `{dep} = {{ version = \"1.0\", optional = true }}`)"
+                    ));
+                }
+            }
+            for item in spec.feature_refs() {
+                let is_feature = self.features.contains_key(item);
+                let is_optional_dep = self
+                    .dependencies
+                    .get(item)
+                    .is_some_and(|dep| dep.optional());
+                if !is_feature && !is_optional_dep {
+                    let hint = if self.dependencies.contains_key(item) {
+                        format!(
+                            "`{item}` is a non-optional dependency (always active); \
+                             remove it from the feature list"
+                        )
+                    } else {
+                        let mut available: Vec<&str> =
+                            self.features.keys().map(String::as_str).collect();
+                        available.sort();
+                        format!("available features: {}", available.join(", "))
+                    };
+                    return Err(format!(
+                        "feature `{name}` references unknown feature `{item}`\n\
+                         hint: {hint}"
+                    ));
+                }
+            }
+        }
+        // Optional deps must be reachable from at least one feature. A
+        // dep that no feature enables can never be installed: loud error.
+        let mut enabled_by_feature: BTreeSet<String> = BTreeSet::new();
+        for (feature, spec) in &self.features {
+            for dep in spec.dep_refs() {
+                enabled_by_feature.insert(dep.clone());
+            }
+            for item in spec.feature_refs() {
+                if self
+                    .dependencies
+                    .get(item)
+                    .is_some_and(|dep| dep.optional())
+                {
+                    enabled_by_feature.insert(item.clone());
+                }
+            }
+            let _ = feature;
+        }
+        for (dep, spec) in &self.dependencies {
+            if spec.optional() && !enabled_by_feature.contains(dep) {
+                return Err(format!(
+                    "optional dependency `{dep}` is never enabled by any feature\n\
+                     hint: add `deps = [\"{dep}\"]` to a [features] entry (e.g. `{dep} = {{ deps = [\"{dep}\"] }}`) \
+                     or drop `optional = true`"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the enabled feature set for `requested` (already-parsed
+    /// `--features` names) or `all` (`--all-features`).
+    ///
+    /// The implicit `default` feature (when declared) is always enabled.
+    /// Feature-to-feature references are followed transitively; unknown
+    /// names and cycles are loud errors naming the offending feature.
+    pub fn enabled_features(
+        &self,
+        requested: &[String],
+        all: bool,
+    ) -> Result<BTreeSet<String>, String> {
+        self.validate_features()?;
+        let mut enabled: BTreeSet<String> = BTreeSet::new();
+        let mut seeds: Vec<String> = Vec::new();
+        if all {
+            seeds.extend(self.features.keys().cloned());
+        } else {
+            if self.features.contains_key("default") {
+                seeds.push("default".to_string());
+            }
+            for name in requested {
+                if !self.features.contains_key(name) {
+                    let mut available: Vec<&str> =
+                        self.features.keys().map(String::as_str).collect();
+                    available.sort();
+                    return Err(format!(
+                        "unknown feature `{name}`\n\
+                         hint: available features: {}\n\
+                         hint: pass one or more with --features <name>[,<name>...] or use --all-features",
+                        if available.is_empty() {
+                            "(none declared)".to_string()
+                        } else {
+                            available.join(", ")
+                        }
+                    ));
+                }
+                seeds.push(name.clone());
+            }
+        }
+        // DFS with an explicit stack; `path` detects cycles among
+        // feature-to-feature references.
+        fn visit(
+            manifest: &Manifest,
+            name: &str,
+            path: &mut Vec<String>,
+            done: &mut BTreeSet<String>,
+            enabled: &mut BTreeSet<String>,
+        ) -> Result<(), String> {
+            if done.contains(name) {
+                return Ok(());
+            }
+            if let Some(pos) = path.iter().position(|p| p == name) {
+                let mut cycle = path[pos..].to_vec();
+                cycle.push(name.to_string());
+                return Err(format!(
+                    "feature cycle: {}\n\
+                     hint: feature lists must not reference each other in a loop",
+                    cycle.join(" -> ")
+                ));
+            }
+            enabled.insert(name.to_string());
+            path.push(name.to_string());
+            if let Some(spec) = manifest.features.get(name) {
+                for item in spec.feature_refs() {
+                    if manifest.features.contains_key(item) {
+                        visit(manifest, item, path, done, enabled)?;
+                    }
+                }
+            }
+            path.pop();
+            done.insert(name.to_string());
+            Ok(())
+        }
+        let mut done = BTreeSet::new();
+        for seed in seeds {
+            let mut path = Vec::new();
+            visit(self, &seed, &mut path, &mut done, &mut enabled)?;
+        }
+        Ok(enabled)
+    }
+
+    /// Resolve a [`FeatureSelection`] against this manifest.
+    pub fn resolve_features(
+        &self,
+        selection: &FeatureSelection,
+    ) -> Result<BTreeSet<String>, String> {
+        self.enabled_features(&selection.names(), selection.all)
+    }
+
+    /// Dependencies active for an enabled feature set: every non-optional
+    /// dependency, plus optional deps named by an enabled feature's `deps`
+    /// (or directly by a bare-list entry).
+    pub fn enabled_dependencies(
+        &self,
+        enabled: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, String> {
+        self.validate_features()?;
+        let mut active: BTreeSet<String> = self
+            .dependencies
+            .iter()
+            .filter(|(_, spec)| !spec.optional())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for feature in enabled {
+            let Some(spec) = self.features.get(feature) else {
+                return Err(format!(
+                    "internal: unknown enabled feature `{feature}`\n\
+                     hint: pass feature names to Manifest::enabled_features"
+                ));
+            };
+            for dep in spec.dep_refs() {
+                // validate_features guarantees the dep exists.
+                active.insert(dep.clone());
+            }
+            for item in spec.feature_refs() {
+                if self
+                    .dependencies
+                    .get(item)
+                    .is_some_and(|dep| dep.optional())
+                {
+                    active.insert(item.clone());
+                }
+            }
+        }
+        Ok(active)
+    }
+
+    /// Convenience: selection → active dependency names.
+    pub fn active_dependency_names(
+        &self,
+        selection: &FeatureSelection,
+    ) -> Result<BTreeSet<String>, String> {
+        let enabled = self.resolve_features(selection)?;
+        self.enabled_dependencies(&enabled)
+    }
+
+    /// Module path → feature names that gate it. Used by the loader to
+    /// turn a disabled-module import into a fix-it diagnostic.
+    pub fn module_gates(&self) -> BTreeMap<String, Vec<String>> {
+        let mut gates: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (feature, spec) in &self.features {
+            for module in spec.modules() {
+                gates
+                    .entry(normalize_module_path(module))
+                    .or_default()
+                    .push(feature.clone());
+            }
+        }
+        for features in gates.values_mut() {
+            features.sort();
+            features.dedup();
+        }
+        gates
+    }
+
+    /// Declared feature names, sorted (`zz info` / diagnostics).
+    pub fn feature_names(&self) -> Vec<String> {
+        self.features.keys().cloned().collect()
     }
 
     /// Configured entry override (`[package] entry = "src/cli.zz"`).
@@ -1303,6 +1895,7 @@ impl Manifest {
             dependencies: HashMap::new(),
             native: None,
             collections: BTreeMap::new(),
+            features: BTreeMap::new(),
         };
         let path = dir.join("zz.toml");
         manifest.save(&path)?;
@@ -1432,17 +2025,22 @@ mod tests {
                         version: "2.0".into(),
                         git: "https://github.com/user/repo".into(),
                         rev: "main".into(),
+                        optional: false,
+                        features: Vec::new(),
                     }),
                 );
                 d.insert(
                     "baz".into(),
                     DepSpec::Path(PathDep {
                         path: "../baz".into(),
+                        optional: false,
+                        features: Vec::new(),
                     }),
                 );
                 d
             },
             native: None,
+            features: BTreeMap::new(),
         };
 
         let d = tmp_dir("round_trip");
@@ -1478,15 +2076,15 @@ inline_table = { version = "^2.0.0" }
         .expect("mixed dependency spellings must parse");
         assert_eq!(
             m.dependencies.get("rand"),
-            Some(&DepSpec::Version("^0.4.1".to_string()))
+            Some(&DepSpec::Version("^0.4.1".into()))
         );
         assert_eq!(
             m.dependencies.get("inline_bare"),
-            Some(&DepSpec::Version("^1.0.0".to_string()))
+            Some(&DepSpec::Version("^1.0.0".into()))
         );
         assert_eq!(
             m.dependencies.get("inline_table"),
-            Some(&DepSpec::Version("^2.0.0".to_string()))
+            Some(&DepSpec::Version("^2.0.0".into()))
         );
         assert!(matches!(
             m.dependencies.get("faker"),
@@ -1498,15 +2096,229 @@ inline_table = { version = "^2.0.0" }
     fn version_table_extras_stay_loud() {
         // Unknown keys must not silently degrade to a registry dep: a
         // `git` without `rev` (or any stray key) is still an error.
+        // `optional` and `features` are the only widened keys (#488).
         for bad in [
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", git = \"https://example.com/r\" }\n",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", features = [\"a\"] }\n",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", rev = \"main\" }\n",
         ] {
             assert!(
                 Manifest::parse(bad).is_err(),
                 "extra keys must not parse silently: {bad}"
             );
         }
+    }
+
+    const FEATURE_MANIFEST: &str = r#"
+[package]
+name = "faker"
+version = "1.0.0"
+
+[dependencies]
+faker_locales_ar = { path = "../locales/ar", optional = true }
+faker_locales_fr = { path = "../locales/fr", optional = true }
+rand = "^0.4"
+
+[features]
+default = ["std"]
+std = []
+locales-ar = { modules = ["locales/ar"], deps = ["faker_locales_ar"] }
+locales-fr = { modules = ["locales/fr", "locales/fr/extra"], deps = ["faker_locales_fr"] }
+all-locales = ["locales-ar", "locales-fr"]
+"#;
+
+    #[test]
+    fn feature_shapes_parse_and_round_trip() {
+        let m = Manifest::parse(FEATURE_MANIFEST).expect("both feature shapes parse");
+        assert_eq!(
+            m.features.get("default"),
+            Some(&FeatureSpec::List(vec!["std".to_string()]))
+        );
+        assert_eq!(
+            m.features.get("locales-ar"),
+            Some(&FeatureSpec::Table(FeatureTable {
+                modules: vec!["locales/ar".to_string()],
+                deps: vec!["faker_locales_ar".to_string()],
+            }))
+        );
+        assert!(matches!(
+            m.dependencies.get("faker_locales_ar"),
+            Some(DepSpec::Path(p)) if p.optional && p.features.is_empty()
+        ));
+        // No features in the value → canonical bare string on save.
+        let d = tmp_dir("features_round_trip");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("rand = \"^0.4\""), "{text}");
+        assert!(text.contains("[features]"), "{text}");
+        assert!(text.contains("optional = true"), "{text}");
+        let loaded = Manifest::load(&path).unwrap();
+        assert_eq!(m, loaded);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn feature_closure_is_transitive() {
+        let m = Manifest::parse(FEATURE_MANIFEST).unwrap();
+        let enabled = m.enabled_features(&[], false).unwrap();
+        assert!(enabled.contains("default"));
+        assert!(enabled.contains("std"));
+        assert!(!enabled.contains("locales-ar"));
+
+        let enabled = m
+            .enabled_features(&["all-locales".to_string()], false)
+            .unwrap();
+        assert!(enabled.contains("all-locales"));
+        assert!(enabled.contains("locales-ar"));
+        assert!(enabled.contains("locales-fr"));
+        // default stays implicit even when other features are requested.
+        assert!(enabled.contains("default"));
+
+        let all = m.enabled_features(&[], true).unwrap();
+        assert_eq!(all, m.features.keys().cloned().collect());
+
+        let active = m.enabled_dependencies(&enabled).unwrap();
+        assert!(active.contains("rand"), "non-optional always active");
+        assert!(active.contains("faker_locales_ar"));
+        assert!(active.contains("faker_locales_fr"));
+        // Default selection excludes optional locale deps.
+        let default_active = m
+            .enabled_dependencies(&m.enabled_features(&[], false).unwrap())
+            .unwrap();
+        assert!(default_active.contains("rand"));
+        assert!(!default_active.contains("faker_locales_ar"));
+    }
+
+    #[test]
+    fn feature_unknown_name_is_loud() {
+        let m = Manifest::parse(FEATURE_MANIFEST).unwrap();
+        let err = m
+            .enabled_features(&["locales-de".to_string()], false)
+            .unwrap_err();
+        assert!(err.contains("unknown feature `locales-de`"), "{err}");
+        assert!(err.contains("locales-ar"), "lists available: {err}");
+    }
+
+    #[test]
+    fn feature_cycle_is_loud() {
+        let m = Manifest::parse(FEATURE_MANIFEST).unwrap();
+        let mut cyclic = m.clone();
+        cyclic.features.insert(
+            "loop-a".to_string(),
+            FeatureSpec::List(vec!["loop-b".to_string()]),
+        );
+        cyclic.features.insert(
+            "loop-b".to_string(),
+            FeatureSpec::List(vec!["loop-a".to_string()]),
+        );
+        let err = cyclic
+            .enabled_features(&["loop-a".to_string()], false)
+            .unwrap_err();
+        assert!(err.contains("feature cycle"), "{err}");
+        assert!(err.contains("loop-a") && err.contains("loop-b"), "{err}");
+    }
+
+    #[test]
+    fn feature_validation_rejects_bad_manifests() {
+        // Optional dep no feature can enable.
+        let err = Manifest::parse(
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+[dependencies]
+lonely = { version = "1.0", optional = true }
+[features]
+default = []
+"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("never enabled"), "{err}");
+
+        // Dep referenced by a feature but not declared.
+        let err = Manifest::parse(
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+[features]
+gone = { deps = ["missing"] }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("undeclared dependency `missing`"), "{err}");
+
+        // Module paths may not escape the package root.
+        for evil in ["../secrets", "/abs/path", ""] {
+            let err = Manifest::parse(&format!(
+                "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[features]\nf = {{ modules = [\"{evil}\"] }}\n"
+            ))
+            .unwrap_err();
+            assert!(err.contains("invalid module"), "`{evil}`: {err}");
+        }
+
+        // Feature names must be identifier/kebab-ish.
+        let err = Manifest::parse(
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[features]\n\"bad name\" = []\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid feature name"), "{err}");
+    }
+
+    #[test]
+    fn dep_flags_round_trip_canonically() {
+        let m = Manifest::parse(
+            r#"
+[package]
+name = "consumer"
+version = "0.1.0"
+
+[dependencies]
+plain = "^1.0"
+flagged = { version = "^2.0", optional = true, features = ["ar", "fr"] }
+g = { git = "https://example.com/g.git", rev = "main", version = "*", optional = true, features = ["x"] }
+p = { path = "../p", optional = true }
+[features]
+f = { deps = ["flagged", "g", "p"] }
+"#,
+        )
+        .unwrap();
+        let d = tmp_dir("dep_flags_rt");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("plain = \"^1.0\""), "{text}");
+        assert_eq!(Manifest::load(&path).unwrap(), m);
+        let loaded = Manifest::parse(&text).unwrap();
+        assert_eq!(loaded.dependencies["flagged"].features(), ["ar", "fr"]);
+        assert!(loaded.dependencies["flagged"].optional());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn manifest_without_features_is_unchanged() {
+        // Backward compatibility: adding `[features]` support must not
+        // change the serialized form of an old manifest.
+        let original = r#"[package]
+name = "legacy"
+version = "1.0.0"
+authors = ["Alice"]
+
+[dependencies]
+foo = "^1.0"
+bar = { version = "2.0", git = "https://example.com/r", rev = "main" }
+baz = { path = "../baz" }
+"#;
+        let m = Manifest::parse(original).unwrap();
+        let d = tmp_dir("legacy_unchanged");
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("[features]"), "{saved}");
+        assert!(!saved.contains("optional"), "{saved}");
+        assert!(!saved.contains("features ="), "{saved}");
+        assert_eq!(Manifest::parse(&saved).unwrap(), m);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -1737,6 +2549,7 @@ foo = "^1.0"
             dependencies: HashMap::new(),
             native: None,
             collections: BTreeMap::new(),
+            features: BTreeMap::new(),
         };
 
         let d = tmp_dir("meta_rt");

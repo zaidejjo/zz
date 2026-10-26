@@ -6,12 +6,12 @@
 //! [`ResolveError::RegistryUnsupported`] (legacy behavior, kept so plain
 //! `resolve()` never touches the network).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::hash;
 use crate::lock::{LockedDep, Lockfile};
-use crate::manifest::{DepSpec, GitDep, Manifest, PathDep};
+use crate::manifest::{DepSpec, FeatureSelection, GitDep, Manifest, PathDep};
 use crate::remote;
 
 /// Errors during dependency resolution.
@@ -44,6 +44,8 @@ pub enum ResolveError {
     VersionConflict { name: String, detail: String },
     /// I/O error during resolution.
     Io(String),
+    /// Invalid or unsatisfiable feature selection (#488).
+    Feature(String),
 }
 
 impl std::fmt::Display for ResolveError {
@@ -95,6 +97,7 @@ impl std::fmt::Display for ResolveError {
                 )
             }
             Self::Io(msg) => write!(f, "resolution I/O error: {msg}"),
+            Self::Feature(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -113,10 +116,15 @@ pub enum RegistrySource {
     Remote(String),
 }
 
-/// Resolver knobs. Defaults to fully offline.
+/// Resolver knobs. Defaults to fully offline with the manifest's `default`
+/// feature set.
 #[derive(Debug, Clone, Default)]
 pub struct ResolveOptions {
     pub registry: RegistrySource,
+    /// `--features` / `--all-features` selection (#488). The manifest's
+    /// implicit `default` set is always included; no `[features]` section
+    /// means every dependency is active.
+    pub features: FeatureSelection,
 }
 
 impl ResolveOptions {
@@ -124,6 +132,7 @@ impl ResolveOptions {
     pub fn offline() -> Self {
         Self {
             registry: RegistrySource::Offline,
+            features: FeatureSelection::default(),
         }
     }
 
@@ -132,8 +141,28 @@ impl ResolveOptions {
     pub fn remote(base: &str) -> Self {
         Self {
             registry: RegistrySource::Remote(base.to_string()),
+            features: FeatureSelection::default(),
         }
     }
+
+    /// Select features (`--features a,b` / `--all-features`).
+    pub fn with_features(mut self, features: FeatureSelection) -> Self {
+        self.features = features;
+        self
+    }
+}
+
+/// Active dependency names for a manifest + explicit feature requests.
+fn active_dep_names(
+    manifest: &Manifest,
+    requested: &[String],
+) -> Result<BTreeSet<String>, ResolveError> {
+    let enabled = manifest
+        .enabled_features(requested, false)
+        .map_err(ResolveError::Feature)?;
+    manifest
+        .enabled_dependencies(&enabled)
+        .map_err(ResolveError::Feature)
 }
 
 /// Result of resolving all dependencies.
@@ -198,6 +227,16 @@ pub fn resolve_with(
     project_dir: &Path,
     opts: &ResolveOptions,
 ) -> Result<ResolvedDeps, ResolveError> {
+    // Phase 0: feature gates (#488). Only active dependencies participate
+    // in resolution: disabled optional deps never need network, registry
+    // metadata, or a lock entry.
+    let enabled_features = manifest
+        .resolve_features(&opts.features)
+        .map_err(ResolveError::Feature)?;
+    let active = manifest
+        .enabled_dependencies(&enabled_features)
+        .map_err(ResolveError::Feature)?;
+
     // Phase 1: Dependency graph analysis — detect cycles
     detect_cycles(&manifest.dependencies)?;
 
@@ -208,6 +247,9 @@ pub fn resolve_with(
 
     // Phase 2: Resolve each dependency
     for (name, spec) in &manifest.dependencies {
+        if !active.contains(name) {
+            continue;
+        }
         // #266 precedence rule: the manifest declaration always wins. A lock
         // pin from another source (e.g. registry, left over from before the
         // manifest flipped to a path dep) is stale by definition — record
@@ -226,7 +268,7 @@ pub fn resolve_with(
                 RegistrySource::Offline => {
                     return Err(ResolveError::RegistryUnsupported {
                         name: name.clone(),
-                        version_req: version_req.clone(),
+                        version_req: version_req.version.clone(),
                     });
                 }
                 RegistrySource::Remote(base) => {
@@ -259,6 +301,7 @@ pub fn resolve_with(
         lockfile,
         project_dir,
         opts,
+        &active,
         &mut locked,
         &mut path_deps,
         &mut path_hashes,
@@ -312,6 +355,7 @@ fn resolve_transitive(
     lockfile: Option<&Lockfile>,
     project_dir: &Path,
     opts: &ResolveOptions,
+    active: &BTreeSet<String>,
     locked: &mut Vec<LockedDep>,
     path_deps: &mut Vec<PathDep>,
     path_hashes: &mut HashMap<String, String>,
@@ -320,14 +364,29 @@ fn resolve_transitive(
     if manifest.dependencies.is_empty() {
         return Ok(());
     }
-    let direct: HashSet<String> = manifest.dependencies.keys().cloned().collect();
+    let direct: HashSet<String> = active.iter().cloned().collect();
     // Current version choices, seeded with the direct pins.
     let mut choices: HashMap<String, LockedDep> =
         locked.iter().map(|l| (l.name.clone(), l.clone())).collect();
     // Canonical content dirs, filled during the walk (path entries need
     // their parent dir to resolve `rel` against).
     let mut dirs: HashMap<String, PathBuf> = HashMap::new();
+    // Features each package was requested with (`dep.features`, #488).
+    // Seeded for the root's active direct deps; transitive edges union in
+    // during the walk.
+    let mut feature_reqs: HashMap<String, BTreeSet<String>> = HashMap::new();
     for (name, spec) in &manifest.dependencies {
+        if active.contains(name) {
+            feature_reqs
+                .entry(name.clone())
+                .or_default()
+                .extend(spec.features().iter().cloned());
+        }
+    }
+    for (name, spec) in &manifest.dependencies {
+        if !active.contains(name) {
+            continue;
+        }
         if let DepSpec::Path(p) = spec {
             let dir = project_dir.join(&p.path);
             let canon = std::fs::canonicalize(&dir).map_err(|_| ResolveError::PathNotFound {
@@ -352,6 +411,7 @@ fn resolve_transitive(
             opts,
             lockfile,
             &direct,
+            &mut feature_reqs,
             &mut choices,
             &mut dirs,
             &mut meta_cache,
@@ -504,6 +564,7 @@ fn walk_closure(
     opts: &ResolveOptions,
     lockfile: Option<&Lockfile>,
     direct: &HashSet<String>,
+    feature_reqs: &mut HashMap<String, BTreeSet<String>>,
     choices: &mut HashMap<String, LockedDep>,
     dirs: &mut HashMap<String, PathBuf>,
     meta_cache: &mut HashMap<String, crate::remote::PackageInfo>,
@@ -540,10 +601,25 @@ fn walk_closure(
         let Some(child_manifest) = load_child_manifest(&dir, &pkg)? else {
             continue;
         };
-        let mut child_names: Vec<&String> = child_manifest.dependencies.keys().collect();
+        // Feature gates of the dependency itself (#488): only deps its
+        // enabled features activate contribute to the closure.
+        let requested: Vec<String> = feature_reqs
+            .get(&pkg)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let active_children = active_dep_names(&child_manifest, &requested)?;
+        let mut child_names: Vec<&String> = child_manifest
+            .dependencies
+            .keys()
+            .filter(|n| active_children.contains(*n))
+            .collect();
         child_names.sort();
         for child in child_names {
             let spec = child_manifest.dependencies[child].clone();
+            feature_reqs
+                .entry(child.clone())
+                .or_default()
+                .extend(spec.features().iter().cloned());
             edges.entry(pkg.clone()).or_default().push(child.clone());
             reqs.entry(child.clone()).or_default().push(ParentReq {
                 parent: pkg.clone(),
@@ -714,7 +790,7 @@ fn resolve_transitive_dep(
                     let DepSpec::Version(v) = &r.spec else {
                         unreachable!()
                     };
-                    (r.parent.clone(), v.clone())
+                    (r.parent.clone(), v.version.clone())
                 })
                 .collect();
             // Lock-first: a usable pin satisfying every known req is
@@ -1122,9 +1198,32 @@ pub fn closure(
     lockfile: &Lockfile,
     project_dir: &Path,
 ) -> Result<HashMap<String, PathBuf>, ResolveError> {
+    closure_with_features(
+        manifest,
+        lockfile,
+        project_dir,
+        &FeatureSelection::default(),
+    )
+}
+
+/// [`closure`] with an explicit feature selection (#488). Disabled
+/// optional deps are absent from the returned map, so link/staleness
+/// checks match what was actually installed.
+pub fn closure_with_features(
+    manifest: &Manifest,
+    lockfile: &Lockfile,
+    project_dir: &Path,
+    selection: &FeatureSelection,
+) -> Result<HashMap<String, PathBuf>, ResolveError> {
+    let active = manifest
+        .active_dependency_names(selection)
+        .map_err(ResolveError::Feature)?;
     let mut dirs: HashMap<String, PathBuf> = HashMap::new();
     // Direct layer first.
     for (name, spec) in &manifest.dependencies {
+        if !active.contains(name) {
+            continue;
+        }
         match spec {
             DepSpec::Path(p) => {
                 let dir = project_dir.join(&p.path);
@@ -1144,22 +1243,48 @@ pub fn closure(
             }
         }
     }
-    // Then transitive layers (BFS over manifests; cycle-guarded).
-    let mut queue: Vec<String> = manifest.dependencies.keys().cloned().collect();
+    // Then transitive layers (BFS over manifests; cycle-guarded). Feature
+    // requests are unioned per package so a dep's `features` gates its
+    // own optional deps too.
+    let mut feature_reqs: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (name, spec) in &manifest.dependencies {
+        if active.contains(name) {
+            feature_reqs
+                .entry(name.clone())
+                .or_default()
+                .extend(spec.features().iter().cloned());
+        }
+    }
+    let mut queue: Vec<String> = dirs.keys().cloned().collect();
     let mut seen: HashSet<String> = queue.iter().cloned().collect();
+    queue.sort();
     while let Some(pkg) = queue.pop() {
         let dir = dirs[&pkg].clone();
         let Some(child_manifest) = load_child_manifest(&dir, &pkg)? else {
             continue;
         };
-        let mut child_names: Vec<&String> = child_manifest.dependencies.keys().collect();
+        let requested: Vec<String> = feature_reqs
+            .get(&pkg)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let active_children = active_dep_names(&child_manifest, &requested)?;
+        let mut child_names: Vec<&String> = child_manifest
+            .dependencies
+            .keys()
+            .filter(|n| active_children.contains(*n))
+            .collect();
         child_names.sort();
         for child in child_names {
+            let spec = child_manifest.dependencies[child].clone();
+            feature_reqs
+                .entry(child.clone())
+                .or_default()
+                .extend(spec.features().iter().cloned());
             if seen.contains(child) {
                 continue;
             }
             seen.insert(child.clone());
-            match &child_manifest.dependencies[child] {
+            match &spec {
                 DepSpec::Path(p) => {
                     let target = dir.join(&p.path);
                     dirs.insert(
@@ -1226,15 +1351,43 @@ pub fn transitive_reqs_stale(
     lockfile: &Lockfile,
     project_dir: &Path,
 ) -> Result<bool, ResolveError> {
-    let dirs = match closure(manifest, lockfile, project_dir) {
+    transitive_reqs_stale_with_features(
+        manifest,
+        lockfile,
+        project_dir,
+        &FeatureSelection::default(),
+    )
+}
+
+/// [`transitive_reqs_stale`] with an explicit feature selection (#488).
+pub fn transitive_reqs_stale_with_features(
+    manifest: &Manifest,
+    lockfile: &Lockfile,
+    project_dir: &Path,
+    selection: &FeatureSelection,
+) -> Result<bool, ResolveError> {
+    let active = manifest
+        .active_dependency_names(selection)
+        .map_err(ResolveError::Feature)?;
+    let dirs = match closure_with_features(manifest, lockfile, project_dir, selection) {
         Ok(d) => d,
         Err(_) => return Ok(true),
     };
     // Every closure package must resolve requirements against the lock.
-    let mut queue: Vec<String> = manifest.dependencies.keys().cloned().collect();
+    let mut queue: Vec<String> = active.iter().cloned().collect();
     let mut seen: HashSet<String> = HashSet::new();
     // (name -> parents) for union checks.
     let mut reqs: HashMap<String, Vec<ParentReq>> = HashMap::new();
+    // Features each package was requested with, unioned across parents.
+    let mut feature_reqs: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (name, spec) in &manifest.dependencies {
+        if active.contains(name) {
+            feature_reqs
+                .entry(name.clone())
+                .or_default()
+                .extend(spec.features().iter().cloned());
+        }
+    }
     while let Some(pkg) = queue.pop() {
         if !seen.insert(pkg.clone()) {
             continue;
@@ -1246,7 +1399,19 @@ pub fn transitive_reqs_stale(
         let Some(child_manifest) = load_child_manifest(&dir, &pkg)? else {
             continue;
         };
+        let requested: Vec<String> = feature_reqs
+            .get(&pkg)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let active_children = active_dep_names(&child_manifest, &requested)?;
         for (child, spec) in &child_manifest.dependencies {
+            if !active_children.contains(child) {
+                continue;
+            }
+            feature_reqs
+                .entry(child.clone())
+                .or_default()
+                .extend(spec.features().iter().cloned());
             reqs.entry(child.clone()).or_default().push(ParentReq {
                 parent: pkg.clone(),
                 spec: spec.clone(),
@@ -1270,9 +1435,7 @@ pub fn transitive_reqs_stale(
     // Orphaned pins (lock entries outside the closure) also bust the
     // cache so removals prune `vendor/` + lock on the next install.
     let mut closure_names: HashSet<String> = seen;
-    for name in manifest.dependencies.keys() {
-        closure_names.insert(name.clone());
-    }
+    closure_names.extend(active.iter().cloned());
     for dep in &lockfile.deps {
         if !closure_names.contains(&dep.name) {
             return Ok(true);
@@ -1478,12 +1641,33 @@ pub fn path_deps_stale(
     lockfile: Option<&Lockfile>,
     project_dir: &Path,
 ) -> Result<bool, ResolveError> {
+    path_deps_stale_with_features(
+        manifest,
+        lockfile,
+        project_dir,
+        &FeatureSelection::default(),
+    )
+}
+
+/// [`path_deps_stale`] with an explicit feature selection (#488).
+pub fn path_deps_stale_with_features(
+    manifest: &Manifest,
+    lockfile: Option<&Lockfile>,
+    project_dir: &Path,
+    selection: &FeatureSelection,
+) -> Result<bool, ResolveError> {
     let lock = match lockfile {
         Some(l) => l,
         None => return Ok(true), // No lockfile = everything is stale
     };
+    let active = manifest
+        .active_dependency_names(selection)
+        .map_err(ResolveError::Feature)?;
 
     for (name, spec) in &manifest.dependencies {
+        if !active.contains(name) {
+            continue; // disabled optional path dep: not installed
+        }
         if let DepSpec::Path(path_dep) = spec {
             let dep_path = project_dir.join(&path_dep.path);
             if !dep_path.exists() {
@@ -1511,7 +1695,7 @@ pub fn path_deps_stale(
     // Transitive path pins: re-hash each against its closure dir. A
     // closure that no longer resolves is itself stale (re-resolve
     // surfaces the reason — moved dirs, dropped pins, GC'd CAS).
-    let dirs = match closure(manifest, lock, project_dir) {
+    let dirs = match closure_with_features(manifest, lock, project_dir, selection) {
         Ok(d) => d,
         Err(_) => return Ok(true),
     };
@@ -1554,7 +1738,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .dependencies
-            .insert("foo".to_string(), DepSpec::Version("^1.2.0".to_string()));
+            .insert("foo".to_string(), DepSpec::Version("^1.2.0".into()));
 
         // Plain resolve() is offline: registry deps error without network.
         let err = resolve(&manifest, None, std::path::Path::new(".")).unwrap_err();
@@ -1570,9 +1754,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "missing".to_string(),
-            DepSpec::Path(PathDep {
-                path: "../nonexistent".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("../nonexistent".to_string())),
         );
 
         let err = resolve(&manifest, None, &d).unwrap_err();
@@ -1597,9 +1779,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "dep_a".to_string(),
-            DepSpec::Path(PathDep {
-                path: "dep_a".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("dep_a".to_string())),
         );
 
         let result = resolve(&manifest, None, &d);
@@ -1624,9 +1804,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "dep_b".to_string(),
-            DepSpec::Path(PathDep {
-                path: "dep_b".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("dep_b".to_string())),
         );
 
         // First resolve — creates hashes
@@ -1660,6 +1838,89 @@ mod tests {
     }
 
     #[test]
+    fn feature_gated_deps_are_not_resolved() {
+        // Disabled optional deps must not be resolved — even a missing
+        // path must not fail (it is not installed at all).
+        let d = tmp();
+        let manifest = Manifest::parse(
+            r#"
+[package]
+name = "root"
+version = "0.1.0"
+[dependencies]
+base = { path = "base" }
+locales = { path = "missing-locales", optional = true }
+[features]
+default = []
+locales = { modules = ["locales/ar"], deps = ["locales"] }
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(d.join("base")).unwrap();
+        fs::write(
+            d.join("base/zz.toml"),
+            "[package]\nname = \"base\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let default = resolve(&manifest, None, &d).expect("disabled optional dep is skipped");
+        assert_eq!(default.path_deps.len(), 1, "only `base` resolves");
+
+        let opts =
+            ResolveOptions::offline().with_features(FeatureSelection::new(["locales"], false));
+        let err = resolve_with(&manifest, None, &d, &opts).unwrap_err();
+        assert!(matches!(err, ResolveError::PathNotFound { .. }), "{err}");
+
+        let opts = ResolveOptions::offline()
+            .with_features(FeatureSelection::new(Vec::<String>::new(), true));
+        let err = resolve_with(&manifest, None, &d, &opts).unwrap_err();
+        assert!(matches!(err, ResolveError::PathNotFound { .. }), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn feature_gated_transitive_deps_are_not_resolved() {
+        // A dependency's own optional deps stay out of the closure unless
+        // the parent requests that feature.
+        let d = tmp();
+        let dep = d.join("faker");
+        fs::create_dir_all(&dep).unwrap();
+        fs::write(
+            dep.join("zz.toml"),
+            r#"
+[package]
+name = "faker"
+version = "0.1.0"
+[dependencies]
+locales = { path = "missing-locales", optional = true }
+[features]
+default = []
+locales-ar = { deps = ["locales"] }
+"#,
+        )
+        .unwrap();
+        let manifest = Manifest::parse(
+            r#"
+[package]
+name = "root"
+version = "0.1.0"
+[dependencies]
+faker = { path = "faker" }
+"#,
+        )
+        .unwrap();
+        assert!(resolve(&manifest, None, &d).is_ok());
+
+        let mut with_features = manifest.clone();
+        if let Some(DepSpec::Path(p)) = with_features.dependencies.get_mut("faker") {
+            p.features = vec!["locales-ar".to_string()];
+        }
+        let err = resolve(&with_features, None, &d).unwrap_err();
+        assert!(err.to_string().contains("locales"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn version_satisfies_cases() {
         assert!(version_satisfies("1.4.1", "^1.2"));
         assert!(version_satisfies("1.2.0", "1.2.0"));
@@ -1673,21 +1934,19 @@ mod tests {
     fn source_kinds_classify() {
         // #266: only the provider matters for staleness, not URLs/versions.
         assert_eq!(
-            spec_source_kind(&DepSpec::Version("^1.0".to_string())),
+            spec_source_kind(&DepSpec::Version("^1.0".into())),
             "registry"
         );
         assert_eq!(
-            spec_source_kind(&DepSpec::Git(GitDep {
-                version: "1.0.0".to_string(),
-                git: "https://example.com/r.git".to_string(),
-                rev: "main".to_string(),
-            })),
+            spec_source_kind(&DepSpec::Git(GitDep::new(
+                "1.0.0".to_string(),
+                "https://example.com/r.git".to_string(),
+                "main".to_string()
+            ))),
             "git"
         );
         assert_eq!(
-            spec_source_kind(&DepSpec::Path(PathDep {
-                path: "../x".to_string(),
-            })),
+            spec_source_kind(&DepSpec::Path(PathDep::new("../x".to_string()))),
             "path"
         );
         assert_eq!(lock_source_kind("path"), "path");
@@ -1713,9 +1972,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "mylib".to_string(),
-            DepSpec::Path(PathDep {
-                path: "mylib".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("mylib".to_string())),
         );
 
         let mut lock = Lockfile::new();
@@ -1746,11 +2003,11 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "mylib".to_string(),
-            DepSpec::Git(GitDep {
-                version: "1.0.0".to_string(),
-                git: "file:///tmp/zz-pm-nonexistent-repo".to_string(),
-                rev: "main".to_string(),
-            }),
+            DepSpec::Git(GitDep::new(
+                "1.0.0".to_string(),
+                "file:///tmp/zz-pm-nonexistent-repo".to_string(),
+                "main".to_string(),
+            )),
         );
 
         let mut lock = Lockfile::new();
@@ -1782,7 +2039,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .dependencies
-            .insert("foo".to_string(), DepSpec::Version("^1.0".to_string()));
+            .insert("foo".to_string(), DepSpec::Version("^1.0".into()));
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {
             name: "foo".to_string(),
@@ -1840,7 +2097,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest
             .dependencies
-            .insert("foo".to_string(), DepSpec::Version("^1.0".to_string()));
+            .insert("foo".to_string(), DepSpec::Version("^1.0".into()));
         let opts = ResolveOptions::remote(&base);
         let resolved = resolve_with(&manifest, None, &d, &opts).unwrap();
         assert_eq!(resolved.locked.len(), 1);
@@ -1881,7 +2138,7 @@ mod tests {
     #[test]
     fn circular_dep_detection_self_ref() {
         let mut deps = std::collections::HashMap::new();
-        deps.insert("foo".to_string(), DepSpec::Version("^1.0".to_string()));
+        deps.insert("foo".to_string(), DepSpec::Version("^1.0".into()));
         // The shallow pre-check never false-positives; real cycles
         // (including self-references through manifests) surface from the
         // closure walk's `check_closure_cycles`.
@@ -1918,9 +2175,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             dep.to_string(),
-            DepSpec::Path(PathDep {
-                path: rel.to_string(),
-            }),
+            DepSpec::Path(PathDep::new(rel.to_string())),
         );
         manifest
     }
@@ -2014,15 +2269,11 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "mid".to_string(),
-            DepSpec::Path(PathDep {
-                path: "mid".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("mid".to_string())),
         );
         manifest.dependencies.insert(
             "leaf".to_string(),
-            DepSpec::Path(PathDep {
-                path: "leaf".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("leaf".to_string())),
         );
 
         let resolved = resolve(&manifest, None, &d).unwrap();
@@ -2050,15 +2301,11 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "mid".to_string(),
-            DepSpec::Path(PathDep {
-                path: "mid".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("mid".to_string())),
         );
         manifest.dependencies.insert(
             "leaf".to_string(),
-            DepSpec::Path(PathDep {
-                path: "leaf".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("leaf".to_string())),
         );
 
         let resolved = resolve(&manifest, None, &d).unwrap();
@@ -2181,15 +2428,11 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.dependencies.insert(
             "a".to_string(),
-            DepSpec::Path(PathDep {
-                path: "a".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("a".to_string())),
         );
         manifest.dependencies.insert(
             "b".to_string(),
-            DepSpec::Path(PathDep {
-                path: "b".to_string(),
-            }),
+            DepSpec::Path(PathDep::new("b".to_string())),
         );
         let opts = ResolveOptions::remote(&base);
         let err = resolve_with(&manifest, None, &d, &opts).unwrap_err();

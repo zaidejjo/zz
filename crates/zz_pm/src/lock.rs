@@ -35,6 +35,12 @@ pub struct Lockfile {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_deps_hash: Option<String>,
+    /// Fingerprint of the explicit feature selection that produced this
+    /// lock (`--features` / `--all-features`, #488). Absent = the default
+    /// feature set, which keeps pre-feature lockfiles valid.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_features_hash: Option<String>,
     /// Checksum stored in header comment, verified on load.
     /// Not serialized to TOML (stored in comment header).
     #[serde(skip)]
@@ -103,6 +109,7 @@ impl Lockfile {
             version: LOCK_VERSION,
             deps: Vec::new(),
             manifest_deps_hash: None,
+            manifest_features_hash: None,
             checksum: String::new(),
         }
     }
@@ -190,6 +197,20 @@ impl Lockfile {
     /// Record the manifest deps hash (call after resolving).
     pub fn set_manifest_deps_hash(&mut self, hash: String) {
         self.manifest_deps_hash = Some(hash);
+    }
+
+    /// Check whether the lock was built with the given feature-selection
+    /// fingerprint. Absent means the default selection, whose fingerprint
+    /// is the empty string — so pre-feature lockfiles stay valid.
+    pub fn features_match(&self, features_hash: &str) -> bool {
+        self.manifest_features_hash.as_deref().unwrap_or("") == features_hash
+    }
+
+    /// Record the feature-selection fingerprint. The default selection
+    /// stores nothing (keeps the lockfile byte-identical to pre-feature
+    /// output).
+    pub fn set_features_hash(&mut self, hash: String) {
+        self.manifest_features_hash = if hash.is_empty() { None } else { Some(hash) };
     }
 
     /// Find a locked dep by name.
@@ -338,6 +359,7 @@ mod tests {
             dependencies: deps,
             native: None,
             collections: std::collections::BTreeMap::new(),
+            features: std::collections::BTreeMap::new(),
         };
 
         let manifest_hash = manifest.deps_hash();
@@ -351,6 +373,26 @@ mod tests {
 
         // Different hash: no match
         assert!(!lock.deps_match("different_hash"));
+    }
+
+    #[test]
+    fn feature_selection_shortcircuit_is_backward_compatible() {
+        use crate::manifest::FeatureSelection;
+        let mut lock = Lockfile::new();
+        // Absent field = default selection, exactly like pre-feature locks.
+        assert!(lock.features_match(""));
+        assert!(!lock.features_match("explicit"));
+
+        let explicit = FeatureSelection::new(["locales-ar"], false).fingerprint();
+        lock.set_features_hash(explicit.clone());
+        assert!(lock.features_match(&explicit));
+        assert!(!lock.features_match(""));
+
+        // Setting the default fingerprint stores nothing: the lockfile
+        // stays byte-identical to pre-feature output.
+        lock.set_features_hash(String::new());
+        assert!(lock.manifest_features_hash.is_none());
+        assert!(lock.features_match(""));
     }
 
     #[test]

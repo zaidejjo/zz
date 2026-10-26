@@ -473,6 +473,7 @@ fn publish_fixture(client: &RegistryClient, name: &str, version: &str) -> String
         license: "MIT".to_string(),
         category: "utilities".to_string(),
         keywords: vec!["fixture".to_string()],
+        features: Vec::new(),
     };
     let resp = client
         .publish(MOCK_TOKEN, &req)
@@ -557,7 +558,7 @@ fn publish_round_trip_then_visible_everywhere() {
     let mut manifest = zz_pm::manifest::Manifest::default();
     manifest.dependencies.insert(
         "gadget".to_string(),
-        zz_pm::manifest::DepSpec::Version("^0.2".to_string()),
+        zz_pm::manifest::DepSpec::Version("^0.2".into()),
     );
     let dir = std::env::temp_dir();
     let resolved = resolve_with(&manifest, None, &dir, &ResolveOptions::remote(&base)).unwrap();
@@ -604,6 +605,7 @@ fn republish_same_version_conflicts() {
         license: String::new(),
         category: String::new(),
         keywords: Vec::new(),
+        features: Vec::new(),
     };
     let err = client.publish(MOCK_TOKEN, &req).unwrap_err();
     assert!(matches!(err, RemoteError::Conflict(_)), "{err:?}");
@@ -630,6 +632,7 @@ fn bad_token_is_unauthorized() {
         license: String::new(),
         category: String::new(),
         keywords: Vec::new(),
+        features: Vec::new(),
     };
     let err = client.publish("zz_pat_wrong", &req).unwrap_err();
     assert!(matches!(err, RemoteError::Unauthorized), "{err:?}");
@@ -671,7 +674,7 @@ fn locked_registry_dep_resolves_offline() {
     let mut manifest = zz_pm::manifest::Manifest::default();
     manifest.dependencies.insert(
         "widget".to_string(),
-        zz_pm::manifest::DepSpec::Version("^1.0".to_string()),
+        zz_pm::manifest::DepSpec::Version("^1.0".into()),
     );
     let dir = std::env::temp_dir();
     // First resolve hits the network and pins the hash.

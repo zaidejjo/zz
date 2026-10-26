@@ -254,6 +254,17 @@ fn main() -> ExitCode {
                 print_run_help();
                 return ExitCode::SUCCESS;
             }
+            // Feature-gated dependencies (#488): strip the flags before
+            // file/arg parsing, then thread the selection through every
+            // run path (VM, bytecode, native, watch, cache key).
+            let (features, run_args) = match extract_feature_flags(rest) {
+                Ok(parsed) => parsed,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let rest = run_args.as_slice();
             let native = rest.iter().any(|a| a == "--native");
             let bytecode = rest.iter().any(|a| a == "--bytecode");
             let watching = rest.iter().any(|a| a == "--watch");
@@ -316,6 +327,7 @@ fn main() -> ExitCode {
                     child_argv.push("--embed".to_string());
                     child_argv.push(dir.to_string_lossy().into_owned());
                 }
+                push_feature_flags(&mut child_argv, &features);
                 match watch::run_watch(resolved, child_argv, embed, flags) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
@@ -324,7 +336,7 @@ fn main() -> ExitCode {
                     }
                 }
             } else if native {
-                match run_native(file, &script_args, embed, output) {
+                match run_native(file, &script_args, embed, output, &features) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(msg) => {
                         eprintln!("zz: {msg}");
@@ -332,7 +344,7 @@ fn main() -> ExitCode {
                     }
                 }
             } else if bytecode {
-                let result = run_bytecode(file, &script_args, embed);
+                let result = run_bytecode(file, &script_args, embed, &features);
                 zz_runtime::vm::stats::dump_if_enabled();
                 match result {
                     Ok(()) => ExitCode::SUCCESS,
@@ -342,7 +354,7 @@ fn main() -> ExitCode {
                     }
                 }
             } else {
-                let result = run_file(file, &script_args, embed);
+                let result = run_file(file, &script_args, embed, &features);
                 zz_runtime::vm::stats::dump_if_enabled();
                 match result {
                     Ok(()) => ExitCode::SUCCESS,
@@ -387,6 +399,15 @@ fn main() -> ExitCode {
                 print_subcommand_help("check");
                 return ExitCode::SUCCESS;
             }
+            // Feature gates (#488): strip before the path/flags split.
+            let (features, check_args) = match extract_feature_flags(rest) {
+                Ok(parsed) => parsed,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let rest = check_args.as_slice();
             // Strip the two-token `--format <value>` form before path
             // parsing (the bare value would otherwise parse as the path);
             // `--format=<value>` is already a single flag token.
@@ -448,6 +469,7 @@ fn main() -> ExitCode {
                 has_hard,
                 has_stats,
                 format_json,
+                &features,
             ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
@@ -468,7 +490,15 @@ fn main() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let interactive = has_interactive && !has_hard;
-            match check_or_fix_path(&path, true, interactive, has_hard, false, false) {
+            match check_or_fix_path(
+                &path,
+                true,
+                interactive,
+                has_hard,
+                false,
+                false,
+                &zz_pm::manifest::FeatureSelection::default(),
+            ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("zz: {msg}");
@@ -744,6 +774,8 @@ FLAGS:
   --interactive, -i  with --fix, prompt for ambiguous fixes interactively
   --stats            print per-file check statistics
   --format json      machine-readable diagnostics on stdout
+  --features <list>  enable project features (comma-separated; repeatable)
+  --all-features     enable every declared [features] entry
   -h, --help         show this help
 
 PATH can be a single .zz file or a directory (recursively scans all .zz files).
@@ -1151,6 +1183,21 @@ pub(crate) fn prepare_run(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
 ) -> Result<PreparedRun, String> {
+    prepare_run_with_features(
+        path,
+        script_args,
+        embed,
+        &zz_pm::manifest::FeatureSelection::default(),
+    )
+}
+
+/// [`prepare_run`] with an explicit feature selection (#488).
+pub(crate) fn prepare_run_with_features(
+    path: &str,
+    script_args: &[String],
+    embed: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
+) -> Result<PreparedRun, String> {
     let script_path = std::path::Path::new(path);
     // Project root: walk up from the script (entry files usually live in
     // `src/`; `zz.lock` sits at the root). Falls back to the script dir.
@@ -1162,14 +1209,15 @@ pub(crate) fn prepare_run(
     });
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(script_path)?;
+    loader::validate_feature_selection(script_path, features)?;
     // Discover plugin manifest signatures so `zz run` type-checks the
     // same dotted names the AOT path merges.
     let plugin_funcs = crate::build::discover_plugin_manifests(script_path);
 
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program(script_path)?
+        loader::load_program_with_features(script_path, features)?
     } else {
-        loader::load_program_with_plugins(script_path, &plugin_funcs)?
+        loader::load_program_with_plugins_and_features(script_path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -1308,7 +1356,10 @@ fn meta_from_prep(prep: &PreparedRun) -> run_cache::RunMeta {
 /// prints only when compilation actually happened. Never runs user code
 /// (`prepare_run` loads, checks and seeds — execution stays in `run`).
 /// Never fails: any error means `zz run` will surface it properly there.
-pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
+pub(crate) fn prewarm_run_cache(
+    root: &std::path::Path,
+    features: &zz_pm::manifest::FeatureSelection,
+) {
     if !run_cache::cache_enabled() {
         return;
     }
@@ -1317,7 +1368,7 @@ pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
         Err(_) => return, // no entry (lib-only package): nothing to warm
     };
     let plugin_funcs = crate::build::discover_plugin_manifests(&entry);
-    let slug = match run_cache::run_key(&entry, &plugin_funcs, None) {
+    let slug = match run_cache::run_key_with_features(&entry, &plugin_funcs, None, features) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -1325,7 +1376,7 @@ pub(crate) fn prewarm_run_cache(root: &std::path::Path) {
         return;
     }
     let path = entry.to_string_lossy().into_owned();
-    let prep = match prepare_run(&path, &[], None) {
+    let prep = match prepare_run_with_features(&path, &[], None, features) {
         Ok(p) => p,
         Err(_) => return, // check errors: `zz run` reports them
     };
@@ -1434,6 +1485,7 @@ fn run_bytecode(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     let path = resolve_run_entry(
         path,
@@ -1443,7 +1495,7 @@ fn run_bytecode(
     if path.ends_with(".zzc") {
         run_bytecode_file(&path, script_args)
     } else {
-        run_bytecode_zz(&path, script_args, embed)
+        run_bytecode_zz(&path, script_args, embed, features)
     }
 }
 
@@ -1451,8 +1503,9 @@ fn run_bytecode_zz(
     path: &str,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
-    let mut prep = prepare_run(path, script_args, embed)?;
+    let mut prep = prepare_run_with_features(path, script_args, embed, features)?;
     let mut last = Value::Unit;
     for (i, program) in prep.programs.iter().enumerate() {
         let native_names: std::sync::Arc<std::collections::HashSet<String>> =
@@ -1721,6 +1774,7 @@ fn run_file(
     path: Option<&String>,
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     let resolved = resolve_run_entry(
         path,
@@ -1728,6 +1782,7 @@ fn run_file(
         "provide the path to a .zz file to execute",
     )?;
     let path = &resolved;
+    loader::validate_feature_selection(std::path::Path::new(path), features)?;
 
     // One-time-compiler fast path: the key is content-addressed over the
     // whole closure, so a hit executes cached IR with no frontend work.
@@ -1736,7 +1791,9 @@ fn run_file(
     let mut timer = run_cache::StageTimer::start();
     let plugin_funcs = crate::build::discover_plugin_manifests(entry_path);
     timer.stage("plugin discovery");
-    if let Ok(slug) = run_cache::run_key(entry_path, &plugin_funcs, embed.as_deref()) {
+    if let Ok(slug) =
+        run_cache::run_key_with_features(entry_path, &plugin_funcs, embed.as_deref(), features)
+    {
         timer.stage("run key");
         if let Some(hit) = run_cache::lookup(&slug) {
             timer.stage("lookup");
@@ -1766,7 +1823,7 @@ fn run_file(
             }
         }
         // Miss: full pipeline, then store the compiled IR for next time.
-        let mut prep = prepare_run(path, script_args, embed.clone())?;
+        let mut prep = prepare_run_with_features(path, script_args, embed.clone(), features)?;
         let mut last = Value::Unit;
         // Compile each module to IR bytes alongside the typed execution
         // (shared with install-time prewarming below).
@@ -1802,7 +1859,7 @@ fn run_file(
     }
 
     // Key computation failed (unreadable entry): today's behavior exactly.
-    let mut prep = prepare_run(path, script_args, embed)?;
+    let mut prep = prepare_run_with_features(path, script_args, embed, features)?;
     let mut last = Value::Unit;
     for (i, program) in prep.programs.iter().enumerate() {
         match prep.interp.run_typed(
@@ -1926,6 +1983,7 @@ fn run_native(
     script_args: &[String],
     embed: Option<std::path::PathBuf>,
     output: Option<std::path::PathBuf>,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     let resolved = resolve_run_entry(
         path,
@@ -1936,6 +1994,7 @@ fn run_native(
     let p = std::path::Path::new(path);
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(p)?;
+    loader::validate_feature_selection(p, features)?;
     // Release mode for true native speed — unless `ZZ_NATIVE_DEV=1`
     // (parity sweeps: `-O0 -g`, no LTO, ~4x faster clang per fixture;
     // same generated C, separate cache entries via the fingerprint).
@@ -1948,6 +2007,7 @@ fn run_native(
     let rel = build::ReleaseOptions {
         embed,
         output,
+        features: features.clone(),
         ..Default::default()
     };
     // Publish through a private destination when the user gave no `-o`:
@@ -2003,7 +2063,7 @@ fn run_native(
 fn print_run_help() {
     println!(
         "\
-usage: zz run [--native|--bytecode] [--watch] [--embed <dir>] [-o <name>] [<file.zz>]
+usage: zz run [--native|--bytecode] [--watch] [--embed <dir>] [-o <name>] [--features <list>|--all-features] [<file.zz>]
 
 type-check and run a ZZ source file through the VM (leaving no build
 artifacts), or through the native backend with `--native`. Inside a
@@ -2023,6 +2083,8 @@ FLAGS:
   --clear              clear the screen per restart (with `--watch`)
   --debounce <ms>      quiet time before a restart (default 150; with `--watch`)
   --watch-ignore <glob>  skip matching paths (repeatable; with `--watch`)
+  --features <list>    enable project features (comma-separated; repeatable)
+  --all-features       enable every declared [features] entry
   -h, --help           show this help
 
 RUN CACHE:
@@ -2062,7 +2124,7 @@ global cache, run entries included."
 fn build_cmd(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [-o <name>] [<file.zz>]\n\
+            "usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [--features <list>|--all-features] [-o <name>] [<file.zz>]\n\
              \n\
              compile a native binary (cached; defaults to a static self-contained build).\n\
              \n\
@@ -2078,6 +2140,8 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
                --target <triple>    cross-compile via clang --target=\n  \
                --cc <clang|zig>     select the Clang provider\n  \
                --embed <dir>        bake a static asset directory into the binary\n  \
+               --features <list>    enable project features (comma-separated)\n  \
+               --all-features       enable every declared [features] entry\n  \
                -o, --output <name>  name the output binary\n  \
                --verbose            print the exact clang command line\n  \
                -h, --help           show this help"
@@ -2087,6 +2151,10 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--emit-ir") {
         return emit_ir_cmd(args);
     }
+    // Feature gates (#488): strip before positional-path parsing so the
+    // value never looks like a file, then thread into cache + loader.
+    let (features, build_args) = extract_feature_flags(args)?;
+    let args = build_args.as_slice();
     // Training args for `--full -- <program args>`: everything after the
     // first `--` belongs to the training run, never to flag parsing —
     // so the split happens before any flag is read. A bare `--` still
@@ -2178,6 +2246,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
 
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     crate::enforce_project_zz(p)?;
+    loader::validate_feature_selection(p, &features)?;
 
     // Default (no flags) is a static self-contained build; `--full`
     // selects max optimization (full LTO; plus PGO when training args
@@ -2222,6 +2291,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             .iter()
             .any(|a| a == "--chunk" || a == "--unstable-chunk")
             || std::env::var("ZZ_CHUNK_C").is_ok(),
+        features: features.clone(),
     };
     let mode_str = match mode {
         build::BuildMode::Dev => "dev",
@@ -2535,6 +2605,73 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// Extract `--features <list>` (repeatable, comma-separated) and
+/// `--all-features` from a subcommand's argv (#488). Returns the parsed
+/// selection plus the remaining argv; the loader and the script must never
+/// see the flags.
+pub(crate) fn extract_feature_flags(
+    args: &[String],
+) -> Result<(zz_pm::manifest::FeatureSelection, Vec<String>), String> {
+    let mut requested: Vec<String> = Vec::new();
+    let mut all = false;
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    // Everything after `--` belongs to the program being run/built (e.g.
+    // `zz build -- ...` training args), never to zz's own flags.
+    let split = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let (head, tail) = args.split_at(split);
+    let mut i = 0;
+    while i < head.len() {
+        let a = &head[i];
+        if a == "--all-features" {
+            all = true;
+            i += 1;
+            continue;
+        }
+        if a == "--features" {
+            let Some(value) = head.get(i + 1) else {
+                return Err("`--features` needs a value\n\
+                     hint: pass a comma-separated list, e.g. `--features locales-ar,extras`"
+                    .to_string());
+            };
+            if value.trim().is_empty() {
+                return Err("`--features` needs a value\n\
+                     hint: pass a comma-separated list, e.g. `--features locales-ar,extras`"
+                    .to_string());
+            }
+            requested.push(value.clone());
+            i += 2;
+            continue;
+        }
+        if let Some(value) = a.strip_prefix("--features=") {
+            if value.trim().is_empty() {
+                return Err("`--features` needs a value\n\
+                     hint: pass a comma-separated list, e.g. `--features locales-ar,extras`"
+                    .to_string());
+            }
+            requested.push(value.to_string());
+            i += 1;
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    out.extend_from_slice(tail);
+    let names = zz_pm::manifest::parse_feature_list(&requested);
+    Ok((zz_pm::manifest::FeatureSelection::new(names, all), out))
+}
+
+/// Re-emit feature flags into a child argv (`zz run --watch` replay).
+fn push_feature_flags(argv: &mut Vec<String>, features: &zz_pm::manifest::FeatureSelection) {
+    if features.all {
+        argv.push("--all-features".to_string());
+    }
+    let names = features.names();
+    if !names.is_empty() {
+        argv.push("--features".to_string());
+        argv.push(names.join(","));
+    }
+}
+
 /// Whether `run`'s help flag appears before the entry file.
 ///
 /// `zz run --help` must describe the subcommand, but everything after the
@@ -2542,7 +2679,14 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
 /// and must not be swallowed. Values of value-taking flags are skipped so
 /// `zz run --embed assets --help` still reaches the help.
 fn help_before_entry(args: &[String]) -> bool {
-    const VALUE_FLAGS: [&str; 5] = ["--embed", "-o", "--output", "--debounce", "--watch-ignore"];
+    const VALUE_FLAGS: [&str; 6] = [
+        "--embed",
+        "-o",
+        "--output",
+        "--debounce",
+        "--watch-ignore",
+        "--features",
+    ];
     let mut skip_next = false;
     for a in args {
         if skip_next {
@@ -2786,6 +2930,7 @@ fn check_or_fix_path(
     force: bool,
     show_stats: bool,
     format_json: bool,
+    features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     use zz_frontend::diag::{FixSafety, Severity};
 
@@ -2818,7 +2963,8 @@ fn check_or_fix_path(
             std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
 
         let file_start = std::time::Instant::now();
-        let loaded = loader::load_program_check(path)?;
+        loader::validate_feature_selection(path, features)?;
+        let loaded = loader::load_program_check_with_features(path, features)?;
         let file_ms = file_start.elapsed().as_secs_f64() * 1000.0;
         if show_stats {
             stat_files += 1;
@@ -3092,14 +3238,30 @@ mod tests {
     /// otherwise pollutes their entry counts mid-flight.
     fn check_isolated(path: &str) -> Result<(), String> {
         super::loader::cache::with_isolated_cache(|| {
-            check_or_fix_path(&Some(path.to_string()), false, false, false, false, false)
+            check_or_fix_path(
+                &Some(path.to_string()),
+                false,
+                false,
+                false,
+                false,
+                false,
+                &zz_pm::manifest::FeatureSelection::default(),
+            )
         })
     }
 
     /// Run `zz check --fix` (fix mode) under the isolated cache env.
     fn fix_isolated(path: &str) -> Result<(), String> {
         super::loader::cache::with_isolated_cache(|| {
-            check_or_fix_path(&Some(path.to_string()), true, false, false, false, false)
+            check_or_fix_path(
+                &Some(path.to_string()),
+                true,
+                false,
+                false,
+                false,
+                false,
+                &zz_pm::manifest::FeatureSelection::default(),
+            )
         })
     }
 
@@ -3184,7 +3346,7 @@ mod tests {
         let mut src = String::new();
         for i in 0..400 {
             src.push_str(&format!(
-                "func zz_perf_fn_{i}(x: int) -> int {{ x + {i} }}\n"
+                "func zz_perf_fn_{i}(x: int) -> int {{ return x + {i} }}\n"
             ));
         }
         src.push_str("func main() {\n    println(zz_perf_fn_0(1))\n}\n");

@@ -109,14 +109,32 @@ fn vm_fingerprint_with(build_stamp: u64, plugin_funcs: &[(String, zz_checker::Fu
 /// Compute the run-cache slug for an entry file. Reads the entry bytes and
 /// hashes the closure live (same machinery as the native build cache).
 /// `embed` joins the key via the artifact segment when `--embed` is used.
+#[allow(dead_code)] // default-selection wrapper; tests + API parity
 pub fn run_key(
     entry: &Path,
     plugin_funcs: &[(String, zz_checker::FuncSig)],
     embed: Option<&Path>,
 ) -> Result<String, String> {
+    run_key_with_features(
+        entry,
+        plugin_funcs,
+        embed,
+        &zz_pm::manifest::FeatureSelection::default(),
+    )
+}
+
+/// [`run_key`] with an explicit feature selection (#488): different
+/// `--features` compile different modules, so they must never share a
+/// cache entry. The default selection leaves the fingerprint unchanged.
+pub fn run_key_with_features(
+    entry: &Path,
+    plugin_funcs: &[(String, zz_checker::FuncSig)],
+    embed: Option<&Path>,
+    features: &zz_pm::manifest::FeatureSelection,
+) -> Result<String, String> {
     let src = std::fs::read_to_string(entry)
         .map_err(|e| format!("zz: cannot read {}: {e}", entry.display()))?;
-    let fp = vm_fingerprint(plugin_funcs);
+    let fp = fingerprint_with_features(plugin_funcs, features);
     // Fast path: stat-only closure check against the fingerprint sidecar
     // (no source reads on no-change runs). Falls back to the canonical
     // full hash on any doubt; manifest errors propagate like `compute`.
@@ -129,6 +147,23 @@ pub fn run_key(
     }
     fp_store(entry, &key);
     Ok(key.to_slug())
+}
+
+/// Toolchain fingerprint plus the explicit feature selection (#488).
+/// Default selection returns [`vm_fingerprint`] bit-for-bit.
+fn fingerprint_with_features(
+    plugin_funcs: &[(String, zz_checker::FuncSig)],
+    features: &zz_pm::manifest::FeatureSelection,
+) -> u64 {
+    let fp = vm_fingerprint(plugin_funcs);
+    let selection = features.fingerprint();
+    if selection.is_empty() {
+        return fp;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    selection.hash(&mut h);
+    fp ^ h.finish()
 }
 
 // ---------------------------------------------------------------------------
