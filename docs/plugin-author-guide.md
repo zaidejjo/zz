@@ -423,7 +423,7 @@ pub unsafe extern "C" fn my_process(s: *const c_char) -> i64 {
 
 `plugin.zzi`:
 
-```zz
+```
 // Version: 1
 // C-ABI: 1
 // Plugin-version: 0.1.0
