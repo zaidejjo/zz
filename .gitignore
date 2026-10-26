@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
-/examples
+/examples/*
+!/examples/rust-fnv/
 /plans
 bench/add_to_1M
 bench/native/bench_fib
