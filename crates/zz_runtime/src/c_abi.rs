@@ -22,7 +22,7 @@
 //! `bool` params and `ptr` params are rejected at registration with an
 //! actionable error (extend the shape table below when a plugin needs them).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 use std::sync::{OnceLock, RwLock};
 
@@ -40,6 +40,10 @@ pub enum CParam {
     /// (`*const u8` + `usize`, no copy, no NUL). Stamps pair it with a
     /// same-index `Len` slot (see below); both error loudly on non-bytes.
     Bytes,
+    /// Opaque integer-handle (#234): crosses C as `i64` (`int64_t`). The
+    /// runtime tracks live handle ids in a validity registry so
+    /// use-after-free surfaces as a clean ZZ error instead of UB.
+    Handle,
     /// Length half of a [`CParam::Bytes`] pair: always follows its `Bytes`
     /// at the same arg index. Never constructed from a real parameter.
     Len,
@@ -51,6 +55,20 @@ pub enum CRet {
     Int,
     Float,
     Void,
+    /// Opaque integer-handle return (#234): crosses C as `i64`.
+    Handle,
+    /// Owned `bytes` return (#234): C fills a caller-provided
+    /// `zz_bytes*` out-slot and returns `int` status; the ZZ side owns
+    /// the result and frees it via `zz_release_bytes`.
+    Bytes,
+    /// Owned `str` return (#234): C fills a caller-provided
+    /// `zz_str*` out-slot and returns `int` status; the ZZ side owns
+    /// the result and frees it via `zz_release`.
+    Str,
+    /// `Result<int, str>` return (#234): C returns `int` status and writes
+    /// the error message into a caller-provided `char **` message slot.
+    /// The ZZ side maps status 0 → `Ok(value)`, nonzero → `Err(msg)`.
+    ResultIntStr,
 }
 
 /// A plugin function's C signature: ordered params + return.
@@ -75,6 +93,35 @@ unsafe impl Sync for CEntry {}
 
 static REGISTRY: OnceLock<RwLock<HashMap<String, CEntry>>> = OnceLock::new();
 
+/// Live opaque-handle ids created by C plugins (#234). Plugins register a
+/// handle id when they create one and release it when they free it; the ZZ
+/// side checks validity on every handle argument so use-after-free surfaces
+/// as a clean ZZ error instead of UB.
+static HANDLES: OnceLock<RwLock<HashSet<i64>>> = OnceLock::new();
+
+fn handles() -> &'static RwLock<HashSet<i64>> {
+    HANDLES.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+/// Register a handle id as live. Returns false if already registered.
+pub fn register_handle(id: i64) -> bool {
+    handles().write().expect("handle registry lock").insert(id)
+}
+
+/// Release a handle id, marking it no longer valid. Returns false if it was
+/// not registered.
+pub fn release_handle(id: i64) -> bool {
+    handles().write().expect("handle registry lock").remove(&id)
+}
+
+/// True when `id` is a live handle.
+pub fn is_handle_valid(id: i64) -> bool {
+    handles()
+        .read()
+        .expect("handle registry lock")
+        .contains(&id)
+}
+
 fn registry() -> &'static RwLock<HashMap<String, CEntry>> {
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
@@ -90,6 +137,7 @@ fn shape_key(sig: &CSig) -> String {
             CParam::Float => 'F',
             CParam::Str => 'S',
             CParam::Bytes => 'B',
+            CParam::Handle => 'H',
             // `Len` is a stamp-level pairing device, never a real param.
             CParam::Len => continue,
         });
@@ -99,6 +147,10 @@ fn shape_key(sig: &CSig) -> String {
         CRet::Int => 'i',
         CRet::Float => 'f',
         CRet::Void => 'v',
+        CRet::Handle => 'h',
+        CRet::Bytes => 'b',
+        CRet::Str => 's',
+        CRet::ResultIntStr => 'r',
     });
     k
 }
@@ -127,6 +179,7 @@ macro_rules! adapters_i {
     (@ctype F) => { f64 };
     (@ctype S) => { *const c_char };
     (@ctype B) => { *const u8 };
+    (@ctype H) => { i64 };
     (@ctype L) => { usize };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
@@ -191,6 +244,27 @@ macro_rules! adapters_i {
             }
         }
     }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt H $held:ident) => {{
+        // Opaque handle id crosses as i64; validity is checked by the
+        // handle registry at call time (use-after-free → clean error).
+        match &$args[$idx] {
+            Value::Int(i) => {
+                if !is_handle_valid(*i) {
+                    return Err(EvalError::new(
+                        format!("`{}`: handle `{i}` is not live (use-after-free)", $fname),
+                        $span,
+                    ));
+                }
+                *i
+            }
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected handle, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
     (@extract $args:ident $span:ident $fname:ident $idx:tt L $held:ident) => {{
         match &$args[$idx] {
             Value::Bytes(b) => b.as_slice().len(),
@@ -225,6 +299,7 @@ macro_rules! adapters_v {
     (@ctype F) => { f64 };
     (@ctype S) => { *const c_char };
     (@ctype B) => { *const u8 };
+    (@ctype H) => { i64 };
     (@ctype L) => { usize };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
@@ -282,6 +357,27 @@ macro_rules! adapters_v {
             other => {
                 return Err(EvalError::new(
                     format!("`{}`: expected bytes, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt H $held:ident) => {{
+        // Opaque handle id crosses as i64; validity is checked by the
+        // handle registry at call time (use-after-free → clean error).
+        match &$args[$idx] {
+            Value::Int(i) => {
+                if !is_handle_valid(*i) {
+                    return Err(EvalError::new(
+                        format!("`{}`: handle `{i}` is not live (use-after-free)", $fname),
+                        $span,
+                    ));
+                }
+                *i
+            }
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected handle, got `{other}`", $fname),
                     $span,
                 ));
             }
@@ -316,11 +412,14 @@ adapters_i! {
     c3_isi(0: I, 1: S, 2: I);
     // Borrowed bytes view: one ZZ arg, two C params (ptr + len).
     c1_b(0: B, 0: L);
+    // Opaque integer-handle: one ZZ arg, one C i64 param.
+    c1_h(0: H);
 }
 
 adapters_v! {
     c0_v0_void();
     c1_i_void(0: I);
+    c1_h_void(0: H);
 }
 
 macro_rules! adapters_f {
@@ -344,6 +443,7 @@ macro_rules! adapters_f {
     (@ctype F) => { f64 };
     (@ctype S) => { *const c_char };
     (@ctype B) => { *const u8 };
+    (@ctype H) => { i64 };
     (@ctype L) => { usize };
     (@extract $args:ident $span:ident $fname:ident $idx:tt I $held:ident) => {{
         match &$args[$idx] {
@@ -401,6 +501,27 @@ macro_rules! adapters_f {
             other => {
                 return Err(EvalError::new(
                     format!("`{}`: expected bytes, got `{other}`", $fname),
+                    $span,
+                ));
+            }
+        }
+    }};
+    (@extract $args:ident $span:ident $fname:ident $idx:tt H $held:ident) => {{
+        // Opaque handle id crosses as i64; validity is checked by the
+        // handle registry at call time (use-after-free → clean error).
+        match &$args[$idx] {
+            Value::Int(i) => {
+                if !is_handle_valid(*i) {
+                    return Err(EvalError::new(
+                        format!("`{}`: handle `{i}` is not live (use-after-free)", $fname),
+                        $span,
+                    ));
+                }
+                *i
+            }
+            other => {
+                return Err(EvalError::new(
+                    format!("`{}`: expected handle, got `{other}`", $fname),
                     $span,
                 ));
             }
@@ -445,6 +566,8 @@ fn adapter_for(sig: &CSig) -> Option<Adapter> {
         "IS>i" => c2_is,
         "ISI>i" => c3_isi,
         "B>i" => c1_b,
+        "H>i" => c1_h,
+        "H>v" => c1_h_void,
         "I>f" => c1_i_f,
         _ => return None,
     })
@@ -560,6 +683,13 @@ mod tests {
             return -1;
         }
         h + q
+    }
+    // Opaque handle: t_use_handle consumes a live handle id.
+    extern "C" fn t_use_handle(h: i64) -> i64 {
+        h * 10
+    }
+    extern "C" fn t_use_handle_void(h: i64) {
+        let _ = h;
     }
 
     fn reg(name: &str, f: *mut c_void, params: Vec<CParam>, ret: CRet) {
@@ -748,6 +878,57 @@ mod tests {
         match native_value("cabi_t_add") {
             Some(Value::Native(nf)) => assert_eq!(nf.arity, 2),
             other => panic!("expected native, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_param_crosses_as_i64() {
+        reg(
+            "cabi_t_use_handle",
+            t_use_handle as *mut c_void,
+            vec![CParam::Handle],
+            CRet::Int,
+        );
+        // Register the id as live first (as a plugin would when creating it).
+        assert!(register_handle(42));
+        expect_int("cabi_t_use_handle", vec![Value::Int(42)], 420);
+        // Arity stays ZZ-level: one arg.
+        assert_eq!(arity_of("cabi_t_use_handle"), Some(1));
+    }
+
+    #[test]
+    fn handle_param_use_after_free_errors() {
+        reg(
+            "cabi_t_use_handle",
+            t_use_handle as *mut c_void,
+            vec![CParam::Handle],
+            CRet::Int,
+        );
+        // Do NOT register 99 → simulating a freed/never-created handle.
+        assert!(!is_handle_valid(99));
+        let mut args = vec![Value::Int(99)];
+        match call("cabi_t_use_handle", &mut args, span()) {
+            Some(Err(e)) => assert!(
+                e.message.contains("not live"),
+                "expected use-after-free error, got {e:?}"
+            ),
+            other => panic!("expected use-after-free error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_void_return() {
+        reg(
+            "cabi_t_use_handle_void",
+            t_use_handle_void as *mut c_void,
+            vec![CParam::Handle],
+            CRet::Void,
+        );
+        assert!(register_handle(7));
+        let mut args = vec![Value::Int(7)];
+        match call("cabi_t_use_handle_void", &mut args, span()) {
+            Some(Ok(Value::Unit)) => {}
+            other => panic!("expected Unit, got {other:?}"),
         }
     }
 }

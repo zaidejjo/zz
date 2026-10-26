@@ -35,9 +35,6 @@ pub enum ManifestError {
         func: String,
         ty: String,
     },
-
-    #[error("manifest `{path}`: plugin extern function `{func}` returns str, which is not yet supported — return an int status code and use a getter pattern instead")]
-    StrReturn { path: String, func: String },
 }
 
 /// Parsed metadata from a `.zzi` manifest header.
@@ -214,12 +211,9 @@ fn extern_func_to_sig(
     let ret = match &ef.ret {
         Some(t) => {
             let ty = ast_to_c_type(t);
-            if matches!(ty, Type::Str) {
-                return Err(ManifestError::StrReturn {
-                    path: path.to_string(),
-                    func: ef.name.name.clone(),
-                });
-            }
+            // Owned returns (#234): `bytes`/`str`/`handle` may now be
+            // returned via explicit transfer (caller-owned, freed by the
+            // runtime). All are C-ABI-safe.
             if !is_c_abi_type(&ty) {
                 return Err(ManifestError::NonCType {
                     path: path.to_string(),
@@ -259,6 +253,12 @@ fn ast_to_c_type(t: &zz_frontend::ast::Ty) -> Type {
         TyKind::Array(inner) => Type::Array(Box::new(ast_to_c_type(inner))),
         // Borrowed byte views (#234): spelled `bytes` in the manifest.
         TyKind::Named(name, _) if name == "bytes" => Type::Bytes,
+        // Opaque integer-handle (#234): crosses C as int64_t; runtime tracks
+        // validity so use-after-free → clean ZZ error.
+        TyKind::Named(name, _) if name == "handle" => Type::Handle,
+        // Owned byte/string returns (#234): spelled `bytes`/`str` in return
+        // position. Handled above as their base type; the loader distinguishes
+        // owned return by the transfer convention (see c_sig_of).
         _ => Type::Void, // unknown/non-C types map to Void for C ABI check
     }
 }
@@ -273,6 +273,7 @@ fn is_c_abi_type(t: &Type) -> bool {
             | Type::Bool
             | Type::Str
             | Type::Bytes
+            | Type::Handle
             | Type::Void
             | Type::Unit
             | Type::Ptr { .. }
@@ -401,6 +402,58 @@ extern "C" {
         let load = manifest.funcs.get("load").unwrap();
         assert!(matches!(load.params[0].1, Type::Ptr { mutable: false, .. }));
         assert!(matches!(load.ret, Type::Ptr { mutable: true, .. }));
+    }
+
+    #[test]
+    fn test_bytes_return_accepted() {
+        let f = write_manifest(
+            r#"// Version: 1
+// Rustc: 1.85.0
+// Plugin-version: 0.1.0
+
+extern "C" {
+    fnv_digest(data: bytes) -> bytes
+}
+"#,
+        );
+        let manifest = load_manifest(f.path()).unwrap();
+        let f = manifest.funcs.get("fnv_digest").unwrap();
+        assert!(matches!(f.params[0].1, Type::Bytes));
+        assert!(matches!(f.ret, Type::Bytes));
+    }
+
+    #[test]
+    fn test_str_return_accepted() {
+        let f = write_manifest(
+            r#"// Version: 1
+// Rustc: 1.85.0
+// Plugin-version: 0.1.0
+
+extern "C" {
+    fnv_message() -> str
+}
+"#,
+        );
+        let manifest = load_manifest(f.path()).unwrap();
+        let f = manifest.funcs.get("fnv_message").unwrap();
+        assert!(matches!(f.ret, Type::Str));
+    }
+
+    #[test]
+    fn test_handle_return_accepted() {
+        let f = write_manifest(
+            r#"// Version: 1
+// Rustc: 1.85.0
+// Plugin-version: 0.1.0
+
+extern "C" {
+    zimg_open(path: str) -> handle
+}
+"#,
+        );
+        let manifest = load_manifest(f.path()).unwrap();
+        let f = manifest.funcs.get("zimg_open").unwrap();
+        assert!(matches!(f.ret, Type::Handle));
     }
 
     #[test]

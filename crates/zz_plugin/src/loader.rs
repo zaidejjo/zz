@@ -45,10 +45,12 @@ fn is_plain_ident(name: &str) -> bool {
 }
 
 /// Map a manifest signature to its C-ABI descriptor. Only the scalar
-/// subset travels directly (`int`/`float`/`str` params, `int`/`float`/`void`
-/// returns) plus borrowed `bytes` views (one ZZ arg → `*const u8` + `usize`
-/// C params, no copy, no NUL — the C side must not retain the pointer);
-/// anything else is an actionable load error, never UB.
+/// subset travels directly (`int`/`float`/`str`/`bytes`/`handle` params,
+/// `int`/`float`/`void`/`bytes`/`str`/`handle` returns) plus borrowed `bytes`
+/// views (one ZZ arg → `*const u8` + `usize` C params, no copy, no NUL — the
+/// C side must not retain the pointer); owned `bytes`/`str` returns transfer
+/// ownership to the caller via an out-slot; anything else is an actionable
+/// load error, never UB.
 fn c_sig_of(
     params: &[(String, zz_checker::Type)],
     ret: &zz_checker::Type,
@@ -61,9 +63,10 @@ fn c_sig_of(
             Type::Float => zz_runtime::c_abi::CParam::Float,
             Type::Str => zz_runtime::c_abi::CParam::Str,
             Type::Bytes => zz_runtime::c_abi::CParam::Bytes,
+            Type::Handle => zz_runtime::c_abi::CParam::Handle,
             other => {
                 return Err(format!(
-                    "parameter `{name}` has non-C type `{other}` (C plugins take int/float/str/bytes only)"
+                    "parameter `{name}` has non-C type `{other}` (C plugins take int/float/str/bytes/handle only)"
                 ));
             }
         });
@@ -72,9 +75,15 @@ fn c_sig_of(
         Type::Int => zz_runtime::c_abi::CRet::Int,
         Type::Float => zz_runtime::c_abi::CRet::Float,
         Type::Void | Type::Unit => zz_runtime::c_abi::CRet::Void,
+        // Owned returns (#234): `bytes`/`str`/`handle` transfer ownership to
+        // the caller (freed by the runtime). The C side fills an out-slot
+        // and returns an int status; see c_abi::CRet.
+        Type::Bytes => zz_runtime::c_abi::CRet::Bytes,
+        Type::Str => zz_runtime::c_abi::CRet::Str,
+        Type::Handle => zz_runtime::c_abi::CRet::Handle,
         other => {
             return Err(format!(
-                "return type `{other}` is not C-callable (C plugins return int/float/void only)"
+                "return type `{other}` is not C-callable (C plugins return int/float/void/bytes/str/handle only)"
             ));
         }
     };
@@ -370,11 +379,37 @@ mod tests {
     }
 
     #[test]
-    fn test_c_sig_rejects_str_return() {
+    fn test_c_sig_bytes_return() {
+        use zz_checker::Type;
+        let (params, ret) = sig(vec![("buf", Type::Bytes)], Type::Bytes);
+        let csig = c_sig_of(&params, &ret).unwrap();
+        assert_eq!(csig.params, vec![zz_runtime::c_abi::CParam::Bytes]);
+        assert_eq!(csig.ret, zz_runtime::c_abi::CRet::Bytes);
+    }
+
+    #[test]
+    fn test_c_sig_str_return_owned() {
         use zz_checker::Type;
         let (params, ret) = sig(vec![], Type::Str);
-        let err = c_sig_of(&params, &ret).unwrap_err();
-        assert!(err.contains("not C-callable"), "{err}");
+        let csig = c_sig_of(&params, &ret).unwrap();
+        assert_eq!(csig.ret, zz_runtime::c_abi::CRet::Str);
+    }
+
+    #[test]
+    fn test_c_sig_handle_return_owned() {
+        use zz_checker::Type;
+        let (params, ret) = sig(vec![], Type::Handle);
+        let csig = c_sig_of(&params, &ret).unwrap();
+        assert_eq!(csig.ret, zz_runtime::c_abi::CRet::Handle);
+    }
+
+    #[test]
+    fn test_c_sig_handle_param() {
+        use zz_checker::Type;
+        let (params, ret) = sig(vec![("h", Type::Handle)], Type::Int);
+        let csig = c_sig_of(&params, &ret).unwrap();
+        assert_eq!(csig.params, vec![zz_runtime::c_abi::CParam::Handle]);
+        assert_eq!(csig.ret, zz_runtime::c_abi::CRet::Int);
     }
 
     #[test]

@@ -29,6 +29,10 @@ pub enum Type {
     /// Contiguous byte buffer (produced by `fs.read_bytes`,
     /// `fs.read_chunk_bytes`). Indexes to `int`, slices to `bytes`.
     Bytes,
+    /// Opaque integer-handle exposed to C plugins (#234). Crosses the C ABI
+    /// as `int64_t`; the runtime tracks live handles in a validity registry
+    /// so use-after-free surfaces as a clean ZZ error instead of UB.
+    Handle,
     /// `{K: V}` — dictionary type.
     Dict(Box<Type>, Box<Type>),
     /// `A | B` — union type.
@@ -135,6 +139,7 @@ impl fmt::Display for Type {
             }
             Type::Array(t) => write!(f, "[{t}]"),
             Type::Bytes => write!(f, "bytes"),
+            Type::Handle => write!(f, "handle"),
             Type::Dict(k, v) => write!(f, "{{{k}: {v}}}"),
             Type::Union(ts) => {
                 for (i, t) in ts.iter().enumerate() {

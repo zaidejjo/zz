@@ -69,7 +69,7 @@ impl Flow {
 /// parameters of these types are read-only without walking anything.
 fn type_is_inline(ty: &Type, structs: &HashMap<String, zz_checker::StructSig>) -> bool {
     match ty {
-        Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void => true,
+        Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void | Type::Handle => true,
         Type::Struct(name, _) => {
             // Unboxed (all-scalar, transitively) structs lower to raw C
             // values with no heap refs. Anything else is heap.

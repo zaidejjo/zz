@@ -86,6 +86,9 @@ impl<'a> Lowerer<'a> {
             CheckerType::Unit => IrType::Unit,
             CheckerType::Void => IrType::Void,
             CheckerType::Bytes => IrType::Bytes,
+            // Opaque integer-handle (#234): no HIR layout, carried as int64
+            // at the C ABI. Treat as opaque like `Opaque`.
+            CheckerType::Handle => IrType::Opaque(self.intern("handle")),
             CheckerType::Json => IrType::Json,
             CheckerType::Db => IrType::Db,
             CheckerType::HttpServer => IrType::HttpServer,
