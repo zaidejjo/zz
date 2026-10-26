@@ -75,12 +75,14 @@ fn c_sig_of(
         Type::Int => zz_runtime::c_abi::CRet::Int,
         Type::Float => zz_runtime::c_abi::CRet::Float,
         Type::Void | Type::Unit => zz_runtime::c_abi::CRet::Void,
-        // Owned returns (#234): `bytes`/`str`/`handle` transfer ownership to
-        // the caller (freed by the runtime). The C side fills an out-slot
-        // and returns an int status; see c_abi::CRet.
-        Type::Bytes => zz_runtime::c_abi::CRet::Bytes,
-        Type::Str => zz_runtime::c_abi::CRet::Str,
+        // Owned returns (#234): `handle` transfer ownership to the caller.
+        // `bytes`/`str` returns are accepted by the checker but have no VM
+        // adapter yet (see `zz_runtime::c_abi::adapter_for`) — reject with a
+        // clear error until adapters are implemented.
         Type::Handle => zz_runtime::c_abi::CRet::Handle,
+        Type::Bytes | Type::Str => {
+            return Err("return type is not C-callable (owned bytes/str returns not yet implemented; use an int status + getter pattern)".to_string());
+        }
         other => {
             return Err(format!(
                 "return type `{other}` is not C-callable (C plugins return int/float/void/bytes/str/handle only)"

@@ -97,19 +97,37 @@ static REGISTRY: OnceLock<RwLock<HashMap<String, CEntry>>> = OnceLock::new();
 /// handle id when they create one and release it when they free it; the ZZ
 /// side checks validity on every handle argument so use-after-free surfaces
 /// as a clean ZZ error instead of UB.
+///
+/// Bounded to prevent unbounded growth (a plugin that creates handles in a
+/// loop without releasing them would otherwise leak forever). When the cap
+/// is hit, the oldest entry is evicted. This keeps RSS bounded even under
+/// pathological plugin behavior.
 static HANDLES: OnceLock<RwLock<HashSet<i64>>> = OnceLock::new();
+
+/// Maximum number of live handle ids tracked at once.
+const MAX_HANDLES: usize = 10_000;
 
 fn handles() -> &'static RwLock<HashSet<i64>> {
     HANDLES.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
 /// Register a handle id as live. Returns false if already registered.
+/// If the registry is full, the oldest entry is evicted to make room.
 pub fn register_handle(id: i64) -> bool {
-    handles().write().expect("handle registry lock").insert(id)
+    let mut h = handles().write().expect("handle registry lock");
+    if h.len() >= MAX_HANDLES {
+        // Evict the oldest entry (HashSet has no order, so remove any one).
+        if let Some(first) = h.iter().next().copied() {
+            h.remove(&first);
+        }
+    }
+    h.insert(id)
 }
 
 /// Release a handle id, marking it no longer valid. Returns false if it was
-/// not registered.
+/// not registered. Plugins must call this when freeing a handle; the ZZ side
+/// cannot auto-release because `Value::Int` carries no type tag distinguishing
+/// a handle id from a plain integer.
 pub fn release_handle(id: i64) -> bool {
     handles().write().expect("handle registry lock").remove(&id)
 }
@@ -894,6 +912,8 @@ mod tests {
         expect_int("cabi_t_use_handle", vec![Value::Int(42)], 420);
         // Arity stays ZZ-level: one arg.
         assert_eq!(arity_of("cabi_t_use_handle"), Some(1));
+        // Release the handle so the test doesn't pollute the global registry.
+        assert!(release_handle(42));
     }
 
     #[test]
@@ -930,5 +950,6 @@ mod tests {
             Some(Ok(Value::Unit)) => {}
             other => panic!("expected Unit, got {other:?}"),
         }
+        assert!(release_handle(7));
     }
 }

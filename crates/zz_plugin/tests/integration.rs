@@ -207,7 +207,7 @@ extern "C" {
 }
 
 #[test]
-fn test_manifest_str_return_rejected_with_guidance() {
+fn test_manifest_str_return_accepted() {
     let f = write_manifest(
         r#"// Version: 1
 // Rustc: 1.85.0
@@ -219,10 +219,7 @@ extern "C" {
 "#,
     );
 
-    let err = zz_plugin::load_manifest(f.path()).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("returns str") && msg.contains("getter pattern"),
-        "expected str-return guidance, got: {msg}"
-    );
+    let manifest = zz_plugin::load_manifest(f.path()).unwrap();
+    let f = manifest.funcs.get("toy.greet").unwrap();
+    assert!(matches!(f.ret, zz_checker::Type::Str));
 }
