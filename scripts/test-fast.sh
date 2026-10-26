@@ -36,6 +36,9 @@ cargo test -p zz_cli \
 	--test native_build \
 	--test performance_check_regression
 
+echo "== hermetic Rust plugin (both engines) =="
+cargo test -p zz_cli --test rust_plugin_e2e
+
 echo "== parity (VM leg only; native leg needs --native builds) =="
 ZZ_PARITY_VM_ONLY=1 cargo test -p zz_cli --test dual_engine_parity
 
