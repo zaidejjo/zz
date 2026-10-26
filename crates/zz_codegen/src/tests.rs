@@ -1026,6 +1026,70 @@ println(p.x)
     assert_eq!(out, "10\n20\n99\n");
 }
 
+/// Issue #557: module-scope binding method call on chunk.
+///
+/// `a := .some(11); b := a.unwrap_or(0)` lowers to
+/// `CallPath ["top2.a", "unwrap_or"]`. The chunk backend must split
+/// this into `("option", "unwrap_or")` and resolve to `zz_option_unwrap_or`,
+/// matching the VM's static method dispatch (#508 pattern extended to
+/// module-scope bindings and match-arm bindings).
+#[test]
+fn native_module_scope_method_call() {
+    let src = r#"
+a := .some(11)
+b := a.unwrap_or(0)
+println(b)
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "11\n");
+}
+
+#[test]
+fn native_module_scope_method_call_none() {
+    let src = r#"
+a := .none
+b := a.unwrap_or(0)
+println(b)
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "0\n");
+}
+
+#[test]
+fn native_match_arm_method_call() {
+    let src = r#"
+func main() {
+    o := .some(.some(5))
+    v := match o {
+        .some(inner) => inner.unwrap_or(0),
+        .none => 0,
+    }
+    println(v)
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn native_method_call_on_value_receiver() {
+    let src = r#"
+func main() {
+    o := .some(.some(5))
+    v := match o {
+        .some(inner) => inner.unwrap_or(0),
+        .none => 0,
+    }
+    println(v)
+    o2 := .none
+    v2 := o2.unwrap_or(99)
+    println(v2)
+}
+"#;
+    let (_, out) = native_run(src);
+    assert_eq!(out, "5\n99\n");
+}
+
 #[test]
 fn native_closure_env_capture() {
     // Closures capture by reference (match the VM): mutations through the
