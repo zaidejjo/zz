@@ -503,6 +503,8 @@ mod tests {
         manifest.dependencies.insert(
             "local_dep".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "../local_dep".to_string(),
             }),
         );
@@ -716,6 +718,8 @@ mod tests {
         manifest.dependencies.insert(
             "some_dep".to_string(),
             DepSpec::Git(crate::manifest::GitDep {
+                features: Vec::new(),
+                optional: false,
                 version: "^1.0".to_string(),
                 git: "https://github.com/example/repo.git".to_string(),
                 rev: "main".to_string(),

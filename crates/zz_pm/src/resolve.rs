@@ -222,15 +222,15 @@ pub fn resolve_with(
             }
         }
         match spec {
-            DepSpec::Version(version_req) => match &opts.registry {
+            DepSpec::Version(v) => match &opts.registry {
                 RegistrySource::Offline => {
                     return Err(ResolveError::RegistryUnsupported {
                         name: name.clone(),
-                        version_req: version_req.clone(),
+                        version_req: v.version.clone(),
                     });
                 }
                 RegistrySource::Remote(base) => {
-                    let pinned = resolve_registry_dep(name, version_req, lockfile, base)?;
+                    let pinned = resolve_registry_dep(name, &v.version, lockfile, base)?;
                     locked.push(pinned);
                 }
             },
@@ -714,7 +714,7 @@ fn resolve_transitive_dep(
                     let DepSpec::Version(v) = &r.spec else {
                         unreachable!()
                     };
-                    (r.parent.clone(), v.clone())
+                    (r.parent.clone(), v.version.clone())
                 })
                 .collect();
             // Lock-first: a usable pin satisfying every known req is
@@ -886,7 +886,7 @@ fn transitive_path_target(
 /// Human description of a dep spec for conflict messages.
 fn dep_spec_desc(spec: &DepSpec) -> String {
     match spec {
-        DepSpec::Version(v) => format!("registry `{v}`"),
+        DepSpec::Version(v) => format!("registry `{}`", v.version),
         DepSpec::Git(g) => format!("git {}#{}", g.git, g.rev),
         DepSpec::Path(p) => format!("path `{}`", p.path),
     }
@@ -956,7 +956,7 @@ fn choice_satisfies(
                 let DepSpec::Version(v) = &r.spec else {
                     return false;
                 };
-                version_satisfies(&choice.version, v)
+                version_satisfies(&choice.version, &v.version)
             })
         }
         DepSpec::Git(_) => rs.iter().all(|r| {
@@ -1552,9 +1552,13 @@ mod tests {
     #[test]
     fn registry_unsupported_error() {
         let mut manifest = Manifest::default();
-        manifest
-            .dependencies
-            .insert("foo".to_string(), DepSpec::Version("^1.2.0".to_string()));
+        manifest.dependencies.insert(
+            "foo".to_string(),
+            DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.2.0".to_string(),
+                ..Default::default()
+            }),
+        );
 
         // Plain resolve() is offline: registry deps error without network.
         let err = resolve(&manifest, None, std::path::Path::new(".")).unwrap_err();
@@ -1571,6 +1575,8 @@ mod tests {
         manifest.dependencies.insert(
             "missing".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "../nonexistent".to_string(),
             }),
         );
@@ -1598,6 +1604,8 @@ mod tests {
         manifest.dependencies.insert(
             "dep_a".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "dep_a".to_string(),
             }),
         );
@@ -1625,6 +1633,8 @@ mod tests {
         manifest.dependencies.insert(
             "dep_b".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "dep_b".to_string(),
             }),
         );
@@ -1673,11 +1683,16 @@ mod tests {
     fn source_kinds_classify() {
         // #266: only the provider matters for staleness, not URLs/versions.
         assert_eq!(
-            spec_source_kind(&DepSpec::Version("^1.0".to_string())),
+            spec_source_kind(&DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.0".to_string(),
+                ..Default::default()
+            })),
             "registry"
         );
         assert_eq!(
             spec_source_kind(&DepSpec::Git(GitDep {
+                features: Vec::new(),
+                optional: false,
                 version: "1.0.0".to_string(),
                 git: "https://example.com/r.git".to_string(),
                 rev: "main".to_string(),
@@ -1686,6 +1701,8 @@ mod tests {
         );
         assert_eq!(
             spec_source_kind(&DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "../x".to_string(),
             })),
             "path"
@@ -1714,6 +1731,8 @@ mod tests {
         manifest.dependencies.insert(
             "mylib".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "mylib".to_string(),
             }),
         );
@@ -1747,6 +1766,8 @@ mod tests {
         manifest.dependencies.insert(
             "mylib".to_string(),
             DepSpec::Git(GitDep {
+                features: Vec::new(),
+                optional: false,
                 version: "1.0.0".to_string(),
                 git: "file:///tmp/zz-pm-nonexistent-repo".to_string(),
                 rev: "main".to_string(),
@@ -1780,9 +1801,13 @@ mod tests {
         // the base URL is unreachable and must never be contacted.
         let d = tmp();
         let mut manifest = Manifest::default();
-        manifest
-            .dependencies
-            .insert("foo".to_string(), DepSpec::Version("^1.0".to_string()));
+        manifest.dependencies.insert(
+            "foo".to_string(),
+            DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.0".to_string(),
+                ..Default::default()
+            }),
+        );
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {
             name: "foo".to_string(),
@@ -1838,9 +1863,13 @@ mod tests {
 
         let d = tmp();
         let mut manifest = Manifest::default();
-        manifest
-            .dependencies
-            .insert("foo".to_string(), DepSpec::Version("^1.0".to_string()));
+        manifest.dependencies.insert(
+            "foo".to_string(),
+            DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.0".to_string(),
+                ..Default::default()
+            }),
+        );
         let opts = ResolveOptions::remote(&base);
         let resolved = resolve_with(&manifest, None, &d, &opts).unwrap();
         assert_eq!(resolved.locked.len(), 1);
@@ -1881,7 +1910,13 @@ mod tests {
     #[test]
     fn circular_dep_detection_self_ref() {
         let mut deps = std::collections::HashMap::new();
-        deps.insert("foo".to_string(), DepSpec::Version("^1.0".to_string()));
+        deps.insert(
+            "foo".to_string(),
+            DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.0".to_string(),
+                ..Default::default()
+            }),
+        );
         // The shallow pre-check never false-positives; real cycles
         // (including self-references through manifests) surface from the
         // closure walk's `check_closure_cycles`.
@@ -1919,6 +1954,8 @@ mod tests {
         manifest.dependencies.insert(
             dep.to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: rel.to_string(),
             }),
         );
@@ -2015,12 +2052,16 @@ mod tests {
         manifest.dependencies.insert(
             "mid".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "mid".to_string(),
             }),
         );
         manifest.dependencies.insert(
             "leaf".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "leaf".to_string(),
             }),
         );
@@ -2051,12 +2092,16 @@ mod tests {
         manifest.dependencies.insert(
             "mid".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "mid".to_string(),
             }),
         );
         manifest.dependencies.insert(
             "leaf".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "leaf".to_string(),
             }),
         );
@@ -2182,12 +2227,16 @@ mod tests {
         manifest.dependencies.insert(
             "a".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "a".to_string(),
             }),
         );
         manifest.dependencies.insert(
             "b".to_string(),
             DepSpec::Path(PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "b".to_string(),
             }),
         );

@@ -517,10 +517,16 @@ pub fn add(args: &[String]) -> Result<(), String> {
 
     // Build the dep spec
     let dep_spec = if let Some(p) = path_dep {
-        zz_pm::manifest::DepSpec::Path(zz_pm::manifest::PathDep { path: p })
+        zz_pm::manifest::DepSpec::Path(zz_pm::manifest::PathDep {
+            path: p,
+            features: Vec::new(),
+            optional: false,
+        })
     } else if let Some(url) = git_url {
         let rev = git_rev.unwrap_or_else(|| "main".to_string());
         zz_pm::manifest::DepSpec::Git(zz_pm::manifest::GitDep {
+            features: Vec::new(),
+            optional: false,
             version: version.clone().unwrap_or_else(|| "*".into()),
             git: url,
             rev,
@@ -542,7 +548,10 @@ pub fn add(args: &[String]) -> Result<(), String> {
                 }
                 None => resolve_latest_req(&pkg_name, registry_base_from(args))?,
             };
-            zz_pm::manifest::DepSpec::Version(req)
+            zz_pm::manifest::DepSpec::Version(zz_pm::manifest::VersionDep {
+                version: req,
+                ..Default::default()
+            })
         }
     };
 
@@ -1645,7 +1654,7 @@ fn docs_source(dir: &std::path::Path) -> String {
 
 fn dep_spec_string(spec: &zz_pm::manifest::DepSpec) -> String {
     match spec {
-        zz_pm::manifest::DepSpec::Version(v) => v.clone(),
+        zz_pm::manifest::DepSpec::Version(v) => v.version.clone(),
         zz_pm::manifest::DepSpec::Git(g) => format!("git+{}#{}", g.git, g.rev),
         zz_pm::manifest::DepSpec::Path(p) => format!("path:{}", p.path),
     }
@@ -1730,38 +1739,40 @@ pub fn update(args: &[String]) -> Result<(), String> {
                     .map(|l| l.version.clone())
                     .unwrap_or_default();
                 match client.fetch_metadata(name) {
-                    Ok(info) => match zz_pm::remote::pick_version(&info.metadata.versions, req) {
-                        Ok(picked) => {
-                            if picked != current {
-                                let expected = zz_pm::remote::expected_sha(&info, &picked);
-                                lock.upsert(zz_pm::lock::LockedDep {
-                                    name: (*name).clone(),
-                                    version: picked.clone(),
-                                    source: format!("registry+{base}/{name}#{picked}"),
-                                    hash: expected,
-                                    commit: None,
-                                    native: None,
-                                });
-                                changed = true;
-                                println!("    {name}: {current} → {picked}");
-                            } else {
-                                println!("    {name} is up to date ({current})");
-                                // #295: a newer release exists but the manifest
-                                // requirement excludes it — name the blocker
-                                // instead of no-op silence that contradicts
-                                // `zz outdated`.
-                                if !info.metadata.latest.is_empty()
-                                    && info.metadata.latest != picked
-                                {
-                                    println!(
+                    Ok(info) => {
+                        match zz_pm::remote::pick_version(&info.metadata.versions, &req.version) {
+                            Ok(picked) => {
+                                if picked != current {
+                                    let expected = zz_pm::remote::expected_sha(&info, &picked);
+                                    lock.upsert(zz_pm::lock::LockedDep {
+                                        name: (*name).clone(),
+                                        version: picked.clone(),
+                                        source: format!("registry+{base}/{name}#{picked}"),
+                                        hash: expected,
+                                        commit: None,
+                                        native: None,
+                                    });
+                                    changed = true;
+                                    println!("    {name}: {current} → {picked}");
+                                } else {
+                                    println!("    {name} is up to date ({current})");
+                                    // #295: a newer release exists but the manifest
+                                    // requirement excludes it — name the blocker
+                                    // instead of no-op silence that contradicts
+                                    // `zz outdated`.
+                                    if !info.metadata.latest.is_empty()
+                                        && info.metadata.latest != picked
+                                    {
+                                        println!(
                                         "    note: {} exists but requirement `{req}` excludes it — edit zz.toml to widen it",
                                         info.metadata.latest
                                     );
+                                    }
                                 }
                             }
+                            Err(e) => eprintln!("    warning: {e}"),
                         }
-                        Err(e) => eprintln!("    warning: {e}"),
-                    },
+                    }
                     Err(e) => eprintln!("    warning: failed to check {name}: {e}"),
                 }
             }
@@ -2007,7 +2018,7 @@ pub fn outdated(args: &[String]) -> Result<(), String> {
         .dependencies
         .iter()
         .filter_map(|(name, spec)| match spec {
-            zz_pm::manifest::DepSpec::Version(req) => Some((name, req)),
+            zz_pm::manifest::DepSpec::Version(req) => Some((name, &req.version)),
             _ => None,
         })
         .collect();
@@ -2175,7 +2186,7 @@ fn dep_version_label(
         return format!("{} ({})", locked.version, dep_source_label(&locked.source));
     }
     match manifest.dependencies.get(name) {
-        Some(zz_pm::manifest::DepSpec::Version(req)) => format!("{req} (unresolved)"),
+        Some(zz_pm::manifest::DepSpec::Version(req)) => format!("{} (unresolved)", req.version),
         Some(zz_pm::manifest::DepSpec::Git(_)) => "git (unresolved)".to_string(),
         Some(zz_pm::manifest::DepSpec::Path(_)) => "path (unresolved)".to_string(),
         None => "?".to_string(),

@@ -48,13 +48,19 @@ impl RegistryEntry {
     /// entry names no usable source (neither `path` nor `git`).
     pub fn to_dep_spec(&self) -> Option<DepSpec> {
         if let Some(path) = &self.path {
-            return Some(DepSpec::Path(PathDep { path: path.clone() }));
+            return Some(DepSpec::Path(PathDep {
+                path: path.clone(),
+                features: Vec::new(),
+                optional: false,
+            }));
         }
         if let Some(git) = &self.git {
             return Some(DepSpec::Git(GitDep {
                 version: self.version.clone().unwrap_or_else(|| "*".to_string()),
                 git: git.clone(),
                 rev: self.rev.clone().unwrap_or_else(|| "main".to_string()),
+                features: Vec::new(),
+                optional: false,
             }));
         }
         None

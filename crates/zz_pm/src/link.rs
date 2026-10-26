@@ -576,9 +576,13 @@ mod tests {
         fs::write(cas_dir.join("lib.zz"), "pub func hello() {}").unwrap();
 
         let mut manifest = Manifest::default();
-        manifest
-            .dependencies
-            .insert("mylib".to_string(), DepSpec::Version("^1.0".to_string()));
+        manifest.dependencies.insert(
+            "mylib".to_string(),
+            DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.0".to_string(),
+                ..Default::default()
+            }),
+        );
 
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {
@@ -619,6 +623,8 @@ mod tests {
         manifest.dependencies.insert(
             "mylib".to_string(),
             DepSpec::Path(crate::manifest::PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "../mylib".to_string(),
             }),
         );
@@ -655,9 +661,13 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
 
         let mut manifest = Manifest::default();
-        manifest
-            .dependencies
-            .insert("mylib".to_string(), DepSpec::Version("^1.0".to_string()));
+        manifest.dependencies.insert(
+            "mylib".to_string(),
+            DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.0".to_string(),
+                ..Default::default()
+            }),
+        );
 
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {
@@ -708,6 +718,8 @@ mod tests {
         manifest.dependencies.insert(
             "mid".to_string(),
             DepSpec::Path(crate::manifest::PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "../mid".to_string(),
             }),
         );
@@ -755,6 +767,8 @@ mod tests {
         manifest.dependencies.insert(
             "mid".to_string(),
             DepSpec::Path(crate::manifest::PathDep {
+                features: Vec::new(),
+                optional: false,
                 path: "../mid".to_string(),
             }),
         );
@@ -799,9 +813,13 @@ mod tests {
         fs::create_dir_all(&cas_dir).unwrap();
 
         let mut manifest = Manifest::default();
-        manifest
-            .dependencies
-            .insert("mylib".to_string(), DepSpec::Version("^1.0".to_string()));
+        manifest.dependencies.insert(
+            "mylib".to_string(),
+            DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.0".to_string(),
+                ..Default::default()
+            }),
+        );
 
         let mut lock = Lockfile::new();
         lock.upsert(LockedDep {

@@ -20,7 +20,7 @@
 //! optional: manifests written before they existed still parse, and
 //! `save()` omits them while empty so diffs stay minimal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,12 @@ pub struct Manifest {
     pub package: PackageSpec,
     #[serde(default)]
     pub dependencies: HashMap<String, DepSpec>,
+    /// Named feature gates (issue #488). Each feature maps to the
+    /// modules/files it exposes and/or the optional sub-dependencies it
+    /// pulls in. Absent (or empty) → today's behavior: every declared
+    /// dependency is active, zero migration.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub features: HashMap<String, FeatureSpec>,
     /// Native build configuration for packages that provide C/Rust extensions.
     #[serde(default)]
     pub native: Option<NativeSpec>,
@@ -74,9 +80,31 @@ impl Default for Manifest {
                 entry: None,
             },
             dependencies: HashMap::new(),
+            features: HashMap::new(),
             native: None,
         }
     }
+}
+
+/// One feature gate: the modules/files it exposes and/or the optional
+/// sub-dependencies it pulls in.
+///
+/// ```toml
+/// [features]
+/// default = ["std"]
+/// locales-ar = { modules = ["locales/ar"], deps = ["faker_locales_ar"] }
+/// locales-fr = { modules = ["locales/fr"], deps = ["faker_locales_fr"] }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FeatureSpec {
+    /// Modules/files this feature makes available (e.g. `locales/ar`).
+    /// Used by the compiler to name the feature to enable on a failed
+    /// `import` of a non-enabled module.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
+    /// Optional dependencies this feature pulls in (by dep name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
 }
 
 /// Package metadata.
@@ -595,14 +623,22 @@ fn parse_dotted(s: &str) -> Option<(u32, u32)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
-/// Dependency specification — three variants.
+/// Dependency specification — three variants. Every variant carries
+/// `optional` and `features` so a dependency can be gated behind a
+/// `[features]` set (issue #488). A non-optional dependency is always
+/// active; an optional one is resolved/compiled only when at least one of
+/// its `features` is enabled (or it is listed in an enabled feature's
+/// `deps`).
+///
+/// ```toml
+/// [dependencies]
+/// faker = { version = "^1.0", optional = true, features = ["locales-ar"] }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum DepSpec {
-    /// Simple version range: `"^1.2.0"`, or the table form
-    /// `{ version = "^1.2.0" }` (#419: `[dependencies.x]` tables and
-    /// Cargo-style inline tables spell the same registry dep).
-    Version(#[serde(deserialize_with = "version_or_table")] String),
+    /// Registry dependency.
+    Version(VersionDep),
     /// Git dependency with version constraint.
     Git(GitDep),
     /// Path dependency (local filesystem).
@@ -615,67 +651,119 @@ pub enum DepSpec {
     Path(PathDep),
 }
 
+/// Registry (version) dependency.
+///
+/// The bare-string form `foo = "^1.2.0"` is accepted on input and
+/// re-serialized as `{ version = "^1.2.0" }` (optional/features omitted
+/// when at their defaults), so existing manifests keep round-tripping.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct VersionDep {
+    pub version: String,
+    /// When `true`, the dep is only resolved/compiled when one of its
+    /// `features` is enabled. Default `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+    /// Feature names (from `[features]`) that pull this dep in.
+    /// Default `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for VersionDep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct VersionDepVisitor;
+        impl<'de> serde::de::Visitor<'de> for VersionDepVisitor {
+            type Value = VersionDep;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a version string or `{ version = \"...\" }`")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<VersionDep, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(VersionDep {
+                    version: v.to_string(),
+                    ..Default::default()
+                })
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<VersionDep, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(VersionDep {
+                    version: v,
+                    ..Default::default()
+                })
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<VersionDep, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let table =
+                    VersionTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(VersionDep {
+                    version: table.version,
+                    optional: table.optional,
+                    features: table.features,
+                })
+            }
+        }
+        deserializer.deserialize_any(VersionDepVisitor)
+    }
+}
+
+/// `is_false` helper for `skip_serializing_if`.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl std::fmt::Display for VersionDep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.version)
+    }
+}
+
 /// `{ version = "x" }` table with unknown keys denied: extras (a `git`
-/// without `rev`, a stray `features`) must stay loud errors rather than
-/// silently degrading to a registry dep.
+/// without `rev`, a stray key) must stay loud errors rather than silently
+/// degrading to a registry dep. `optional` and `features` are the only
+/// extra keys permitted here.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VersionTable {
     version: String,
-}
-
-/// Accept a bare version string or its table form for `DepSpec::Version`.
-/// Serialization stays canonical (plain string); only parsing widens.
-fn version_or_table<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct VersionOrTable;
-    impl<'de> serde::de::Visitor<'de> for VersionOrTable {
-        type Value = String;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a version string or `{ version = \"...\" }`")
-        }
-
-        fn visit_str<E>(self, v: &str) -> Result<String, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v.to_string())
-        }
-
-        fn visit_string<E>(self, v: String) -> Result<String, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v)
-        }
-
-        fn visit_map<A>(self, map: A) -> Result<String, A::Error>
-        where
-            A: serde::de::MapAccess<'de>,
-        {
-            let table =
-                VersionTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-            Ok(table.version)
-        }
-    }
-    deserializer.deserialize_any(VersionOrTable)
+    #[serde(default)]
+    optional: bool,
+    #[serde(default)]
+    features: Vec<String>,
 }
 
 /// Git dependency spec.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct GitDep {
     pub version: String,
     pub git: String,
     pub rev: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 /// Path dependency spec.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PathDep {
     pub path: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 impl Manifest {
@@ -713,6 +801,88 @@ impl Manifest {
         self.dependencies
             .values()
             .any(|d| matches!(d, DepSpec::Path(_)))
+    }
+
+    /// Names of features enabled by `requested`, unioned with the `default`
+    /// feature when a `[features]` section exists.
+    ///
+    /// Returns an empty set when the manifest has no `[features]` section;
+    /// callers treat that as "no gating" (every dependency active).
+    pub fn enabled_features(&self, requested: &[String]) -> HashSet<String> {
+        if self.features.is_empty() {
+            return HashSet::new();
+        }
+        let mut enabled: HashSet<String> = requested.iter().cloned().collect();
+        if self.features.contains_key("default") {
+            enabled.insert("default".to_string());
+        }
+        enabled
+    }
+
+    /// Whether one dependency spec is active under `enabled_features`.
+    ///
+    /// A non-optional dependency is always active. An optional dependency
+    /// is active when one of its `features` is enabled, or when it is
+    /// listed in an enabled feature's `deps`.
+    pub fn is_dep_active(
+        &self,
+        dep_name: &str,
+        spec: &DepSpec,
+        enabled_features: &HashSet<String>,
+    ) -> bool {
+        let (optional, dep_features) = match spec {
+            DepSpec::Version(v) => (v.optional, &v.features),
+            DepSpec::Git(g) => (g.optional, &g.features),
+            DepSpec::Path(p) => (p.optional, &p.features),
+        };
+        if !optional {
+            return true;
+        }
+        if dep_features.iter().any(|f| enabled_features.contains(f)) {
+            return true;
+        }
+        // Pulled in by an enabled feature's `deps` list.
+        self.features.iter().any(|(fname, fspec)| {
+            enabled_features.contains(fname) && fspec.deps.iter().any(|d| d == dep_name)
+        })
+    }
+
+    /// Modules (from `[features].*.modules`) exposed by the enabled
+    /// features, used by the compiler to name the feature to enable when
+    /// an `import` targets a non-enabled module. Returns every declared
+    /// module when there is no `[features]` section (no gating).
+    pub fn enabled_modules(&self, enabled_features: &HashSet<String>) -> HashSet<String> {
+        if self.features.is_empty() {
+            return self
+                .features
+                .values()
+                .flat_map(|f| f.modules.iter().cloned())
+                .collect();
+        }
+        self.features
+            .iter()
+            .filter_map(|(fname, fspec)| {
+                enabled_features
+                    .contains(fname)
+                    .then_some(fspec.modules.clone())
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The feature name(s) that expose `module`, empty when the module is
+    /// not gated behind any feature (or no `[features]` section exists).
+    pub fn features_for_module(&self, module: &str) -> Vec<String> {
+        self.features
+            .iter()
+            .filter_map(|(fname, fspec)| {
+                fspec
+                    .modules
+                    .iter()
+                    .any(|m| m == module)
+                    .then_some(fname.clone())
+            })
+            .collect()
     }
 
     /// Enforce this manifest's minimum-compiler requirement, if any.
@@ -805,6 +975,7 @@ impl Manifest {
                 entry: None,
             },
             dependencies: HashMap::new(),
+            features: HashMap::new(),
             native: None,
         };
         let path = dir.join("zz.toml");
@@ -927,10 +1098,18 @@ mod tests {
             },
             dependencies: {
                 let mut d = HashMap::new();
-                d.insert("foo".into(), DepSpec::Version("^1.2.0".into()));
+                d.insert(
+                    "foo".into(),
+                    DepSpec::Version(VersionDep {
+                        version: "^1.2.0".into(),
+                        ..Default::default()
+                    }),
+                );
                 d.insert(
                     "bar".into(),
                     DepSpec::Git(GitDep {
+                        features: Vec::new(),
+                        optional: false,
                         version: "2.0".into(),
                         git: "https://github.com/user/repo".into(),
                         rev: "main".into(),
@@ -939,11 +1118,14 @@ mod tests {
                 d.insert(
                     "baz".into(),
                     DepSpec::Path(PathDep {
+                        features: Vec::new(),
+                        optional: false,
                         path: "../baz".into(),
                     }),
                 );
                 d
             },
+            features: HashMap::new(),
             native: None,
         };
 
@@ -980,15 +1162,24 @@ inline_table = { version = "^2.0.0" }
         .expect("mixed dependency spellings must parse");
         assert_eq!(
             m.dependencies.get("rand"),
-            Some(&DepSpec::Version("^0.4.1".to_string()))
+            Some(&DepSpec::Version(VersionDep {
+                version: "^0.4.1".to_string(),
+                ..Default::default()
+            }))
         );
         assert_eq!(
             m.dependencies.get("inline_bare"),
-            Some(&DepSpec::Version("^1.0.0".to_string()))
+            Some(&DepSpec::Version(VersionDep {
+                version: "^1.0.0".to_string(),
+                ..Default::default()
+            }))
         );
         assert_eq!(
             m.dependencies.get("inline_table"),
-            Some(&DepSpec::Version("^2.0.0".to_string()))
+            Some(&DepSpec::Version(VersionDep {
+                version: "^2.0.0".to_string(),
+                ..Default::default()
+            }))
         );
         assert!(matches!(
             m.dependencies.get("faker"),
@@ -1000,15 +1191,51 @@ inline_table = { version = "^2.0.0" }
     fn version_table_extras_stay_loud() {
         // Unknown keys must not silently degrade to a registry dep: a
         // `git` without `rev` (or any stray key) is still an error.
-        for bad in [
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", git = \"https://example.com/r\" }\n",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", features = [\"a\"] }\n",
-        ] {
-            assert!(
-                Manifest::parse(bad).is_err(),
-                "extra keys must not parse silently: {bad}"
-            );
-        }
+        // `optional`/`features` are explicitly allowed now (#488).
+        let bad = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", git = \"https://example.com/r\" }\n";
+        assert!(
+            Manifest::parse(bad).is_err(),
+            "extra keys must not parse silently: {bad}"
+        );
+    }
+
+    #[test]
+    fn version_table_optional_and_features_parse() {
+        // #488: `optional` and `features` are legal on a version table.
+        let m = Manifest::parse(
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { version = \"^1.0\", optional = true, features = [\"locales-ar\"] }\n",
+        )
+        .expect("optional/features must parse");
+        assert_eq!(
+            m.dependencies.get("dep"),
+            Some(&DepSpec::Version(VersionDep {
+                version: "^1.0".to_string(),
+                optional: true,
+                features: vec!["locales-ar".to_string()],
+            }))
+        );
+    }
+
+    #[test]
+    fn bare_string_version_still_round_trips() {
+        // #488 zero-migration: `foo = "^1.0"` parses and re-serializes as
+        // `{ version = "^1.0" }` with optional/features omitted.
+        let m = Manifest::parse(
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\nfoo = \"^1.0\"\n",
+        )
+        .unwrap();
+        let d = std::env::temp_dir().join(format!("zz_rt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("zz.toml");
+        m.save(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("version = \"^1.0\""));
+        assert!(!content.contains("optional"));
+        assert!(!content.contains("features"));
+        let reloaded = Manifest::load(&path).unwrap();
+        assert_eq!(m, reloaded);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -1237,6 +1464,7 @@ foo = "^1.0"
                 entry: Some("src/cli.zz".into()),
             },
             dependencies: HashMap::new(),
+            features: HashMap::new(),
             native: None,
         };
 

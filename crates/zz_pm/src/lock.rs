@@ -316,7 +316,10 @@ mod tests {
         let mut deps = std::collections::HashMap::new();
         deps.insert(
             "foo".to_string(),
-            crate::manifest::DepSpec::Version("^1.0".into()),
+            crate::manifest::DepSpec::Version(crate::manifest::VersionDep {
+                version: "^1.0".into(),
+                ..Default::default()
+            }),
         );
         let manifest = crate::manifest::Manifest {
             package: crate::manifest::PackageSpec {
@@ -332,6 +335,7 @@ mod tests {
                 entry: None,
             },
             dependencies: deps,
+            features: std::collections::HashMap::new(),
             native: None,
         };
 
