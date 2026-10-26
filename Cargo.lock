@@ -3765,6 +3765,7 @@ dependencies = [
  "tar",
  "toml",
  "ureq",
+ "zz_frontend",
 ]
 
 [[package]]

@@ -14,13 +14,17 @@
 //! foo = "^1.2.0"
 //! bar = { version = "2.0", git = "https://github.com/user/repo", rev = "main" }
 //! baz = { path = "../baz" }
+//!
+//! [collect.commands]
+//! dir = "commands"
+//! sig = "func(args: [str]) -> int"
 //! ```
 //!
 //! The `authors`, `description`, `license`, and `repository` keys are
 //! optional: manifests written before they existed still parse, and
 //! `save()` omits them while empty so diffs stay minimal.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +60,15 @@ pub struct Manifest {
     /// Native build configuration for packages that provide C/Rust extensions.
     #[serde(default)]
     pub native: Option<NativeSpec>,
+    /// Directory-based typed registries (`[collect.<name>]`). Sorted map
+    /// keeps manifest emission deterministic. Empty (the common case)
+    /// omits the key entirely.
+    #[serde(
+        default,
+        rename = "collect",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub collections: BTreeMap<String, CollectionSpec>,
 }
 
 impl Default for Manifest {
@@ -75,8 +88,321 @@ impl Default for Manifest {
             },
             dependencies: HashMap::new(),
             native: None,
+            collections: BTreeMap::new(),
         }
     }
+}
+
+/// A directory-based typed registry declared as `[collect.<name>]`.
+///
+/// Every `*.zz` file directly inside `dir` is a member. The compiler
+/// synthesizes a module with `get(name)` / `all()` accessors; members must
+/// export `pub <export>` (default `run`) with the signature in `sig`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CollectionSpec {
+    /// Member directory, relative to the package root.
+    pub dir: String,
+    /// Required member signature: a function type (`func([str]) -> int`)
+    /// or a function declaration shape (`func run(args: [str]) -> int`).
+    pub sig: String,
+    /// Member naming strategy. v1 supports `"file"` only (file stem,
+    /// with `-` normalized to `_`).
+    #[serde(default = "default_collection_name")]
+    pub name: String,
+    /// Required exported function name (default `run`).
+    #[serde(default = "default_collection_export")]
+    pub export: String,
+}
+
+fn default_collection_name() -> String {
+    "file".to_string()
+}
+
+fn default_collection_export() -> String {
+    "run".to_string()
+}
+
+/// A discovered collection member.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionMember {
+    /// Identifier the member is registered under (`get("<name>")`).
+    pub name: String,
+    /// Path to the member source file.
+    pub path: PathBuf,
+    /// File stem as written on disk (for diagnostics; `foo-bar.zz`).
+    pub file: String,
+}
+
+impl CollectionSpec {
+    /// Validate the spec against a package root: `dir` containment/existence,
+    /// supported `name` mode, identifier-shaped `export`, and a `sig` that
+    /// parses through the real frontend grammar into a function type.
+    pub fn validate(&self, pkg_root: &Path) -> Result<(), String> {
+        if self.name != "file" {
+            return Err(format!(
+                "invalid [collect]: `name = \"{}\"` is not supported\n\
+                 hint: v1 supports only `name = \"file\"` (member name = file stem)",
+                self.name
+            ));
+        }
+        if !is_identifier(&self.export) {
+            return Err(format!(
+                "invalid [collect]: `export = \"{}\"` is not a valid identifier",
+                self.export
+            ));
+        }
+        let rel = Path::new(&self.dir);
+        if self.dir.is_empty()
+            || rel.is_absolute()
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!(
+                "invalid [collect]: `dir = \"{}\"` must be relative and stay inside the package",
+                self.dir
+            ));
+        }
+        let dir = pkg_root.join(rel);
+        if !dir.is_dir() {
+            return Err(format!(
+                "invalid [collect]: `dir = \"{}\"` does not exist or is not a directory\n\
+                 hint: create the directory or fix the path in zz.toml",
+                self.dir
+            ));
+        }
+        // Symlink escape: the directory itself must stay inside the package.
+        let root_canon = pkg_root
+            .canonicalize()
+            .unwrap_or_else(|_| pkg_root.to_path_buf());
+        if let Ok(dir_canon) = dir.canonicalize() {
+            if !dir_canon.starts_with(&root_canon) {
+                return Err(format!(
+                    "invalid [collect]: `dir = \"{}\"` escapes the package (symlink)",
+                    self.dir
+                ));
+            }
+        }
+        self.parsed_signature().map(|_| ())
+    }
+
+    /// Parse `sig` through the frontend parser and return the function type.
+    ///
+    /// Both spellings are accepted:
+    /// - type form: `func([str]) -> int`
+    /// - declaration form: `func run(args: [str]) -> int` (also the
+    ///   issue's `func(args: [str]) -> int` spelling, where `args` is a
+    ///   parameter name).
+    pub fn parsed_signature(&self) -> Result<zz_frontend::ast::Ty, String> {
+        parse_collection_signature(&self.sig)
+    }
+
+    /// Like [`Self::parsed_signature`], but also returns a canonical source
+    /// spelling of the function type (`func([str]) -> int`) for the
+    /// synthesized module. Declaration-form signatures are normalized so
+    /// the generated AST is exactly what the checker sees.
+    pub fn parsed_signature_with_source(&self) -> Result<(zz_frontend::ast::Ty, String), String> {
+        parse_collection_signature_full(&self.sig)
+    }
+
+    /// Discover and validate members: `*.zz` files directly in `dir`,
+    /// sorted by file stem. Empty collections are valid.
+    pub fn discover(&self, pkg_root: &Path) -> Result<Vec<CollectionMember>, String> {
+        let dir = pkg_root.join(&self.dir);
+        let mut members = Vec::new();
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| format!("cannot read collection directory `{}`: {e}", dir.display()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("zz") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let name = stem.replace('-', "_");
+            if !is_identifier(&name) {
+                return Err(format!(
+                    "collection `{}`: file `{}` does not yield a valid identifier\n\
+                     hint: rename the file to start with a letter/underscore and use only letters, digits, and underscores",
+                    self.collection_label(),
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&stem)
+                ));
+            }
+            let file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&stem)
+                .to_string();
+            members.push(CollectionMember { name, path, file });
+        }
+        members.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+        // Normalized-name collisions (`foo-bar.zz` + `foo_bar.zz`) are loud:
+        // silently dropping one member would make registration order decide.
+        for pair in members.windows(2) {
+            if pair[0].name == pair[1].name {
+                return Err(format!(
+                    "collection `{}`: files `{}` and `{}` both map to member `{}`\n\
+                     hint: rename one file so each member name is unique",
+                    self.collection_label(),
+                    pair[0].file,
+                    pair[1].file,
+                    pair[0].name
+                ));
+            }
+        }
+        Ok(members)
+    }
+
+    /// Human-readable collection name used in diagnostics. Callers usually
+    /// have the manifest key; `dir` is the best fallback for spec-local
+    /// errors.
+    fn collection_label(&self) -> &str {
+        &self.dir
+    }
+}
+
+/// Parse a collection signature through the real frontend parser.
+///
+/// Returns the parsed `Ty` (always `TyKind::Func`). This is intentionally
+/// grammar-driven: no hand-rolled signature parser can drift from the
+/// language.
+pub fn parse_collection_signature(sig: &str) -> Result<zz_frontend::ast::Ty, String> {
+    parse_collection_signature_full(sig).map(|(ty, _)| ty)
+}
+
+/// Full signature parse: the `Ty` plus its canonical source spelling.
+pub fn parse_collection_signature_full(
+    sig: &str,
+) -> Result<(zz_frontend::ast::Ty, String), String> {
+    use zz_frontend::ast::{Stmt, Ty, TyKind};
+    let src = sig.trim();
+    if src.is_empty() {
+        return Err("invalid [collect]: `sig` must not be empty".to_string());
+    }
+    // Declaration forms. `func(...)` is ambiguous with the type form
+    // (`func([str]) -> int`), so a failed declaration parse falls through
+    // to the type parser instead of erroring immediately.
+    let decl_src = if let Some(rest) = src.strip_prefix("func ") {
+        Some((format!("pub func {rest} {{ }}"), true))
+    } else {
+        src.strip_prefix("func(")
+            .map(|rest| (format!("pub func __collection_sig({rest} {{ }}"), false))
+    };
+    if let Some((source, strict)) = decl_src {
+        let parsed = zz_frontend::parse(&source);
+        if first_parse_error(&parsed.errors).is_none() {
+            let func = parsed.program.stmts.iter().find_map(|s| match s {
+                Stmt::Func {
+                    generics,
+                    params,
+                    ret,
+                    span,
+                    ..
+                } => Some((generics, params, ret, *span)),
+                _ => None,
+            });
+            let Some((generics, params, ret, span)) = func else {
+                return Err(format!(
+                    "invalid [collect]: `sig = \"{sig}\"` is not a function signature"
+                ));
+            };
+            if !generics.is_empty() {
+                return Err(format!(
+                    "invalid [collect]: `sig = \"{sig}\"` must not be generic\n\
+                     hint: collection members are concrete functions"
+                ));
+            }
+            let mut tys = Vec::new();
+            for p in params {
+                let Some(ty) = &p.ty else {
+                    return Err(format!(
+                        "invalid [collect]: parameter `{}` in `sig = \"{sig}\"` has no type",
+                        p.name.name
+                    ));
+                };
+                tys.push(ty.clone());
+            }
+            let ret_ty = ret.clone().unwrap_or(Ty {
+                kind: TyKind::Unit,
+                span,
+            });
+            let params_src: Vec<String> = tys
+                .iter()
+                .map(|t| source[t.span.start as usize..t.span.end as usize].to_string())
+                .collect();
+            let ret_src = ret
+                .as_ref()
+                .map(|t| source[t.span.start as usize..t.span.end as usize].to_string())
+                .unwrap_or_else(|| "unit".to_string());
+            let ty_source = format!("func({}) -> {ret_src}", params_src.join(", "));
+            return Ok((
+                Ty {
+                    kind: TyKind::Func(tys, Box::new(ret_ty)),
+                    span,
+                },
+                ty_source,
+            ));
+        }
+        if strict {
+            let err = first_parse_error(&parsed.errors).unwrap_or_default();
+            return Err(format!(
+                "invalid [collect]: `sig = \"{sig}\"` does not parse: {err}\n\
+                 hint: use e.g. `sig = \"func(args: [str]) -> int\"` or `sig = \"func([str]) -> int\"`"
+            ));
+        }
+    }
+    // Type form.
+    let source = format!("type __CollectionSig = {src}");
+    let parsed = zz_frontend::parse(&source);
+    if let Some(err) = first_parse_error(&parsed.errors) {
+        return Err(format!(
+            "invalid [collect]: `sig = \"{sig}\"` does not parse: {err}\n\
+             hint: use a function type, e.g. `sig = \"func([str]) -> int\"`"
+        ));
+    }
+    let ty = parsed.program.stmts.iter().find_map(|s| match s {
+        Stmt::TypeAlias { target, .. } => Some(target.clone()),
+        _ => None,
+    });
+    let Some(ty) = ty else {
+        return Err(format!(
+            "invalid [collect]: `sig = \"{sig}\"` is not a type"
+        ));
+    };
+    if !matches!(ty.kind, TyKind::Func(..)) {
+        return Err(format!(
+            "invalid [collect]: `sig = \"{sig}\"` is not a function type\n\
+             hint: collection members export a function, e.g. `sig = \"func([str]) -> int\"`"
+        ));
+    }
+    let ty_source = source[ty.span.start as usize..ty.span.end as usize].to_string();
+    Ok((ty, ty_source))
+}
+
+fn first_parse_error(errors: &[zz_frontend::diag::RawDiag]) -> Option<String> {
+    errors
+        .iter()
+        .find(|e| e.severity == zz_frontend::diag::Severity::Error)
+        .map(|e| e.message.clone())
+}
+
+/// True when `name` is usable as a ZZ identifier: leading letter or `_`,
+/// then letters/digits/underscores.
+pub fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Package metadata.
@@ -806,6 +1132,7 @@ impl Manifest {
             },
             dependencies: HashMap::new(),
             native: None,
+            collections: BTreeMap::new(),
         };
         let path = dir.join("zz.toml");
         manifest.save(&path)?;
@@ -925,6 +1252,7 @@ mod tests {
                 zz: None,
                 entry: None,
             },
+            collections: BTreeMap::new(),
             dependencies: {
                 let mut d = HashMap::new();
                 d.insert("foo".into(), DepSpec::Version("^1.2.0".into()));
@@ -1238,6 +1566,7 @@ foo = "^1.0"
             },
             dependencies: HashMap::new(),
             native: None,
+            collections: BTreeMap::new(),
         };
 
         let d = tmp_dir("meta_rt");
@@ -1643,5 +1972,176 @@ version = "0.1.0"
         };
         let err = n.validate(Path::new("/pkg")).unwrap_err();
         assert!(err.contains("https:"), "{err}");
+    }
+
+    // ── Collections ───────────────────────────────────────────────────
+
+    fn collection_manifest(spec: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "[package]\nname = \"c\"\nversion = \"0.1.0\"\n[collect.commands]\n{spec}"
+        ))
+        .expect("collection manifest parses")
+    }
+
+    fn collection_project(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let d = tmp_dir(tag);
+        for (rel, contents) in files {
+            let p = d.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, contents).unwrap();
+        }
+        fs::create_dir_all(d.join("commands")).unwrap();
+        d
+    }
+
+    #[test]
+    fn collect_parses_defaults() {
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        let spec = m.collections.get("commands").expect("collection parsed");
+        assert_eq!(spec.dir, "commands");
+        assert_eq!(spec.name, "file");
+        assert_eq!(spec.export, "run");
+        assert!(m.collections.contains_key("commands"));
+    }
+
+    #[test]
+    fn collect_round_trips() {
+        let m = collection_manifest(
+            "dir = \"commands\"\nsig = \"func(args: [str]) -> int\"\nexport = \"main\"\n",
+        );
+        let d = tmp_dir("collect_rt");
+        m.save(&d.join("zz.toml")).unwrap();
+        let loaded = Manifest::load(&d.join("zz.toml")).unwrap();
+        assert_eq!(loaded, m);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_absent_is_empty_and_backcompat() {
+        let m = Manifest::parse("[package]\nname = \"old\"\nversion = \"0.1.0\"\n").unwrap();
+        assert!(m.collections.is_empty());
+    }
+
+    #[test]
+    fn collect_validates_dir_and_sig() {
+        let d = collection_project("collect_ok", &[]);
+        let ok = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        ok.collections["commands"].validate(&d).unwrap();
+        // Issue spelling with named parameters also parses.
+        let named = collection_manifest("dir = \"commands\"\nsig = \"func(args: [str]) -> int\"\n");
+        named.collections["commands"].validate(&d).unwrap();
+        let _ = fs::remove_dir_all(&d);
+
+        // Missing dir.
+        let d = collection_project("collect_missing", &[]);
+        let missing = collection_manifest("dir = \"nope\"\nsig = \"func([str]) -> int\"\n");
+        let err = missing.collections["commands"].validate(&d).unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_rejects_escaping_paths() {
+        let d = collection_project("collect_escape", &[]);
+        for dir in ["../outside", "/abs/path", ""] {
+            let m =
+                collection_manifest(&format!("dir = \"{dir}\"\nsig = \"func([str]) -> int\"\n"));
+            let err = m.collections["commands"].validate(&d).unwrap_err();
+            assert!(
+                err.contains("relative") || err.contains("empty") || err.contains("invalid"),
+                "dir `{dir}`: {err}"
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_rejects_bad_signatures() {
+        let d = collection_project("collect_badsig", &[]);
+        for sig in ["", "int", "func([str] -> int", "func() ->"] {
+            let m = collection_manifest(&format!("dir = \"commands\"\nsig = \"{sig}\"\n"));
+            let err = m.collections["commands"]
+                .validate(&d)
+                .expect_err("bad sig must fail");
+            assert!(
+                err.contains("sig") || err.contains("parse") || err.contains("function"),
+                "sig `{sig}`: {err}"
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_rejects_bad_name_mode_and_export() {
+        let d = collection_project("collect_badname", &[]);
+        let m = collection_manifest(
+            "dir = \"commands\"\nsig = \"func([str]) -> int\"\nname = \"numbered\"\n",
+        );
+        let err = m.collections["commands"].validate(&d).unwrap_err();
+        assert!(err.contains("name ="), "{err}");
+        let m = collection_manifest(
+            "dir = \"commands\"\nsig = \"func([str]) -> int\"\nexport = \"not valid\"\n",
+        );
+        let err = m.collections["commands"].validate(&d).unwrap_err();
+        assert!(err.contains("identifier"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_discovery_orders_and_skips_non_zz() {
+        let d = collection_project(
+            "collect_discover",
+            &[
+                ("commands/zeta.zz", ""),
+                ("commands/alpha.zz", ""),
+                ("commands/readme.md", ""),
+                ("commands/nested/inner.zz", ""),
+            ],
+        );
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        let members = m.collections["commands"].discover(&d).unwrap();
+        let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "zeta"], "single-level, sorted");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_empty_dir_is_valid() {
+        let d = collection_project("collect_empty", &[]);
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        assert!(m.collections["commands"].discover(&d).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_name_collisions_are_loud() {
+        let d = collection_project(
+            "collect_collision",
+            &[("commands/foo-bar.zz", ""), ("commands/foo_bar.zz", "")],
+        );
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        let err = m.collections["commands"].discover(&d).unwrap_err();
+        assert!(err.contains("foo-bar.zz"), "{err}");
+        assert!(err.contains("foo_bar.zz"), "{err}");
+        assert!(err.contains("both map"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_invalid_identifier_is_loud() {
+        let d = collection_project("collect_badident", &[("commands/9lives.zz", "")]);
+        let m = collection_manifest("dir = \"commands\"\nsig = \"func([str]) -> int\"\n");
+        let err = m.collections["commands"].discover(&d).unwrap_err();
+        assert!(err.contains("valid identifier"), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn collect_identifier_rules() {
+        assert!(is_identifier("run"));
+        assert!(is_identifier("_private1"));
+        assert!(!is_identifier("9lives"));
+        assert!(!is_identifier(""));
+        assert!(!is_identifier("has-dash"));
     }
 }
