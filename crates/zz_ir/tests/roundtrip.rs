@@ -868,7 +868,7 @@ fn derotate_loops_restores_the_historical_layout() {
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     let module = lower_typed_spanmap(
-        "func m() {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n s\n}\nm()",
+        "func m() -> int {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n return s\n}\nm()",
         &sigs,
     );
     let fi = module
@@ -925,7 +925,7 @@ fn derotate_keeps_vartab_aligned_with_nested_loops() {
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     let module = lower_typed_spanmap(
-        "func m() {\n s := 0\n for _i in 0..2 {\n  for j in 0..3 {\n   s = s + j\n  }\n }\n s\n}\nm()",
+        "func m() -> int {\n s := 0\n for _i in 0..2 {\n  for j in 0..3 {\n   s = s + j\n  }\n }\n return s\n}\nm()",
         &sigs,
     );
     let fi = module
@@ -1029,7 +1029,7 @@ fn vartab_records_loop_var_slots() {
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     let module = lower_typed_spanmap(
-        "func m() {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n s\n}\nm()",
+        "func m() -> int {\n s := 0\n for v in 0..10 {\n s = s + v\n }\n return s\n}\nm()",
         &sigs,
     );
     verify::verify(&module).expect("verify failed");
@@ -1080,11 +1080,11 @@ fn nested_for_loops_verify() {
     let mut sigs = HashMap::new();
     sigs.insert("m".to_string(), int_sig(0));
     for src in [
-        "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n s = s + i + j\n }\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n j := 0\n while j < 3 {\n for k in 0..3 {\n s = s + j + k\n }\n j = j + 1\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n i := 0\n while i < 3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n i = i + 1\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n for i in 0..3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n }\n s\n}\nm()",
-        "func m() {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n for k in 0..3 {\n s = s + i + j + k\n }\n }\n }\n s\n}\nm()",
+        "func m() -> int {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n s = s + i + j\n }\n }\n return s\n}\nm()",
+        "func m() -> int {\n s := 0\n j := 0\n while j < 3 {\n for k in 0..3 {\n s = s + j + k\n }\n j = j + 1\n }\n return s\n}\nm()",
+        "func m() -> int {\n s := 0\n i := 0\n while i < 3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n i = i + 1\n }\n return s\n}\nm()",
+        "func m() -> int {\n s := 0\n for i in 0..3 {\n j := 0\n while j < 3 {\n s = s + i + j\n j = j + 1\n }\n }\n return s\n}\nm()",
+        "func m() -> int {\n s := 0\n for i in 0..3 {\n for j in 0..3 {\n for k in 0..3 {\n s = s + i + j + k\n }\n }\n }\n return s\n}\nm()",
     ] {
         let module = lower_typed_spanmap(src, &sigs);
         // lower_typed runs max_stack_for + full verify internally, so a
