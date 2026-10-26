@@ -42,6 +42,7 @@
 - [Check fix format](tooling/check-fmt.md): diagnostics, auto-fix, file loading
 - [Test and bench](tooling/test-bench.md): test/bench/cover flags, engines
 - [Packages](tooling/packages.md): zz.toml, registry/git/path, vendor, publish
+- [Collections](tooling/collections.md): directory-based typed registries (`[collect.*]`)
 - [Plugins](tooling/plugins.md): C ABI, plugin.zzi, build hooks
 - [Editors and debugging](tooling/editors-debug.md): LSP parity gate, DAP
 - [Performance](tooling/perf.md): budgets, PGO, black_box, fast paths

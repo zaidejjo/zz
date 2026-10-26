@@ -43,6 +43,7 @@
   - [Check, fix, format](tooling/check-fmt.md)
   - [Test and bench](tooling/test-bench.md)
   - [Packages](tooling/packages.md)
+  - [Collections](tooling/collections.md)
   - [Plugins](tooling/plugins.md)
   - [Editors and debugging](tooling/editors-debug.md)
   - [Offline doc lookup](tooling/doc-spec.md)
