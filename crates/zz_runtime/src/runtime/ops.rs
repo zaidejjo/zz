@@ -18,7 +18,7 @@ use crate::value::{DictData, ObjectValue, Value};
 /// `s[i]` on an ASCII string used to build a fresh `String` *and* a fresh
 /// `Arc` per character, which is what `str_scan` (176 k reads) paid for.
 /// The table is filled once per process and a read is then a refcount bump.
-fn ascii_chars() -> &'static [std::sync::Arc<String>; 128] {
+pub(crate) fn ascii_chars() -> &'static [std::sync::Arc<String>; 128] {
     static TABLE: std::sync::OnceLock<[std::sync::Arc<String>; 128]> = std::sync::OnceLock::new();
     TABLE
         .get_or_init(|| std::array::from_fn(|b| std::sync::Arc::new((b as u8 as char).to_string())))

@@ -167,6 +167,23 @@ fn op_text(module: &Module, op: &Op) -> String {
                 str_text(module, *field)
             )
         }
+        Op::GetFieldSlotIdx {
+            home_slot,
+            home_var,
+            idx,
+            dst,
+        } => {
+            format!(
+                "getfieldslotidx {} idx={idx} dst={dst}",
+                home_text(home_slot, home_var, module)
+            )
+        }
+        Op::IndexIntSlot { arr, idx, dst } => {
+            format!("indexintslot {arr} {idx} -> {dst}")
+        }
+        Op::IndexDictInt { dict, key, dst } => {
+            format!("indexdictint {dict} {key} -> {dst}")
+        }
         Op::SlotAddInt { dst, src } => format!("slotaddint {dst} {src}"),
         Op::SlotInc { slot } => format!("slotinc {slot}"),
         Op::SlotAddIntImm { dst, imm } => format!("slotaddintimm {dst} {imm}"),

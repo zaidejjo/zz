@@ -140,12 +140,42 @@ pub enum Op {
         field: String,
         span: Span,
     },
+    /// Take the home, clone one element of the named field at `idx`, store
+    /// it straight into slot `dst`, restore the home. Fused `s.f[i]` reads:
+    /// O(1) element clone instead of cloning the field array, no stack
+    /// traffic, fused with the assignment destination. Non-direct shapes
+    /// complete generically at runtime (same errors).
+    GetFieldSlotIdx {
+        home: TakeHome,
+        idx: u16,
+        dst: u16,
+        span: Span,
+    },
     /// Take the home, push the length of the named field, restore the
     /// home. Fused `len(s.f)` (#242): no container or field clone.
     /// Non-direct shapes complete generically at runtime (same errors).
     LenField {
         home: TakeHome,
         field: String,
+        span: Span,
+    },
+    /// Read `array[idx]` where both are stack slots: single bounds check,
+    /// no `normalize_index` call, no `Value` tag loop. Fused `a[i]` reads
+    /// when both operands are slot-resolvable. Result written to `dst`.
+    IndexIntSlot {
+        arr: u16,
+        idx: u16,
+        dst: u16,
+        span: Span,
+    },
+    /// Read `dict[key]` where key is an int: probe DictData with a
+    /// precomputed hash + open-addressed table. Fused int-keyed dict reads
+    /// when both operands are slot-resolvable. Non-int keys fall back to
+    /// generic `IndexOp`. Result written to `dst`.
+    IndexDictInt {
+        dict: u16,
+        key: u16,
+        dst: u16,
         span: Span,
     },
     /// In-place integer add: `slot[dst] = Int(slot[dst] + slot[src])`.
@@ -667,6 +697,9 @@ impl Op {
             Op::CompoundIndexTake { .. } => "CompoundIndexTake",
             Op::FieldBinopTake { .. } => "FieldBinopTake",
             Op::GetFieldIndex { .. } => "GetFieldIndex",
+            Op::GetFieldSlotIdx { .. } => "GetFieldSlotIdx",
+            Op::IndexIntSlot { .. } => "IndexIntSlot",
+            Op::IndexDictInt { .. } => "IndexDictInt",
             Op::LenField { .. } => "LenField",
             Op::SlotAddInt { .. } => "SlotAddInt",
             Op::SlotInc { .. } => "SlotInc",
@@ -765,6 +798,7 @@ impl Op {
             | Op::CompoundIndexTake { .. }
             | Op::FieldBinopTake { .. }
             | Op::GetFieldIndex { .. }
+            | Op::GetFieldSlotIdx { .. }
             | Op::LenField { .. }
             | Op::SlotAddInt { .. }
             | Op::SlotInc { .. }
@@ -849,6 +883,8 @@ impl Op {
             | Op::SetFieldIdx(..)
             | Op::CompoundFieldOp { .. }
             | Op::IndexOp(..)
+            | Op::IndexIntSlot { .. }
+            | Op::IndexDictInt { .. }
             | Op::StoreIndexOp(..)
             | Op::CompoundIndexOp { .. }
             | Op::SliceOp(..)

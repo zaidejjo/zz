@@ -406,6 +406,29 @@ impl<'a> Raiser<'a> {
                 field: self.str(*field)?,
                 span: VmSpan::default(),
             }),
+            Op::GetFieldSlotIdx {
+                home_slot,
+                home_var,
+                idx,
+                dst,
+            } => Ok(VmOp::GetFieldSlotIdx {
+                home: self.raise_home(home_slot, home_var)?,
+                idx: *idx,
+                dst: *dst,
+                span: VmSpan::default(),
+            }),
+            Op::IndexIntSlot { arr, idx, dst } => Ok(VmOp::IndexIntSlot {
+                arr: *arr,
+                idx: *idx,
+                dst: *dst,
+                span: VmSpan::default(),
+            }),
+            Op::IndexDictInt { dict, key, dst } => Ok(VmOp::IndexDictInt {
+                dict: *dict,
+                key: *key,
+                dst: *dst,
+                span: VmSpan::default(),
+            }),
             // Fused slot fast paths raise one to one: the interpreter
             // takes the native fast path (with the generic fallback the
             // op already carries), which is what the format carries them
