@@ -1442,7 +1442,11 @@ impl Checker {
                 span,
             } => {
                 let ct = self.check_expr(cond);
-                self.ensure_bool(ct, cond.span());
+                let glob_hint = match cond.as_ref() {
+                    Expr::Str { value, .. } if Self::looks_like_glob(value) => Some(value.as_str()),
+                    _ => None,
+                };
+                self.ensure_bool(ct, cond.span(), glob_hint);
                 let tt = self.check_block(then);
                 match els {
                     Some(e) => {
@@ -1510,7 +1514,11 @@ impl Checker {
             }
             Expr::While { cond, body, .. } => {
                 let ct = self.check_expr(cond);
-                self.ensure_bool(ct, cond.span());
+                let glob_hint = match cond.as_ref() {
+                    Expr::Str { value, .. } if Self::looks_like_glob(value) => Some(value.as_str()),
+                    _ => None,
+                };
+                self.ensure_bool(ct, cond.span(), glob_hint);
                 self.loop_depth += 1;
                 self.check_block_discarded(body);
                 self.loop_depth -= 1;
@@ -1782,9 +1790,17 @@ impl Checker {
         match op {
             BinOp::And | BinOp::Or => {
                 let lt = self.check_expr(left);
-                self.ensure_bool(lt, left.span());
+                let lhint = match left {
+                    Expr::Str { value, .. } if Self::looks_like_glob(value) => Some(value.as_str()),
+                    _ => None,
+                };
+                self.ensure_bool(lt, left.span(), lhint);
                 let rt = self.check_expr(right);
-                self.ensure_bool(rt, right.span());
+                let rhint = match right {
+                    Expr::Str { value, .. } if Self::looks_like_glob(value) => Some(value.as_str()),
+                    _ => None,
+                };
+                self.ensure_bool(rt, right.span(), rhint);
                 Type::Bool
             }
             BinOp::Elvis => {

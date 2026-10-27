@@ -147,26 +147,6 @@ impl Checker {
         if let Some(scope) = self.defined_names.last_mut() {
             scope.insert(name.to_string(), DefinedBinding { span, warn_unused });
         }
-        // A binding reusing a namespace root (own module name or imported
-        // head) shadows the namespace object: qualified calls through it
-        // fail at runtime while the check stays green (#376, #361). Warn
-        // once per binding site with a rename as the fix.
-        if self.shadow_roots.contains(name) {
-            self.errors.push(
-                warning_at(
-                    format!(
-                        "`{name}` shadows a module namespace — qualified calls through it fail at runtime"
-                    ),
-                    span,
-                )
-                .with_note("rename the binding to something other than the module name")
-                .with_fixit(FixIt::safe(
-                    span,
-                    format!("{name}_local"),
-                    "rename binding",
-                )),
-            );
-        }
     }
 
     /// Define a variable, recording its immutability when `is_const`.

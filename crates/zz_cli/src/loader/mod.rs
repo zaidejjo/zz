@@ -21,7 +21,7 @@ use zz_checker::{
     check_program_with_module_ns, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type,
 };
 use zz_frontend::ast::{Block, Expr, ImportItem, Program, Stmt, Ty, TyKind};
-use zz_frontend::diag::{error_at, RawDiag};
+use zz_frontend::diag::{error_at, warning_at, RawDiag};
 use zz_frontend::parse;
 use zz_frontend::span::Span;
 use zz_pm::manifest::FeatureSelection;
@@ -2388,16 +2388,16 @@ impl Loader {
                 self.errors.push(LoadError {
                     name: display.display().to_string(),
                     source: source.to_string(),
-                    diags: vec![error_at(
+                    diags: vec![warning_at(
                         format!(
                             "namespace `{ns}` is claimed by both `{}` and `std.{module}`\n\
-                             hint: use an alias for one of the imports",
+                             hint: alias one of the imports with `as`",
                             existing.display()
                         ),
                         Span::new(0, 0),
                     )],
                 });
-                return false;
+                return true;
             }
             return true;
         }
@@ -2426,21 +2426,24 @@ impl Loader {
         }
         if let Some(existing) = self.namespaces.get(ns) {
             if existing != canon {
+                // Two different modules claim the same namespace: warn
+                // and suggest aliasing one import with `as`. The first
+                // binding wins as canonical (#380); loading continues so
+                // the user can alias and keep compiling.
                 self.errors.push(LoadError {
                     name: display.display().to_string(),
                     source: source.to_string(),
-                    diags: vec![error_at(
+                    diags: vec![warning_at(
                         format!(
                             "namespace `{ns}` is claimed by both `{}` and `{}`\n\
-                             hint: two different files are trying to use the same namespace; \
-                             consider using an alias for one of the imports",
+                             hint: alias one of the imports with `as`",
                             existing.display(),
                             display.display()
                         ),
                         Span::new(0, 0),
                     )],
                 });
-                return false;
+                return true;
             }
             return true;
         }

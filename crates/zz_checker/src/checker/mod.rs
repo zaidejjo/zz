@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_frontend::ast::{Program, Stmt, Ty};
-use zz_frontend::diag::{warning_at, FixIt, RawDiag};
+use zz_frontend::diag::RawDiag;
 use zz_frontend::span::Span;
 
 use crate::type_::Type;
@@ -312,60 +312,6 @@ fn check_program_impl(
         initial_enums,
         initial_consts,
     );
-    // Namespace roots whose shadowing breaks runtime resolution while the
-    // check stays green (#376, #361): the module's own namespace plus
-    // every imported namespace head. Any env binding reusing one hides
-    // the namespace object, so qualified calls through it fail at
-    // runtime (`undefined method`/`undefined variable`). Collected up
-    // front (position-independent): an import below the binding still
-    // breaks the same way.
-    if !module_ns.is_empty() {
-        checker.shadow_roots.insert(module_ns.to_string());
-    }
-    for stmt in &program.stmts {
-        if let Stmt::Import {
-            path,
-            alias,
-            items,
-            span,
-            ..
-        } = stmt
-        {
-            let head = alias
-                .clone()
-                .or_else(|| path.last().cloned())
-                .unwrap_or_default();
-            if !head.is_empty() {
-                checker.shadow_roots.insert(head.clone());
-                // Warn only when the import actually binds the std module head
-                // name. A full module import (`import std.str`) binds `head`;
-                // a selective import (`import std.str(split)`) binds only the
-                // named items, so no namespace collision exists and the warning
-                // would be a false positive (#630). Only enforced for
-                // loader-checked user modules (non-empty owner); stdlib
-                // internals, the REPL, and merged HIR programs pass an empty
-                // owner and skip it.
-                if items.is_empty()
-                    && !module_ns.is_empty()
-                    && crate::checker::is_std_module_head(&head)
-                {
-                    let diag = warning_at(
-                        format!(
-                            "import binds `{head}`, shadowing the std module `{head}` — `std.{head}.*` will resolve to your binding at runtime",
-                        ),
-                        *span,
-                    )
-                    .with_note("alias it: `import <pkg>.<head> as <name>`".to_string())
-                    .with_fixit(FixIt::safe(
-                        *span,
-                        format!("import {} as {}_mod", path.join("."), head),
-                        "alias the import to avoid the collision",
-                    ));
-                    checker.errors.push(diag);
-                }
-            }
-        }
-    }
     // Offset fresh-var ids above any `Var(id)` carried in seed signatures
     // from already-checked modules. Those ids were allocated by a previous
     // checker's unifier; reusing them here would unify unrelated types
@@ -1264,14 +1210,6 @@ pub(crate) struct Checker {
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
     pub(crate) scope: Vec<Arc<str>>,
-    /// Own module namespace for this check (`fen` for `fen.zz`), plus
-    /// every imported namespace head. Any env binding reusing one of
-    /// these names shadows the namespace object at runtime, so
-    /// same-module (or same-import) qualified calls through it fail
-    /// with `undefined method`/`undefined variable` while the check
-    /// stays green (#376, #361). Empty when unknown (REPL, merged HIR
-    /// programs already covered per-module by the loader).
-    pub(crate) shadow_roots: std::collections::HashSet<String>,
 }
 
 impl Checker {
@@ -1330,7 +1268,6 @@ impl Checker {
             scope: Vec::new(),
             link_libs: Vec::new(),
             http_lint: http_lint::HttpLintState::default(),
-            shadow_roots: std::collections::HashSet::new(),
         }
     }
 
