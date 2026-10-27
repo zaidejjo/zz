@@ -626,15 +626,16 @@ fn resolve_staticlib(release: bool) -> Result<(PathBuf, RtSource), FfiError> {
     if let Some(dir) = find_bundled_libdir() {
         return Ok((dir.join(lib_file_name()), RtSource::Prebuilt));
     }
-    Err(FfiError(format!(
+    Err(FfiError(
         "cannot locate native runtime archive; tried:\n \
          - $ZZ_NATIVE_RT_DIR (not set or invalid)\n \
          - compile-time workspace root (stale baked path)\n \
          - runtime workspace root walk from CWD/exe dir (no Cargo.toml found)\n \
          - bundled release libdir (<exe>/lib, /usr/lib/zz)\n \
-          set ZZ_NATIVE_RT_DIR to the workspace root or install a release \
-          toolchain (which ships the prebuilt native runtime)"
-    )))
+         set ZZ_NATIVE_RT_DIR to the workspace root or install a release \
+         toolchain (which ships the prebuilt native runtime)"
+            .to_string(),
+    ))
 }
 
 /// Compile-time workspace root when it exists on disk (dev checkouts).

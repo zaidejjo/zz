@@ -504,6 +504,7 @@ pub(crate) fn build_native_deps(
     let mut artifacts = Vec::new();
     let mut link_args: Vec<String> = Vec::new();
     let mut audits: Vec<(String, zz_pm::lock::LockedNative)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
 
     let empty = NativeBuild {
         artifacts: Vec::new(),
@@ -590,19 +591,21 @@ pub(crate) fn build_native_deps(
                         // Fall through to source build (gates apply below).
                     }
                     Err(e) => {
-                        return Err(format!(
+                        errors.push(format!(
                             "plugin `{}` prebuilt for {tag} failed verification: {e}",
                             dep.name
                         ));
+                        continue;
                     }
                 }
             }
             if !had_entry {
                 if !direct && !opts.allow_source_builds {
-                    return Err(format!(
+                    errors.push(format!(
                         "plugin `{}` has no prebuilt for `{host}`; ask the maintainer or re-run with --allow-source-builds",
                         dep.name
                     ));
+                    continue;
                 }
                 if direct {
                     eprintln!(
@@ -612,33 +615,43 @@ pub(crate) fn build_native_deps(
                 }
             }
             eprintln!("zz: building plugin `{}` (declarative cc)...", dep.name);
-            let out = zz_pm::native_build::ensure_cc(&pkg_dir, &dep.name, cc_spec, None)
-                .map_err(|e| format!("plugin `{}` declarative build failed: {e}", dep.name))?;
-            artifacts.extend(out.objects);
-            artifacts.push(out.archive);
-            collect_link_args(&out.ldflags_path, &mut link_args);
-            audits.push((
-                dep.name.clone(),
-                zz_pm::lock::LockedNative {
-                    backend: "cc".to_string(),
-                    tag: out.tag,
-                    compiler: out.compiler,
-                    artifact_sha256: String::new(),
-                    pkg_config_resolved: zz_pm::native_build::pkg_config_versions(
-                        &cc_spec.pkg_config,
-                    ),
-                    vendor_key: String::new(),
-                },
-            ));
-            continue;
+            match zz_pm::native_build::ensure_cc(&pkg_dir, &dep.name, cc_spec, None) {
+                Ok(out) => {
+                    artifacts.extend(out.objects);
+                    artifacts.push(out.archive);
+                    collect_link_args(&out.ldflags_path, &mut link_args);
+                    audits.push((
+                        dep.name.clone(),
+                        zz_pm::lock::LockedNative {
+                            backend: "cc".to_string(),
+                            tag: out.tag,
+                            compiler: out.compiler,
+                            artifact_sha256: String::new(),
+                            pkg_config_resolved: zz_pm::native_build::pkg_config_versions(
+                                &cc_spec.pkg_config,
+                            ),
+                            vendor_key: String::new(),
+                        },
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "plugin `{}` declarative build failed: {e}",
+                        dep.name
+                    ));
+                    continue;
+                }
+            }
         }
         // Hermetic Rust backend: vendored closure, cargo driven by zz.
         if let Some(rust_spec) = native.build_rust.as_ref() {
             if !direct && !opts.allow_source_builds {
-                return Err(format!(
+                errors.push(format!(
                     "plugin `{}` is a Rust source plugin (no prebuilt artifacts); transitive source builds need --allow-source-builds",
                     dep.name
                 ));
+                continue;
             }
             if direct {
                 eprintln!(
@@ -647,40 +660,49 @@ pub(crate) fn build_native_deps(
                 );
             }
             eprintln!("zz: building plugin `{}` (hermetic rust)...", dep.name);
-            let out = zz_pm::native_build::ensure_rust(&pkg_dir, &dep.name, rust_spec, None)
-                .map_err(|e| format!("plugin `{}` hermetic Rust build failed: {e}", dep.name))?;
-            artifacts.push(out.archive);
-            collect_link_args(&out.ldflags_path, &mut link_args);
-            audits.push((
-                dep.name.clone(),
-                zz_pm::lock::LockedNative {
-                    backend: "rust".to_string(),
-                    tag: out.tag,
-                    compiler: out.compiler,
-                    artifact_sha256: String::new(),
-                    pkg_config_resolved: String::new(),
-                    vendor_key: out.vendor_key,
-                },
-            ));
-            continue;
+            match zz_pm::native_build::ensure_rust(&pkg_dir, &dep.name, rust_spec, None) {
+                Ok(out) => {
+                    artifacts.push(out.archive);
+                    collect_link_args(&out.ldflags_path, &mut link_args);
+                    audits.push((
+                        dep.name.clone(),
+                        zz_pm::lock::LockedNative {
+                            backend: "rust".to_string(),
+                            tag: out.tag,
+                            compiler: out.compiler,
+                            artifact_sha256: String::new(),
+                            pkg_config_resolved: String::new(),
+                            vendor_key: out.vendor_key,
+                        },
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "plugin `{}` hermetic Rust build failed: {e}",
+                        dep.name
+                    ));
+                    continue;
+                }
+            }
         }
         let Some(hook_rel) = native.build.as_deref() else {
             continue;
         };
 
         if !direct {
-            return Err(format!(
-                "plugin `{}` uses legacy [native] build hook, which is forbidden for transitive dependencies\n\
-                 hint: ask the maintainer to migrate to [native.build-cc] (see docs/plugin-author-guide.md §4)",
+            errors.push(format!(
+                "plugin `{}` uses legacy [native] build hook, which is forbidden for transitive dependencies\n                 hint: ask the maintainer to migrate to [native.build-cc] (see docs/plugin-author-guide.md §4)",
                 dep.name
             ));
+            continue;
         }
         if !opts.allow_hooks {
-            return Err(format!(
-                "plugin `{}` uses legacy [native] build = \"{hook_rel}\" (deprecated)\n\
-                 hint: re-run with --allow-hooks, or ask the maintainer to migrate to [native.build-cc]",
+            errors.push(format!(
+                "plugin `{}` uses legacy [native] build = \"{hook_rel}\" (deprecated)\n                 hint: re-run with --allow-hooks, or ask the maintainer to migrate to [native.build-cc]",
                 dep.name
             ));
+            continue;
         }
 
         // Invoke the build hook
@@ -744,6 +766,18 @@ pub(crate) fn build_native_deps(
     // The loose object is authoritative (build hooks recompile it every
     // run, while archives may be cargo-cached and stale).
     thin_shadowed_archive_members(&mut artifacts);
+
+    if !errors.is_empty() {
+        return Err(format!(
+            "native dependency build failed for {} dependency{}:{}",
+            errors.len(),
+            if errors.len() == 1 { "" } else { "s" },
+            errors
+                .into_iter()
+                .map(|e| format!("\n  - {e}"))
+                .collect::<String>()
+        ));
+    }
 
     Ok(NativeBuild {
         artifacts,
