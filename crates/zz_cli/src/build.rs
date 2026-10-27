@@ -737,8 +737,9 @@ pub(crate) fn build_native_deps(
         }
 
         eprintln!("zz: building plugin `{}` via {hook_rel}...", dep.name);
-        let output = std::process::Command::new("bash")
-            .arg(&build_script)
+        let (interpreter, interp_args) = hook_interpreter(&build_script);
+        let output = std::process::Command::new(&interpreter)
+            .args(&interp_args)
             .current_dir(&pkg_dir)
             .output();
 
@@ -751,8 +752,13 @@ pub(crate) fn build_native_deps(
                 }
             }
             Err(e) => {
+                let hint = if e.kind() == std::io::ErrorKind::NotFound && cfg!(windows) {
+                    "\n                 hint: `.sh` hooks need Git Bash or WSL on Windows; ship a `.cmd`/`.bat`/`.ps1` hook instead"
+                } else {
+                    ""
+                };
                 eprintln!(
-                    "warning: failed to run plugin `{}` build hook: {e}",
+                    "warning: failed to run plugin `{}` build hook: {e}{hint}",
                     dep.name
                 );
                 continue;
@@ -817,6 +823,35 @@ fn discover_native_artifacts(
 ) -> Result<(Vec<PathBuf>, Vec<String>), String> {
     let built = build_native_deps(project_path, opts)?;
     Ok((built.artifacts, built.link_args))
+}
+
+/// Interpreter for a legacy `[native] build = "<script>"` hook.
+///
+/// No silent bash assumption: `.cmd`/`.bat` run under `cmd /C`, `.ps1`
+/// under `powershell -File`, everything else (`.sh`, shebang scripts)
+/// under `bash`. Windows users without Git Bash/WSL get a diagnostic
+/// from the caller instead of a confusing spawn failure.
+fn hook_interpreter(script: &Path) -> (String, Vec<String>) {
+    let ext = script
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let path = script.display().to_string();
+    match ext.as_str() {
+        "cmd" | "bat" => ("cmd".to_string(), vec!["/C".to_string(), path]),
+        "ps1" => (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                path,
+            ],
+        ),
+        _ => ("bash".to_string(), vec![path]),
+    }
 }
 
 /// Merge whitespace-split flags from an `ldflags.txt` into `link_args`,
@@ -1818,6 +1853,30 @@ fn windows_status_name(code: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_interpreter_is_extension_driven() {
+        let (prog, args) = hook_interpreter(Path::new("build.sh"));
+        assert_eq!(prog, "bash");
+        assert_eq!(args, vec!["build.sh".to_string()]);
+
+        let (prog, args) = hook_interpreter(Path::new("build.cmd"));
+        assert_eq!(prog, "cmd");
+        assert_eq!(args, vec!["/C".to_string(), "build.cmd".to_string()]);
+
+        let (prog, args) = hook_interpreter(Path::new("build.bat"));
+        assert_eq!(prog, "cmd");
+        assert_eq!(args[0], "/C");
+
+        let (prog, args) = hook_interpreter(Path::new("build.ps1"));
+        assert_eq!(prog, "powershell");
+        assert_eq!(args[0], "-NoProfile");
+        assert_eq!(args.last().map(String::as_str), Some("build.ps1"));
+
+        // No extension: shebang scripts go through bash like `.sh`.
+        let (prog, _) = hook_interpreter(Path::new("build"));
+        assert_eq!(prog, "bash");
+    }
 
     #[test]
     fn transient_builds_are_isolated_across_threads() {

@@ -1,0 +1,27 @@
+# Keep shell scripts and workflow YAML LF on every checkout: the Windows CI
+# legs run `scripts/*.sh` through Git Bash, and CRLF breaks the shebang /
+# `set -euo pipefail` parsing. Windows-only scripts (.bat/.cmd) stay CRLF
+# when the author writes them that way.
+*.sh   text eol=lf
+*.bash text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Language sources and fixtures are LF: the formatter's output must be
+# byte-identical across hosts, and fixtures are compared verbatim.
+*.zz   text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+*.rs   text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary artifacts never get line-ending conversion.
+*.zip  binary
+*.png  binary
+*.ico  binary

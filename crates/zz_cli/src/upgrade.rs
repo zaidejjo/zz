@@ -10,6 +10,9 @@
 //!
 //! Safety: download → temp extract → verify → atomic swap with rollback.
 //! The previous binaries are restored if anything fails after the swap.
+//! `zz` and `zz-lsp` are always upgraded as one unit: a zip without the
+//! LSP is rejected rather than leaving a version-skewed pair, and both
+//! binaries are version-checked before the swap is considered successful.
 
 use crate::ui;
 
@@ -17,11 +20,12 @@ const REPO: &str = "zaidejjo/zz";
 const API_LATEST: &str = "https://api.github.com/repos/zaidejjo/zz/releases/latest";
 
 /// `(os, arch)` asset slug, or an error for unsupported platforms.
-/// The compiler ships linux/macos × x86_64/aarch64 only.
+/// The compiler ships linux/macos/windows × x86_64/aarch64.
 fn platform_slug() -> Result<(&'static str, &'static str), String> {
     let os = match std::env::consts::OS {
         "linux" => "linux",
         "macos" => "macos",
+        "windows" => "windows",
         other => {
             return Err(format!(
                 "no prebuilt zz for {other}\n\
@@ -60,6 +64,45 @@ fn parse_version(tag: &str) -> Result<(u64, u64, u64), String> {
 /// Asset file name for a release: `zz-0.1.6-linux-x86_64.zip`.
 fn asset_name(ver: &str, os: &str, arch: &str) -> String {
     format!("zz-{ver}-{os}-{arch}.zip")
+}
+
+/// Installed binary file name: `zz` on Unix, `zz.exe` on Windows.
+fn exe_name(base: &str) -> String {
+    if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    }
+}
+
+/// Extract a release zip into `dest` (`unzip` on Unix, `Expand-Archive`
+/// on Windows — neither ships on the other platform).
+fn extract_release_zip(zip: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(format!(
+            "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+            zip.display(),
+            dest.display()
+        ))
+        .output();
+    #[cfg(not(windows))]
+    let out = std::process::Command::new("unzip")
+        .arg("-q")
+        .arg("-o")
+        .arg(zip)
+        .arg("-d")
+        .arg(dest)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "cannot extract release zip: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("cannot extract release zip: {e}")),
+    }
 }
 
 /// Download URL for a release tag: `.../releases/download/v0.1.6/<asset>`.
@@ -162,7 +205,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     let dir = install_dir()?;
-    if !dir.join("zz").exists() {
+    let zz_bin = exe_name("zz");
+    if !dir.join(&zz_bin).exists() {
         return Err(format!(
             "no zz binary in {}\n\
               hint: install first with the script at https://zz-lang.pages.dev/getting-started",
@@ -209,26 +253,23 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return cleanup(Err(format!("cannot stage download: {e}")));
     }
     let pkg = tmp.join("pkg");
-    let unzip = std::process::Command::new("unzip")
-        .arg("-q")
-        .arg("-o")
-        .arg(&zip_path)
-        .arg("-d")
-        .arg(&pkg)
-        .output();
-    match unzip {
-        Ok(out) if out.status.success() => {}
-        _ => {
-            return cleanup(Err(
-                "cannot extract release zip (need the `unzip` command)".to_string()
-            ));
-        }
+    if let Err(e) = extract_release_zip(&zip_path, &pkg) {
+        return cleanup(Err(e));
     }
-    let staged_zz = find_staged(&pkg, "zz").ok_or_else(|| {
+    let staged_zz = find_staged(&pkg, &exe_name("zz")).ok_or_else(|| {
         let _ = std::fs::remove_dir_all(&tmp);
         "release zip has no zz binary".to_string()
     })?;
-    let staged_lsp = find_staged(&pkg, "zz-lsp");
+    let staged_lsp = find_staged(&pkg, &exe_name("zz-lsp"));
+    let lsp_bin = exe_name("zz-lsp");
+    if staged_lsp.is_none() && dir.join(&lsp_bin).exists() {
+        return cleanup(Err(
+            "release zip has no zz-lsp binary; refusing to leave a mismatched \
+             compiler/LSP pair installed\n\
+             hint: this is a packaging bug — report it with the release tag"
+                .to_string(),
+        ));
+    }
 
     // Swap with rollback: rename current aside, move new in, verify, and
     // restore the backup if verification fails.
@@ -268,44 +309,51 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         Ok(())
     };
-    if let Err(e) = swap("zz", Some(staged_zz)) {
+    if let Err(e) = swap(&zz_bin, Some(staged_zz)) {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
     // The pair must never mix versions: a failed zz-lsp swap restores zz.
-    if let Err(e) = swap("zz-lsp", staged_lsp) {
-        let _ = std::fs::rename(dir.join("zz.bak"), dir.join("zz"));
+    if let Err(e) = swap(&exe_name("zz-lsp"), staged_lsp) {
+        let _ = std::fs::rename(dir.join(format!("{zz_bin}.bak")), dir.join(&zz_bin));
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
 
     ui::step(4, 4, "Verifying install");
-    let got = std::process::Command::new(dir.join("zz"))
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
-    let reported = got
-        .split_whitespace()
-        .find_map(|tok| parse_version(tok).ok());
-    if reported != Some(want) {
-        // Roll back both binaries.
-        for name in ["zz", "zz-lsp"] {
-            let live = dir.join(name);
+    // The compiler and its LSP ship as one pair: the LSP embeds the
+    // checker of its own build, so a version skew between the two breaks
+    // diagnostics. Verify both and roll both back together.
+    let zz_reported = reported_version(&dir.join(&zz_bin));
+    let lsp_path = dir.join(&lsp_bin);
+    let lsp_installed = lsp_path.exists();
+    let lsp_reported = reported_version(&lsp_path);
+    let lsp_ok = !lsp_installed || lsp_reported == Some(want);
+    if zz_reported != Some(want) || !lsp_ok {
+        for base in ["zz", "zz-lsp"] {
+            let name = exe_name(base);
+            let live = dir.join(&name);
             let bak = dir.join(format!("{name}.bak"));
             if bak.exists() {
                 let _ = std::fs::rename(&bak, &live);
+            } else {
+                // Newly installed with no previous copy: remove it so the
+                // directory never keeps a half-upgraded pair.
+                let _ = std::fs::remove_file(&live);
             }
         }
         let _ = std::fs::remove_dir_all(&tmp);
+        let mut detail = format!("zz {}", version_label(zz_reported));
+        if !lsp_ok {
+            detail.push_str(&format!(", zz-lsp {}", version_label(lsp_reported)));
+        }
         return Err(format!(
-            "upgraded binary reports `{got}` instead of {tag} (rolled back)"
+            "upgrade verification failed: {detail}, expected {tag} (rolled back)"
         ));
     }
     if !keep_backup {
-        for name in ["zz", "zz-lsp"] {
-            let _ = std::fs::remove_file(dir.join(format!("{name}.bak")));
+        for base in ["zz", "zz-lsp"] {
+            let _ = std::fs::remove_file(dir.join(format!("{}.bak", exe_name(base))));
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -332,6 +380,26 @@ fn find_staged(pkg: &std::path::Path, name: &str) -> Option<std::path::PathBuf> 
         }
         None
     })
+}
+
+/// Run `<bin> --version` and parse the first `X.Y.Z` token it prints.
+fn reported_version(bin: &std::path::Path) -> Option<(u64, u64, u64)> {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()?;
+    String::from_utf8(out.stdout)
+        .ok()?
+        .split_whitespace()
+        .find_map(|tok| parse_version(tok).ok())
+}
+
+/// Human label for a [`reported_version`] result.
+fn version_label(v: Option<(u64, u64, u64)>) -> String {
+    match v {
+        Some((a, b, c)) => format!("v{a}.{b}.{c}"),
+        None => "unknown version".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -362,6 +430,18 @@ mod tests {
             asset_url("v0.1.6", "zz-0.1.6-macos-aarch64.zip"),
             "https://github.com/zaidejjo/zz/releases/download/v0.1.6/zz-0.1.6-macos-aarch64.zip"
         );
+        // Windows assets use the same platform-uniform naming.
+        assert_eq!(
+            asset_name("0.4.0", "windows", "aarch64"),
+            "zz-0.4.0-windows-aarch64.zip"
+        );
+    }
+
+    #[test]
+    fn exe_name_carries_the_platform_suffix() {
+        let expected = if cfg!(windows) { "zz.exe" } else { "zz" };
+        assert_eq!(exe_name("zz"), expected);
+        assert!(exe_name("zz-lsp").starts_with("zz-lsp"));
     }
 
     #[test]

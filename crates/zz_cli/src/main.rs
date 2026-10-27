@@ -102,7 +102,7 @@ PACKAGE MANAGER:
     zz toolchain install          download a pinned Zig C backend into ~/.zz/toolchain
     zz toolchain status           installed versions, pin, active backend
     zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
-    zz upgrade [--dry-run]         self-update from GitHub releases
+    zz upgrade [--dry-run]         self-update zz + zz-lsp from GitHub releases
     zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
 
 REGISTRY (see `zz pm --help` for full flags):
