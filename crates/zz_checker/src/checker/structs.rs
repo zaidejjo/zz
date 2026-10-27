@@ -26,7 +26,13 @@ impl Checker {
                 fields,
                 ..
             } => (name, generics, fields),
-            _ => unreachable!(),
+            _ => {
+                self.errors.push(error_at(
+                    "internal: collect_struct called with a non-Struct statement",
+                    stmt.span(),
+                ));
+                return;
+            }
         };
         // Reject duplicate type parameters (`struct P[T, T]`).
         let mut seen = std::collections::HashSet::new();
