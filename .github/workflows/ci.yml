@@ -53,52 +53,52 @@ jobs:
     strategy:
       # One platform failing must not hide the others: we want all logs.
       fail-fast: false
-    matrix:
-      include:
-        # runner labels verified 2026: macos-13 (Intel) is retired;
-        # Intel is `macos-15-intel`. Windows ARM64 is `windows-11-arm`.
-        - name: linux-x86_64
-          runner: ubuntu-24.04
-          family: linux
-          native: true
-          timeout: 30
-          clang_pin: "23"
-          docker_smoke: true
-        - name: linux-aarch64
-          runner: ubuntu-24.04-arm
-          family: linux
-          native: true
-          timeout: 45
-          clang_pin: ""
-          docker_smoke: false
-        - name: macos-aarch64
-          runner: macos-14
-          family: macos
-          native: true
-          timeout: 45
-          clang_pin: ""
-          docker_smoke: false
-        - name: macos-x86_64
-          runner: macos-15-intel
-          family: macos
-          native: true
-          timeout: 45
-          clang_pin: ""
-          docker_smoke: false
-        - name: windows-x86_64
-          runner: windows-2025
-          family: windows
-          native: true
-          timeout: 60
-          clang_pin: ""
-          docker_smoke: false
-        - name: windows-aarch64
-          runner: windows-11-arm
-          family: windows
-          native: true
-          timeout: 60
-          clang_pin: ""
-          docker_smoke: false
+      matrix:
+        include:
+          # runner labels verified 2026: macos-13 (Intel) is retired;
+          # Intel is `macos-15-intel`. Windows ARM64 is `windows-11-arm`.
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            family: linux
+            native: true
+            timeout: 30
+            clang_pin: "23"
+            docker_smoke: true
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            family: linux
+            native: true
+            timeout: 45
+            clang_pin: ""
+            docker_smoke: false
+          - name: macos-aarch64
+            runner: macos-14
+            family: macos
+            native: true
+            timeout: 45
+            clang_pin: ""
+            docker_smoke: false
+          - name: macos-x86_64
+            runner: macos-15-intel
+            family: macos
+            native: true
+            timeout: 45
+            clang_pin: ""
+            docker_smoke: false
+          - name: windows-x86_64
+            runner: windows-2025
+            family: windows
+            native: true
+            timeout: 60
+            clang_pin: ""
+            docker_smoke: false
+          - name: windows-aarch64
+            runner: windows-11-arm
+            family: windows
+            native: true
+            timeout: 60
+            clang_pin: ""
+            docker_smoke: false
     uses: ./.github/workflows/ci-test.yml
     with:
       name: ${{ matrix.name }}
