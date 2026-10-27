@@ -436,6 +436,10 @@ impl<'a> Lowerer<'a> {
         f.max_stack = max_stack;
         f.toplevel_slots = toplevel_slots;
         f.locals = locals;
+        // VM chunks carry no per-op result types: every value-producing
+        // op is `None` ("no information"). Backends decide representation
+        // from `locals` (declared slot types) — never from inference.
+        f.op_result_types = vec![None; f.code.len()];
         // vartab: kth `ForNext` VmOp ↔ kth recorded slot vec, in chunk
         // order (nested lifts carry their own tables, so order is stable
         // within one lift). Count mismatch is a compiler bug: fail here,
@@ -1368,9 +1372,13 @@ pub fn expand_fused(module: &Module) -> Result<std::borrow::Cow<'_, Module>, IrE
         let (nc, ns) = remap_and_flatten(groups, &spans)?;
         let max_stack = crate::verify::max_stack_for(&nc)?;
         let f = &mut out.funcs[fi];
+        let nl = nc.len();
         f.code = nc;
         f.spans = ns;
         f.max_stack = max_stack;
+        // Expansion changes code length; fused chunks carry no per-op type
+        // info, so reset to all-None matching the new stream.
+        f.op_result_types = vec![None; nl];
     }
     Ok(std::borrow::Cow::Owned(out))
 }
