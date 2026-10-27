@@ -3619,6 +3619,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "tar",
+ "tempfile",
  "toml",
  "ureq",
  "zz_checker",

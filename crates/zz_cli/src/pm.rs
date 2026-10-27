@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Handle `zz init [--template T] [--author A] [--description D] [--license L] [--repo URL]`.
 pub fn init(args: &[String]) -> Result<(), String> {
@@ -103,14 +104,28 @@ pub fn new(args: &[String]) -> Result<(), String> {
             let opts = init_options(args);
             zz_pm::manifest::Manifest::create_new_opts(&parent, name, template.as_deref(), &opts)?;
         }
+        Some("plugin") => {
+            plugin_scaffold(&parent, name, &init_options(args))?;
+        }
         Some(spec) => {
             new_from_template(&parent, name, spec, args, force)?;
         }
     }
 
+    let (main_file, extra) = if template.as_deref() == Some("plugin") {
+        (
+            format!("src/{name}.zz"),
+            format!("plugin.zzi, csrc/{name}.c, tests/{name}_test.zz"),
+        )
+    } else {
+        ("src/main.zz".to_string(), String::new())
+    };
     println!("created project `{name}` at {}", project_dir.display());
     println!("  zz.toml: created");
-    println!("  src/main.zz: created");
+    println!("  {main_file}: created");
+    if !extra.is_empty() {
+        println!("  {extra}: created");
+    }
     println!("  .gitignore: ensured (vendor/, build/, bin/)");
 
     if no_git {
@@ -125,6 +140,156 @@ pub fn new(args: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Scaffold the `fnv` plugin layout for `zz new --template plugin <name>`.
+///
+/// Writes `plugin.zzi` (manifest headers + `extern "C"` example fn),
+/// `zz.toml` (`[native.build-cc]` over `csrc/<name>.c`), `csrc/<name>.c`
+/// (ABI stamp + example fn), `src/<name>.zz` (ergonomic ZZ stub wrapping
+/// the native), and `tests/<name>_test.zz`. Mirrors `cli`/`lib` flow via
+/// `create_new_opts`, then overlays the plugin-specific files.
+fn plugin_scaffold(
+    parent: &Path,
+    name: &str,
+    opts: &zz_pm::manifest::InitOptions,
+) -> Result<(), String> {
+    let project_dir = parent.join(name);
+    // Base: zz.toml + src/main.zz + .gitignore (reuse the cli/lib path).
+    zz_pm::manifest::Manifest::create_new_opts(parent, name, Some("plugin"), opts)?;
+
+    // Re-write zz.toml as a native C plugin manifest.
+    let toml = format!(
+        r#"[package]
+name = "{}"
+version = "0.1.0"
+authors = [{}]
+description = {}
+license = {}
+repository = {}
+
+[native.build-cc]
+sources = ["csrc/{}.c"]
+manifest = "plugin.zzi"
+
+"#,
+        name,
+        toml_list_value(&opts.authors),
+        toml_value(&opts.description),
+        toml_value(&opts.license),
+        toml_value(&opts.repository),
+        name,
+    );
+    std::fs::write(project_dir.join("zz.toml"), &toml)
+        .map_err(|e| format!("cannot write zz.toml: {e}"))?;
+
+    // plugin.zzi: Version / C-ABI / Plugin-version header + extern "C" fn.
+    let zzi = format!(
+        r#"// Version: 1
+// C-ABI: 1
+// Plugin-version: 0.1.0
+
+extern "C" {{
+    /// FNV-1a 64-bit hash of the NUL-terminated input string.
+    func {name}_hash(data: str) -> int
+}}"#,
+    );
+    std::fs::write(project_dir.join("plugin.zzi"), &zzi)
+        .map_err(|e| format!("cannot write plugin.zzi: {e}"))?;
+
+    // csrc/<name>.c: pure-C plugin with ABI version stamp + example fn.
+    let csrc_dir = project_dir.join("csrc");
+    std::fs::create_dir_all(&csrc_dir).map_err(|e| format!("cannot create csrc/: {e}"))?;
+    let c_src = format!(
+        r#"/* Pure-C plugin for `{name}`. ABI stamp + one example native. */
+
+#include <stddef.h>
+
+/* C-ABI version stamp — must match zz_runtime::c_abi::C_ABI_VERSION.
+   `zz check` and `zz install` fail on mismatch, never dlsym-surprise. */
+const unsigned int ZZ_C_PLUGIN_ABI_VERSION = {abi};
+
+/* manifest `str` -> C `const char*` (NUL-terminated, borrowed for the call);
+   manifest `int`  -> C `int` (read back as i64 on the ZZ side). */
+int {name}_hash(const char *data) {{
+    unsigned long long h = 14695981039346656037ULL;
+    if (data != 0) {{
+        for (const unsigned char *p = (const unsigned char *)data; *p; p++) {{
+            h ^= (unsigned long long)(*p);
+            h = h.wrapping_mul(1099511628211ULL);
+        }}
+    }}
+    return (int)(h & 0x7fffffffffffffffLL);
+}}
+"#,
+        abi = zz_runtime::c_abi::C_ABI_VERSION,
+    );
+    std::fs::write(csrc_dir.join(format!("{name}.c")), &c_src)
+        .map_err(|e| format!("cannot write csrc/{name}.c: {e}"))?;
+
+    // src/<name>.zz: ergonomic ZZ stub wrapping the native. The native
+    // `{name}_hash` is declared in `plugin.zzi` (seen by this module via
+    // `merge_own_plugin_sigs`) and implemented in `csrc/{name}.c`; the
+    // wrapper exposes it under the same ZZ-visible name.
+    let stub = format!(
+        "// Ergonomic wrapper for the `{name}` plugin native.\n\
+         // Regenerate with `zz generate-wrapper` after `plugin.zzi` changes.\n\
+         // The `{name}_hash` native is declared in `plugin.zzi` and\n\
+         // implemented in `csrc/{name}.c`.\n\n\
+         pub func {name}_hash(data: str) -> int {{\n\
+             {name}_hash(data)\n\
+         }}\n"
+    );
+    std::fs::write(project_dir.join("src").join(format!("{name}.zz")), &stub)
+        .map_err(|e| format!("cannot write src/{name}.zz: {e}"))?;
+
+    // Drop the placeholder src/main.zz (plugins have no binary entry).
+    let _ = std::fs::remove_file(project_dir.join("src").join("main.zz"));
+
+    // tests/<name>_test.zz: both-engine exercised by `zz plugin test`.
+    let test_dir = project_dir.join("tests");
+    std::fs::create_dir_all(&test_dir).map_err(|e| format!("cannot create tests/: {e}"))?;
+    let test_src = format!(
+        r#"import std.test
+
+@test
+func {name}_hash_known() {{
+    // FNV-1a 64-bit of "" is the offset basis, masked to a positive int.
+    assert_eq({name}_hash(""), 0)
+}}
+
+@test
+func {name}_hash_deterministic() {{
+    let a = {name}_hash("abc")
+    let b = {name}_hash("abc")
+    assert_eq(a, b)
+}}
+"#
+    );
+    std::fs::write(test_dir.join(format!("{name}_test.zz")), &test_src)
+        .map_err(|e| format!("cannot write tests/{name}_test.zz: {e}"))?;
+
+    Ok(())
+}
+
+/// Render an optional string as a TOML literal (or empty when absent).
+fn toml_value(opt: &Option<String>) -> String {
+    match opt {
+        Some(s) if !s.is_empty() => format!("\"{}\"", s.replace('"', "\\\"")),
+        _ => "".to_string(),
+    }
+}
+
+/// Render a string list as a TOML array (e.g. `["a", "b"]`).
+fn toml_list_value(list: &[String]) -> String {
+    if list.is_empty() {
+        return "".to_string();
+    }
+    let items: Vec<String> = list
+        .iter()
+        .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
+        .collect();
+    format!("[{}]", items.join(", "))
 }
 
 /// Is `dir` missing, or an existing empty directory?
@@ -2086,6 +2251,227 @@ pub fn generate_wrapper(args: &[String]) -> Result<(), String> {
     }
     std::fs::write(&dest, &out).map_err(|e| format!("cannot write `{}`: {e}", dest.display()))?;
     println!("wrote {}", dest.display());
+    Ok(())
+}
+
+/// Handle `zz plugin [test|check] [<dir>]`.
+///
+/// `zz plugin test` scaffolds a throwaway consumer in a temp dir that
+/// path-depends on the plugin, installs it (building the native artifact
+/// for both engines), then runs the plugin's tests under `zz test` (VM)
+/// and `zz test --engine native` (AOT), reporting per-engine results.
+/// Exit 0 iff both engines pass — this is the both-engine parity gate
+/// the issue requires (`zz new --template plugin <name> && zz plugin test`
+/// green with zero manual manifest editing).
+pub fn plugin(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "usage: zz plugin test [<plugin-dir>]\n\
+             \n\
+             Run a plugin's ZZ tests under both engines (VM dlopen +\n\
+             AOT static) and report per-engine results. Exit 0 iff both\n\
+             engines pass.\n\
+             \n\
+             FLAGS:\n\
+               -h, --help   show this help"
+        );
+        return Ok(());
+    }
+    let sub = args.first().map(String::as_str);
+    let rest = &args[1..];
+    match sub {
+        None | Some("test") => plugin_test(rest),
+        Some("check") => plugin_check(rest),
+        Some(other) => Err(format!(
+            "zz: unknown plugin subcommand `{other}`\n\
+                 hint: `zz plugin test [<dir>]`"
+        )),
+    }
+}
+
+/// Run a plugin's tests under both engines.
+fn plugin_test(args: &[String]) -> Result<(), String> {
+    let plugin_dir = match args.first() {
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?,
+    };
+    let plugin_dir = match plugin_dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => return Err(format!("cannot resolve plugin dir `{plugin_dir:?}`: {e}")),
+    };
+    if !plugin_dir.join("plugin.zzi").exists() {
+        return Err(format!(
+            "no `plugin.zzi` in `{}`\n\
+             hint: run `zz plugin test` inside a plugin package (or pass its dir)",
+            plugin_dir.display()
+        ));
+    }
+    let manifest = zz_pm::manifest::Manifest::load(&plugin_dir.join("zz.toml")).map_err(|e| {
+        format!(
+            "cannot load plugin manifest `{}`: {e}",
+            plugin_dir.join("zz.toml").display()
+        )
+    })?;
+    let pkg_name = manifest.package.name.clone();
+
+    // Collect the plugin's own tests so `zz plugin test` exercises exactly
+    // what the author wrote, under both engines.
+    let tests_dir = plugin_dir.join("tests");
+    let mut test_files: Vec<PathBuf> = Vec::new();
+    if tests_dir.is_dir() {
+        for entry in
+            std::fs::read_dir(&tests_dir).map_err(|e| format!("cannot read plugin tests/: {e}"))?
+        {
+            let entry = entry.map_err(|e| format!("cannot read plugin tests entry: {e}"))?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "zz").unwrap_or(false) {
+                test_files.push(path);
+            }
+        }
+    }
+    test_files.sort();
+
+    // Throwaway consumer that path-depends on the plugin.
+    let consumer = std::env::temp_dir().join(format!(
+        "zz-plugin-test-{}-{}",
+        pkg_name,
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&consumer);
+    std::fs::create_dir_all(&consumer).map_err(|e| format!("cannot create consumer dir: {e}"))?;
+    let consumer_tests = consumer.join("tests");
+    std::fs::create_dir_all(&consumer_tests)
+        .map_err(|e| format!("cannot create consumer tests/: {e}"))?;
+
+    // consumer zz.toml: path dependency on the plugin.
+    let consumer_toml = format!(
+        r#"[package]
+name = "zz-plugin-test-consumer"
+version = "0.1.0"
+
+[dependencies]
+{pkg_name} = {{ path = "{}" }}
+"#,
+        plugin_dir.display()
+    );
+    std::fs::write(consumer.join("zz.toml"), &consumer_toml)
+        .map_err(|e| format!("cannot write consumer zz.toml: {e}"))?;
+
+    // Copy each plugin test, prepending `import <pkg>` so its natives are
+    // in scope (import_plugin inserts them under bare names).
+    for tf in &test_files {
+        let content = std::fs::read_to_string(tf)
+            .map_err(|e| format!("cannot read plugin test `{}`: {e}", tf.display()))?;
+        let prefixed = format!("import {pkg_name}\n\n{content}");
+        std::fs::write(consumer_tests.join(tf.file_name().unwrap()), &prefixed)
+            .map_err(|e| format!("cannot write consumer test: {e}"))?;
+    }
+
+    // If the plugin ships no tests, still run a trivial smoke test so the
+    // both-engine gate passes/fails on the install itself.
+    if test_files.is_empty() {
+        std::fs::write(
+            consumer_tests.join("smoke_test.zz"),
+            format!("import {pkg_name}\n\n@test func smoke() {{ }}\n"),
+        )
+        .map_err(|e| format!("cannot write smoke test: {e}"))?;
+    }
+
+    let zz = std::env::current_exe().map_err(|e| format!("cannot locate zz binary: {e}"))?;
+    let run = |engine: &str, extra: &[&str]| -> Result<(), String> {
+        let mut cmd = Command::new(&zz);
+        cmd.current_dir(&consumer)
+            .arg("test")
+            .arg("--engine")
+            .arg(engine);
+        for e in extra {
+            cmd.arg(*e);
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| format!("failed to run `zz test --engine {engine}`: {e}"))?;
+        let status = out.status;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !stdout.is_empty() {
+            println!("[{engine}] {stdout}");
+        }
+        if !stderr.is_empty() {
+            eprint!("[{engine}] {stderr}");
+        }
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "`zz test --engine {engine}` failed (exit {})",
+                status.code().unwrap_or(-1)
+            ))
+        }
+    };
+
+    // Install (builds the native artifact; loads VM plugin at run time).
+    {
+        let mut cmd = Command::new(&zz);
+        cmd.current_dir(&consumer).arg("install");
+        let out = cmd
+            .output()
+            .map_err(|e| format!("failed to run `zz install`: {e}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "`zz install` failed for plugin `{pkg_name}`\n{stderr}"
+            ));
+        }
+    }
+
+    let vm_res = run("vm", &[]);
+    let native_res = run("native", &[]);
+
+    let _ = std::fs::remove_dir_all(&consumer);
+
+    match (vm_res, native_res) {
+        (Ok(()), Ok(())) => {
+            println!("plugin `{pkg_name}`: both engines passed");
+            Ok(())
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            Err(format!("plugin `{pkg_name}`: both-engine test failed\n{e}"))
+        }
+    }
+}
+
+/// `zz plugin check`: validate a plugin's manifest + zzi + zz.toml drift
+/// without installing. Delegates to the same checks `zz check` runs when
+/// it discovers a `plugin.zzi` (see `check_or_fix_path`).
+fn plugin_check(args: &[String]) -> Result<(), String> {
+    let dir = match args.first() {
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?,
+    };
+    let dir = match dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => return Err(format!("cannot resolve dir `{dir:?}`: {e}")),
+    };
+    zz_plugin::load_manifest(&dir.join("plugin.zzi"))
+        .map_err(|e| format!("plugin `{}` manifest invalid: {e}", dir.display()))?;
+    let manifest = zz_pm::manifest::Manifest::load(&dir.join("zz.toml"))
+        .map_err(|e| format!("cannot load zz.toml: {e}"))?;
+    if let Some(native) = &manifest.native {
+        native
+            .validate(&dir)
+            .map_err(|e| format!("invalid [native]: {e}"))?;
+    }
+    // Version drift: zzi Plugin-version vs zz.toml package.version.
+    let zzi = zz_plugin::load_manifest(&dir.join("plugin.zzi"))
+        .map_err(|e| format!("cannot load plugin.zzi: {e}"))?;
+    if zzi.meta.plugin_version != manifest.package.version {
+        return Err(format!(
+            "version drift: plugin.zzi Plugin-version `{}` != zz.toml version `{}`\n\
+             hint: keep them in sync",
+            zzi.meta.plugin_version, manifest.package.version
+        ));
+    }
+    println!("plugin `{}`: manifest + zzi valid, no drift", dir.display());
     Ok(())
 }
 
