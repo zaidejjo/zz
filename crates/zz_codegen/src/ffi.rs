@@ -26,6 +26,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::compile::is_windows_target;
+
 /// FFI protocol version. Re-exported from `zz_native_rt` (single source of
 /// truth); AOT binaries built against a mismatched static library must be
 /// rebuilt.
@@ -739,7 +741,9 @@ fn find_shipped_libstd(libdir: &std::path::Path) -> Option<String> {
     let (prefix, suffix) = if cfg!(target_os = "macos") {
         ("libstd-", ".dylib")
     } else if cfg!(windows) {
-        ("libstd-", ".dll")
+        // MSVC names the shared libstd `std-<hash>.dll` (no `lib` prefix);
+        // GNU/mingw uses `libstd-<hash>.dll`. Probe both.
+        ("std-", ".dll")
     } else {
         ("libstd-", ".so")
     };
@@ -1160,21 +1164,28 @@ pub fn link_args_for_target(
         .map(|p| p.to_path_buf())
         .ok_or_else(|| FfiError(format!("static library has no parent: {}", lib.display())))?;
 
+    // Target-aware platform detection: use the --target triple when
+    // provided, otherwise fall back to the host cfg. This matters for
+    // cross-compilation (e.g. building Windows targets from Linux).
+    let is_windows = target
+        .map(is_windows_target)
+        .unwrap_or_else(|| cfg!(windows));
+
     // Windows/MSVC linking: /LIBPATH: and .lib import/static libraries.
     // zig cc on Windows and clang-cl both accept these flags.
-    if cfg!(windows) {
-        let mut base = vec![
-            format!("/LIBPATH:{}", libdir.display()),
-            lib_file_name().to_string(), // "zz_native_rt.lib"
-        ];
+    if is_windows {
+        let lib_name = if target.is_some() {
+            "zz_native_rt.lib".to_string()
+        } else {
+            lib_file_name().to_string()
+        };
+        let mut base = vec![format!("/LIBPATH:{}", libdir.display()), lib_name];
         base.extend(sys_link_libs_windows().iter().map(|s| s.to_string()));
         // Release installs ship the static libstd next to the archive.
-        if target.is_none() {
-            if let Some(shipped) = find_shipped_std_rlib(&libdir) {
-                let mut flags = base.clone();
-                flags.insert(1, libdir.join(&shipped).display().to_string());
-                return Ok((flags, lib));
-            }
+        if let Some(shipped) = find_shipped_std_rlib(&libdir) {
+            let mut flags = base.clone();
+            flags.insert(1, libdir.join(&shipped).display().to_string());
+            return Ok((flags, lib));
         }
         if let Ok(rustc_dir) = rustc_libdir_for_target(target) {
             if let Ok(rlib) = find_std_rlib(&rustc_dir) {
@@ -1201,14 +1212,10 @@ pub fn link_args_for_target(
     // Release installs ship the static libstd next to the archive: link
     // it by absolute path — no rustc, no RUNPATH, no sidecar. The `ldd`
     // output shows no `libstd` line (glibc/libm dynamic is fine).
-    // Native-only: cross builds must resolve the target's sysroot below
-    // (a host archive in the libdir would silently mix architectures).
-    if target.is_none() {
-        if let Some(shipped) = find_shipped_std_rlib(&libdir) {
-            let mut flags = base.clone();
-            flags.insert(2, libdir.join(&shipped).display().to_string());
-            return Ok((flags, lib));
-        }
+    if let Some(shipped) = find_shipped_std_rlib(&libdir) {
+        let mut flags = base.clone();
+        flags.insert(2, libdir.join(&shipped).display().to_string());
+        return Ok((flags, lib));
     }
     if let Ok(rustc_dir) = rustc_libdir_for_target(target) {
         if let Ok(rlib) = find_std_rlib(&rustc_dir) {
@@ -1221,13 +1228,11 @@ pub fn link_args_for_target(
     // zips, or a toolchain without rlibs). Native-only like the static
     // shipped path above — cross builds error loudly on the target
     // sysroot instead of mixing host objects.
-    if target.is_none() {
-        if let Some(shipped) = find_shipped_libstd(&libdir) {
-            let mut flags = base.clone();
-            flags.insert(2, format!("-L{}", libdir.display()));
-            flags.insert(3, format!("-l:{shipped}"));
-            return Ok((flags, lib));
-        }
+    if let Some(shipped) = find_shipped_libstd(&libdir) {
+        let mut flags = base.clone();
+        flags.insert(2, format!("-L{}", libdir.display()));
+        flags.insert(3, format!("-l:{shipped}"));
+        return Ok((flags, lib));
     }
     let rustc_dir = rustc_libdir_for_target(target).map_err(|e| {
         FfiError(format!(

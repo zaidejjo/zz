@@ -762,22 +762,28 @@ pub(crate) fn build_native_deps(
     // (e.g. libzimg_native.a contains zimg_wrapper.o alongside
     // build/zimg_wrapper.o). Linking both yields "multiple definition"
     // errors, so thin the archives: copy each conflicting archive next
-    // to the original and delete the members shadowed by loose objects.
-    // The loose object is authoritative (build hooks recompile it every
-    // run, while archives may be cargo-cached and stale).
-    thin_shadowed_archive_members(&mut artifacts);
+    // Deduplicate identical errors (e.g. duplicate lock entries) before
+    // surfacing them.
+    let mut deduped: Vec<String> = errors
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    deduped.sort();
+    deduped.dedup();
 
-    if !errors.is_empty() {
+    if !deduped.is_empty() {
         return Err(format!(
             "native dependency build failed for {} dependency{}:{}",
-            errors.len(),
-            if errors.len() == 1 { "" } else { "s" },
-            errors
-                .into_iter()
-                .map(|e| format!("\n  - {e}"))
-                .collect::<String>()
+            deduped.len(),
+            if deduped.len() == 1 { "" } else { "s" },
+            deduped.join("\n  - ")
         ));
     }
+
+    // Thin archives that duplicate loose `.o` objects (after the error
+    // check, so thinning failures don't mask dependency errors).
+    thin_shadowed_archive_members(&mut artifacts)?;
 
     Ok(NativeBuild {
         artifacts,
@@ -810,15 +816,17 @@ fn collect_link_args(ldflags_path: &Path, link_args: &mut Vec<String>) {
 
 /// Copy archives that duplicate loose `.o` files and delete the shadowed
 /// members from the copies, replacing the archive paths in `artifacts`.
-/// When `ar` is unavailable the list is left untouched.
-fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) {
+/// When `ar` is unavailable the list is left untouched (a warning is
+/// emitted, but the build continues — duplicate members may cause linker
+/// "multiple definition" errors which the user can then diagnose).
+fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) -> Result<(), String> {
     let loose_stems: std::collections::HashSet<String> = artifacts
         .iter()
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("o"))
         .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
         .collect();
     if loose_stems.is_empty() {
-        return;
+        return Ok(());
     }
     // replacement per archive.
     let mut replacements: Vec<(usize, PathBuf)> = Vec::new();
@@ -832,7 +840,14 @@ fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) {
             .output()
         {
             Ok(o) if o.status.success() => o,
-            _ => continue,
+            // `ar` unavailable: leave the archive as-is, warn loudly.
+            _ => {
+                eprintln!(
+                    "warning: `ar` not found; cannot thin archive {}, duplicate object members may cause linker errors",
+                    archive.display()
+                );
+                continue;
+            }
         };
         let mut shadowed: Vec<String> = Vec::new();
         for member in String::from_utf8_lossy(&output.stdout).lines() {
@@ -869,7 +884,11 @@ fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) {
             .is_some_and(|(thin_mtime, arch_mtime)| thin_mtime >= arch_mtime);
         if !reuse {
             if std::fs::copy(archive, &thin_path).is_err() {
-                continue;
+                return Err(format!(
+                    "cannot thin archive {}: failed to copy to {}",
+                    archive.display(),
+                    thin_path.display()
+                ));
             }
             let mut cmd = std::process::Command::new("ar");
             cmd.arg("d").arg(&thin_path);
@@ -878,7 +897,10 @@ fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) {
             }
             if !cmd.output().is_ok_and(|o| o.status.success()) {
                 let _ = std::fs::remove_file(&thin_path);
-                continue;
+                return Err(format!(
+                    "cannot thin archive {}: failed to remove shadowed members",
+                    archive.display()
+                ));
             }
         }
         replacements.push((i, thin_path));
@@ -886,6 +908,7 @@ fn thin_shadowed_archive_members(artifacts: &mut [PathBuf]) {
     for (i, thin_path) in replacements {
         artifacts[i] = thin_path;
     }
+    Ok(())
 }
 
 /// Type-check + DCE all modules to a typed program, entry-main name, and

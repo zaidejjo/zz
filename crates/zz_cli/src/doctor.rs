@@ -6,6 +6,7 @@
 //! when shell integration is the problem.
 
 use crate::{setup, ui};
+use std::path::PathBuf;
 use zz_codegen::ffi::{self as ffi, RtSource};
 
 /// One check result.
@@ -99,27 +100,50 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     // 3. Native runtime (AOT linking for `zz build` / `zz run --native`).
-    match ffi::native_rt_resolution(false) {
-        Ok((lib, source, strategy)) => {
-            let kind = match source {
-                RtSource::Cargo => "cargo-built",
-                RtSource::Prebuilt => "prebuilt",
-            };
-            checks.push(pass(
-                "Native runtime",
-                format!("{kind} native runtime: {} ({})", lib.display(), strategy),
-            ));
+    // Check both debug and release profiles — AOT defaults to release, but
+    // dev checkouts may only have debug built. Report per-profile status.
+    let mut rt_sources: Vec<(bool, RtSource, PathBuf, &'static str)> = Vec::new();
+    for release in [false, true] {
+        match ffi::native_rt_resolution(release) {
+            Ok((lib, source, strategy)) => {
+                rt_sources.push((release, source, lib, strategy));
+            }
+            Err(e) => {
+                let profile = if release { "release" } else { "debug" };
+                checks.push(fail(
+                    "Native runtime",
+                    format!("cannot locate native runtime archive ({profile}): {}", e.0),
+                    "set ZZ_NATIVE_RT_DIR or build from a source checkout",
+                ));
+            }
         }
-        Err(e) => {
-            checks.push(fail(
-                "Native runtime",
-                "cannot locate native runtime archive".to_string(),
-                e.0,
-            ));
-        }
+    }
+    let rt_source = rt_sources
+        .iter()
+        .find(|(_, source, _, _)| *source == RtSource::Prebuilt)
+        .or_else(|| rt_sources.first())
+        .map(|(_, source, _, _)| *source);
+
+    for (release, source, lib, strategy) in &rt_sources {
+        let kind = match source {
+            RtSource::Cargo => "cargo-built",
+            RtSource::Prebuilt => "prebuilt",
+        };
+        let profile = if *release { "release" } else { "debug" };
+        checks.push(pass(
+            "Native runtime",
+            format!(
+                "native runtime ({profile}): {kind} {} ({})",
+                lib.display(),
+                strategy
+            ),
+        ));
     }
 
     // Cargo availability (needed to build native runtime from source).
+    // Only a hard failure when the runtime must be built from source
+    // (RtSource::Cargo); with a prebuilt archive (release installs) cargo
+    // is optional so this check is informational.
     match std::process::Command::new("cargo")
         .arg("--version")
         .output()
@@ -132,11 +156,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 .unwrap_or_default();
             checks.push(pass("Cargo", format!("cargo {ver}")));
         }
-        _ => checks.push(fail(
-            "Cargo",
-            "cargo not found".to_string(),
-            "install Rust toolchain — needed to build libzz_native_rt.a from source",
-        )),
+        _ => match rt_source {
+            Some(RtSource::Cargo) | None => checks.push(fail(
+                "Cargo",
+                "cargo not found".to_string(),
+                "install Rust toolchain — needed to build libzz_native_rt.a from source",
+            )),
+            Some(RtSource::Prebuilt) => checks.push(pass(
+                "Cargo",
+                "cargo not found (optional — prebuilt native runtime ships with release)",
+            )),
+        },
     }
 
     // 4. Shell integration (same state as `zz setup --dry-run`).
