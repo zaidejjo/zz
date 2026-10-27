@@ -53,6 +53,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # compiler looks in `<exe>/lib` and `<exe>/../lib/zz`, so the archive has to
 # land on the AUR layout at /usr/local/lib/zz. Dropping `lib/` makes every
 # `zz build` fail with "cannot locate workspace".
+#
+# Only the two linking artifacts are installed: release zips also carry the
+# bundled Zig toolchain (`lib/std`, `lib/libc`, …) because `zig` resolves
+# them from `<exe>/lib`, but this image has no `zig` binary — the builder
+# image uses system Clang — so copying that tree would add ~150MB of dead
+# weight to every pull.
 RUN case "${TARGETARCH:-$(uname -m)}" in \
         amd64|x86_64) ZZARCH=x86_64 ;; \
         arm64|aarch64) ZZARCH=aarch64 ;; \
@@ -61,7 +67,8 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
     curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${ZZ_VERSION}/zz-${ZZ_VERSION}-linux-${ZZARCH}.zip" -o /tmp/zz.zip && \
     mkdir -p /tmp/zzdist && unzip -q /tmp/zz.zip -d /tmp/zzdist && \
     install -m755 /tmp/zzdist/zz /tmp/zzdist/zz-lsp /usr/local/bin/ && \
-    mkdir -p /usr/local/lib/zz && cp -a /tmp/zzdist/lib/. /usr/local/lib/zz/ && \
+    mkdir -p /usr/local/lib/zz && \
+    cp -a /tmp/zzdist/lib/libzz_native_rt.a /tmp/zzdist/lib/libstd-*.rlib /usr/local/lib/zz/ && \
     rm -rf /tmp/zzdist /tmp/zz.zip && \
     zz --version
 ENTRYPOINT ["zz"]
