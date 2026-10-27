@@ -306,9 +306,11 @@ size_t zz_array_len(const zz_array *a) {
 
 // FFI bridge for the Rust static library: positional array read without
 // requiring Rust to mirror the zz_array layout. Cloned item, or unit for
-// non-arrays and out-of-range indices.
-zz_value zz_array_at(zz_value arr, size_t i) {
+// non-arrays and out-of-range indices (with *err set).
+zz_value zz_array_at(zz_value arr, size_t i, int *err) {
+    *err = 0;
     if (arr.tag != ZZ_ARRAY || arr.arr == NULL || i >= arr.arr->len) {
+        *err = 1;
         return zz_unit();
     }
     return zz_clone(arr.arr->items[i]);
