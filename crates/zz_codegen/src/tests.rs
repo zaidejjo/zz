@@ -649,6 +649,33 @@ println(10.0 / 4)
 }
 
 #[test]
+fn native_codegen_graceful_fallbacks_no_panic() {
+    // Exercises codegen paths that previously contained `unreachable!()`:
+    //   chunk.rs BinOp fast-path -> zz_binop fallback (bitwise / shift / mod)
+    //   chunk.rs UnOp fast-path map (Neg / Pos / Not / BitNot)
+    //   lower/expr.rs scalar fallbacks -> zz_binop (mixed int/double, div)
+    let src = r#"
+println(6 & 3)
+println(6 | 3)
+println(6 ^ 3)
+println(~6)
+println(1 << 10)
+println(1024 >> 3)
+println(-7)
+println(+42)
+println(1 + 2.5)
+println(10.0 / 4)
+println(10 % 3)
+"#;
+    let (exit, out) = native_run(src);
+    assert_eq!(exit, 0, "native build/run must not panic: {out}");
+    assert_eq!(
+        out, "2\n7\n5\n-7\n1024\n128\n-7\n42\n3.5\n2.5\n1\n",
+        "native output mismatch"
+    );
+}
+
+#[test]
 fn native_scalar_copy_matches_vm() {
     // Scalar-to-scalar copies (`s := sx` Decl, `s = sy` Assign between raw
     // scalar locals) once miscompiled to `(v).f` on a plain `double`, so
