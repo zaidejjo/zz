@@ -3746,15 +3746,16 @@ impl<'a> Emitter<'a> {
                     // Int fast path (UB-free under `-fwrapv`); mixed
                     // types fall back to the full operator.
                     let e = match b {
-                        zz_ir::op::BinOp::Add => "zz_int(_a.i + _b.i)",
-                        zz_ir::op::BinOp::Sub => "zz_int(_a.i - _b.i)",
-                        zz_ir::op::BinOp::Mul => "zz_int(_a.i * _b.i)",
-                        zz_ir::op::BinOp::Lt => "zz_bool(_a.i < _b.i)",
-                        zz_ir::op::BinOp::Gt => "zz_bool(_a.i > _b.i)",
-                        zz_ir::op::BinOp::Le => "zz_bool(_a.i <= _b.i)",
-                        zz_ir::op::BinOp::Ge => "zz_bool(_a.i >= _b.i)",
-                        _ => unreachable!(),
+                        zz_ir::op::BinOp::Add => Some("zz_int(_a.i + _b.i)"),
+                        zz_ir::op::BinOp::Sub => Some("zz_int(_a.i - _b.i)"),
+                        zz_ir::op::BinOp::Mul => Some("zz_int(_a.i * _b.i)"),
+                        zz_ir::op::BinOp::Lt => Some("zz_bool(_a.i < _b.i)"),
+                        zz_ir::op::BinOp::Gt => Some("zz_bool(_a.i > _b.i)"),
+                        zz_ir::op::BinOp::Le => Some("zz_bool(_a.i <= _b.i)"),
+                        zz_ir::op::BinOp::Ge => Some("zz_bool(_a.i >= _b.i)"),
+                        _ => None,
                     };
+                    let e = e.ok_or_else(|| ChunkError::op("binop fast-path"))?;
                     out.push_str(&format!(
                         "    {{ zz_value _b = st[--sp]; zz_value _a = st[--sp]; if (_a.tag == ZZ_INT && _b.tag == ZZ_INT) {{ st[sp++] = {e}; }} else {{ st[sp++] = zz_binop({c}, _a, _b); }} zz_release(&_a); zz_release(&_b); }}\n"
                     ));
@@ -3772,11 +3773,12 @@ impl<'a> Emitter<'a> {
                     }
                     _ => {
                         let f = match u {
-                            zz_ir::op::UnOp::Neg => "zz_neg",
-                            zz_ir::op::UnOp::Not => "zz_not",
-                            zz_ir::op::UnOp::BitNot => "zz_bitnot",
-                            zz_ir::op::UnOp::Pos => unreachable!(),
+                            zz_ir::op::UnOp::Neg => Some("zz_neg"),
+                            zz_ir::op::UnOp::Not => Some("zz_not"),
+                            zz_ir::op::UnOp::BitNot => Some("zz_bitnot"),
+                            zz_ir::op::UnOp::Pos => None,
                         };
+                        let f = f.ok_or_else(|| ChunkError::op("unop fast-path"))?;
                         out.push_str(&format!(
                             "    {{ zz_value _v = st[--sp]; st[sp++] = {f}(_v); zz_release(&_v); }}\n"
                         ));

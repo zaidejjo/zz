@@ -724,10 +724,6 @@ impl Lowerer {
                                 (&left_raw, &right_raw),
                                 (Some((_, "int64_t")), Some((_, "int64_t")),)
                             ) {
-                                let (lc, rc) = match (&left_raw, &right_raw) {
-                                    (Some((lc, _)), Some((rc, _))) => (lc.clone(), rc.clone()),
-                                    _ => unreachable!(),
-                                };
                                 let c_op = match op {
                                     zz_frontend::ast::BinOp::Add => "+",
                                     zz_frontend::ast::BinOp::Sub => "-",
@@ -738,6 +734,17 @@ impl Lowerer {
                                     zz_frontend::ast::BinOp::BitOr => "|",
                                     zz_frontend::ast::BinOp::BitXor => "^",
                                     _ => "+",
+                                };
+                                let (Some((lc, _)), Some((rc, _))) = (&left_raw, &right_raw) else {
+                                    // Guarded by matches! above; unreachable. Fall back to the
+                                    // runtime binop so a new IR op never panics the compiler.
+                                    let boxed_l = box_scalar_operand(left, names, &l);
+                                    let boxed_l =
+                                        self.box_struct_operand(left, boxed_l, &l, names, out);
+                                    let boxed_r = box_scalar_operand(right, names, &r);
+                                    let boxed_r =
+                                        self.box_struct_operand(right, boxed_r, &r, names, out);
+                                    return format!("zz_binop({c_op}, {boxed_l}, {boxed_r})");
                                 };
                                 // Div/Rem always route through zz_binop: they can
                                 // trap (zero divisor, MIN/-1), and raw C
@@ -763,16 +770,23 @@ impl Lowerer {
                                 (&left_raw, &right_raw),
                                 (Some((_, "double")), Some((_, "double")),)
                             ) {
-                                let (lc, rc) = match (&left_raw, &right_raw) {
-                                    (Some((lc, _)), Some((rc, _))) => (lc.clone(), rc.clone()),
-                                    _ => unreachable!(),
-                                };
                                 let c_op = match op {
                                     zz_frontend::ast::BinOp::Add => "+",
                                     zz_frontend::ast::BinOp::Sub => "-",
                                     zz_frontend::ast::BinOp::Mul => "*",
                                     zz_frontend::ast::BinOp::Div => "/",
                                     _ => "+",
+                                };
+                                let (Some((lc, _)), Some((rc, _))) = (&left_raw, &right_raw) else {
+                                    // Guarded by matches! above; unreachable. Fall back to the
+                                    // runtime binop so a new IR op never panics the compiler.
+                                    let boxed_l = box_scalar_operand(left, names, &l);
+                                    let boxed_l =
+                                        self.box_struct_operand(left, boxed_l, &l, names, out);
+                                    let boxed_r = box_scalar_operand(right, names, &r);
+                                    let boxed_r =
+                                        self.box_struct_operand(right, boxed_r, &r, names, out);
+                                    return format!("zz_binop({c_op}, {boxed_l}, {boxed_r})");
                                 };
                                 if matches!(op, zz_frontend::ast::BinOp::Rem) {
                                     format!("(double)(fmod({l}, {r}))")
