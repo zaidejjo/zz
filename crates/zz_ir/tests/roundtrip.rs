@@ -161,6 +161,7 @@ fn verify_matcherror_is_terminal() {
             toplevel_slots: vec![],
             vartab: vec![],
             locals: vec![zz_ir::TypeId(1), zz_ir::TypeId(2)],
+            op_result_types: vec![],
             // base, scrutinee (declared Result), arm to trap terminator,
             // keep-top cleanup: the trap edge is dead, the arm value
             // (Str) is what the epilogue returns.
@@ -210,6 +211,7 @@ fn verify_rejects_join_mismatch() {
             toplevel_slots: vec![],
             vartab: vec![],
             locals: vec![],
+            op_result_types: vec![],
             // arm 1 pushes two values, arm 2 pushes one → join mismatch.
             code: vec![
                 Op::PushConst(zz_ir::ConstId(0)),
@@ -697,6 +699,7 @@ fn verify_rejects_slot_store_mismatch() {
                 ret: u,
             },
             locals: vec![int],
+            op_result_types: vec![],
             toplevel_slots: vec![],
             vartab: vec![],
             code: vec![Op::PushConst(zz_ir::ConstId(0)), Op::StoreSlot(0)],
@@ -724,6 +727,7 @@ fn verify_rejects_bad_call() {
             ret: u,
         },
         locals: vec![],
+        op_result_types: vec![],
         toplevel_slots: vec![],
         vartab: vec![],
         code: vec![
@@ -750,6 +754,7 @@ fn verify_rejects_bad_call() {
         }],
         sig: g_sig,
         locals: vec![int],
+        op_result_types: vec![],
         toplevel_slots: vec![],
         vartab: vec![],
         code: vec![Op::LoadSlot(0)],
@@ -984,6 +989,7 @@ fn derotate_handles_an_empty_loop_body() {
             toplevel_slots: vec![],
             vartab: vec![vec![]],
             locals: vec![TypeId(0)],
+            op_result_types: vec![],
             // [placeholder, iterable, setup, entry jump, test (body ==
             // test), exit pop].
             code: vec![
@@ -1124,6 +1130,7 @@ fn verify_accepts_error_declared_iterable() {
             toplevel_slots: vec![],
             vartab: vec![vec![]],
             locals: vec![zz_ir::TypeId(1)],
+            op_result_types: vec![],
             // [push result placeholder, load Error slot, setup,
             // header, empty body, back-edge, exit pop].
             code: vec![
@@ -1175,6 +1182,7 @@ fn verify_short_locals_fails_closed() {
                 ret: TypeId(0),
             },
             locals: vec![],
+            op_result_types: vec![],
             vartab: vec![],
             toplevel_slots: vec![],
             code: vec![],
@@ -1238,6 +1246,7 @@ fn shape_module(arity: usize, locals_len: usize, code: Vec<zz_ir::Op>) -> zz_ir:
                 ret: TypeId(0),
             },
             locals: vec![TypeId(0); locals_len],
+            op_result_types: vec![],
             vartab: vec![],
             toplevel_slots: vec![],
             code,

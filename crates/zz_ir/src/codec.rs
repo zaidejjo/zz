@@ -267,6 +267,17 @@ fn encode_funcs(module: &Module, ranges: &[(u32, u32)]) -> Vec<u8> {
             put_u32(&mut v, name.0);
             put_u16(&mut v, *slot);
         }
+        // Per-op result type table (v5): count, then per op 0=None / 1=type id.
+        put_u32(&mut v, f.op_result_types.len() as u32);
+        for ty in &f.op_result_types {
+            match ty {
+                Some(id) => {
+                    put_u8(&mut v, 1);
+                    put_u32(&mut v, id.0);
+                }
+                None => put_u8(&mut v, 0),
+            }
+        }
     }
     v
 }
@@ -1095,6 +1106,20 @@ fn decode_funcs(bytes: &[u8]) -> Result<FuncTable, IrError> {
         for _ in 0..nt {
             toplevel_slots.push((StrId(r.u32()?), r.u16()?));
         }
+        // Per-op result type table (v5).
+        let nr = r.u32()? as usize;
+        if nr > 100_000 {
+            return Err(IrError::new("absurd .zzc op-result table count"));
+        }
+        let mut op_result_types = Vec::with_capacity(nr.min(1024));
+        for _ in 0..nr {
+            let tag = r.u8()?;
+            op_result_types.push(match tag {
+                0 => None,
+                1 => Some(TypeId(r.u32()?)),
+                _ => return Err(IrError::new("bad .zzc op-result type tag")),
+            });
+        }
         ranges.push((off, len));
         funcs.push(FuncDef {
             name,
@@ -1104,6 +1129,7 @@ fn decode_funcs(bytes: &[u8]) -> Result<FuncTable, IrError> {
             locals,
             vartab,
             toplevel_slots,
+            op_result_types,
             code: Vec::new(),
             spans: Vec::new(),
             max_stack,

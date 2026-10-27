@@ -380,6 +380,7 @@ impl<'a> Lowerer<'a> {
             vartab: Vec::new(),
             code: Vec::new(),
             spans: Vec::new(),
+            op_result_types: Vec::new(),
             max_stack: 0,
         });
         let expanded = self.expand_chunk(chunk)?;
