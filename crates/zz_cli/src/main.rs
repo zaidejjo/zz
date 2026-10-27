@@ -80,7 +80,8 @@ USAGE:
 PACKAGE MANAGER:
     zz init [--template T]        initialize zz.toml + src/main.zz in cwd
     zz new <name> [--template T]  create a new project (git init -b main)
-                                  template: cli|lib|web, pkg:NAME, git URL, or PATH
+                                  template: cli|lib|web|plugin, pkg:NAME,
+                                  git URL, or PATH
                                   flags: --force (non-empty dir), --no-git
     zz add <pkg>[@ver]            add a dependency to zz.toml
     zz install, zz i              resolve deps, fetch into CAS, link
@@ -110,6 +111,7 @@ REGISTRY (see `zz pm --help` for full flags):
     zz outdated                   locked vs wanted vs latest per dep
     zz audit                      verify pins + native closure (hash? licensed? drift? hooks?)
     zz generate-wrapper [--check] generate src/<pkg>.zz wrappers from plugin.zzi
+    zz plugin test [<dir>]        run a plugin's tests under both engines
     zz search <query>             search the package registry
     zz info <pkg>                 show package metadata and versions
     zz login [--browser]          authenticate for publishing
@@ -637,6 +639,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("plugin") => match pm::plugin(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("zz: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         Some("clean") => match pm::clean(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
@@ -828,6 +837,21 @@ FLAGS:
 
 PATH can be a single .zz file or a directory (recursively formats all .zz files).
 Defaults to `.` (current directory) if omitted.
+"
+        }
+        "plugin" => {
+            "\
+usage: zz plugin test [<plugin-dir>]
+
+Run a plugin's ZZ tests under both engines (VM dlopen + AOT static) and
+report per-engine results. Exit 0 iff both engines pass.
+
+This scaffolds a throwaway consumer that path-depends on the plugin,
+installs it (building the native artifact), then runs `zz test` (VM) and
+`zz test --engine native` (AOT).
+
+FLAGS:
+  -h, --help   show this help
 "
         }
         _ => USAGE,
@@ -2991,6 +3015,79 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
 }
 
 /// Parse, type-check, and optionally auto-fix files.
+/// Check-time plugin validation (#238). Rendered as `zz check` errors so
+/// drift and broken manifests fail at check time, never at `dlsym` time.
+fn check_plugin_project(root: &std::path::Path) -> Result<(), String> {
+    let zzi_path = root.join("plugin.zzi");
+    let toml_path = root.join("zz.toml");
+
+    // 1. Manifest headers + zzi grammar + C-ABI-safe types.
+    let zzi = zz_plugin::load_manifest(&zzi_path).map_err(|e| {
+        format!(
+            "invalid plugin manifest `{}`: {e}\n\
+             hint: fix `plugin.zzi` headers (`Version`/`C-ABI`/`Plugin-version`)\n\
+                  and the `extern \"C\"` block",
+            zzi_path.display()
+        )
+    })?;
+
+    // 2. zz.toml [native.*] schema (sources exist, flags allowlisted, ...).
+    let manifest = zz_pm::manifest::Manifest::load(&toml_path).map_err(|e| {
+        format!(
+            "invalid `zz.toml` for plugin `{}`: {e}\n\
+             hint: add `[native.build-cc] sources = [...]` and `manifest = \"plugin.zzi\"`",
+            root.display()
+        )
+    })?;
+    if let Some(native) = &manifest.native {
+        native
+            .validate(root)
+            .map_err(|e| format!("invalid `[native]` for plugin `{}`: {e}", root.display()))?;
+    }
+
+    // 3. Drift: zzi Plugin-version vs zz.toml package.version.
+    if zzi.meta.plugin_version != manifest.package.version {
+        return Err(format!(
+            "version drift in plugin `{}`: plugin.zzi Plugin-version `{}` != zz.toml version `{}`\n\
+                 hint: keep them in sync",
+            root.display(),
+            zzi.meta.plugin_version,
+            manifest.package.version
+        ));
+    }
+
+    // 4. Drift: every zzi symbol present in csrc/ (cheap textual check;
+    //    `nm` verification stays at build time).
+    let csrc_dir = root.join("csrc");
+    let mut missing: Vec<String> = Vec::new();
+    if csrc_dir.is_dir() {
+        let sources: Vec<String> = std::fs::read_dir(&csrc_dir)
+            .map_err(|e| format!("cannot read csrc/: {e}"))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|ext| ext == "c").unwrap_or(false))
+            .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+            .collect();
+        for name in zzi.funcs.keys() {
+            let leaf = name.rsplit('.').next().unwrap_or(name);
+            if !sources.iter().any(|s| s.contains(leaf)) {
+                missing.push(name.clone());
+            }
+        }
+    } else if !zzi.funcs.is_empty() {
+        missing = zzi.funcs.keys().cloned().collect();
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "plugin `{}`: `plugin.zzi` symbols have no matching `csrc/*.c` definition: {}\n\
+             hint: implement each declared native in `csrc/` (or remove it from `plugin.zzi`)",
+            root.display(),
+            missing.join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
 fn check_or_fix_path(
     path_arg: &Option<String>,
     do_fix: bool,
@@ -3008,6 +3105,24 @@ fn check_or_fix_path(
 
     if files.is_empty() {
         return Err(format!("no .zz files found in `{raw}`"));
+    }
+
+    // Plugin DX (#238): check-time plugin validation. When the checked tree
+    // contains a `plugin.zzi`, run the validation pass once and render its
+    // diagnostics as check errors (drift, bad manifest, missing csrc
+    // symbols, ...) — never a runtime `dlsym` surprise.
+    let plugin_root = files.first().and_then(|p| {
+        std::fs::canonicalize(p)
+            .ok()
+            .and_then(|c| loader::find_project_root(&c))
+    });
+    if let Some(root) = &plugin_root {
+        if root.join("plugin.zzi").exists() {
+            if let Err(e) = check_plugin_project(root) {
+                eprintln!("zz: {e}");
+                return Err(e);
+            }
+        }
     }
 
     let mut total_errors = 0u32;
@@ -3479,5 +3594,101 @@ mod profile_tests {
         let (left, train) = split_train_args(&a);
         assert_eq!(left, &["app.zz".to_string()]);
         assert!(train.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+
+    fn plugin_root() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    fn write_zzi(root: &std::path::Path, content: &str) {
+        std::fs::write(root.join("plugin.zzi"), content).unwrap();
+    }
+
+    fn write_toml(root: &std::path::Path, content: &str) {
+        std::fs::write(root.join("zz.toml"), content).unwrap();
+    }
+
+    fn valid_zzi() -> String {
+        "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    fn ping() -> int\n}\n".to_string()
+    }
+
+    #[test]
+    fn check_plugin_project_valid_passes() {
+        let root = plugin_root();
+        write_zzi(root.path(), &valid_zzi());
+        write_toml(
+            root.path(),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[native.build-cc]\nsources = [\"csrc/p.c\"]\nmanifest = \"plugin.zzi\"\n",
+        );
+        std::fs::create_dir_all(root.path().join("csrc")).unwrap();
+        std::fs::write(
+            root.path().join("csrc").join("p.c"),
+            "const unsigned int ZZ_C_PLUGIN_ABI_VERSION = 1;\nint ping() { return 0; }\n",
+        )
+        .unwrap();
+        assert!(check_plugin_project(root.path()).is_ok());
+    }
+
+    #[test]
+    fn check_plugin_project_version_drift() {
+        let root = plugin_root();
+        write_zzi(
+            root.path(),
+            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 9.9.9\n\nextern \"C\" {\n    fn ping() -> int\n}\n",
+        );
+        write_toml(
+            root.path(),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[native.build-cc]\nsources = [\"csrc/p.c\"]\nmanifest = \"plugin.zzi\"\n",
+        );
+        std::fs::create_dir_all(root.path().join("csrc")).unwrap();
+        std::fs::write(
+            root.path().join("csrc").join("p.c"),
+            "int ping() { return 0; }\n",
+        )
+        .unwrap();
+        let err = check_plugin_project(root.path()).unwrap_err();
+        assert!(
+            err.contains("version drift") && err.contains("9.9.9"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn check_plugin_project_missing_csrc_symbol() {
+        let root = plugin_root();
+        write_zzi(
+            root.path(),
+            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    fn ping() -> int\n    fn absent() -> int\n}\n",
+        );
+        write_toml(
+            root.path(),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[native.build-cc]\nsources = [\"csrc/p.c\"]\nmanifest = \"plugin.zzi\"\n",
+        );
+        std::fs::create_dir_all(root.path().join("csrc")).unwrap();
+        // only `ping` defined; `absent` missing.
+        std::fs::write(
+            root.path().join("csrc").join("p.c"),
+            "int ping() { return 0; }\n",
+        )
+        .unwrap();
+        let err = check_plugin_project(root.path()).unwrap_err();
+        assert!(err.contains("absent"), "unexpected: {err}");
+        assert!(!err.contains("ping"), "ping should not be reported: {err}");
+    }
+
+    #[test]
+    fn check_plugin_project_missing_zzi() {
+        let root = plugin_root();
+        write_toml(
+            root.path(),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+        );
+        let err = check_plugin_project(root.path()).unwrap_err();
+        assert!(err.contains("plugin.zzi"), "unexpected: {err}");
     }
 }
