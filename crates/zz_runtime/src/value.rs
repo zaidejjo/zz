@@ -1749,6 +1749,42 @@ mod tests {
         assert_ne!(v, Value::Int(1));
         assert!(zz_native_rt::drop_handle(h.id));
     }
+
+    #[test]
+    fn method_namespace_owned_no_leak() {
+        // Opaque handles dispatch on their tag via an owned String — no
+        // Box::leak per distinct tag (issue #649).
+        let mut ids = Vec::new();
+        for tag in ["regex", "uuid", "http", "sqlz", "net"] {
+            let h = zz_native_rt::alloc(tag, std::sync::Arc::new(0u32));
+            ids.push(h.id);
+            let v = Value::Opaque(Box::new(h));
+            assert_eq!(v.method_namespace(), Some(tag.to_string()));
+        }
+        for id in ids {
+            assert!(zz_native_rt::drop_handle(id));
+        }
+
+        // Object namespace strips the final dotted segment (issue #649).
+        let point = Value::Object(std::sync::Arc::new(ObjectValue {
+            name: "shapes.Point".to_string(),
+            fields: vec![],
+        }));
+        assert_eq!(point.method_namespace(), Some("shapes".to_string()));
+
+        let nested = Value::Object(std::sync::Arc::new(ObjectValue {
+            name: "a.b.c".to_string(),
+            fields: vec![],
+        }));
+        assert_eq!(nested.method_namespace(), Some("a.b".to_string()));
+
+        // Bare name without a namespace -> None.
+        let bare = Value::Object(std::sync::Arc::new(ObjectValue {
+            name: "Point".to_string(),
+            fields: vec![],
+        }));
+        assert_eq!(bare.method_namespace(), None);
+    }
 }
 
 #[cfg(test)]
