@@ -577,10 +577,26 @@ impl Checker {
                     ty = self.unifier.fresh_var();
                 }
                 other => {
-                    self.errors.push(error_at(
+                    let mut diag = error_at(
                         format!("cannot access field `{field}` on a value of type `{other}`"),
                         span,
-                    ));
+                    );
+                    // Unimported-but-known std module root (`sqlz.open`
+                    // without `import std.sqlz`): suggest the import even
+                    // when the root name itself is bound to something else
+                    // (partial binding / alias).
+                    if parts.len() >= 2 && super::is_std_module_head(&parts[0]) {
+                        let import_stmt = format!("import std.{}", parts[0]);
+                        diag = diag.with_note(format!(
+                            "add `{import_stmt}` at the top of the file to use `{joined}`"
+                        ));
+                        diag = diag.with_fixit(FixIt::safe(
+                            Span::new(0, 0),
+                            format!("{import_stmt}\n"),
+                            "add import",
+                        ));
+                    }
+                    self.errors.push(diag);
                     return Type::Error;
                 }
             }
