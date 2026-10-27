@@ -2596,7 +2596,12 @@ impl Compiler {
                 target,
                 span,
             },
-            other => panic!("patch_jump on non-jump op: {other:?}"),
+            other => {
+                // Defensive: a non-jump op at the patch target. Restore it
+                // and leave the jump unpatched rather than aborting.
+                self.chunk.code[pos] = other;
+                return;
+            }
         };
     }
 
@@ -3200,7 +3205,11 @@ impl Compiler {
                     self.compile_write_back(obj);
                     self.stmt_unit(value_discarded)
                 }
-                _ => unreachable!("unhandled assignment target"),
+                _ => {
+                    // Defensive: an assignment target that cannot be stored
+                    // to. Leave the stack untouched rather than aborting.
+                    StmtValue::None
+                }
             },
             Stmt::CompoundAssign {
                 target,
@@ -3279,7 +3288,11 @@ impl Compiler {
                     self.compile_write_back(obj);
                     self.stmt_unit(value_discarded)
                 }
-                _ => unreachable!("unhandled compound assignment target"),
+                _ => {
+                    // Defensive: a compound-assignment target that cannot be
+                    // stored to. Leave the stack untouched rather than aborting.
+                    StmtValue::None
+                }
             },
             Stmt::Expr(e) => {
                 // A discarded `if` needs no value: compile it as a statement,
