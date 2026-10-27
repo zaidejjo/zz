@@ -3256,3 +3256,16 @@ fn cache_rebind_global() {
         Some(Value::Int(3))
     );
 }
+
+/// A `for` loop over a non-iterable value must not abort the process. The
+/// old code hit `unreachable!("ForNext on non-iterable")`; the VM now
+/// returns a catchable `EvalError` ("cannot iterate a value of type ...").
+#[test]
+fn vm_for_loop_over_non_iterable_returns_error() {
+    let err = run_src("for x in 5 {}").unwrap_err();
+    assert!(
+        err.message.contains("cannot iterate"),
+        "expected a cannot-iterate error, got: {:?}",
+        err
+    );
+}
