@@ -1,0 +1,16 @@
+import std.time
+
+// Allocation-heavy workload: allocate and drop a small array every
+// iteration, exercising the allocator + refcount/drop path (the cost the
+// int slot fast paths and `overwrite_scalar` target).
+
+func main() {
+    t0 := time.now_ms()
+    total := 0
+    for i in 0..100000 {
+        a := [i, i + 1, i + 2, i + 3]
+        total = total + a[0] + a[1] + a[2] + a[3]
+    }
+    t1 := time.now_ms()
+    println("alloc_churn: {t1 - t0}ms result={total}")
+}
