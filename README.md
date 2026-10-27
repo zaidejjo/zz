@@ -96,6 +96,31 @@ zz upgrade   # self-update to the latest release
 zz doctor    # audit binary, clang, shell, git, registry (add --fix)
 ```
 
+## Native runtime & build environment
+
+`zz build` and `zz run --native` compile ZZ → C → native binary via Clang
+(default) or zig cc (`--cc zig`). The native runtime
+(`libzz_native_rt.a`, providing FFI natives like regexp, base64, float
+formatting, SQL, crypto) is linked into every AOT binary.
+
+**Source checkout:** no setup needed. `zz build` finds the workspace
+root automatically and builds `libzz_native_rt.a` via cargo — no
+`ZZ_NATIVE_RT_DIR`, no system C library, no stub shell variables.
+
+**Release zip:** ships a prebuilt `libzz_native_rt.a` (`.lib` on
+Windows) plus a bundled ~25MB `zig` binary, so `zz build` works
+immediately after download with zero external tools. `zz toolchain
+install` stays optional for pinned zig updates.
+
+**VM mode** (`zz run` without `--native`) needs nothing extra — it's
+pure Rust bytecode interpretation, no linking involved.
+
+Verify your environment:
+
+```bash
+zz doctor    # reports C backend, native runtime, cargo, and more
+```
+
 ## Documentation
 
 - [Getting started](https://zz-lang.pages.dev/getting-started)
