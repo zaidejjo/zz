@@ -464,8 +464,14 @@ pub fn disassemble(module: &Module) -> String {
         ));
         for (pc, op) in f.code.iter().enumerate() {
             let span = f.spans.get(pc).copied().unwrap_or(crate::Span::new(0, 0));
+            let ty = f
+                .op_result_types
+                .get(pc)
+                .and_then(|o| o.as_ref())
+                .map(|id| format!(" : {}", short_type(module, *id)))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "  {pc:04}  {}  ; @{}..{}\n",
+                "  {pc:04}  {}{ty}  ; @{}..{}\n",
                 op_text(module, op),
                 span.start,
                 span.end

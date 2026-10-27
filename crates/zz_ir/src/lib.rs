@@ -36,16 +36,19 @@ use std::fmt;
 
 /// Magic bytes opening every `.zzc` file (spec §8).
 pub const MAGIC: [u8; 4] = *b"ZZC1";
-/// Format version this crate reads and writes (spec §8: this spec = 4).
+/// Format version this crate reads and writes (spec §8: this spec = 5).
 /// v2 adds the per-function locals type table (`FUNCS` records); v3
 /// carries the VM's fused slot fast paths (`SlotInc`, `SlotBinaryInt`, …)
 /// as ops instead of desugaring them (the interpreter ran the desugared
 /// form on cached runs and paid 3 extra stack ops per loop iteration);
 /// v4 rotates `for` loops (`ForNext` carries its body entry and is the
 /// back-edge, so an iteration is one test dispatch instead of a test plus
-/// a `Jump`).
+/// a `Jump`); v5 adds per-op result type annotations (`op_result_types`),
+/// a parallel table giving the checker-derived type of every value-producing
+/// op — the foundation for slot-stability inference and unboxed int/float
+/// locals in the chunk→C backend (issue #252).
 /// Older files are rejected (re-emit with `zz build --emit-ir`).
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// Identity of the running binary: executable length + mtime + inode.
 ///
@@ -172,6 +175,13 @@ pub struct FuncDef {
     pub code: Vec<Op>,
     /// Same length as `code`.
     pub spans: Vec<Span>,
+    /// Same length as `code`: `Some(ty)` for each value-producing op
+    /// (LoadSlot, PushConst, IntAdd, IndexOp, Call, …), `None` for pure
+    /// effect ops (StoreSlot, Jump, …). Populated at typed compile time;
+    /// `None` means "no information" (temps, untyped compiles). The
+    /// verifier checks length only; backends decide representation from
+    /// this + `locals` (never from inference).
+    pub op_result_types: Vec<Option<TypeId>>,
     /// Maximum operand-stack depth, computed by [`verify`].
     pub max_stack: u32,
 }

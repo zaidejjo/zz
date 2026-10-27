@@ -189,6 +189,9 @@ fn verify_func(
     if func.spans.len() != n {
         return Err(IrError::new("span/code length mismatch"));
     }
+    if func.op_result_types.len() != n {
+        return Err(IrError::new("op-result-types/code length mismatch"));
+    }
     let span_at = |pc: usize| func.spans.get(pc).copied().unwrap_or(Span::new(0, 0));
     // Id range checks first (cheap, precise errors).
     for (pc, op) in func.code.iter().enumerate() {
