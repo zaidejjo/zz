@@ -2218,6 +2218,10 @@ fn setup_test_interp(test: &TestInfo, cover: bool) -> Result<(Interp, Value, Vec
     }
 
     for zz_prog in zz_stdlib::zz_stdlib_programs() {
+        let zz_prog = match zz_prog {
+            Ok(p) => p,
+            Err(e) => return Err(format!("stdlib init error: {e:?}")),
+        };
         if let Err(e) = interp.run_typed(
             &zz_prog.program,
             Arc::new(zz_prog.types.clone()),

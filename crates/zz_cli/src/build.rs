@@ -896,6 +896,10 @@ fn typed_program_for(
     // definitions, so merging cannot introduce top-level side effects.
     let mut merged_stmts = Vec::new();
     for zz_prog in zz_stdlib::zz_stdlib_programs() {
+        let zz_prog = match zz_prog {
+            Ok(p) => p,
+            Err(e) => return Err(format!("stdlib init error: {e:?}")),
+        };
         merged_stmts.extend(zz_prog.program.stmts.iter().cloned());
     }
     let merged_span = loaded
@@ -977,8 +981,16 @@ fn chunk_module_for(
     // "cannot resolve call target" error instead of miscompiling.
     let mut merged_stmts = Vec::new();
     for idx in zz_stdlib::stdlib_program_closure(&loaded.stdlib_modules) {
-        let zz_prog = zz_stdlib::zz_stdlib_program_at(idx);
-        merged_stmts.extend(zz_prog.program.stmts.iter().cloned());
+        match zz_stdlib::zz_stdlib_program_at(idx) {
+            Ok(zz_prog) => {
+                merged_stmts.extend(zz_prog.program.stmts.iter().cloned());
+            }
+            Err(e) => {
+                return Err(format!(
+                    "pure-ZZ stdlib module {idx} failed to compile: {e}"
+                ));
+            }
+        }
     }
     let merged_span = loaded
         .programs

@@ -72,6 +72,10 @@ impl Session {
         for zz_prog in zz_stdlib_programs() {
             // Seed the type checker with pure-ZZ function signatures so that
             // calls like `vec.map(...)` type-check in user snippets.
+            let zz_prog = match zz_prog {
+                Ok(p) => p,
+                Err(e) => panic!("zz: pure-ZZ stdlib module failed to compile: {e:?}"),
+            };
             funcs.extend(zz_prog.funcs.clone());
             if let Err(e) = interp.run_typed(
                 &zz_prog.program,

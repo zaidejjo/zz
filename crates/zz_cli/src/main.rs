@@ -1173,15 +1173,22 @@ fn setup_interp(
         None => (0..zz_stdlib::zz_stdlib_program_count()).collect(),
     };
     for idx in wanted {
-        let zz_prog = zz_stdlib::zz_stdlib_program_at(idx);
-        if let Err(e) = interp.run_typed(
-            &zz_prog.program,
-            std::sync::Arc::new(zz_prog.types.clone()),
-            zz_prog.structs.clone(),
-            zz_prog.enums.clone(),
-        ) {
-            eprintln!("zz: pure-ZZ stdlib error: {e:?}");
-            return Err("stdlib initialization failed".to_string());
+        match zz_stdlib::zz_stdlib_program_at(idx) {
+            Ok(zz_prog) => {
+                if let Err(e) = interp.run_typed(
+                    &zz_prog.program,
+                    std::sync::Arc::new(zz_prog.types.clone()),
+                    zz_prog.structs.clone(),
+                    zz_prog.enums.clone(),
+                ) {
+                    eprintln!("zz: pure-ZZ stdlib error: {e:?}");
+                    return Err("stdlib initialization failed".to_string());
+                }
+            }
+            Err(e) => {
+                eprintln!("zz: pure-ZZ stdlib module {idx} failed to compile: {e}");
+                return Err("stdlib initialization failed".to_string());
+            }
         }
     }
     if let Some(t) = timer {

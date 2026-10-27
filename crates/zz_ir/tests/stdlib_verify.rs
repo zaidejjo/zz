@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 fn standalone_verify(idx: usize, name: &str) {
-    let prog = zz_stdlib::zz_stdlib_program_at(idx);
+    let prog = zz_stdlib::zz_stdlib_program_at(idx)
+        .as_ref()
+        .expect("stdlib module should compile");
     let natives: std::collections::HashSet<String> =
         zz_stdlib::stdlib_natives().keys().cloned().collect();
     let chunk = zz_runtime::vm::Compiler::compile_program_typed(
