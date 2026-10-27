@@ -1122,6 +1122,28 @@ fn if_condition_must_be_bool() {
 }
 
 #[test]
+fn if_condition_glob_str_hint() {
+    // A GLOB/pattern string passed as a condition gets the `expected `bool``
+    // error plus a note steering toward a truthy check instead of aliasing.
+    let r = check_src("if \"*.txt\" { 1 } else { 2 }");
+    let err = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("expected `bool`"))
+        .expect("expected bool error");
+    assert!(
+        err.notes.iter().any(|n| n.contains("GLOB/pattern")),
+        "expected GLOB/pattern note, got notes: {:?}",
+        err.notes
+    );
+    assert!(
+        err.notes.iter().any(|n| n.contains("truthy check")),
+        "expected truthy-check note, got notes: {:?}",
+        err.notes
+    );
+}
+
+#[test]
 fn while_condition_must_be_bool() {
     errors_contain("while 1 { f() }", "expected `bool`");
 }
@@ -3336,54 +3358,52 @@ fn unreachable_after_return_warns() {
 
 #[test]
 fn param_shadowing_module_name_warns() {
-    // #376: a param named after its own module shadows the namespace
-    // object, so same-module helper calls fail at runtime while the
-    // check stays green. Must warn (not error) with a rename fix.
+    // #376: a param named after its own module no longer warns — `str := 5`
+    // then `str.trim(...)` follows normal shadowing semantics; the language
+    // does not treat reusing a module head as a shadowing hazard anymore.
     let r = check_src_with_module_ns("func parse(fen: str) -> str {\n    return fen\n}", "fen");
-    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
-    let w = r
-        .errors
-        .iter()
-        .find(|e| e.message.contains("shadows a module namespace"))
-        .expect("expected shadow warning");
+    assert!(!has_errors(&r), "must stay clean: {:?}", r.errors);
     assert!(
-        w.fixits.iter().any(|f| f.replacement == "fen_local"),
-        "expected rename fixit, got: {:?}",
-        w.fixits
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("shadows a module namespace")),
+        "no shadow warning expected, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
 
 #[test]
 fn local_shadowing_module_name_warns() {
-    // #361: `lib9 := []` inside `lib9` breaks `helper(...)` at runtime.
+    // #361: `lib9 := []` inside `lib9` no longer warns — reusing a module
+    // head as a binding is normal shadowing semantics, not a hazard.
     let r = check_src_with_module_ns(
         "func outer() -> int {\n    lib9 := 1\n    return lib9\n}",
         "lib9",
     );
-    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(!has_errors(&r), "must stay clean: {:?}", r.errors);
     assert!(
-        r.errors
+        !r.errors
             .iter()
-            .any(|e| e.message.contains("`lib9` shadows a module namespace")),
-        "expected shadow warning, got: {:?}",
+            .any(|e| e.message.contains("shadows a module namespace")),
+        "no shadow warning expected, got: {:?}",
         r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
 
 #[test]
 fn binding_shadowing_imported_namespace_warns() {
-    // Same hazard through imports: a local named `vec` hides
-    // `vec.push` resolution the same way.
+    // Same hazard through imports: a local named `vec` no longer warns —
+    // reusing an imported head as a binding follows normal shadowing.
     let r = check_src_with_module_ns(
         "import std.vec\nfunc f() -> int {\n    vec := 1\n    return vec\n}",
         "m",
     );
-    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(!has_errors(&r), "must stay clean: {:?}", r.errors);
     assert!(
-        r.errors
+        !r.errors
             .iter()
-            .any(|e| e.message.contains("`vec` shadows a module namespace")),
-        "expected shadow warning, got: {:?}",
+            .any(|e| e.message.contains("shadows a module namespace")),
+        "no shadow warning expected, got: {:?}",
         r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
@@ -4049,8 +4069,9 @@ fn explicit_return_type_no_implicit_warning() {
 
 #[test]
 fn import_std_module_head_shadows_warns() {
-    // Importing a module whose head collides with a std module head
-    // should warn at the import site when a module namespace is set.
+    // Importing a module whose head collides with a std module head no
+    // longer warns — `import std.str` + `str.trim(...)` is just how the
+    // language works.
     let r = check_src_with_module_ns("import args", "mypkg");
     let warns: Vec<String> = r
         .errors
@@ -4059,8 +4080,8 @@ fn import_std_module_head_shadows_warns() {
         .map(|e| e.message.clone())
         .collect();
     assert!(
-        warns.iter().any(|m| m.contains("shadowing the std module")),
-        "expected std-module shadow warning, got: {warns:?}"
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
+        "no std-module shadow warning expected, got: {warns:?}"
     );
 }
 
@@ -4131,7 +4152,8 @@ fn import_std_head_selective_no_warn() {
 
 #[test]
 fn import_std_head_full_warns_with_fixit() {
-    // Full import binds the head: warn + auto-applicable alias fixit (#630).
+    // Full import binds the head: no shadow warning anymore —
+    // `import std.str` + `str.trim(...)` is how the language works.
     let r = check_src_with_module_ns("import std.str", "mypkg");
     let warns: Vec<String> = r
         .errors
@@ -4140,16 +4162,39 @@ fn import_std_head_full_warns_with_fixit() {
         .map(|e| e.message.clone())
         .collect();
     assert!(
-        warns.iter().any(|m| m.contains("shadowing the std module")),
-        "expected std-module shadow warning, got: {warns:?}"
+        !warns.iter().any(|m| m.contains("shadowing the std module")),
+        "no std-module shadow warning expected, got: {warns:?}"
     );
-    let fixit = r
-        .errors
-        .iter()
-        .flat_map(|d| d.fixits.iter())
-        .find(|f| f.replacement == "import std.str as str_mod")
-        .expect("expected safe alias fixit");
-    assert_eq!(fixit.safety, zz_frontend::diag::FixSafety::Safe);
+    assert!(
+        r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .all(|f| f.replacement != "import std.str as str_mod"),
+        "no alias fixit expected, got: {:?}",
+        r.errors
+            .iter()
+            .flat_map(|d| d.fixits.iter())
+            .map(|f| &f.replacement)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn import_std_str_then_str_trim_warns_not() {
+    // The core ask: `import std.str` then `str.trim(...)` compiles without
+    // the old "shadowing the std module" warning — no alias, no type
+    // annotation required. (std.str itself isn't seeded in this unit test,
+    // so `str.trim` resolves at loader level via register_module_namespace;
+    // here we only assert the shadow warning is gone.)
+    let r = check_src_with_module_ns("import std.str\nx := str.trim(\"  x  \")\nx", "mypkg");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("shadowing the std module")
+                || e.message.contains("shadows a module namespace")),
+        "no shadow warning expected, got: {:?}",
+        r.errors
+    );
 }
 
 #[test]

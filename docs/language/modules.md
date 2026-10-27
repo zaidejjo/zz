@@ -49,38 +49,33 @@ a.zz imports b.zz, which imports a.zz  ->  error
 
 Fix: extract shared types into `c.zz`; both `a` and `b` import `c`.
 
-## Importing a std module shadows it at runtime
-
-A full std import (`import std.str`) binds the head name `str` in your module.
-At runtime `std.<head>` wins over an explicit `import <pkg>.<head>`, so your
-binding shadows the std module and qualified calls through it (`std.str.x`) may
-fail — `zz check` passes while `zz run` fails. The checker warns at the import
-site instead:
-
-```text
-warning: import binds `str`, shadowing the std module `str` — `std.str.*` will
-resolve to your binding at runtime
-  --> main.zz:3:1
-    |
-  3 | import std.str
-    | ^^^^^^^^^^^^^^ help: replace with `import std.str as str_mod`
-```
-
-Alias the import to avoid the collision:
+## Importing a std module
 
 ```zz
-// before — warns
 import std.str
-println(str.to_upper("hi"))
-
-// after — no warning
-import std.str as str_mod
-println(str_mod.to_upper("hi"))
+import std.math
 ```
 
-Selective imports (`import std.str(split)`, `import std.math(PI)`) bind only
-the named items, never the head, so they do **not** warn. Aliased imports
-(`import std.str as s`) also do not warn.
+A full std import (`import std.str`) binds the head name `str` in your module,
+so you can call its functions directly: `str.trim("  x  ")`, `str.length("hi")`.
+That's just how the language works — `str` refers to the std module here, no
+alias or type annotation required.
+
+Selective imports (`import std.str(split)`) bind only the named items and never
+the head, so they can't collide with a `str` binding you define yourself.
+
+## Name collisions between packages
+
+If two packages (or a package and a std module) import under the same head name
+— e.g. both `import utils` and `import other.utils` bind `utils` — `zz check`
+warns and tells you to alias one of them with `as`. You choose the alias:
+
+```zz
+import utils as u          // or: import other.utils as u
+```
+
+Aliasing is only required when two names actually collide; a single import of a
+std module needs no alias.
 
 ## Cross-module types
 

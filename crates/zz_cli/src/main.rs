@@ -3206,6 +3206,11 @@ fn check_or_fix_path(
                 }
                 json_files.push((path_str.clone(), diags));
             } else {
+                // Name the first module that broke before the cascade, so
+                // the user sees the root cause instead of follow-on noise.
+                if let Some(first) = loaded.errors.first() {
+                    eprintln!("first module that broke: {} ({})\n", first.name, path_str);
+                }
                 for e in &loaded.errors {
                     let mut files_ctx = Files::new();
                     let id = files_ctx.add(e.name.clone(), e.source.clone());

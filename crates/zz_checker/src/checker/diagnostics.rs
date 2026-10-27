@@ -91,7 +91,7 @@ impl Checker {
         false
     }
 
-    pub(crate) fn ensure_bool(&mut self, t: Type, span: Span) {
+    pub(crate) fn ensure_bool(&mut self, t: Type, span: Span, glob_hint: Option<&str>) {
         match self.unifier.resolve(&t) {
             Type::Bool => {}
             Type::Var(id) => {
@@ -100,10 +100,30 @@ impl Checker {
             // Divergent condition: unreachable, vacuously fine.
             Type::Never => {}
             other => {
-                self.errors
-                    .push(error_at(format!("expected `bool`, found `{other}`"), span));
+                let mut diag = error_at(format!("expected `bool`, found `{other}`"), span);
+                // A `str` that looks like a GLOB/pattern is a common mistake
+                // where the author meant a truthy check, not a boolean.
+                if matches!(other, Type::Str) {
+                    if let Some(s) = glob_hint {
+                        if Self::looks_like_glob(s) {
+                            diag = diag.with_note(format!(
+                                "expected a boolean condition; `{}` looks like a GLOB/pattern string \
+                                 — use a truthy check (e.g. `{}` != \"\") or pass a `bool`",
+                                s, s
+                            ));
+                        }
+                    }
+                }
+                self.errors.push(diag);
             }
         }
+    }
+
+    /// True when `s` contains characters typical of a GLOB/pattern:
+    /// `*`, `?`, `[`, `]`, `{`, `}`.
+    pub(crate) fn looks_like_glob(s: &str) -> bool {
+        s.chars()
+            .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
     }
 
     pub(crate) fn ensure_int(&mut self, t: Type, span: Span) {
