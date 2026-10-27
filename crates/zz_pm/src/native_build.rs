@@ -1182,7 +1182,15 @@ pub fn ensure_rust(
         .map_err(|e| format!("cannot write {}: {e}", cflags_path.display()))?;
     // Rust std's staticlib needs the platform's threading/dl/math libs.
     // `zz` dedupes flags at link time, so overlap with the runtime is safe.
-    let link_libs = "-lpthread -ldl -lm";
+    let link_libs = if cfg!(windows) {
+        // Windows MSVC links these by default; no explicit flags needed.
+        ""
+    } else if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
+        "-lpthread -ldl -lm"
+    } else {
+        // BSDs: no libdl.
+        "-lpthread -lm"
+    };
     std::fs::write(&ldflags_path, link_libs)
         .map_err(|e| format!("cannot write {}: {e}", ldflags_path.display()))?;
 

@@ -738,6 +738,8 @@ fn find_shipped_std_rlib(libdir: &std::path::Path) -> Option<String> {
 fn find_shipped_libstd(libdir: &std::path::Path) -> Option<String> {
     let (prefix, suffix) = if cfg!(target_os = "macos") {
         ("libstd-", ".dylib")
+    } else if cfg!(windows) {
+        ("libstd-", ".dll")
     } else {
         ("libstd-", ".so")
     };
@@ -1054,6 +1056,20 @@ fn sys_link_libs() -> &'static [&'static str] {
     }
 }
 
+/// System libraries for Windows/MSVC native FFI links.
+///
+/// These are .lib import libraries that the MSVC linker (or clang/zig in
+/// MSVC-compatible mode on Windows) understands.
+fn sys_link_libs_windows() -> &'static [&'static str] {
+    &[
+        "kernel32.lib",
+        "user32.lib",
+        "advapi32.lib",
+        "ws2_32.lib",
+        "crypt32.lib",
+    ]
+}
+
 /// `rustc`'s platform library directory (home of `libstd-*.rlib`).
 /// With `target`, the target's libdir (`--target <triple>`); otherwise
 /// the host's. Cross builds needing the native runtime must have the
@@ -1127,7 +1143,7 @@ fn find_libstd(libdir: &std::path::Path) -> Result<String, FfiError> {
 /// thread/dl helpers.
 ///
 /// Returned flags are appended after the program object on the `cc` command
-/// line. Fails on Windows (MSVC import-library story is unimplemented).
+/// line. Supports Windows via MSVC-style `/LIBPATH:` and `.lib` flags.
 pub fn link_args(release: bool) -> Result<(Vec<String>, PathBuf), FfiError> {
     link_args_for_target(release, None)
 }
@@ -1138,16 +1154,42 @@ pub fn link_args_for_target(
     release: bool,
     target: Option<&str>,
 ) -> Result<(Vec<String>, PathBuf), FfiError> {
-    if cfg!(windows) {
-        return Err(FfiError(
-            "native FFI link is not implemented on Windows yet".into(),
-        ));
-    }
     let (lib, _source) = resolve_staticlib(release)?;
     let libdir = lib
         .parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| FfiError(format!("static library has no parent: {}", lib.display())))?;
+
+    // Windows/MSVC linking: /LIBPATH: and .lib import/static libraries.
+    // zig cc on Windows and clang-cl both accept these flags.
+    if cfg!(windows) {
+        let mut base = vec![
+            format!("/LIBPATH:{}", libdir.display()),
+            lib_file_name().to_string(), // "zz_native_rt.lib"
+        ];
+        base.extend(sys_link_libs_windows().iter().map(|s| s.to_string()));
+        // Release installs ship the static libstd next to the archive.
+        if target.is_none() {
+            if let Some(shipped) = find_shipped_std_rlib(&libdir) {
+                let mut flags = base.clone();
+                flags.insert(1, libdir.join(&shipped).display().to_string());
+                return Ok((flags, lib));
+            }
+        }
+        if let Ok(rustc_dir) = rustc_libdir_for_target(target) {
+            if let Ok(rlib) = find_std_rlib(&rustc_dir) {
+                let mut flags = base.clone();
+                flags.insert(1, rustc_dir.join(&rlib).display().to_string());
+                return Ok((flags, lib));
+            }
+        }
+        return Err(FfiError(format!(
+            "no libstd-*.rlib in {} or rustc libdir; native FFI link on Windows needs the static libstd",
+            libdir.display()
+        )));
+    }
+
+    // Unix/macOS linking: -L and -l flags.
     // Base flags shared by every branch: the archive search path, the
     // native runtime itself, then the platform system libs
     // (`-ldl` omitted on the BSDs — `dlopen` lives in libc there).
@@ -1257,6 +1299,38 @@ pub fn stage_shared_libs(
         "$ORIGIN"
     };
     Ok(vec![format!("-Wl,-rpath,{token}")])
+}
+
+/// Windows DLL sidecar: copy the `.dll` next to the `.exe`. Windows
+/// searches the executable's directory first, so no rpath is needed.
+#[cfg(windows)]
+pub fn stage_shared_libs(
+    lib_path: &std::path::Path,
+    out_bin: &std::path::Path,
+) -> Result<Vec<String>, FfiError> {
+    let Some(libdir) = lib_path.parent() else {
+        return Ok(vec![]);
+    };
+    let Some(shipped) = find_shipped_libstd(libdir) else {
+        return Ok(vec![]);
+    };
+    let Some(out_dir) = out_bin.parent() else {
+        return Ok(vec![]);
+    };
+    let dest = out_dir.join(&shipped);
+    let copy = match (
+        std::fs::metadata(libdir.join(&shipped)),
+        std::fs::metadata(&dest),
+    ) {
+        (Ok(src), Ok(dst)) => src.len() != dst.len(),
+        _ => true,
+    };
+    if copy {
+        std::fs::copy(libdir.join(&shipped), &dest)
+            .map_err(|e| FfiError(format!("cannot stage {}: {e}", dest.display())))?;
+    }
+    // Windows searches the exe directory for DLLs — no rpath needed.
+    Ok(vec![])
 }
 
 #[cfg(test)]
