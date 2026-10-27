@@ -60,12 +60,25 @@ jobs:
       - name: install native deps (macos)
         if: inputs.os == 'macos'
         run: brew install xz || true
+      - name: MSVC developer environment (windows)
+        if: inputs.os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ inputs.arch == 'aarch64' && 'arm64' || 'x64' }}
+
       - name: install native deps (windows)
         if: inputs.os == 'windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          # ring's build script compiles C for the target; clang needs the
+          # toolchain + SDK search paths from the MSVC env step above.
           $llvm = "C:\Program Files\LLVM\bin"
-          if (Test-Path $llvm) { $llvm | Out-File -FilePath $env:GITHUB_PATH -Append }
+          if (Test-Path $llvm) {
+            $llvm | Out-File -FilePath $env:GITHUB_PATH -Append
+            $env:PATH = "$llvm;$env:PATH"
+          }
+          clang --version
 
       - name: verify version + build
         shell: bash

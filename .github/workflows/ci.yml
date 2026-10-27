@@ -5,10 +5,15 @@ name: CI
 # never re-runs tests.
 #
 # This file is the orchestrator only: the per-platform work lives in
-# `ci-test.yml` (reusable, called once per runner). GitHub Actions loads
-# only `.github/workflows/*.yml` at the top level — subdirectories are
-# ignored — so "folders" are expressed as separate reusable workflows,
-# not nested directories.
+# `ci-test.yml` (reusable). GitHub Actions loads only
+# `.github/workflows/*.yml` at the top level — subdirectories are ignored —
+# so "folders" are expressed as separate reusable workflows, not nested
+# directories.
+#
+# Jobs are grouped by OS family (linux/macos/windows). Each caller job
+# passes the legs for that family as JSON, and the reusable workflow builds
+# its matrix from them — so the UI shows one group per OS with the two
+# architectures nested underneath, instead of six unrelated top-level jobs.
 #
 # Triggers:
 #   push to dev or main (merge commits included — the merge itself is
@@ -52,63 +57,46 @@ jobs:
         # fails a workflow at parse time (no jobs, no logs) before it lands.
         run: actionlint
 
-  test:
-    name: test (${{ matrix.name }})
-    strategy:
-      # One platform failing must not hide the others: we want all logs.
-      fail-fast: false
-      matrix:
-        include:
-          # runner labels verified 2026: macos-13 (Intel) is retired;
-          # Intel is `macos-15-intel`. Windows ARM64 is `windows-11-arm`.
-          - name: linux-x86_64
-            runner: ubuntu-24.04
-            family: linux
-            native: true
-            timeout: 30
-            clang_pin: "23"
-            docker_smoke: true
-          - name: linux-aarch64
-            runner: ubuntu-24.04-arm
-            family: linux
-            native: true
-            timeout: 45
-            clang_pin: ""
-            docker_smoke: false
-          - name: macos-aarch64
-            runner: macos-14
-            family: macos
-            native: true
-            timeout: 45
-            clang_pin: ""
-            docker_smoke: false
-          - name: macos-x86_64
-            runner: macos-15-intel
-            family: macos
-            native: true
-            timeout: 45
-            clang_pin: ""
-            docker_smoke: false
-          - name: windows-x86_64
-            runner: windows-2025
-            family: windows
-            native: true
-            timeout: 60
-            clang_pin: ""
-            docker_smoke: false
-          - name: windows-aarch64
-            runner: windows-11-arm
-            family: windows
-            native: true
-            timeout: 60
-            clang_pin: ""
-            docker_smoke: false
+  # --- linux: x86_64 (full incl. sanitizer/docker) + aarch64 -------------
+  linux:
+    name: linux
     uses: ./.github/workflows/ci-test.yml
     with:
-      name: ${{ matrix.name }}
-      runner: ${{ matrix.runner }}
-      family: ${{ matrix.family }}
-      native: ${{ matrix.native }}
-      timeout: ${{ matrix.timeout }}
-      clang_pin: ${{ matrix.clang_pin }}
-      docker_smoke: ${{ matrix.docker_smoke }}
+      family: linux
+      legs: >-
+        [
+          {"name": "linux-x86_64", "runner": "ubuntu-24.04", "native": true,
+           "timeout": 30, "clang_pin": "23", "docker_smoke": true},
+          {"name": "linux-aarch64", "runner": "ubuntu-24.04-arm", "native": true,
+           "timeout": 45, "clang_pin": "", "docker_smoke": false}
+        ]
+
+  # --- macos: apple silicon + intel --------------------------------------
+  # Runner labels verified 2026: macos-13 (Intel) is retired, so Intel is
+  # `macos-15-intel`; Apple silicon is `macos-14`.
+  macos:
+    name: macos
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: macos
+      legs: >-
+        [
+          {"name": "macos-aarch64", "runner": "macos-14", "native": true,
+           "timeout": 45, "clang_pin": "", "docker_smoke": false},
+          {"name": "macos-x86_64", "runner": "macos-15-intel", "native": true,
+           "timeout": 45, "clang_pin": "", "docker_smoke": false}
+        ]
+
+  # --- windows: x86_64 + arm64 -------------------------------------------
+  windows:
+    name: windows
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: windows
+      legs: >-
+        [
+          {"name": "windows-x86_64", "runner": "windows-2025", "native": true,
+           "timeout": 60, "clang_pin": "", "docker_smoke": false},
+          {"name": "windows-aarch64", "runner": "windows-11-arm", "native": true,
+           "timeout": 60, "clang_pin": "", "docker_smoke": false}
+        ]

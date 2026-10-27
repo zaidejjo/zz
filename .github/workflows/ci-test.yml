@@ -1,46 +1,25 @@
 name: CI test leg
 
-# Reusable single-platform test leg. Called once per supported
-# platform/arch pair from ci.yml (six entries), so every OS runs the
-# identical suite — no "VM-only" second class citizen.
+# Reusable OS-family test workflow. `ci.yml` calls it once per OS family
+# (linux/macos/windows) and passes that family's legs as JSON; the matrix
+# here expands them, so the UI groups both architectures under one OS job.
 #
-# Why a reusable workflow instead of one big ci.yml: each file stays
-# small and reviewable, and the matrix lives in the caller where the
-# runner labels are visible at a glance.
+# Why a reusable workflow instead of one big ci.yml: each file stays small
+# and reviewable, and the runner labels stay visible in the caller.
 
 on:
   workflow_call:
     inputs:
-      name:
-        description: Matrix entry name (e.g. `linux-x86_64`).
-        required: true
-        type: string
-      runner:
-        description: GitHub-hosted runner label for this leg.
-        required: true
-        type: string
       family:
         description: "`linux` | `macos` | `windows` — selects dependency install."
         required: true
         type: string
-      native:
-        description: Run native AOT legs (false sets ZZ_SKIP_NATIVE=1).
+      legs:
+        description: >-
+          JSON array of legs for this family. Each entry carries
+          `name`, `runner`, `native`, `timeout`, `clang_pin`, `docker_smoke`.
         required: true
-        type: boolean
-      timeout:
-        description: Job timeout in minutes (slowest platform wins).
-        required: true
-        type: number
-      clang_pin:
-        description: ZZ_CLANG_VERSION value; empty means "whatever is installed".
-        required: false
-        default: ""
         type: string
-      docker_smoke:
-        description: Run the docker smoke fixture (Linux x86_64 only).
-        required: false
-        default: false
-        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,12 +27,18 @@ env:
 
 jobs:
   test:
-    name: test (${{ inputs.name }})
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: ${{ inputs.timeout }}
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      # One architecture failing must not hide the other: we want all logs.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.legs) }}
     env:
-      # Empty is fine: clang_pin() filters it out.
-      ZZ_CLANG_VERSION: ${{ inputs.clang_pin }}
+      # Empty is fine: clang_pin() filters it out. Kept job-level so every
+      # step (fast suite, parity, sanitizers) sees the pinned clang.
+      ZZ_CLANG_VERSION: ${{ matrix.clang_pin }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -63,23 +48,23 @@ jobs:
         with:
           # One cache per platform leg: MSVC/GNU artifacts must never
           # leak between legs.
-          key: ${{ inputs.name }}
+          key: ${{ matrix.name }}
 
       - name: install native deps (linux)
         if: inputs.family == 'linux'
         run: |
           set -euo pipefail
           sudo apt-get update
-          if [ -n "${{ inputs.clang_pin }}" ]; then
+          if [ -n "${{ matrix.clang_pin }}" ]; then
             # The pinned sanitizer leg needs apt.llvm.org (Noble's archive
             # tops out at clang-18).
             wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
               | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
             echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{
-              inputs.clang_pin }} main" \
+              matrix.clang_pin }} main" \
               | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
             sudo apt-get update
-            sudo apt-get install -y "clang-${{ inputs.clang_pin }}"
+            sudo apt-get install -y "clang-${{ matrix.clang_pin }}"
           else
             sudo apt-get install -y clang
           fi
@@ -98,6 +83,16 @@ jobs:
           clang -E -x c - <<< '#include <curl/curl.h>' > /dev/null
           clang -E -x c - <<< '#include <sqlite3.h>' > /dev/null
 
+      # clang-cl/MSVC need the Visual Studio toolchain on INCLUDE/LIB even
+      # for cross-arch compiles (the ARM64 ring build failed on a missing
+      # <assert.h> without it). This also puts cl.exe on PATH for the
+      # `cc`-built Windows link shim.
+      - name: MSVC developer environment (windows)
+        if: inputs.family == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+
       - name: cache vcpkg (windows)
         if: inputs.family == 'windows'
         uses: actions/cache@v4
@@ -108,7 +103,7 @@ jobs:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\downloads
-          key: vcpkg-${{ runner.arch }}-curl-sqlite3-v1
+          key: vcpkg-${{ runner.arch }}-curl-sqlite3-v2
           restore-keys: |
             vcpkg-${{ runner.arch }}-
 
@@ -119,11 +114,18 @@ jobs:
           $ErrorActionPreference = "Stop"
           # LLVM: the image normally ships it, but not always on PATH.
           $llvm = "C:\Program Files\LLVM\bin"
-          if (Test-Path $llvm) { $llvm | Out-File -FilePath $env:GITHUB_PATH -Append }
+          if (Test-Path $llvm) {
+            $llvm | Out-File -FilePath $env:GITHUB_PATH -Append
+            # GITHUB_PATH only affects *later* steps; the checks below run
+            # in this one.
+            $env:PATH = "$llvm;$env:PATH"
+          }
           if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
             choco install llvm -y --no-progress
             $llvm | Out-File -FilePath $env:GITHUB_PATH -Append
+            $env:PATH = "$llvm;$env:PATH"
           }
+          clang --version
           # curl + sqlite3 headers/libs: the C runtime includes them by
           # default (ZZ_HAS_CURL/ZZ_HAS_SQLITE3), so native legs need them.
           $vcpkg = $env:VCPKG_INSTALLATION_ROOT
@@ -135,15 +137,18 @@ jobs:
           }
           if (Test-Path "$vcpkg\vcpkg.exe") {
             & "$vcpkg\vcpkg.exe" install "curl:$triplet" "sqlite3:$triplet" --clean-after-build
-            "INCLUDE=$vcpkg\installed\$triplet\include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            "LIB=$vcpkg\installed\$triplet\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            # Append, never replace: the MSVC step above owns the toolchain
+            # and Windows SDK search paths in INCLUDE/LIB.
+            $inc = "$vcpkg\installed\$triplet\include"
+            $lib = "$vcpkg\installed\$triplet\lib"
+            "INCLUDE=$inc;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "LIB=$lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
             Write-Warning "vcpkg not found; curl/sqlite3 natives may fail to link"
           }
-          clang --version
 
       - name: 'docker smoke fixture (AOT compile + run)'
-        if: inputs.docker_smoke
+        if: matrix.docker_smoke
         run: |
           cargo run -q -p zz_cli -- build -p docker/smoke/hello.zz -o /tmp/zz-docker-smoke
           out=$(/tmp/zz-docker-smoke)
@@ -152,14 +157,14 @@ jobs:
 
       # --- PR signal: fast suite (VM) + batched native + sanitizers -----
       - name: 'test (PR: fast suite, native allowed)'
-        if: github.event_name == 'pull_request' && inputs.native
+        if: github.event_name == 'pull_request' && matrix.native
         shell: bash
         env:
           ZZ_CI_SKIP_LINT: "1"
         run: ./scripts/test-fast.sh
 
       - name: 'test (PR: fast suite, native skipped)'
-        if: github.event_name == 'pull_request' && !inputs.native
+        if: github.event_name == 'pull_request' && !matrix.native
         shell: bash
         env:
           ZZ_CI_SKIP_LINT: "1"
@@ -167,23 +172,23 @@ jobs:
         run: ./scripts/test-fast.sh
 
       - name: 'test (PR: batched native parity)'
-        if: github.event_name == 'pull_request' && inputs.native
+        if: github.event_name == 'pull_request' && matrix.native
         shell: bash
         run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
 
       - name: 'ASan+UBSan AOT leg (pinned clang leg only)'
-        if: inputs.clang_pin != ''
+        if: matrix.clang_pin != ''
         shell: bash
         run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
 
       # --- merge/push: full suite --------------------------------------
       - name: 'test (merge: full suite, native allowed)'
-        if: github.event_name != 'pull_request' && inputs.native
+        if: github.event_name != 'pull_request' && matrix.native
         shell: bash
         run: ZZ_BATCH_NATIVE=1 cargo test --all
 
       - name: 'test (merge: full suite, native skipped)'
-        if: github.event_name != 'pull_request' && !inputs.native
+        if: github.event_name != 'pull_request' && !matrix.native
         shell: bash
         env:
           ZZ_SKIP_NATIVE: "1"
