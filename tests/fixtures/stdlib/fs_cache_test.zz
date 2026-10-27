@@ -16,7 +16,7 @@ func read_ok(p: str) -> str {
 
 func main() {
     tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
-    base := "/tmp/zz_fs_cache_{process.pid()}_{tok}"
+    base := "{env.temp_dir()}/zz_fs_cache_{process.pid()}_{tok}"
     path := base + "/a.txt"
     _ := fs.remove_dir_all(base)
     match fs.mkdir_all(base) {

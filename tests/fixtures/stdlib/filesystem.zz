@@ -7,7 +7,7 @@ import std.fs
 import std.process(pid)
 
 scratch_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
-scratch := "/tmp/zz_e2e_test_{pid()}_{scratch_tok}.txt"
+scratch := "{env.temp_dir()}/zz_e2e_test_{pid()}_{scratch_tok}.txt"
 
 // write + read
 match fs.write(scratch, "hello from zz") {
@@ -22,7 +22,7 @@ match fs.read(scratch) {
 
 // exists
 println(fs.exists(scratch))
-println(fs.exists("/tmp/zz_no_such_file.txt"))
+println(fs.exists("{env.temp_dir()}/zz_no_such_file.txt"))
 
 // cleanup
 _u1 := fs.write(scratch, "")

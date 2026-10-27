@@ -23,3 +23,35 @@ pub fn exe_name(name: &str) -> String {
 pub fn exe_in(dir: impl AsRef<Path>, name: &str) -> PathBuf {
     dir.as_ref().join(exe_name(name))
 }
+
+/// True when the fixture can run on this host.
+///
+/// A fixture whose header declares `// platform: unix` exercises Unix-only
+/// stdlib surface (e.g. `net.unix_*`, which is a documented unsupported
+/// stub on Windows). The harnesses skip it instead of reporting a failure
+/// the platform cannot fix.
+pub fn fixture_supported_here(path: &Path) -> bool {
+    if cfg!(unix) {
+        return true;
+    }
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    !header_declares(&text, "platform: unix")
+}
+
+/// Scan only the leading `//` comment block, so a string in the fixture
+/// body can never opt a test out by accident.
+fn header_declares(text: &str, needle: &str) -> bool {
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.starts_with("//") {
+            return false;
+        }
+        if trimmed.contains(needle) {
+            return true;
+        }
+    }
+    false
+}

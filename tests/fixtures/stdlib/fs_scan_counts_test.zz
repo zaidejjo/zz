@@ -6,7 +6,7 @@ import std.process
 import std.str
 
 tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
-base := "/tmp/zz_scan_counts_{process.pid()}_{tok}"
+base := "{env.temp_dir()}/zz_scan_counts_{process.pid()}_{tok}"
 
 src_path := base + "_rust.zz"
 code_text := "// hello\nlet x = 1;\n\n/* block\nmore */\nx + 1\n"
@@ -89,7 +89,7 @@ match fs.scan_counts(empty_path, ["//"], "/*", "*/", false, false) {
 // directories up front via stat — `ftell` on a directory stream
 // reports garbage sizes on some libcs, which used to abort the
 // process inside the sized allocation).
-match fs.scan_counts("/tmp", [], "", "", false, false) {
+match fs.scan_counts(env.temp_dir(), [], "", "", false, false) {
     .ok(_) => println("dir_bad")
     .err(e) => {
         dir_io := str.contains(e, "io_error")
@@ -97,7 +97,7 @@ match fs.scan_counts("/tmp", [], "", "", false, false) {
     }
 }
 // Same guard in read_to_string (shared crash class, same fix).
-match fs.read("/tmp") {
+match fs.read(env.temp_dir()) {
     .ok(_) => println("readdir_bad")
     .err(e) => {
         rdir_io := str.contains(e, "io_error")

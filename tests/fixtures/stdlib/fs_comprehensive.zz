@@ -14,7 +14,7 @@ import std.task
 
 func main() {
     sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
-    base := "/tmp/zz_fs_comprehensive_{pid()}_{sweep_tok}"
+    base := "{env.temp_dir()}/zz_fs_comprehensive_{pid()}_{sweep_tok}"
     // Clean slate (missing dir is a tolerated .err).
     fs.remove_dir_all(base)
     match fs.mkdir_all("{base}/sub/nested") {

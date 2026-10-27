@@ -12,7 +12,7 @@ import std.process(pid)
 
 func main() {
     tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
-    scratch := "/tmp/zz_result_print_{pid()}_{tok}.txt"
+    scratch := "{env.temp_dir()}/zz_result_print_{pid()}_{tok}.txt"
     _u1 := fs.write(scratch, "hello clean")
     // Bare Ok straight to stdout unwraps.
     println(fs.read(scratch))
@@ -23,7 +23,7 @@ func main() {
     println(.some(42))
     println(.none)
     // Errors are handled explicitly and stay catchable.
-    match fs.read("/tmp/zz_result_print_missing.txt") {
+    match fs.read("{env.temp_dir()}/zz_result_print_missing.txt") {
         .ok(c) => println("unexpected: {c}")
         .err(e) => println("caught: {e}")
     }

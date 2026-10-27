@@ -12,6 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod support;
+
 /// Locate the workspace root (where `tests/fixtures/` lives).
 fn fixtures_dir() -> PathBuf {
     // When running `cargo test -p zz_cli`, CARGO_MANIFEST_DIR is crates/zz_cli/.
@@ -207,6 +209,10 @@ macro_rules! e2e_success_test {
             let fixtures = fixtures_dir();
             let path = fixtures.join($category).join($file);
             assert!(path.exists(), "fixture not found: {}", path.display());
+            if !support::fixture_supported_here(&path) {
+                eprintln!("skip {}: fixture is Unix-only", path.display());
+                return;
+            }
 
             let (exit, stdout, stderr) = run_zz(&path);
             assert_eq!(
@@ -1327,6 +1333,10 @@ fn e2e_discover_all_success_fixtures() {
             continue;
         }
         for file in find_fixtures(&dir) {
+            if !support::fixture_supported_here(&file) {
+                eprintln!("skip {}: fixture is Unix-only", file.display());
+                continue;
+            }
             let (exit, stdout, stderr) = run_zz(&file);
             if exit != 0 {
                 failures.push(format!(
@@ -1358,6 +1368,10 @@ fn e2e_discover_all_error_fixtures() {
 
     let mut failures = Vec::new();
     for file in find_fixtures(&err_dir) {
+        if !support::fixture_supported_here(&file) {
+            eprintln!("skip {}: fixture is Unix-only", file.display());
+            continue;
+        }
         let (exit, stdout, _stderr) = run_zz(&file);
         if exit == 0 {
             failures.push(format!(

@@ -4,6 +4,7 @@
 // (`length`) calls must all lower to their canonical natives.
 // The scratch path is per-process so parallel test runners (per-file
 // parity tests + the discover sweep) never share it.
+import std.env
 import std.fs(read as rts)
 import std.fs as f
 import std.math(sin)
@@ -12,7 +13,7 @@ import std.str(length)
 
 func main() {
     println(sin(0.0))
-    p := "/tmp/zz_import_alias_{pid()}.txt"
+    p := "{env.temp_dir()}/zz_import_alias_{pid()}.txt"
     f.write(p, "alias-data")
     println(rts(p))
     println(f.exists(p))

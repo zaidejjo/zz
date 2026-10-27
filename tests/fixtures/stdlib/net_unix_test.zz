@@ -3,6 +3,9 @@
 // Loopback listener on a pid/tok-keyed socket file + client handshake
 // matrix. Accepts run in spawned tasks (like TLS: the server app must
 // accept; the kernel backlog only completes TCP).
+// platform: unix
+// Unix-domain sockets are Unix-only: Windows returns the documented
+// `unix:unsupported` stub error, so the harness skips this fixture there.
 import std.chan
 import std.env
 import std.net

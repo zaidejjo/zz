@@ -1,7 +1,9 @@
 // features: elvis, if-else, imports, locals, nondeterministic, print, std-fs, std-log, std-str, std-time, string-literal
 // E2E: std.log — levels, filtering, file sink, JSON format, spans
 import std.log
+import std.env
 import std.fs
+import std.process(pid)
 import std.str
 import std.time
 
@@ -18,7 +20,7 @@ println("level_bad: {log.set_level(bogus)}")
 println("level2: {log.get_level()}")
 
 // ── text mode to file, with filtering ──
-logpath := "/tmp/zz_log_test.txt"
+logpath := "{env.temp_dir()}/zz_log_test_{pid()}.txt"
 needle_info := "hello-text"
 needle_warn := "warn-text"
 needle_sup := "suppressed-info"
@@ -45,7 +47,7 @@ if str.contains(body, needle_sup) {
 println("has_error: {str.contains(body, needle_err)}")
 
 // ── JSON mode to file ──
-jsonpath := "/tmp/zz_log_json_test.txt"
+jsonpath := "{env.temp_dir()}/zz_log_json_test_{pid()}.txt"
 lvl := "{\"level\":\"info\","
 jmsg := "\"msg\":\"hello-json\""
 jhello := "hello-json"

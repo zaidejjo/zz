@@ -18,6 +18,8 @@ use zz_cli::fixture_meta;
 #[path = "batch_lists.rs"]
 mod batch_lists;
 
+mod support;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -304,6 +306,9 @@ fn utf8_len(first: u8) -> usize {
 
 /// Returns `Some(reason)` if the fixture should be skipped entirely.
 fn native_skip_reason(file: &Path) -> Option<&'static str> {
+    if !support::fixture_supported_here(file) {
+        return Some("Unix-only fixture: `// platform: unix` (stdlib surface missing on Windows)");
+    }
     let stem = file.file_stem()?.to_str()?;
     match stem {
         "http_server_test" | "http_client_test" | "http_phase5b_test" | "concurrent_http_test" => {
@@ -618,6 +623,10 @@ macro_rules! parity_strict_error {
             let fixtures = fixtures_dir();
             let path = fixtures.join("errors").join($file);
             assert!(path.exists(), "fixture not found: {}", path.display());
+            if !support::fixture_supported_here(&path) {
+                eprintln!("SKIP [{}]: Unix-only fixture", path.display());
+                return;
+            }
 
             let vm = run_zz_vm(&path);
             if vm_only() {
@@ -2143,6 +2152,9 @@ fn parity_discover_all_fixtures() {
         // tried and reverted (8 procs on 4 cores thrashed clang to ~140s
         // wall and a native fixture died by signal under the load).
         let file = &task.file;
+        if !support::fixture_supported_here(file) {
+            return SweepOutcome::Skipped;
+        }
         if task.errors_bucket {
             if let Some(bug) = known_native_failure(file) {
                 if vm_only() {

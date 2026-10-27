@@ -9,7 +9,7 @@ import std.process(pid)
 
 func main() {
     os_scratch_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
-    os_path := "/tmp/zz_vfs_os_{pid()}_{os_scratch_tok}.txt"
+    os_path := "{env.temp_dir()}/zz_vfs_os_{pid()}_{os_scratch_tok}.txt"
     // memfs: write/read/append/predicates/listing.
     match fs.memfs() {
         .ok(m) => {
