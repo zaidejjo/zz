@@ -320,6 +320,30 @@ pub fn managed_zig_path() -> Option<PathBuf> {
     Some(path)
 }
 
+/// Bundled Zig shipping next to the `zz` binary in release zips
+/// (`dist/zig` alongside `dist/zz`). Preferred over PATH zig so release
+/// users need no system C compiler at all.
+pub fn bundled_zig_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let exe_name = if cfg!(windows) { "zig.exe" } else { "zig" };
+    let path = dir.join(exe_name);
+    if !path.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&path)
+            .map(|m| m.permissions().mode() & 0o111 == 0)
+            .unwrap_or(true)
+        {
+            return None;
+        }
+    }
+    Some(path)
+}
+
 /// Probe PATH for a Clang provider.
 ///
 /// Order: managed `zig` (an explicit `zz toolchain install` pin always
@@ -362,6 +386,15 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
                 path,
                 zig: true,
                 label: "zig cc",
+            });
+        }
+        // Bundled zig shipping with the release zip: no system clang
+        // needed for end users.
+        if let Some(path) = bundled_zig_path() {
+            return Some(Clang {
+                path,
+                zig: true,
+                label: "bundled zig cc",
             });
         }
     }
