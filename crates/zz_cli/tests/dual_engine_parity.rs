@@ -410,55 +410,81 @@ fn norm_stream(s: &str) -> String {
     strip_numeric_lines(&mask_scratch_paths(&normalize_addrs(s)))
 }
 
-/// Mask per-run scratch segments in `/tmp/zz_*` paths: fixtures isolate
+/// Scratch-directory prefixes masked per run: fixtures create their
+/// scratch dirs in the system temp dir with a `zz_` stem plus per-run
+/// suffixes. The literal `/tmp/zz_` stays for fixtures that spell it out;
+/// the real temp dir is added in both separator styles so Windows
+/// (`C:\...\Temp\zz_...`) masks too.
+fn scratch_prefixes() -> Vec<String> {
+    let mut prefixes = vec!["/tmp/zz_".to_string()];
+    let tmp = std::env::temp_dir();
+    let raw = tmp.to_string_lossy();
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    for prefix in [format!("{trimmed}/zz_"), format!("{trimmed}\\zz_")] {
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    prefixes
+}
+
+/// Mask per-run scratch segments in temp-dir paths: fixtures isolate
 /// parallel runners with `..._<pid>_<token>` suffixes, and VM vs native
 /// legs are always different processes, so these segments can never
 /// match byte-for-byte. Only the trailing `_digits_digits` run is
 /// masked; real output numbers elsewhere are untouched.
 fn mask_scratch_paths(s: &str) -> String {
     let bytes = s.as_bytes();
+    let prefixes = scratch_prefixes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         // Byte-slice prefix check (never `s[i..]`: `i` may sit inside a
         // multibyte char while scanning).
-        if bytes[i..].starts_with(b"/tmp/zz_") {
-            // Consume the stem: [A-Za-z0-9_]+, then strip up to two
-            // trailing _<alnum-with-digit> groups (pid, sweep token),
-            // which become _<run>. The digit requirement keeps real
-            // name parts (`_test`, `_nonexist`) intact.
-            let mut j = i + "/tmp/zz_".len();
-            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                j += 1;
+        let prefix = match prefixes
+            .iter()
+            .find(|p| bytes[i..].starts_with(p.as_bytes()))
+        {
+            Some(p) => p,
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+                continue;
             }
-            let mut k = j;
-            for _ in 0..2 {
-                let mut d = k;
-                while d > i && bytes[d - 1].is_ascii_alphanumeric() {
-                    d -= 1;
-                }
-                let run = &bytes[d..k];
-                if !run.is_empty()
-                    && d > i
-                    && bytes[d - 1] == b'_'
-                    && run.iter().any(|b| b.is_ascii_digit())
-                {
-                    k = d - 1;
-                } else {
-                    break;
-                }
-            }
-            if k < j {
-                out.extend_from_slice(&bytes[i..k]);
-                out.extend_from_slice(b"_<run>");
-            } else {
-                out.extend_from_slice(&bytes[i..j]);
-            }
-            i = j;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
+        };
+        // Consume the stem: [A-Za-z0-9_]+, then strip up to two
+        // trailing _<alnum-with-digit> groups (pid, sweep token),
+        // which become _<run>. The digit requirement keeps real
+        // name parts (`_test`, `_nonexist`) intact.
+        let stem_start = i + prefix.len();
+        let mut j = stem_start;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
         }
+        let mut k = j;
+        for _ in 0..2 {
+            let mut d = k;
+            while d > stem_start && bytes[d - 1].is_ascii_alphanumeric() {
+                d -= 1;
+            }
+            let run = &bytes[d..k];
+            if !run.is_empty()
+                && d > stem_start
+                && bytes[d - 1] == b'_'
+                && run.iter().any(|b| b.is_ascii_digit())
+            {
+                k = d - 1;
+            } else {
+                break;
+            }
+        }
+        if k < j {
+            out.extend_from_slice(&bytes[i..k]);
+            out.extend_from_slice(b"_<run>");
+        } else {
+            out.extend_from_slice(&bytes[i..j]);
+        }
+        i = j;
     }
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
@@ -2361,6 +2387,18 @@ fn mask_scratch_paths_masks_pid_token_suffixes() {
     assert_eq!(
         mask_scratch_paths("see /tmp/zz_phase4a_nonexist.txt"),
         "see /tmp/zz_phase4a_nonexist.txt"
+    );
+    // Platform temp dir, both separator styles (Windows runners).
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.to_string_lossy();
+    let tmp = tmp.trim_end_matches(['/', '\\']);
+    assert_eq!(
+        mask_scratch_paths(&format!("{tmp}/zz_fs_x_123_4/missing")),
+        format!("{tmp}/zz_fs_x_<run>/missing")
+    );
+    assert_eq!(
+        mask_scratch_paths(&format!("{tmp}\\zz_fs_x_123_t9\\missing")),
+        format!("{tmp}\\zz_fs_x_<run>\\missing")
     );
     // Unrelated numbers untouched.
     assert_eq!(

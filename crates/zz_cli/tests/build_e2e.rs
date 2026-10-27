@@ -138,16 +138,17 @@ fn release_without_clang_emits_c_and_scripts() {
 #[test]
 fn pgo_cross_target_rejected() {
     let dir = temp_project();
+    // Must be foreign to the *host* arch, not hardcoded x86_64 — on an
+    // aarch64 runner `aarch64-unknown-linux-gnu` is the native target and
+    // PGO legitimately succeeds.
+    let foreign = if std::env::consts::ARCH == "aarch64" {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        "aarch64-unknown-linux-gnu"
+    };
     let (code, _stdout, stderr) = run(
         &dir,
-        &[
-            "build",
-            "-p",
-            "--pgo",
-            "--target",
-            "aarch64-unknown-linux-gnu",
-            "hello.zz",
-        ],
+        &["build", "-p", "--pgo", "--target", foreign, "hello.zz"],
         &[],
     );
     assert_eq!(code, 1, "pgo+cross must fail.\nstderr:\n{stderr}");

@@ -5,13 +5,9 @@ use std::process::Command;
 
 /// The compiled `zz` binary path (workspace target dir).
 fn zz_bin() -> PathBuf {
-    // From target/debug/deps/zz_cli-<hash>:
-    //   ../../.. = target/  -> target/zz? No: bin is target/debug/zz.
-    let exe = std::env::current_exe().unwrap();
-    // Strip the deps/<crate>-<hash> filename.
-    let deps = exe.parent().unwrap(); // .../target/debug/deps
-    let debug = deps.parent().unwrap(); // .../target/debug
-    debug.join("zz")
+    // `CARGO_BIN_EXE_zz` is the built binary for this test run and
+    // carries the platform executable suffix (`zz.exe` on Windows).
+    PathBuf::from(env!("CARGO_BIN_EXE_zz"))
 }
 
 use std::path::PathBuf;

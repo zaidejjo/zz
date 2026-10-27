@@ -38,10 +38,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn zz_bin() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let deps = exe.parent().unwrap();
-    let debug = deps.parent().unwrap();
-    debug.join("zz")
+    // `CARGO_BIN_EXE_zz` is the built binary for this test run and
+    // carries the platform executable suffix (`zz.exe` on Windows).
+    PathBuf::from(env!("CARGO_BIN_EXE_zz"))
 }
 
 fn run_zz_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {

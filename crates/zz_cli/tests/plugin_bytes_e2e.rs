@@ -3,6 +3,11 @@
 //! no NUL termination (interior NUL bytes are counted), on both engines.
 //! Tempdir pattern mirrors `c_plugin_e2e.rs`.
 
+// `zz run` cannot dlopen plugins on non-Unix hosts (`load_vm_plugins` is a
+// no-op stub there), so every assertion below is Unix-only by construction.
+// The declarative AOT half is covered on Windows by `zz_pm`'s build tests.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

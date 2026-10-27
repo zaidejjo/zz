@@ -13,15 +13,19 @@
 //!
 //! The churn program nests `for`-in-`for`, so it also dogfoods #311 on
 //! the chunk backend.
+//!
+//! Unix-only: the cap is applied with `ulimit -v` under bash, which MSYS
+//! bash on Windows does not implement. The ASan leg covers leaks on the
+//! Linux x86_64 CI leg.
+#![cfg(unix)]
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn zz_bin() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let deps = exe.parent().unwrap();
-    let debug = deps.parent().unwrap();
-    debug.join("zz")
+    // `CARGO_BIN_EXE_zz` is the built binary for this test run and
+    // carries the platform executable suffix (`zz.exe` on Windows).
+    PathBuf::from(env!("CARGO_BIN_EXE_zz"))
 }
 
 fn require_native() -> bool {

@@ -47,10 +47,9 @@ fn require_native_serve() -> bool {
 }
 
 fn zz_bin() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let deps = exe.parent().unwrap();
-    let debug = deps.parent().unwrap();
-    debug.join("zz")
+    // `CARGO_BIN_EXE_zz` is the built binary for this test run and
+    // carries the platform executable suffix (`zz.exe` on Windows).
+    PathBuf::from(env!("CARGO_BIN_EXE_zz"))
 }
 
 fn free_port() -> u16 {

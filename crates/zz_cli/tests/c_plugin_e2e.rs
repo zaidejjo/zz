@@ -4,6 +4,11 @@
 //! float params, and void returns. The hook is `cc` + `sh` only — this test
 //! fails if the C path ever shells out to cargo.
 
+// `zz run` cannot dlopen plugins on non-Unix hosts (`load_vm_plugins` is a
+// no-op stub there), so every assertion below is Unix-only by construction.
+// The declarative AOT half is covered on Windows by `zz_pm`'s build tests.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

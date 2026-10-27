@@ -126,6 +126,11 @@ toolchain:
 - The AOT HTTP *server* (`http.server`, `http.listen`) is Linux-only
   today: it is a fork+epoll design. On macOS/Windows those calls return a
   clear "requires Linux" error; VM mode serves fine everywhere.
+- Loading native plugins in **VM mode** (`zz run` with a `plugin.zzi`
+  dependency) is Unix-only: the loader is built on `dlopen`. On Windows
+  use `zz build` (AOT), which links the plugin's static archive; the
+  declarative `backend = "cc"` / `backend = "rust"` builds produce a
+  `.lib` + `.dll` pair there.
 
 **VM mode** (`zz run` without `--native`) needs nothing extra — it's
 pure Rust bytecode interpretation, no linking involved.

@@ -776,7 +776,7 @@ pub fn ensure_cc(
 /// Output of a hermetic Rust crate build (all paths absolute).
 #[derive(Debug, Clone)]
 pub struct RustBuildOutput {
-    /// Static archive (`build/lib<name>.a`) — AOT link input.
+    /// Static archive (`build/lib<name>.a|.lib`) — AOT link input.
     pub archive: PathBuf,
     /// Shared library (`build/lib<name>.so|.dylib|.dll`) — VM dlopen input.
     pub shared: PathBuf,
@@ -1237,7 +1237,7 @@ pub fn ensure_rust(
             built_archive.display()
         ));
     }
-    if !windows && !built_shared.is_file() {
+    if !built_shared.is_file() {
         return Err(format!(
             "cargo build for `{pkg_name}` produced no cdylib at {}\n\
              hint: [lib] crate-type must include \"cdylib\"",
@@ -1245,12 +1245,14 @@ pub fn ensure_rust(
         ));
     }
 
-    let archive = build_dir.join(format!("lib{stem}.a"));
+    // Same naming rule as `ensure_cc`: MSVC linkers want `.lib`, and the
+    // DLL is staged so VM loaders and tooling see one stable layout per
+    // platform.
+    let archive_ext = if windows { "lib" } else { "a" };
+    let archive = build_dir.join(format!("lib{stem}.{archive_ext}"));
     let shared = build_dir.join(format!("lib{stem}.{suffix}"));
     copy_replace(&built_archive, &archive)?;
-    if !windows {
-        copy_replace(&built_shared, &shared)?;
-    }
+    copy_replace(&built_shared, &shared)?;
 
     let mut cflag_record = vec![format!("--target={triple}")];
     if !spec.cargo_features.is_empty() {
