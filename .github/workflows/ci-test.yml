@@ -156,9 +156,14 @@ jobs:
           clang --version
           # curl + sqlite3 headers/libs: the C runtime includes them by
           # default (ZZ_HAS_CURL/ZZ_HAS_SQLITE3), so native legs need them.
+          # `msvc-dev-cmd` may leave VCPKG_INSTALLATION_ROOT pointing at the
+          # VS-bundled (read-only) tree; fall back to the image's C:\vcpkg
+          # when that path has no usable vcpkg.exe.
           $vcpkg = $env:VCPKG_INSTALLATION_ROOT
-          if (-not $vcpkg) { $vcpkg = "C:\vcpkg" }
-          $triplet = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+          if (-not $vcpkg -or -not (Test-Path "$vcpkg\vcpkg.exe")) {
+            if (Test-Path "C:\vcpkg\vcpkg.exe") { $vcpkg = "C:\vcpkg" }
+          }
+          $triplet = if ("${{ runner.arch }}" -eq "ARM64") {
             "arm64-windows"
           } else {
             "x64-windows"

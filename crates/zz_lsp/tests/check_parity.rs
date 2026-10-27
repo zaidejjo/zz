@@ -82,13 +82,14 @@ fn workspace_root() -> PathBuf {
 }
 
 fn zz_bin() -> PathBuf {
-    // target/debug/deps/check_parity-<hash> -> target/debug/zz.
+    // target/debug/deps/check_parity-<hash> -> target/debug/zz(.exe).
     let exe = std::env::current_exe().expect("current exe");
+    let name = if cfg!(windows) { "zz.exe" } else { "zz" };
     exe.parent()
         .expect("deps dir")
         .parent()
         .expect("debug dir")
-        .join("zz")
+        .join(name)
 }
 
 fn fixture_files() -> Vec<PathBuf> {
