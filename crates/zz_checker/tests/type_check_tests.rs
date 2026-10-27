@@ -3789,6 +3789,37 @@ fn unimported_std_module_suggests_import() {
 }
 
 #[test]
+fn partially_bound_std_module_root_suggests_import() {
+    // `math` is bound to a value (partially resolved root), yet
+    // `math.sin` is used as a dotted path: the import hint + fixit must
+    // still fire.
+    let r = check_src("func main() {\n    math := 5\n    y := math.sin(1.0)\n}");
+    assert!(
+        !r.errors.is_empty(),
+        "expected an error, got: {:?}",
+        r.errors
+    );
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("cannot access field `sin`"))
+        .expect("expected cannot-access-field error");
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("add `import std.math`")),
+        "expected import hint, got notes: {:?}",
+        diag.notes
+    );
+    let fixit = diag
+        .fixits
+        .iter()
+        .find(|f| f.message == "add import")
+        .expect("expected add-import fixit");
+    assert_eq!(fixit.replacement, "import std.math\n");
+}
+
+#[test]
 fn unknown_root_gets_no_import_suggestion() {
     // `wat` is no std module: typo machinery only, never an import hint.
     let r = check_src("y := wat.sin(1.0)");
