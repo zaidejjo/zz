@@ -1543,3 +1543,106 @@ mod cache_serde_tests {
         assert_eq!(format!("{sig:?}"), format!("{back:?}"));
     }
 }
+
+/// Regression tests for #652: the checker must never `unreachable!()`/panic
+/// when a statement variant reaches a collector/checker that expects a
+/// different variant. These paths are defensive ("should never happen") but
+/// must degrade to a recorded `RawDiag` instead of aborting the compiler.
+#[cfg(test)]
+mod unreachable_guard_tests {
+    use super::*;
+    use zz_frontend::parse;
+
+    fn checker() -> Checker {
+        Checker::new(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    fn first_stmt(src: &str) -> Stmt {
+        let parsed = parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        parsed
+            .program
+            .stmts
+            .into_iter()
+            .next()
+            .expect("source should contain a statement")
+    }
+
+    #[test]
+    fn func_name_returns_unknown_for_non_func() {
+        let stmt = first_stmt("struct Point { x: int }");
+        assert_eq!(Checker::func_name(&stmt), "<unknown>");
+    }
+
+    #[test]
+    fn collect_func_non_func_records_error_instead_of_panicking() {
+        let stmt = first_stmt("struct Point { x: int }");
+        let mut c = checker();
+        c.collect_func(&stmt);
+        assert!(
+            !c.errors.is_empty(),
+            "expected collect_func to record an error, got none"
+        );
+        assert!(
+            c.errors.iter().any(|e| e.message.contains("collect_func")),
+            "expected a collect_func error, got: {:?}",
+            c.errors
+        );
+    }
+
+    #[test]
+    fn check_func_body_non_func_records_error_instead_of_panicking() {
+        let stmt = first_stmt("struct Point { x: int }");
+        let mut c = checker();
+        let sig = FuncSig {
+            generics: vec![],
+            bounds: vec![],
+            params: vec![],
+            has_default: vec![],
+            ret: Type::Unit,
+            is_extern: false,
+            extern_c_symbol: None,
+        };
+        c.check_func_body(&stmt, &sig);
+        assert!(
+            !c.errors.is_empty(),
+            "expected check_func_body to record an error, got none"
+        );
+        assert!(
+            c.errors
+                .iter()
+                .any(|e| e.message.contains("check_func_body")),
+            "expected a check_func_body error, got: {:?}",
+            c.errors
+        );
+    }
+
+    #[test]
+    fn collect_struct_non_struct_records_error_instead_of_panicking() {
+        let stmt = first_stmt("func f() { }");
+        let mut c = checker();
+        c.collect_struct(&stmt);
+        assert!(
+            !c.errors.is_empty(),
+            "expected collect_struct to record an error, got none"
+        );
+        assert!(
+            c.errors
+                .iter()
+                .any(|e| e.message.contains("collect_struct")),
+            "expected a collect_struct error, got: {:?}",
+            c.errors
+        );
+    }
+}
