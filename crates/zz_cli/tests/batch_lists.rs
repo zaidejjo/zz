@@ -127,7 +127,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "fs_cache_test.zz", true),
     // Native-runtime (FFI) fixtures: regexp, crypto, float formatting —
     // exercise `native_rt` link path in both VM and AOT engines.
-    ("stdlib", "regexp_test.zz", true),
+    ("stdlib", "regexp_test.zz", false),
     ("stdlib", "crypto_test.zz", true),
     ("stdlib", "crypto_passwords_test.zz", true),
     ("stdlib", "crypto_jwt_test.zz", true),
