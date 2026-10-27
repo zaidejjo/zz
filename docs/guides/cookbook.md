@@ -147,7 +147,7 @@ func port() -> int {
 
 func main() {
     s := http.server()
-    s = http.route(s, "GET", "/health", |_req| "ok")
+    s = http.route(s, "GET", "/health", |req| "ok")
     s = http.log(s, true)
     http.listen(s, port())
 }
@@ -230,7 +230,7 @@ import std.http
 import std.uuid
 
 s := http.server()
-s = http.route(s, "GET", "/", |_req| "ok-{uuid.v7()}")
+s = http.route(s, "GET", "/", |req| "ok-{uuid.v7()}")
 s = http.rate_limit(s, 100, 60000)
 s = http.request_id(s)
 s = http.secure_headers(s)

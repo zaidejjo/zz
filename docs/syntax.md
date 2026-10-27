@@ -236,10 +236,23 @@ double := |x: int| x * 2
 add := |a: int, b: int| a + b
 greet := |name: str| println("Hello, {name}")
 
+// Trailing comma is allowed after the last param
+add_tc := |a: int, b: int,| a + b
+
+// Optional return type annotation
+twice := |x: int| -> int { x * 2 }
+
+// Zero-arg closure
+noop := || { println("hi") }
+
 // Multi-line closure
 square := |x: int| {
     x * x
 }
+
+// Underscore-prefixed param names are regular names —
+// use plain names unless you want to signal "unused"
+route := |req| http.ok("ok")
 ```
 
 ### Dotted Names (Cross-Module)

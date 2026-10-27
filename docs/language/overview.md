@@ -33,7 +33,7 @@ func main() {
     println(names) // ["Ada"]
 
     s := http.server()
-    s = http.route(s, "GET", "/", |_req| "ok")
+    s = http.route(s, "GET", "/", |req| "ok")
     println("routes ready")
 }
 ```

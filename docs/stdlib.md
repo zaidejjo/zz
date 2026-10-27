@@ -293,7 +293,7 @@ Handlers take a typed `Request` and return `str` (200 text), a
 import std.http
 
 server := http.server()
-    |> http.route("GET", "/", |_req: http.request| "Hello, World!")
+    |> http.route("GET", "/", |req: http.request| "Hello, World!")
     |> http.route("GET", "/users/:id", |req| "user-{http.param(req, "id") ?? "?"}")
     |> http.route("POST", "/echo", |req| req.body)
 
@@ -337,7 +337,7 @@ responses gain `Strict-Transport-Security` automatically:
 
 ```zz
 s = http.server()
-s = s.route("GET", "/", |_req| "secure")
+s = s.route("GET", "/", |req| "secure")
 http.listen_tls(s, 8443, "cert.pem", "key.pem")
 ```
 
@@ -429,7 +429,7 @@ func main() -> Result<int, str> {
 import std.http
 
 server := http.server()
-    |> http.route("GET", "/", |_req| "Hello!")
+    |> http.route("GET", "/", |req| "Hello!")
 
 // Test without starting a server
 response := http.test(server, "GET", "/", "")

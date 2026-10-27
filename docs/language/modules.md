@@ -49,6 +49,39 @@ a.zz imports b.zz, which imports a.zz  ->  error
 
 Fix: extract shared types into `c.zz`; both `a` and `b` import `c`.
 
+## Importing a std module shadows it at runtime
+
+A full std import (`import std.str`) binds the head name `str` in your module.
+At runtime `std.<head>` wins over an explicit `import <pkg>.<head>`, so your
+binding shadows the std module and qualified calls through it (`std.str.x`) may
+fail — `zz check` passes while `zz run` fails. The checker warns at the import
+site instead:
+
+```text
+warning: import binds `str`, shadowing the std module `str` — `std.str.*` will
+resolve to your binding at runtime
+  --> main.zz:3:1
+    |
+  3 | import std.str
+    | ^^^^^^^^^^^^^^ help: replace with `import std.str as str_mod`
+```
+
+Alias the import to avoid the collision:
+
+```zz
+// before — warns
+import std.str
+println(str.to_upper("hi"))
+
+// after — no warning
+import std.str as str_mod
+println(str_mod.to_upper("hi"))
+```
+
+Selective imports (`import std.str(split)`, `import std.math(PI)`) bind only
+the named items, never the head, so they do **not** warn. Aliased imports
+(`import std.str as s`) also do not warn.
+
 ## Cross-module types
 
 ```zz

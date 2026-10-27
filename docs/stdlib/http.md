@@ -9,7 +9,7 @@ Handlers take `http.request` and return `str` (200 text), `http.response`
 
 ```zz
 server := http.server()
-    |> http.route("GET", "/", |_req: http.request| "Hello, World!")
+    |> http.route("GET", "/", |req: http.request| "Hello, World!")
     |> http.route("GET", "/users/:id", |req| "user-{http.param(req, "id") ?? "?"}")
     |> http.route("POST", "/echo", |req| req.body)
 
@@ -46,10 +46,10 @@ struct RouteDef {
 
 func main() {
     defs := [
-        RouteDef{method: "GET", path: "/", handle: |_req: http.request| http.ok("root")},
-        RouteDef{method: "GET", path: "/api/pkg/search", handle: |_req: http.request| http.ok("search")},
+        RouteDef{method: "GET", path: "/", handle: |req: http.request| http.ok("root")},
+        RouteDef{method: "GET", path: "/api/pkg/search", handle: |req: http.request| http.ok("search")},
         // ... one row per route ...
-        RouteDef{method: "GET", path: "*", handle: |_req: http.request| http.not_found()},
+        RouteDef{method: "GET", path: "*", handle: |req: http.request| http.not_found()},
     ]
     s := http.server()
     s = http.cors(s, ["https://app.example.com"])
@@ -163,7 +163,7 @@ func main() -> Result<int, str> {
 
 ```zz
 server := http.server()
-    |> http.route("GET", "/", |_req| "Hello!")
+    |> http.route("GET", "/", |req| "Hello!")
 
 res := http.test(server, "GET", "/", "")
 println(res.status())  // 200

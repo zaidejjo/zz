@@ -64,7 +64,7 @@ import app.math(add as f)
 
 ```zz
 s := http.server()
-s = http.route(s, "GET", "/", |_req| "ok")
+s = http.route(s, "GET", "/", |req| "ok")
 http.listen(s, 8080)
 fs.read("f.txt") // match .ok/.err
 c := chan()

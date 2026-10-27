@@ -27,6 +27,7 @@ Every message below is a verbatim `error_at` / `warning_at` string from
 | ``undefined variable `x` `` (+ `did you mean \`y\`?`) | Typo or missing import; `zz fix` renames safe cases. |
 | ``requires `import MOD` `` | Add the import (`std.*` helpers gate on import). |
 | ``x := …` shadows the outer `x`` (warning) | `:=` binds a fresh block-scoped name: use `=` to update the outer binding (fix-it), or rename the inner one. Destructuring warns without a fix — keep the result and assign separately. |
+| ``import binds `head`, shadowing the std module `head`` (warning) | A full `import std.<head>` binds `head`, hiding `std.<head>` at runtime. Alias it: `import std.<head> as <name>_mod`. Selective imports (`import std.<head>(item)`) do not warn. |
 | `unused Result` (warning) | `match`, `?`, or `_ := …`. Block tails exempt. |
 | `unreachable` / dead arm after `_` | Move catch-all last or guard it. |
 
