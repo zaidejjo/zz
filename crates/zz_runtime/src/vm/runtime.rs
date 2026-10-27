@@ -2252,7 +2252,9 @@ impl Vm {
                                     }
                                 }
                             }
-                            _ => unreachable!("ForNext on non-iterable"),
+                            _ => {
+                                return Err(self.error("for-loop over a non-iterable value", *span))
+                            }
                         }
                     } // immutable borrow of self.stack dropped here
 
@@ -3833,7 +3835,12 @@ impl Vm {
             }
             Flow::Break(s) => brk = Some(s),
             Flow::Continue(s) => ctn = Some(s),
-            Flow::Value(_) => unreachable!("unwind_frame on a plain value"),
+            Flow::Value(_) => {
+                return Unwind::Error(self.error(
+                    "internal error: unwind_frame on a plain value",
+                    Span::default(),
+                ))
+            }
             Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
         let f = self.frames.pop().unwrap();
