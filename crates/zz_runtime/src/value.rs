@@ -1466,34 +1466,34 @@ impl Value {
     /// The method namespace for this value type, used for method dispatch.
     /// Returns "str" for strings, "vec" for arrays, the struct namespace for
     /// objects, and None for types without method support.
-    pub fn method_namespace(&self) -> Option<&'static str> {
+    ///
+    /// Returns an owned `String` (rather than a leaked `&'static str`) so
+    /// long-running programs creating many opaque handles or objects do not
+    /// grow memory unboundedly.
+    pub fn method_namespace(&self) -> Option<String> {
         match self {
-            Value::Str(_) => Some("str"),
-            Value::Array(_) => Some("vec"),
-            Value::Bytes(_) => Some("bytes"),
-            Value::Option(_) => Some("option"),
-            Value::Result(_) => Some("result"),
-            Value::Int(_) => Some("int"),
-            Value::Float(_) => Some("float"),
-            Value::Bool(_) => Some("bool"),
-            Value::TcpStream(_) => Some("net"),
-            Value::TcpListener(_) => Some("net"),
-            Value::HttpServer(_) => Some("http"),
-            Value::Db(_) => Some("sqlz"),
+            Value::Str(_) => Some("str".to_string()),
+            Value::Array(_) => Some("vec".to_string()),
+            Value::Bytes(_) => Some("bytes".to_string()),
+            Value::Option(_) => Some("option".to_string()),
+            Value::Result(_) => Some("result".to_string()),
+            Value::Int(_) => Some("int".to_string()),
+            Value::Float(_) => Some("float".to_string()),
+            Value::Bool(_) => Some("bool".to_string()),
+            Value::TcpStream(_) => Some("net".to_string()),
+            Value::TcpListener(_) => Some("net".to_string()),
+            Value::HttpServer(_) => Some("http".to_string()),
+            Value::Db(_) => Some("sqlz".to_string()),
             // Opaque handles dispatch on their tag (e.g. a `"regex"` handle
-            // resolves `regex.is_match`). Tags are dynamic, so the `&str`
-            // is leaked once per distinct tag — same pattern as `Object`
-            // namespaces below.
-            Value::Opaque(h) => Some(Box::leak(h.tag.clone().into_boxed_str()) as &str),
-            Value::Response(_) => Some("http"),
-            Value::HttpRequest(_) => Some("http"),
-            Value::Chan(_) => Some("chan"),
+            // resolves `regex.is_match`). Owned `String` — no `Box::leak`.
+            Value::Opaque(h) => Some(h.tag.clone()),
+            Value::Response(_) => Some("http".to_string()),
+            Value::HttpRequest(_) => Some("http".to_string()),
+            Value::Chan(_) => Some("chan".to_string()),
             Value::TaskJoin(_) => None,
             Value::Object(o) => {
                 // Extract namespace from struct name (e.g., "shapes.Point" -> "shapes")
-                o.name
-                    .rsplit_once('.')
-                    .map(|(ns, _)| Box::leak(ns.to_string().into_boxed_str()) as &str)
+                o.name.rsplit_once('.').map(|(ns, _)| ns.to_string())
             }
             _ => None,
         }
@@ -1738,7 +1738,7 @@ mod tests {
         let h = zz_native_rt::alloc("regex", std::sync::Arc::new(1u32));
         let v = Value::Opaque(Box::new(h.clone()));
         assert_eq!(v.type_name(), "regex");
-        assert_eq!(v.method_namespace(), Some("regex"));
+        assert_eq!(v.method_namespace(), Some("regex".to_string()));
         assert_eq!(v.to_string(), format!("<regex #{}>", h.id));
         assert_eq!(v, Value::Opaque(Box::new(h.clone())));
         let other = Value::Opaque(Box::new(zz_native_rt::Handle {

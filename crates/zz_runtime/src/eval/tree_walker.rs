@@ -985,7 +985,7 @@ impl Interp {
             Value::Float(_) => Some("float".to_string()),
             Value::Bool(_) => Some("bool".to_string()),
             Value::Object(o) => Some(o.name.clone()),
-            _ => recv.method_namespace().map(str::to_string),
+            _ => recv.method_namespace(),
         }
     }
 
