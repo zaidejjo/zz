@@ -180,7 +180,7 @@ jobs:
           # Static libstd: `libstd-<hash>.rlib` on Unix. Release installs
           # resolve it with no Rust toolchain (ffi.rs::resolve_staticlib).
           LIBDIR="$(rustc --print target-libdir)"
-          STD_RLIB="$(ls "$LIBDIR"/libstd-*.rlib 2>/dev/null | tail -1 || true)"
+          STD_RLIB="$(find "$LIBDIR" -maxdepth 1 -name 'libstd-*.rlib' | sort | tail -1)"
           if [ -z "$STD_RLIB" ]; then
             echo "error: no libstd-*.rlib in $LIBDIR" >&2
             exit 1
