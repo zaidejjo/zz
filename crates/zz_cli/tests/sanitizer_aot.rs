@@ -16,6 +16,8 @@
 //! Corpus mirrors `chunk_aot_diff` at small scale (sanitizers slow runs
 //! ~2-4x; timing is not asserted here, only cleanliness + parity).
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -353,7 +355,7 @@ fn sanitizer_aot_hir_and_chunk() {
             let (code, _out, err) = build_zz(&args, &dir);
             assert_eq!(code, 0, "{backend} sanitizer build of {name} failed: {err}");
             assert_no_reports(&format!("{backend} build {name}"), &err);
-            let bin = dir.join(name);
+            let bin = support::exe_in(&dir, name);
             assert!(bin.exists(), "{backend} binary missing for {name}");
             let (rcode, stdout, rerr) = run_bin(&bin);
             assert_no_reports(&format!("{backend} run {name}"), &rerr);

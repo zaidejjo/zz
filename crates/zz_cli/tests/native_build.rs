@@ -1,4 +1,5 @@
 //! CLI native-build e2e tests: `zz build`, `zz run --native`, and caching.
+mod support;
 
 use std::path::Path;
 use std::process::Command;
@@ -63,7 +64,7 @@ fn build_dev_produces_runnable_binary() {
     let f = write_fixture(&dir, "app.zz", HELLO);
     let (code, out) = run_zz_in(&dir, &["build", f.to_str().unwrap()]);
     assert_eq!(code, 0, "build failed: {out}");
-    let bin = dir.join("app");
+    let bin = support::exe_in(&dir, "app");
     assert!(bin.exists(), "binary not produced");
 
     // Run the binary independently.
@@ -82,7 +83,7 @@ fn build_release_is_small_and_works() {
     let f = write_fixture(&dir, "rp.zz", HELLO);
     let (code, out) = run_zz_in(&dir, &["build", "-p", f.to_str().unwrap()]);
     assert_eq!(code, 0, "release build failed: {out}");
-    let bin = dir.join("rp");
+    let bin = support::exe_in(&dir, "rp");
     let size = std::fs::metadata(&bin).unwrap().len();
     assert!(
         size < 2_000_000,

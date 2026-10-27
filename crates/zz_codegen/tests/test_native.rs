@@ -56,7 +56,7 @@ fn native_run(src: &str) -> (i32, String) {
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-test-bug-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = tmp.join(format!("zz_out{}", std::env::consts::EXE_SUFFIX));
     zz_codegen::build_native(
         &pruned,
         &reach,

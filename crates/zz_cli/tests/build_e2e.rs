@@ -13,6 +13,7 @@
 //!   triples fail with the exact CLI-contract errors; bad `--full`
 //!   combos (`--static`, `--dynamic`, `--pgo`) fail with hints.
 //! - removed `--dev` flag is rejected with a hint.
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -69,7 +70,7 @@ fn static_default_builds_native_binary() {
         stderr.contains("(static,"),
         "static marker missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     assert!(
         !dir.join("bin").exists(),
@@ -90,7 +91,7 @@ fn dynamic_flag_builds_dynamic_dev_binary() {
         stderr.contains("(dev,"),
         "dev marker missing for --dynamic.\nstderr:\n{stderr}"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -207,7 +208,7 @@ fn release_native_builds_and_runs() {
         code, 0,
         "release build must pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
@@ -371,7 +372,7 @@ fn full_builds_max_opt_binary() {
         stderr.contains("(full,"),
         "full marker missing.\nstderr:\n{stderr}"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
@@ -407,14 +408,14 @@ fn output_flag_names_binary() {
         return;
     }
     assert_eq!(code, 0, "build -o must pass.\nstderr:\n{stderr}");
-    let bin = dir.join("myapp");
+    let bin = support::exe_in(&dir, "myapp");
     assert!(bin.is_file(), "./myapp missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
     // Path-like -o is used as-is relative to the project dir.
     let (code, _stdout, stderr) = run(&dir, &["build", "-o", "sub/dir/app", "hello.zz"], &[]);
     assert_eq!(code, 0, "build -o path must pass.\nstderr:\n{stderr}");
-    let bin = dir.join("sub/dir/app");
+    let bin = support::exe_in(&dir, "sub/dir/app");
     assert!(bin.is_file(), "sub/dir/app missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -438,7 +439,7 @@ fn full_pgo_flow_trains_and_optimizes() {
         !dir.join("default.profdata").exists(),
         "profdata must be cleaned up on success"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");

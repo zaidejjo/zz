@@ -3,6 +3,7 @@
 //! Each test builds a scratch project under the temp dir (never the repo)
 //! and drives the freshly built `zz` binary at it. Path deps keep the
 //! install test offline; nothing touches the registry.
+mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -156,7 +157,7 @@ fn build_honors_features_and_does_not_reuse_a_gated_cache_entry() {
     let d = gated_project("build");
     let (code, out, err) = run_zz(&d, &["build", "--features", "locales-ar", "src/main.zz"]);
     assert_eq!(code, 0, "feature-enabled build failed:\n{err}\n{out}");
-    let bin = d.join("bin").join("app");
+    let bin = support::exe_in(d.join("bin"), "app");
     assert!(bin.is_file(), "expected binary at {}", bin.display());
     let run = Command::new(&bin).output().expect("run built binary");
     assert_eq!(run.status.code(), Some(0));

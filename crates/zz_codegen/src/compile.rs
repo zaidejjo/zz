@@ -1621,7 +1621,9 @@ pub fn compile_and_run_for_target(
 ) -> Result<(i32, String), BuildError> {
     let tmpdir = transient_dir("zz-run");
     std::fs::create_dir_all(&tmpdir)?;
-    let bin = tmpdir.join("zz_tmp_bin");
+    // Explicit suffix: the linker writes exactly the requested name, and
+    // an extensionless file is not executable by path on Windows.
+    let bin = tmpdir.join(format!("zz_tmp_bin{}", std::env::consts::EXE_SUFFIX));
     build(source, &bin, opts, target)?;
     let r = run_binary(&bin, args);
     let _ = std::fs::remove_file(&bin);

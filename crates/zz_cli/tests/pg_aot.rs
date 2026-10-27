@@ -9,6 +9,8 @@
 //!
 //! Skipped when `initdb`/`pg_ctl` are missing or `ZZ_SKIP_NATIVE=1`.
 
+mod support;
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -191,7 +193,7 @@ fn assert_vm_aot_parity(cl: &Cluster, name: &str, src: &str) {
         "AOT build {name} failed:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let bin = dir.join(name);
+    let bin = support::exe_in(&dir, name);
     let run_aot = Command::new(&bin)
         .env("ZZ_PG_URL", &url)
         .output()
@@ -224,7 +226,7 @@ fn assert_aot_only(cl: &Cluster, name: &str, src: &str, expected: &str) {
         "AOT build {name} failed:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let bin = dir.join(name);
+    let bin = support::exe_in(&dir, name);
     let run_aot = Command::new(&bin)
         .env("ZZ_PG_URL", pg_url(cl.port))
         .output()
@@ -437,7 +439,7 @@ func main() {
         "AOT build pgrefused failed:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let bin = dir.join("pgrefused");
+    let bin = support::exe_in(&dir, "pgrefused");
     let run_aot = Command::new(&bin).output().expect("spawn AOT case");
     assert!(
         !run_aot.status.success(),

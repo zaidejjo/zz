@@ -33,6 +33,7 @@
 //! (chunk output matches the VM): tuple patterns (`match (3, 4)`, HIR
 //! prints 0) and `match` on `bool` with `true`/`false` arms (HIR emits
 //! unbalanced C).
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -778,7 +779,7 @@ fn chunk_matches_hir_stdout_and_exit() {
             args.push(f.to_str().unwrap());
             let (code, _out, err) = run_zz_in(&dir, &args);
             assert_eq!(code, 0, "{backend} build of {name} failed: {err}");
-            let bin = dir.join(name);
+            let bin = support::exe_in(&dir, name);
             assert!(bin.exists(), "{backend} binary missing for {name}");
             let (rcode, stdout) = run_bin(&bin);
             std::fs::write(dir.join("got.stdout"), &stdout).unwrap();

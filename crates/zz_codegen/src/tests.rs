@@ -35,6 +35,15 @@ fn build_reachable(src: &str) -> (TypedProgram, ReachableSet) {
     (pruned, reach)
 }
 
+/// Temp output binary path carrying the platform executable suffix.
+///
+/// The link step writes exactly the name it is given; without `.exe` a
+/// Windows build would produce an extensionless file that the tests then
+/// fail to execute by path.
+fn native_bin(tmp: &std::path::Path, stem: &str) -> std::path::PathBuf {
+    tmp.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
+}
+
 /// Compile + run a source via native, returning exit + stdout.
 fn native_run(src: &str) -> (i32, String) {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,7 +52,7 @@ fn native_run(src: &str) -> (i32, String) {
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-test-{}-{uniq}-out", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let r = compile::run_binary(&bin, &[]).unwrap();
@@ -982,7 +991,7 @@ func main() {
     let (pruned, reach) = build_reachable(src);
     let tmp = std::env::temp_dir().join(format!("zz-test-input-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
 
@@ -1030,7 +1039,7 @@ func main() {
     let (pruned, reach) = build_reachable(src);
     let tmp = std::env::temp_dir().join(format!("zz-test-range-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let (_, out) = compile::run_binary(&bin, &[]).unwrap();
@@ -1728,7 +1737,7 @@ func main() {
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-test-flush-{uniq}-{}-out", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let mut child = std::process::Command::new(&bin)
@@ -1924,7 +1933,7 @@ fn build_temp_bin(src: &str) -> (PathBuf, PathBuf) {
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-link-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}"));
     (tmp, bin)

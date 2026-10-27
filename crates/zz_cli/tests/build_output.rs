@@ -14,6 +14,7 @@
 //! - bare `-o`: renames inside the resolved directory; path-like `-o`
 //!   is used as-is relative to CWD.
 //! - `zz run` (VM) leaves no build artifacts.
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -373,7 +374,7 @@ fn configured_entry_wins_over_conventional() {
     let Some(_) = happy_or_skip(&dir, &["build"]) else {
         return;
     };
-    let bin = dir.join("bin").join(PKG);
+    let bin = support::exe_in(dir.join("bin"), PKG);
     assert!(bin.is_file(), "bin/{PKG} missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "output_ok\n");
@@ -465,7 +466,7 @@ fn standalone_build_lands_in_cwd() {
     let Some(_) = happy_or_skip(&dir, &["build", "hello.zz"]) else {
         return;
     };
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     assert!(!dir.join("bin").exists(), "standalone must not create bin/");
     let out = Command::new(&bin).output().expect("run binary");
@@ -479,7 +480,7 @@ fn project_build_without_arg_uses_package_name() {
     let Some(_) = happy_or_skip(&dir, &["build"]) else {
         return;
     };
-    let bin = dir.join("bin").join(PKG);
+    let bin = support::exe_in(dir.join("bin"), PKG);
     assert!(bin.is_file(), "bin/{PKG} missing");
     assert!(
         !dir.join("src/bin").exists(),
