@@ -31,3 +31,7 @@ socket2 = "0.6"
 
 [dev-dependencies]
 rcgen = "0.13"
+
+[build-dependencies]
+# Windows-only link shim (see cabi_fallback.c).
+cc = "1"

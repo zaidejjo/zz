@@ -1127,14 +1127,29 @@ pub fn lib_file_name_for(os: TargetOs) -> &'static str {
 
 /// System libraries appended after the Rust archives on every link.
 ///
-/// Linux/macOS keep the historical set (`-lpthread -ldl -lm`). The BSDs
-/// ship `dlopen` in libc — there is no `libdl`, and passing `-ldl`
-/// breaks the link — so they get `-lpthread -lm` only. The rlib name
-/// (`std-*.rlib` / `libstd-*.rlib`) and the shared-object suffix are
-/// resolved by the target platform, never the host.
+/// Linux keeps the historical set (`-lpthread -ldl -lm`). The BSDs ship
+/// `dlopen` in libc — there is no `libdl`, and passing `-ldl` breaks the
+/// link — so they get `-lpthread -lm` only. macOS is Unix but its C
+/// stacks live in frameworks, not flat libraries: `sysinfo` (memory/disk
+/// stats) needs CoreFoundation and IOKit, and `ring`'s RNG path can call
+/// into Security, so those are added explicitly (an unused `-framework`
+/// costs nothing). The rlib name (`std-*.rlib` / `libstd-*.rlib`) and the
+/// shared-object suffix are resolved by the target platform, never the
+/// host.
 fn sys_link_libs(os: TargetOs) -> &'static [&'static str] {
     match os {
-        TargetOs::Linux | TargetOs::Macos => &["-lpthread", "-ldl", "-lm"],
+        TargetOs::Linux => &["-lpthread", "-ldl", "-lm"],
+        TargetOs::Macos => &[
+            "-lpthread",
+            "-ldl",
+            "-lm",
+            "-framework",
+            "CoreFoundation",
+            "-framework",
+            "IOKit",
+            "-framework",
+            "Security",
+        ],
         // FreeBSD / OpenBSD / NetBSD / DragonFly: no libdl.
         TargetOs::Other => &["-lpthread", "-lm"],
         // Windows never reaches here (MSVC-style branch above); kept
@@ -1230,7 +1245,8 @@ fn find_libstd(libdir: &std::path::Path, os: TargetOs) -> Result<String, FfiErro
 /// thread/dl helpers.
 ///
 /// Returned flags are appended after the program object on the `cc` command
-/// line. Supports Windows via MSVC-style `/LIBPATH:` and `.lib` flags.
+/// line. Windows targets get the archive by absolute path plus MSVC import
+/// libraries (the driver is GNU-flavoured `clang`/`zig cc`, not clang-cl).
 pub fn link_args(release: bool) -> Result<(Vec<String>, PathBuf), FfiError> {
     link_args_for_target(release, None)
 }
@@ -1252,15 +1268,13 @@ pub fn link_args_for_target(
     // cross-compilation (e.g. building Windows targets from Linux).
     let os = target_os(target);
 
-    // Windows/MSVC linking: /LIBPATH: and .lib import/static libraries.
-    // zig cc on Windows and clang-cl both accept these flags.
+    // Windows/MSVC linking. The compiler driver is the GNU-flavoured
+    // `clang` (or `zig cc`), not clang-cl: only `-L`/`-l` are translated to
+    // `/LIBPATH:`/`foo.lib`. Passing `/LIBPATH:` or a bare relative
+    // `foo.lib` makes the driver treat them as input files
+    // (`error: no such file`), so the archive goes in by absolute path.
     if os == TargetOs::Windows {
-        let lib_name = if target.is_some() {
-            "zz_native_rt.lib".to_string()
-        } else {
-            lib_file_name_for(os).to_string()
-        };
-        let mut base = vec![format!("/LIBPATH:{}", libdir.display()), lib_name];
+        let mut base = vec![libdir.join(lib_file_name_for(os)).display().to_string()];
         base.extend(sys_link_libs_windows().iter().map(|s| s.to_string()));
         // Release installs ship the static libstd next to the archive.
         if let Some(shipped) = find_shipped_std_rlib(&libdir) {
@@ -1624,8 +1638,13 @@ mod tests {
             Ok(a) => a,
             Err(e) => panic!("link_args failed: {e}"),
         };
-        // Same runtime deps as compile::build.
-        args.push("-lcurl".to_string());
+        // Same runtime deps as compile::build (vcpkg names curl's import
+        // library `libcurl.lib` on Windows).
+        args.push(if cfg!(windows) {
+            "-llibcurl".to_string()
+        } else {
+            "-lcurl".to_string()
+        });
         args.push("-lsqlite3".to_string());
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);

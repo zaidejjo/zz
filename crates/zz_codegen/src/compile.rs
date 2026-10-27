@@ -916,6 +916,27 @@ pub fn embed_c(assets: &[EmbedAsset]) -> String {
     out
 }
 
+/// Linker flag that discards unreferenced sections for the *target*
+/// linker, or `None` when the platform linker has no such spelling.
+///
+/// ELF linkers (GNU ld, lld) take `--gc-sections`; Apple's ld64 implements
+/// the same feature as `-dead_strip` and aborts on the GNU name, which
+/// broke every native test on macOS. MSVC's linker always runs `/OPT:REF`
+/// and clang's MSVC driver refuses `-Wl,` link args for it, so Windows
+/// gets no explicit flag — per-function sections still enable COMDAT
+/// folding and dead-stripping there.
+fn gc_sections_link_flag(target: Option<&str>) -> Option<&'static str> {
+    match target {
+        Some(t) if is_windows_target(t) => None,
+        Some(t) if is_macos_target(t) => Some("-Wl,-dead_strip"),
+        Some(_) => Some("-Wl,--gc-sections"),
+        // Host build: the flags must match the linker that will run.
+        None if cfg!(windows) => None,
+        None if cfg!(target_os = "macos") => Some("-Wl,-dead_strip"),
+        None => Some("-Wl,--gc-sections"),
+    }
+}
+
 /// The single release flag set (ThinLTO always).
 ///
 /// Integer arithmetic is defined-wrapping (`-fwrapv`) and aliasing is
@@ -959,7 +980,9 @@ pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
     if opts.gc_sections {
         flags.push("-ffunction-sections".to_string());
         flags.push("-fdata-sections".to_string());
-        flags.push("-Wl,--gc-sections".to_string());
+        if let Some(flag) = gc_sections_link_flag(target) {
+            flags.push(flag.to_string());
+        }
     }
     match opts.pgo {
         PgoMode::Generate => {
@@ -979,9 +1002,12 @@ pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
         flags.push(format!("--target={t}"));
         // The system linker may not understand foreign triples.
         flags.push("-fuse-ld=lld".to_string());
-        if is_windows_target(t) {
-            flags.push("-lws2_32".to_string());
-        }
+    }
+    // Winsock: the C runtime's net layer calls WSAStartup/socket regardless
+    // of the target, and a plain host build on Windows needs the import
+    // library just as much as a cross build does.
+    if target.map_or(cfg!(windows), is_windows_target) {
+        flags.push("-lws2_32".to_string());
     }
     flags
 }
@@ -1049,12 +1075,14 @@ pub fn build_with(
         }
         cmd.arg(flag);
     }
-    cmd.arg("-o")
-        .arg(output_path)
-        .arg(&src_path)
-        // libm stays unconditional (archive members like float binops
-        // need it regardless of position).
-        .arg("-lm")
+    cmd.arg("-o").arg(output_path).arg(&src_path);
+    // libm is unconditional off Windows (archive members like float
+    // binops need it regardless of position). The MSVC CRT has no `m.lib`
+    // and ships the math routines in its default libraries.
+    if !target.map_or(cfg!(windows), is_windows_target) {
+        cmd.arg("-lm");
+    }
+    cmd
         // curl/sqlz: header + link deps only when the program reaches
         // those natives. Defaulting both to 1 (the pre-2026 behavior)
         // made every AOT build require dev headers even for `println`,
@@ -1139,6 +1167,12 @@ fn push_link_inputs(
     for arg in &opts.plugin_link_args {
         cmd.arg(arg);
     }
+    // Winsock for zig cross builds: clang_flags was called with `None`
+    // (the target travels via `-target`), so the flag would be missing.
+    // Duplicate `-lws2_32` on the regular path is harmless.
+    if crate::ffi::target_os(target) == crate::ffi::TargetOs::Windows {
+        cmd.arg("-lws2_32");
+    }
     // Scoped --as-needed LAST: with per-function sections + --gc-sections,
     // programs that never fetch/sql drop those runtime functions, so the
     // heavy libs (curl/TLS tree, sqlite) are skipped instead of faulting
@@ -1154,14 +1188,31 @@ fn push_link_inputs(
     // even when `--gc-sections` later removed every `zz_db_*` section.
     // Omitting the flag entirely leaves no NEEDED entry and links fine.
     if opts.curl_link || opts.sqlite_link {
-        cmd.arg("-Wl,--as-needed");
+        let os = crate::ffi::target_os(target);
+        // `--as-needed` is a GNU ld/lld (ELF) flag; ld64 and link.exe
+        // reject it outright.
+        let elf_linker = matches!(
+            os,
+            crate::ffi::TargetOs::Linux | crate::ffi::TargetOs::Other
+        );
+        if elf_linker {
+            cmd.arg("-Wl,--as-needed");
+        }
         if opts.curl_link {
-            cmd.arg("-lcurl");
+            // vcpkg names the curl import library `libcurl.lib`; the
+            // driver's `-lcurl` would look for `curl.lib`.
+            cmd.arg(if os == crate::ffi::TargetOs::Windows {
+                "-llibcurl"
+            } else {
+                "-lcurl"
+            });
         }
         if opts.sqlite_link {
             cmd.arg("-lsqlite3");
         }
-        cmd.arg("-Wl,--no-as-needed");
+        if elf_linker {
+            cmd.arg("-Wl,--no-as-needed");
+        }
     }
     Ok(())
 }
@@ -1378,7 +1429,10 @@ pub fn compile_units(
     for obj in &objs {
         cmd.arg(obj);
     }
-    cmd.arg("-lm");
+    // See build_with: no `m.lib` on Windows.
+    if !target.map_or(cfg!(windows), is_windows_target) {
+        cmd.arg("-lm");
+    }
     push_link_inputs(&mut cmd, opts, target, clang, output_path)?;
     let out = cmd.output().map_err(BuildError::Io)?;
     if !out.status.success() {
@@ -1439,16 +1493,31 @@ pub fn emit_c_plus_script(
 
     // Conditional system libs: mirror `build_with` so manual builds link
     // exactly what the real build links (no phantom sqlite/curl NEEDED).
+    // `--as-needed` is GNU ld/lld only: ld64 (macOS) and link.exe reject it.
+    let os = crate::ffi::target_os(target);
+    let elf_linker = matches!(
+        os,
+        crate::ffi::TargetOs::Linux | crate::ffi::TargetOs::Other
+    );
     let mut syslibs = String::new();
     if opts.curl_link || opts.sqlite_link {
-        syslibs.push_str(" -Wl,--as-needed");
+        if elf_linker {
+            syslibs.push_str(" -Wl,--as-needed");
+        }
         if opts.curl_link {
-            syslibs.push_str(" -lcurl");
+            // vcpkg's curl import library is `libcurl.lib`.
+            syslibs.push_str(if os == crate::ffi::TargetOs::Windows {
+                " -llibcurl"
+            } else {
+                " -lcurl"
+            });
         }
         if opts.sqlite_link {
             syslibs.push_str(" -lsqlite3");
         }
-        syslibs.push_str(" -Wl,--no-as-needed");
+        if elf_linker {
+            syslibs.push_str(" -Wl,--no-as-needed");
+        }
     }
 
     // Native runtime: mirror `build_with` so FFI programs also build by
@@ -1591,6 +1660,41 @@ mod tests {
 
     fn release_opts() -> BuildOptions {
         BuildOptions::release()
+    }
+
+    #[test]
+    fn gc_sections_flag_matches_target_linker() {
+        // ELF: GNU spelling. macOS: ld64's `-dead_strip` (ld64 aborts on
+        // the GNU flag). Windows: no explicit flag — MSVC's `/OPT:REF` is
+        // on by default and clang's MSVC driver rejects `-Wl,` args.
+        assert_eq!(
+            gc_sections_link_flag(Some("x86_64-unknown-linux-gnu")),
+            Some("-Wl,--gc-sections")
+        );
+        assert_eq!(
+            gc_sections_link_flag(Some("aarch64-apple-darwin")),
+            Some("-Wl,-dead_strip")
+        );
+        assert_eq!(gc_sections_link_flag(Some("aarch64-pc-windows-msvc")), None);
+        // Host build: the flag must match the linker that will run.
+        let host = gc_sections_link_flag(None);
+        if cfg!(windows) {
+            assert_eq!(host, None);
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(host, Some("-Wl,-dead_strip"));
+        } else {
+            assert_eq!(host, Some("-Wl,--gc-sections"));
+        }
+    }
+
+    #[test]
+    fn windows_links_winsock_never_libm() {
+        // The C runtime's net layer uses Winsock on every Windows build
+        // (host and cross); `m.lib` does not exist in the MSVC CRT.
+        let win = clang_flags(&release_opts(), Some("x86_64-pc-windows-msvc"));
+        assert!(win.iter().any(|f| f == "-lws2_32"), "{win:?}");
+        let linux = clang_flags(&release_opts(), Some("x86_64-unknown-linux-gnu"));
+        assert!(!linux.iter().any(|f| f == "-lws2_32"), "{linux:?}");
     }
 
     #[test]
