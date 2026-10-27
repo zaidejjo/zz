@@ -13,6 +13,12 @@
 //! `zz` and `zz-lsp` are always upgraded as one unit: a zip without the
 //! LSP is rejected rather than leaving a version-skewed pair, and both
 //! binaries are version-checked before the swap is considered successful.
+//!
+//! The zip's `lib/` (prebuilt native runtime, static libstd, bundled Zig
+//! std) is swapped in the same transaction: those symbols are
+//! version-locked to the compiler, so an old `lib/` next to a new binary
+//! is a broken install. `lib/` keeps a `.bak` too and is restored with
+//! the binaries when verification fails.
 
 use crate::ui;
 
@@ -238,7 +244,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     };
 
-    ui::step(3, 4, "Verifying + swapping binaries");
+    ui::step(3, 4, "Swapping binaries + runtime");
     let tmp = std::env::temp_dir().join(format!("zz-upgrade-{}", std::process::id()));
     if tmp.exists() {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -320,6 +326,40 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Err(e);
     }
 
+    // The runtime archive (and, in bundled toolchains, Zig's own `lib/`)
+    // must match this exact build: FFI entry points and static libstd are
+    // version-locked to the compiler, so keeping an old `lib/` next to a
+    // new binary is a broken install, not a stale-but-working one.
+    let rt_lib = zz_codegen::ffi::lib_file_name();
+    let published_lib = match find_staged_dir(&pkg, "lib") {
+        Some(staged) if staged.join(rt_lib).is_file() => {
+            if let Err(e) = publish_dir(&dir, "lib", &staged) {
+                // Undo the binary swap: never leave a new compiler beside
+                // the previous runtime.
+                for base in ["zz", "zz-lsp"] {
+                    let name = exe_name(base);
+                    let live = dir.join(&name);
+                    let bak = dir.join(format!("{name}.bak"));
+                    if bak.exists() {
+                        let _ = std::fs::rename(&bak, &live);
+                    } else {
+                        let _ = std::fs::remove_file(&live);
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(e);
+            }
+            true
+        }
+        Some(_) => {
+            ui::warn(&format!(
+                "release zip has no {rt_lib} in lib/; keeping the installed runtime"
+            ));
+            false
+        }
+        None => false,
+    };
+
     ui::step(4, 4, "Verifying install");
     // The compiler and its LSP ship as one pair: the LSP embeds the
     // checker of its own build, so a version skew between the two breaks
@@ -342,6 +382,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 let _ = std::fs::remove_file(&live);
             }
         }
+        if published_lib {
+            let _ = std::fs::remove_dir_all(dir.join("lib"));
+            let _ = std::fs::rename(dir.join("lib.bak"), dir.join("lib"));
+        }
         let _ = std::fs::remove_dir_all(&tmp);
         let mut detail = format!("zz {}", version_label(zz_reported));
         if !lsp_ok {
@@ -354,6 +398,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if !keep_backup {
         for base in ["zz", "zz-lsp"] {
             let _ = std::fs::remove_file(dir.join(format!("{}.bak", exe_name(base))));
+        }
+        if published_lib {
+            let _ = std::fs::remove_dir_all(dir.join("lib.bak"));
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -380,6 +427,77 @@ fn find_staged(pkg: &std::path::Path, name: &str) -> Option<std::path::PathBuf> 
         }
         None
     })
+}
+
+/// Directory `name` inside an extracted release (top level, or one wrapper
+/// level down, mirroring [`find_staged`]).
+fn find_staged_dir(pkg: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let direct = pkg.join(name);
+    if direct.is_dir() {
+        return Some(direct);
+    }
+    std::fs::read_dir(pkg).ok()?.flatten().find_map(|e| {
+        let p = e.path();
+        if !p.is_dir() {
+            return None;
+        }
+        let inner = p.join(name);
+        inner.is_dir().then_some(inner)
+    })
+}
+
+/// Recursively copy `from` into `to` (created if needed).
+fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+    for entry in std::fs::read_dir(from)
+        .map_err(|e| format!("cannot read {}: {e}", from.display()))?
+        .flatten()
+    {
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("cannot stat {}: {e}", src.display()))?;
+        if kind.is_dir() {
+            copy_dir_all(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| format!("cannot copy {}: {e}", src.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Replace `<dir>/<name>` with `staged`, keeping the previous tree as
+/// `<name>.bak` so a failed verification can restore it.
+///
+/// The staged tree is copied *next to* the target first: the download is
+/// unpacked in the temp dir, which may be a different filesystem (tmpfs on
+/// Linux), where `rename` cannot cross.
+fn publish_dir(dir: &std::path::Path, name: &str, staged: &std::path::Path) -> Result<(), String> {
+    let live = dir.join(name);
+    let bak = dir.join(format!("{name}.bak"));
+    let new = dir.join(format!(".{name}.new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&new);
+    copy_dir_all(staged, &new).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&new);
+        format!("cannot stage {name}/: {e}")
+    })?;
+    let _ = std::fs::remove_dir_all(&bak);
+    if live.exists() {
+        std::fs::rename(&live, &bak).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&new);
+            format!(
+                "cannot back up {name}/: {e} (check write permission in {})",
+                dir.display()
+            )
+        })?;
+    }
+    if let Err(e) = std::fs::rename(&new, &live) {
+        let _ = std::fs::rename(&bak, &live);
+        let _ = std::fs::remove_dir_all(&new);
+        return Err(format!("cannot install {name}/: {e} (rolled back)"));
+    }
+    Ok(())
 }
 
 /// Run `<bin> --version` and parse the first `X.Y.Z` token it prints.
@@ -455,5 +573,48 @@ mod tests {
         assert!(find_staged(&dir.join("dist"), "zz").is_some());
         assert!(find_staged(&dir, "zz-lsp").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_staged_lib_dir() {
+        let dir = std::env::temp_dir().join(format!("zz_upgrade_lib_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pkg").join("lib")).unwrap();
+        assert_eq!(
+            find_staged_dir(&dir.join("pkg"), "lib"),
+            Some(dir.join("pkg").join("lib"))
+        );
+        // One wrapper level (the zip's own root) is searched too.
+        assert_eq!(
+            find_staged_dir(&dir, "lib"),
+            Some(dir.join("pkg").join("lib"))
+        );
+        assert!(find_staged_dir(&dir, "missing").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publish_dir_replaces_tree_and_keeps_backup() {
+        let root = std::env::temp_dir().join(format!("zz_upgrade_publish_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let install = root.join("install");
+        let staged = root.join("pkg").join("lib");
+        std::fs::create_dir_all(install.join("lib")).unwrap();
+        std::fs::write(install.join("lib").join("old.a"), "old").unwrap();
+        std::fs::create_dir_all(staged.join("std")).unwrap();
+        std::fs::write(staged.join("std").join("std.zig"), "new").unwrap();
+
+        publish_dir(&install, "lib", &staged).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(install.join("lib").join("std").join("std.zig")).unwrap(),
+            "new"
+        );
+        // Stale files from the previous release must not survive.
+        assert!(!install.join("lib").join("old.a").exists());
+        assert_eq!(
+            std::fs::read_to_string(install.join("lib.bak").join("old.a")).unwrap(),
+            "old"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
