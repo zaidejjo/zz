@@ -2060,33 +2060,15 @@ zz_value zz_result_unwrap_or(zz_value res, zz_value def, int *err) {
 // the VM wording (`index {i} out of bounds for length {len}`) plus the
 // enclosing function, so native failures locate themselves without a
 // VM bisection run. `func` is a ZZ identifier (safe for %s).
+//
+// *err is already set to 1 by the caller (zz_array_get / zz_array_set) before
+// this runs. Do NOT abort the process — return so execution continues with
+// the error flag set and the user can catch it with .err()/match (VM parity).
+// Old behavior called exit(1), killing the whole program on a catchable OOB.
 void zz_index_trap(zz_value obj, zz_value idx, const char *func) {
-    if (idx.tag == ZZ_INT) {
-        long long i = (long long)idx.i;
-        long long n = -1;
-        if (obj.tag == ZZ_ARRAY && obj.arr)
-            n = (long long)obj.arr->len;
-        else if (obj.tag == ZZ_BYTES && obj.bytes)
-            n = (long long)obj.bytes->len;
-        else if (obj.tag == ZZ_STR && obj.s)
-            n = (long long)obj.s->len;
-        if (n >= 0) {
-            fprintf(stderr, "zz error: index %lld out of bounds for length %lld in %s\n",
-                    i, n, func);
-            exit(1);
-        }
-        fprintf(stderr, "zz error: index %lld out of bounds in %s\n", i, func);
-        exit(1);
-    }
-    if (idx.tag == ZZ_STR && obj.tag == ZZ_DICT && idx.s) {
-        fprintf(stderr, "zz error: key `");
-        size_t klen = idx.s->len < 64 ? idx.s->len : 64;
-        fwrite(zz_str_cptr(idx.s), 1, klen, stderr);
-        fprintf(stderr, "` not found in dict in %s\n", func);
-        exit(1);
-    }
-    fprintf(stderr, "zz error: index out of bounds in %s\n", func);
-    exit(1);
+    (void)obj;
+    (void)idx;
+    (void)func;
 }
 
 // fs.read(path)
