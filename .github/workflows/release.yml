@@ -3,9 +3,10 @@ name: release
 # Auto-cuts a GitHub Release from the workspace version in Cargo.toml.
 # You only bump `[workspace.package] version`, merge to main, and this
 # creates tag `vX.Y.Z` + Release (auto-generated notes) with the
-# prebuilt `zz`+`zz-lsp` zips attached. Downstream publishers
-# (docker-publish, aur-publish) trigger off that Release and consume the
-# zips — nobody rebuilds the compiler, nobody hand-creates tags.
+# prebuilt `zz`+`zz-lsp` zips attached for every supported platform.
+# Downstream publishers (docker-publish, aur-publish) trigger off that
+# Release and consume the zips — nobody rebuilds the compiler, nobody
+# hand-creates tags.
 #
 # Trigger: CI success on main (merge commits are tested by CI; release
 # only runs on a green tree — it runs no tests itself), plus manual
@@ -22,9 +23,9 @@ name: release
 # explicit warning.
 #
 # Flow: resolve version -> skip if released -> sync Cargo.lock ->
-# build zips (linux + macos, in parallel) -> create Release WITH
-# the zips attached (single shot, so `release: published` consumers
-# never see a half-ready Release).
+# build six zips in parallel (cd-build-zip.yml) -> create Release WITH
+# all zips + SHA256SUMS attached (single shot, so `release: published`
+# consumers never see a half-ready Release).
 #
 # Lock safety: bumping the workspace version without regenerating
 # Cargo.lock breaks every `cargo build --locked` downstream. So before
@@ -79,10 +80,7 @@ jobs:
             exit 1
           fi
           case "$PKGVER" in
-            *"-"*|*" "*) echo "error: invalid version '$PKGVER'" >&2; exit 1 ;;
-          esac
-          case "$PKGVER" in
-            *"-"*) echo "error: pkgver must not contain '-': $PKGVER" >&2; exit 1 ;;
+            *"-"*|*" "*|*"_"*) echo "error: invalid version '$PKGVER'" >&2; exit 1 ;;
           esac
           TAG="v$PKGVER"
           echo "pkgver=$PKGVER" >> "$GITHUB_OUTPUT"
@@ -162,7 +160,6 @@ jobs:
     # Same CI gate as `cut` (a skipped `cut` leaves `skip` empty, which
     # `!= 'true'` would wrongly pass — belt and suspenders).
     if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && needs.cut.outputs.skip != 'true' }}
-    runs-on: ${{ matrix.runner }}
     strategy:
       # One target failing must not cancel the others: we want all logs.
       # The publish step refuses to cut the Release with a zip missing.
@@ -171,96 +168,35 @@ jobs:
         include:
           - os: linux
             arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
+            timeout: 60
           - os: linux
             arch: aarch64
             runner: ubuntu-24.04-arm
+            timeout: 60
+          - os: macos
+            arch: x86_64
+            runner: macos-15-intel
+            timeout: 60
           - os: macos
             arch: aarch64
             runner: macos-14
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Build the exact tree CI tested: the main HEAD the release
-          # resolves from (workflow_run checks out the default branch).
-          ref: main
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: install native deps (linux)
-        if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev zip unzip xz-utils
-      - name: install native deps (macos)
-        if: matrix.os == 'macos'
-        run: brew install zip unzip
-      - name: build + zip
-        run: |
-          PKGVER="${{ needs.cut.outputs.pkgver }}"
-          TAG="${{ needs.cut.outputs.tag }}"
-          CARGO_VER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
-          if [ "$CARGO_VER" != "$PKGVER" ]; then
-            echo "error: Cargo.toml version ($CARGO_VER) != tag version ($PKGVER)." >&2
-            exit 1
-          fi
-          export CARGO_PROFILE_RELEASE_DEBUG=false
-          cargo build --release --locked -p zz_cli -p zz_lsp
-          ./target/release/zz --version
-          test -x ./target/release/zz-lsp
-          if [ "${{ matrix.os }}" = "macos" ]; then
-            strip -x target/release/zz target/release/zz-lsp
-          else
-            strip target/release/zz target/release/zz-lsp
-          fi
-          # Native-runtime archive + static libstd for the prebuilt link:
-          # AOT programs built by this toolchain resolve them with no
-          # sources and no Rust toolchain (see ffi.rs resolve_staticlib).
-          # Static rlib (#303): linked AOT binaries carry no libstd
-          # dependency and no RUNPATH — no sidecar next to outputs.
-          cargo build --release --locked -p zz_native_rt
-          RT_A="$(ls target/release/libzz_native_rt.a)"
-          # Strip debug symbols from the archive before shipping: the
-          # workspace release profile keeps debuginfo (184M); stripped
-          # it is ~32M and zips to ~12M with the rlib. Final AOT links
-          # are unaffected (only referenced objects are pulled).
-          # GNU strip uses -g, BSD (macos) uses -S for the same.
-          if [ "${{ matrix.os }}" = "macos" ]; then
-            strip -S "$RT_A"
-          else
-            strip -g "$RT_A"
-          fi
-          LIBDIR="$(rustc --print target-libdir)"
-          RT_SO=""
-          for f in "$LIBDIR"/libstd-*.rlib; do
-            [ -e "$f" ] || continue
-            RT_SO="$f"
-          done
-          test -n "$RT_SO"
-          echo "native rt: $RT_A + $RT_SO"
-          # Download bundled zig into dist/ BEFORE zipping (so the zip
-          # includes it). Must run after `rm -rf dist` below so we don't
-          # delete it.
-          ZIP="zz-$PKGVER-${{ matrix.os }}-${{ matrix.arch }}.zip"
-          rm -rf dist "$ZIP"
-          mkdir -p dist dist/lib
-          case "${{ matrix.os }}-${{ matrix.arch }}" in
-            linux-x86_64)   ZIG_URL="https://ziglang.org/download/0.17.0/zig-linux-x86_64-0.17.0.tar.xz" ;;
-            linux-aarch64)  ZIG_URL="https://ziglang.org/download/0.17.0/zig-linux-aarch64-0.17.0.tar.xz" ;;
-            macos-aarch64)  ZIG_URL="https://ziglang.org/download/0.17.0/zig-macos-aarch64-0.17.0.tar.xz" ;;
-            *) echo "error: unsupported os-arch ${{ matrix.os }}-${{ matrix.arch }}" >&2; exit 1 ;;
-          esac
-          curl -fsSL "$ZIG_URL" | tar -xJ -C dist/
-          mv dist/zig-*/zig dist/zig
-          chmod +x dist/zig
-          ./dist/zig version
-          cp target/release/zz target/release/zz-lsp dist/zig LICENSE README.md dist/
-          cp "$RT_A" "$RT_SO" dist/lib/
-          (cd dist && zip -9 -r "../$ZIP" zz zz-lsp zig LICENSE README.md lib)
-          unzip -l "$ZIP"
-      - name: upload zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-zip-${{ matrix.os }}-${{ matrix.arch }}
-          path: zz-*.zip
-          if-no-files-found: error
+            timeout: 60
+          - os: windows
+            arch: x86_64
+            runner: windows-2025
+            timeout: 90
+          - os: windows
+            arch: aarch64
+            runner: windows-11-arm
+            timeout: 90
+    uses: ./.github/workflows/cd-build-zip.yml
+    with:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      runner: ${{ matrix.runner }}
+      pkgver: ${{ needs.cut.outputs.pkgver }}
+      timeout: ${{ matrix.timeout }}
 
   publish-release:
     name: create release with prebuilt zips
@@ -288,9 +224,10 @@ jobs:
       - name: create tag + release with assets (if missing)
         run: |
           TAG="${{ needs.cut.outputs.tag }}"
+          PKGVER="${{ needs.cut.outputs.pkgver }}"
           if [ "${{ inputs['dry-run'] || 'false' }}" = "true" ]; then
             echo "dry-run: would create release $TAG with:"
-            ls -la zz-*.zip
+            ls -la zz-*.zip zz-*.sha256
             exit 0
           fi
           # Re-check: a concurrent run may have cut the tag while we built.
@@ -300,18 +237,29 @@ jobs:
             exit 0
           fi
           ls -la zz-*.zip
-          test -f "zz-${{ needs.cut.outputs.pkgver }}-linux-x86_64.zip" \
-            || { echo "error: linux x86_64 zip missing, refusing half-ready release." >&2; exit 1; }
-          test -f "zz-${{ needs.cut.outputs.pkgver }}-linux-aarch64.zip" \
-            || { echo "error: linux aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
-          test -f "zz-${{ needs.cut.outputs.pkgver }}-macos-aarch64.zip" \
-            || { echo "error: macos aarch64 zip missing, refusing half-ready release." >&2; exit 1; }
+          # Refuse a half-ready release: every platform must have shipped.
+          for asset in \
+            "zz-$PKGVER-linux-x86_64.zip" \
+            "zz-$PKGVER-linux-aarch64.zip" \
+            "zz-$PKGVER-macos-x86_64.zip" \
+            "zz-$PKGVER-macos-aarch64.zip" \
+            "zz-$PKGVER-windows-x86_64.zip" \
+            "zz-$PKGVER-windows-aarch64.zip"
+          do
+            if [ ! -f "$asset" ]; then
+              echo "error: $asset missing, refusing half-ready release." >&2
+              exit 1
+            fi
+          done
+          # One checksum file covering all zips (works on every platform).
+          cat zz-*.zip.sha256 | sort > SHA256SUMS
+          cat SHA256SUMS
           gh release create "$TAG" \
             --target "main" \
             --title "$TAG" \
             --generate-notes \
-            zz-*.zip
-          echo "created release $TAG with prebuilt zips"
+            zz-*.zip SHA256SUMS
+          echo "created release $TAG with prebuilt zips for all six platforms"
         env:
           # User PAT when present so the `release: published` event is
           # genuine and downstream workflows fire; GITHUB_TOKEN fallback

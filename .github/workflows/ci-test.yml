@@ -1,0 +1,196 @@
+name: CI test leg
+
+# Reusable single-platform test leg. Called once per supported
+# platform/arch pair from ci.yml (six entries), so every OS runs the
+# identical suite — no "VM-only" second class citizen.
+#
+# Why a reusable workflow instead of one big ci.yml: each file stays
+# small and reviewable, and the matrix lives in the caller where the
+# runner labels are visible at a glance.
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Matrix entry name (e.g. `linux-x86_64`).
+        required: true
+        type: string
+      runner:
+        description: GitHub-hosted runner label for this leg.
+        required: true
+        type: string
+      family:
+        description: "`linux` | `macos` | `windows` — selects dependency install."
+        required: true
+        type: string
+      native:
+        description: Run native AOT legs (false sets ZZ_SKIP_NATIVE=1).
+        required: true
+        type: boolean
+      timeout:
+        description: Job timeout in minutes (slowest platform wins).
+        required: true
+        type: number
+      clang_pin:
+        description: ZZ_CLANG_VERSION value; empty means "whatever is installed".
+        required: false
+        default: ""
+        type: string
+      docker_smoke:
+        description: Run the docker smoke fixture (Linux x86_64 only).
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: test (${{ inputs.name }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout }}
+    env:
+      # Empty is fine: clang_pin() filters it out.
+      ZZ_CLANG_VERSION: ${{ inputs.clang_pin }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache per platform leg: MSVC/GNU artifacts must never
+          # leak between legs.
+          key: ${{ inputs.name }}
+
+      - name: install native deps (linux)
+        if: inputs.family == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          if [ -n "${{ inputs.clang_pin }}" ]; then
+            # The pinned sanitizer leg needs apt.llvm.org (Noble's archive
+            # tops out at clang-18).
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+              | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+            echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{
+              inputs.clang_pin }} main" \
+              | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+            sudo apt-get update
+            sudo apt-get install -y "clang-${{ inputs.clang_pin }}"
+          else
+            sudo apt-get install -y clang
+          fi
+          # Native codegen links -lcurl -lsqlite3 and compiles with clang.
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev zip unzip xz-utils
+          clang --version
+
+      - name: install native deps (macos)
+        if: inputs.family == 'macos'
+        run: |
+          set -euo pipefail
+          # The SDK ships curl + sqlite3 headers/libs; xz is needed for
+          # the bundled zig tarball at release time.
+          brew install xz || true
+          clang --version
+          clang -E -x c - <<< '#include <curl/curl.h>' > /dev/null
+          clang -E -x c - <<< '#include <sqlite3.h>' > /dev/null
+
+      - name: cache vcpkg (windows)
+        if: inputs.family == 'windows'
+        uses: actions/cache@v4
+        with:
+          # Headers/libs and sources survive between runs: curl pulls a few
+          # dependencies, and a warm cache takes the install step to
+          # seconds instead of ~10 minutes.
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\downloads
+          key: vcpkg-${{ runner.arch }}-curl-sqlite3-v1
+          restore-keys: |
+            vcpkg-${{ runner.arch }}-
+
+      - name: install native deps (windows)
+        if: inputs.family == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # LLVM: the image normally ships it, but not always on PATH.
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvm) { $llvm | Out-File -FilePath $env:GITHUB_PATH -Append }
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+            $llvm | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+          # curl + sqlite3 headers/libs: the C runtime includes them by
+          # default (ZZ_HAS_CURL/ZZ_HAS_SQLITE3), so native legs need them.
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkg) { $vcpkg = "C:\vcpkg" }
+          $triplet = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+            "arm64-windows"
+          } else {
+            "x64-windows"
+          }
+          if (Test-Path "$vcpkg\vcpkg.exe") {
+            & "$vcpkg\vcpkg.exe" install "curl:$triplet" "sqlite3:$triplet" --clean-after-build
+            "INCLUDE=$vcpkg\installed\$triplet\include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "LIB=$vcpkg\installed\$triplet\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            Write-Warning "vcpkg not found; curl/sqlite3 natives may fail to link"
+          }
+          clang --version
+
+      - name: 'docker smoke fixture (AOT compile + run)'
+        if: inputs.docker_smoke
+        run: |
+          cargo run -q -p zz_cli -- build -p docker/smoke/hello.zz -o /tmp/zz-docker-smoke
+          out=$(/tmp/zz-docker-smoke)
+          echo "$out"
+          echo "$out" | grep -qx 'smoke-ok'
+
+      # --- PR signal: fast suite (VM) + batched native + sanitizers -----
+      - name: 'test (PR: fast suite, native allowed)'
+        if: github.event_name == 'pull_request' && inputs.native
+        shell: bash
+        env:
+          ZZ_CI_SKIP_LINT: "1"
+        run: ./scripts/test-fast.sh
+
+      - name: 'test (PR: fast suite, native skipped)'
+        if: github.event_name == 'pull_request' && !inputs.native
+        shell: bash
+        env:
+          ZZ_CI_SKIP_LINT: "1"
+          ZZ_SKIP_NATIVE: "1"
+        run: ./scripts/test-fast.sh
+
+      - name: 'test (PR: batched native parity)'
+        if: github.event_name == 'pull_request' && inputs.native
+        shell: bash
+        run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
+
+      - name: 'test (PR: ASan+UBSan AOT leg)'
+        if: github.event_name == 'pull_request' && inputs.clang_pin != ''
+        shell: bash
+        run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
+
+      # --- merge/push: full suite --------------------------------------
+      - name: 'test (merge: full suite, native allowed)'
+        if: github.event_name != 'pull_request' && inputs.native
+        shell: bash
+        run: ZZ_BATCH_NATIVE=1 cargo test --all
+
+      - name: 'test (merge: full suite, native skipped)'
+        if: github.event_name != 'pull_request' && !inputs.native
+        shell: bash
+        env:
+          ZZ_SKIP_NATIVE: "1"
+        run: ZZ_BATCH_NATIVE=1 cargo test --all
+
+      - name: 'lsp parity (LSP ↔ checker diagnostics)'
+        shell: bash
+        run: |
+          cargo build -p zz_cli
+          cargo test -p zz_lsp --test check_parity

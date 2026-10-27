@@ -4,123 +4,107 @@ name: CI
 # docker, AUR publishers) triggers off CI success or Release events and
 # never re-runs tests.
 #
+# This file is the orchestrator only: the per-platform work lives in
+# `ci-test.yml` (reusable, called once per runner). GitHub Actions loads
+# only `.github/workflows/*.yml` at the top level — subdirectories are
+# ignored — so "folders" are expressed as separate reusable workflows,
+# not nested directories.
+#
 # Triggers:
 #   push to dev or main (merge commits included — the merge itself is
 #     tested, so main is always green),
-#   PRs targeting dev or main (feature branches get checked before merge).
+#   PRs targeting dev or main (feature branches get checked before merge),
+#   manual dispatch.
 
 on:
   push:
     branches: [dev, main]
   pull_request:
     branches: [dev, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
-  # Pinned Clang major for every native build below (`zz` probes
-  # `clang-<ver>` first via ZZ_CLANG_VERSION; the sanitizer leg asserts
-  # the match and logs the exact version).
-  ZZ_CLANG_VERSION: "23"
 
 jobs:
-  test:
-    name: test (ubuntu-latest)
-    runs-on: ubuntu-latest
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: install LLVM 23 repo
-        # Noble's archive tops out at clang-18; the pin needs clang-23,
-        # so add apt.llvm.org (verified: llvm-toolchain-noble-23 exists).
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-23 main" | sudo tee /etc/apt/sources.list.d/llvm-23.list > /dev/null
-      - name: install native deps
-        # Native codegen links -lcurl -lsqlite3 and compiles with clang.
-        # Runner images don't guarantee the headers — install explicitly
-        # so the --native test legs don't fail with `curl/curl.h not found`.
-        # Clang is version-pinned (matches ZZ_CLANG_VERSION above) so
-        # sanitizer/bench builds never drift with the runner image.
-        run: sudo apt-get update && sudo apt-get install -y clang-23 libcurl4-openssl-dev libsqlite3-dev
-      - name: log pinned toolchain
-        run: clang-23 --version
+        with:
+          key: lint
       - name: fmt check
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: 'docker smoke fixture (AOT compile + run)'
-        if: runner.os != 'Windows'
-        # docker-publish compiles this exact file inside the published
-        # builder image. Running it here too means a language change that
-        # breaks the fixture fails a normal PR, not the release.
-        run: |
-          cargo run -q -p zz_cli -- build -p docker/smoke/hello.zz -o /tmp/zz-docker-smoke
-          out=$(/tmp/zz-docker-smoke)
-          echo "$out"
-          echo "$out" | grep -qx 'smoke-ok'
-      - name: 'test (PR: fast suite — VM legs only)'
-        if: runner.os != 'Windows' && github.event_name == 'pull_request'
-        # PR signal in minutes: unit + e2e (VM) + VM-only parity.
-        run: ./scripts/test-fast.sh
-      - name: 'test (PR: batched native parity)'
-        if: runner.os != 'Windows' && github.event_name == 'pull_request'
-        # All batchable strict fixtures' native legs in ~4 clang builds
-        # (same programs, same flags, demuxed per file). Individuals run
-        # VM-only inside test-fast.sh above.
-        run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
-      - name: 'test (PR: ASan+UBSan AOT leg)'
-        if: runner.os != 'Windows' && github.event_name == 'pull_request'
-        # Instrumented HIR→C and Chunk→C builds of the diff corpus + small
-        # programs (reports are fatal). Asserts the ZZ_CLANG_VERSION pin
-        # and logs the exact toolchain. Not in test-fast.sh: clang builds
-        # are minutes, not seconds.
-        run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
-      - name: 'test (merge: full suite, strict natives via batch)'
-        if: runner.os != 'Windows' && github.event_name != 'pull_request'
-        # `ZZ_BATCH_NATIVE=1`: strict-success natives run batched
-        # (same programs, same flags); quad, error, and known-failure
-        # natives stay individual. Full coverage, no duplicated builds.
-        run: ZZ_BATCH_NATIVE=1 cargo test --all
-      - name: 'test (windows: VM-only, native backend unsupported)'
-        if: runner.os == 'Windows'
-        # The native backend is POSIX/Linux-only (epoll/fork AOT server, no
-        # Windows FFI link — see ffi.rs). ZZ_SKIP_NATIVE keeps the VM legs
-        # running while the native legs report skips.
-        run: cargo test --all
-        env:
-          ZZ_SKIP_NATIVE: 1
 
-  check-arm:
-    name: check (aarch64)
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: install native deps
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev
-      - name: check workspace for aarch64
-        # Native ARM runner (real gcc, no cross toolchain needed).
-        # Type-checks every crate for the arch AUR ships — catches
-        # arch-dependent breakage (e.g. c_char signedness) x86_64 can
-        # never see. No linking, no tests: pure type gate, stays fast.
-        run: cargo check --workspace --all-targets
-
-  lsp-parity:
-    name: lsp-parity
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: build zz binary (check side of the gate)
-        # The gate shells out to a freshly built `zz check`; the LSP
-        # side runs in-process. Check-only: no clang, no native deps.
-        run: cargo build -p zz_cli
-      - name: lsp-vs-check diagnostic parity gate (#264)
-        run: cargo test -p zz_lsp --test check_parity
+  test:
+    name: test (${{ matrix.name }})
+    strategy:
+      # One platform failing must not hide the others: we want all logs.
+      fail-fast: false
+    matrix:
+      include:
+        # runner labels verified 2026: macos-13 (Intel) is retired;
+        # Intel is `macos-15-intel`. Windows ARM64 is `windows-11-arm`.
+        - name: linux-x86_64
+          runner: ubuntu-24.04
+          family: linux
+          native: true
+          timeout: 30
+          clang_pin: "23"
+          docker_smoke: true
+        - name: linux-aarch64
+          runner: ubuntu-24.04-arm
+          family: linux
+          native: true
+          timeout: 45
+          clang_pin: ""
+          docker_smoke: false
+        - name: macos-aarch64
+          runner: macos-14
+          family: macos
+          native: true
+          timeout: 45
+          clang_pin: ""
+          docker_smoke: false
+        - name: macos-x86_64
+          runner: macos-15-intel
+          family: macos
+          native: true
+          timeout: 45
+          clang_pin: ""
+          docker_smoke: false
+        - name: windows-x86_64
+          runner: windows-2025
+          family: windows
+          native: true
+          timeout: 60
+          clang_pin: ""
+          docker_smoke: false
+        - name: windows-aarch64
+          runner: windows-11-arm
+          family: windows
+          native: true
+          timeout: 60
+          clang_pin: ""
+          docker_smoke: false
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      name: ${{ matrix.name }}
+      runner: ${{ matrix.runner }}
+      family: ${{ matrix.family }}
+      native: ${{ matrix.native }}
+      timeout: ${{ matrix.timeout }}
+      clang_pin: ${{ matrix.clang_pin }}
+      docker_smoke: ${{ matrix.docker_smoke }}
