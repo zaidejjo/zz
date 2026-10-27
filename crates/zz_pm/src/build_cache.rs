@@ -190,6 +190,7 @@ mod tests {
             artifact_hash: String::new(),
             artifact_flags: String::new(),
             native_build_sig: String::new(),
+            native_rt_archive_hash: String::new(),
         }
     }
 
