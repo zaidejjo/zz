@@ -6932,14 +6932,12 @@ int main(int argc, char **argv) {
 }
 // ---- codegen shims ------------------------------------------------------
 // Trap for reachable stdlib natives with no AOT implementation (VM-only
-// Phase 3 HTTP surface, etc.). Aborts loudly with the missing name:
-// the old silent-unit fallback wedged programs (a retry loop matching
-// on the result never fires when the value is unit — http_tls_p3 spun
-// at 100% CPU forever). Declared to return zz_value so call sites fit
-// expression positions; it never returns.
+// Phase 3 HTTP surface, etc.). Returns a proper ZZ Result error value
+// instead of aborting: callers can handle it with `.err()`/`match`, matching
+// the VM which returns a catchable error for missing natives. Declared to
+// return zz_value so call sites fit expression positions.
 zz_value zz_unimplemented_native(const char *name) {
-    fprintf(stderr, "zz: native `%s` is not implemented in AOT builds\n", name);
-    exit(1);
+    return zz_variant_err(zz_str_static(name));
 }
 zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a) {
     int err = 0;

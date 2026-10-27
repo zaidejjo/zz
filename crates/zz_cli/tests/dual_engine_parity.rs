@@ -379,20 +379,19 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // `listen_tls`, `fetch_insecure`, `body_bytes`, `hijack`,
         // `serve_dir_at`, and `test_req` et al have no C impl yet
         // (tracked in zz_codegen/tests.rs KNOWN_CODEGEN_GAPS as "P3
-        // AOT"). Native legs abort at first use via
-        // `zz_unimplemented_native` (exit 1 with `not implemented in AOT
-        // builds`) instead of the old silent unit, which wedged retry
-        // loops forever.
+        // AOT"). Native legs return a catchable ZZ error via
+        // `zz_unimplemented_native` (issue #644) instead of aborting the
+        // process; output diverges from the VM which implements them.
         "http_tls_p3" => Some(
-            "P3 AOT: listen_tls + fetch_insecure are VM-only; native aborts",
+            "P3 AOT: listen_tls + fetch_insecure are VM-only; native returns error",
         ),
         "http_hijack_p3" | "http_bytes_p3" => {
-            Some("P3 AOT: hijack / body_bytes are VM-only; native aborts")
+            Some("P3 AOT: hijack / body_bytes are VM-only; native returns error")
         }
         // `http_limits_p2` is strict parity now: AOT implements
         // `http.listen_cfg` with the same limits/shutdown behavior as the VM.
         "http_middleware_p2" | "http_static_p2" => {
-            Some("P3 AOT: serve_dir_at / test_req are VM-only; native aborts")
+            Some("P3 AOT: serve_dir_at / test_req are VM-only; native returns error")
         }
         _ => None,
     }
