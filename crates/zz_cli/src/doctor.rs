@@ -6,6 +6,7 @@
 //! when shell integration is the problem.
 
 use crate::{setup, ui};
+use zz_codegen::ffi::{self as ffi, RtSource};
 
 /// One check result.
 struct Check {
@@ -97,7 +98,48 @@ pub fn run(args: &[String]) -> Result<(), String> {
         )),
     }
 
-    // 3. Shell integration (same state as `zz setup --dry-run`).
+    // 3. Native runtime (AOT linking for `zz build` / `zz run --native`).
+    match ffi::native_rt_resolution(false) {
+        Ok((lib, source, strategy)) => {
+            let kind = match source {
+                RtSource::Cargo => "cargo-built",
+                RtSource::Prebuilt => "prebuilt",
+            };
+            checks.push(pass(
+                "Native runtime",
+                format!("{kind} native runtime: {} ({})", lib.display(), strategy),
+            ));
+        }
+        Err(e) => {
+            checks.push(fail(
+                "Native runtime",
+                "cannot locate native runtime archive".to_string(),
+                e.0,
+            ));
+        }
+    }
+
+    // Cargo availability (needed to build native runtime from source).
+    match std::process::Command::new("cargo")
+        .arg("--version")
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let ver = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .map(str::to_string)
+                .unwrap_or_default();
+            checks.push(pass("Cargo", format!("cargo {ver}")));
+        }
+        _ => checks.push(fail(
+            "Cargo",
+            "cargo not found".to_string(),
+            "install Rust toolchain — needed to build libzz_native_rt.a from source",
+        )),
+    }
+
+    // 4. Shell integration (same state as `zz setup --dry-run`).
     let st = setup::status();
     if !st.bin_exists {
         checks.push(fail(

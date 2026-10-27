@@ -583,6 +583,19 @@ pub fn ensure_staticlib(release: bool) -> Result<PathBuf, FfiError> {
     resolve_staticlib(release).map(|(lib, _)| lib)
 }
 
+/// How the native runtime archive would be resolved: which strategy found
+/// it and where the archive lives. Used by `zz doctor` to audit the
+/// environment so contributors know whether `zz build` / `zz run --native`
+/// can link without `ZZ_NATIVE_RT_DIR`.
+pub fn native_rt_resolution(release: bool) -> Result<(PathBuf, RtSource, &'static str), FfiError> {
+    let (lib, source) = resolve_staticlib(release)?;
+    let strategy = match source {
+        RtSource::Cargo => "cargo build from workspace sources",
+        RtSource::Prebuilt => "shipped prebuilt archive",
+    };
+    Ok((lib, source, strategy))
+}
+
 /// How [`ensure_staticlib`] found the archive: workspace sources get a
 /// (cached, incremental) cargo build; release installs use the shipped
 /// archive directly — no cargo, no sources, no Rust toolchain.
