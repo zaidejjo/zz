@@ -53,9 +53,18 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: actionlint (workflow syntax)
-        # Preinstalled on the Ubuntu images. Catches the class of error that
-        # fails a workflow at parse time (no jobs, no logs) before it lands.
-        run: actionlint
+        # Not preinstalled on the Ubuntu images (exit 127 otherwise). Pinned
+        # release tarball: no third-party action, no dangling "latest".
+        # Catches the class of error that fails a workflow at parse time
+        # (no jobs, no logs) before it lands.
+        run: |
+          set -euo pipefail
+          version=1.7.7
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint -version
+          /tmp/actionlint
 
   # --- linux: x86_64 (full incl. sanitizer/docker) + aarch64 -------------
   linux:

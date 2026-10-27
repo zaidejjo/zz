@@ -66,6 +66,31 @@ jobs:
         with:
           arch: ${{ inputs.arch == 'aarch64' && 'arm64' || 'x64' }}
 
+      # Git for Windows' coreutils `link.exe` shadows the MSVC linker on
+      # PATH (rustc then fails with `link: extra operand`). Same fix as the
+      # CI legs: pin the linker for cargo and remove the shadow.
+      - name: unshadow the MSVC linker (windows)
+        if: inputs.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vctools = $env:VCToolsInstallDir
+          if (-not $vctools) { throw "VCToolsInstallDir unset; msvc-dev-cmd did not run" }
+          $arch = "${{ inputs.arch == 'aarch64' && 'arm64' || 'x64' }}"
+          $link = Join-Path $vctools "bin\Host$arch\$arch\link.exe"
+          if (-not (Test-Path $link)) { throw "MSVC linker not found: $link" }
+          Write-Host "MSVC linker: $link"
+          $triple = "${{ inputs.arch }}-pc-windows-msvc"
+          $var = "CARGO_TARGET_" + ($triple.ToUpper() -replace '-', '_') + "_LINKER"
+          "$var=$link" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $gitLink = "C:\Program Files\Git\usr\bin\link.exe"
+          if (Test-Path $gitLink) { Remove-Item $gitLink -Force }
+          $resolved = (Get-Command link.exe -ErrorAction SilentlyContinue).Source
+          Write-Host "link.exe -> $resolved"
+          if (-not $resolved -or $resolved -notmatch 'VC\\Tools\\MSVC') {
+            throw "MSVC link.exe does not win the PATH lookup (got '$resolved')"
+          }
+
       - name: install native deps (windows)
         if: inputs.os == 'windows'
         shell: pwsh
@@ -138,8 +163,18 @@ jobs:
           mkdir -p dist/lib
           curl -fsSL "$ZIG_URL" | tar -xJ -C dist/
           mv dist/zig-*/zig dist/zig
+          # Zig resolves std/libc from `<exe_dir>/lib`, so the bundled
+          # toolchain is useless without the tree's own `lib/`. Merge it
+          # into `dist/lib` (next to the prebuilt runtime archives) — this
+          # is the only C toolchain an end user gets.
+          cp -R dist/zig-*/lib/. dist/lib/
+          rm -rf dist/zig-*
           chmod +x dist/zig
           ./dist/zig version
+          # The bundle must compile on its own: no system Zig, no clang.
+          printf 'int main(void){return 0;}\n' > /tmp/zz-zig-smoke.c
+          ./dist/zig cc /tmp/zz-zig-smoke.c -o /tmp/zz-zig-smoke
+          /tmp/zz-zig-smoke
           cp target/release/zz target/release/zz-lsp dist/
           cp target/release/libzz_native_rt.a dist/lib/
           # Static libstd: `libstd-<hash>.rlib` on Unix. Release installs
@@ -152,12 +187,13 @@ jobs:
           fi
           cp "$STD_RLIB" dist/lib/
           cp LICENSE README.md dist/
-          (cd dist && zip -9 -r "../$ZIP" zz zz-lsp zig LICENSE README.md lib)
+          (cd dist && zip -6 -r "../$ZIP" zz zz-lsp zig LICENSE README.md lib)
           # Audit: compiler, its LSP, bundled toolchain and prebuilt runtime
           # must all ship. `zz upgrade` replaces the zz + zz-lsp pair in one
           # transaction and refuses a zip that lacks either binary.
           members="$(unzip -Z1 "$ZIP")"
-          for required in zz zz-lsp zig lib/libzz_native_rt.a LICENSE README.md; do
+          for required in zz zz-lsp zig lib/libzz_native_rt.a lib/std/std.zig \
+                          LICENSE README.md; do
             if ! printf '%s\n' "$members" | grep -qxF "$required"; then
               echo "error: $ZIP is missing $required" >&2
               exit 1
@@ -168,7 +204,13 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$members"
-          sha256sum "$ZIP" > "$ZIP.sha256"
+          # `sha256sum` is GNU coreutils (absent on stock macOS); `shasum`
+          # is the Perl one-liner macOS ships. Both print `<hash>  <file>`.
+          if command -v sha256sum > /dev/null 2>&1; then
+            sha256sum "$ZIP" > "$ZIP.sha256"
+          else
+            shasum -a 256 "$ZIP" > "$ZIP.sha256"
+          fi
 
       - name: package zip (windows)
         if: inputs.os == 'windows'
@@ -182,13 +224,26 @@ jobs:
             "windows-aarch64" { "https://ziglang.org/download/0.17.0/zig-aarch64-windows-0.17.0.zip" }
             default { throw "unsupported os-arch ${{ inputs.os }}-${{ inputs.arch }}" }
           }
-          Remove-Item -Recurse -Force dist, $zip -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force dist, zigdist, $zip -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force dist/lib | Out-Null
           Invoke-WebRequest -Uri $zigUrl -OutFile zig.zip
-          Expand-Archive -Path zig.zip -DestinationPath zigdist -Force
-          $zigExe = Get-ChildItem zigdist -Recurse -Filter zig.exe | Select-Object -First 1
-          Copy-Item $zigExe.FullName dist/zig.exe
+          New-Item -ItemType Directory -Force zigdist | Out-Null
+          & tar.exe -xf zig.zip -C zigdist
+          if ($LASTEXITCODE -ne 0) { throw "cannot extract $zigUrl" }
+          $zigRoot = Get-ChildItem zigdist -Directory | Select-Object -First 1
+          if (-not $zigRoot) { throw "zig zip has no top-level directory" }
+          Copy-Item (Join-Path $zigRoot.FullName "zig.exe") dist/zig.exe
+          # Zig loads std/libc from `<exe_dir>\lib`, so the bundled toolchain
+          # needs the tree's own `lib/` next to the prebuilt runtime — it is
+          # the only C toolchain an end user gets.
+          Copy-Item (Join-Path $zigRoot.FullName "lib\*") dist/lib -Recurse -Force
           & dist/zig.exe version
+          # The bundle must compile on its own (no system Zig, no clang).
+          Set-Content -Path zz-zig-smoke.c -Value "int main(void){return 0;}"
+          & dist/zig.exe cc zz-zig-smoke.c -o zz-zig-smoke.exe
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path zz-zig-smoke.exe)) {
+            throw "bundled zig cannot compile without its lib"
+          }
           Copy-Item target/release/zz.exe, target/release/zz-lsp.exe dist/
           Copy-Item target/release/zz_native_rt.lib dist/lib/zz_native_rt.lib
           # MSVC names the static libstd `std-<hash>.rlib` (no `lib` prefix).
@@ -197,20 +252,102 @@ jobs:
           if (-not $rlib) { throw "no std-*.rlib in $libdir" }
           Copy-Item $rlib.FullName dist/lib/
           Copy-Item LICENSE, README.md dist/
-          Compress-Archive -Path dist/* -DestinationPath $zip -CompressionLevel Optimal
-          # Audit the archive: exact expected members, no strays.
-          $names = (Get-ChildItem dist -Recurse -File | ForEach-Object {
-            $_.FullName.Substring((Resolve-Path dist).Path.Length + 1).Replace('\', '/')
-          }) | Sort-Object
-          $names | ForEach-Object { Write-Host "  $_" }
-          foreach ($required in @("zz.exe", "zz-lsp.exe", "zig.exe", "lib/zz_native_rt.lib", "LICENSE", "README.md")) {
-            if ($names -notcontains $required) { throw "missing $required in $zip" }
+          # bsdtar is an order of magnitude faster than Compress-Archive on
+          # the ~15k-file zig tree and writes forward-slash members that the
+          # GNU/zip-based tooling (and `zz upgrade`) expect.
+          $zipPath = Join-Path (Get-Location) $zip
+          Push-Location dist
+          try {
+            & tar.exe -a -c -f $zipPath zz.exe zz-lsp.exe zig.exe LICENSE README.md lib
+            if ($LASTEXITCODE -ne 0) { throw "zip creation failed" }
+          } finally {
+            Pop-Location
           }
-          if (-not ($names | Where-Object { $_ -like "lib/std-*.rlib" })) {
+          # Audit the archive: required members, no missing toolchain.
+          $members = & tar.exe -tf $zipPath
+          if ($LASTEXITCODE -ne 0) { throw "cannot list $zip" }
+          $members | ForEach-Object { Write-Host "  $_" }
+          foreach ($required in @("zz.exe", "zz-lsp.exe", "zig.exe",
+                                  "lib/zz_native_rt.lib", "lib/std/std.zig",
+                                  "LICENSE", "README.md")) {
+            if ($members -notcontains $required) { throw "missing $required in $zip" }
+          }
+          if (-not ($members | Where-Object { $_ -like "lib/std-*.rlib" })) {
             throw "missing lib/std-*.rlib in $zip"
           }
           (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" |
             Out-File -Encoding ascii "$zip.sha256"
+
+      # End-user gate: unpack the finished zip somewhere else and build a
+      # program with nothing but its own contents. The release binary bakes
+      # its build-time checkout path (which is this very workspace on CI),
+      # so the marker is hidden during the run — that forces
+      # `ffi::resolve_staticlib` down the bundled `<exe>/lib` path an end
+      # user takes. Providers installed on the runner cannot mask a broken
+      # zip: the bundled zig wins detection and this asserts it compiles.
+      - name: smoke the packaged zip as an end user
+        if: inputs.os != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="zz-${{ inputs.pkgver }}-${{ inputs.os }}-${{ inputs.arch }}.zip"
+          rm -rf zipsmoke
+          mkdir zipsmoke
+          unzip -q "$ZIP" -d zipsmoke
+          printf 'func main() {\n    println("zip-ok")\n}\n' > zipsmoke/hello.zz
+          mv Cargo.toml Cargo.toml.smoke-hidden
+          trap 'mv Cargo.toml.smoke-hidden Cargo.toml' EXIT
+          ( cd zipsmoke && ./zz build -p --verbose hello.zz ) > build.log 2>&1
+          mv Cargo.toml.smoke-hidden Cargo.toml
+          trap - EXIT
+          cat build.log
+          grep -q 'zig cc' build.log
+          out="$(./zipsmoke/hello)"
+          [ "$out" = "zip-ok" ]
+          ./zipsmoke/zz-lsp --version
+
+      - name: smoke the packaged zip as an end user (windows)
+        if: inputs.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Native stderr (zz's verbose line) must not become a terminating
+          # error on PS 7.4+ runners.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $zip = "zz-${{ inputs.pkgver }}-windows-${{ inputs.arch }}.zip"
+          Remove-Item -Recurse -Force zipsmoke -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory zipsmoke | Out-Null
+          & tar.exe -xf $zip -C zipsmoke
+          if ($LASTEXITCODE -ne 0) { throw "cannot extract $zip" }
+          # Here-strings need a column-0 terminator, which YAML cannot
+          # express inside a block scalar — build the source line by line.
+          $hello = @(
+            'func main() {'
+            '    println("zip-ok")'
+            '}'
+          ) -join "`n"
+          Set-Content -Path zipsmoke/hello.zz -Value $hello -Encoding ascii
+          Rename-Item Cargo.toml Cargo.toml.smoke-hidden
+          try {
+            Push-Location zipsmoke
+            try {
+              & ./zz.exe build -p --verbose hello.zz *> ../build.log
+              $code = $LASTEXITCODE
+            } finally {
+              Pop-Location
+            }
+          } finally {
+            Rename-Item Cargo.toml.smoke-hidden Cargo.toml
+          }
+          Get-Content build.log | Write-Host
+          if ($code -ne 0) { throw "packaged zz failed to build (exit $code)" }
+          if (-not (Select-String -Path build.log -Pattern 'zig cc' -Quiet)) {
+            throw "packaged build did not use the bundled zig"
+          }
+          $out = (& ./zipsmoke/hello.exe | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "packaged binary exited $LASTEXITCODE" }
+          if ($out -ne "zip-ok") { throw "unexpected packaged-binary output: $out" }
+          & ./zipsmoke/zz-lsp.exe --version
 
       - name: upload zip artifact
         uses: actions/upload-artifact@v4

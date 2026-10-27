@@ -92,7 +92,7 @@ zz install --path .
 Keep the toolchain healthy:
 
 ```bash
-zz upgrade   # self-update zz + zz-lsp together to the latest release
+zz upgrade   # self-update zz + zz-lsp (+ bundled runtime/lib) to the latest release
 zz doctor    # audit binary, clang, shell, git, registry (add --fix)
 ```
 
@@ -108,7 +108,8 @@ root automatically and builds `libzz_native_rt.a` via cargo — no
 `ZZ_NATIVE_RT_DIR`, no system C library, no stub shell variables.
 
 **Release zip:** ships a prebuilt `libzz_native_rt.a` (`.lib` on
-Windows) plus a bundled ~25MB `zig` binary, so `zz build` works
+Windows) plus a bundled Zig toolchain (`zig` + its `lib/`, the std/libc
+sources Zig loads from `<exe>/lib`; ~65MB unpacked), so `zz build` works
 immediately after download with zero external tools. `zz toolchain
 install` stays optional for pinned zig updates.
 

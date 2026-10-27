@@ -73,8 +73,10 @@ hello
 ### `zz build [FLAGS] [<file.zz>]`
 
 Single Clang backend. Every `zz build` produces a real native binary and
-requires `clang` (18+) or `zig` on PATH. (`zz run` without `--native` is
-the only VM path, and it leaves no build artifacts.)
+requires `clang` (18+) or `zig` on PATH — except in a release zip, which
+bundles both a `zig` binary and its `lib/`, so no external compiler is
+needed. (`zz run` without `--native` is the only VM path, and it leaves
+no build artifacts.)
 
 ```bash
 # Static (default): self-contained -O3 -flto=thin, stripped, DCE.

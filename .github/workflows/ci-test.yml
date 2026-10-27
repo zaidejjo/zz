@@ -93,6 +93,34 @@ jobs:
         with:
           arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
+      # Git for Windows ships coreutils `/usr/bin/link.exe`. That directory
+      # precedes the MSVC toolchain on PATH, so rustc's `link.exe` lookup
+      # picks the coreutils binary and every build dies with
+      # `link: extra operand ...` (both Windows legs, run 40559424218).
+      # Pin the toolchain linker via CARGO_TARGET_*_LINKER *and* remove the
+      # shadow, then prove the lookup resolves to MSVC.
+      - name: unshadow the MSVC linker (windows)
+        if: inputs.family == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vctools = $env:VCToolsInstallDir
+          if (-not $vctools) { throw "VCToolsInstallDir unset; msvc-dev-cmd did not run" }
+          $arch = "${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}"
+          $link = Join-Path $vctools "bin\Host$arch\$arch\link.exe"
+          if (-not (Test-Path $link)) { throw "MSVC linker not found: $link" }
+          Write-Host "MSVC linker: $link"
+          $triple = "${{ runner.arch == 'ARM64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}"
+          $var = "CARGO_TARGET_" + ($triple.ToUpper() -replace '-', '_') + "_LINKER"
+          "$var=$link" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $gitLink = "C:\Program Files\Git\usr\bin\link.exe"
+          if (Test-Path $gitLink) { Remove-Item $gitLink -Force }
+          $resolved = (Get-Command link.exe -ErrorAction SilentlyContinue).Source
+          Write-Host "link.exe -> $resolved"
+          if (-not $resolved -or $resolved -notmatch 'VC\\Tools\\MSVC') {
+            throw "MSVC link.exe does not win the PATH lookup (got '$resolved')"
+          }
+
       - name: cache vcpkg (windows)
         if: inputs.family == 'windows'
         uses: actions/cache@v4
