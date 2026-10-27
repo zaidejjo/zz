@@ -1227,13 +1227,12 @@ pub fn build_release(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let t_build = std::time::Instant::now();
     let t_front = std::time::Instant::now();
     let (pruned, reach, main_key) = typed_program_for(path, &entry_ns, &rel.features)?;
+    let load_ms = t_front.elapsed().as_millis();
     if rel.verbose {
-        eprintln!(
-            "zz: timing load_check_hir_dce={}ms",
-            t_front.elapsed().as_millis()
-        );
+        eprintln!("zz: timing load_check_hir_dce={}ms", load_ms);
     }
     // Project-owned sources publish under `<root>/bin/` — make sure the
     // root ignores it even when the project predates the redesign (new
@@ -1266,6 +1265,7 @@ pub fn build_release(
 
     // Discover and build plugin native artifacts (compiled .o / .a files
     // plus dependency link flags from each package's ldflags.txt).
+    let t_plugins = std::time::Instant::now();
     let (plugin_artifacts, plugin_link_args) = discover_native_artifacts(
         path,
         NativeBuildOpts {
@@ -1273,6 +1273,7 @@ pub fn build_release(
             allow_hooks: rel.allow_hooks,
         },
     )?;
+    let plugins_ms = t_plugins.elapsed().as_millis();
     opts.plugin_artifacts = plugin_artifacts;
     opts.plugin_link_args = plugin_link_args;
 
@@ -1299,9 +1300,11 @@ pub fn build_release(
     // Resolve the provider now so a missing toolchain fails fast — but
     // still leave app.c + scripts behind for manual builds, next to the
     // planned destination (project-root `bin/` or standalone CWD).
+    let t_clang = std::time::Instant::now();
     let clang = match zz_codegen::detect_clang_with(rel.provider) {
         Some(c) => c,
         None => {
+            let clang_ms = t_clang.elapsed().as_millis();
             let lowered = zz_codegen::lower_only(&pruned, &reach, &main_key);
             let mut script_opts = opts.clone();
             script_opts.curl_link = script_opts.curl_link || lowered.needs_curl;
@@ -1312,9 +1315,16 @@ pub fn build_release(
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or_else(|| PathBuf::from("."));
             let _ = zz_codegen::emit_c_plus_script(&lowered.source, &dir, target, &script_opts);
+            if rel.verbose {
+                eprintln!(
+                    "zz: timing load={} plugins={} clang={}ms (no clang)",
+                    load_ms, plugins_ms, clang_ms
+                );
+            }
             return Err(zz_codegen::BuildError::NoClang.to_string());
         }
     };
+    let clang_ms = t_clang.elapsed().as_millis();
     // Seed system-lib needs from reachability before the static-syslibs
     // probe: with conditional linking, programs that neither fetch nor
     // query need no static syslibs, so the probe must not downgrade them.
@@ -1400,6 +1410,7 @@ pub fn build_release(
         std::process::id(),
         TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
     ));
+    let t_codegen = std::time::Instant::now();
     // Chunk backend: lower from the unified IR, then compile the
     // emitted source with the same option/flag flow as `build_native`.
     if rel.chunk {
@@ -1435,6 +1446,7 @@ pub fn build_release(
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());
     }
+    let codegen_ms = t_codegen.elapsed().as_millis();
     // Some compilers create the output without the exec bit when writing a
     // fresh file; force it so the rename only ever publishes runnable code.
     #[cfg(unix)]
@@ -1456,6 +1468,10 @@ pub fn build_release(
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("cannot publish cache entry: {e}"));
     }
+    let total_ms = t_build.elapsed().as_millis();
+    eprintln!(
+        "zz: build {total_ms}ms (load={load_ms} plugins={plugins_ms} clang={clang_ms} codegen={codegen_ms})"
+    );
     publish_to_bin(&cached, path, target, output.as_deref())
 }
 
