@@ -1439,17 +1439,30 @@ impl<'a> Parser<'a> {
             // convert the statement forms back.)
             // Anything else parses as an expression as before.
             let start_span = pat.span();
-            let stmt = self.parse_stmt();
-            let body = match stmt {
-                Stmt::Expr(e) => e,
-                Stmt::Break { span } => Expr::Break { span },
-                Stmt::Continue { span } => Expr::Continue { span },
-                other => {
-                    let span = start_span.join(other.span());
-                    Expr::Block(Block {
-                        stmts: vec![other],
-                        span,
-                    })
+            let body = if self.at(TokenKind::Comma)
+                || self.at(TokenKind::RBrace)
+                || self.at(TokenKind::Eof)
+            {
+                // Empty arm body (`pat => ,` / `pat => }`): a noop that
+                // evaluates to unit, so exhaustive matches can have an
+                // intentional no-op arm without a throwaway `noop()`.
+                Expr::Tuple {
+                    items: vec![],
+                    span: start_span.join(self.peek().span),
+                }
+            } else {
+                let stmt = self.parse_stmt();
+                match stmt {
+                    Stmt::Expr(e) => e,
+                    Stmt::Break { span } => Expr::Break { span },
+                    Stmt::Continue { span } => Expr::Continue { span },
+                    other => {
+                        let span = start_span.join(other.span());
+                        Expr::Block(Block {
+                            stmts: vec![other],
+                            span,
+                        })
+                    }
                 }
             };
             let end_span = body.span();
