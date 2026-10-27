@@ -3865,7 +3865,7 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 //      (positional c0..cN keys; struct mapping happens at the ZZ
 //      layer via field order).
 //    - `zz_db_close(db)` → unit (or closed when the last reference drops).
-#ifdef ZZ_HAS_SQLITE3
+#if ZZ_HAS_SQLITE3
 #include <sqlite3.h>
 // Non-DB programs still carry the inline ARC DB hook, which resolves to
 // `zz_db_backend_close`; keep its only SQLite reference weak so binaries
@@ -3916,7 +3916,7 @@ static void zz_db_backend_close(zz_db_handle *h) {
     if (h->backend == ZZDB_PG) {
         zz_pg_close_raw(h->pg_id);
     }
-#ifdef ZZ_HAS_SQLITE3
+#if ZZ_HAS_SQLITE3
     else if (h->backend == ZZDB_SQLITE) {
         sqlite3_close((sqlite3 *)h->sqlite);
     }
@@ -3999,7 +3999,7 @@ zz_value zz_db_open(zz_value path, int *err) {
         h->pg_id = id;
         return (zz_value){ZZ_DB, {.db = h}};
     }
-#ifdef ZZ_HAS_SQLITE3
+#if ZZ_HAS_SQLITE3
     sqlite3 *conn = NULL;
     int rc;
     if (strcmp(p, ":memory:") == 0) rc = sqlite3_open(":memory:", &conn);
@@ -4029,14 +4029,14 @@ zz_value zz_db_open(zz_value path, int *err) {
 }
 
 static int zz_db_bind_all(
-#ifdef ZZ_HAS_SQLITE3
+#if ZZ_HAS_SQLITE3
     sqlite3_stmt *st,
 #endif
     zz_value *binds, size_t nbinds, int *err) {
     (void)err;
     for (size_t i = 0; i < nbinds; i++) {
         zz_value v = binds[i];
-#ifdef ZZ_HAS_SQLITE3
+#if ZZ_HAS_SQLITE3
         int idx = (int)i + 1;
         int rc = SQLITE_OK;
         switch (v.tag) {
@@ -4093,7 +4093,7 @@ zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nb
         }
         return zz_int(n);
     }
-#ifdef ZZ_HAS_SQLITE3
+#if ZZ_HAS_SQLITE3
     sqlite3 *conn = (sqlite3 *)h->sqlite;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(conn, sql, -1, &st, NULL) != SQLITE_OK) return zz_int(0);
@@ -4123,7 +4123,7 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
         zz_release(&out);
         return zz_pg_query_raw(h->pg_id, sql, strlen(sql), binds, nbinds);
     }
-#ifdef ZZ_HAS_SQLITE3
+#if ZZ_HAS_SQLITE3
     sqlite3 *conn = (sqlite3 *)h->sqlite;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(conn, sql, -1, &st, NULL) != SQLITE_OK) return out;
@@ -10987,6 +10987,12 @@ zz_value zz_encoding_hex_decode(zz_value s, int *err) {
 //  HTTP client — libcurl-based implementation
 // =====================================================================
 
+// curl/sqlite3 are optional: plain programs build with
+// `-DZZ_HAS_CURL=0 -DZZ_HAS_SQLITE3=0` so they need no dev headers at
+// all. The `#else` stubs keep the native symbol table complete (the VM
+// adapter shape) and report a clear error if a program reaches an
+// HTTP-client native that this build did not link.
+#if ZZ_HAS_CURL
 // Helper struct for curl body accumulation (avoids flexible-array-member issues)
 typedef struct {
     char *data;
@@ -11442,6 +11448,37 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
     zz_release(&headers_dict);
     return zz_variant_ok(resp_val);
 }
+
+#else // !ZZ_HAS_CURL — HTTP client stubs (no libcurl at build or run time)
+
+static zz_value zz_http_no_curl(int *err) {
+    *err = 1;
+    return zz_variant_err(zz_str_static(
+        "http client: built without curl support (ZZ_HAS_CURL=0)"));
+}
+
+zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers,
+                       zz_value body, zz_value timeout_ms, int *err) {
+    (void)url; (void)method; (void)headers; (void)body; (void)timeout_ms;
+    return zz_http_no_curl(err);
+}
+
+zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
+    (void)url; (void)headers;
+    return zz_http_no_curl(err);
+}
+
+zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
+    (void)url; (void)body; (void)headers;
+    return zz_http_no_curl(err);
+}
+
+zz_value zz_http_post_json(zz_value url, zz_value json, zz_value headers, int *err) {
+    (void)url; (void)json; (void)headers;
+    return zz_http_no_curl(err);
+}
+
+#endif // ZZ_HAS_CURL
 
 // http.response.status(response) → int
 zz_value zz_http_response_status(zz_value resp, int *err) {

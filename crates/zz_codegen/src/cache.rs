@@ -57,9 +57,9 @@ fn clang_id(clang: &Clang) -> String {
 /// change to `build_compile_flags` (the key does not hash flags).
 const RT_CACHE_VERSION: &str = "rt6";
 
-/// Assemble the 6-field cache key.
+/// Assemble the 7-field cache key.
 ///
-/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{pin}-{rt_version}-{san}`
+/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{pin}-{rt_version}-{san}-{deps}`
 /// `pin` is the managed-toolchain pin (`nopin` when none): switching the
 /// `zz toolchain` pin must never reuse an archive built by another
 /// toolchain, even when the resolved `clang_id` hash collides in theory.
@@ -68,7 +68,16 @@ const RT_CACHE_VERSION: &str = "rt6";
 /// `san` is the requested sanitizer set (`nosan` normally): a
 /// sanitizer-instrumented archive must never satisfy a plain link (or
 /// vice versa).
-pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String {
+/// `deps` records whether the runtime was compiled with curl/sqlite3
+/// headers enabled (`c1s0`): the archive embeds those branches, so a
+/// program with `http.fetch` must never link a no-curl archive.
+pub fn cache_key(
+    target: Option<&str>,
+    optimize: bool,
+    clang: &Clang,
+    curl: bool,
+    sqlite: bool,
+) -> String {
     let fallback_triple = crate::compile::host_triple();
     let triple = target.unwrap_or(&fallback_triple);
     let mode = if optimize { "rel" } else { "dev" };
@@ -79,8 +88,9 @@ pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String 
     } else {
         san
     };
+    let deps = format!("c{}s{}", u8::from(curl), u8::from(sqlite));
     format!(
-        "{}-{}-{}-{}-{}-{}-{}",
+        "{}-{}-{}-{}-{}-{}-{}-{}",
         triple,
         mode,
         runtime_src_hash(),
@@ -88,6 +98,7 @@ pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String 
         pin,
         RT_CACHE_VERSION,
         san,
+        deps,
     )
 }
 
@@ -109,7 +120,13 @@ pub fn ensure_rt_a(
         return compile_rt_a(opts, clang, target, None);
     }
 
-    let key = cache_key(target, opts.optimize, clang);
+    let key = cache_key(
+        target,
+        opts.optimize,
+        clang,
+        opts.curl_link,
+        opts.sqlite_link,
+    );
     // Per-key subdirectory with a fixed archive name — allows `-lzz_rt`.
     let dir = cache_dir().join(&key);
     std::fs::create_dir_all(&dir).map_err(BuildError::Io)?;
@@ -226,7 +243,13 @@ fn compile_rt_a(
     target: Option<&str>,
     dest: Option<&Path>,
 ) -> Result<PathBuf, BuildError> {
-    let key = cache_key(target, opts.optimize, clang);
+    let key = cache_key(
+        target,
+        opts.optimize,
+        clang,
+        opts.curl_link,
+        opts.sqlite_link,
+    );
 
     // Assemble the runtime TU (same as the current single-TU approach).
     let raw = format!("{}\n{}", crate::RUNTIME_H, crate::RUNTIME_C);
@@ -269,7 +292,8 @@ fn compile_rt_a(
         }
         cmd.arg(flag);
     }
-    cmd.arg("-DZZ_HAS_SQLITE3");
+    cmd.arg(format!("-DZZ_HAS_CURL={}", u8::from(opts.curl_link)));
+    cmd.arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
     cmd.arg("-c");
     cmd.arg(&c_path);
     cmd.arg("-o");

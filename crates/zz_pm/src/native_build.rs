@@ -93,7 +93,16 @@ pub fn host_tag() -> Result<String, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        return Ok("windows-x86_64-msvc".to_string());
+        let normalized = match arch {
+            "x86_64" => "x86_64",
+            "aarch64" => "aarch64",
+            _ => {
+                return Err(format!(
+                    "unsupported windows arch `{arch}` for native builds"
+                ))
+            }
+        };
+        return Ok(format!("windows-{normalized}-msvc"));
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -116,7 +125,7 @@ pub fn tags_compatible(artifact: &str, host: &str) -> bool {
         (["macos", a_arch, a_floor], ["macos", h_arch, h_floor]) => {
             a_arch == h_arch && floor_le(a_floor, h_floor, "min")
         }
-        (["windows", "x86_64", "msvc"], ["windows", "x86_64", "msvc"]) => true,
+        (["windows", a_arch, "msvc"], ["windows", h_arch, "msvc"]) => a_arch == h_arch,
         _ => false,
     }
 }
@@ -145,7 +154,8 @@ pub fn llvm_triple_for_tag(tag: &str) -> Result<&'static str, String> {
         ["linux", "aarch64", ..] => Ok("aarch64-unknown-linux-gnu"),
         ["macos", "arm64", ..] => Ok("aarch64-apple-darwin"),
         ["macos", "x86_64", ..] => Ok("x86_64-apple-darwin"),
-        ["windows", "x86_64", ..] => Ok("x86_64-pc-windows-gnu"),
+        ["windows", "x86_64", ..] => Ok("x86_64-pc-windows-msvc"),
+        ["windows", "aarch64", ..] => Ok("aarch64-pc-windows-msvc"),
         _ => Err(format!("no LLVM triple for platform tag `{tag}`")),
     }
 }
@@ -167,6 +177,7 @@ pub fn rust_triple_for_tag(tag: &str) -> Result<&'static str, String> {
         ["macos", "arm64", _] => Ok("aarch64-apple-darwin"),
         ["macos", "x86_64", _] => Ok("x86_64-apple-darwin"),
         ["windows", "x86_64", "msvc"] => Ok("x86_64-pc-windows-msvc"),
+        ["windows", "aarch64", "msvc"] => Ok("aarch64-pc-windows-msvc"),
         _ => Err(format!(
             "no Rust target triple for platform tag `{tag}`\n\
              hint: supported tags are linux-{{x86_64,aarch64}}-{{gnu-glibc*,musl}}, \
@@ -391,7 +402,73 @@ fn hermetic_env(tmpdir: &Path) -> Vec<(String, String)> {
         "SOURCE_DATE_EPOCH".to_string(),
         SOURCE_DATE_EPOCH.to_string(),
     ));
+    // Windows children need the system root to load DLLs at all, plus the
+    // MSVC/SDK search paths when clang drives `link.exe`. Only forwarded
+    // when present, so Unix stays as hermetic as before.
+    #[cfg(windows)]
+    for key in [
+        "SystemRoot",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "INCLUDE",
+        "LIB",
+        "VCToolsInstallDir",
+        "WindowsSdkDir",
+        "UCRTVersion",
+        "WindowsSDKVersion",
+        "VSCMD_ARG_TGT_ARCH",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            env.push((key.to_string(), v));
+        }
+    }
     env
+}
+
+/// First tool from `candidates` that can be spawned and reports a version.
+///
+/// Windows MSVC tooling (`lib.exe`, `nm`-equivalents) does not speak GNU
+/// `--version`, so a failed version probe still counts as "spawnable" —
+/// the real invocation surfaces the error if the tool is unusable.
+fn find_tool(candidates: &[&str]) -> Option<String> {
+    for cand in candidates {
+        if let Ok(out) = Command::new(cand).arg("--version").output() {
+            if out.status.success() {
+                return Some((*cand).to_string());
+            }
+            // Spawnable, just not a GNU tool (e.g. MSVC `lib`).
+            return Some((*cand).to_string());
+        }
+    }
+    None
+}
+
+/// Create a static archive from `objects` with whatever archiver the
+/// platform ships: `ar`/`llvm-ar` (`rcs`) or MSVC `lib` (`/OUT:`).
+fn archive_objects(archive: &Path, objects: &[PathBuf], tmpdir: &Path) -> Result<(), String> {
+    if let Some(ar) = find_tool(&["llvm-ar", "ar"]) {
+        let mut cmd = Command::new(&ar);
+        cmd.arg("rcs").arg(archive);
+        for o in objects {
+            cmd.arg(o);
+        }
+        return run_hermetic(cmd, tmpdir, "ar rcs").map(|_| ());
+    }
+    if let Some(lib) = find_tool(&["lib"]) {
+        let mut cmd = Command::new(&lib);
+        cmd.arg("/nologo")
+            .arg(format!("/OUT:{}", archive.display()));
+        for o in objects {
+            cmd.arg(o);
+        }
+        return run_hermetic(cmd, tmpdir, "lib /OUT").map(|_| ());
+    }
+    Err(
+        "no static archiver found (need `ar`, `llvm-ar`, or MSVC `lib`)\n\
+         hint: install the LLVM binutils (`llvm-ar`) or Visual Studio Build Tools"
+            .to_string(),
+    )
 }
 
 /// Run `cmd` with the hermetic environment, returning stdout on success
@@ -467,7 +544,12 @@ pub fn expected_c_symbols(zzi_path: &Path) -> Result<Vec<String>, String> {
 /// (`nm -g --defined-only`), preserving multiplicity so the ABI stamp can
 /// be required exactly once.
 fn defined_symbols(path: &Path, tmpdir: &Path) -> Result<Vec<String>, String> {
-    let mut cmd = Command::new("nm");
+    let nm = find_tool(&["llvm-nm", "nm"]).ok_or_else(|| {
+        "no symbol dumper found (need `nm` or `llvm-nm`)\n\
+         hint: install binutils (`nm`) or LLVM (`llvm-nm`)"
+            .to_string()
+    })?;
+    let mut cmd = Command::new(&nm);
     cmd.arg("-g").arg("--defined-only").arg(path);
     let out = run_hermetic(cmd, tmpdir, &format!("nm {}", path.display()))?;
     let mut symbols = Vec::new();
@@ -621,16 +703,15 @@ pub fn ensure_cc(
         objects.push(obj);
     }
 
-    // Static archive (AOT input).
-    let archive = build_dir.join(format!("lib{stem}.a"));
-    {
-        let mut cmd = Command::new("ar");
-        cmd.arg("rcs").arg(&archive);
-        for o in &objects {
-            cmd.arg(o);
-        }
-        run_hermetic(cmd, &tmpdir, "ar rcs")?;
-    }
+    // Static archive (AOT input). MSVC toolchains use `.lib`; everything
+    // else uses `.a` (llvm-ar writes a COFF archive either way).
+    let archive_ext = if tag.starts_with("windows-") {
+        "lib"
+    } else {
+        "a"
+    };
+    let archive = build_dir.join(format!("lib{stem}.{archive_ext}"));
+    archive_objects(&archive, &objects, &tmpdir)?;
 
     // Shared library (VM dlopen input).
     let suffix = shared_suffix_for_tag(&tag);
@@ -1882,7 +1963,11 @@ mod tests {
         );
         assert_eq!(
             llvm_triple_for_tag("windows-x86_64-msvc").unwrap(),
-            "x86_64-pc-windows-gnu"
+            "x86_64-pc-windows-msvc"
+        );
+        assert_eq!(
+            llvm_triple_for_tag("windows-aarch64-msvc").unwrap(),
+            "aarch64-pc-windows-msvc"
         );
     }
 
@@ -2214,6 +2299,10 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
         assert_eq!(
             rust_triple_for_tag("windows-x86_64-msvc").unwrap(),
             "x86_64-pc-windows-msvc"
+        );
+        assert_eq!(
+            rust_triple_for_tag("windows-aarch64-msvc").unwrap(),
+            "aarch64-pc-windows-msvc"
         );
         let err = rust_triple_for_tag("plan9-arm64-none").unwrap_err();
         assert!(err.contains("no Rust target triple"), "{err}");
