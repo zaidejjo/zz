@@ -16,7 +16,13 @@ impl Checker {
                 ret,
                 ..
             } => (name, generics, params, ret),
-            _ => unreachable!(),
+            _ => {
+                self.errors.push(error_at(
+                    "internal: collect_func called with a non-Func statement",
+                    stmt.span(),
+                ));
+                return;
+            }
         };
         let gen_names: Vec<String> = generics.iter().map(|g| g.name.name.clone()).collect();
         let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
@@ -159,7 +165,13 @@ impl Checker {
             Stmt::Func {
                 name, params, body, ..
             } => (name, params, body),
-            _ => unreachable!(),
+            _ => {
+                self.errors.push(error_at(
+                    "internal: check_func_body called with a non-Func statement",
+                    stmt.span(),
+                ));
+                return;
+            }
         };
         self.push_scope();
         for (i, (pname, pty)) in sig.params.iter().enumerate() {

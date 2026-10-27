@@ -1338,7 +1338,7 @@ impl Checker {
     pub(crate) fn func_name(stmt: &Stmt) -> String {
         match stmt {
             Stmt::Func { name, .. } => name.join("."),
-            _ => unreachable!(),
+            _ => "<unknown>".to_string(),
         }
     }
 

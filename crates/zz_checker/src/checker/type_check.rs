@@ -409,7 +409,10 @@ impl Checker {
                 let it = self.check_expr(iter);
                 let it = self.unifier.resolve(&it);
                 match vars.len() {
-                    0 => unreachable!(),
+                    0 => {
+                        self.errors
+                            .push(error_at("internal: for-loop with no variables", *span));
+                    }
                     1 => {
                         // `for x in collection` — single variable
                         let elem = match it {
