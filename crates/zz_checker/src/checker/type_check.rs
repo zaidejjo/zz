@@ -439,7 +439,7 @@ impl Checker {
                             }
                         };
                         self.push_scope();
-                        self.define_at(&vars[0].name, elem, vars[0].span);
+                        self.define_binding_at(&vars[0].name, elem, vars[0].span, false);
                         self.loop_depth += 1;
                         self.check_block_discarded(body);
                         self.loop_depth -= 1;
@@ -452,8 +452,8 @@ impl Checker {
                         match it {
                             Type::Dict(k, v) => {
                                 self.push_scope();
-                                self.define_at(&vars[0].name, *k, vars[0].span);
-                                self.define_at(&vars[1].name, *v, vars[1].span);
+                                self.define_binding_at(&vars[0].name, *k, vars[0].span, false);
+                                self.define_binding_at(&vars[1].name, *v, vars[1].span, false);
                                 self.loop_depth += 1;
                                 self.check_block_discarded(body);
                                 self.loop_depth -= 1;
@@ -463,15 +463,17 @@ impl Checker {
                                 match self.unifier.resolve(&elem) {
                                     Type::Tuple(pair) if pair.len() == 2 => {
                                         self.push_scope();
-                                        self.define_at(
+                                        self.define_binding_at(
                                             &vars[0].name,
                                             pair[0].clone(),
                                             vars[0].span,
+                                            false,
                                         );
-                                        self.define_at(
+                                        self.define_binding_at(
                                             &vars[1].name,
                                             pair[1].clone(),
                                             vars[1].span,
+                                            false,
                                         );
                                         self.loop_depth += 1;
                                         self.check_block_discarded(body);
@@ -485,8 +487,18 @@ impl Checker {
                                         let k_var = self.unifier.fresh_var();
                                         let v_var = self.unifier.fresh_var();
                                         self.push_scope();
-                                        self.define_at(&vars[0].name, k_var, vars[0].span);
-                                        self.define_at(&vars[1].name, v_var, vars[1].span);
+                                        self.define_binding_at(
+                                            &vars[0].name,
+                                            k_var,
+                                            vars[0].span,
+                                            false,
+                                        );
+                                        self.define_binding_at(
+                                            &vars[1].name,
+                                            v_var,
+                                            vars[1].span,
+                                            false,
+                                        );
                                         self.loop_depth += 1;
                                         self.check_block_discarded(body);
                                         self.loop_depth -= 1;
@@ -500,8 +512,18 @@ impl Checker {
                                             *span,
                                         ));
                                         self.push_scope();
-                                        self.define_at(&vars[0].name, Type::Unit, vars[0].span);
-                                        self.define_at(&vars[1].name, Type::Unit, vars[1].span);
+                                        self.define_binding_at(
+                                            &vars[0].name,
+                                            Type::Unit,
+                                            vars[0].span,
+                                            false,
+                                        );
+                                        self.define_binding_at(
+                                            &vars[1].name,
+                                            Type::Unit,
+                                            vars[1].span,
+                                            false,
+                                        );
                                         self.loop_depth += 1;
                                         self.check_block_discarded(body);
                                         self.loop_depth -= 1;
@@ -515,8 +537,18 @@ impl Checker {
                                     *span,
                                 ));
                                 self.push_scope();
-                                self.define_at(&vars[0].name, Type::Unit, vars[0].span);
-                                self.define_at(&vars[1].name, Type::Unit, vars[1].span);
+                                self.define_binding_at(
+                                    &vars[0].name,
+                                    Type::Unit,
+                                    vars[0].span,
+                                    false,
+                                );
+                                self.define_binding_at(
+                                    &vars[1].name,
+                                    Type::Unit,
+                                    vars[1].span,
+                                    false,
+                                );
                                 self.loop_depth += 1;
                                 self.check_block_discarded(body);
                                 self.loop_depth -= 1;
@@ -530,8 +562,18 @@ impl Checker {
                                     *span,
                                 ));
                                 self.push_scope();
-                                self.define_at(&vars[0].name, Type::Unit, vars[0].span);
-                                self.define_at(&vars[1].name, Type::Unit, vars[1].span);
+                                self.define_binding_at(
+                                    &vars[0].name,
+                                    Type::Unit,
+                                    vars[0].span,
+                                    false,
+                                );
+                                self.define_binding_at(
+                                    &vars[1].name,
+                                    Type::Unit,
+                                    vars[1].span,
+                                    false,
+                                );
                                 self.loop_depth += 1;
                                 self.check_block_discarded(body);
                                 self.loop_depth -= 1;

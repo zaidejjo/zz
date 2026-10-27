@@ -658,17 +658,30 @@ fn unused_tuple_binding_span_points_at_binding() {
 
 #[test]
 fn unused_for_loop_var_span_points_at_binding() {
-    // #293 (same class): unused loop variables point at their own site.
-    let src = "func main() {\n    total := 0\n    for i, x in [(1, 10), (2, 20)] {\n        total = total + x\n    }\n}\n";
+    // #293 (same class): unused loop variables are no longer flagged;
+    // only genuinely unused non-loop bindings warn.
+    let src = "func main() {\n    total := 0\n    for i, x in [(1, 10), (2, 20)] {\n        total = total + x\n    }\n    unused := 1\n}\n";
     let r = check_src(src);
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
-    let warn = r
+    // Loop var `i` is unused but must NOT warn; `unused` (non-loop) must warn.
+    let has_i_warn = r
         .errors
         .iter()
-        .find(|d| d.message.contains("unused variable `i`"))
-        .expect("expected unused-`i` warning");
-    let span = warn.span.expect("warning must carry a span");
-    assert_eq!(&src[span.to_range()], "i", "span {span:?} must cover `i`");
+        .any(|d| d.message.contains("unused variable `i`"));
+    assert!(
+        !has_i_warn,
+        "loop var `i` should not warn, got: {:?}",
+        r.errors
+    );
+    let has_unused_warn = r
+        .errors
+        .iter()
+        .any(|d| d.message.contains("unused variable `unused`"));
+    assert!(
+        has_unused_warn,
+        "expected unused-`unused` warning, got: {:?}",
+        r.errors
+    );
 }
 
 #[test]
