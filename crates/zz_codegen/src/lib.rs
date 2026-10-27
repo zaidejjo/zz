@@ -51,7 +51,10 @@ pub const C_BUILD_VERSION: &str = "0.1.0";
 /// edit changes this constant, which changes the crate fingerprint and
 /// forces a rebuild + fresh embed. Without it, `include_str!` edits were
 /// silently ignored until an unrelated Rust change rebuilt the crate.
-pub const RUNTIME_SRC_HASH: &str = env!("ZZ_RUNTIME_HASH");
+pub const RUNTIME_SRC_HASH: &str = match option_env!("ZZ_RUNTIME_HASH") {
+    Some(h) => h,
+    None => "0000000000000000",
+};
 
 /// Lower a pruned typed program to C without compiling.
 ///

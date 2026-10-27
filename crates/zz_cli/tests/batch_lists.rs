@@ -125,6 +125,14 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "vec_sort.zz", true),
     ("regression", "block_local_no_clobber.zz", false),
     ("stdlib", "fs_cache_test.zz", true),
+    // Native-runtime (FFI) fixtures: regexp, crypto, float formatting —
+    // exercise `native_rt` link path in both VM and AOT engines.
+    ("stdlib", "regexp_test.zz", true),
+    ("stdlib", "crypto_test.zz", true),
+    ("stdlib", "crypto_passwords_test.zz", true),
+    ("stdlib", "crypto_jwt_test.zz", true),
+    ("regression", "edge_float_format.zz", true),
+    ("regression", "edge_float_nan_display.zz", true),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors

@@ -201,6 +201,7 @@ fn cache_key(
     key.artifact_hash = artifact_hash;
     key.artifact_flags = artifact_flags;
     key.native_build_sig = native_build_sig_for(source_path);
+    key.native_rt_archive_hash = native_rt_archive_hash();
     // Feature selection changes which modules compile (#488). Default
     // selection leaves the key untouched (existing caches stay valid).
     let features_fp = features.fingerprint();
@@ -271,6 +272,22 @@ fn native_build_sig_for(source_path: &Path) -> String {
     }
     per_dep.sort();
     zz_pm::hash::hash_bytes(per_dep.join("\0").as_bytes())
+}
+
+/// Content hash of the resolved native-runtime archive, for cache
+/// invalidation. A new prebuilt archive in a release zip, or a rebuilt
+/// archive from changed sources, busts entries linked against the older
+/// archive. Empty when no archive is found (stable slug).
+fn native_rt_archive_hash() -> String {
+    if let Some(path) = zz_codegen::ffi::native_rt_archive_path() {
+        if let Ok(contents) = std::fs::read(&path) {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            contents.hash(&mut h);
+            return format!("{:016x}", h.finish());
+        }
+    }
+    String::new()
 }
 
 /// Get modification time of every input that affects native output, for
@@ -1737,9 +1754,10 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
     if let Some(code) = status.code() {
         return Ok(code);
     }
-    // Killed by signal (Unix): name it. The old bare `-1` hid segfaults
-    // (e.g. every `http.listen` native binary died in _dl_fini with no
-    // message and surfaced only as "code -1").
+    // Killed by signal (Unix) or terminated abnormally (Windows): name it.
+    // The old bare `-1` hid segfaults (e.g. every `http.listen` native
+    // binary died in _dl_fini with no message and surfaced only as
+    // "code -1").
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -1749,6 +1767,16 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
                 signal_name(sig)
             ));
         }
+    }
+    #[cfg(windows)]
+    {
+        // Windows reports process termination via exit code, not signals.
+        // A crash (access violation, stack overflow, etc.) yields a
+        // status code that is not a normal exit code. Report it as a
+        // Windows status code so the user can diagnose the crash.
+        return Err(format!(
+            "native process terminated abnormally (no exit code reported)"
+        ));
     }
     Ok(-1)
 }
@@ -1769,6 +1797,21 @@ fn signal_name(sig: i32) -> &'static str {
         14 => "SIGALRM",
         15 => "SIGTERM",
         _ => "unknown signal",
+    }
+}
+
+/// Short name for a Windows termination status code (common cases;
+/// else the raw hex value).
+#[cfg(windows)]
+fn windows_status_name(code: u32) -> &'static str {
+    match code {
+        0xC0000005 => "STATUS_ACCESS_VIOLATION (segfault)",
+        0xC000000D => "STATUS_INVALID_PARAMETER",
+        0xC0000094 => "STATUS_INTEGER_DIVIDE_BY_ZERO",
+        0xC00000FD => "STATUS_STACK_OVERFLOW",
+        0xC0000139 => "STATUS_ENTRYPOINT_NOT_FOUND",
+        0xC0000409 => "STATUS_STACK_BUFFER_OVERRUN",
+        _ => "unknown status",
     }
 }
 

@@ -64,6 +64,12 @@ pub struct CacheKey {
     /// change busts entries linked against older plugin artifacts.
     /// Empty for plugin-free projects (stable slug).
     pub native_build_sig: String,
+    /// Content hash of the resolved native-runtime archive
+    /// (`libzz_native_rt.a` / `zz_native_rt.lib`). A new prebuilt archive
+    /// in a release zip, or a rebuilt archive from changed sources, busts
+    /// entries linked against the older archive. Empty when no archive
+    /// is found (stable slug).
+    pub native_rt_archive_hash: String,
 }
 
 impl CacheKey {
@@ -128,6 +134,7 @@ impl CacheKey {
             artifact_hash: String::new(),
             artifact_flags: String::new(),
             native_build_sig: String::new(),
+            native_rt_archive_hash: String::new(),
         })
     }
 
@@ -193,9 +200,14 @@ impl CacheKey {
         } else {
             self.native_build_sig[..16.min(self.native_build_sig.len())].to_string()
         };
+        let rt_archive_slug = if self.native_rt_archive_hash.is_empty() {
+            "none".to_string()
+        } else {
+            self.native_rt_archive_hash[..16.min(self.native_rt_archive_hash.len())].to_string()
+        };
 
         format!(
-            "{}-{}-{}-{}-{}-{}-{}-{}-{}-{}",
+            "{}-{}-{}-{}-{}-{}-{}-{}-{}-{}-{}",
             &self.source_hash[..16.min(self.source_hash.len())],
             path_slug,
             deps_slug,
@@ -206,6 +218,7 @@ impl CacheKey {
             art_slug,
             flags_slug,
             native_slug,
+            rt_archive_slug,
         )
     }
 

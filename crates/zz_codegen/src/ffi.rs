@@ -23,7 +23,7 @@
 //! link test below, so the test exercises the real link path.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::compile::is_windows_target;
@@ -718,6 +718,32 @@ fn find_bundled_libdir() -> Option<PathBuf> {
         .find(|d| d.join(lib_file_name()).is_file())
 }
 
+/// Path to the native-runtime archive, without triggering a build.
+/// Checks cargo target dirs (dev checkout) and bundled libdir (release install).
+pub fn native_rt_archive_path() -> Option<PathBuf> {
+    // Dev checkout: cargo target dirs
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let root = PathBuf::from(manifest_dir)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        for profile in ["debug", "release"] {
+            let path = root.join("target").join(profile).join(lib_file_name());
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    // Release install: bundled libdir
+    if let Some(dir) = find_bundled_libdir() {
+        let path = dir.join(lib_file_name());
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Shipped static libstd in a release lib dir (`libstd-<hash>.rlib`).
 /// Same newest-wins pick as the rustc-libdir scan. `None` when the dir
 /// ships none (old releases shipped only the shared object).
@@ -1036,7 +1062,7 @@ fn src_dir_mtime_newer_than(dir: &std::path::Path, threshold: std::time::SystemT
 }
 
 /// Static library file name for the current platform.
-fn lib_file_name() -> &'static str {
+pub fn lib_file_name() -> &'static str {
     if cfg!(windows) {
         "zz_native_rt.lib"
     } else {
@@ -1735,5 +1761,64 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
         });
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn native_rt_resolution_returns_archive_path() {
+        // native_rt_resolution should either resolve an archive (cargo
+        // checkout or bundled libdir) or fail cleanly with all strategies
+        // named. On this dev checkout it resolves via the cargo target dir.
+        match native_rt_resolution(false) {
+            Ok((lib, source, strategy)) => {
+                assert!(
+                    lib.is_file(),
+                    "resolved archive must exist: {}",
+                    lib.display()
+                );
+                assert!(matches!(source, RtSource::Cargo | RtSource::Prebuilt));
+                assert!(!strategy.is_empty(), "strategy must be described");
+            }
+            Err(e) => {
+                // On a checkout without a built archive, this is acceptable
+                // — but the error must name every strategy tried.
+                let msg = e.0;
+                assert!(
+                    msg.contains("ZZ_NATIVE_RT_DIR") || msg.contains("workspace root"),
+                    "error must name strategies, got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_checkout_root_finds_workspace() {
+        // From within the zz checkout, runtime_checkout_root must find the
+        // workspace root (the dir containing Cargo.toml with
+        // crates/zz_native_rt/Cargo.toml).
+        let root = runtime_checkout_root();
+        assert!(root.is_some(), "must find workspace root from CWD");
+        let root = root.unwrap();
+        assert!(
+            root.join("Cargo.toml").is_file(),
+            "root must have Cargo.toml"
+        );
+        assert!(
+            root.join("crates")
+                .join("zz_native_rt")
+                .join("Cargo.toml")
+                .is_file(),
+            "root must contain crates/zz_native_rt"
+        );
+    }
+
+    #[test]
+    fn lib_file_name_platform_correct() {
+        let name = lib_file_name();
+        if cfg!(windows) {
+            assert_eq!(name, "zz_native_rt.lib", "Windows uses .lib");
+        } else {
+            assert_eq!(name, "libzz_native_rt.a", "Unix/macOS uses .a");
+        }
+        assert!(!name.is_empty());
     }
 }
