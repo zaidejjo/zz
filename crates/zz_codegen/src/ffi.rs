@@ -785,6 +785,21 @@ pub fn target_os(target: Option<&str>) -> TargetOs {
     }
 }
 
+/// C name → linker symbol name for a `-u`/`--undefined` request.
+///
+/// `ld -u` (and the `--undefined`/`-U` family) name a *linker* symbol,
+/// not a C identifier. Mach-O prefixes every C symbol with `_`, so a
+/// bare `-u zz_float_format_raw` on Darwin only invents a phantom
+/// undefined: the link fails with `<initial-undefines>` /
+/// `symbol(s) not found` even though the archive defines the C symbol
+/// (seen on macOS CI for the float formatter).
+pub fn force_undef_symbol(sym: &str, target: Option<&str>) -> String {
+    match target_os(target) {
+        TargetOs::Macos => format!("_{sym}"),
+        _ => sym.to_string(),
+    }
+}
+
 /// True when `name` is a Rust std static archive.
 ///
 /// Unix and GNU Windows ship `libstd-<hash>.rlib`; the MSVC toolchain
@@ -1505,6 +1520,23 @@ mod tests {
         assert_eq!(target_os(Some("aarch64-apple-darwin")), TargetOs::Macos);
         assert_eq!(target_os(Some("x86_64-unknown-linux-gnu")), TargetOs::Linux);
         assert_eq!(target_os(Some("x86_64-unknown-freebsd")), TargetOs::Other);
+    }
+
+    #[test]
+    fn force_undef_symbol_underscores_on_darwin() {
+        // `ld -u` takes the linker symbol: Mach-O prefixes C names with `_`.
+        assert_eq!(
+            force_undef_symbol("zz_float_format_raw", Some("aarch64-apple-darwin")),
+            "_zz_float_format_raw"
+        );
+        assert_eq!(
+            force_undef_symbol("zz_float_format_raw", Some("x86_64-unknown-linux-gnu")),
+            "zz_float_format_raw"
+        );
+        assert_eq!(
+            force_undef_symbol("zz_float_format_raw", Some("x86_64-pc-windows-msvc")),
+            "zz_float_format_raw"
+        );
     }
 
     #[test]

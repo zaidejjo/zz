@@ -326,6 +326,17 @@ pub fn managed_zig_path() -> Option<PathBuf> {
 pub fn bundled_zig_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
+    zig_bundle_in(dir)
+}
+
+/// The `zig` binary in `dir`, when the bundle is complete.
+///
+/// Zig resolves `std`/libc from `<exe_dir>/lib`, so a zip that ships only
+/// the executable fails every AOT build with
+/// `unable to load "std.zig": FileNotFound`. Treating an incomplete
+/// bundle as absent falls back to a PATH clang/zig instead of breaking
+/// builds that used to work.
+fn zig_bundle_in(dir: &Path) -> Option<PathBuf> {
     let exe_name = if cfg!(windows) { "zig.exe" } else { "zig" };
     let path = dir.join(exe_name);
     if !path.is_file() {
@@ -340,6 +351,11 @@ pub fn bundled_zig_path() -> Option<PathBuf> {
         {
             return None;
         }
+    }
+    // `lib/std/std.zig` is the marker for a complete Zig distribution; the
+    // release zips merge the Zig tree's `lib/` with the prebuilt runtime.
+    if !dir.join("lib").join("std").join("std.zig").is_file() {
+        return None;
     }
     Some(path)
 }
@@ -1146,14 +1162,17 @@ fn push_link_inputs(
         if opts.pg_link {
             for sym in crate::ffi::PG_LINK_SYMBOLS {
                 cmd.arg("-u");
-                cmd.arg(sym);
+                cmd.arg(crate::ffi::force_undef_symbol(sym, target));
             }
         }
         // Float Display (spec §4): same weak-ref situation — pull the
         // Rust-core formatter explicitly when the gate fired.
         if opts.float_link {
             cmd.arg("-u");
-            cmd.arg(crate::ffi::FLOAT_FMT_SYMBOL);
+            cmd.arg(crate::ffi::force_undef_symbol(
+                crate::ffi::FLOAT_FMT_SYMBOL,
+                target,
+            ));
         }
         for a in &extra {
             cmd.arg(a);
@@ -1530,12 +1549,15 @@ pub fn emit_c_plus_script(
         if opts.pg_link {
             for sym in crate::ffi::PG_LINK_SYMBOLS {
                 rt_link.push_str(" -u ");
-                rt_link.push_str(sym);
+                rt_link.push_str(&crate::ffi::force_undef_symbol(sym, target));
             }
         }
         if opts.float_link {
             rt_link.push_str(" -u ");
-            rt_link.push_str(crate::ffi::FLOAT_FMT_SYMBOL);
+            rt_link.push_str(&crate::ffi::force_undef_symbol(
+                crate::ffi::FLOAT_FMT_SYMBOL,
+                target,
+            ));
         }
         match crate::ffi::link_args_for_target(opts.optimize, target) {
             Ok((args, _)) => {
@@ -2123,12 +2145,21 @@ mod toolchain_tests {
             let _ = std::fs::set_permissions(&fake_zig, std::fs::Permissions::from_mode(0o755));
         }
 
+        // A bare binary is not a toolchain: Zig loads std/libc from
+        // `<exe_dir>/lib`, so the old "ship only the executable" zip must
+        // not be selected (it fails with `unable to load "std.zig"`).
+        assert!(
+            zig_bundle_in(&tmp).is_none(),
+            "a zig binary without lib/std/std.zig must be rejected"
+        );
+
+        // With the Zig tree's `lib/` merged in (release layout) it is usable.
+        std::fs::create_dir_all(tmp.join("lib").join("std")).unwrap();
+        std::fs::write(tmp.join("lib").join("std").join("std.zig"), "").unwrap();
+        assert_eq!(zig_bundle_in(&tmp), Some(fake_zig.clone()));
+
         // bundled_zig_path() uses current_exe(), which points at the test
-        // harness, not our fake dir. We can't easily redirect that, so we
-        // just verify the function returns None when no zig is next to the
-        // real exe, and that the path logic is sound by checking the fake
-        // file exists where we expect.
-        assert!(fake_zig.is_file(), "fake zig must exist at {fake_zig:?}");
+        // harness, not our fake dir — it must still never invent a path.
         assert!(
             bundled_zig_path().is_none(),
             "bundled_zig_path should be None when real exe has no sibling zig"
