@@ -614,16 +614,27 @@ fn resolve_staticlib(release: bool) -> Result<(PathBuf, RtSource), FfiError> {
     if let Some(root) = checkout_root() {
         return Ok((build_staticlib(&root, release)?, RtSource::Cargo));
     }
-    // 3. Release install: archive shipped next to the binaries.
+    // 3. Runtime workspace-root fallback: walk up from CWD and the exe
+    // directory looking for a Cargo.toml whose tree contains
+    // crates/zz_native_rt. Handles release binaries whose baked
+    // checkout_root() path is stale, so no ZZ_NATIVE_RT_DIR is required
+    // when building from a source checkout on any machine.
+    if let Some(root) = runtime_checkout_root() {
+        return Ok((build_staticlib(&root, release)?, RtSource::Cargo));
+    }
+    // 4. Release install: archive shipped next to the binaries.
     if let Some(dir) = find_bundled_libdir() {
         return Ok((dir.join(lib_file_name()), RtSource::Prebuilt));
     }
-    Err(FfiError(
-        "cannot locate workspace (no Cargo.toml above zz_codegen); \
-         set ZZ_NATIVE_RT_DIR to the workspace root or install a release \
-         toolchain (which ships the prebuilt native runtime)"
-            .to_string(),
-    ))
+    Err(FfiError(format!(
+        "cannot locate native runtime archive; tried:\n \
+         - $ZZ_NATIVE_RT_DIR (not set or invalid)\n \
+         - compile-time workspace root (stale baked path)\n \
+         - runtime workspace root walk from CWD/exe dir (no Cargo.toml found)\n \
+         - bundled release libdir (<exe>/lib, /usr/lib/zz)\n \
+          set ZZ_NATIVE_RT_DIR to the workspace root or install a release \
+          toolchain (which ships the prebuilt native runtime)"
+    )))
 }
 
 /// Compile-time workspace root when it exists on disk (dev checkouts).
@@ -635,6 +646,36 @@ fn checkout_root() -> Option<PathBuf> {
         .parent()?
         .to_path_buf();
     root.join("Cargo.toml").is_file().then_some(root)
+}
+
+/// Runtime workspace-root fallback: walk up from CWD and the exe
+/// directory looking for a Cargo.toml whose tree contains
+/// crates/zz_native_rt.
+fn runtime_checkout_root() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let cwd = std::env::current_dir().ok();
+    let candidates: Vec<PathBuf> = exe_dir.into_iter().chain(cwd).collect();
+    for start in candidates {
+        let mut dir = start;
+        loop {
+            if dir.join("Cargo.toml").is_file()
+                && dir
+                    .join("crates")
+                    .join("zz_native_rt")
+                    .join("Cargo.toml")
+                    .is_file()
+            {
+                return Some(dir);
+            }
+            match dir.parent() {
+                Some(p) if p != dir => dir = p.to_path_buf(),
+                _ => break,
+            }
+        }
+    }
+    None
 }
 
 /// Release-install library directories: `<exe>/lib` (manual unzip) and
