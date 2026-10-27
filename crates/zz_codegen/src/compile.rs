@@ -320,6 +320,30 @@ pub fn managed_zig_path() -> Option<PathBuf> {
     Some(path)
 }
 
+/// Bundled Zig shipping next to the `zz` binary in release zips
+/// (`dist/zig` alongside `dist/zz`). Preferred over PATH zig so release
+/// users need no system C compiler at all.
+pub fn bundled_zig_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let exe_name = if cfg!(windows) { "zig.exe" } else { "zig" };
+    let path = dir.join(exe_name);
+    if !path.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&path)
+            .map(|m| m.permissions().mode() & 0o111 == 0)
+            .unwrap_or(true)
+        {
+            return None;
+        }
+    }
+    Some(path)
+}
+
 /// Probe PATH for a Clang provider.
 ///
 /// Order: managed `zig` (an explicit `zz toolchain install` pin always
@@ -364,6 +388,15 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
                 label: "zig cc",
             });
         }
+        // Bundled zig shipping with the release zip: no system clang
+        // needed for end users.
+        if let Some(path) = bundled_zig_path() {
+            return Some(Clang {
+                path,
+                zig: true,
+                label: "bundled zig cc",
+            });
+        }
     }
     if allow_clang {
         for name in ["clang", "clang-23", "clang-22"] {
@@ -377,7 +410,10 @@ pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
         }
     }
     if allow_zig {
-        if let Some(path) = managed_zig_path().or_else(|| which("zig")) {
+        if let Some(path) = managed_zig_path()
+            .or_else(bundled_zig_path)
+            .or_else(|| which("zig"))
+        {
             return Some(Clang {
                 path,
                 zig: true,
@@ -392,18 +428,39 @@ fn which(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(name);
-        if candidate.is_file() {
+        if is_executable(&candidate) {
             return Some(candidate);
         }
         #[cfg(windows)]
         {
             let exe = dir.join(format!("{name}.exe"));
-            if exe.is_file() {
+            if is_executable(&exe) {
                 return Some(exe);
             }
         }
     }
     None
+}
+
+/// True when `p` is an executable file: present, non-empty, and (on Unix)
+/// carrying at least one execute bit. Prevents accepting a non-executable
+/// file named `zig`/`clang` on PATH that would fail at exec time.
+fn is_executable(p: &Path) -> bool {
+    let Ok(meta) = p.metadata() else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Normalized `(arch, os)` pair for triple comparison.
@@ -1041,16 +1098,14 @@ fn push_link_inputs(
         let (extra, rt_lib) = crate::ffi::link_args_for_target(opts.optimize, target)
             .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
         // Pre-#303 fallback (shared libstd): sidecar the shipped shared
-        // libs next to the output binary (`$ORIGIN` rpath) so it runs
-        // with no toolchain. No-op for static links (nothing to stage)
-        // and for dev checkouts (rustc rpath above already applies).
-        #[cfg(not(windows))]
-        {
-            let rpath = crate::ffi::stage_shared_libs(&rt_lib, output_path)
-                .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
-            for a in &rpath {
-                cmd.arg(a);
-            }
+        // libs next to the output binary (`$ORIGIN` rpath on Unix,
+        // DLL next to .exe on Windows) so it runs with no toolchain.
+        // No-op for static links (nothing to stage) and for dev
+        // checkouts (rustc rpath above already applies).
+        let rpath = crate::ffi::stage_shared_libs(&rt_lib, output_path)
+            .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
+        for a in &rpath {
+            cmd.arg(a);
         }
         // Postgres backend: the C dispatcher references the symbols
         // weakly (so sqlite-only programs link cleanly without the

@@ -188,7 +188,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install native deps (linux)
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev zip unzip
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev zip unzip xz-utils
       - name: install native deps (macos)
         if: matrix.os == 'macos'
         run: brew install zip unzip
@@ -235,12 +235,25 @@ jobs:
           done
           test -n "$RT_SO"
           echo "native rt: $RT_A + $RT_SO"
+          # Download bundled zig into dist/ BEFORE zipping (so the zip
+          # includes it). Must run after `rm -rf dist` below so we don't
+          # delete it.
           ZIP="zz-$PKGVER-${{ matrix.os }}-${{ matrix.arch }}.zip"
           rm -rf dist "$ZIP"
           mkdir -p dist dist/lib
-          cp target/release/zz target/release/zz-lsp LICENSE README.md dist/
+          case "${{ matrix.os }}-${{ matrix.arch }}" in
+            linux-x86_64)   ZIG_URL="https://ziglang.org/download/0.17.0/zig-linux-x86_64-0.17.0.tar.xz" ;;
+            linux-aarch64)  ZIG_URL="https://ziglang.org/download/0.17.0/zig-linux-aarch64-0.17.0.tar.xz" ;;
+            macos-aarch64)  ZIG_URL="https://ziglang.org/download/0.17.0/zig-macos-aarch64-0.17.0.tar.xz" ;;
+            *) echo "error: unsupported os-arch ${{ matrix.os }}-${{ matrix.arch }}" >&2; exit 1 ;;
+          esac
+          curl -fsSL "$ZIG_URL" | tar -xJ -C dist/
+          mv dist/zig-*/zig dist/zig
+          chmod +x dist/zig
+          ./dist/zig version
+          cp target/release/zz target/release/zz-lsp dist/zig LICENSE README.md dist/
           cp "$RT_A" "$RT_SO" dist/lib/
-          (cd dist && zip -9 -r "../$ZIP" zz zz-lsp LICENSE README.md lib)
+          (cd dist && zip -9 -r "../$ZIP" zz zz-lsp zig LICENSE README.md lib)
           unzip -l "$ZIP"
       - name: upload zip artifact
         uses: actions/upload-artifact@v4

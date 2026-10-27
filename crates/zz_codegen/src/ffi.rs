@@ -26,6 +26,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::compile::is_windows_target;
+
 /// FFI protocol version. Re-exported from `zz_native_rt` (single source of
 /// truth); AOT binaries built against a mismatched static library must be
 /// rebuilt.
@@ -583,6 +585,19 @@ pub fn ensure_staticlib(release: bool) -> Result<PathBuf, FfiError> {
     resolve_staticlib(release).map(|(lib, _)| lib)
 }
 
+/// How the native runtime archive would be resolved: which strategy found
+/// it and where the archive lives. Used by `zz doctor` to audit the
+/// environment so contributors know whether `zz build` / `zz run --native`
+/// can link without `ZZ_NATIVE_RT_DIR`.
+pub fn native_rt_resolution(release: bool) -> Result<(PathBuf, RtSource, &'static str), FfiError> {
+    let (lib, source) = resolve_staticlib(release)?;
+    let strategy = match source {
+        RtSource::Cargo => "cargo build from workspace sources",
+        RtSource::Prebuilt => "shipped prebuilt archive",
+    };
+    Ok((lib, source, strategy))
+}
+
 /// How [`ensure_staticlib`] found the archive: workspace sources get a
 /// (cached, incremental) cargo build; release installs use the shipped
 /// archive directly — no cargo, no sources, no Rust toolchain.
@@ -614,12 +629,24 @@ fn resolve_staticlib(release: bool) -> Result<(PathBuf, RtSource), FfiError> {
     if let Some(root) = checkout_root() {
         return Ok((build_staticlib(&root, release)?, RtSource::Cargo));
     }
-    // 3. Release install: archive shipped next to the binaries.
+    // 3. Runtime workspace-root fallback: walk up from CWD and the exe
+    // directory looking for a Cargo.toml whose tree contains
+    // crates/zz_native_rt. Handles release binaries whose baked
+    // checkout_root() path is stale, so no ZZ_NATIVE_RT_DIR is required
+    // when building from a source checkout on any machine.
+    if let Some(root) = runtime_checkout_root() {
+        return Ok((build_staticlib(&root, release)?, RtSource::Cargo));
+    }
+    // 4. Release install: archive shipped next to the binaries.
     if let Some(dir) = find_bundled_libdir() {
         return Ok((dir.join(lib_file_name()), RtSource::Prebuilt));
     }
     Err(FfiError(
-        "cannot locate workspace (no Cargo.toml above zz_codegen); \
+        "cannot locate native runtime archive; tried:\n \
+         - $ZZ_NATIVE_RT_DIR (not set or invalid)\n \
+         - compile-time workspace root (stale baked path)\n \
+         - runtime workspace root walk from CWD/exe dir (no Cargo.toml found)\n \
+         - bundled release libdir (<exe>/lib, /usr/lib/zz)\n \
          set ZZ_NATIVE_RT_DIR to the workspace root or install a release \
          toolchain (which ships the prebuilt native runtime)"
             .to_string(),
@@ -635,6 +662,36 @@ fn checkout_root() -> Option<PathBuf> {
         .parent()?
         .to_path_buf();
     root.join("Cargo.toml").is_file().then_some(root)
+}
+
+/// Runtime workspace-root fallback: walk up from CWD and the exe
+/// directory looking for a Cargo.toml whose tree contains
+/// crates/zz_native_rt.
+fn runtime_checkout_root() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let cwd = std::env::current_dir().ok();
+    let candidates: Vec<PathBuf> = exe_dir.into_iter().chain(cwd).collect();
+    for start in candidates {
+        let mut dir = start;
+        loop {
+            if dir.join("Cargo.toml").is_file()
+                && dir
+                    .join("crates")
+                    .join("zz_native_rt")
+                    .join("Cargo.toml")
+                    .is_file()
+            {
+                return Some(dir);
+            }
+            match dir.parent() {
+                Some(p) if p != dir => dir = p.to_path_buf(),
+                _ => break,
+            }
+        }
+    }
+    None
 }
 
 /// Release-install library directories: `<exe>/lib` (manual unzip) and
@@ -683,6 +740,10 @@ fn find_shipped_std_rlib(libdir: &std::path::Path) -> Option<String> {
 fn find_shipped_libstd(libdir: &std::path::Path) -> Option<String> {
     let (prefix, suffix) = if cfg!(target_os = "macos") {
         ("libstd-", ".dylib")
+    } else if cfg!(windows) {
+        // MSVC names the shared libstd `std-<hash>.dll` (no `lib` prefix);
+        // GNU/mingw uses `libstd-<hash>.dll`. Probe both.
+        ("std-", ".dll")
     } else {
         ("libstd-", ".so")
     };
@@ -999,6 +1060,20 @@ fn sys_link_libs() -> &'static [&'static str] {
     }
 }
 
+/// System libraries for Windows/MSVC native FFI links.
+///
+/// These are .lib import libraries that the MSVC linker (or clang/zig in
+/// MSVC-compatible mode on Windows) understands.
+fn sys_link_libs_windows() -> &'static [&'static str] {
+    &[
+        "kernel32.lib",
+        "user32.lib",
+        "advapi32.lib",
+        "ws2_32.lib",
+        "crypt32.lib",
+    ]
+}
+
 /// `rustc`'s platform library directory (home of `libstd-*.rlib`).
 /// With `target`, the target's libdir (`--target <triple>`); otherwise
 /// the host's. Cross builds needing the native runtime must have the
@@ -1072,7 +1147,7 @@ fn find_libstd(libdir: &std::path::Path) -> Result<String, FfiError> {
 /// thread/dl helpers.
 ///
 /// Returned flags are appended after the program object on the `cc` command
-/// line. Fails on Windows (MSVC import-library story is unimplemented).
+/// line. Supports Windows via MSVC-style `/LIBPATH:` and `.lib` flags.
 pub fn link_args(release: bool) -> Result<(Vec<String>, PathBuf), FfiError> {
     link_args_for_target(release, None)
 }
@@ -1083,16 +1158,49 @@ pub fn link_args_for_target(
     release: bool,
     target: Option<&str>,
 ) -> Result<(Vec<String>, PathBuf), FfiError> {
-    if cfg!(windows) {
-        return Err(FfiError(
-            "native FFI link is not implemented on Windows yet".into(),
-        ));
-    }
     let (lib, _source) = resolve_staticlib(release)?;
     let libdir = lib
         .parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| FfiError(format!("static library has no parent: {}", lib.display())))?;
+
+    // Target-aware platform detection: use the --target triple when
+    // provided, otherwise fall back to the host cfg. This matters for
+    // cross-compilation (e.g. building Windows targets from Linux).
+    let is_windows = target
+        .map(is_windows_target)
+        .unwrap_or_else(|| cfg!(windows));
+
+    // Windows/MSVC linking: /LIBPATH: and .lib import/static libraries.
+    // zig cc on Windows and clang-cl both accept these flags.
+    if is_windows {
+        let lib_name = if target.is_some() {
+            "zz_native_rt.lib".to_string()
+        } else {
+            lib_file_name().to_string()
+        };
+        let mut base = vec![format!("/LIBPATH:{}", libdir.display()), lib_name];
+        base.extend(sys_link_libs_windows().iter().map(|s| s.to_string()));
+        // Release installs ship the static libstd next to the archive.
+        if let Some(shipped) = find_shipped_std_rlib(&libdir) {
+            let mut flags = base.clone();
+            flags.insert(1, libdir.join(&shipped).display().to_string());
+            return Ok((flags, lib));
+        }
+        if let Ok(rustc_dir) = rustc_libdir_for_target(target) {
+            if let Ok(rlib) = find_std_rlib(&rustc_dir) {
+                let mut flags = base.clone();
+                flags.insert(1, rustc_dir.join(&rlib).display().to_string());
+                return Ok((flags, lib));
+            }
+        }
+        return Err(FfiError(format!(
+            "no libstd-*.rlib in {} or rustc libdir; native FFI link on Windows needs the static libstd",
+            libdir.display()
+        )));
+    }
+
+    // Unix/macOS linking: -L and -l flags.
     // Base flags shared by every branch: the archive search path, the
     // native runtime itself, then the platform system libs
     // (`-ldl` omitted on the BSDs — `dlopen` lives in libc there).
@@ -1104,14 +1212,10 @@ pub fn link_args_for_target(
     // Release installs ship the static libstd next to the archive: link
     // it by absolute path — no rustc, no RUNPATH, no sidecar. The `ldd`
     // output shows no `libstd` line (glibc/libm dynamic is fine).
-    // Native-only: cross builds must resolve the target's sysroot below
-    // (a host archive in the libdir would silently mix architectures).
-    if target.is_none() {
-        if let Some(shipped) = find_shipped_std_rlib(&libdir) {
-            let mut flags = base.clone();
-            flags.insert(2, libdir.join(&shipped).display().to_string());
-            return Ok((flags, lib));
-        }
+    if let Some(shipped) = find_shipped_std_rlib(&libdir) {
+        let mut flags = base.clone();
+        flags.insert(2, libdir.join(&shipped).display().to_string());
+        return Ok((flags, lib));
     }
     if let Ok(rustc_dir) = rustc_libdir_for_target(target) {
         if let Ok(rlib) = find_std_rlib(&rustc_dir) {
@@ -1124,13 +1228,11 @@ pub fn link_args_for_target(
     // zips, or a toolchain without rlibs). Native-only like the static
     // shipped path above — cross builds error loudly on the target
     // sysroot instead of mixing host objects.
-    if target.is_none() {
-        if let Some(shipped) = find_shipped_libstd(&libdir) {
-            let mut flags = base.clone();
-            flags.insert(2, format!("-L{}", libdir.display()));
-            flags.insert(3, format!("-l:{shipped}"));
-            return Ok((flags, lib));
-        }
+    if let Some(shipped) = find_shipped_libstd(&libdir) {
+        let mut flags = base.clone();
+        flags.insert(2, format!("-L{}", libdir.display()));
+        flags.insert(3, format!("-l:{shipped}"));
+        return Ok((flags, lib));
     }
     let rustc_dir = rustc_libdir_for_target(target).map_err(|e| {
         FfiError(format!(
@@ -1202,6 +1304,38 @@ pub fn stage_shared_libs(
         "$ORIGIN"
     };
     Ok(vec![format!("-Wl,-rpath,{token}")])
+}
+
+/// Windows DLL sidecar: copy the `.dll` next to the `.exe`. Windows
+/// searches the executable's directory first, so no rpath is needed.
+#[cfg(windows)]
+pub fn stage_shared_libs(
+    lib_path: &std::path::Path,
+    out_bin: &std::path::Path,
+) -> Result<Vec<String>, FfiError> {
+    let Some(libdir) = lib_path.parent() else {
+        return Ok(vec![]);
+    };
+    let Some(shipped) = find_shipped_libstd(libdir) else {
+        return Ok(vec![]);
+    };
+    let Some(out_dir) = out_bin.parent() else {
+        return Ok(vec![]);
+    };
+    let dest = out_dir.join(&shipped);
+    let copy = match (
+        std::fs::metadata(libdir.join(&shipped)),
+        std::fs::metadata(&dest),
+    ) {
+        (Ok(src), Ok(dst)) => src.len() != dst.len(),
+        _ => true,
+    };
+    if copy {
+        std::fs::copy(libdir.join(&shipped), &dest)
+            .map_err(|e| FfiError(format!("cannot stage {}: {e}", dest.display())))?;
+    }
+    // Windows searches the exe directory for DLLs — no rpath needed.
+    Ok(vec![])
 }
 
 #[cfg(test)]

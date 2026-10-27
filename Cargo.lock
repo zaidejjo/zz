@@ -3580,7 +3580,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zz-dap"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3591,11 +3591,11 @@ dependencies = [
 
 [[package]]
 name = "zz_arena"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "zz_checker"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3604,7 +3604,7 @@ dependencies = [
 
 [[package]]
 name = "zz_cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "codespan-reporting",
@@ -3636,7 +3636,7 @@ dependencies = [
 
 [[package]]
 name = "zz_codegen"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rayon",
  "zz_checker",
@@ -3651,7 +3651,7 @@ dependencies = [
 
 [[package]]
 name = "zz_fmt"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ignore",
  "rayon",
@@ -3664,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "zz_frontend"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "codespan-reporting",
  "colored",
@@ -3673,7 +3673,7 @@ dependencies = [
 
 [[package]]
 name = "zz_hir"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "zz_checker",
  "zz_frontend",
@@ -3681,7 +3681,7 @@ dependencies = [
 
 [[package]]
 name = "zz_ir"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "zz_checker",
  "zz_frontend",
@@ -3691,7 +3691,7 @@ dependencies = [
 
 [[package]]
 name = "zz_lsp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dashmap 6.2.1",
  "env_logger",
@@ -3711,7 +3711,7 @@ dependencies = [
 
 [[package]]
 name = "zz_native_rt"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3751,7 +3751,7 @@ dependencies = [
 
 [[package]]
 name = "zz_pm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -3771,7 +3771,7 @@ dependencies = [
 
 [[package]]
 name = "zz_runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "codespan-reporting",
  "loom",
@@ -3782,7 +3782,7 @@ dependencies = [
 
 [[package]]
 name = "zz_stdlib"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-deque",
