@@ -171,8 +171,8 @@ jobs:
         shell: bash
         run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
 
-      - name: 'test (PR: ASan+UBSan AOT leg)'
-        if: github.event_name == 'pull_request' && inputs.clang_pin != ''
+      - name: 'ASan+UBSan AOT leg (pinned clang leg only)'
+        if: inputs.clang_pin != ''
         shell: bash
         run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
 
