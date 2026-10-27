@@ -51,16 +51,20 @@ const ZZ_SOURCES: &[(&str, &str)] = &[
 ];
 
 /// Compiled pure-ZZ stdlib programs, computed once.
-static COMPILED: OnceLock<Vec<TypedProgram>> = OnceLock::new();
+static COMPILED: OnceLock<Vec<Result<TypedProgram, String>>> = OnceLock::new();
 
 /// Per-program lazy slots: scoped runs compile only the programs in the
 /// import closure instead of all fifteen (each `compile_one` is
 /// independent — same global seeds, no cross-program state). Full-access
 /// paths (`zz_stdlib_programs`, codegen) still compile everything once.
-const fn new_slot() -> OnceLock<TypedProgram> {
+///
+/// Each slot holds a `Result` so a compile error in one embedded
+/// stdlib module is reported as a diagnostic instead of panicking the
+/// process.
+const fn new_slot() -> OnceLock<Result<TypedProgram, String>> {
     OnceLock::new()
 }
-static SLOTS: [OnceLock<TypedProgram>; 16] = [
+static SLOTS: [OnceLock<Result<TypedProgram, String>>; 16] = [
     new_slot(),
     new_slot(),
     new_slot(),
@@ -85,19 +89,19 @@ const _: () = assert!(
 );
 
 /// Compile (once) and borrow one embedded program by `ZZ_SOURCES` index.
-fn program_at(idx: usize) -> &'static TypedProgram {
+///
+/// Returns a `Result` so a compile error in one embedded stdlib module is
+/// surfaced as a diagnostic instead of panicking the process.
+fn program_at(idx: usize) -> &'static Result<TypedProgram, String> {
     let (name, source) = ZZ_SOURCES[idx];
     SLOTS[idx].get_or_init(|| {
-        match compile_one(
+        compile_one(
             name,
             source,
             &HashMap::new(),
             crate::funcs::stdlib_funcs_cached(),
             &HashMap::new(),
-        ) {
-            Ok(tp) => tp,
-            Err(e) => panic!("pure-ZZ stdlib compilation failed: {e}"),
-        }
+        )
     })
 }
 
@@ -151,7 +155,9 @@ fn compile_one(
 /// The resulting [`TypedProgram`]s contain the original AST plus the resolved
 /// type map. The VM executes them to populate the environment with the
 /// compiled functions; AOT codegen lowers them to C.
-fn compile_all() -> Vec<TypedProgram> {
+/// Each element is a `Result` so a compile error in one module is reported
+/// instead of panicking the process.
+fn compile_all() -> Vec<Result<TypedProgram, String>> {
     (0..ZZ_SOURCES.len())
         .map(|idx| program_at(idx).clone())
         .collect()
@@ -159,17 +165,20 @@ fn compile_all() -> Vec<TypedProgram> {
 
 /// Get the compiled pure-ZZ stdlib programs.
 ///
-/// Returns a reference to a `Vec<TypedProgram>` that is computed exactly once.
-/// Each element corresponds to one embedded `.zz` file, in compilation order.
-pub fn zz_stdlib_programs() -> &'static [TypedProgram] {
+/// Returns a reference to a `Vec<Result<TypedProgram, String>>` that is
+/// computed exactly once. Each element corresponds to one embedded `.zz`
+/// file, in compilation order. An `Err` element means that module failed to
+/// compile; callers must handle it rather than assuming every module
+/// compiled successfully.
+pub fn zz_stdlib_programs() -> &'static [Result<TypedProgram, String>] {
     COMPILED.get_or_init(compile_all)
 }
 
 /// Borrow one compiled program by `ZZ_SOURCES` index (compiles it on
 /// first use). Scoped runs resolve indices via [`stdlib_program_closure`]
 /// and touch only the needed slots — an import-free program compiles zero
-/// stdlib sources.
-pub fn zz_stdlib_program_at(idx: usize) -> &'static TypedProgram {
+/// stdlib sources. Returns `Err` if the module failed to compile.
+pub fn zz_stdlib_program_at(idx: usize) -> &'static Result<TypedProgram, String> {
     program_at(idx)
 }
 
@@ -332,6 +341,7 @@ mod tests {
         assert_eq!(programs.len(), 16, "expected 16 pure-ZZ stdlib modules");
         // Each module should have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
+            let tp = tp.as_ref().expect("stdlib module should compile");
             assert!(
                 !tp.types.is_empty(),
                 "module {i} should have resolved types"
@@ -342,7 +352,7 @@ mod tests {
     #[test]
     fn pure_zz_str_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let str_prog = &programs[0]; // str/mod.zz
+        let str_prog = programs[0].as_ref().expect("str module should compile"); // str/mod.zz
         assert!(
             str_prog.funcs.contains_key("str.repeat"),
             "str.repeat should be defined"
@@ -372,7 +382,7 @@ mod tests {
     #[test]
     fn pure_zz_math_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let math_prog = &programs[1]; // math/mod.zz
+        let math_prog = programs[1].as_ref().expect("math module should compile"); // math/mod.zz
         assert!(
             math_prog.funcs.contains_key("math.sum"),
             "math.sum should be defined"
@@ -457,7 +467,9 @@ mod tests {
     #[test]
     fn pure_zz_vec_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let vec_prog = &programs[2]; // collections/vec.zz
+        let vec_prog = programs[2]
+            .as_ref()
+            .expect("collections/vec module should compile"); // collections/vec.zz
         assert!(
             vec_prog.funcs.contains_key("vec.fold"),
             "vec.fold should be defined"
@@ -512,7 +524,7 @@ mod tests {
     #[test]
     fn pure_zz_regexp_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let regexp_prog = &programs[4]; // regexp/mod.zz
+        let regexp_prog = programs[4].as_ref().expect("regexp module should compile"); // regexp/mod.zz
         assert!(
             regexp_prog.funcs.contains_key("Regexp.new"),
             "Regexp.new should be defined"
@@ -526,7 +538,7 @@ mod tests {
     #[test]
     fn pure_zz_time_has_duration() {
         let programs = zz_stdlib_programs();
-        let time_prog = &programs[5]; // time/mod.zz
+        let time_prog = programs[5].as_ref().expect("time module should compile"); // time/mod.zz
         for name in [
             "time.micros",
             "time.millis",
@@ -547,7 +559,7 @@ mod tests {
     #[test]
     fn pure_zz_path_has_helpers() {
         let programs = zz_stdlib_programs();
-        let path_prog = &programs[8]; // path/mod.zz
+        let path_prog = programs[8].as_ref().expect("path module should compile"); // path/mod.zz
         for name in [
             "path.join",
             "path.join_all",
@@ -567,7 +579,7 @@ mod tests {
     #[test]
     fn pure_zz_http_has_helpers() {
         let programs = zz_stdlib_programs();
-        let http_prog = &programs[9]; // http/mod.zz
+        let http_prog = programs[9].as_ref().expect("http module should compile"); // http/mod.zz
         for name in [
             "http.use",
             "http.ok",
@@ -591,7 +603,7 @@ mod tests {
     #[test]
     fn pure_zz_args_has_parser() {
         let programs = zz_stdlib_programs();
-        let args_prog = &programs[6]; // args/mod.zz
+        let args_prog = programs[6].as_ref().expect("args module should compile"); // args/mod.zz
         assert!(
             args_prog.funcs.contains_key("ArgsParser.new"),
             "ArgsParser.new should be defined"
@@ -602,7 +614,9 @@ mod tests {
     fn pure_zz_new_modules_have_expected_functions() {
         let programs = zz_stdlib_programs();
         // map (collections/map.zz, index 10)
-        let map_prog = &programs[10];
+        let map_prog = programs[10]
+            .as_ref()
+            .expect("collections/map module should compile");
         for name in [
             "map.has",
             "map.get_or",
@@ -617,7 +631,9 @@ mod tests {
             );
         }
         // set (collections/set.zz, index 11)
-        let set_prog = &programs[11];
+        let set_prog = programs[11]
+            .as_ref()
+            .expect("collections/set module should compile");
         for name in [
             "set.has",
             "set.insert",
@@ -631,7 +647,7 @@ mod tests {
             );
         }
         // dec (dec/mod.zz, index 12)
-        let dec_prog = &programs[12];
+        let dec_prog = programs[12].as_ref().expect("dec module should compile");
         for name in ["dec.add", "dec.cmp", "dec.format", "dec.is_valid"] {
             assert!(
                 dec_prog.funcs.contains_key(name),
@@ -639,7 +655,7 @@ mod tests {
             );
         }
         // bytes builders (bytes/mod.zz, index 13)
-        let bytes_prog = &programs[13];
+        let bytes_prog = programs[13].as_ref().expect("bytes module should compile");
         for name in [
             "bytes.builder",
             "bytes.push_byte",
@@ -652,7 +668,7 @@ mod tests {
             );
         }
         // csv (csv/mod.zz, index 14)
-        let csv_prog = &programs[14];
+        let csv_prog = programs[14].as_ref().expect("csv module should compile");
         for name in ["csv.parse", "csv.stringify", "csv.to_json", "csv.header"] {
             assert!(
                 csv_prog.funcs.contains_key(name),
@@ -660,7 +676,9 @@ mod tests {
             );
         }
         // property (property/mod.zz, index 15)
-        let prop_prog = &programs[15];
+        let prop_prog = programs[15]
+            .as_ref()
+            .expect("property module should compile");
         for name in [
             "property.seed",
             "property.int_in",
@@ -681,7 +699,7 @@ mod tests {
     #[test]
     fn pure_zz_colors_has_palette() {
         let programs = zz_stdlib_programs();
-        let colors_prog = &programs[7]; // colors/mod.zz
+        let colors_prog = programs[7].as_ref().expect("colors module should compile"); // colors/mod.zz
         for name in [
             "colors.red",
             "colors.green",
@@ -767,6 +785,7 @@ mod tests {
         let mut definer: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for (idx, tp) in programs.iter().enumerate() {
+            let tp = tp.as_ref().expect("stdlib module should compile");
             for key in super::own_func_names(tp) {
                 definer.insert(key.clone(), idx);
                 definer.insert(format!("std.{key}"), idx);
@@ -776,6 +795,7 @@ mod tests {
         let own_ns: Vec<Vec<String>> = programs
             .iter()
             .map(|tp| {
+                let tp = tp.as_ref().expect("stdlib module should compile");
                 let mut v: Vec<String> = super::own_func_names(tp)
                     .iter()
                     .map(|k| k.split('.').next().unwrap_or("").to_string())
@@ -847,6 +867,7 @@ mod tests {
         let valid: std::collections::HashSet<&str> =
             crate::STDLIB_MODULES.iter().copied().collect();
         for (idx, tp) in programs.iter().enumerate() {
+            let tp = tp.as_ref().expect("stdlib module should compile");
             for key in super::own_func_names(tp) {
                 if let Some((ns, _)) = key.split_once('.') {
                     assert!(
