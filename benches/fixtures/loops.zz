@@ -1,0 +1,48 @@
+import std.time as time_mod
+
+// Loop-heavy compile-time fixture: nested loops across many iterations.
+// Exercises checker control-flow analysis and AOT lowering of loops.
+
+func sum_n(n: int) -> int {
+    s := 0
+    for i in 0..n {
+        s = s + i
+    }
+    return s
+}
+
+func sum_sq(n: int) -> int {
+    s := 0
+    for i in 0..n {
+        s = s + i * i
+    }
+    return s
+}
+
+func mat_sum(rows: int, cols: int) -> int {
+    s := 0
+    for i in 0..rows {
+        for _j in 0..cols {
+            s = s + i * _j
+        }
+    }
+    return s
+}
+
+func tri(n: int) -> int {
+    s := 0
+    for i in 0..n {
+        for _j in 0..i {
+            s = s + 1
+        }
+    }
+    return s
+}
+
+func main() {
+    t0 := time_mod.now_ms()
+    r := sum_n(10000) + sum_sq(1000) + mat_sum(50, 50) + tri(200)
+    t1 := time_mod.now_ms()
+    println("loops: {t1 - t0}ms result={r}")
+    println("done")
+}

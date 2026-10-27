@@ -1,0 +1,61 @@
+import std.time as time_mod
+
+// Small compile-time fixture: ~12 functions, trivial bodies.
+// Exercises the frontend lexer/parser/checker and a minimal AOT lower.
+
+func add(a: int, b: int) -> int {
+    return a + b
+}
+
+func sub(a: int, b: int) -> int {
+    return a - b
+}
+
+func mul(a: int, b: int) -> int {
+    return a * b
+}
+
+func div(a: int, b: int) -> int {
+    return a / b
+}
+
+func rem(a: int, b: int) -> int {
+    return a % b
+}
+
+func neg(a: int) -> int {
+    return -a
+}
+
+func is_pos(a: int) -> bool {
+    return a > 0
+}
+
+func is_neg(a: int) -> bool {
+    return a < 0
+}
+
+func is_zero(a: int) -> bool {
+    return a == 0
+}
+
+func inc(a: int) -> int {
+    return a + 1
+}
+
+func dec(a: int) -> int {
+    return a - 1
+}
+
+func twice(a: int) -> int {
+    return a * 2
+}
+
+func main() {
+    t0 := time_mod.now_ms()
+    r := add(1, 2) + sub(5, 3) * mul(4, 2) / div(8, 2) % rem(10, 3)
+    t1 := time_mod.now_ms()
+    println("small: {t1 - t0}ms result={r}")
+    _ = neg(inc(dec(twice(0))))
+    println("done")
+}

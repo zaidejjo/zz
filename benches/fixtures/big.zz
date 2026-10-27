@@ -1,0 +1,411 @@
+import std.time as time_mod
+
+// Big-file compile-time fixture: ~200 functions, trivial bodies.
+// Exercises frontend lexer/parser/checker + AOT lower at scale.
+func f1(a: int, b: int) -> int { return a + 1 * b }
+func f2(a: int, b: int) -> int { return a + 2 * b }
+func f3(a: int, b: int) -> int { return a + 3 * b }
+func f4(a: int, b: int) -> int { return a + 4 * b }
+func f5(a: int, b: int) -> int { return a + 5 * b }
+func f6(a: int, b: int) -> int { return a + 6 * b }
+func f7(a: int, b: int) -> int { return a + 7 * b }
+func f8(a: int, b: int) -> int { return a + 8 * b }
+func f9(a: int, b: int) -> int { return a + 9 * b }
+func f10(a: int, b: int) -> int { return a + 10 * b }
+func f11(a: int, b: int) -> int { return a + 11 * b }
+func f12(a: int, b: int) -> int { return a + 12 * b }
+func f13(a: int, b: int) -> int { return a + 13 * b }
+func f14(a: int, b: int) -> int { return a + 14 * b }
+func f15(a: int, b: int) -> int { return a + 15 * b }
+func f16(a: int, b: int) -> int { return a + 16 * b }
+func f17(a: int, b: int) -> int { return a + 17 * b }
+func f18(a: int, b: int) -> int { return a + 18 * b }
+func f19(a: int, b: int) -> int { return a + 19 * b }
+func f20(a: int, b: int) -> int { return a + 20 * b }
+func f21(a: int, b: int) -> int { return a + 21 * b }
+func f22(a: int, b: int) -> int { return a + 22 * b }
+func f23(a: int, b: int) -> int { return a + 23 * b }
+func f24(a: int, b: int) -> int { return a + 24 * b }
+func f25(a: int, b: int) -> int { return a + 25 * b }
+func f26(a: int, b: int) -> int { return a + 26 * b }
+func f27(a: int, b: int) -> int { return a + 27 * b }
+func f28(a: int, b: int) -> int { return a + 28 * b }
+func f29(a: int, b: int) -> int { return a + 29 * b }
+func f30(a: int, b: int) -> int { return a + 30 * b }
+func f31(a: int, b: int) -> int { return a + 31 * b }
+func f32(a: int, b: int) -> int { return a + 32 * b }
+func f33(a: int, b: int) -> int { return a + 33 * b }
+func f34(a: int, b: int) -> int { return a + 34 * b }
+func f35(a: int, b: int) -> int { return a + 35 * b }
+func f36(a: int, b: int) -> int { return a + 36 * b }
+func f37(a: int, b: int) -> int { return a + 37 * b }
+func f38(a: int, b: int) -> int { return a + 38 * b }
+func f39(a: int, b: int) -> int { return a + 39 * b }
+func f40(a: int, b: int) -> int { return a + 40 * b }
+func f41(a: int, b: int) -> int { return a + 41 * b }
+func f42(a: int, b: int) -> int { return a + 42 * b }
+func f43(a: int, b: int) -> int { return a + 43 * b }
+func f44(a: int, b: int) -> int { return a + 44 * b }
+func f45(a: int, b: int) -> int { return a + 45 * b }
+func f46(a: int, b: int) -> int { return a + 46 * b }
+func f47(a: int, b: int) -> int { return a + 47 * b }
+func f48(a: int, b: int) -> int { return a + 48 * b }
+func f49(a: int, b: int) -> int { return a + 49 * b }
+func f50(a: int, b: int) -> int { return a + 50 * b }
+func f51(a: int, b: int) -> int { return a + 51 * b }
+func f52(a: int, b: int) -> int { return a + 52 * b }
+func f53(a: int, b: int) -> int { return a + 53 * b }
+func f54(a: int, b: int) -> int { return a + 54 * b }
+func f55(a: int, b: int) -> int { return a + 55 * b }
+func f56(a: int, b: int) -> int { return a + 56 * b }
+func f57(a: int, b: int) -> int { return a + 57 * b }
+func f58(a: int, b: int) -> int { return a + 58 * b }
+func f59(a: int, b: int) -> int { return a + 59 * b }
+func f60(a: int, b: int) -> int { return a + 60 * b }
+func f61(a: int, b: int) -> int { return a + 61 * b }
+func f62(a: int, b: int) -> int { return a + 62 * b }
+func f63(a: int, b: int) -> int { return a + 63 * b }
+func f64(a: int, b: int) -> int { return a + 64 * b }
+func f65(a: int, b: int) -> int { return a + 65 * b }
+func f66(a: int, b: int) -> int { return a + 66 * b }
+func f67(a: int, b: int) -> int { return a + 67 * b }
+func f68(a: int, b: int) -> int { return a + 68 * b }
+func f69(a: int, b: int) -> int { return a + 69 * b }
+func f70(a: int, b: int) -> int { return a + 70 * b }
+func f71(a: int, b: int) -> int { return a + 71 * b }
+func f72(a: int, b: int) -> int { return a + 72 * b }
+func f73(a: int, b: int) -> int { return a + 73 * b }
+func f74(a: int, b: int) -> int { return a + 74 * b }
+func f75(a: int, b: int) -> int { return a + 75 * b }
+func f76(a: int, b: int) -> int { return a + 76 * b }
+func f77(a: int, b: int) -> int { return a + 77 * b }
+func f78(a: int, b: int) -> int { return a + 78 * b }
+func f79(a: int, b: int) -> int { return a + 79 * b }
+func f80(a: int, b: int) -> int { return a + 80 * b }
+func f81(a: int, b: int) -> int { return a + 81 * b }
+func f82(a: int, b: int) -> int { return a + 82 * b }
+func f83(a: int, b: int) -> int { return a + 83 * b }
+func f84(a: int, b: int) -> int { return a + 84 * b }
+func f85(a: int, b: int) -> int { return a + 85 * b }
+func f86(a: int, b: int) -> int { return a + 86 * b }
+func f87(a: int, b: int) -> int { return a + 87 * b }
+func f88(a: int, b: int) -> int { return a + 88 * b }
+func f89(a: int, b: int) -> int { return a + 89 * b }
+func f90(a: int, b: int) -> int { return a + 90 * b }
+func f91(a: int, b: int) -> int { return a + 91 * b }
+func f92(a: int, b: int) -> int { return a + 92 * b }
+func f93(a: int, b: int) -> int { return a + 93 * b }
+func f94(a: int, b: int) -> int { return a + 94 * b }
+func f95(a: int, b: int) -> int { return a + 95 * b }
+func f96(a: int, b: int) -> int { return a + 96 * b }
+func f97(a: int, b: int) -> int { return a + 97 * b }
+func f98(a: int, b: int) -> int { return a + 98 * b }
+func f99(a: int, b: int) -> int { return a + 99 * b }
+func f100(a: int, b: int) -> int { return a + 100 * b }
+func f101(a: int, b: int) -> int { return a + 101 * b }
+func f102(a: int, b: int) -> int { return a + 102 * b }
+func f103(a: int, b: int) -> int { return a + 103 * b }
+func f104(a: int, b: int) -> int { return a + 104 * b }
+func f105(a: int, b: int) -> int { return a + 105 * b }
+func f106(a: int, b: int) -> int { return a + 106 * b }
+func f107(a: int, b: int) -> int { return a + 107 * b }
+func f108(a: int, b: int) -> int { return a + 108 * b }
+func f109(a: int, b: int) -> int { return a + 109 * b }
+func f110(a: int, b: int) -> int { return a + 110 * b }
+func f111(a: int, b: int) -> int { return a + 111 * b }
+func f112(a: int, b: int) -> int { return a + 112 * b }
+func f113(a: int, b: int) -> int { return a + 113 * b }
+func f114(a: int, b: int) -> int { return a + 114 * b }
+func f115(a: int, b: int) -> int { return a + 115 * b }
+func f116(a: int, b: int) -> int { return a + 116 * b }
+func f117(a: int, b: int) -> int { return a + 117 * b }
+func f118(a: int, b: int) -> int { return a + 118 * b }
+func f119(a: int, b: int) -> int { return a + 119 * b }
+func f120(a: int, b: int) -> int { return a + 120 * b }
+func f121(a: int, b: int) -> int { return a + 121 * b }
+func f122(a: int, b: int) -> int { return a + 122 * b }
+func f123(a: int, b: int) -> int { return a + 123 * b }
+func f124(a: int, b: int) -> int { return a + 124 * b }
+func f125(a: int, b: int) -> int { return a + 125 * b }
+func f126(a: int, b: int) -> int { return a + 126 * b }
+func f127(a: int, b: int) -> int { return a + 127 * b }
+func f128(a: int, b: int) -> int { return a + 128 * b }
+func f129(a: int, b: int) -> int { return a + 129 * b }
+func f130(a: int, b: int) -> int { return a + 130 * b }
+func f131(a: int, b: int) -> int { return a + 131 * b }
+func f132(a: int, b: int) -> int { return a + 132 * b }
+func f133(a: int, b: int) -> int { return a + 133 * b }
+func f134(a: int, b: int) -> int { return a + 134 * b }
+func f135(a: int, b: int) -> int { return a + 135 * b }
+func f136(a: int, b: int) -> int { return a + 136 * b }
+func f137(a: int, b: int) -> int { return a + 137 * b }
+func f138(a: int, b: int) -> int { return a + 138 * b }
+func f139(a: int, b: int) -> int { return a + 139 * b }
+func f140(a: int, b: int) -> int { return a + 140 * b }
+func f141(a: int, b: int) -> int { return a + 141 * b }
+func f142(a: int, b: int) -> int { return a + 142 * b }
+func f143(a: int, b: int) -> int { return a + 143 * b }
+func f144(a: int, b: int) -> int { return a + 144 * b }
+func f145(a: int, b: int) -> int { return a + 145 * b }
+func f146(a: int, b: int) -> int { return a + 146 * b }
+func f147(a: int, b: int) -> int { return a + 147 * b }
+func f148(a: int, b: int) -> int { return a + 148 * b }
+func f149(a: int, b: int) -> int { return a + 149 * b }
+func f150(a: int, b: int) -> int { return a + 150 * b }
+func f151(a: int, b: int) -> int { return a + 151 * b }
+func f152(a: int, b: int) -> int { return a + 152 * b }
+func f153(a: int, b: int) -> int { return a + 153 * b }
+func f154(a: int, b: int) -> int { return a + 154 * b }
+func f155(a: int, b: int) -> int { return a + 155 * b }
+func f156(a: int, b: int) -> int { return a + 156 * b }
+func f157(a: int, b: int) -> int { return a + 157 * b }
+func f158(a: int, b: int) -> int { return a + 158 * b }
+func f159(a: int, b: int) -> int { return a + 159 * b }
+func f160(a: int, b: int) -> int { return a + 160 * b }
+func f161(a: int, b: int) -> int { return a + 161 * b }
+func f162(a: int, b: int) -> int { return a + 162 * b }
+func f163(a: int, b: int) -> int { return a + 163 * b }
+func f164(a: int, b: int) -> int { return a + 164 * b }
+func f165(a: int, b: int) -> int { return a + 165 * b }
+func f166(a: int, b: int) -> int { return a + 166 * b }
+func f167(a: int, b: int) -> int { return a + 167 * b }
+func f168(a: int, b: int) -> int { return a + 168 * b }
+func f169(a: int, b: int) -> int { return a + 169 * b }
+func f170(a: int, b: int) -> int { return a + 170 * b }
+func f171(a: int, b: int) -> int { return a + 171 * b }
+func f172(a: int, b: int) -> int { return a + 172 * b }
+func f173(a: int, b: int) -> int { return a + 173 * b }
+func f174(a: int, b: int) -> int { return a + 174 * b }
+func f175(a: int, b: int) -> int { return a + 175 * b }
+func f176(a: int, b: int) -> int { return a + 176 * b }
+func f177(a: int, b: int) -> int { return a + 177 * b }
+func f178(a: int, b: int) -> int { return a + 178 * b }
+func f179(a: int, b: int) -> int { return a + 179 * b }
+func f180(a: int, b: int) -> int { return a + 180 * b }
+func f181(a: int, b: int) -> int { return a + 181 * b }
+func f182(a: int, b: int) -> int { return a + 182 * b }
+func f183(a: int, b: int) -> int { return a + 183 * b }
+func f184(a: int, b: int) -> int { return a + 184 * b }
+func f185(a: int, b: int) -> int { return a + 185 * b }
+func f186(a: int, b: int) -> int { return a + 186 * b }
+func f187(a: int, b: int) -> int { return a + 187 * b }
+func f188(a: int, b: int) -> int { return a + 188 * b }
+func f189(a: int, b: int) -> int { return a + 189 * b }
+func f190(a: int, b: int) -> int { return a + 190 * b }
+func f191(a: int, b: int) -> int { return a + 191 * b }
+func f192(a: int, b: int) -> int { return a + 192 * b }
+func f193(a: int, b: int) -> int { return a + 193 * b }
+func f194(a: int, b: int) -> int { return a + 194 * b }
+func f195(a: int, b: int) -> int { return a + 195 * b }
+func f196(a: int, b: int) -> int { return a + 196 * b }
+func f197(a: int, b: int) -> int { return a + 197 * b }
+func f198(a: int, b: int) -> int { return a + 198 * b }
+func f199(a: int, b: int) -> int { return a + 199 * b }
+func f200(a: int, b: int) -> int { return a + 200 * b }
+
+func main() {
+    t0 := time_mod.now_ms()
+    r := f1(1, 2)
+    r = r + f2(r, 2)
+    r = r + f3(r, 3)
+    r = r + f4(r, 4)
+    r = r + f5(r, 5)
+    r = r + f6(r, 6)
+    r = r + f7(r, 7)
+    r = r + f8(r, 8)
+    r = r + f9(r, 9)
+    r = r + f10(r, 10)
+    r = r + f11(r, 11)
+    r = r + f12(r, 12)
+    r = r + f13(r, 13)
+    r = r + f14(r, 14)
+    r = r + f15(r, 15)
+    r = r + f16(r, 16)
+    r = r + f17(r, 17)
+    r = r + f18(r, 18)
+    r = r + f19(r, 19)
+    r = r + f20(r, 20)
+    r = r + f21(r, 21)
+    r = r + f22(r, 22)
+    r = r + f23(r, 23)
+    r = r + f24(r, 24)
+    r = r + f25(r, 25)
+    r = r + f26(r, 26)
+    r = r + f27(r, 27)
+    r = r + f28(r, 28)
+    r = r + f29(r, 29)
+    r = r + f30(r, 30)
+    r = r + f31(r, 31)
+    r = r + f32(r, 32)
+    r = r + f33(r, 33)
+    r = r + f34(r, 34)
+    r = r + f35(r, 35)
+    r = r + f36(r, 36)
+    r = r + f37(r, 37)
+    r = r + f38(r, 38)
+    r = r + f39(r, 39)
+    r = r + f40(r, 40)
+    r = r + f41(r, 41)
+    r = r + f42(r, 42)
+    r = r + f43(r, 43)
+    r = r + f44(r, 44)
+    r = r + f45(r, 45)
+    r = r + f46(r, 46)
+    r = r + f47(r, 47)
+    r = r + f48(r, 48)
+    r = r + f49(r, 49)
+    r = r + f50(r, 50)
+    r = r + f51(r, 51)
+    r = r + f52(r, 52)
+    r = r + f53(r, 53)
+    r = r + f54(r, 54)
+    r = r + f55(r, 55)
+    r = r + f56(r, 56)
+    r = r + f57(r, 57)
+    r = r + f58(r, 58)
+    r = r + f59(r, 59)
+    r = r + f60(r, 60)
+    r = r + f61(r, 61)
+    r = r + f62(r, 62)
+    r = r + f63(r, 63)
+    r = r + f64(r, 64)
+    r = r + f65(r, 65)
+    r = r + f66(r, 66)
+    r = r + f67(r, 67)
+    r = r + f68(r, 68)
+    r = r + f69(r, 69)
+    r = r + f70(r, 70)
+    r = r + f71(r, 71)
+    r = r + f72(r, 72)
+    r = r + f73(r, 73)
+    r = r + f74(r, 74)
+    r = r + f75(r, 75)
+    r = r + f76(r, 76)
+    r = r + f77(r, 77)
+    r = r + f78(r, 78)
+    r = r + f79(r, 79)
+    r = r + f80(r, 80)
+    r = r + f81(r, 81)
+    r = r + f82(r, 82)
+    r = r + f83(r, 83)
+    r = r + f84(r, 84)
+    r = r + f85(r, 85)
+    r = r + f86(r, 86)
+    r = r + f87(r, 87)
+    r = r + f88(r, 88)
+    r = r + f89(r, 89)
+    r = r + f90(r, 90)
+    r = r + f91(r, 91)
+    r = r + f92(r, 92)
+    r = r + f93(r, 93)
+    r = r + f94(r, 94)
+    r = r + f95(r, 95)
+    r = r + f96(r, 96)
+    r = r + f97(r, 97)
+    r = r + f98(r, 98)
+    r = r + f99(r, 99)
+    r = r + f100(r, 100)
+    r = r + f101(r, 101)
+    r = r + f102(r, 102)
+    r = r + f103(r, 103)
+    r = r + f104(r, 104)
+    r = r + f105(r, 105)
+    r = r + f106(r, 106)
+    r = r + f107(r, 107)
+    r = r + f108(r, 108)
+    r = r + f109(r, 109)
+    r = r + f110(r, 110)
+    r = r + f111(r, 111)
+    r = r + f112(r, 112)
+    r = r + f113(r, 113)
+    r = r + f114(r, 114)
+    r = r + f115(r, 115)
+    r = r + f116(r, 116)
+    r = r + f117(r, 117)
+    r = r + f118(r, 118)
+    r = r + f119(r, 119)
+    r = r + f120(r, 120)
+    r = r + f121(r, 121)
+    r = r + f122(r, 122)
+    r = r + f123(r, 123)
+    r = r + f124(r, 124)
+    r = r + f125(r, 125)
+    r = r + f126(r, 126)
+    r = r + f127(r, 127)
+    r = r + f128(r, 128)
+    r = r + f129(r, 129)
+    r = r + f130(r, 130)
+    r = r + f131(r, 131)
+    r = r + f132(r, 132)
+    r = r + f133(r, 133)
+    r = r + f134(r, 134)
+    r = r + f135(r, 135)
+    r = r + f136(r, 136)
+    r = r + f137(r, 137)
+    r = r + f138(r, 138)
+    r = r + f139(r, 139)
+    r = r + f140(r, 140)
+    r = r + f141(r, 141)
+    r = r + f142(r, 142)
+    r = r + f143(r, 143)
+    r = r + f144(r, 144)
+    r = r + f145(r, 145)
+    r = r + f146(r, 146)
+    r = r + f147(r, 147)
+    r = r + f148(r, 148)
+    r = r + f149(r, 149)
+    r = r + f150(r, 150)
+    r = r + f151(r, 151)
+    r = r + f152(r, 152)
+    r = r + f153(r, 153)
+    r = r + f154(r, 154)
+    r = r + f155(r, 155)
+    r = r + f156(r, 156)
+    r = r + f157(r, 157)
+    r = r + f158(r, 158)
+    r = r + f159(r, 159)
+    r = r + f160(r, 160)
+    r = r + f161(r, 161)
+    r = r + f162(r, 162)
+    r = r + f163(r, 163)
+    r = r + f164(r, 164)
+    r = r + f165(r, 165)
+    r = r + f166(r, 166)
+    r = r + f167(r, 167)
+    r = r + f168(r, 168)
+    r = r + f169(r, 169)
+    r = r + f170(r, 170)
+    r = r + f171(r, 171)
+    r = r + f172(r, 172)
+    r = r + f173(r, 173)
+    r = r + f174(r, 174)
+    r = r + f175(r, 175)
+    r = r + f176(r, 176)
+    r = r + f177(r, 177)
+    r = r + f178(r, 178)
+    r = r + f179(r, 179)
+    r = r + f180(r, 180)
+    r = r + f181(r, 181)
+    r = r + f182(r, 182)
+    r = r + f183(r, 183)
+    r = r + f184(r, 184)
+    r = r + f185(r, 185)
+    r = r + f186(r, 186)
+    r = r + f187(r, 187)
+    r = r + f188(r, 188)
+    r = r + f189(r, 189)
+    r = r + f190(r, 190)
+    r = r + f191(r, 191)
+    r = r + f192(r, 192)
+    r = r + f193(r, 193)
+    r = r + f194(r, 194)
+    r = r + f195(r, 195)
+    r = r + f196(r, 196)
+    r = r + f197(r, 197)
+    r = r + f198(r, 198)
+    r = r + f199(r, 199)
+    r = r + f200(r, 200)
+    t1 := time_mod.now_ms()
+    println("big: {t1 - t0}ms result={r}")
+    println("done")
+}
