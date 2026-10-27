@@ -13,6 +13,7 @@
 //! `zz_str_view` (never a Rust-side struct mirror).
 
 use std::ffi::c_void;
+use std::os::raw::c_int;
 
 /// `zz_value` by value: 4-byte tag + 4-byte pad + 8-byte payload (16 total).
 #[repr(C)]
@@ -110,9 +111,10 @@ extern "C" {
     pub fn zz_bytes_view(v: CValue, out_ptr: *mut *const u8, out_len: *mut usize);
     /// Build a `ZZ_BYTES` by copying `len` bytes.
     pub fn zz_bytes_new(data: *const u8, len: usize) -> CValue;
-    /// Positional array read (cloned item, or unit when out of range).
-    /// The caller owns the clone and must release it with [`zz_release`].
-    pub fn zz_array_at(arr: CValue, i: usize) -> CValue;
+    /// Positional array read (cloned item, or unit when out of range, with
+    /// `*err` set on OOB / non-array). The caller owns the clone and must
+    /// release it with [`zz_release`].
+    pub fn zz_array_at(arr: CValue, i: usize, err: *mut c_int) -> CValue;
     /// Release one owned `zz_value` (balances a clone from `zz_array_at`).
     pub fn zz_value_release(v: CValue);
 }
@@ -190,7 +192,9 @@ pub fn cvalue_to_str_vec(v: CValue) -> Option<Vec<String>> {
     let mut out = Vec::with_capacity(n.min(1_000_000));
     for i in 0..n.min(1_000_000) {
         // SAFETY: `i` is in range; the clone is ours to release.
-        let item = unsafe { zz_array_at(v, i) };
+        let mut err: c_int = 0;
+        let item = unsafe { zz_array_at(v, i, &mut err) };
+        debug_assert_eq!(err, 0, "in-range array read must not set err");
         let s = cvalue_to_string(item).unwrap_or_default();
         // SAFETY: balances the clone above.
         unsafe { zz_value_release(item) };
