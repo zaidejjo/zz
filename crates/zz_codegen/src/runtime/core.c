@@ -566,7 +566,21 @@ zz_value zz_closure_make_ex_typed(
             rep->cell_size[i] =
                 sizes ? sizes[i] : sizeof(zz_value);
         }
-        for (size_t i = 0; i < nenv; i++) rep->env[i] = cells[i];
+        for (size_t i = 0; i < nenv; i++) {
+            // Never adopt a NULL cell: a closure that later reads a NULL
+            // captured cell dereferences NULL and segfaults (#645). When the
+            // source cell is NULL, allocate a valid cell holding zz_unit()
+            // — the closure takes ownership (freed in zz_closure_release_rep),
+            // matching the call-site-transfer design.
+            if (cells[i]) {
+                rep->env[i] = cells[i];
+            } else {
+                rep->env[i] = malloc(sizeof(zz_value));
+                if (rep->env[i]) {
+                    *(zz_value *)rep->env[i] = zz_unit();
+                }
+            }
+        }
     } else {
         rep->cell_kind = NULL;
         rep->cell_size = NULL;
