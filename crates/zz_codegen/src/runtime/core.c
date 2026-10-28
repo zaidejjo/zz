@@ -3893,12 +3893,19 @@ typedef struct {
     };
 } zz_db_handle;
 
-// Postgres backend (Rust staticlib). Weak imports: programs that never
-// touch PG link WITHOUT the staticlib (see `needs_native_rt`), so these
-// resolve to NULL there; any binary that can actually hold a PG handle
-// links the staticlib (the gate keys off sqlz/pg reachability) and sees
-// them. Guards live at the two creation sites below — a live PG handle
-// proves linkage, so use sites call directly.
+// Postgres backend (Rust staticlib). The archive is compiled per link
+// profile: `-DZZ_LINK_PG=1` when the program can actually reach PG (the
+// build links and force-extracts `libzz_native_rt.a`), `0` otherwise.
+// Programs that never touch PG must not carry even a *weak* reference:
+// Darwin's ld64 rejects an unresolved `weak_import` in an executable
+// (ELF allows it), which broke every non-PG AOT link on macOS.
+// `ZZ_LINK_PG` is defined by `cache::build_compile_flags`; the default
+// keeps the historical weak-reference shape for direct C builds.
+#ifndef ZZ_LINK_PG
+#define ZZ_LINK_PG 1
+#endif
+
+#if ZZ_LINK_PG
 #if defined(__APPLE__)
 #define ZZ_WEAK_IMPORT __attribute__((weak_import))
 #else
@@ -3908,13 +3915,18 @@ uint64_t zz_pg_connect_raw(const char *info, size_t len) ZZ_WEAK_IMPORT;
 int64_t zz_pg_exec_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 zz_value zz_pg_query_raw(uint64_t id, const char *sql, size_t len, const zz_value *binds, size_t nbinds) ZZ_WEAK_IMPORT;
 void zz_pg_close_raw(uint64_t id) ZZ_WEAK_IMPORT;
+#endif
 
 // Close the backend once and leave the shell as a tombstone. Idempotent:
 // a closed handle stays closed, and stale ZZ values read empty results.
 static void zz_db_backend_close(zz_db_handle *h) {
     if (!h) return;
     if (h->backend == ZZDB_PG) {
+#if ZZ_LINK_PG
         zz_pg_close_raw(h->pg_id);
+#endif
+        // Without the backend no PG handle can exist (the creation sites
+        // below refuse), so there is nothing to close.
     }
 #if ZZ_HAS_SQLITE3
     else if (h->backend == ZZDB_SQLITE) {
@@ -3947,6 +3959,11 @@ void zz_db_release_handle(void *db) {
 // conninfo is never printed (it may carry passwords).
 zz_value zz_pg_connect(zz_value info, int *err) {
     (void)err;
+#if !ZZ_LINK_PG
+    (void)info;
+    fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
+    exit(1);
+#else
     if (info.tag != ZZ_STR || !info.s) {
         fprintf(stderr, "zz error: pg.connect failed: expected a connection string\n");
         exit(1);
@@ -3970,6 +3987,7 @@ zz_value zz_pg_connect(zz_value info, int *err) {
     h->backend = ZZDB_PG;
     h->pg_id = id;
     return (zz_value){ZZ_DB, {.db = h}};
+#endif
 }
 
 zz_value zz_db_open(zz_value path, int *err) {
@@ -3980,6 +3998,10 @@ zz_value zz_db_open(zz_value path, int *err) {
     // handle enum below records the backend so query/exec/close
     // dispatch without re-sniffing.
     if (strncmp(p, "postgres://", 11) == 0 || strncmp(p, "postgresql://", 13) == 0) {
+#if !ZZ_LINK_PG
+        fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
+        exit(1);
+#else
         if (!zz_pg_connect_raw) {
             fprintf(stderr, "zz error: pg.connect failed: postgres support not linked in\n");
             exit(1);
@@ -3998,6 +4020,7 @@ zz_value zz_db_open(zz_value path, int *err) {
         h->backend = ZZDB_PG;
         h->pg_id = id;
         return (zz_value){ZZ_DB, {.db = h}};
+#endif
     }
 #if ZZ_HAS_SQLITE3
     sqlite3 *conn = NULL;
@@ -4083,6 +4106,7 @@ zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nb
         return zz_int(0);
     }
     if (h->backend == ZZDB_PG) {
+#if ZZ_LINK_PG
         int64_t n = zz_pg_exec_raw(h->pg_id, sql, strlen(sql), binds, nbinds);
         // The Rust side reports failure as -1 (a bare 0 is a legitimate
         // "no rows changed"); flag it exactly like the SQLite path so
@@ -4092,6 +4116,9 @@ zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nb
             n = 0;
         }
         return zz_int(n);
+#else
+        return zz_int(0); // unreachable: no PG handle without the backend
+#endif
     }
 #if ZZ_HAS_SQLITE3
     sqlite3 *conn = (sqlite3 *)h->sqlite;
@@ -4120,8 +4147,12 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
         return out;
     }
     if (h->backend == ZZDB_PG) {
+#if ZZ_LINK_PG
         zz_release(&out);
         return zz_pg_query_raw(h->pg_id, sql, strlen(sql), binds, nbinds);
+#else
+        return out; // unreachable: no PG handle without the backend
+#endif
     }
 #if ZZ_HAS_SQLITE3
     sqlite3 *conn = (sqlite3 *)h->sqlite;

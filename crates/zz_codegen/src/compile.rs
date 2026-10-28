@@ -1437,6 +1437,8 @@ pub fn compile_units(
         clang,
         opts.curl_link,
         opts.sqlite_link,
+        opts.pg_link && (opts.native_rt || opts.float_link),
+        opts.float_link,
     );
     let flags_hash = opts.fingerprint_with(target);
     let mut staged: Vec<(PathBuf, PathBuf, Option<PathBuf>)> = Vec::new();
@@ -2351,10 +2353,10 @@ mod toolchain_tests {
             zig: false,
             label: "clang",
         };
-        let unpinned = crate::cache::cache_key(None, true, &clang, false, false);
+        let unpinned = crate::cache::cache_key(None, true, &clang, false, false, false, false);
         assert!(unpinned.contains("-nopin-"), "unpinned key: {unpinned}");
         root.pin("0.17.0");
-        let pinned = crate::cache::cache_key(None, true, &clang, false, false);
+        let pinned = crate::cache::cache_key(None, true, &clang, false, false, false, false);
         assert!(pinned.contains("-0.17.0-"), "pinned key: {pinned}");
         assert_ne!(unpinned, pinned);
     }
