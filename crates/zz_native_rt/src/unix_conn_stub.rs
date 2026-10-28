@@ -74,6 +74,46 @@ impl StubStream {
 pub struct UnixConn {
     pub stream: StubStream,
     pub peer: String,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+}
+
+impl UnixConn {
+    pub fn set_read_timeout(&mut self, _dur: Option<Duration>) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    pub fn set_write_timeout(&mut self, _dur: Option<Duration>) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    pub fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            UNSUPPORTED,
+        ))
+    }
+
+    pub fn read_exact(&mut self, _buf: &mut [u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            UNSUPPORTED,
+        ))
+    }
+
+    pub fn write_all(&mut self, _buf: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            UNSUPPORTED,
+        ))
+    }
+
+    pub fn read_line(&mut self) -> std::io::Result<String> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            UNSUPPORTED,
+        ))
+    }
 }
 
 /// A Unix listener (never constructed on Windows).

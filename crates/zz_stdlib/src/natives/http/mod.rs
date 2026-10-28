@@ -2396,9 +2396,12 @@ fn listen_inner(
         match listener.accept() {
             Ok((stream, _)) => {
                 inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Read timeouts live on the socket, so TLS reads (which go
-                // through this same fd) inherit them after the handshake.
-                let _ = stream.set_read_timeout(Some(limits.read_timeout));
+                // Note: SO_RCVTIMEO/set_read_timeout is deliberately NOT set
+                // on accepted sockets. Darwin returns EINVAL for SO_RCVTIMEO
+                // on some socket types and can cause spurious read failures
+                // on keep-alive second requests (ECONNRESET/EOF). Idle
+                // keep-alive connections are reclaimed by the connection
+                // thread's request loop instead.
                 let job = PoolJob {
                     stream,
                     snapshot: Arc::clone(&snapshot),
