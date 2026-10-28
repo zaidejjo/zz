@@ -142,8 +142,16 @@ fn floor_le(artifact: &str, host: &str, prefix: &str) -> bool {
 }
 
 fn parse_dotted(s: &str) -> Option<(u32, u32)> {
-    let (a, b) = s.split_once('.')?;
-    Some((a.parse().ok()?, b.parse().ok()?))
+    // `sw_vers -productVersion` is `major.minor.patch` (`15.6.1`) and the
+    // patch is non-zero on every real runner, so parse the leading two
+    // components and ignore the rest.
+    let mut parts = s.split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = match parts.next() {
+        Some(m) => m.trim().parse().ok()?,
+        None => 0,
+    };
+    Some((major, minor))
 }
 
 /// LLVM triple for a platform tag (used as clang `--target=`).
@@ -1833,6 +1841,31 @@ mod tests {
             let tag = host_tag().expect("host tag detects");
             assert!(
                 tag.starts_with("linux-x86_64-") || tag.starts_with("linux-aarch64-"),
+                "{tag}"
+            );
+            crate::manifest::validate_platform_tag(&tag).expect("host tag valid");
+        }
+    }
+
+    #[test]
+    fn parse_dotted_accepts_patch_component() {
+        // `sw_vers -productVersion` reports `major.minor.patch` (15.6.1)
+        // on every real runner; the old parser required exactly two parts
+        // and failed every macOS host-tag call.
+        assert_eq!(parse_dotted("15.6.1"), Some((15, 6)));
+        assert_eq!(parse_dotted("26.0"), Some((26, 0)));
+        assert_eq!(parse_dotted("15"), Some((15, 0)));
+        assert_eq!(parse_dotted("15."), None);
+        assert_eq!(parse_dotted("x.y"), None);
+    }
+
+    #[test]
+    fn host_tag_macos_shape() {
+        #[cfg(target_os = "macos")]
+        {
+            let tag = host_tag().expect("host tag detects");
+            assert!(
+                tag.starts_with("macos-arm64-") || tag.starts_with("macos-x86_64-"),
                 "{tag}"
             );
             crate::manifest::validate_platform_tag(&tag).expect("host tag valid");
