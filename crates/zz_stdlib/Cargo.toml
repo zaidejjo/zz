@@ -16,7 +16,7 @@ libc = "0.2"
 memchr = "2"
 socket2 = "0.6"
 urlencoding = "2"
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream", "gzip", "json"] }
 rusqlite = { version = "0.32", features = ["bundled", "column_decltype"] }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
