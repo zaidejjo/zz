@@ -2,11 +2,16 @@ use super::*;
 use std::fs;
 
 /// Create a unique temp dir with the given (relative path → contents).
+///
+/// The pid matters: libtest runs these in one process (counter separates
+/// them), but `cargo nextest` gives every test its own process, so the
+/// counter alone restarts at 0 in each worker and two tests would share
+/// `/tmp/zz_loader_test_0` — one wiping the other's project mid-run.
 fn temp_project(files: &[(&str, &str)]) -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("zz_loader_test_{}", n));
+    let dir = std::env::temp_dir().join(format!("zz_loader_test_{}_{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     for (rel, contents) in files {
