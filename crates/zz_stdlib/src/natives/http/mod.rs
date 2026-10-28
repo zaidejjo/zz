@@ -2537,22 +2537,17 @@ fn spawn_pool(
                         continue;
                     }
                 };
-                // Blocking handshake, bounded by the accept-path read
-                // timeout on the socket. Probes and wrong-protocol
-                // clients fail here and just close.
-                let mut ok = true;
-                while conn.is_handshaking() {
-                    if conn.complete_io(&mut stream).is_err() {
-                        ok = false;
-                        break;
-                    }
-                }
-                if !ok {
+                // Write the server's first flight (ServerHello, etc.) after
+                // reading the client's ClientHello on the first I/O in
+                // handle_connection_thread. Using complete_io here would
+                // deadlock: it blocks reading the client's Finished while
+                // the client blocks reading our ServerHello. net.tls_accept
+                // does the same — just flush, then complete on first read/write.
+                let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
+                if tls_stream.flush().is_err() {
                     inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
-                let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
-                // TLS has no raw socket to hand over: upgrades are disabled.
                 match handle_connection_thread(
                     &job.snapshot,
                     &mut tls_stream,
