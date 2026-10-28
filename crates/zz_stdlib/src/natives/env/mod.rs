@@ -321,8 +321,11 @@ mod tests {
     #[test]
     fn set_cwd_roundtrip() {
         let mut interp = Interp::new();
-        let start = std::env::current_dir().unwrap();
-        let tmp = std::env::temp_dir();
+        // `current_dir()` reports the resolved path: macOS resolves the
+        // `/var` → `/private/var` symlink, so comparing against the raw
+        // `temp_dir()` spelling fails there even when `set_cwd` worked.
+        let start = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let mut args = vec![Value::Str(tmp.to_string_lossy().into_owned().into())];
         assert_eq!(
             val_to_string(&env_set_cwd(&mut interp, &mut args, Span::new(0, 0)).unwrap()),

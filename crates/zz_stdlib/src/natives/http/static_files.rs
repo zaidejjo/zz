@@ -293,13 +293,19 @@ mod tests {
             let (st, _, _) = serve_static_file(dir.to_str().unwrap(), evil, &[]).unwrap();
             assert_eq!(st, 403, "{evil}");
         }
-        // Symlink escapes are contained.
+        // Symlink escapes are contained. The escape target is built here
+        // rather than borrowed from the host (`/etc/hostname` does not
+        // exist on macOS), so the assertion tests containment, not the
+        // distribution's file layout.
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink("/etc", dir.join("evil")).unwrap();
+            let outside = tmpdir("trav-outside");
+            std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("evil")).unwrap();
             let (st, _, _) =
-                serve_static_file(dir.to_str().unwrap(), "/evil/hostname", &[]).unwrap();
+                serve_static_file(dir.to_str().unwrap(), "/evil/secret.txt", &[]).unwrap();
             assert_eq!(st, 403);
+            let _ = std::fs::remove_dir_all(&outside);
         }
     }
 

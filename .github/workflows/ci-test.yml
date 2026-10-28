@@ -55,6 +55,26 @@ jobs:
           # leak between legs.
           key: ${{ matrix.name }}
 
+      - name: free runner disk (linux)
+        if: inputs.family == 'linux'
+        run: |
+          set -euo pipefail
+          # Hosted images ship toolchains this repo never uses (Android
+          # SDK, .NET, GHC, CodeQL) — ~20 GB. A cold debug build of this
+          # workspace plus its ~20 test binaries needs more room than the
+          # image baseline leaves; when the disk fills, the runner gets a
+          # shutdown signal mid-step and the leg dies with no cargo error
+          # (seen on both Linux legs, runs 40607605907 / 40611973038 /
+          # 40614658084). Reclaim the unused toolchains and log the head
+          # room so a future regression is visible.
+          df -h /
+          free -m
+          for dir in /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                     /opt/hostedtoolcache/CodeQL; do
+            sudo rm -rf "$dir" || true
+          done
+          df -h /
+
       - name: install native deps (linux)
         if: inputs.family == 'linux'
         run: |
