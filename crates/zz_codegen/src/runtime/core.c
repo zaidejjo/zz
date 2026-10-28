@@ -5255,31 +5255,6 @@ static int spawn_workers(int listen_fd, int port) {
         }
         launched++;
     }
-
-// ---- Main server startup: one process, one thread per CPU ----
-
-static int spawn_workers(int listen_fd, int port) {
-    (void)port;
-    int workers = get_cpu_count();
-    pthread_t *threads = (pthread_t *)calloc((size_t)workers, sizeof(pthread_t));
-    if (!threads) return -1;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    // 256 KB stacks (default 8 MB wastes virtual space per thread and
-    // pressures overcommit accounting; workers use ~16 KB).
-    pthread_attr_setstacksize(&attr, 256 * 1024);
-    int launched = 0;
-    for (int w = 0; w < workers; w++) {
-        http_worker_arg *a = (http_worker_arg *)malloc(sizeof(http_worker_arg));
-        if (!a) break;
-        a->listen_fd = listen_fd;
-        a->worker_id = w;
-        if (pthread_create(&threads[w], &attr, worker_loop, a) != 0) {
-            free(a);
-            break;
-        }
-        launched++;
-    }
     pthread_attr_destroy(&attr);
     if (launched == 0) {
         free(threads);
@@ -5289,18 +5264,6 @@ static int spawn_workers(int listen_fd, int port) {
     for (int w = 0; w < launched; w++) pthread_join(threads[w], NULL);
     free(threads);
     return 0;
-}
-#else
-// Non-Linux fallback: no epoll here. Emits a clear error so a native
-// binary fails loudly at `listen` time instead of not compiling at all.
-// Uses only stdio so it builds on every target (incl. Windows/MSVC).
-static int spawn_workers(int listen_fd, int port) {
-    (void)listen_fd;
-    (void)port;
-    fprintf(stderr,
-        "zz_http_listen: the AOT HTTP server requires Linux (epoll); "
-        "use `zz run` (VM) on this platform\n");
-    return -1;
 }
 #endif
 
