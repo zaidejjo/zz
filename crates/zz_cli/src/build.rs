@@ -1298,6 +1298,16 @@ pub fn bin_name(stem: &str, target: Option<&str>) -> String {
     name
 }
 
+/// True when `p` is a native-runtime shared-library sidecar (`libstd-*`)
+/// staged next to a built binary by the codegen link step. Uses the
+/// platform-aware extensions so Windows (`dll`) isn't silently skipped.
+fn is_native_rt_sidecar(name: &str) -> bool {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str());
+    name.starts_with("libstd-") && matches!(ext, Some("so") | Some("dylib") | Some("dll"))
+}
+
 /// True when `p` is a file that can be executed: present, non-empty, and
 /// (on unix) carrying at least one execute bit. Protects the cache from
 /// stale artifacts left by interrupted builds, which clang may leave as
@@ -1628,8 +1638,7 @@ fn publish_to_bin(
             if let Ok(entries) = std::fs::read_dir(from_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    let is_sidecar = name.starts_with("libstd-")
-                        && (name.ends_with(".so") || name.ends_with(".dylib"));
+                    let is_sidecar = is_native_rt_sidecar(&name);
                     if is_sidecar && !to_dir.join(&name).is_file() {
                         let _ = std::fs::copy(entry.path(), to_dir.join(&name));
                     }
@@ -1719,8 +1728,7 @@ pub fn stage_exec_copy(built: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Str
         if let Ok(entries) = std::fs::read_dir(from_dir) {
             for entry in entries.flatten() {
                 let side = entry.file_name().to_string_lossy().into_owned();
-                let is_sidecar = side.starts_with("libstd-")
-                    && (side.ends_with(".so") || side.ends_with(".dylib"));
+                let is_sidecar = is_native_rt_sidecar(&side);
                 if is_sidecar {
                     let _ = std::fs::copy(entry.path(), dir.join(&side));
                 }

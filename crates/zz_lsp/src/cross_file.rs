@@ -440,7 +440,10 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("vendor").join("dep")).unwrap();
         let files = scan_for_zz_files(&root);
         assert_eq!(files.len(), 1, "only main.zz, got: {files:?}");
-        assert!(files[0].ends_with("main.zz"));
+        assert!(
+            files[0].file_name().and_then(|n| n.to_str()) == Some("main.zz"),
+            "unexpected file: {files:?}"
+        );
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::remove_dir_all(&outside).unwrap();
     }
