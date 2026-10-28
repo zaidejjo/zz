@@ -163,27 +163,42 @@ fn read_until_delim<R: std::io::Read>(
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     // On Darwin, blocking `read()` on a TCP socket can spuriously return
-    // `Ok(0)` (EOF) right after a `write()`+`flush()` on the same socket,
-    // breaking HTTP keep-alive second reads. Retry briefly before treating
-    // `Ok(0)` as a genuine peer close.
-    let mut empty_reads: u32 = 0;
+    // `Ok(0)` (EOF) or transient errors right after a `write()`+`flush()`
+    // on the same socket, breaking HTTP keep-alive second reads. Retry
+    // briefly before treating EOF/errors as a genuine peer close.
+    let mut retries: u32 = 0;
     loop {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            empty_reads += 1;
-            if empty_reads > 3 {
-                break; // persistent EOF: peer really closed
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                if retries > 3 {
+                    break; // persistent EOF: peer really closed
+                }
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            continue;
-        }
-        empty_reads = 0;
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > cap {
-            return Ok(None);
-        }
-        if find_subslice(&buf, delim).is_some() {
-            break;
+            Ok(n) => {
+                retries = 0;
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > cap {
+                    return Ok(None);
+                }
+                if find_subslice(&buf, delim).is_some() {
+                    break;
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::Interrupted
+                    || e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                if retries > 3 {
+                    return Err(e);
+                }
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(e) => return Err(e),
         }
     }
     Ok(Some(buf))
