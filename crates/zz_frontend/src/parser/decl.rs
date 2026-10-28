@@ -131,7 +131,7 @@ impl<'a> Parser<'a> {
                 let kind = match full_name.as_str() {
                     "int" => {
                         if !args.is_empty() {
-                            self.errors.push(error_at(
+                            self.push_error(error_at(
                                 "type `int` does not take type arguments",
                                 tok.span,
                             ));
@@ -140,7 +140,7 @@ impl<'a> Parser<'a> {
                     }
                     "float" => {
                         if !args.is_empty() {
-                            self.errors.push(error_at(
+                            self.push_error(error_at(
                                 "type `float` does not take type arguments",
                                 tok.span,
                             ));
@@ -149,7 +149,7 @@ impl<'a> Parser<'a> {
                     }
                     "bool" => {
                         if !args.is_empty() {
-                            self.errors.push(error_at(
+                            self.push_error(error_at(
                                 "type `bool` does not take type arguments",
                                 tok.span,
                             ));
@@ -158,7 +158,7 @@ impl<'a> Parser<'a> {
                     }
                     "str" => {
                         if !args.is_empty() {
-                            self.errors.push(error_at(
+                            self.push_error(error_at(
                                 "type `str` does not take type arguments",
                                 tok.span,
                             ));
@@ -167,7 +167,7 @@ impl<'a> Parser<'a> {
                     }
                     "unit" => {
                         if !args.is_empty() {
-                            self.errors.push(error_at(
+                            self.push_error(error_at(
                                 "type `unit` does not take type arguments",
                                 tok.span,
                             ));
@@ -176,7 +176,7 @@ impl<'a> Parser<'a> {
                     }
                     "void" => {
                         if !args.is_empty() {
-                            self.errors.push(error_at(
+                            self.push_error(error_at(
                                 "type `void` does not take type arguments",
                                 tok.span,
                             ));
@@ -186,7 +186,7 @@ impl<'a> Parser<'a> {
                     "Option" => match args.len() {
                         1 => TyKind::Option(Box::new(args.into_iter().next().unwrap())),
                         _ => {
-                            self.errors.push(error_at(
+                            self.push_error(error_at(
                                 "`Option` requires exactly one type argument",
                                 tok.span,
                             ));
@@ -201,7 +201,7 @@ impl<'a> Parser<'a> {
                         match (it.next(), it.next()) {
                             (Some(t), Some(e)) => TyKind::Result(Box::new(t), Box::new(e)),
                             _ => {
-                                self.errors.push(error_at(
+                                self.push_error(error_at(
                                     "`Result` requires two type arguments",
                                     tok.span,
                                 ));

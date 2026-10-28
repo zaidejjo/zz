@@ -40,6 +40,10 @@ them qualified after `import my`. The C symbol defaults to the ZZ name
 with `.` replaced by `_` (`my.process` → `my_process`); `= "..."` overrides
 it. Bare short names are never auto-exposed, so two plugins cannot collide.
 
+Signatures use ZZ's `func` keyword, not Rust's `fn` — `fn` is rejected with
+an explicit diagnostic. `extern "C"` blocks are parsed by the ZZ parser,
+so the rest of the line is ordinary ZZ syntax too (`-> int`, no `;`).
+
 ### Metadata Header
 
 The first comment block carries metadata the loader validates:

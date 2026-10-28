@@ -77,6 +77,7 @@ pub fn parse(source: &str) -> Parsed {
         delim_stack: Vec::new(),
         pending_gt: 0,
         no_union: false,
+        aborted: false,
     };
     let program = parser.parse_program();
     let mut errors = parser.errors;
@@ -137,6 +138,9 @@ struct Parser<'a> {
     /// forbidden; delimited positions (parens, `<>`, brackets, braces)
     /// keep full union parsing.
     no_union: bool,
+    /// Set once [`MAX_PARSE_ERRORS`] is hit: further diagnostics are dropped
+    /// and the cursor is parked on Eof so the parse unwinds immediately.
+    aborted: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -173,10 +177,14 @@ impl<'a> Parser<'a> {
         match self.delim_stack.iter().rposition(|e| e.open == expected) {
             Some(idx) => {
                 // Pop everything above the match (mismatched delimiters).
-                for entry in self.delim_stack.drain(idx + 1..) {
-                    let want = closer_for(entry.open);
-                    let at = Span::new(close_span.start, close_span.start);
-                    self.errors.push(
+                // Collect first: `push_error` borrows all of `self`, so it
+                // cannot run while `delim_stack` is being drained.
+                let diags: Vec<RawDiag> = self
+                    .delim_stack
+                    .drain(idx + 1..)
+                    .map(|entry| {
+                        let want = closer_for(entry.open);
+                        let at = Span::new(close_span.start, close_span.start);
                         error_at(
                             format!(
                                 "unclosed `{}` (opened here) — add `{want}` before `{}`",
@@ -189,13 +197,16 @@ impl<'a> Parser<'a> {
                             at,
                             want,
                             format!("add missing `{want}`"),
-                        )),
-                    );
+                        ))
+                    })
+                    .collect();
+                for diag in diags {
+                    self.push_error(diag);
                 }
                 self.delim_stack.pop(); // Remove the matching opener.
             }
             None => {
-                self.errors.push(
+                self.push_error(
                     error_at(
                         format!(
                             "unexpected `{}` with no matching opening `{}` — remove it",
@@ -216,9 +227,11 @@ impl<'a> Parser<'a> {
 
     fn check_unclosed_delims(&mut self) {
         let at = Span::new(self.src_len(), self.src_len());
-        for entry in self.delim_stack.drain(..) {
-            let want = closer_for(entry.open);
-            self.errors.push(
+        let diags: Vec<RawDiag> = self
+            .delim_stack
+            .drain(..)
+            .map(|entry| {
+                let want = closer_for(entry.open);
                 error_at(
                     format!(
                         "unclosed `{}` at end of file (opened here) — add `{want}` at end of file",
@@ -230,8 +243,11 @@ impl<'a> Parser<'a> {
                     at,
                     want,
                     format!("add `{want}` at end of file"),
-                )),
-            );
+                ))
+            })
+            .collect();
+        for diag in diags {
+            self.push_error(diag);
         }
     }
 }
