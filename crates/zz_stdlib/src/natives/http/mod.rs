@@ -162,11 +162,22 @@ fn read_until_delim<R: std::io::Read>(
 ) -> std::io::Result<Option<Vec<u8>>> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
+    // On Darwin, blocking `read()` on a TCP socket can spuriously return
+    // `Ok(0)` (EOF) right after a `write()`+`flush()` on the same socket,
+    // breaking HTTP keep-alive second reads. Retry briefly before treating
+    // `Ok(0)` as a genuine peer close.
+    let mut empty_reads: u32 = 0;
     loop {
         let n = stream.read(&mut chunk)?;
         if n == 0 {
-            break; // EOF: return what we have; caller validates it.
+            empty_reads += 1;
+            if empty_reads > 3 {
+                break; // persistent EOF: peer really closed
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
         }
+        empty_reads = 0;
         buf.extend_from_slice(&chunk[..n]);
         if buf.len() > cap {
             return Ok(None);
