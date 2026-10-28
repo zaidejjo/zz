@@ -1351,13 +1351,6 @@ parity_strict!(
     "stdlib",
     "concurrency_recall_test.zz"
 );
-parity_known_failure!(
-    parity_stdlib_concurrency_panic_test,
-    "stdlib",
-    "concurrency_panic_test.zz"
-);
-
-// Error fixtures (both must error)
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
 parity_strict_error!(parity_err_alias_cycle, "alias_cycle.zz");
 parity_strict_error!(parity_err_alias_dup, "alias_dup.zz");
