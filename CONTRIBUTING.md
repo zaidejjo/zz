@@ -24,6 +24,30 @@ cargo fmt --check
 
 CI enforces zero clippy warnings and clean `cargo fmt`.
 
+## CI
+
+`.github/workflows/ci.yml` orchestrates and `.github/workflows/ci-test.yml`
+runs one OS family. Two tiers:
+
+| Run | Legs |
+| --- | --- |
+| pull request | `linux-x86_64`, `macos-aarch64`, `windows-x86_64` |
+| push to `dev`/`main`, nightly, manual dispatch | all six (adds `linux-aarch64`, `macos-x86_64`, `windows-aarch64`) |
+
+Need the full matrix on a branch before merging a platform-sensitive
+change?
+
+```bash
+gh workflow run ci.yml --ref <your-branch>
+```
+
+Windows legs run with `ZZ_SKIP_NATIVE=1`: the AOT backend needs a POSIX C
+runtime (`<pthread.h>`, `fcntl`/`poll`), so native suites report "skip"
+there and each leg logs `native AOT: unavailable` at the end. VM, CLI, PM
+and LSP suites run everywhere. The reverse is enforced too: a leg whose
+matrix entry says `native: true` fails if it cannot build an AOT binary,
+so a green run never hides lost AOT coverage.
+
 ## PRs
 
 1. Fork, branch from `main`, keep the diff focused.

@@ -19,17 +19,34 @@ name: CI
 #   push to dev or main (merge commits included — the merge itself is
 #     tested, so main is always green),
 #   PRs targeting dev or main (feature branches get checked before merge),
-#   manual dispatch.
+#   nightly (full matrix against the default branch, so platform drift is
+#     never older than a day),
+#   manual dispatch (full matrix; `gh workflow run ci.yml --ref <branch>`
+#     runs all six legs against that branch).
+#
+# Two tiers, because the second architecture of each OS family rarely
+# carries new signal and doubles the runner bill:
+#   PR        -> the three `"tier": "pr"` legs: both toolchains that gate
+#                merge (GNU/Clang on Linux, Apple Clang on arm64, MSVC on
+#                x86_64 Windows). Covers every OS family.
+#   everything else -> all six (`"tier": "full"` included): the aarch64
+#                Linux, Intel macOS and Windows arm64 legs, where a
+#                regression surfaces within a day instead of at release.
+# A manual dispatch is the escape hatch for "I need all six before merge".
 
 on:
   push:
     branches: [dev, main]
   pull_request:
     branches: [dev, main]
+  schedule:
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # The event name is part of the group so a manual full run never queues
+  # behind (or cancels) the automatic PR run for the same branch.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -85,12 +102,13 @@ jobs:
     uses: ./.github/workflows/ci-test.yml
     with:
       family: linux
+      full: ${{ github.event_name != 'pull_request' }}
       legs: >-
         [
           {"name": "linux-x86_64", "runner": "ubuntu-24.04", "native": true,
-           "timeout": 30, "clang_pin": "23", "docker_smoke": true},
+           "tier": "pr", "timeout": 30, "clang_pin": "23", "docker_smoke": true},
           {"name": "linux-aarch64", "runner": "ubuntu-24.04-arm", "native": true,
-           "timeout": 45, "clang_pin": "", "docker_smoke": false}
+           "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
         ]
 
   # --- macos: apple silicon + intel --------------------------------------
@@ -103,12 +121,13 @@ jobs:
     uses: ./.github/workflows/ci-test.yml
     with:
       family: macos
+      full: ${{ github.event_name != 'pull_request' }}
       legs: >-
         [
           {"name": "macos-aarch64", "runner": "macos-26", "native": true,
-           "timeout": 45, "clang_pin": "", "docker_smoke": false},
+           "tier": "pr", "timeout": 45, "clang_pin": "", "docker_smoke": false},
           {"name": "macos-x86_64", "runner": "macos-26-intel", "native": true,
-           "timeout": 45, "clang_pin": "", "docker_smoke": false}
+           "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
         ]
 
   # --- windows: x86_64 + arm64 -------------------------------------------
@@ -117,17 +136,19 @@ jobs:
   # `fcntl`/`poll`), so these legs set `ZZ_SKIP_NATIVE=1` and run every VM,
   # CLI, PM and LSP suite. `support::native_unsupported()` in the CLI
   # integration tests makes the AOT cases report "skip" instead of failing
-  # on a limitation the platform cannot fix. Tracked as the Windows runtime
-  # port; flip the flag with that work, not before.
+  # on a limitation the platform cannot fix, and the leg's final
+  # `native capability` step says so in the log. Tracked as the Windows
+  # runtime port; flip the flag with that work, not before.
   windows:
     name: windows
     uses: ./.github/workflows/ci-test.yml
     with:
       family: windows
+      full: ${{ github.event_name != 'pull_request' }}
       legs: >-
         [
           {"name": "windows-x86_64", "runner": "windows-2025", "native": false,
-           "timeout": 60, "clang_pin": "", "docker_smoke": false},
+           "tier": "pr", "timeout": 60, "clang_pin": "", "docker_smoke": false},
           {"name": "windows-aarch64", "runner": "windows-11-arm", "native": false,
-           "timeout": 60, "clang_pin": "", "docker_smoke": false}
+           "tier": "full", "timeout": 60, "clang_pin": "", "docker_smoke": false}
         ]

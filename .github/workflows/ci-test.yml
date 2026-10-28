@@ -4,6 +4,11 @@ name: CI test leg
 # (linux/macos/windows) and passes that family's legs as JSON; the matrix
 # here expands them, so the UI groups both architectures under one OS job.
 #
+# `full` selects the tier: false (pull requests) runs only the legs marked
+# `"tier": "pr"`, true (push, nightly, manual dispatch) runs every leg.
+# Skipped legs keep their names in the matrix, so the UI still shows which
+# architecture was not exercised by *this* run.
+#
 # Why a reusable workflow instead of one big ci.yml: each file stays small
 # and reviewable, and the runner labels stay visible in the caller.
 
@@ -17,10 +22,17 @@ on:
         description: "`linux` | `macos` | `windows` — selects dependency install."
         required: true
         type: string
+      full:
+        description: >-
+          Run every leg. False runs only legs marked `"tier": "pr"`.
+        required: false
+        type: boolean
+        default: true
       legs:
         description: >-
           JSON array of legs for this family. Each entry carries
-          `name`, `runner`, `native`, `timeout`, `clang_pin`, `docker_smoke`.
+          `name`, `runner`, `native`, `tier`, `timeout`, `clang_pin`,
+          `docker_smoke`.
         required: true
         type: string
 
@@ -29,15 +41,36 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Filter the caller's leg list down to this tier. Kept as a job (not an
+  # expression in `strategy.matrix`) because GitHub expressions cannot
+  # filter arrays, and `matrix` is unavailable in a job-level `if`.
+  plan:
+    name: plan (${{ inputs.family }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          LEGS: ${{ inputs.legs }}
+          FULL: ${{ inputs.full }}
+        run: |
+          set -euo pipefail
+          matrix=$(jq -c --argjson full "${FULL:-true}" \
+            '{include: [.[] | select($full or .tier == "pr")]}' <<<"$LEGS")
+          echo "legs: $matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   test:
     name: test (${{ matrix.name }})
+    needs: plan
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       # One architecture failing must not hide the other: we want all logs.
       fail-fast: false
-      matrix:
-        include: ${{ fromJSON(inputs.legs) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       # Empty is fine: clang_pin() filters it out. Kept job-level so every
       # step (fast suite, parity, sanitizers) sees the pinned clang.
@@ -269,3 +302,43 @@ jobs:
         run: |
           cargo build -p zz_cli
           cargo test -p zz_lsp --test check_parity
+
+      # --- coverage honesty --------------------------------------------
+      # A green leg must state whether it exercised the AOT backend. The
+      # probe builds and runs one tiny program (`--native` needs no output
+      # path, so exe naming is the CLI's problem, not this step's); the
+      # gate then fails a leg declared `native: true` if the probe cannot
+      # build — otherwise a native-capable runner could silently skip the
+      # AOT suites and still report success.
+      - name: native capability probe
+        id: native_probe
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -uo pipefail
+          src="$RUNNER_TEMP/zz-native-probe.zz"
+          printf 'func main() { println("native-ok") }\n' > "$src"
+          # Capture instead of piping: `grep -q` closing early would SIGPIPE
+          # the producer and trip `pipefail` on a *successful* probe.
+          out=$(cargo run -q -p zz_cli -- run --native "$src" 2>/dev/null) || out=""
+          if [ "$out" = "native-ok" ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+            echo "native AOT: available on this leg (AOT suites ran)"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "native AOT: unavailable on this leg (AOT suites reported skip)"
+          fi
+
+      - name: native capability gate
+        if: always()
+        shell: bash
+        run: |
+          ok="${{ steps.native_probe.outputs.ok }}"
+          if [ "${{ matrix.native }}" = "true" ] && [ "$ok" != "1" ]; then
+            echo "::error::leg '${{ matrix.name }}' is declared native-capable but cannot build an AOT binary"
+            exit 1
+          fi
+          if [ "${{ matrix.native }}" = "false" ] && [ "$ok" = "1" ]; then
+            echo "::warning::native AOT works on '${{ matrix.name }}' but the leg sets native: false; flip it once its AOT suites pass"
+          fi
