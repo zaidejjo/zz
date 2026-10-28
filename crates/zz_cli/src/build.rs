@@ -2032,10 +2032,11 @@ mod tests {
         let cli = cfg.join("src").join("cli.zz");
         std::fs::write(&cli, "println(\"hi\")\n").unwrap();
         let cfg_out = canon(&cfg);
-        assert_eq!(
-            resolve_entry(&cfg).unwrap(),
-            cfg_out.join("src").join("cli.zz")
-        );
+        // `resolve_entry` joins the configured entry onto the root it was
+        // given (no canonicalization), while destination planning goes
+        // through discovery, which does canonicalize — hence `cli` here and
+        // `cfg_out` below.
+        assert_eq!(resolve_entry(&cfg).unwrap(), cli);
         assert_eq!(default_stem_for(&cli), "cfg-pkg");
         assert_eq!(
             planned_dest_for(&cli, None, None),

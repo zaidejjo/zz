@@ -1850,6 +1850,10 @@ fn e2e_bench_basic_vm() {
 
 #[test]
 fn e2e_bench_basic_native() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let fixtures = fixtures_dir();
     let path = fixtures.join("bench").join("basic_bench.zz");
     assert!(path.exists(), "fixture not found: {}", path.display());
@@ -2105,6 +2109,10 @@ fn e2e_test_doctest_json_kind() {
 
 #[test]
 fn e2e_test_doctest_native() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let fixtures = fixtures_dir();
     let path = fixtures.join("test").join("doctests.zz");
     assert!(path.exists(), "fixture not found: {}", path.display());
