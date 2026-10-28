@@ -40,8 +40,7 @@ jobs:
     strategy:
       # One architecture failing must not hide the other: we want all logs.
       fail-fast: false
-      matrix:
-        include: ${{ fromJSON(inputs.legs) }}
+      matrix: ${{ fromJSON(inputs.legs) }}
     env:
       # Empty is fine: clang_pin() filters it out. Kept job-level so every
       # step (fast suite, parity, sanitizers) sees the pinned clang.
