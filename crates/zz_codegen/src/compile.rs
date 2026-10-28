@@ -1114,6 +1114,24 @@ pub fn build_with(
     Ok(clang.clone())
 }
 
+/// Linker flag that force-extracts `symbol` from a static archive.
+///
+/// Must travel through `-Wl,`: `zig cc` — the compiler shipped inside the
+/// release zips — does not accept a bare `-u <symbol>` and treats the
+/// symbol as an input file (`error: zz_float_format_raw: unrecognized
+/// file extension`), so every float-printing program failed to link for
+/// users of the bundled toolchain. Clang forwards `-Wl,` verbatim to
+/// whichever linker it drives, and lld-link/link.exe spell the same
+/// request `/INCLUDE:<sym>`.
+pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>) -> String {
+    let sym = crate::ffi::force_undef_symbol(symbol, target);
+    if crate::ffi::target_os(target) == crate::ffi::TargetOs::Windows {
+        format!("-Wl,/INCLUDE:{sym}")
+    } else {
+        format!("-Wl,-u,{sym}")
+    }
+}
+
 /// Shared link inputs for single-TU and multi-TU builds: precompiled
 /// runtime archive, Rust native runtime, plugin artifacts, conditional
 /// system libs. Object files / TU sources are added by the caller.
@@ -1158,24 +1176,34 @@ fn push_link_inputs(
         // Postgres backend: the C dispatcher references the symbols
         // weakly (so sqlite-only programs link cleanly without the
         // staticlib); force-extract the objects whenever the gate fired.
-        // `-u` precedes the archive that satisfies it (linker order).
+        // The flag precedes the archive that satisfies it (linker order).
         if opts.pg_link {
             for sym in crate::ffi::PG_LINK_SYMBOLS {
-                cmd.arg("-u");
-                cmd.arg(crate::ffi::force_undef_symbol(sym, target));
+                cmd.arg(force_undef_flag(sym, target));
             }
         }
         // Float Display (spec §4): same weak-ref situation — pull the
         // Rust-core formatter explicitly when the gate fired.
         if opts.float_link {
-            cmd.arg("-u");
-            cmd.arg(crate::ffi::force_undef_symbol(
-                crate::ffi::FLOAT_FMT_SYMBOL,
-                target,
-            ));
+            cmd.arg(force_undef_flag(crate::ffi::FLOAT_FMT_SYMBOL, target));
         }
         for a in &extra {
             cmd.arg(a);
+        }
+        // Zig ships libunwind but — unlike clang, which adds `-lgcc_s`
+        // implicitly on GNU targets — does not link it into a plain C
+        // link. The Rust staticlib references `_Unwind_*` (panic
+        // unwinding, backtraces), so every AOT binary failed with
+        // `ld.lld: error: undefined symbol: _Unwind_Backtrace` when the
+        // bundled zig was the provider. Darwin and Windows take their
+        // unwinder from libSystem / SEH, so the flag is GNU-only.
+        if clang.zig
+            && !matches!(
+                crate::ffi::target_os(target),
+                crate::ffi::TargetOs::Macos | crate::ffi::TargetOs::Windows
+            )
+        {
+            cmd.arg("-lunwind");
         }
     }
     // Link plugin package artifacts (compiled .o / .a from build hooks).
@@ -1684,6 +1712,35 @@ mod tests {
 
     fn release_opts() -> BuildOptions {
         BuildOptions::release()
+    }
+
+    #[test]
+    fn force_undef_flag_is_linker_passthrough() {
+        // Bare `-u <sym>` breaks the bundled `zig cc` (it reads the symbol
+        // as an input file: "unrecognized file extension"), so the flag
+        // must go through `-Wl,` for every driver.
+        assert_eq!(
+            force_undef_flag("zz_float_format_raw", Some("x86_64-unknown-linux-gnu")),
+            "-Wl,-u,zz_float_format_raw"
+        );
+        // Darwin's ld64 wants the leading underscore, still via `-Wl,`.
+        assert_eq!(
+            force_undef_flag("zz_float_format_raw", Some("aarch64-apple-darwin")),
+            "-Wl,-u,_zz_float_format_raw"
+        );
+        // lld-link / link.exe spell it `/INCLUDE:<sym>`.
+        assert_eq!(
+            force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-msvc")),
+            "-Wl,/INCLUDE:zz_float_format_raw"
+        );
+        // Host builds (no explicit target) use the same passthrough form.
+        if cfg!(windows) {
+            assert_eq!(force_undef_flag("sym", None), "-Wl,/INCLUDE:sym");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(force_undef_flag("sym", None), "-Wl,-u,_sym");
+        } else {
+            assert_eq!(force_undef_flag("sym", None), "-Wl,-u,sym");
+        }
     }
 
     #[test]
