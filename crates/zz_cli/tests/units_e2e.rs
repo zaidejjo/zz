@@ -104,6 +104,10 @@ fn run_bin(bin: &Path) -> (i32, String) {
 
 #[test]
 fn units_split_matches_single_tu() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let single = build(&dir, false);
     let split = build(&dir, true);

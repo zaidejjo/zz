@@ -107,6 +107,13 @@ jobs:
         ]
 
   # --- windows: x86_64 + arm64 -------------------------------------------
+  # `native: false`: the AOT backend cannot build on Windows yet (the C
+  # runtime includes <pthread.h> and its socket layer is POSIX
+  # `fcntl`/`poll`), so these legs set `ZZ_SKIP_NATIVE=1` and run every VM,
+  # CLI, PM and LSP suite. `support::native_unsupported()` in the CLI
+  # integration tests makes the AOT cases report "skip" instead of failing
+  # on a limitation the platform cannot fix. Tracked as the Windows runtime
+  # port; flip the flag with that work, not before.
   windows:
     name: windows
     uses: ./.github/workflows/ci-test.yml
@@ -114,8 +121,8 @@ jobs:
       family: windows
       legs: >-
         [
-          {"name": "windows-x86_64", "runner": "windows-2025", "native": true,
+          {"name": "windows-x86_64", "runner": "windows-2025", "native": false,
            "timeout": 60, "clang_pin": "", "docker_smoke": false},
-          {"name": "windows-aarch64", "runner": "windows-11-arm", "native": true,
+          {"name": "windows-aarch64", "runner": "windows-11-arm", "native": false,
            "timeout": 60, "clang_pin": "", "docker_smoke": false}
         ]

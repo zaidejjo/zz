@@ -399,18 +399,29 @@ jobs:
           # runtime (see README "Supported platforms"), so `zz build` is
           # not exercised on Windows until that port lands. The unix legs
           # run the float/AOT gate that proves the packaged archives link.
-          $out = @(& ./zipsmoke/zz.exe run hello.zz)
-          if ($LASTEXITCODE -ne 0) { throw "packaged zz failed to run (exit $LASTEXITCODE)" }
-          if ($out.Count -ne 4 -or $out[0] -ne "zip-ok" -or $out[1] -ne "0" -or $out[3] -ne "2") {
-            throw "unexpected packaged-binary output: $($out -join '|')"
+          #
+          # Run from inside the extracted tree: `zz run hello.zz` resolves
+          # the entry relative to the *process* CWD, not to the binary's
+          # directory, so invoking `./zipsmoke/zz.exe` from the repo root
+          # looked for a repo-root `hello.zz` (run 40611973038).
+          Push-Location zipsmoke
+          try {
+            $out = @(& ./zz.exe run hello.zz)
+            if ($LASTEXITCODE -ne 0) { throw "packaged zz failed to run (exit $LASTEXITCODE)" }
+            if ($out.Count -ne 4 -or $out[0] -ne "zip-ok" -or $out[1] -ne "0" -or $out[3] -ne "2") {
+              throw "unexpected packaged-binary output: $($out -join '|')"
+            }
+            & ./zz.exe check hello.zz
+            if ($LASTEXITCODE -ne 0) { throw "packaged zz check failed (exit $LASTEXITCODE)" }
+            $ver = (& ./zz.exe --version | Out-String).Trim()
+            if ($ver -notmatch '^zz ') { throw "unexpected --version: $ver" }
+            $zigver = (& ./zig.exe version | Out-String).Trim()
+            if ($zigver -notmatch '^0\.17\.') { throw "unexpected bundled zig version: $zigver" }
+            & ./zz-lsp.exe --version
+            if ($LASTEXITCODE -ne 0) { throw "packaged zz-lsp failed (exit $LASTEXITCODE)" }
+          } finally {
+            Pop-Location
           }
-          & ./zipsmoke/zz.exe check hello.zz
-          if ($LASTEXITCODE -ne 0) { throw "packaged zz check failed (exit $LASTEXITCODE)" }
-          $ver = (& ./zipsmoke/zz.exe --version | Out-String).Trim()
-          if ($ver -notmatch '^zz ') { throw "unexpected --version: $ver" }
-          $zigver = (& ./zipsmoke/zig.exe version | Out-String).Trim()
-          if ($zigver -notmatch '^0\.17\.') { throw "unexpected bundled zig version: $zigver" }
-          & ./zipsmoke/zz-lsp.exe --version
 
       - name: upload zip artifact
         uses: actions/upload-artifact@v4

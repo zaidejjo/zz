@@ -1683,7 +1683,14 @@ mod tests {
     /// with the real flags, run it, and check handle alloc/tag/drop plus a
     /// crypto call (which exercises the linkable `zz_str_*` constructors)
     /// across the language boundary.
+    ///
+    /// Gated on Windows for the same reason `mod tests` is (see `lib.rs`):
+    /// the runtime TU includes `<pthread.h>` and the socket layer is POSIX,
+    /// so it cannot compile with MSVC there yet. Windows CI still covers
+    /// the FFI surface through the pure string/flag tests above and the
+    /// CLI-level VM suites.
     #[test]
+    #[cfg(not(windows))]
     fn link_staticlib_from_c() {
         let (mut args, _rt_lib) = match link_args(false) {
             Ok(a) => a,

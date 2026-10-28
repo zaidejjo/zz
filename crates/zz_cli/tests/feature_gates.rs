@@ -145,6 +145,10 @@ fn unknown_feature_flag_is_loud() {
 
 #[test]
 fn build_honors_features_and_does_not_reuse_a_gated_cache_entry() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     if std::process::Command::new("clang")
         .arg("--version")
         .output()

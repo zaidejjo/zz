@@ -38,6 +38,18 @@ pub fn fixture_supported_here(path: &Path) -> bool {
     !header_declares(&text, "platform: unix")
 }
 
+/// True when the native (AOT) backend cannot produce a binary on this host.
+///
+/// Windows is not supported yet: the generated C runtime includes
+/// `<pthread.h>` and its socket layer is POSIX (`fcntl`/`poll`), so the AOT
+/// pipeline cannot compile with MSVC. CI sets `ZZ_SKIP_NATIVE=1` on those
+/// legs (`.github/workflows/ci.yml`), and suites that spawn `zz build`
+/// directly check this helper so the leg reports "skip" instead of a
+/// failure the platform cannot fix. VM suites still run everywhere.
+pub fn native_unsupported() -> bool {
+    cfg!(windows) || std::env::var_os("ZZ_SKIP_NATIVE").is_some()
+}
+
 /// Scan only the leading `//` comment block, so a string in the fixture
 /// body can never opt a test out by accident.
 fn header_declares(text: &str, needle: &str) -> bool {

@@ -1060,6 +1060,24 @@ pub fn clang_flags_with(
     flags
 }
 
+/// `zig cc` links Mach-O with its own Mach-O linker, which refuses LTO
+/// outright (`error: LTO requires using LLD`) — reproduced with zig
+/// 0.17.0 for `*-macos` targets; `-fuse-ld=lld` makes no difference. ELF
+/// and COFF targets link through LLD and keep ThinLTO, so only Mach-O
+/// drops the flags. Plain clang is untouched: its driver picks a
+/// plugin-capable linker per platform.
+fn strip_unsupported_lto(flags: &mut Vec<String>, zig: bool, target: Option<&str>) {
+    if !zig {
+        return;
+    }
+    if target.map_or(cfg!(target_os = "macos"), is_macos_target) {
+        // Both `-flto=thin` and `-flto=full` (and a bare `-flto`) must go:
+        // the compile step would otherwise emit bitcode the linker cannot
+        // consume.
+        flags.retain(|f| !f.starts_with("-flto"));
+    }
+}
+
 /// Compile C source (already including the runtime) to a binary at
 /// `output_path` using the detected Clang provider.
 ///
@@ -1118,7 +1136,9 @@ pub fn build_with(
     }
     // Zig gets its target through `-target`, so these flags deliberately
     // omit the clang driver's `--target=`/`-fuse-ld=lld`.
-    for flag in clang_flags_with(&opts, target, !clang.zig) {
+    let mut cflags = clang_flags_with(&opts, target, !clang.zig);
+    strip_unsupported_lto(&mut cflags, clang.zig, target);
+    for flag in &cflags {
         cmd.arg(flag);
     }
     cmd.arg("-o").arg(output_path).arg(&src_path);
@@ -1438,7 +1458,8 @@ pub fn compile_units(
         .thread_name(|i| format!("zz-cc-{i}"))
         .build()
         .map_err(|e| BuildError::Io(std::io::Error::other(format!("{e}"))))?;
-    let cflags = clang_flags_with(opts, target, !clang.zig);
+    let mut cflags = clang_flags_with(opts, target, !clang.zig);
+    strip_unsupported_lto(&mut cflags, clang.zig, target);
     let cache_hits = staged
         .iter()
         .filter(|(s, _, _)| s.as_os_str().is_empty())
@@ -1503,7 +1524,7 @@ pub fn compile_units(
             cmd.arg("-target").arg(t);
         }
     }
-    for flag in clang_flags_with(opts, target, !clang.zig) {
+    for flag in &cflags {
         cmd.arg(flag);
     }
     cmd.arg("-o").arg(output_path);
@@ -1780,6 +1801,42 @@ mod tests {
             .iter()
             .any(|f| f == "--target=x86_64-pc-windows-gnu"));
         assert!(clang_win.iter().any(|f| f == "-fuse-ld=lld"));
+    }
+
+    #[test]
+    fn zig_drops_lto_only_for_macho_targets() {
+        let opts = release_opts();
+        // zig cc's Mach-O linker rejects LTO (`error: LTO requires using
+        // LLD`), so the flag must be stripped before it reaches the
+        // driver — for cross targets and for a macOS host build alike.
+        let mut mac_cross = clang_flags_with(&opts, Some("aarch64-macos"), false);
+        strip_unsupported_lto(&mut mac_cross, true, Some("aarch64-macos"));
+        assert!(
+            !mac_cross.iter().any(|f| f.starts_with("-flto")),
+            "zig + Mach-O must not carry LTO: {mac_cross:?}"
+        );
+        assert!(mac_cross.iter().any(|f| f == "-O3"), "{mac_cross:?}");
+
+        let mut mac_host = clang_flags_with(&opts, None, false);
+        strip_unsupported_lto(&mut mac_host, true, None);
+        assert_eq!(
+            mac_host.iter().any(|f| f.starts_with("-flto")),
+            !cfg!(target_os = "macos"),
+            "host build strips LTO exactly on macOS: {mac_host:?}"
+        );
+
+        // ELF/COFF keep ThinLTO through LLD.
+        let mut linux = clang_flags_with(&opts, Some("x86_64-linux-gnu"), false);
+        strip_unsupported_lto(&mut linux, true, Some("x86_64-linux-gnu"));
+        assert!(linux.iter().any(|f| f == "-flto=thin"), "{linux:?}");
+        let mut win = clang_flags_with(&opts, Some("x86_64-windows-gnu"), false);
+        strip_unsupported_lto(&mut win, true, Some("x86_64-windows-gnu"));
+        assert!(win.iter().any(|f| f == "-flto=thin"), "{win:?}");
+
+        // Plain clang is never touched, even for Mach-O.
+        let mut clang_mac = clang_flags(&opts, Some("aarch64-macos"));
+        strip_unsupported_lto(&mut clang_mac, false, Some("aarch64-macos"));
+        assert!(clang_mac.iter().any(|f| f == "-flto=thin"), "{clang_mac:?}");
     }
 
     #[test]

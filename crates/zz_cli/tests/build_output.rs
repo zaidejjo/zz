@@ -447,6 +447,11 @@ fn vm_run_without_arg_uses_project_entry() {
 // --- Happy paths (need a real toolchain; skip otherwise) ---
 
 fn happy_or_skip(dir: &Path, args: &[&str]) -> Option<(String, String)> {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        let _ = std::fs::remove_dir_all(dir);
+        return None;
+    }
     let (code, stdout, stderr) = run(dir, args, &[]);
     if code != 0 && stderr.contains("no clang found") {
         eprintln!("SKIP: no clang on PATH");

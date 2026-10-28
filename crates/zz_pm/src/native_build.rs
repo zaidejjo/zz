@@ -2561,7 +2561,17 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
         assert_eq!(out.profile, "release");
         assert!(out.vendor_key.is_empty(), "no deps means no vendor key");
         // Artifacts live in the package build dir, never the crate tree.
-        assert!(out.archive.starts_with(pkg.join("build")));
+        // `ensure_rust` canonicalises the package dir, and macOS resolves
+        // `/var` → `/private/var`; compare canonical paths on both sides so
+        // the assertion holds on every host.
+        let build_dir = std::fs::canonicalize(pkg.join("build")).expect("build dir");
+        let archive = std::fs::canonicalize(&out.archive).expect("archive path");
+        assert!(
+            archive.starts_with(&build_dir),
+            "archive {} escaped {}",
+            archive.display(),
+            build_dir.display()
+        );
         let _ = std::fs::remove_dir_all(&pkg);
     }
 

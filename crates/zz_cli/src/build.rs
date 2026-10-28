@@ -1883,6 +1883,13 @@ mod tests {
         // Regression: transient dir was pid-only, so parallel native runs
         // overwrote one `zz_out` and tests executed each other's binaries
         // (rotating VM-vs-native mismatches in bug_hunter).
+        //
+        // Windows runs the VM only: the AOT runtime is POSIX (see the
+        // windows legs in `.github/workflows/ci.yml`), so there is no
+        // transient native binary to race here.
+        if cfg!(windows) {
+            return;
+        }
         if zz_codegen::compile::detect_clang().is_none() {
             return;
         }

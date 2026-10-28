@@ -52,6 +52,10 @@ fn run(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, S
 
 #[test]
 fn static_default_builds_native_binary() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, stdout, stderr) = run(&dir, &["build", "hello.zz"], &[]);
     if !stdout.contains("(static,") && stderr.contains("no clang found") {
@@ -84,6 +88,10 @@ fn static_default_builds_native_binary() {
 
 #[test]
 fn dynamic_flag_builds_dynamic_dev_binary() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, _stdout, stderr) = run(&dir, &["build", "--dynamic", "hello.zz"], &[]);
     assert_eq!(code, 0, "dynamic build must pass.\nstderr:\n{stderr}");
@@ -197,6 +205,10 @@ fn removed_dev_flag_is_rejected() {
 
 #[test]
 fn release_native_builds_and_runs() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, stdout, stderr) = run(&dir, &["build", "-p", "hello.zz"], &[]);
     if !stdout.contains("release") && stderr.contains("no clang found") {
@@ -360,6 +372,10 @@ fn has_llvm_profdata() -> bool {
 
 #[test]
 fn full_builds_max_opt_binary() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, _stdout, stderr) = run(&dir, &["build", "--full", "hello.zz"], &[]);
     if code != 0 && stderr.contains("no clang found") {
@@ -400,6 +416,10 @@ fn full_flag_conflicts_error_with_hints() {
 
 #[test]
 fn output_flag_names_binary() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, _stdout, stderr) = run(&dir, &["build", "-o", "myapp", "hello.zz"], &[]);
     if code != 0 && stderr.contains("no clang found") {
@@ -422,6 +442,10 @@ fn output_flag_names_binary() {
 
 #[test]
 fn full_pgo_flow_trains_and_optimizes() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     if !has_llvm_profdata() {
         eprintln!("SKIP: llvm-profdata not on PATH");
         return;
