@@ -41,8 +41,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: aarch64, runner: macos-14 }
-          - { name: x86_64, runner: macos-15-intel }
+          - { name: aarch64, runner: macos-26 }
+          - { name: x86_64, runner: macos-26-intel }
     steps:
       - uses: actions/checkout@v4
         with:

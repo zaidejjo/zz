@@ -91,8 +91,10 @@ jobs:
         ]
 
   # --- macos: apple silicon + intel --------------------------------------
-  # Runner labels verified 2026: macos-13 (Intel) is retired, so Intel is
-  # `macos-15-intel`; Apple silicon is `macos-14`.
+  # Runner labels verified 2026: Apple silicon is `macos-26` (`macos-latest`
+  # also points at macOS 26 arm64); Intel is `macos-26-intel`. The older
+  # `macos-14` arm64 image is retired from this matrix because it is slow to
+  # schedule and two OS releases behind the Intel leg.
   macos:
     name: macos
     uses: ./.github/workflows/ci-test.yml
@@ -100,9 +102,9 @@ jobs:
       family: macos
       legs: >-
         [
-          {"name": "macos-aarch64", "runner": "macos-14", "native": true,
+          {"name": "macos-aarch64", "runner": "macos-26", "native": true,
            "timeout": 45, "clang_pin": "", "docker_smoke": false},
-          {"name": "macos-x86_64", "runner": "macos-15-intel", "native": true,
+          {"name": "macos-x86_64", "runner": "macos-26-intel", "native": true,
            "timeout": 45, "clang_pin": "", "docker_smoke": false}
         ]
 
