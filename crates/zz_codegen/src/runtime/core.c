@@ -2583,10 +2583,13 @@ static void zz_run_task(zz_task_t task) {
         // green closures reachable from this non-green frame (they are
         // invoked through `zz_call_closure`, which clears TLS — this
         // belt-and-braces NULL keeps the raw trampoline path identical).
+        // Keep `zz_current_task` set so `panic`/`fail` inside the task
+        // returns an error result through `task.join` instead of killing
+        // the whole process (VM parity).
         zz_task_frame *saved_fr = zz_current_frame;
         zz_task_t *saved_task = zz_current_task;
         zz_current_frame = NULL;
-        zz_current_task = NULL;
+        zz_current_task = &task;
         zz_value result = zz_call_closure_raw(task.fn, args, 1);
         zz_current_frame = saved_fr;
         zz_current_task = saved_task;
