@@ -51,7 +51,21 @@ impl std::fmt::Display for BuildError {
                     "Error: Static binaries are not supported on macOS targets"
                 )
             }
-            BuildError::CompileFailed { stderr } => write!(f, "C compile failed:\n{stderr}"),
+            BuildError::CompileFailed { stderr } => {
+                write!(f, "C compile failed:\n{stderr}")?;
+                // The only way `<pthread.h>` is missing is a Windows target
+                // without the POSIX runtime: say what is supported instead
+                // of leaving the user with a raw compiler header error.
+                if stderr.contains("pthread.h") {
+                    write!(
+                        f,
+                        "\nhint: the AOT C runtime is POSIX-thread based, so native \
+                         builds are not supported on Windows yet; `zz run`, `zz check` \
+                         and `zz test` run on the VM there"
+                    )?;
+                }
+                Ok(())
+            }
             BuildError::NativeRt { reason } => write!(f, "native runtime link failed: {reason}"),
             BuildError::Io(e) => write!(f, "io error: {e}"),
         }
@@ -966,6 +980,22 @@ fn gc_sections_link_flag(target: Option<&str>) -> Option<&'static str> {
 ///
 /// - cross builds add `-fuse-ld=lld`; Windows triples add `-lws2_32`.
 pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
+    clang_flags_with(opts, target, true)
+}
+
+/// [`clang_flags`] with control over the *driver* target flags.
+///
+/// `zig cc` spells the target as `-target <triple>` (added by the caller)
+/// and drives its own linker, so it must not also receive `--target=` /
+/// `-fuse-ld=lld`. Every linker-facing decision (gc-sections spelling,
+/// winsock, libm) still follows the real target — passing `None` there
+/// made a Linux host emit `-Wl,--gc-sections` for a Mach-O target and a
+/// Windows host link `-lws2_32` into Linux binaries.
+pub fn clang_flags_with(
+    opts: &BuildOptions,
+    target: Option<&str>,
+    driver_target: bool,
+) -> Vec<String> {
     let mut flags: Vec<String> = Vec::new();
     // Wrapping + aliasing contract first: applies to dev and release.
     flags.push("-fwrapv".to_string());
@@ -1015,9 +1045,11 @@ pub fn clang_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
     // release `-fomit-frame-pointer` above.
     flags.extend(sanitize_flags());
     if let Some(t) = target {
-        flags.push(format!("--target={t}"));
-        // The system linker may not understand foreign triples.
-        flags.push("-fuse-ld=lld".to_string());
+        if driver_target {
+            flags.push(format!("--target={t}"));
+            // The system linker may not understand foreign triples.
+            flags.push("-fuse-ld=lld".to_string());
+        }
     }
     // Winsock: the C runtime's net layer calls WSAStartup/socket regardless
     // of the target, and a plain host build on Windows needs the import
@@ -1084,11 +1116,9 @@ pub fn build_with(
             cmd.arg("-target").arg(t);
         }
     }
-    for flag in clang_flags(&opts, if clang.zig { None } else { target }) {
-        // For zig the target travels via `-target`, not `--target=`.
-        if clang.zig && flag.starts_with("--target=") {
-            continue;
-        }
+    // Zig gets its target through `-target`, so these flags deliberately
+    // omit the clang driver's `--target=`/`-fuse-ld=lld`.
+    for flag in clang_flags_with(&opts, target, !clang.zig) {
         cmd.arg(flag);
     }
     cmd.arg("-o").arg(output_path).arg(&src_path);
@@ -1121,11 +1151,17 @@ pub fn build_with(
 /// symbol as an input file (`error: zz_float_format_raw: unrecognized
 /// file extension`), so every float-printing program failed to link for
 /// users of the bundled toolchain. Clang forwards `-Wl,` verbatim to
-/// whichever linker it drives, and lld-link/link.exe spell the same
-/// request `/INCLUDE:<sym>`.
-pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>) -> String {
+/// whichever linker it drives; lld-link/link.exe spell the same request
+/// `/INCLUDE:<sym>`, which `zig cc` rejects, so zig always gets
+/// `-Wl,-u,<sym>` instead (lld-link understands it).
+pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, zig: bool) -> String {
     let sym = crate::ffi::force_undef_symbol(symbol, target);
-    if crate::ffi::target_os(target) == crate::ffi::TargetOs::Windows {
+    // `zig cc` rejects the MSVC spelling outright ("unsupported linker
+    // arg: /INCLUDE:<sym>") even when it links for a Windows target,
+    // because its driver parses `-Wl,` itself and only maps GNU-style
+    // args. lld-link accepts `-u <sym>` identically, so zig always gets
+    // the GNU spelling; plain clang keeps `/INCLUDE:` for link.exe.
+    if !zig && crate::ffi::target_os(target) == crate::ffi::TargetOs::Windows {
         format!("-Wl,/INCLUDE:{sym}")
     } else {
         format!("-Wl,-u,{sym}")
@@ -1179,13 +1215,17 @@ fn push_link_inputs(
         // The flag precedes the archive that satisfies it (linker order).
         if opts.pg_link {
             for sym in crate::ffi::PG_LINK_SYMBOLS {
-                cmd.arg(force_undef_flag(sym, target));
+                cmd.arg(force_undef_flag(sym, target, clang.zig));
             }
         }
         // Float Display (spec §4): same weak-ref situation — pull the
         // Rust-core formatter explicitly when the gate fired.
         if opts.float_link {
-            cmd.arg(force_undef_flag(crate::ffi::FLOAT_FMT_SYMBOL, target));
+            cmd.arg(force_undef_flag(
+                crate::ffi::FLOAT_FMT_SYMBOL,
+                target,
+                clang.zig,
+            ));
         }
         for a in &extra {
             cmd.arg(a);
@@ -1398,7 +1438,7 @@ pub fn compile_units(
         .thread_name(|i| format!("zz-cc-{i}"))
         .build()
         .map_err(|e| BuildError::Io(std::io::Error::other(format!("{e}"))))?;
-    let cflags = clang_flags(opts, if clang.zig { None } else { target });
+    let cflags = clang_flags_with(opts, target, !clang.zig);
     let cache_hits = staged
         .iter()
         .filter(|(s, _, _)| s.as_os_str().is_empty())
@@ -1427,9 +1467,6 @@ pub fn compile_units(
                     }
                 }
                 for flag in &cflags {
-                    if clang.zig && flag.starts_with("--target=") {
-                        continue;
-                    }
                     if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
                         continue;
                     }
@@ -1466,10 +1503,7 @@ pub fn compile_units(
             cmd.arg("-target").arg(t);
         }
     }
-    for flag in clang_flags(opts, if clang.zig { None } else { target }) {
-        if clang.zig && flag.starts_with("--target=") {
-            continue;
-        }
+    for flag in clang_flags_with(opts, target, !clang.zig) {
         cmd.arg(flag);
     }
     cmd.arg("-o").arg(output_path);
@@ -1576,15 +1610,16 @@ pub fn emit_c_plus_script(
     if opts.native_rt || opts.float_link {
         if opts.pg_link {
             for sym in crate::ffi::PG_LINK_SYMBOLS {
-                rt_link.push_str(" -u ");
-                rt_link.push_str(&crate::ffi::force_undef_symbol(sym, target));
+                rt_link.push(' ');
+                rt_link.push_str(&force_undef_flag(sym, target, false));
             }
         }
         if opts.float_link {
-            rt_link.push_str(" -u ");
-            rt_link.push_str(&crate::ffi::force_undef_symbol(
+            rt_link.push(' ');
+            rt_link.push_str(&force_undef_flag(
                 crate::ffi::FLOAT_FMT_SYMBOL,
                 target,
+                false,
             ));
         }
         match crate::ffi::link_args_for_target(opts.optimize, target) {
@@ -1593,7 +1628,7 @@ pub fn emit_c_plus_script(
                     rt_link.push(' ');
                     rt_link.push_str(a);
                 }
-                rt_note = "# NOTE: native-runtime paths below are absolute to the machine that ran `zz build`; adjust -L/path entries when building elsewhere.\n".to_string();
+                rt_note = "# NOTE: native-runtime paths below are absolute to the machine that ran `zz build`; adjust -L/path entries when building elsewhere. With `zig cc` add -lunwind (GNU targets).\n".to_string();
             }
             Err(e) => {
                 rt_note = format!(
@@ -1602,6 +1637,13 @@ pub fn emit_c_plus_script(
             }
         }
     }
+    // `-lm` is a GNU/ELF convention; MSVC has `m.lib` and the CRT
+    // already carries the math symbols, so clang-cl rejects `-lm`.
+    let math_lib = if os == crate::ffi::TargetOs::Windows {
+        ""
+    } else {
+        " -lm"
+    };
 
     let c_deps = format!(
         "-DZZ_HAS_CURL={} -DZZ_HAS_SQLITE3={}",
@@ -1613,7 +1655,7 @@ pub fn emit_c_plus_script(
     std::fs::write(
         &sh,
         format!(
-            "#!/bin/sh\n# Generated by `zz build`. Requires clang 18+ (or: replace `clang` with `zig cc -target <triple>`).\n{rt_note}set -e\ncd \"$(dirname \"$0\")\"\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs}{rt_link} {c_deps}\n"
+            "#!/bin/sh\n# Generated by `zz build`. Requires clang 18+ (or: replace `clang` with `zig cc -target <triple>`).\n{rt_note}set -e\ncd \"$(dirname \"$0\")\"\nclang {flag_str} -o {target_out} app.c{extra_inputs}{math_lib}{syslibs}{rt_link} {c_deps}\n"
         ),
     )?;
     #[cfg(unix)]
@@ -1632,7 +1674,7 @@ pub fn emit_c_plus_script(
     std::fs::write(
         &bat,
         format!(
-            "@echo off\r\nREM Generated by `zz build`. Requires clang (LLVM) on PATH.\r\n{bat_note}cd /d %~dp0\r\nclang {flag_str} -o {target_out} app.c{extra_inputs} -lm{syslibs}{rt_link} {c_deps}\r\n"
+            "@echo off\r\nREM Generated by `zz build`. Requires clang (LLVM) on PATH.\r\n{bat_note}cd /d %~dp0\r\nclang {flag_str} -o {target_out} app.c{extra_inputs}{math_lib}{syslibs}{rt_link} {c_deps}\r\n"
         ),
     )?;
     Ok((app_c, sh, bat))
@@ -1715,31 +1757,92 @@ mod tests {
     }
 
     #[test]
+    fn zig_flags_follow_target_without_driver_target() {
+        let opts = release_opts();
+        // `zig cc` gets `-target` from the caller and drives its own
+        // linker, so the driver flags must be omitted — while every
+        // target-dependent link flag still follows the cross target.
+        let mac = clang_flags_with(&opts, Some("aarch64-apple-darwin"), false);
+        assert!(
+            !mac.iter()
+                .any(|f| f.starts_with("--target=") || f == "-fuse-ld=lld"),
+            "zig must not see clang driver target flags: {mac:?}"
+        );
+        assert!(!mac.iter().any(|f| f == "-lws2_32"), "{mac:?}");
+        let win = clang_flags_with(&opts, Some("x86_64-pc-windows-gnu"), false);
+        assert!(
+            win.iter().any(|f| f == "-lws2_32"),
+            "Windows cross target needs ws2_32 for zig too: {win:?}"
+        );
+        // Plain clang keeps both.
+        let clang_win = clang_flags(&opts, Some("x86_64-pc-windows-gnu"));
+        assert!(clang_win
+            .iter()
+            .any(|f| f == "--target=x86_64-pc-windows-gnu"));
+        assert!(clang_win.iter().any(|f| f == "-fuse-ld=lld"));
+    }
+
+    #[test]
+    fn windows_pthread_failure_hints_at_vm_mode() {
+        // A Windows target without the POSIX runtime fails on <pthread.h>;
+        // the error must name the supported path instead of just dumping
+        // the compiler header error.
+        let e = BuildError::CompileFailed {
+            stderr: "core.h:26:10: fatal error: 'pthread.h' file not found".to_string(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("not supported on Windows"), "{msg}");
+        assert!(msg.contains("VM"), "{msg}");
+        // Unrelated compile errors stay untouched.
+        let plain = BuildError::CompileFailed {
+            stderr: "app.c:1:1: error: expected ';'".to_string(),
+        }
+        .to_string();
+        assert!(!plain.contains("hint:"), "{plain}");
+    }
+
+    #[test]
     fn force_undef_flag_is_linker_passthrough() {
         // Bare `-u <sym>` breaks the bundled `zig cc` (it reads the symbol
         // as an input file: "unrecognized file extension"), so the flag
         // must go through `-Wl,` for every driver.
         assert_eq!(
-            force_undef_flag("zz_float_format_raw", Some("x86_64-unknown-linux-gnu")),
+            force_undef_flag(
+                "zz_float_format_raw",
+                Some("x86_64-unknown-linux-gnu"),
+                false
+            ),
             "-Wl,-u,zz_float_format_raw"
         );
         // Darwin's ld64 wants the leading underscore, still via `-Wl,`.
         assert_eq!(
-            force_undef_flag("zz_float_format_raw", Some("aarch64-apple-darwin")),
+            force_undef_flag("zz_float_format_raw", Some("aarch64-apple-darwin"), false),
             "-Wl,-u,_zz_float_format_raw"
         );
         // lld-link / link.exe spell it `/INCLUDE:<sym>`.
         assert_eq!(
-            force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-msvc")),
+            force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-msvc"), false),
             "-Wl,/INCLUDE:zz_float_format_raw"
+        );
+        // Zig parses `-Wl,` itself and rejects the MSVC spelling even for
+        // Windows targets ("unsupported linker arg: /INCLUDE:..."), so it
+        // always gets the GNU form (lld-link understands `-u`).
+        assert_eq!(
+            force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-msvc"), true),
+            "-Wl,-u,zz_float_format_raw"
+        );
+        assert_eq!(
+            force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-gnu"), true),
+            "-Wl,-u,zz_float_format_raw"
         );
         // Host builds (no explicit target) use the same passthrough form.
         if cfg!(windows) {
-            assert_eq!(force_undef_flag("sym", None), "-Wl,/INCLUDE:sym");
+            assert_eq!(force_undef_flag("sym", None, false), "-Wl,/INCLUDE:sym");
+            assert_eq!(force_undef_flag("sym", None, true), "-Wl,-u,sym");
         } else if cfg!(target_os = "macos") {
-            assert_eq!(force_undef_flag("sym", None), "-Wl,-u,_sym");
+            assert_eq!(force_undef_flag("sym", None, false), "-Wl,-u,_sym");
         } else {
-            assert_eq!(force_undef_flag("sym", None), "-Wl,-u,sym");
+            assert_eq!(force_undef_flag("sym", None, false), "-Wl,-u,sym");
         }
     }
 
@@ -1877,8 +1980,15 @@ mod tests {
         assert!(!linux.iter().any(|f| f == "-lws2_32"));
         let win = clang_flags(&release_opts(), Some("x86_64-pc-windows-gnu"));
         assert!(win.iter().any(|f| f == "-lws2_32"));
+        // Host builds follow the host: a Linux/macOS host must not link
+        // ws2_32, a Windows host must (this assertion was written Linux-
+        // only and failed the first time the Windows leg ran).
         let native = clang_flags(&release_opts(), None);
-        assert!(!native.iter().any(|f| f == "-lws2_32"));
+        assert_eq!(
+            native.iter().any(|f| f == "-lws2_32"),
+            cfg!(windows),
+            "host link flags must match the host OS"
+        );
     }
 
     #[test]
@@ -1972,8 +2082,12 @@ mod tests {
         let (_c, sh, bat) =
             emit_c_plus_script("int main(){return 0;}", &dir, None, &opts).expect("emit");
         let text = std::fs::read_to_string(&sh).expect("read sh");
+        // Unix links `-L<dir> -lzz_native_rt`; Windows passes the archive
+        // path directly (`zz_native_rt.lib`), so accept both spellings.
+        let links_rt =
+            |t: &str| t.contains("-lzz_native_rt") || t.contains(crate::ffi::lib_file_name());
         assert!(
-            text.contains("-lzz_native_rt"),
+            links_rt(&text),
             "script must link the native runtime: {text}"
         );
         assert!(
@@ -1986,8 +2100,8 @@ mod tests {
         );
         let bat_text = std::fs::read_to_string(&bat).expect("read bat");
         assert!(
-            bat_text.contains("-lzz_native_rt"),
-            "batch script must link the native runtime too"
+            links_rt(&bat_text),
+            "batch script must link the native runtime too: {bat_text}"
         );
         // Non-FFI programs: no runtime tail at all.
         let dir2 = transient_dir("zz-emit-plain-test");

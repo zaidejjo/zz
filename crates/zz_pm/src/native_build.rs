@@ -548,31 +548,141 @@ pub fn expected_c_symbols(zzi_path: &Path) -> Result<Vec<String>, String> {
     Ok(syms)
 }
 
-/// Defined global symbols of an object/archive/shared lib
-/// (`nm -g --defined-only`), preserving multiplicity so the ABI stamp can
-/// be required exactly once.
-fn defined_symbols(path: &Path, tmpdir: &Path) -> Result<Vec<String>, String> {
-    let nm = find_tool(&["llvm-nm", "nm"]).ok_or_else(|| {
-        "no symbol dumper found (need `nm` or `llvm-nm`)\n\
-         hint: install binutils (`nm`) or LLVM (`llvm-nm`)"
-            .to_string()
-    })?;
-    let mut cmd = Command::new(&nm);
-    cmd.arg("-g").arg("--defined-only").arg(path);
-    let out = run_hermetic(cmd, tmpdir, &format!("nm {}", path.display()))?;
-    let mut symbols = Vec::new();
-    for line in String::from_utf8_lossy(&out).lines() {
-        let line = line.trim();
-        if line.is_empty() || line.ends_with(':') {
-            continue; // archive member headers
-        }
-        // `addr TYPE name` or `TYPE name` or bare `name`.
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if let Some(name) = cols.last() {
-            symbols.push(name.to_string());
+/// Outcome of one symbol-dump invocation (stdout is useful even when the
+/// tool exits non-zero: `nm` reports unreadable archive members on stderr
+/// but still lists the rest).
+struct DumpOutput {
+    ok: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run `cmd` hermetically, keeping stdout/stderr/status instead of
+/// collapsing a non-zero exit into an error.
+fn run_hermetic_raw(mut cmd: Command, tmpdir: &Path, what: &str) -> Result<DumpOutput, String> {
+    let prog = cmd.get_program().to_string_lossy().into_owned();
+    let out = cmd
+        .env_clear()
+        .envs(hermetic_env(tmpdir))
+        .output()
+        .map_err(|e| format!("{what} failed to spawn `{prog}`: {e}"))?;
+    Ok(DumpOutput {
+        ok: out.status.success(),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    })
+}
+
+/// Symbol dumpers, best first. `llvm-nm` reads objects built by newer
+/// LLVM than Apple's cctools `nm` can (the Xcode 16.4 `nm` rejects
+/// rustc/LLVM 23 archives with "Unknown attribute kind"), so prefer it
+/// and locate Xcode's copy through `xcrun` when it is not on `PATH`.
+fn symbol_dumpers() -> Vec<String> {
+    let mut tools: Vec<String> = Vec::new();
+    if let Some(t) = find_tool(&["llvm-nm"]) {
+        tools.push(t);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(t) = xcrun_tool("llvm-nm") {
+        if !tools.contains(&t) {
+            tools.push(t);
         }
     }
-    Ok(symbols)
+    if let Some(t) = find_tool(&["nm"]) {
+        if !tools.contains(&t) {
+            tools.push(t);
+        }
+    }
+    tools
+}
+
+/// Resolve a tool inside the active Xcode toolchain (`xcrun -f <name>`),
+/// which is where `llvm-nm` lives on macOS.
+#[cfg(target_os = "macos")]
+fn xcrun_tool(name: &str) -> Option<String> {
+    let out = Command::new("xcrun").arg("-f").arg(name).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() || !Path::new(&path).is_file() {
+        return None;
+    }
+    Some(path)
+}
+
+/// `nm -g` symbol names, dropping undefined entries. Mach-O prefixes
+/// every C symbol with `_`, so `strip_macho_underscore` normalises
+/// `_my_add` back to `my_add`.
+fn parse_symbol_names(raw: &[u8], strip_macho_underscore: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in String::from_utf8_lossy(raw).lines() {
+        let line = line.trim();
+        if line.is_empty() || line.ends_with(':') || line.contains(": no symbols") {
+            continue; // archive member headers / empty members
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // `addr TYPE name` / `TYPE name` / bare `name`; `U` = undefined.
+        if cols.contains(&"U") {
+            continue;
+        }
+        let Some(name) = cols.last() else { continue };
+        if name.is_empty() || name.chars().all(|c| c.is_ascii_punctuation()) {
+            continue;
+        }
+        let name = if strip_macho_underscore {
+            name.strip_prefix('_').unwrap_or(name)
+        } else {
+            name
+        };
+        names.push(name.to_string());
+    }
+    names
+}
+
+/// Defined global symbols of an object/archive/shared lib, preserving
+/// multiplicity so the ABI stamp can be required exactly once.
+fn defined_symbols(
+    path: &Path,
+    tmpdir: &Path,
+    strip_macho_underscore: bool,
+) -> Result<Vec<String>, String> {
+    let tools = symbol_dumpers();
+    if tools.is_empty() {
+        return Err("no symbol dumper found (need `nm` or `llvm-nm`)\n\
+                    hint: install binutils (`nm`) or LLVM (`llvm-nm`)"
+            .to_string());
+    }
+    let mut last_err = String::new();
+    for tool in &tools {
+        let mut cmd = Command::new(tool);
+        cmd.arg("-g").arg(path);
+        let out = run_hermetic_raw(cmd, tmpdir, &format!("nm {}", path.display()))?;
+        let names = parse_symbol_names(&out.stdout, strip_macho_underscore);
+        if !names.is_empty() {
+            // Some members may be unreadable (newer LLVM objects under an
+            // older `nm`); the symbols we can see are still authoritative
+            // for the names the plugin actually exports.
+            if !out.ok {
+                eprintln!(
+                    "note: `{tool}` could not read every member of {}; verifying against the {} symbol(s) it listed",
+                    path.display(),
+                    names.len()
+                );
+            }
+            return Ok(names);
+        }
+        last_err = format!(
+            "nm {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Err(format!(
+        "{last_err}\nhint: no symbol dumper could read {} ({} tried)",
+        path.display(),
+        tools.join(", ")
+    ))
 }
 
 /// Count the ABI version stamp across both accepted spellings.
@@ -1393,10 +1503,13 @@ fn verify_engine_parity(
     probe_tmp: &Path,
 ) -> Result<(), String> {
     let expected = expected_c_symbols(zzi_path)?;
+    // Mach-O prefixes C symbols with `_`; normalise so `plugin.zzi`
+    // names (`my_add`) match what `nm` prints on macOS (`_my_add`).
+    let macho = tag.starts_with("macos-");
     let mut arch_syms: HashSet<String> = HashSet::new();
     let mut arch_stamps = 0usize;
     for archive in archives {
-        let set = defined_symbols(archive, probe_tmp)
+        let set = defined_symbols(archive, probe_tmp, macho)
             .map_err(|e| format!("static verification failed for `{pkg_name}`: {e}"))?;
         arch_stamps += abi_stamp_count(&set);
         arch_syms.extend(set);
@@ -1419,7 +1532,7 @@ fn verify_engine_parity(
         eprintln!("note: `{pkg_name}` on windows is AOT-only (VM dlopen deferred)");
         return Ok(());
     }
-    let shared_syms = defined_symbols(shared, probe_tmp)
+    let shared_syms = defined_symbols(shared, probe_tmp, macho)
         .map_err(|e| format!("shared verification failed for `{pkg_name}`: {e}"))?;
     for s in &expected {
         if !shared_syms.contains(s) {
@@ -2478,5 +2591,30 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
             C_ABI_STAMP.to_string(),
         ];
         assert_eq!(abi_stamp_count(&mixed), 3);
+    }
+
+    /// Mach-O prints `_my_add` where ELF prints `my_add`, archive member
+    /// headers and `U` (undefined) lines must not become symbols, and
+    /// `nm`'s "no symbols" line for an empty member is noise.
+    #[test]
+    fn parse_symbol_names_normalises_macho_and_skips_noise() {
+        let raw = b"archive.a(member.o):\n\
+                    0000000000000000 T _my_add\n\
+                    0000000000000000 T my_sub\n\
+                    \x20                U _puts\n\
+                    archive.a(empty.o): no symbols\n\
+                    0000000000000000 D _ZZ_C_PLUGIN_ABI_VERSION\n";
+        let elvish = parse_symbol_names(raw, false);
+        assert!(elvish.contains(&"_my_add".to_string()));
+        assert!(elvish.contains(&"my_sub".to_string()));
+        assert!(!elvish.iter().any(|s| s == "_puts"), "undefined leaked");
+        assert!(
+            !elvish.iter().any(|s| s == "symbols" || s == "no"),
+            "member noise leaked: {elvish:?}"
+        );
+        let macho = parse_symbol_names(raw, true);
+        assert!(macho.contains(&"my_add".to_string()));
+        assert!(macho.contains(&"my_sub".to_string()));
+        assert_eq!(abi_stamp_count(&macho), 1, "{macho:?}");
     }
 }

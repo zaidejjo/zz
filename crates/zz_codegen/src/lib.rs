@@ -218,5 +218,14 @@ pub fn build_native_with(
     Ok(lowered)
 }
 
-#[cfg(test)]
+/// Native e2e suite: lowers, compiles with the system C toolchain, runs the
+/// binary and diffs stdout against the VM.
+///
+/// Skipped on Windows: the C runtime is POSIX-thread based (`core.h`
+/// includes `<pthread.h>`, the channel/rep-pool code uses mutexes and
+/// condition variables) and the socket layer is written against POSIX
+/// `fcntl`/`poll`, so the AOT backend cannot build there yet. Windows CI
+/// runs the VM suites and the CLI/PM tests; native legs are gated by
+/// `ZZ_SKIP_NATIVE` in the integration tests for the same reason.
+#[cfg(all(test, not(windows)))]
 mod tests;

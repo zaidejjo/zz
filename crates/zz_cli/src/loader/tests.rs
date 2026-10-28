@@ -2157,7 +2157,7 @@ fn dep_style_warnings_collapse_to_one_note() {
         ),
         (
             "app/src/main.zz",
-            "import ask.editor\nx := editor.edit()",
+            "import ask.editor\nprintln(editor.edit())",
         ),
         ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
         (
@@ -2165,10 +2165,10 @@ fn dep_style_warnings_collapse_to_one_note() {
             "pub func get() -> int { return 1 }",
         ),
         (
-            // `ed` shadows the `ed` import head: the #381 lint fires
-            // inside the dep (same shape as ask's `ed := env.get(..)`).
+            // Two style lints inside the dep (an unused import and an
+            // unused local). Neither may reach the consumer.
             "askpkg/src/editor.zz",
-            "import ask.helper as ed\npub func edit() -> int {\n    ed := 1\n    return ed\n}",
+            "import ask.helper\npub func edit() -> int {\n    unused := 1\n    return 2\n}",
         ),
     ]);
     let mut lock = zz_pm::lock::Lockfile::new();
@@ -2189,12 +2189,12 @@ fn dep_style_warnings_collapse_to_one_note() {
         .iter()
         .flat_map(|e| e.diags.iter().map(|d| d.message.as_str()))
         .collect();
-    // The raw per-site warning must not reach the consumer ...
+    // The raw per-site warnings must not reach the consumer ...
     assert!(
         !msgs
             .iter()
-            .any(|m| m.contains("shadows a module namespace")),
-        "dep shadow warning must collapse, got: {:?}",
+            .any(|m| m.contains("unused variable") || m.contains("unused import")),
+        "dep style warnings must collapse, got: {:?}",
         msgs
     );
     // ... but the collapse note names the dependency.
@@ -2204,32 +2204,32 @@ fn dep_style_warnings_collapse_to_one_note() {
         "expected collapse note, got: {:?}",
         msgs
     );
+    assert!(
+        msgs.iter().any(|m| m.contains("inside dependency")
+            && m.contains("`editor`")
+            && m.contains("hidden")),
+        "collapse note must name the dependency, got: {:?}",
+        msgs
+    );
 }
 
 #[test]
-fn first_party_shadow_warning_still_fires() {
+fn first_party_style_warning_still_fires() {
     // #387 companion: first-party files keep the raw per-site warning.
     let dir = temp_project(&[
         (
             "zz.toml",
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
         ),
-        (
-            "src/main.zz",
-            "import math.utils\nfunc f(utils: str) -> str {\n    return utils\n}",
-        ),
-        (
-            "src/math/utils.zz",
-            "pub func double(n: int) -> int { return n * 2 }",
-        ),
+        ("src/main.zz", "unused := 1"),
     ]);
     let result = load_program(&dir.join("src/main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
     assert!(
         diag_texts(&result)
             .iter()
-            .any(|m| m.contains("shadows a module namespace")),
-        "first-party shadow warning must fire, got: {:?}",
+            .any(|m| m.contains("unused variable")),
+        "first-party style warning must fire, got: {:?}",
         diag_texts(&result)
     );
 }

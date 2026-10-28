@@ -28,6 +28,11 @@ zz --version
 VM-only work (`zz run`, `zz check`, `zz test`) needs no C toolchain.
 `zz build` / `zz run --native` / `zz test --engine native` need one.
 
+AOT currently ships on Linux and macOS. The Windows backend still needs
+its runtime ported to Win32 threads/sockets (`<pthread.h>`, `fcntl`,
+`poll`), so `zz build` there reports that native builds are unsupported;
+VM mode, the REPL, `zz-lsp` and `zz pm` work on Windows.
+
 ## No toolchain? Use the managed Zig backend
 
 ```bash

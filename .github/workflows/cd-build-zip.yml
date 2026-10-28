@@ -9,6 +9,9 @@ name: CD build zip
 # platform-uniform (`zz-0.4.0-windows-x86_64.zip`), the version lives in
 # the archive name and in `zz --version` — never in the executable name.
 
+permissions:
+  contents: read
+
 on:
   workflow_call:
     inputs:
@@ -84,6 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           # Build the exact tree CI tested (releases pass `main`); a manual
           # run packages the dispatched branch unless it names another ref.
           ref: ${{ inputs.ref || github.ref_name }}
@@ -247,7 +251,7 @@ jobs:
             echo "error: $ZIP is missing lib/libstd-<hash>.rlib" >&2
             exit 1
           fi
-          cat members.txt
+          wc -l < members.txt
           # `sha256sum` is GNU coreutils (absent on stock macOS); `shasum`
           # is the Perl one-liner macOS ships. Both print `<hash>  <file>`.
           if command -v sha256sum > /dev/null 2>&1; then
@@ -290,10 +294,16 @@ jobs:
           }
           Copy-Item target/release/zz.exe, target/release/zz-lsp.exe dist/
           Copy-Item target/release/zz_native_rt.lib dist/lib/zz_native_rt.lib
-          # MSVC names the static libstd `std-<hash>.rlib` (no `lib` prefix).
+          # rustc keeps the `lib` prefix for rlibs on every target
+          # (`libstd-<hash>.rlib`, confirmed against the MSVC rust-std
+          # component); the unprefixed `std-<hash>.dll.lib` is the import
+          # library, not the static libstd. Accept both spellings so an
+          # older/newer toolchain layout does not break the packaging.
           $libdir = (& rustc --print target-libdir).Trim()
-          $rlib = Get-ChildItem $libdir -Filter "std-*.rlib" | Sort-Object Name | Select-Object -Last 1
-          if (-not $rlib) { throw "no std-*.rlib in $libdir" }
+          $rlib = Get-ChildItem $libdir -Filter "*.rlib" |
+            Where-Object { $_.Name -match '^(lib)?std-[0-9a-f]+\.rlib$' } |
+            Sort-Object Name | Select-Object -Last 1
+          if (-not $rlib) { throw "no libstd-*.rlib in $libdir" }
           Copy-Item $rlib.FullName dist/lib/
           Copy-Item LICENSE, README.md dist/
           # bsdtar is an order of magnitude faster than Compress-Archive on
@@ -316,8 +326,8 @@ jobs:
                                   "LICENSE", "README.md")) {
             if ($members -notcontains $required) { throw "missing $required in $zip" }
           }
-          if (-not ($members | Where-Object { $_ -like "lib/std-*.rlib" })) {
-            throw "missing lib/std-*.rlib in $zip"
+          if (-not ($members | Where-Object { $_ -match '^lib/(lib)?std-[0-9a-f]+\.rlib$' })) {
+            throw "missing lib/libstd-<hash>.rlib in $zip"
           }
           (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" |
             Out-File -Encoding ascii "$zip.sha256"
@@ -338,16 +348,27 @@ jobs:
           rm -rf zipsmoke
           mkdir zipsmoke
           unzip -q "$ZIP" -d zipsmoke
-          printf 'func main() {\n    println("zip-ok")\n}\n' > zipsmoke/hello.zz
+          # A float forces the Rust native runtime (and the forced
+          # `zz_float_format_raw` extraction) through the packaged
+          # archives, which is exactly what a string-only program skips.
+          printf 'func main() {\n    println(1.5)\n    println("zip-ok")\n}\n' > zipsmoke/hello.zz
           mv Cargo.toml Cargo.toml.smoke-hidden
           trap 'mv Cargo.toml.smoke-hidden Cargo.toml' EXIT
-          ( cd zipsmoke && ./zz build -p --verbose hello.zz ) > build.log 2>&1
+          if ! ( cd zipsmoke && ./zz build -p --verbose hello.zz ) > build.log 2>&1; then
+            echo "error: packaged zz failed to build" >&2
+            cat build.log >&2
+            exit 1
+          fi
           mv Cargo.toml.smoke-hidden Cargo.toml
           trap - EXIT
           cat build.log
           grep -q 'zig cc' build.log
           out="$(./zipsmoke/hello)"
-          [ "$out" = "zip-ok" ]
+          expected="$(printf '1.5\nzip-ok')"
+          [ "$out" = "$expected" ] || {
+            echo "error: unexpected output: $out" >&2
+            exit 1
+          }
           ./zipsmoke/zz-lsp --version
 
       - name: smoke the packaged zip as an end user (windows)
@@ -368,29 +389,27 @@ jobs:
           $hello = @(
             'func main() {'
             '    println("zip-ok")'
+            '    for i in 0..3 {'
+            '        println(i)'
+            '    }'
             '}'
           ) -join "`n"
           Set-Content -Path zipsmoke/hello.zz -Value $hello -Encoding ascii
-          Rename-Item Cargo.toml Cargo.toml.smoke-hidden
-          try {
-            Push-Location zipsmoke
-            try {
-              & ./zz.exe build -p --verbose hello.zz *> ../build.log
-              $code = $LASTEXITCODE
-            } finally {
-              Pop-Location
-            }
-          } finally {
-            Rename-Item Cargo.toml.smoke-hidden Cargo.toml
+          # VM + CLI only: the AOT C backend needs a POSIX-thread/socket
+          # runtime (see README "Supported platforms"), so `zz build` is
+          # not exercised on Windows until that port lands. The unix legs
+          # run the float/AOT gate that proves the packaged archives link.
+          $out = @(& ./zipsmoke/zz.exe run hello.zz)
+          if ($LASTEXITCODE -ne 0) { throw "packaged zz failed to run (exit $LASTEXITCODE)" }
+          if ($out.Count -ne 4 -or $out[0] -ne "zip-ok" -or $out[1] -ne "0" -or $out[3] -ne "2") {
+            throw "unexpected packaged-binary output: $($out -join '|')"
           }
-          Get-Content build.log | Write-Host
-          if ($code -ne 0) { throw "packaged zz failed to build (exit $code)" }
-          if (-not (Select-String -Path build.log -Pattern 'zig cc' -Quiet)) {
-            throw "packaged build did not use the bundled zig"
-          }
-          $out = (& ./zipsmoke/hello.exe | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0) { throw "packaged binary exited $LASTEXITCODE" }
-          if ($out -ne "zip-ok") { throw "unexpected packaged-binary output: $out" }
+          & ./zipsmoke/zz.exe check hello.zz
+          if ($LASTEXITCODE -ne 0) { throw "packaged zz check failed (exit $LASTEXITCODE)" }
+          $ver = (& ./zipsmoke/zz.exe --version | Out-String).Trim()
+          if ($ver -notmatch '^zz ') { throw "unexpected --version: $ver" }
+          $zigver = (& ./zipsmoke/zig.exe version | Out-String).Trim()
+          if ($zigver -notmatch '^0\.17\.') { throw "unexpected bundled zig version: $zigver" }
           & ./zipsmoke/zz-lsp.exe --version
 
       - name: upload zip artifact

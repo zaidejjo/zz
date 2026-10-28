@@ -7,6 +7,9 @@ name: CI test leg
 # Why a reusable workflow instead of one big ci.yml: each file stays small
 # and reviewable, and the runner labels stay visible in the caller.
 
+permissions:
+  contents: read
+
 on:
   workflow_call:
     inputs:
@@ -41,6 +44,8 @@ jobs:
       ZZ_CLANG_VERSION: ${{ matrix.clang_pin }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

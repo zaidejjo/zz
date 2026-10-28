@@ -906,6 +906,20 @@ fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, Ffi
     snapshot_staticlib(&lib, release)
 }
 
+/// Copy `src` to `dst` through a share-all read handle.
+///
+/// `std::fs::copy` uses `CopyFileExW` on Windows, which opens the source
+/// without `FILE_SHARE_WRITE`: a concurrent producer rewriting the archive
+/// (cargo replacing the static lib) then fails with
+/// `ERROR_SHARING_VIOLATION`, and so does the copy. `File::open` asks for
+/// full sharing on Windows and behaves like `open(2)` on POSIX, so a
+/// snapshot never blocks the writer.
+fn copy_shared(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<u64> {
+    let mut from = std::fs::File::open(src)?;
+    let mut to = std::fs::File::create(dst)?;
+    std::io::copy(&mut from, &mut to)
+}
+
 /// Immutable snapshot of the cargo-built archive, for linking.
 ///
 /// The cargo output path is not stable: `cargo build` replaces the file,
@@ -987,7 +1001,7 @@ fn snapshot_staticlib(lib: &std::path::Path, strip: bool) -> Result<PathBuf, Ffi
             std::process::id(),
             TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
-        let copied = std::fs::copy(lib, &tmp).ok().and_then(|_| stamp(&tmp));
+        let copied = copy_shared(lib, &tmp).ok().and_then(|_| stamp(&tmp));
         let after = stamp(lib);
         let stable = match (before, copied, after) {
             (Some(b), Some(c), Some(a)) if b == a && c.0 == b.0 && c.0 > 0 => {
@@ -1175,15 +1189,20 @@ fn sys_link_libs(os: TargetOs) -> &'static [&'static str] {
 
 /// System libraries for Windows/MSVC native FFI links.
 ///
-/// These are .lib import libraries that the MSVC linker (or clang/zig in
-/// MSVC-compatible mode on Windows) understands.
+/// Windows system import libraries.
+///
+/// `-l<name>` (not bare `<name>.lib`): bare file names only resolve when
+/// the MSVC `LIB` directory happens to be in the environment, so a
+/// clang/GNU-ABI link on Windows failed with "no such file or directory:
+/// 'kernel32.lib'". clang maps `-l` to the right import library for both
+/// the MSVC and the GNU driver.
 fn sys_link_libs_windows() -> &'static [&'static str] {
     &[
-        "kernel32.lib",
-        "user32.lib",
-        "advapi32.lib",
-        "ws2_32.lib",
-        "crypt32.lib",
+        "-lkernel32",
+        "-luser32",
+        "-ladvapi32",
+        "-lws2_32",
+        "-lcrypt32",
     ]
 }
 

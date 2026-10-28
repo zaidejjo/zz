@@ -15,6 +15,9 @@ name: CD rehearse zip
 #
 # Never publishes: artifacts only.
 
+permissions:
+  contents: read
+
 on:
   pull_request:
     types: [labeled]
@@ -42,6 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || inputs.ref || github.ref_name }}
       - name: read workspace version
         id: ver

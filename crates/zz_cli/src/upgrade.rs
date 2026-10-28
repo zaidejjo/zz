@@ -88,9 +88,11 @@ fn extract_release_zip(zip: &std::path::Path, dest: &std::path::Path) -> Result<
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command"])
         .arg(format!(
+            // Single quotes are literal in PowerShell: double them, or a
+            // path containing `'` breaks the command (and could inject).
             "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
-            zip.display(),
-            dest.display()
+            zip.display().to_string().replace('\'', "''"),
+            dest.display().to_string().replace('\'', "''")
         ))
         .output();
     #[cfg(not(windows))]
@@ -289,15 +291,29 @@ pub fn run(args: &[String]) -> Result<(), String> {
         };
         let bak = dir.join(format!("{name}.bak"));
         let _ = std::fs::remove_file(&bak);
+        // Stage next to the target before renaming: the download is
+        // unpacked in the temp dir, which may be a different filesystem
+        // (tmpfs `/tmp` on Linux, another volume on Windows) where
+        // `rename` fails with EXDEV.
+        let local = dir.join(format!(".{name}.new-{}", std::process::id()));
+        let _ = std::fs::remove_file(&local);
+        std::fs::copy(&src, &local).map_err(|e| {
+            format!(
+                "cannot stage {}: {e} (check write permission)",
+                live.display()
+            )
+        })?;
         if live.exists() {
             std::fs::rename(&live, &bak).map_err(|e| {
+                let _ = std::fs::remove_file(&local);
                 format!(
                     "cannot back up {}: {e} (check write permission)",
                     live.display()
                 )
             })?;
         }
-        if let Err(e) = std::fs::rename(&src, &live) {
+        if let Err(e) = std::fs::rename(&local, &live) {
+            let _ = std::fs::remove_file(&local);
             let _ = std::fs::rename(&bak, &live);
             return Err(format!(
                 "cannot install {}: {e} (rolled back)",
@@ -352,10 +368,25 @@ pub fn run(args: &[String]) -> Result<(), String> {
             true
         }
         Some(_) => {
-            ui::warn(&format!(
-                "release zip has no {rt_lib} in lib/; keeping the installed runtime"
+            // `lib/` is present but lacks the version-locked runtime
+            // archive: publishing it would pair a new compiler with the
+            // previous ABI. Fail like any other packaging defect.
+            for base in ["zz", "zz-lsp"] {
+                let name = exe_name(base);
+                let live = dir.join(&name);
+                let bak = dir.join(format!("{name}.bak"));
+                if bak.exists() {
+                    let _ = std::fs::rename(&bak, &live);
+                } else {
+                    let _ = std::fs::remove_file(&live);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!(
+                "release zip ships lib/ without {rt_lib}; refusing to leave the previous \
+                 runtime next to the new compiler (rolled back)\n\
+                 hint: this is a packaging bug — report it with the release tag"
             ));
-            false
         }
         None => false,
     };

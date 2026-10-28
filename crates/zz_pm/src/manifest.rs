@@ -1244,12 +1244,12 @@ pub fn validate_pkg_config_token(tok: &str) -> Result<(), String> {
 /// Accepted: `linux-{x86_64,aarch64}-gnu-glibc<major>.<minor>`
 /// (e.g. `linux-x86_64-gnu-glibc2.28`), `linux-{x86_64,aarch64}-musl`,
 /// `macos-{x86_64,arm64}-min<major>.<minor>` (e.g. `macos-arm64-min11.0`),
-/// `windows-x86_64-msvc`. Anything else is a manifest error.
+/// `windows-{x86_64,aarch64}-msvc`. Anything else is a manifest error.
 pub fn validate_platform_tag(tag: &str) -> Result<(), String> {
     fn bad(tag: &str) -> String {
         format!(
             "invalid platform tag `{tag}`\n\
-             hint: e.g. linux-x86_64-gnu-glibc2.28, linux-x86_64-musl, macos-arm64-min11.0, windows-x86_64-msvc"
+             hint: e.g. linux-x86_64-gnu-glibc2.28, linux-x86_64-musl, macos-arm64-min11.0, windows-x86_64-msvc, windows-aarch64-msvc"
         )
     }
     let parts: Vec<&str> = tag.split('-').collect();
@@ -1264,7 +1264,11 @@ pub fn validate_platform_tag(tag: &str) -> Result<(), String> {
             parse_dotted(&floor[3..]).ok_or_else(|| bad(tag))?;
             Ok(())
         }
-        ["windows", "x86_64", "msvc"] => Ok(()),
+        // Both Windows architectures are first-class: `host_tag()` emits
+        // `windows-aarch64-msvc` on ARM64 and the release pipeline builds
+        // it, so rejecting the tag made native packages unpublishable
+        // there.
+        ["windows", "x86_64" | "aarch64", "msvc"] => Ok(()),
         _ => Err(bad(tag)),
     }
 }
@@ -3049,6 +3053,7 @@ version = "0.1.0"
             "macos-arm64-min11.0",
             "macos-x86_64-min12.0",
             "windows-x86_64-msvc",
+            "windows-aarch64-msvc",
         ] {
             assert!(validate_platform_tag(t).is_ok(), "`{t}` allowed");
         }
@@ -3064,6 +3069,8 @@ version = "0.1.0"
             "linux-x86_64-gnu",
             "linux-x86_64-gnu-glibc",
             "windows-x86_64",
+            "windows-aarch64",
+            "windows-aarch64-gnu",
             "freebsd-x86_64-gnu-glibc2.28",
         ] {
             assert!(validate_platform_tag(t).is_err(), "`{t}` must be rejected");
