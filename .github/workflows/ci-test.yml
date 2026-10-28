@@ -204,6 +204,18 @@ jobs:
           ZZ_SKIP_NATIVE: "1"
         run: ./scripts/test-fast.sh
 
+      - name: 'test (PR: zz_cli unit tests inside the binary)'
+        # `test-fast.sh` runs `-p zz_cli --lib` (5 tests); the CLI's own
+        # unit tests (upgrade, doctor, setup, arg parsing — ~280) live in
+        # the binary target and only ran on push via `cargo test --all`,
+        # so PRs could break them unnoticed. CI-only: the debug binary is
+        # large and this is heavy for a laptop.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          ZZ_CI_SKIP_LINT: "1"
+        run: cargo test -p zz_cli --bins
+
       - name: 'test (PR: batched native parity)'
         if: github.event_name == 'pull_request' && matrix.native
         shell: bash
