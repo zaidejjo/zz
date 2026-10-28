@@ -24,15 +24,19 @@ name: CI
 #   manual dispatch (full matrix; `gh workflow run ci.yml --ref <branch>`
 #     runs all six legs against that branch).
 #
-# Two tiers, because the second architecture of each OS family rarely
-# carries new signal and doubles the runner bill:
-#   PR        -> the three `"tier": "pr"` legs: both toolchains that gate
-#                merge (GNU/Clang on Linux, Apple Clang on arm64, MSVC on
-#                x86_64 Windows). Covers every OS family.
-#   everything else -> all six (`"tier": "full"` included): the aarch64
-#                Linux, Intel macOS and Windows arm64 legs, where a
-#                regression surfaces within a day instead of at release.
-# A manual dispatch is the escape hatch for "I need all six before merge".
+# Two tiers. This repo is public, so runner minutes are free: the tier buys
+# *latency and signal*, not money. `macos-26-intel` and `windows-11-arm`
+# queue far longer and flake more often, and a PR does not need a second
+# architecture of the same OS to prove a change:
+#   PR        -> the three `"tier": "pr"` legs: one toolchain per OS family
+#                (GNU/Clang on Linux, Apple Clang on arm64 macOS, MSVC on
+#                x86_64 Windows).
+#   everything else -> all six (`"tier": "full"` included): adds linux
+#                aarch64, Intel macOS and Windows arm64, so a regression
+#                there surfaces within a day instead of at release.
+# It is not lower coverage: every merge, every night and every manual
+# dispatch run the full matrix. `gh workflow run ci.yml --ref <branch>` is
+# the escape hatch for "I need all six before merge".
 
 on:
   push:
@@ -96,20 +100,61 @@ jobs:
           /tmp/shellcheck-v${sc_version}/shellcheck --version | head -2
           /tmp/actionlint -shellcheck=/tmp/shellcheck-v${sc_version}/shellcheck
 
+  # --- plan: which legs run for *this* event -----------------------------
+  # GitHub expressions cannot filter arrays, and `matrix` is not available
+  # in a job-level `if`, so selection happens here once and each family
+  # workflow receives an already-filtered list (a `"skipped"` matrix entry
+  # would still spin up a runner).
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      linux: ${{ steps.pick.outputs.linux }}
+      macos: ${{ steps.pick.outputs.macos }}
+      windows: ${{ steps.pick.outputs.windows }}
+    steps:
+      - id: pick
+        env:
+          FULL: ${{ github.event_name != 'pull_request' }}
+          LEGS: |
+            {
+              "linux": [
+                {"name": "linux-x86_64", "runner": "ubuntu-24.04", "native": true,
+                 "tier": "pr", "timeout": 30, "clang_pin": "23", "docker_smoke": true},
+                {"name": "linux-aarch64", "runner": "ubuntu-24.04-arm", "native": true,
+                 "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
+              ],
+              "macos": [
+                {"name": "macos-aarch64", "runner": "macos-26", "native": true,
+                 "tier": "pr", "timeout": 45, "clang_pin": "", "docker_smoke": false},
+                {"name": "macos-x86_64", "runner": "macos-26-intel", "native": true,
+                 "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
+              ],
+              "windows": [
+                {"name": "windows-x86_64", "runner": "windows-2025", "native": false,
+                 "tier": "pr", "timeout": 60, "clang_pin": "", "docker_smoke": false},
+                {"name": "windows-aarch64", "runner": "windows-11-arm", "native": false,
+                 "tier": "full", "timeout": 60, "clang_pin": "", "docker_smoke": false}
+              ]
+            }
+        run: |
+          set -euo pipefail
+          for family in linux macos windows; do
+            picked=$(jq -c --argjson full "${FULL:-true}" --arg f "$family" \
+              '{include: [.[$f][] | select($full or .tier == "pr")]}' <<<"$LEGS")
+            echo "$family: $picked"
+            echo "$family=$picked" >> "$GITHUB_OUTPUT"
+          done
+
   # --- linux: x86_64 (full incl. sanitizer/docker) + aarch64 -------------
   linux:
     name: linux
+    needs: plan
     uses: ./.github/workflows/ci-test.yml
     with:
       family: linux
-      full: ${{ github.event_name != 'pull_request' }}
-      legs: >-
-        [
-          {"name": "linux-x86_64", "runner": "ubuntu-24.04", "native": true,
-           "tier": "pr", "timeout": 30, "clang_pin": "23", "docker_smoke": true},
-          {"name": "linux-aarch64", "runner": "ubuntu-24.04-arm", "native": true,
-           "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
-        ]
+      legs: ${{ needs.plan.outputs.linux }}
 
   # --- macos: apple silicon + intel --------------------------------------
   # Runner labels verified 2026: Apple silicon is `macos-26` (`macos-latest`
@@ -118,17 +163,11 @@ jobs:
   # and slow to schedule, so the pair never matched.
   macos:
     name: macos
+    needs: plan
     uses: ./.github/workflows/ci-test.yml
     with:
       family: macos
-      full: ${{ github.event_name != 'pull_request' }}
-      legs: >-
-        [
-          {"name": "macos-aarch64", "runner": "macos-26", "native": true,
-           "tier": "pr", "timeout": 45, "clang_pin": "", "docker_smoke": false},
-          {"name": "macos-x86_64", "runner": "macos-26-intel", "native": true,
-           "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
-        ]
+      legs: ${{ needs.plan.outputs.macos }}
 
   # --- windows: x86_64 + arm64 -------------------------------------------
   # `native: false`: the AOT backend cannot build on Windows yet (the C
@@ -141,14 +180,8 @@ jobs:
   # runtime port; flip the flag with that work, not before.
   windows:
     name: windows
+    needs: plan
     uses: ./.github/workflows/ci-test.yml
     with:
       family: windows
-      full: ${{ github.event_name != 'pull_request' }}
-      legs: >-
-        [
-          {"name": "windows-x86_64", "runner": "windows-2025", "native": false,
-           "tier": "pr", "timeout": 60, "clang_pin": "", "docker_smoke": false},
-          {"name": "windows-aarch64", "runner": "windows-11-arm", "native": false,
-           "tier": "full", "timeout": 60, "clang_pin": "", "docker_smoke": false}
-        ]
+      legs: ${{ needs.plan.outputs.windows }}

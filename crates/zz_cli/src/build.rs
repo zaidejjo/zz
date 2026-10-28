@@ -1260,11 +1260,12 @@ pub fn default_stem_for(src: &Path) -> String {
 pub fn planned_dest_for(src: &Path, output: Option<&Path>, target: Option<&str>) -> PathBuf {
     match output {
         Some(o) if o.components().count() > 1 => {
+            // Explicit user path (`-o out/server`): honor it verbatim for a
+            // host build (`target == None`), but append `.exe` when
+            // cross-compiling to an explicit Windows target — the user is
+            // targeting Windows, so the output needs `.exe` to run there.
             let mut dest = o.to_path_buf();
-            let windows = match target {
-                Some(t) => zz_codegen::is_windows_target(t),
-                None => cfg!(windows),
-            };
+            let windows = target.is_some_and(zz_codegen::is_windows_target);
             if windows && dest.extension().is_none() {
                 dest.set_extension("exe");
             }

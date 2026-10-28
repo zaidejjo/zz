@@ -4,10 +4,8 @@ name: CI test leg
 # (linux/macos/windows) and passes that family's legs as JSON; the matrix
 # here expands them, so the UI groups both architectures under one OS job.
 #
-# `full` selects the tier: false (pull requests) runs only the legs marked
-# `"tier": "pr"`, true (push, nightly, manual dispatch) runs every leg.
-# Skipped legs keep their names in the matrix, so the UI still shows which
-# architecture was not exercised by *this* run.
+# The caller (`ci.yml`) has already selected the tier and passes exactly the
+# legs that should run for this event, so this file only expands the matrix.
 #
 # Why a reusable workflow instead of one big ci.yml: each file stays small
 # and reviewable, and the runner labels stay visible in the caller.
@@ -22,12 +20,6 @@ on:
         description: "`linux` | `macos` | `windows` — selects dependency install."
         required: true
         type: string
-      full:
-        description: >-
-          Run every leg. False runs only legs marked `"tier": "pr"`.
-        required: false
-        type: boolean
-        default: true
       legs:
         description: >-
           JSON array of legs for this family. Each entry carries
@@ -41,36 +33,15 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Filter the caller's leg list down to this tier. Kept as a job (not an
-  # expression in `strategy.matrix`) because GitHub expressions cannot
-  # filter arrays, and `matrix` is unavailable in a job-level `if`.
-  plan:
-    name: plan (${{ inputs.family }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - id: pick
-        env:
-          LEGS: ${{ inputs.legs }}
-          FULL: ${{ inputs.full }}
-        run: |
-          set -euo pipefail
-          matrix=$(jq -c --argjson full "${FULL:-true}" \
-            '{include: [.[] | select($full or .tier == "pr")]}' <<<"$LEGS")
-          echo "legs: $matrix"
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-
   test:
     name: test (${{ matrix.name }})
-    needs: plan
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       # One architecture failing must not hide the other: we want all logs.
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix:
+        include: ${{ fromJSON(inputs.legs) }}
     env:
       # Empty is fine: clang_pin() filters it out. Kept job-level so every
       # step (fast suite, parity, sanitizers) sees the pinned clang.

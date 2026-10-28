@@ -1993,7 +1993,12 @@ fn package_mapping_beats_relative_lookalike() {
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
     assert!(
-        result.files.iter().any(|(n, _)| n.ends_with("src/main.zz")),
+        result.files.iter().any(|(n, _)| {
+            let comps: Vec<_> = std::path::Path::new(n).components().collect();
+            comps.len() >= 2
+                && comps[comps.len() - 2].as_os_str() == "src"
+                && comps[comps.len() - 1].as_os_str() == "main.zz"
+        }),
         "expected src/main.zz in load set, got: {:?}",
         result.files.iter().map(|(n, _)| n).collect::<Vec<_>>(),
     );

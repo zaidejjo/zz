@@ -996,16 +996,20 @@ fn load_vm_plugins(
             }
         }
         if let Ok(entries) = std::fs::read_dir(&build_dir) {
-            let wanted = std::env::consts::DLL_SUFFIX.trim_start_matches('.');
+            // Accept every shared-library spelling the build hook may have
+            // produced (`libctoy_native.so` on a Linux-flavored hook, `.dylib`
+            // on macOS, `.dll` on Windows) — never assume the host's
+            // `DLL_SUFFIX` matches what the hook actually emitted.
+            let is_shared_lib = |p: &std::path::Path| {
+                matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some(ext) if ext == "so" || ext == "dylib" || ext == "dll"
+                )
+            };
             let mut scanned: Vec<std::path::PathBuf> = entries
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| {
-                    matches!(
-                        p.extension().and_then(|e| e.to_str()),
-                        Some(ext) if ext == wanted
-                    ) && !lib_paths.contains(p)
-                })
+                .filter(|p| is_shared_lib(p) && !lib_paths.contains(p))
                 .collect();
             scanned.sort();
             lib_paths.extend(scanned);
