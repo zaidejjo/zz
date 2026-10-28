@@ -556,19 +556,8 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Phase 2/3 HTTP natives — deliberate AOT exclusions (VM-only). Each is
     // excluded because porting it to the C HTTP runtime needs infrastructure
     // that does not exist in AOT (rustls TLS, WebSocket handshake + TCP
-    // handoff, insecure curl client, closure-invoking post-middleware, Bytes
-    // request accessor, header-injecting test dispatch, prefix-scoped static
-    // roots). They abort loudly (`zz_unimplemented_native`) on AOT — never
-    // silently lower to unit.
-    ("std.http.pipe_post", "AOT exclusion (VM-only): post-middleware invokes ZZ closures after the handler; AOT dispatch has no post-response closure call"),
-    ("http.pipe_post", "AOT exclusion (VM-only): post-middleware invokes ZZ closures after the handler; AOT dispatch has no post-response closure call"),
-    ("std.http.with_headers", "AOT exclusion (VM-only): response header merge needs C HttpResponse clone + case-insensitive dict merge; not ported"),
-    ("http.with_headers", "AOT exclusion (VM-only): response header merge needs C HttpResponse clone + case-insensitive dict merge; not ported"),
-    ("std.http.serve_dir_at", "AOT exclusion (VM-only): prefix-scoped static roots extend the AOT static-dir table; not ported"),
-    ("http.serve_dir_at", "AOT exclusion (VM-only): prefix-scoped static roots extend the AOT static-dir table; not ported"),
-    ("std.http.test_req", "AOT exclusion (VM-only): header-injecting in-process test dispatch; zz_http_test exists but no header-carrying twin"),
-    ("std.http.body_bytes", "AOT exclusion (VM-only): exact raw request Bytes; C requests carry String bodies; no Bytes request accessor"),
-    ("http.body_bytes", "AOT exclusion (VM-only): exact raw request Bytes; C requests carry String bodies; no Bytes request accessor"),
+    // handoff, insecure curl client). They abort loudly (`zz_unimplemented_native`)
+    // on AOT — never silently lower to unit.
     ("std.http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
     ("http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
     ("std.http.listen_tls_cfg", "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C"),

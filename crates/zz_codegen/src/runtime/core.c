@@ -946,8 +946,15 @@ zz_value zz_fail(zz_value v, int *err) {
     (void)err;
     char *s = zz_value_to_string(&v);
     fprintf(stderr, "error: fail: %s\n", s);
-    free(s);
     fflush(stderr);
+    // Panic inside a task: return an error result so task.join surfaces it
+    // as .err (VM parity), instead of killing the whole process.
+    if (zz_current_task) {
+        zz_value err_val = zz_variant_err(zz_str_new(s, strlen(s)));
+        free(s);
+        return err_val;
+    }
+    free(s);
     exit(1);
 }
 
@@ -5154,6 +5161,10 @@ static http_route_entry g_http_route_table[HTTP_MAX_ROUTES];
 static int g_http_route_count = 0;
 static zz_value g_http_middlewares[HTTP_MAX_MIDDLEWARE];
 static int g_http_middleware_count = 0;
+// Post-middleware: runs AFTER the handler (response-phase, like the VM's
+// `http.pipe_post`). Registered via `zz_http_pipe_post`.
+static zz_value g_http_post_middlewares[HTTP_MAX_MIDDLEWARE];
+static int g_http_post_middleware_count = 0;
 // Access-log flag for the socket serve path (http.log).
 static int g_http_log_enabled = 0;
 
@@ -5237,6 +5248,57 @@ static int http_rate_check(const char *key, uint64_t *retry_after) {
 zz_value zz_http_server(zz_value unused, int *err) {
     (void)unused;
     *err = 0;
+    return zz_int(0);
+}
+
+// Static-dir table (AOT): prefix → directory root. `serve_dir` is prefix
+// "/"; `serve_dir_at` registers scoped prefixes. Longest match wins.
+#define HTTP_MAX_STATIC_DIRS 16
+typedef struct {
+    char *prefix;
+    size_t plen;
+    char *dir;
+} http_static_dir;
+static http_static_dir g_http_static_dirs[HTTP_MAX_STATIC_DIRS];
+static int g_http_static_dir_count = 0;
+
+// Normalize a static prefix: leading `/`, no trailing `/` (root stays `/`).
+static void http_normalize_prefix(char *dst, size_t cap, const char *src) {
+    size_t n = strlen(src);
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+    if (n == 0 || dst[0] != '/') {
+        memmove(dst + 1, dst, n + 1);
+        dst[0] = '/';
+        n++;
+    }
+    while (n > 1 && dst[n - 1] == '/') dst[--n] = '\0';
+}
+
+// zz_http_serve_dir_at(server, prefix, dir, err) — register scoped prefix.
+zz_value zz_http_serve_dir_at(zz_value server, zz_value prefix, zz_value dir, int *err);
+
+// zz_http_serve_dir(server, dir, err) — register prefix "/" static root.
+zz_value zz_http_serve_dir(zz_value server, zz_value dir, int *err) {
+    return zz_http_serve_dir_at(server, dir, zz_str_static("/"), err);
+}
+
+// zz_http_serve_dir_at(server, prefix, dir, err) — register scoped prefix.
+zz_value zz_http_serve_dir_at(zz_value server, zz_value prefix, zz_value dir, int *err) {
+    *err = 0;
+    (void)server;
+    if (prefix.tag != ZZ_STR || !prefix.s || dir.tag != ZZ_STR || !dir.s) {
+        *err = 1;
+        return zz_int(0);
+    }
+    if (g_http_static_dir_count >= HTTP_MAX_STATIC_DIRS) return zz_int(0);
+    http_static_dir *d = &g_http_static_dirs[g_http_static_dir_count++];
+    d->dir = strndup(zz_str_cptr(dir.s), dir.s->len);
+    d->prefix = malloc(256);
+    if (!d->dir || !d->prefix) { free(d->dir); free(d->prefix); *err = 1; return zz_int(0); }
+    http_normalize_prefix(d->prefix, 256, zz_str_cptr(prefix.s));
+    d->plen = strlen(d->prefix);
     return zz_int(0);
 }
 
@@ -5759,6 +5821,30 @@ zz_value zz_http_body_form(zz_value req, int *err) {
     return ret;
 }
 
+// zz_http_body_bytes(req) → exact raw request body bytes.
+// Unlike body_json/body_form (text), binary uploads round-trip intact.
+// Mirrors the VM's `http.body_bytes`.
+zz_value zz_http_body_bytes(zz_value req, int *err) {
+    *err = 0;
+    if (req.tag != ZZ_DICT || !req.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.body_bytes: expected a dict"));
+    }
+    zz_value b = http_dict_field(req, "body");
+    zz_value out;
+    if (b.tag == ZZ_STR && b.s) {
+        zz_str *bytes = str_alloc(b.s->len);
+        memcpy(zz_str_ptr(bytes), zz_str_cptr(b.s), b.s->len);
+        zz_str_ptr(bytes)[b.s->len] = '\0';
+        bytes->len = b.s->len;
+        out = (zz_value){ZZ_BYTES, {.b = bytes}};
+    } else {
+        out = (zz_value){ZZ_BYTES, {.b = NULL}};
+    }
+    zz_release(&b);
+    return out;
+}
+
 // ---- in-process dispatch (http.test / http.handle) ----
 
 // Find the best route for (method, path): exact string equality
@@ -6068,6 +6154,89 @@ static zz_value http_rate_limited(uint64_t retry_after) {
     return resp;
 }
 
+// Serve a static file under a registered prefix. Returns a 200 response
+// with the file contents, 404 if missing/unreadable, or unit when the
+// path doesn't match any static dir (caller falls through to 405/500).
+// Mirrors the VM's `serve_dir`/`serve_dir_at` (longest prefix wins).
+static zz_value http_serve_static_file(const char *path, size_t pathlen) {
+    // Find the longest matching prefix.
+    int best = -1;
+    size_t best_plen = 0;
+    for (int i = 0; i < g_http_static_dir_count; i++) {
+        http_static_dir *d = &g_http_static_dirs[i];
+        if (d->plen > pathlen) continue;
+        if (memcmp(d->prefix, path, d->plen) != 0) continue;
+        // Must match at a segment boundary: prefix == path, or path[plen] == '/'.
+        if (d->plen == pathlen || path[d->plen] == '/') {
+            if (d->plen > best_plen) { best = i; best_plen = d->plen; }
+        }
+    }
+    if (best < 0) return zz_unit();
+
+    http_static_dir *d = &g_http_static_dirs[best];
+    // Build the file path: dir + subpath (strip prefix).
+    size_t sublen = pathlen - best_plen;
+    const char *sub = path + best_plen;
+    if (sublen == 0 || sub[0] == '/') sub++; // skip leading '/' after prefix
+    size_t fplen = strlen(d->dir) + 1 + sublen;
+    char *fpath = malloc(fplen + 1);
+    if (!fpath) return zz_unit();
+    size_t n = 0;
+    memcpy(fpath + n, d->dir, strlen(d->dir)); n += strlen(d->dir);
+    fpath[n++] = '/';
+    memcpy(fpath + n, sub, sublen); n += sublen;
+    fpath[n] = '\0';
+
+    // Guard against path traversal: resolved path must stay under dir.
+    // Simple check: no ".." segment in subpath.
+    int traversal = 0;
+    for (size_t i = 0; i + 1 < sublen; i++) {
+        if (sub[i] == '.' && sub[i + 1] == '.' &&
+            (i == 0 || sub[i - 1] == '/') &&
+            (i + 2 == sublen || sub[i + 2] == '/')) { traversal = 1; break; }
+    }
+    if (traversal) { free(fpath); return http_500("403 Forbidden", 15); }
+
+    FILE *f = fopen(fpath, "rb");
+    free(fpath);
+    if (!f) return zz_unit(); // file not found → caller returns 404
+
+    fseek(f, 0, SEEK_END);
+    long flen = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (flen < 0) { fclose(f); return zz_unit(); }
+
+    zz_str *body = str_alloc((size_t)flen);
+    size_t rd = fread(zz_str_ptr(body), 1, (size_t)flen, f);
+    fclose(f);
+    body->len = rd;
+
+    // Basic MIME type by extension.
+    zz_value hdrs = zz_dict_new();
+    const char *ct = "application/octet-stream";
+    const char *dot = strrchr(path, '.');
+    if (dot) {
+        if (strcasecmp(dot, ".html") == 0 || strcasecmp(dot, ".htm") == 0) ct = "text/html";
+        else if (strcasecmp(dot, ".css") == 0) ct = "text/css";
+        else if (strcasecmp(dot, ".js") == 0) ct = "application/javascript";
+        else if (strcasecmp(dot, ".json") == 0) ct = "application/json";
+        else if (strcasecmp(dot, ".txt") == 0) ct = "text/plain";
+        else if (strcasecmp(dot, ".png") == 0) ct = "image/png";
+        else if (strcasecmp(dot, ".jpg") == 0 || strcasecmp(dot, ".jpeg") == 0) ct = "image/jpeg";
+        else if (strcasecmp(dot, ".gif") == 0) ct = "image/gif";
+        else if (strcasecmp(dot, ".svg") == 0) ct = "image/svg+xml";
+        else if (strcasecmp(dot, ".ico") == 0) ct = "image/x-icon";
+        else if (strcasecmp(dot, ".txt") == 0) ct = "text/plain";
+    }
+    zz_value ct_v = zz_str_new(ct, strlen(ct));
+    zz_dict_set(hdrs.dict, zz_str_static("Content-Type"), ct_v);
+    zz_release(&ct_v);
+
+    zz_value resp = http_response_new(200, body, hdrs);
+    zz_release(&hdrs);
+    return resp;
+}
+
 // Shared dispatch core: match, middleware chain, handler call. Returns an
 // http.response object in all cases (VM http.test semantics). Sets
 // *failed when the 500 came from the dispatcher itself (no route,
@@ -6095,6 +6264,13 @@ static zz_value http_dispatch(const char *method, const char *path, size_t pathl
     zz_value params = zz_dict_new();
     zz_value handler = http_match_route(method, path, plen, params);
     if (handler.tag == ZZ_UNIT) {
+        // Static dir serve: longest matching prefix serves the file.
+        zz_value static_resp = http_serve_static_file(path, plen);
+        if (static_resp.tag != ZZ_UNIT) {
+            zz_release(&query);
+            zz_release(&params);
+            return static_resp;
+        }
         // Path exists under another method → 405 with `Allow` (a normal
         // response, like the VM), not a dispatch failure.
         if (http_matches_other_method(method, path, plen)) {
@@ -6176,9 +6352,27 @@ static zz_value http_dispatch(const char *method, const char *path, size_t pathl
     }
     zz_value r = zz_call_closure(handler, &req, 1);
     zz_release(&req);
-    zz_value out = http_wrap_result(r);
+    zz_value resp = http_wrap_result(r);
     zz_release(&r);
-    return out;
+    // Post-middleware chain in registration order (response phase). Each
+    // receives the response object and may return a replacement.
+    for (int i = 0; i < g_http_post_middleware_count; i++) {
+        zz_value pr = zz_call_closure(g_http_post_middlewares[i], &resp, 1);
+        zz_release(&resp);
+        if (pr.tag == ZZ_RESULT_OK && pr.payload) {
+            zz_value inner = *pr.payload;
+            if (inner.tag == ZZ_OBJECT) {
+                resp = zz_clone(inner);
+                zz_release(&pr);
+                continue;
+            }
+            resp = inner; // non-object ok return, take ownership
+            continue;
+        }
+        zz_release(&pr);
+        break; // error: keep previous response
+    }
+    return resp;
 }
 
 // ---- socket serve path (Step-2 true-AOT dispatch) ----
@@ -6725,6 +6919,27 @@ zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value 
     return out;
 }
 
+// zz_http_test_req(server, method, path, headers, body) → HttpResponse.
+// Like `http.test` but injects request headers — conditionals, ranges,
+// auth flows — without a socket. Mirrors the VM's `http.test_req`.
+zz_value zz_http_test_req(zz_value server, zz_value method, zz_value path,
+                          zz_value headers, zz_value body, int *err) {
+    (void)server;
+    if (method.tag != ZZ_STR || !method.s || path.tag != ZZ_STR || !path.s
+        || body.tag != ZZ_STR || !body.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.test_req: expected (server, method, path, headers, body)"));
+    }
+    if (headers.tag != ZZ_DICT || !headers.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.test_req: expected a headers dict"));
+    }
+    int failed = 0;
+    zz_value out = http_dispatch(zz_str_cptr(method.s), zz_str_cptr(path.s), path.s->len, body, headers, "http.test", &failed);
+    *err = 0;
+    return out;
+}
+
 // zz_http_handle(server, method, path, body) → .ok(body str) | .err(msg).
 // Mirrors the VM: dispatcher failures (no route, middleware violation)
 // are .err, while a handler-produced response (any status) is .ok(text).
@@ -6758,6 +6973,78 @@ zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err) {
         g_http_middlewares[g_http_middleware_count++] = zz_clone(middleware);
     }
     return server;
+}
+
+// zz_http_pipe_post(server, middleware, err) — appends a post-middleware
+// that runs AFTER the handler (response phase). Mirrors the VM's
+// `http.pipe_post`.
+zz_value zz_http_pipe_post(zz_value server, zz_value middleware, int *err) {
+    *err = 0;
+    if (g_http_post_middleware_count < HTTP_MAX_MIDDLEWARE - 1) {
+        g_http_post_middlewares[g_http_post_middleware_count++] = zz_clone(middleware);
+    }
+    return server;
+}
+
+// zz_http_with_headers(res, extra_headers_dict, err) — returns a copy of
+// `res` with `extra` merged in case-insensitively (extra wins). Mirrors
+// the VM's `http.with_headers`.
+zz_value zz_http_with_headers(zz_value resp, zz_value extra, int *err) {
+    *err = 0;
+    if (resp.tag != ZZ_OBJECT) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.with_headers: expected a response"));
+    }
+    zz_value st = zz_object_get_field(&resp, "status");
+    if (st.tag != ZZ_INT) {
+        zz_release(&st);
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.with_headers: not a response object"));
+    }
+    zz_release(&st);
+
+    if (extra.tag != ZZ_DICT || !extra.dict) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.with_headers: expected a headers dict"));
+    }
+
+    zz_value out = zz_clone(resp);
+    zz_value hdrs = zz_object_get_field(&out, "headers");
+    if (hdrs.tag != ZZ_DICT || !hdrs.dict) {
+        zz_release(&hdrs);
+        zz_release(&out);
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.with_headers: response has no headers"));
+    }
+
+    for (size_t k = 0; k < extra.dict->len; k++) {
+        zz_str *ek = zz_dict_key_str(&extra.dict->entries[k]);
+        if (!ek) continue;
+        zz_value ev = extra.dict->entries[k].val;
+        if (ev.tag != ZZ_STR || !ev.s) continue;
+
+        // Case-insensitive merge: replace existing header, else append.
+        int replaced = 0;
+        for (size_t j = 0; j < hdrs.dict->len; j++) {
+            zz_str *hk = zz_dict_key_str(&hdrs.dict->entries[j]);
+            if (hk && strcasecmp(zz_str_cptr(hk), zz_str_cptr(ek)) == 0) {
+                zz_release(&hdrs.dict->entries[j].val);
+                hdrs.dict->entries[j].val = zz_clone(ev);
+                replaced = 1;
+                break;
+            }
+        }
+        if (!replaced) {
+            zz_str *kclone = str_alloc(ek->len);
+            memcpy(zz_str_ptr(kclone), zz_str_cptr(ek), ek->len);
+            zz_str_ptr(kclone)[ek->len] = '\0';
+            kclone->len = ek->len;
+            zz_value vclone = zz_clone(ev);
+            zz_dict_set(hdrs.dict, (zz_value){ZZ_STR, {.s = kclone}}, vclone);
+        }
+    }
+    zz_release(&hdrs);
+    return out;
 }
 
 // zz_http_log(server, enabled, err) — arms the per-request access log
@@ -7258,8 +7545,12 @@ zz_value zz_math_root(zz_value x, zz_value n, int *err) {
 // math.factorial(n) → .ok(int) or .err(str)
 zz_value zz_math_factorial(zz_value n, int *err) {
     (void)err;
-    if (n.tag != ZZ_INT || n.i < 0 || n.i > 20)
-        return zz_variant_err(zz_str_static("factorial: input out of range"));
+    if (n.tag != ZZ_INT)
+        return zz_variant_err(zz_str_static("factorial expects an integer"));
+    if (n.i < 0)
+        return zz_variant_err(zz_str_static("factorial: negative input"));
+    if (n.i > 20)
+        return zz_variant_err(zz_str_static("factorial: input too large (max 20)"));
     int64_t r = 1;
     for (int64_t i = 2; i <= n.i; i++) r *= i;
     return zz_variant_ok((zz_value){ZZ_INT, {.i = r}});
@@ -7428,8 +7719,10 @@ zz_value zz_math_nan(zz_value unused, int *err) {
 // math.isqrt(n) → .ok(int) or .err(str)
 zz_value zz_math_isqrt(zz_value n, int *err) {
     (void)err;
-    if (n.tag != ZZ_INT || n.i < 0)
-        return zz_variant_err(zz_str_static("isqrt: non-negative integer required"));
+    if (n.tag != ZZ_INT)
+        return zz_variant_err(zz_str_static("isqrt expects an integer"));
+    if (n.i < 0)
+        return zz_variant_err(zz_str_static("isqrt: negative input"));
     int64_t x = n.i, y = (x + 1) / 2;
     while (y < x) { x = y; y = (x + n.i / x) / 2; }
     return zz_variant_ok((zz_value){ZZ_INT, {.i = x}});
@@ -10999,7 +11292,7 @@ zz_value zz_encoding_hex_decode(zz_value s, int *err) {
     };
     size_t len = s.s->len;
     if (len % 2 != 0)
-        return zz_variant_err(zz_str_static("odd-length hex string"));
+        return zz_variant_err(zz_str_static("hex decode error: odd-length hex string"));
     const unsigned char *src = (const unsigned char *)zz_str_cptr(s.s);
     char *out = (char *)malloc(len / 2 + 1);
     if (!out) return zz_variant_err(zz_str_static("out of memory"));
