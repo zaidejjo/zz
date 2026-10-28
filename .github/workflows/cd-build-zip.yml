@@ -33,6 +33,45 @@ on:
         required: false
         default: 60
         type: number
+      ref:
+        description: Git ref to package (releases pass `main`).
+        required: false
+        default: main
+        type: string
+  # Manual run: the zip layout (bundled zig, merged `lib/`, prebuilt
+  # runtime) can only be proven on the real runners, and releases are cut
+  # far too rarely to be the first place a broken package surfaces.
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "Target OS family."
+        required: true
+        type: choice
+        options: [linux, macos, windows]
+      arch:
+        description: "Target architecture."
+        required: true
+        type: choice
+        options: [x86_64, aarch64]
+      runner:
+        description: GitHub-hosted runner label.
+        required: true
+        type: string
+        default: ubuntu-24.04
+      pkgver:
+        description: Workspace version without the `v` prefix.
+        required: true
+        type: string
+        default: 0.4.0
+      timeout:
+        description: Job timeout in minutes.
+        required: false
+        type: number
+        default: 90
+      ref:
+        description: Git ref to package (empty = the dispatched ref).
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,8 +84,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Build the exact tree CI tested: main HEAD at release time.
-          ref: main
+          # Build the exact tree CI tested (releases pass `main`); a manual
+          # run packages the dispatched branch unless it names another ref.
+          ref: ${{ inputs.ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
