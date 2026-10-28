@@ -218,7 +218,40 @@ EXAMPLES:
     zz build --static hello.zz       static build, explicit (self-contained)
 ";
 
+/// Stack reserved for the thread that runs the CLI.
+///
+/// The OS default for a process' main thread is 1 MiB on Windows (8 MiB on
+/// macOS/Linux). Parsing, checking, IR lowering and the interpreter all
+/// recurse once per nested construct, and a *debug* binary's frames are an
+/// order of magnitude larger than a release build's: 20 levels of nested
+/// parentheses overflow the 1 MiB Windows default with
+/// `STATUS_STACK_OVERFLOW` (exit -1073741571), while a release binary needs
+/// under 128 KiB. Compilers reserve a worker stack for the same reason;
+/// 16 MiB keeps deep (not adversarial) programs working everywhere.
+const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    // Run everything on a worker thread with a known stack size instead of
+    // the platform default (see CLI_STACK_BYTES).
+    let worker = std::thread::Builder::new()
+        .name("zz".to_string())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(main_inner);
+    match worker {
+        Ok(handle) => match handle.join() {
+            Ok(code) => code,
+            // The panic itself is already rendered by the panic hook; only
+            // the exit status is ours to choose.
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(e) => {
+            eprintln!("zz: cannot start worker thread: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn main_inner() -> ExitCode {
     // Self-heal ~/.zz/bin + PATH hint on every run (cheap, silent when piped).
     // No hint when already running setup/completion — that *is* the fix.
     let args: Vec<String> = std::env::args().skip(1).collect();
