@@ -3268,6 +3268,7 @@ void zz_safepoint(void) {
 #include <sys/epoll.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
+#include <poll.h>
 #include <sched.h>
 #endif
 #include <fcntl.h>
@@ -4403,6 +4404,7 @@ typedef struct {
     // request count for this connection.
     int64_t  read_deadline_ms;
     uint64_t reqs_served;
+    int      poll_idx; // macOS poll path: index into the pollfd array (-1 = unused)
 } Connection;
 
 // Per-thread connection pool: calloc'd once per worker thread; the
@@ -4452,6 +4454,7 @@ static Connection* alloc_connection(int fd) {
     c->req_consumed = 0;
     c->peer[0] = '\0';
     c->reqs_served = 0;
+    c->poll_idx = -1;
     http_note_read(c);
     return c;
 }
@@ -4494,6 +4497,7 @@ static void init_connections(void) {
         t_conns[i].write_pos = 0;
         t_conns[i].response_len = 0;
         t_conns[i].keep_alive = 0;
+        t_conns[i].poll_idx = -1;
     }
 }
 
@@ -4812,7 +4816,7 @@ static void http_install_shutdown_handlers(void) {
 // strings read-only (registration finishes before threads spawn); ARC
 // is atomic, the intern table is mutex'd, and all request scratch is
 // thread-local. No worker touches another's pool.
-#ifdef __linux__
+#if defined(__linux__)
 typedef struct { int listen_fd; int worker_id; } http_worker_arg;
 
 static int http_worker_has_active(void) {
@@ -4822,12 +4826,12 @@ static int http_worker_has_active(void) {
     return 0;
 }
 
-static void *worker_loop(void *arg) {
+// ---- Epoll worker loop (Linux) ----
+static void *worker_loop_linux(void *arg) {
     int listen_fd = ((http_worker_arg *)arg)->listen_fd;
     int worker_id = ((http_worker_arg *)arg)->worker_id;
     free(arg);
-    // Per-thread pool: one calloc, never grows. Untouched slots never
-    // fault, so RSS tracks live connections, not capacity.
+
     t_conns = (Connection *)calloc((size_t)HTTP_WORKER_SLOTS, sizeof(Connection));
     if (!t_conns) {
         fprintf(stderr, "worker %d: connection pool calloc failed\n", worker_id);
@@ -4841,8 +4845,6 @@ static void *worker_loop(void *arg) {
         return NULL;
     }
 
-    // Add listen_fd to epoll. Clients carry their Connection* in
-    // data.ptr (O(1) lookup); the listen fd uses the NULL sentinel.
     struct epoll_event ev;
     ev.events = EPOLLIN | EPOLLET;
     ev.data.ptr = NULL;
@@ -4858,9 +4860,6 @@ static void *worker_loop(void *arg) {
 
     while (g_http_server_running) {
         int64_t now = http_monotonic_ms();
-        // Enforce read_ms on idle/partial requests. This is checked on
-        // the 500 ms tick as well as after events, so a client that
-        // sends nothing is reaped without pinning a worker slot.
         for (int s = 0; s < t_nconns; s++) {
             Connection *sc = &t_conns[s];
             if (sc->fd < 0) continue;
@@ -4880,8 +4879,6 @@ static void *worker_loop(void *arg) {
             if (!http_worker_has_active() || http_monotonic_ms() >= shutdown_deadline) break;
         }
 
-        // 500 ms timeout (not -1): lets a shutdown flag change drain
-        // promptly; shorter when read_ms itself is tighter.
         int poll_ms = 500;
         if (g_http_limits.read_ms < (uint64_t)poll_ms) poll_ms = (int)g_http_limits.read_ms;
         if (poll_ms < 1) poll_ms = 1;
@@ -4896,17 +4893,13 @@ static void *worker_loop(void *arg) {
             uint32_t revents = events[i].events;
 
             if (ptr == NULL) {
-                // Stop accepting once shutdown starts; existing
-                // connections keep draining.
                 if (g_http_shutdown_requested) continue;
-                // Accept all pending connections
                 while (1) {
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
                     int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
                     if (client_fd < 0) break;
 
-                    // Disable Nagle + enable keep-alive
                     int flag = 1;
                     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
                     setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
@@ -4928,10 +4921,8 @@ static void *worker_loop(void *arg) {
                         free_connection(c);
                         continue;
                     }
-
                 }
             } else {
-                // Client socket event: O(1) via data.ptr (no fd scan).
                 Connection *c = (Connection *)ptr;
                 int fd = c->fd;
                 if (fd < 0) continue;
@@ -4943,9 +4934,7 @@ static void *worker_loop(void *arg) {
                 }
 
                 if (revents & EPOLLIN) {
-                    // Edge-triggered: read all available data until EAGAIN
                     while (read_from_socket(c)) {
-                        // Transition from keep-alive to reading when new data arrives
                         if (c->state == CONN_KEEP_ALIVE) {
                             connection_to_reading(c);
                         }
@@ -4955,18 +4944,10 @@ static void *worker_loop(void *arg) {
                             break;
                         }
                     }
-                    // If socket closed or error
-                    if (c->fd < 0) {
-                        continue;
-                    }
+                    if (c->fd < 0) continue;
                 }
 
-                // Drive writes plus any pipelined requests already
-                // buffered: edge-triggered epoll won't refire for bytes
-                // sitting in read_buf, so loop inline (bounded per turn
-                // to avoid starving other connections).
                 for (int pipeline = 0; pipeline < 16 && c->state == CONN_WRITING; pipeline++) {
-                    // Edge-triggered: write all data until EAGAIN
                     while (http_write_pending(c)) {
                         int written = write_to_socket(c);
                         if (!written) {
@@ -4975,18 +4956,11 @@ static void *worker_loop(void *arg) {
                             break;
                         }
                     }
-                    // Check if write complete
                     if (c->fd >= 0 && !http_write_pending(c)) {
-
                         if (!c->keep_alive) {
                             connection_to_closed(c);
                             epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                         } else {
-                            // Keep-alive reset: compact any pipelined bytes
-                            // (a second request already in the head buffer)
-                            // to the front instead of dropping them.
-                            // Prefers the static buffer; keeps (and shrinks
-                            // when oversized) the dynamic one otherwise.
                             size_t total = http_head_len(c);
                             size_t leftover = (total > c->req_consumed)
                                 ? total - c->req_consumed
@@ -4994,10 +4968,7 @@ static void *worker_loop(void *arg) {
                             const char *hbuf = http_head_buf(c);
                             if (leftover > 0 && leftover < READ_BUF_SIZE) {
                                 memmove(c->read_buf, hbuf + c->req_consumed, leftover);
-                                if (c->head_dyn) {
-                                    free(c->head_dyn);
-                                    c->head_dyn = NULL;
-                                }
+                                if (c->head_dyn) { free(c->head_dyn); c->head_dyn = NULL; }
                                 c->read_pos = (int)leftover;
                                 c->read_buf[c->read_pos] = '\0';
                                 c->head_len = 0;
@@ -5008,19 +4979,13 @@ static void *worker_loop(void *arg) {
                                     if (c->head_dyn) {
                                         memcpy(c->head_dyn, hbuf + c->req_consumed, leftover);
                                         c->head_dyn[leftover] = '\0';
-                                    } else {
-                                        leftover = 0;
-                                    }
+                                    } else { leftover = 0; }
                                 } else {
                                     memmove(c->head_dyn, hbuf + c->req_consumed, leftover);
                                     c->head_dyn[leftover] = '\0';
                                     if (c->head_cap > 16384) {
-                                        char *nb = (char *)realloc(
-                                            c->head_dyn, leftover + 1);
-                                        if (nb) {
-                                            c->head_dyn = nb;
-                                            c->head_cap = leftover + 1;
-                                        }
+                                        char *nb = (char *)realloc(c->head_dyn, leftover + 1);
+                                        if (nb) { c->head_dyn = nb; c->head_cap = leftover + 1; }
                                     }
                                 }
                                 c->head_len = leftover;
@@ -5029,18 +4994,10 @@ static void *worker_loop(void *arg) {
                                 http_conn_free_dyn(c);
                                 c->read_pos = 0;
                             }
-                            // Response and body state are always done here
-                            // (dispatch freed the buffers; NULL defensively).
-                            if (c->wbuf) {
-                                free(c->wbuf);
-                                c->wbuf = NULL;
-                            }
+                            if (c->wbuf) { free(c->wbuf); c->wbuf = NULL; }
                             c->wlen = 0;
                             c->wpos = 0;
-                            if (c->body_buf) {
-                                free(c->body_buf);
-                                c->body_buf = NULL;
-                            }
+                            if (c->body_buf) { free(c->body_buf); c->body_buf = NULL; }
                             c->body_len = 0;
                             c->body_need = 0;
                             c->head_end = 0;
@@ -5049,9 +5006,6 @@ static void *worker_loop(void *arg) {
                             c->write_pos = 0;
                             c->response_len = 0;
                             c->req_consumed = 0;
-                            // Pipelined second request already buffered:
-                            // dispatch immediately (no new EPOLLIN will fire
-                            // for bytes already in the buffer).
                             int pipelined = 0;
                             if (leftover > 0) {
                                 size_t hend = http_head_end(http_head_buf(c), http_head_len(c));
@@ -5060,23 +5014,18 @@ static void *worker_loop(void *arg) {
                                     c->state = CONN_READING;
                                     process_connection(c);
                                     pipelined = (c->fd >= 0
-                                        && (c->state == CONN_WRITING
-                                            || c->state == CONN_READING_BODY));
-                                } else {
-                                    c->state = CONN_KEEP_ALIVE;
-                                }
-                            } else {
-                                c->state = CONN_KEEP_ALIVE;
-                            }
+                                        && (c->state == CONN_WRITING || c->state == CONN_READING_BODY));
+                                } else { c->state = CONN_KEEP_ALIVE; }
+                            } else { c->state = CONN_KEEP_ALIVE; }
                             http_note_read(c);
                             struct epoll_event cev;
                             cev.events = EPOLLIN | EPOLLET;
                             cev.data.ptr = c;
                             epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &cev);
-                            if (pipelined) continue; // loop: drain new response
+                            if (pipelined) continue;
                         }
                     } else {
-                        break; // write incomplete (EAGAIN): wait for EPOLLOUT
+                        break;
                     }
                 }
             }
@@ -5086,6 +5035,226 @@ static void *worker_loop(void *arg) {
     close(epfd);
     return NULL;
 }
+
+// ---- Poll worker loop (macOS / POSIX) ----
+// poll() is available on both Linux and macOS; we use it on macOS since
+// epoll is Linux-only. The semantics are level-triggered, so we re-arm
+// reads/writes every iteration — slightly more syscalls than epoll but
+// behavior-identical for our connection pool.
+#if defined(__APPLE__)
+static void *worker_loop_poll(void *arg) {
+    int listen_fd = ((http_worker_arg *)arg)->listen_fd;
+    int worker_id = ((http_worker_arg *)arg)->worker_id;
+    free(arg);
+
+    t_conns = (Connection *)calloc((size_t)HTTP_WORKER_SLOTS, sizeof(Connection));
+    if (!t_conns) {
+        fprintf(stderr, "worker %d: connection pool calloc failed\n", worker_id);
+        return NULL;
+    }
+    t_nconns = HTTP_WORKER_SLOTS;
+    init_connections();
+
+    int64_t shutdown_deadline = 0;
+    int shutdown_started = 0;
+
+    while (g_http_server_running) {
+        int64_t now = http_monotonic_ms();
+        // Enforce read_ms on idle/partial requests.
+        for (int s = 0; s < t_nconns; s++) {
+            Connection *sc = &t_conns[s];
+            if (sc->fd < 0) continue;
+            if (sc->state != CONN_READING && sc->state != CONN_READING_BODY
+                && sc->state != CONN_KEEP_ALIVE) continue;
+            if (now < sc->read_deadline_ms) continue;
+            connection_to_closed(sc);
+        }
+
+        if (g_http_shutdown_requested) {
+            if (!shutdown_started) {
+                shutdown_started = 1;
+                shutdown_deadline = http_monotonic_ms() + (int64_t)g_http_limits.shutdown_ms;
+            }
+            int active = 0;
+            for (int s = 0; s < t_nconns; s++) if (t_conns[s].fd >= 0) active = 1;
+            if (!active || http_monotonic_ms() >= shutdown_deadline) break;
+        }
+
+        // Build the pollfd array from live connection slots + listen fd.
+        struct pollfd fds[HTTP_WORKER_SLOTS + 1];
+        int nfds = 0;
+        fds[nfds].fd = listen_fd;
+        fds[nfds].events = POLLIN;
+        fds[nfds].revents = 0;
+        nfds++;
+        int listen_idx = 0;
+        for (int s = 0; s < t_nconns; s++) {
+            Connection *sc = &t_conns[s];
+            if (sc->fd < 0) continue;
+            short events = 0;
+            if (sc->state == CONN_READING || sc->state == CONN_READING_BODY
+                || sc->state == CONN_KEEP_ALIVE) events |= POLLIN;
+            if (sc->state == CONN_WRITING) events |= POLLOUT;
+            if (!events) continue;
+            fds[nfds].fd = sc->fd;
+            fds[nfds].events = events;
+            fds[nfds].revents = 0;
+            sc->poll_idx = nfds;  // back-reference for O(1) del/mod
+            nfds++;
+        }
+
+        int poll_ms = 500;
+        if (g_http_limits.read_ms < (uint64_t)poll_ms) poll_ms = (int)g_http_limits.read_ms;
+        if (poll_ms < 1) poll_ms = 1;
+        int nready = poll(fds, (nfds_t)nfds, poll_ms);
+        if (nready < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        // Listen fd readable -> accept all pending.
+        if (fds[listen_idx].revents & POLLIN) {
+            if (g_http_shutdown_requested) { /* drain existing conns only */ }
+            else {
+                while (1) {
+                    struct sockaddr_in client_addr;
+                    socklen_t client_len = sizeof(client_addr);
+                    int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+                    if (client_fd < 0) break;
+
+                    int flag = 1;
+                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+                    setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+
+                    Connection *c = alloc_connection(client_fd);
+                    if (!c) { close(client_fd); continue; }
+                    if (!inet_ntop(AF_INET, &client_addr.sin_addr, c->peer, sizeof c->peer)) {
+                        snprintf(c->peer, sizeof c->peer, "%s", "unknown");
+                    }
+                    set_nonblock(client_fd);
+                }
+            }
+        }
+
+        // Process client events.
+        for (int s = 0; s < t_nconns; s++) {
+            Connection *c = &t_conns[s];
+            if (c->fd < 0 || c->poll_idx < 0) continue;
+            struct pollfd *pfd = &fds[c->poll_idx];
+            c->poll_idx = -1; // consume
+            short revents = pfd->revents;
+
+            if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                connection_to_closed(c);
+                continue;
+            }
+
+            if (revents & POLLIN) {
+                while (read_from_socket(c)) {
+                    if (c->state == CONN_KEEP_ALIVE) connection_to_reading(c);
+                    process_connection(c);
+                    if (c->state != CONN_READING && c->state != CONN_KEEP_ALIVE
+                        && c->state != CONN_READING_BODY) break;
+                }
+                if (c->fd < 0) continue;
+            }
+
+            if (c->fd >= 0 && (revents & POLLOUT) && c->state == CONN_WRITING) {
+                for (int pipeline = 0; pipeline < 16 && c->state == CONN_WRITING; pipeline++) {
+                    while (http_write_pending(c)) {
+                        int written = write_to_socket(c);
+                        if (!written) { connection_to_closed(c); break; }
+                    }
+                    if (c->fd < 0) break;
+                    if (!http_write_pending(c)) {
+                        if (!c->keep_alive) { connection_to_closed(c); }
+                        else {
+                            size_t total = http_head_len(c);
+                            size_t leftover = (total > c->req_consumed)
+                                ? total - c->req_consumed : 0;
+                            const char *hbuf = http_head_buf(c);
+                            if (leftover > 0 && leftover < READ_BUF_SIZE) {
+                                memmove(c->read_buf, hbuf + c->req_consumed, leftover);
+                                if (c->head_dyn) { free(c->head_dyn); c->head_dyn = NULL; }
+                                c->read_pos = (int)leftover;
+                                c->read_buf[c->read_pos] = '\0';
+                                c->head_len = 0; c->head_cap = 0;
+                            } else if (leftover > 0) {
+                                if (!c->head_dyn) {
+                                    c->head_dyn = (char *)malloc(leftover + 1);
+                                    if (c->head_dyn) {
+                                        memcpy(c->head_dyn, hbuf + c->req_consumed, leftover);
+                                        c->head_dyn[leftover] = '\0';
+                                    } else { leftover = 0; }
+                                } else {
+                                    memmove(c->head_dyn, hbuf + c->req_consumed, leftover);
+                                    c->head_dyn[leftover] = '\0';
+                                    if (c->head_cap > 16384) {
+                                        char *nb = (char *)realloc(c->head_dyn, leftover + 1);
+                                        if (nb) { c->head_dyn = nb; c->head_cap = leftover + 1; }
+                                    }
+                                }
+                                c->head_len = leftover; c->read_pos = 0;
+                            } else { http_conn_free_dyn(c); c->read_pos = 0; }
+                            if (c->wbuf) { free(c->wbuf); c->wbuf = NULL; }
+                            c->wlen = 0; c->wpos = 0;
+                            if (c->body_buf) { free(c->body_buf); c->body_buf = NULL; }
+                            c->body_len = 0; c->body_need = 0;
+                            c->head_end = 0; c->head_too_large = 0;
+                            c->body_truncated = 0;
+                            c->write_pos = 0; c->response_len = 0; c->req_consumed = 0;
+                            int pipelined = 0;
+                            if (leftover > 0) {
+                                size_t hend = http_head_end(http_head_buf(c), http_head_len(c));
+                                if (hend > 0) {
+                                    c->head_end = hend; c->state = CONN_READING;
+                                    process_connection(c);
+                                    pipelined = (c->fd >= 0
+                                        && (c->state == CONN_WRITING || c->state == CONN_READING_BODY));
+                                } else { c->state = CONN_KEEP_ALIVE; }
+                            } else { c->state = CONN_KEEP_ALIVE; }
+                            http_note_read(c);
+                            if (pipelined) continue;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return NULL;
+}
+#endif
+
+// ---- Main server startup: one process, one thread per CPU ----
+static int spawn_workers(int listen_fd, int port) {
+    (void)port;
+    int workers = get_cpu_count();
+    pthread_t *threads = (pthread_t *)calloc((size_t)workers, sizeof(pthread_t));
+    if (!threads) return -1;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 256 * 1024);
+    int launched = 0;
+    for (int w = 0; w < workers; w++) {
+        http_worker_arg *a = (http_worker_arg *)malloc(sizeof(http_worker_arg));
+        if (!a) break;
+        a->listen_fd = listen_fd;
+        a->worker_id = w;
+#if defined(__linux__)
+        if (pthread_create(&threads[w], &attr, worker_loop_linux, a) != 0) {
+#elif defined(__APPLE__)
+        if (pthread_create(&threads[w], &attr, worker_loop_poll, a) != 0) {
+#else
+        if (pthread_create(&threads[w], &attr, worker_loop_linux, a) != 0) {
+#endif
+            free(a);
+            break;
+        }
+        launched++;
+    }
 
 // ---- Main server startup: one process, one thread per CPU ----
 
