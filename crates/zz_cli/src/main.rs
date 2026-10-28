@@ -1475,7 +1475,7 @@ pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &
         for note in &e.notes {
             eprintln!("  note: {note}");
         }
-        return "program failed".to_string();
+        return format!("runtime error: {}", e.message);
     }
     let mut files = Files::new();
     let id = files.add(name.to_string(), source.to_string());
@@ -1490,7 +1490,10 @@ pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &
     }
     let diags = vec![diag];
     eprint!("{}", render_to_string(&files, id, &diags));
-    "program failed".to_string()
+    // The trailing `zz: ...` line is what survives when stderr is captured
+    // and only the tail is read, so make it name the failure instead of the
+    // opaque "program failed".
+    format!("runtime error: {}", e.message)
 }
 
 /// Print a non-unit program result, then auto-call `main()` when the
@@ -1533,7 +1536,7 @@ pub(crate) fn run_entry_main(
                 if let Value::Result(r) = v {
                     if let Err(e) = &*r {
                         eprintln!("{e}");
-                        return Err("program failed".to_string());
+                        return Err(format!("main() returned an error: {e}"));
                     }
                 }
             }
@@ -2174,10 +2177,15 @@ fn run_native(
         let _ = std::fs::remove_dir_all(&dir);
     }
     if code != 0 {
-        return Err(format!(
-            "native program exited with code {code}\n\
-             hint: the program may have panicked or returned a non-zero exit code"
-        ));
+        // Exit code 1 from generated code is the deliberate runtime-trap
+        // path (`zz error: ...` already on stderr), not a crash. Only say
+        // "panicked" for signal-ish codes it could actually mean.
+        let hint = if code == 1 {
+            "hint: the program stopped on a runtime error; see the `zz error:` line above"
+        } else {
+            "hint: the program may have crashed (signal or abort); re-run with `zz run` (VM) to compare behavior"
+        };
+        return Err(format!("native program exited with code {code}\n{hint}"));
     }
     Ok(())
 }
@@ -3680,7 +3688,7 @@ mod plugin_tests {
     }
 
     fn valid_zzi() -> String {
-        "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    fn ping() -> int\n}\n".to_string()
+        "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    func ping() -> int\n}\n".to_string()
     }
 
     #[test]
@@ -3705,7 +3713,7 @@ mod plugin_tests {
         let root = plugin_root();
         write_zzi(
             root.path(),
-            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 9.9.9\n\nextern \"C\" {\n    fn ping() -> int\n}\n",
+            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 9.9.9\n\nextern \"C\" {\n    func ping() -> int\n}\n",
         );
         write_toml(
             root.path(),
@@ -3729,7 +3737,7 @@ mod plugin_tests {
         let root = plugin_root();
         write_zzi(
             root.path(),
-            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    fn ping() -> int\n    fn absent() -> int\n}\n",
+            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    func ping() -> int\n    func absent() -> int\n}\n",
         );
         write_toml(
             root.path(),

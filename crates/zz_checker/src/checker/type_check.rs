@@ -52,6 +52,19 @@ fn check_sql_static(text: &str) -> Option<String> {
     None
 }
 
+/// Human wording for the valid index range of a value of length `len`,
+/// shared by the checker's static out-of-bounds diagnostics.
+fn index_range_hint(len: usize) -> String {
+    if len == 0 {
+        "the value is empty, so no index is valid (check `len(...)` first)".to_string()
+    } else {
+        format!(
+            "valid indices are 0..={} (or -1..=-{len}, counting from the end)",
+            len - 1
+        )
+    }
+}
+
 /// A method invocation: resolved signature plus receiver, args, and span.
 pub(crate) struct MethodCall<'a> {
     pub sig: &'a super::FuncSig,
@@ -840,6 +853,9 @@ impl Checker {
                 match ot {
                     Type::Array(elem) => {
                         self.ensure_int(it, index.span());
+                        if let Expr::Array { elems, .. } = obj.as_ref() {
+                            self.check_literal_array_index(elems.len(), index);
+                        }
                         *elem
                     }
                     Type::Dict(k, v) => {
@@ -922,12 +938,54 @@ impl Checker {
             Some(i) if i < elems.len() => elems[i].clone(),
             _ => {
                 self.errors.push(error_at(
-                    format!("tuple index out of bounds for length {}", elems.len()),
+                    format!(
+                        "tuple index out of bounds for length {}\n\
+                         hint: {}",
+                        elems.len(),
+                        index_range_hint(elems.len())
+                    ),
                     index.span(),
                 ));
                 Type::Error
             }
         }
+    }
+
+    /// A constant index into an array *literal* is decidable at check time:
+    /// report the out-of-bounds before the program runs (the runtime would
+    /// trap on it anyway), with the valid range as the hint.
+    fn check_literal_array_index(&mut self, len: usize, index: &Expr) {
+        let raw: i64 = match index {
+            Expr::Int { value, .. } => *value,
+            Expr::Unary {
+                op: UnOp::Neg,
+                expr,
+                ..
+            } => match expr.as_ref() {
+                Expr::Int { value, .. } => match value.checked_neg() {
+                    Some(v) => v,
+                    None => return,
+                },
+                _ => return,
+            },
+            _ => return, // not a literal: runtime bounds-check handles it
+        };
+        let in_bounds = if raw < 0 {
+            (len as i64).checked_add(raw).is_some_and(|i| i >= 0)
+        } else {
+            (raw as u64) < len as u64
+        };
+        if in_bounds {
+            return;
+        }
+        self.errors.push(error_at(
+            format!(
+                "index {raw} out of bounds for length {len}\n\
+                 hint: {}",
+                index_range_hint(len)
+            ),
+            index.span(),
+        ));
     }
 
     /// Whether a loop body can leave through a `break` that targets this
@@ -1342,6 +1400,9 @@ impl Checker {
                 match ot {
                     Type::Array(elem) => {
                         self.ensure_int(it, index.span());
+                        if let Expr::Array { elems, .. } = obj.as_ref() {
+                            self.check_literal_array_index(elems.len(), index);
+                        }
                         *elem
                     }
                     Type::Bytes => {
