@@ -1174,7 +1174,15 @@ pub fn build_with(
 /// whichever linker it drives; lld-link/link.exe spell the same request
 /// `/INCLUDE:<sym>`, which `zig cc` rejects, so zig always gets
 /// `-Wl,-u,<sym>` instead (lld-link understands it).
-pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, zig: bool) -> String {
+pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, zig: bool) -> Option<String> {
+    // On macOS, runtime symbols are declared `__attribute__((weak_import))`
+    // which allows them to be undefined at link time. `-Wl,-u` forces them
+    // to be required, which conflicts with weak_import and causes "undefined
+    // symbol" linker errors. Skip `-u` on macOS; normal reference resolution
+    // pulls in the archive members when the symbols are actually needed.
+    if crate::ffi::target_os(target) == crate::ffi::TargetOs::Macos {
+        return None;
+    }
     let sym = crate::ffi::force_undef_symbol(symbol, target);
     // `zig cc` rejects the MSVC spelling outright ("unsupported linker
     // arg: /INCLUDE:<sym>") even when it links for a Windows target,
@@ -1182,9 +1190,9 @@ pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, zig: bool) ->
     // args. lld-link accepts `-u <sym>` identically, so zig always gets
     // the GNU spelling; plain clang keeps `/INCLUDE:` for link.exe.
     if !zig && crate::ffi::target_os(target) == crate::ffi::TargetOs::Windows {
-        format!("-Wl,/INCLUDE:{sym}")
+        Some(format!("-Wl,/INCLUDE:{sym}"))
     } else {
-        format!("-Wl,-u,{sym}")
+        Some(format!("-Wl,-u,{sym}"))
     }
 }
 
@@ -1235,17 +1243,17 @@ fn push_link_inputs(
         // The flag precedes the archive that satisfies it (linker order).
         if opts.pg_link {
             for sym in crate::ffi::PG_LINK_SYMBOLS {
-                cmd.arg(force_undef_flag(sym, target, clang.zig));
+                if let Some(flag) = force_undef_flag(sym, target, clang.zig) {
+                    cmd.arg(flag);
+                }
             }
         }
         // Float Display (spec §4): same weak-ref situation — pull the
         // Rust-core formatter explicitly when the gate fired.
         if opts.float_link {
-            cmd.arg(force_undef_flag(
-                crate::ffi::FLOAT_FMT_SYMBOL,
-                target,
-                clang.zig,
-            ));
+            if let Some(flag) = force_undef_flag(crate::ffi::FLOAT_FMT_SYMBOL, target, clang.zig) {
+                cmd.arg(flag);
+            }
         }
         for a in &extra {
             cmd.arg(a);
@@ -1631,17 +1639,17 @@ pub fn emit_c_plus_script(
     if opts.native_rt || opts.float_link {
         if opts.pg_link {
             for sym in crate::ffi::PG_LINK_SYMBOLS {
-                rt_link.push(' ');
-                rt_link.push_str(&force_undef_flag(sym, target, false));
+                if let Some(flag) = force_undef_flag(sym, target, false) {
+                    rt_link.push(' ');
+                    rt_link.push_str(&flag);
+                }
             }
         }
         if opts.float_link {
-            rt_link.push(' ');
-            rt_link.push_str(&force_undef_flag(
-                crate::ffi::FLOAT_FMT_SYMBOL,
-                target,
-                false,
-            ));
+            if let Some(flag) = force_undef_flag(crate::ffi::FLOAT_FMT_SYMBOL, target, false) {
+                rt_link.push(' ');
+                rt_link.push_str(&flag);
+            }
         }
         match crate::ffi::link_args_for_target(opts.optimize, target) {
             Ok((args, _)) => {
@@ -1869,37 +1877,46 @@ mod tests {
                 Some("x86_64-unknown-linux-gnu"),
                 false
             ),
-            "-Wl,-u,zz_float_format_raw"
+            Some("-Wl,-u,zz_float_format_raw".to_string())
         );
-        // Darwin's ld64 wants the leading underscore, still via `-Wl,`.
+        // macOS: weak_import symbols conflict with `-u`, skip the flag.
         assert_eq!(
             force_undef_flag("zz_float_format_raw", Some("aarch64-apple-darwin"), false),
-            "-Wl,-u,_zz_float_format_raw"
+            None
         );
         // lld-link / link.exe spell it `/INCLUDE:<sym>`.
         assert_eq!(
             force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-msvc"), false),
-            "-Wl,/INCLUDE:zz_float_format_raw"
+            Some("-Wl,/INCLUDE:zz_float_format_raw".to_string())
         );
         // Zig parses `-Wl,` itself and rejects the MSVC spelling even for
         // Windows targets ("unsupported linker arg: /INCLUDE:..."), so it
         // always gets the GNU form (lld-link understands `-u`).
         assert_eq!(
             force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-msvc"), true),
-            "-Wl,-u,zz_float_format_raw"
+            Some("-Wl,-u,zz_float_format_raw".to_string())
         );
         assert_eq!(
             force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-gnu"), true),
-            "-Wl,-u,zz_float_format_raw"
+            Some("-Wl,-u,zz_float_format_raw".to_string())
         );
         // Host builds (no explicit target) use the same passthrough form.
         if cfg!(windows) {
-            assert_eq!(force_undef_flag("sym", None, false), "-Wl,/INCLUDE:sym");
-            assert_eq!(force_undef_flag("sym", None, true), "-Wl,-u,sym");
+            assert_eq!(
+                force_undef_flag("sym", None, false),
+                Some("-Wl,/INCLUDE:sym".to_string())
+            );
+            assert_eq!(
+                force_undef_flag("sym", None, true),
+                Some("-Wl,-u,sym".to_string())
+            );
         } else if cfg!(target_os = "macos") {
-            assert_eq!(force_undef_flag("sym", None, false), "-Wl,-u,_sym");
+            assert_eq!(force_undef_flag("sym", None, false), None);
         } else {
-            assert_eq!(force_undef_flag("sym", None, false), "-Wl,-u,sym");
+            assert_eq!(
+                force_undef_flag("sym", None, false),
+                Some("-Wl,-u,sym".to_string())
+            );
         }
     }
 
