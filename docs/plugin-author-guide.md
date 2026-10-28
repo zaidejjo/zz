@@ -676,9 +676,15 @@ If either check fails, the loader refuses to load the plugin with a clear error 
 |----------|-------------------|----------------|
 | Linux | ✅ Static linking | ✅ dlopen/dlsym |
 | macOS | ✅ Static linking | ✅ dlopen/dlsym |
-| Windows | ✅ Static linking | ❌ Deferred (LoadLibrary) |
+| Windows | ⏳ Pending runtime port | ❌ Deferred (LoadLibrary) |
 
-The AOT path works everywhere (it's just static linking). The VM path requires dlopen support. Windows support is planned for a future release.
+The AOT path is plain static linking on Linux and macOS. It is not
+available on Windows yet: the AOT C runtime needs POSIX threads and
+sockets (`<pthread.h>`, `fcntl`/`poll`), so it needs a Win32 port before
+`zz build` ships there. The VM path needs dlopen/LoadLibrary support;
+Windows is planned for a future release. `zz pm` still builds C and Rust
+plugin packages on Windows hosts — only linking them into a ZZ binary is
+blocked.
 
 ---
 

@@ -260,7 +260,7 @@ No hook, no `build.sh`, no `build.rs`.
 | Old binary after rebuilding the plugin's `.so`/`.a` | covered automatically: the cache key hashes linked artifact bytes + flags content, so a real rebuild busts; `rm -rf ~/.zz/cache` only needed if you suspect staleness anyway | §4 |
 | Old binary after editing compiler sources | covered automatically: key includes compiler-source mtimes (verified: a `touch` forces a new entry); same-second edits are the residual gap — clear cache to be sure | — |
 | Works VM, fails AOT (or reverse) | engine-specific lowering/dispatch; minimize to one call, compare | §7 |
-| Windows: VM won't load | dlopen path unimplemented; ship AOT only | guide §12 |
+| Windows: VM won't load | VM loader (LoadLibrary) not implemented yet; Windows AOT is also pending the runtime port, so host plugin tests must run on Linux/macOS | guide §12 |
 
 ## Pre-publish checklist
 
