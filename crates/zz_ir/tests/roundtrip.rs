@@ -127,6 +127,10 @@ fn verify_rejects_bad_jump() {
     let mut module = lower::lower(&chunk).expect("lower failed");
     module.funcs[0].code.push(zz_ir::Op::Jump(9999));
     module.funcs[0].spans.push(zz_ir::Span::new(0, 0));
+    // v5: every op owns one result-type entry — keep the parallel table in
+    // step or the verifier fails with a length mismatch before the jump
+    // target rule this test is about.
+    module.funcs[0].op_result_types.push(None);
     let err = verify::verify(&module).expect_err("bad jump accepted");
     assert!(err.message.contains("jump target"), "wrong error: {err}");
 }
@@ -161,7 +165,7 @@ fn verify_matcherror_is_terminal() {
             toplevel_slots: vec![],
             vartab: vec![],
             locals: vec![zz_ir::TypeId(1), zz_ir::TypeId(2)],
-            op_result_types: vec![],
+            op_result_types: vec![None; 7],
             // base, scrutinee (declared Result), arm to trap terminator,
             // keep-top cleanup: the trap edge is dead, the arm value
             // (Str) is what the epilogue returns.
@@ -211,7 +215,7 @@ fn verify_rejects_join_mismatch() {
             toplevel_slots: vec![],
             vartab: vec![],
             locals: vec![],
-            op_result_types: vec![],
+            op_result_types: vec![None; 4],
             // arm 1 pushes two values, arm 2 pushes one → join mismatch.
             code: vec![
                 Op::PushConst(zz_ir::ConstId(0)),
@@ -699,7 +703,7 @@ fn verify_rejects_slot_store_mismatch() {
                 ret: u,
             },
             locals: vec![int],
-            op_result_types: vec![],
+            op_result_types: vec![None; 2],
             toplevel_slots: vec![],
             vartab: vec![],
             code: vec![Op::PushConst(zz_ir::ConstId(0)), Op::StoreSlot(0)],
@@ -727,7 +731,7 @@ fn verify_rejects_bad_call() {
             ret: u,
         },
         locals: vec![],
-        op_result_types: vec![],
+        op_result_types: vec![None; 2],
         toplevel_slots: vec![],
         vartab: vec![],
         code: vec![
@@ -754,7 +758,7 @@ fn verify_rejects_bad_call() {
         }],
         sig: g_sig,
         locals: vec![int],
-        op_result_types: vec![],
+        op_result_types: vec![None; 1],
         toplevel_slots: vec![],
         vartab: vec![],
         code: vec![Op::LoadSlot(0)],
@@ -863,7 +867,7 @@ fn dis_shows_locals_and_format_version() {
         &sigs,
     );
     let text = zz_ir::dis::disassemble(&module);
-    assert!(text.contains("; zzcz v4"), "missing v4 header:\n{text}");
+    assert!(text.contains("; zzcz v5"), "missing v5 header:\n{text}");
     assert!(text.contains("locals=[int"), "missing locals:\n{text}");
 }
 
@@ -989,7 +993,7 @@ fn derotate_handles_an_empty_loop_body() {
             toplevel_slots: vec![],
             vartab: vec![vec![]],
             locals: vec![TypeId(0)],
-            op_result_types: vec![],
+            op_result_types: vec![None; 6],
             // [placeholder, iterable, setup, entry jump, test (body ==
             // test), exit pop].
             code: vec![
@@ -1130,7 +1134,7 @@ fn verify_accepts_error_declared_iterable() {
             toplevel_slots: vec![],
             vartab: vec![vec![]],
             locals: vec![zz_ir::TypeId(1)],
-            op_result_types: vec![],
+            op_result_types: vec![None; 7],
             // [push result placeholder, load Error slot, setup,
             // header, empty body, back-edge, exit pop].
             code: vec![
@@ -1233,6 +1237,7 @@ fn shape_module(arity: usize, locals_len: usize, code: Vec<zz_ir::Op>) -> zz_ir:
             default: None,
         })
         .collect();
+    let ops = code.len();
     Module {
         types: vec![IrType::Unknown],
         strings: vec!["f".to_string()],
@@ -1246,7 +1251,7 @@ fn shape_module(arity: usize, locals_len: usize, code: Vec<zz_ir::Op>) -> zz_ir:
                 ret: TypeId(0),
             },
             locals: vec![TypeId(0); locals_len],
-            op_result_types: vec![],
+            op_result_types: vec![None; ops],
             vartab: vec![],
             toplevel_slots: vec![],
             code,
