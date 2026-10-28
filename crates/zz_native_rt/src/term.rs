@@ -21,8 +21,11 @@
 //!   is an error, never a hang.
 //! - Non-TTY (pipes, CI, redirected stdin) fails soft with
 //!   `.err("std.term.<op>: not a tty")` — callers degrade to `input()`.
-//! - Windows is a stub: same shapes, fallible ops `.err(unsupported)`
-//!   (`disable_raw`/`is_tty` stay total-friendly: no-op `Ok` / `false`).
+//! - Windows: `is_tty` is real (`std::io::IsTerminal`) and `poll` follows
+//!   the same contract as Unix for consoles, pipes and files (it never
+//!   fails just because stdin is not a console). Raw mode / `read_key` /
+//!   `get_size` remain explicit `.err(unsupported)` stubs; `disable_raw`
+//!   stays a no-op `Ok`.
 
 use crate::cabi::{cvalue_str, CValue};
 
@@ -187,10 +190,44 @@ mod unix {
     }
 }
 
-#[cfg(not(unix))]
-mod unix {
+#[cfg(windows)]
+mod windows {
+    //! Console/pipes/files share one `poll` contract with Unix: it answers
+    //! "is stdin readable within `ms`?" and never fails just because stdin
+    //! is not a console. `cargo test` on CI redirects stdin, so a
+    //! console-only implementation that returns `Err` would fail for a
+    //! reason the API does not promise.
+    //!
+    //! No `windows-sys` dependency: these kernel32 imports are stable ABI,
+    //! and the crate already links kernel32 through std.
+    use std::ffi::c_void;
+    use std::time::{Duration, Instant};
+
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const FILE_TYPE_DISK: u32 = 0x0001;
+    const FILE_TYPE_PIPE: u32 = 0x0003;
+    const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
+
+    #[link(name = "kernel32")]
+    #[allow(non_snake_case)] // Win32 entry points keep their documented names.
+    extern "system" {
+        fn GetStdHandle(nstdhandle: u32) -> *mut c_void;
+        fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
+        fn GetNumberOfConsoleInputEvents(handle: *mut c_void, count: *mut u32) -> i32;
+        fn GetFileType(handle: *mut c_void) -> u32;
+        fn PeekNamedPipe(
+            pipe: *mut c_void,
+            buffer: *mut c_void,
+            buffer_size: u32,
+            bytes_read: *mut u32,
+            bytes_available: *mut u32,
+            bytes_left: *mut u32,
+        ) -> i32;
+    }
+
     pub fn is_tty() -> bool {
-        false
+        use std::io::IsTerminal as _;
+        std::io::stdin().is_terminal()
     }
 
     pub fn enable_raw() -> Result<(), String> {
@@ -207,6 +244,86 @@ mod unix {
         Err("std.term.read_key: unsupported on this platform".to_string())
     }
 
+    /// Like Unix `poll(POLLIN)`: a console with queued input events, a pipe
+    /// with buffered bytes (or a closed writer → EOF is readable), and a
+    /// regular file are ready; everything else (NUL, unknown handles)
+    /// reports "no input" instead of failing.
+    fn input_ready() -> bool {
+        // SAFETY: every call takes the value returned by `GetStdHandle` and
+        // writes only to valid stack out-params. A null/invalid handle is
+        // rejected up front; failure of any probe degrades to "not ready".
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            let mut mode = 0u32;
+            if GetConsoleMode(handle, &mut mode) != 0 {
+                let mut events = 0u32;
+                return GetNumberOfConsoleInputEvents(handle, &mut events) != 0 && events > 0;
+            }
+            match GetFileType(handle) {
+                // Regular files never block, matching Unix poll semantics.
+                FILE_TYPE_DISK => true,
+                FILE_TYPE_PIPE => {
+                    let mut available = 0u32;
+                    let ok = PeekNamedPipe(
+                        handle,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut available,
+                        std::ptr::null_mut(),
+                    );
+                    // Peek fails once the writer is gone (ERROR_BROKEN_PIPE):
+                    // the read side is readable (EOF), same as Linux POLLHUP.
+                    ok == 0 || available > 0
+                }
+                _ => false,
+            }
+        }
+    }
+
+    pub fn poll(ms: i64) -> Result<bool, String> {
+        let timeout = Duration::from_millis(ms.max(0) as u64);
+        let deadline = Instant::now() + timeout;
+        loop {
+            if input_ready() {
+                return Ok(true);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(false);
+            }
+            // Windows has no waitable "console input has events" primitive
+            // that also covers pipes/files, so re-probe on a short tick.
+            std::thread::sleep((deadline - now).min(Duration::from_millis(5)));
+        }
+    }
+
+    pub fn get_size() -> Result<(i64, i64), String> {
+        Err("std.term.get_size: unsupported on this platform".to_string())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod stub {
+    pub fn is_tty() -> bool {
+        false
+    }
+
+    pub fn enable_raw() -> Result<(), String> {
+        Err("std.term.enable_raw: unsupported on this platform".to_string())
+    }
+
+    pub fn disable_raw() -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn read_key() -> Result<i64, String> {
+        Err("std.term.read_key: unsupported on this platform".to_string())
+    }
+
     pub fn poll(_ms: i64) -> Result<bool, String> {
         Err("std.term.poll: unsupported on this platform".to_string())
     }
@@ -216,34 +333,41 @@ mod unix {
     }
 }
 
+#[cfg(not(any(unix, windows)))]
+use stub as imp;
+#[cfg(unix)]
+use unix as imp;
+#[cfg(windows)]
+use windows as imp;
+
 /// True when stdin is a TTY (total — never fails).
 pub fn is_tty() -> bool {
-    unix::is_tty()
+    imp::is_tty()
 }
 
 /// Switch stdin to raw mode (idempotent). See module docs.
 pub fn enable_raw() -> Result<(), String> {
-    unix::enable_raw()
+    imp::enable_raw()
 }
 
 /// Restore the pre-raw terminal state (idempotent no-op when not raw).
 pub fn disable_raw() -> Result<(), String> {
-    unix::disable_raw()
+    imp::disable_raw()
 }
 
 /// Block for one stdin byte, returning `0–255`.
 pub fn read_key() -> Result<i64, String> {
-    unix::read_key()
+    imp::read_key()
 }
 
 /// True when stdin has a byte ready within `ms` (`ms <= 0` = no wait).
 pub fn poll(ms: i64) -> Result<bool, String> {
-    unix::poll(ms)
+    imp::poll(ms)
 }
 
 /// Terminal `(cols, rows)` via `TIOCGWINSZ`.
 pub fn get_size() -> Result<(i64, i64), String> {
-    unix::get_size()
+    imp::get_size()
 }
 
 /// Flush stdout immediately (total — interactive renders without a
@@ -395,7 +519,7 @@ mod tests {
         // This also bounds the test's wall time by construction.
         let start = std::time::Instant::now();
         let r = poll(0);
-        assert!(r.is_ok());
+        assert!(r.is_ok(), "poll(0) failed: {r:?}");
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
@@ -403,7 +527,7 @@ mod tests {
     fn poll_negative_clamps_to_zero() {
         let start = std::time::Instant::now();
         let r = poll(-100);
-        assert!(r.is_ok());
+        assert!(r.is_ok(), "poll(-100) failed: {r:?}");
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
