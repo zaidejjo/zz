@@ -1064,12 +1064,30 @@ pub fn plan_cargo_build(
         args.push("--features".to_string());
         args.push(features.join(","));
     }
+    let mut env = rust_hermetic_env(cargo_home, tmpdir, true);
+    // An explicit linker pin is the one cargo setting that must survive the
+    // allowlist: CI sets it because Git for Windows ships a `link.exe` that
+    // shadows the MSVC one. Only the exact key for this triple is read —
+    // no other ambient `CARGO_*` variable is inherited.
+    let linker_key = linker_pin_key(triple);
+    if let Ok(value) = std::env::var(&linker_key) {
+        env.push((linker_key, value));
+    }
     ChildPlan {
         program: cargo.to_string(),
         args,
         cwd: cwd.to_path_buf(),
-        env: rust_hermetic_env(cargo_home, tmpdir, true),
+        env,
     }
+}
+
+/// Cargo's per-target linker variable, e.g. `x86_64-pc-windows-msvc` →
+/// `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER`.
+fn linker_pin_key(triple: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_LINKER",
+        triple.to_uppercase().replace('-', "_")
+    )
 }
 
 /// Plan the closure vendor fetch (`cargo vendor --locked`). This is the
@@ -2554,9 +2572,12 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
             // On Windows the platform allowlist is inherited too (MSVC
             // linker/sdk discovery); Unix must stay fully hermetic.
             let platform_allowlisted = cfg!(windows) && WINDOWS_ENV_ALLOWLIST.contains(&k.as_str());
+            // Only the exact per-target linker pin may ride along.
+            let linker_pin = k == &linker_pin_key("x86_64-unknown-linux-gnu");
             assert!(
                 RUST_ENV_ALLOWLIST.contains(&k.as_str())
                     || platform_allowlisted
+                    || linker_pin
                     || matches!(
                         k.as_str(),
                         "CARGO_HOME"
@@ -2582,6 +2603,19 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
                 "`{key}` must be forwarded to Windows children"
             );
         }
+    }
+
+    /// Cargo's linker pin must keep the triple's exact spelling.
+    #[test]
+    fn linker_pin_key_shape() {
+        assert_eq!(
+            linker_pin_key("x86_64-pc-windows-msvc"),
+            "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"
+        );
+        assert_eq!(
+            linker_pin_key("aarch64-apple-darwin"),
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
+        );
     }
 
     /// `push_allowlisted` forwards only keys that are set, verbatim.
