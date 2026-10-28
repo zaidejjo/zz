@@ -365,7 +365,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // --- Output differences (native runs but output differs) ---
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
-        "decorators" => Some("DEFERRED to HIR->IR lowering: only the final marker prints; decorator wrapper output missing"),
         "extension_methods" => {
             Some("DEFERRED to HIR->IR lowering: extension-method call results missing + spurious conflict diagnostics on stderr")
         }
@@ -379,23 +378,19 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // via silent-unit leniency); all three now fail loudly like the
         // VM and pass as strict error fixtures.
 
+        // NOTE: `http_middleware_p2` (serve_dir_at) and `http_static_p2`
+        // (serve_dir) are now implemented in C and run as strict parity.
+        // `http_bytes_p3` (body_bytes) is also implemented.
+        // `http_tls_p3`, `http_hijack_p3` still need rustls/curl in C.
+
         // --- Phase 2/3 HTTP: VM-only natives abort loudly on AOT ---
-        // `listen_tls`, `fetch_insecure`, `body_bytes`, `hijack`,
-        // `serve_dir_at`, and `test_req` et al have no C impl yet
-        // (tracked in zz_codegen/tests.rs KNOWN_CODEGEN_GAPS as "P3
-        // AOT"). Native legs return a catchable ZZ error via
-        // `zz_unimplemented_native` (issue #644) instead of aborting the
-        // process; output diverges from the VM which implements them.
+        // `listen_tls`, `fetch_insecure` are VM-only (need rustls in C).
+        // `hijack` is VM-only (needs WebSocket handshake in C).
         "http_tls_p3" => Some(
             "P3 AOT: listen_tls + fetch_insecure are VM-only; native returns error",
         ),
-        "http_hijack_p3" | "http_bytes_p3" => {
-            Some("P3 AOT: hijack / body_bytes are VM-only; native returns error")
-        }
-        // `http_limits_p2` is strict parity now: AOT implements
-        // `http.listen_cfg` with the same limits/shutdown behavior as the VM.
-        "http_middleware_p2" | "http_static_p2" => {
-            Some("P3 AOT: serve_dir_at / test_req are VM-only; native returns error")
+        "http_hijack_p3" => {
+            Some("P3 AOT: hijack is VM-only; native returns error")
         }
         _ => None,
     }
