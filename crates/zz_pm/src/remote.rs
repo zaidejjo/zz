@@ -9,12 +9,13 @@
 //! Auth tokens live only in request headers and are never included in
 //! errors or `Debug` output.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
+use crate::pathsafe::escapes_root;
 
 /// Default registry (mirrors `SITE_DOMAIN` in `zz-website/wrangler.toml`).
 pub const DEFAULT_REGISTRY: &str = "https://zz-registry.onrender.com";
@@ -534,8 +535,8 @@ pub fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), RemoteError> {
             .path()
             .map_err(|e| RemoteError::Tarball(format!("bad entry path: {e}")))?
             .into_owned();
-        // Reject escapes before joining: absolute paths and any `..`.
-        if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        // Reject escapes before joining: absolute (any host spelling) or `..`.
+        if escapes_root(&path) {
             return Err(RemoteError::Tarball(format!(
                 "entry escapes package root: {}",
                 path.display()
@@ -780,6 +781,36 @@ pub(crate) mod tests {
             "{err:?}"
         );
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// A tarball built on Linux with Windows-style names must not unpack
+    /// into `C:\...`-relative escapes when extracted on Windows, and a
+    /// Windows-built tarball must not escape on Linux either.
+    #[test]
+    fn extract_rejects_hostile_spellings_on_every_host() {
+        for name in [
+            "\\evil.zz",
+            "C:\\evil.zz",
+            "C:/evil.zz",
+            "C:evil.zz",
+            "\\\\server\\share\\evil.zz",
+            "../evil.zz",
+            "a/../../evil.zz",
+        ] {
+            let bytes = make_raw_tarball(name, b"x\n");
+            let dest = std::env::temp_dir().join(format!(
+                "zz_rm_hostile_{}_{}",
+                std::process::id(),
+                name.len()
+            ));
+            let _ = std::fs::remove_dir_all(&dest);
+            let err = extract_tarball(&bytes, &dest).unwrap_err();
+            assert!(
+                matches!(err, RemoteError::Tarball(ref m) if m.contains("escapes package root")),
+                "`{name}`: {err:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dest);
+        }
     }
 
     #[test]

@@ -36,6 +36,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+use crate::pathsafe::escapes_root;
+
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
@@ -166,15 +168,7 @@ impl CollectionSpec {
             ));
         }
         let rel = Path::new(&self.dir);
-        if self.dir.is_empty()
-            || rel.is_absolute()
-            || rel.components().any(|c| {
-                matches!(
-                    c,
-                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
-                )
-            })
-        {
+        if self.dir.is_empty() || escapes_root(rel) {
             return Err(format!(
                 "invalid [collect]: `dir = \"{}\"` must be relative and stay inside the package",
                 self.dir
@@ -582,14 +576,7 @@ fn validate_feature_module(feature: &str, module: &str) -> Result<(), String> {
         return Err(bad("must not be empty"));
     }
     let p = Path::new(module);
-    if p.is_absolute()
-        || p.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
-    {
+    if escapes_root(p) {
         return Err(bad("must be relative and stay inside the package"));
     }
     Ok(())
@@ -1088,14 +1075,7 @@ fn check_contained(pkg_root: &Path, rel: &str, field: &str) -> Result<(), String
         return Err(format!("invalid [native]: `{field}` must not be empty"));
     }
     let p = Path::new(rel);
-    if p.is_absolute()
-        || p.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
-    {
+    if escapes_root(p) {
         return Err(format!(
             "invalid [native]: `{field}` entry `{rel}` must be relative and stay inside the package\n\
              hint: use a path like \"csrc/wrapper.c\""
@@ -1839,14 +1819,7 @@ impl Manifest {
             return Err(bad("must not be empty"));
         }
         let p = Path::new(rel);
-        if p.is_absolute()
-            || p.components().any(|c| {
-                matches!(
-                    c,
-                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
-                )
-            })
-        {
+        if escapes_root(p) {
             return Err(bad("must be relative and stay inside the package"));
         }
         if p.extension().and_then(|e| e.to_str()) != Some("zz") {
@@ -2868,6 +2841,35 @@ foo = "^1.0"
         spec.sources = vec!["csrc/ok.c".to_string()];
         spec.include_dirs = vec!["../inc".to_string()];
         assert!(validate_cc(&spec).is_err());
+    }
+
+    /// Every spelling a Windows or Unix host could call absolute must be
+    /// refused on *both* — a manifest accepted on Linux must not become an
+    /// escape when the same package is built on Windows.
+    #[test]
+    fn path_escape_spellings_rejected_everywhere() {
+        for evil in [
+            "/abs.c",
+            "\\abs.c",
+            "C:\\abs.c",
+            "C:/abs.c",
+            "C:abs.c",
+            "\\\\server\\share\\evil.c",
+            "../x.c",
+            "a/../../x.c",
+        ] {
+            let mut spec = cc_spec();
+            spec.sources = vec![evil.to_string()];
+            let err = validate_cc(&spec).expect_err(evil);
+            assert!(
+                err.contains("must be relative and stay inside the package"),
+                "`{evil}` rejected for the wrong reason: {err}"
+            );
+            // include_dirs take the same guard.
+            let mut spec = cc_spec();
+            spec.include_dirs = vec![evil.to_string()];
+            assert!(validate_cc(&spec).is_err(), "include_dir `{evil}`");
+        }
     }
 
     #[test]
