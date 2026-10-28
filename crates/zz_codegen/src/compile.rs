@@ -2168,10 +2168,13 @@ mod tests {
             text.contains(".rlib"),
             "script must link the static libstd: {text}"
         );
-        assert!(
-            text.contains(crate::ffi::FLOAT_FMT_SYMBOL),
-            "script must force-extract the float formatter: {text}"
-        );
+        // macOS: weak_import symbols skip `-u` force-extract
+        if crate::ffi::target_os(None) != crate::ffi::TargetOs::Macos {
+            assert!(
+                text.contains(crate::ffi::FLOAT_FMT_SYMBOL),
+                "script must force-extract the float formatter: {text}"
+            );
+        }
         let bat_text = std::fs::read_to_string(&bat).expect("read bat");
         assert!(
             links_rt(&bat_text),
