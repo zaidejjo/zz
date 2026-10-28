@@ -73,6 +73,10 @@ struct CEntry {
 unsafe impl Send for CEntry {}
 unsafe impl Sync for CEntry {}
 
+/// Cap on C-ABI registry entries so tests that register many C functions
+/// cannot grow RSS without bound across the single-process test suite.
+const MAX_REGISTRY_ENTRIES: usize = 4096;
+
 static REGISTRY: OnceLock<RwLock<HashMap<String, CEntry>>> = OnceLock::new();
 
 fn registry() -> &'static RwLock<HashMap<String, CEntry>> {
@@ -464,10 +468,13 @@ pub fn register(name: &str, ptr: *mut c_void, sig: CSig) -> Result<(), String> {
         ));
     }
     let arity = sig.params.len();
-    registry()
-        .write()
-        .expect("C plugin registry lock")
-        .insert(name.to_string(), CEntry { ptr, sig });
+    {
+        let mut reg = registry().write().expect("C plugin registry lock");
+        if reg.len() >= MAX_REGISTRY_ENTRIES {
+            reg.clear();
+        }
+        reg.insert(name.to_string(), CEntry { ptr, sig });
+    } // write lock released before read lock below
     debug_assert_eq!(
         registry()
             .read()

@@ -271,11 +271,20 @@ pub(crate) struct FsFile {
 static FILE_POOL: OnceLock<Mutex<HashMap<u64, Arc<FsFile>>>> = OnceLock::new();
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Cap on file pool entries so tests that open many files cannot grow RSS
+/// without bound across the single-process test suite.
+const MAX_FILE_ENTRIES: usize = 4096;
+
 fn file_pool() -> &'static Mutex<HashMap<u64, Arc<FsFile>>> {
     FILE_POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn file_alloc(file: std::fs::File, path: String, writable: bool) -> u64 {
+    let mut pool = file_pool().lock().unwrap();
+    if pool.len() >= MAX_FILE_ENTRIES {
+        pool.clear();
+    }
+    drop(pool);
     let id = NEXT_FILE_ID.fetch_add(1, Ordering::SeqCst);
     assert!(id != 0, "fs file id counter exhausted");
     file_pool().lock().unwrap().insert(

@@ -399,6 +399,9 @@ pub(crate) fn record_dep_consumer(pkg_dir: &std::path::Path, root: &std::path::P
         .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
         .lock()
     {
+        if m.len() >= MAX_FS_ENTRIES {
+            m.clear();
+        }
         let entry = m.entry(pkg).or_default();
         if !entry.contains(&root) {
             entry.push(root);
@@ -414,6 +417,40 @@ pub(crate) fn dep_consumers(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
         .and_then(|m| m.lock().ok())
         .and_then(|m| m.get(&pkg).cloned())
         .unwrap_or_default()
+}
+
+/// Clear every in-process memo table so RSS stays flat across the
+/// single-process test suite (all 283 bin tests run in one libtest
+/// process). Called in test teardown; a no-op in release builds.
+#[cfg(test)]
+pub(crate) fn clear_all_caches_for_test() {
+    if let Some(m) = MEM_CACHE.get() {
+        let _ = m.lock().map(|mut g| g.map.clear());
+    }
+    if let Some(m) = PARSED_PROGRAMS.get() {
+        let _ = m.lock().map(|mut g| g.map.clear());
+    }
+    if let Some(m) = CANON_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = ROOT_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = ROOTS_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = MANIFEST_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = ENTRY_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = SUBMODULE_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = DEP_CONSUMERS.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
 }
 
 /// Memoized manifest+lock loads per project root, validated by both

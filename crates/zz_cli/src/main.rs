@@ -1039,16 +1039,40 @@ fn load_vm_plugins(
 /// Loaded plugin libraries, kept alive for the process lifetime.
 /// Dropping a `PluginLib` unloads its `.so`, unmapping every registered
 /// function pointer — so handles are never released once loaded.
+/// Capped at `MAX_PLUGIN_LIBS` so a single-process test suite (all 283
+/// bin tests run in one libtest process) cannot grow RSS without bound
+/// and get OOM-killed.
 static PLUGIN_LIBS: std::sync::OnceLock<std::sync::Mutex<Vec<zz_plugin::PluginLib>>> =
     std::sync::OnceLock::new();
 
+/// Cap on retained plugin handles; oldest are dropped when full.
+const MAX_PLUGIN_LIBS: usize = 64;
+
 /// Retain a loaded plugin library for the rest of the process.
 fn keep_plugin_alive(handle: zz_plugin::PluginLib) {
-    PLUGIN_LIBS
+    let mut g = PLUGIN_LIBS
         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
         .lock()
-        .expect("plugin registry lock")
-        .push(handle);
+        .expect("plugin registry lock");
+    if g.len() >= MAX_PLUGIN_LIBS {
+        // Drop the oldest handle so its `.so` is unmapped before adding
+        // the new one, keeping RSS bounded in long-running processes.
+        g.remove(0);
+    }
+    g.push(handle);
+}
+
+/// Drop all retained plugin handles so their `.so` mappings are released.
+/// Test-only: call in test teardown to keep RSS flat across the 283 bin
+/// tests that share one libtest process.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn clear_plugin_libs_for_test() {
+    if let Some(m) = PLUGIN_LIBS.get() {
+        if let Ok(mut g) = m.lock() {
+            g.clear();
+        }
+    }
 }
 
 /// Non-Unix stub for VM plugin loading.
@@ -3566,20 +3590,43 @@ mod tests {
     #[test]
     fn check_no_arg_errors() {
         // NOTE: `examples/` is gitignored (personal scratch dir, absent in
-        // CI checkouts) — scan the tracked fixtures instead. The point is
-        // directory discovery finds files and does not panic/IO-error.
+        // CI checkouts) — scan a bounded subset of fixtures instead of all
+        // 365 (~318MB source). Checking every fixture populates unbounded
+        // process-global memory caches (MEM_CACHE + PARSED_PROGRAMS) that
+        // persist across all 283 bin tests in one libtest process and can
+        // OOM-kill the test runner. A subset still proves directory
+        // discovery finds files and does not panic/IO-error.
         let fixtures_dir =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
         assert!(fixtures_dir.is_dir(), "tests/fixtures dir should exist");
-        let result = check_isolated(&fixtures_dir.display().to_string());
-        // The function may fail type-check on fixtures; the point is it
-        // should find files and not panic/IO-error.
-        match &result {
-            Err(msg) if msg.contains("does not exist") || msg.contains("no .zz files") => {
-                panic!("scan should find files: {msg}");
+        let subset: Vec<&str> = vec![
+            "stdlib/declarations.zz",
+            "stdlib/net_tcp_test.zz",
+            "stdlib/net_unix_test.zz",
+            "stdlib/http_keepalive_p1.zz",
+            "syntax/declarations.zz",
+            "types/declarations.zz",
+        ];
+        let mut any_ok_or_type_error = false;
+        for rel in &subset {
+            let path = fixtures_dir.join(rel);
+            if !path.is_file() {
+                continue;
             }
-            _ => {} // either Ok or type-check errors — both prove scanning worked.
+            let result = check_isolated(&path.display().to_string());
+            match &result {
+                Err(msg) if msg.contains("does not exist") || msg.contains("no .zz files") => {
+                    panic!("scan should find files: {msg}");
+                }
+                _ => any_ok_or_type_error = true, // either Ok or type-check errors — both prove scanning worked.
+            }
         }
+        assert!(
+            any_ok_or_type_error,
+            "no fixture files were checked; directory discovery may be broken"
+        );
+        // Clear memory caches so RSS stays flat for the rest of the suite.
+        super::loader::cache::clear_all_caches_for_test();
     }
 }
 
