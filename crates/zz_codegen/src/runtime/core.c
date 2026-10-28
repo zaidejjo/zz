@@ -3279,7 +3279,6 @@ void zz_safepoint(void) {
 #ifdef __linux__
 #include <malloc.h>
 #endif
-#endif
 
 // One-time network startup (WSAStartup on Windows, no-op on POSIX).
 // Called lazily from the TCP natives so binaries pay nothing when the
@@ -4816,7 +4815,6 @@ static void http_install_shutdown_handlers(void) {
 // strings read-only (registration finishes before threads spawn); ARC
 // is atomic, the intern table is mutex'd, and all request scratch is
 // thread-local. No worker touches another's pool.
-#if defined(__linux__)
 typedef struct { int listen_fd; int worker_id; } http_worker_arg;
 
 static int http_worker_has_active(void) {
@@ -4826,6 +4824,7 @@ static int http_worker_has_active(void) {
     return 0;
 }
 
+#if defined(__linux__)
 // ---- Epoll worker loop (Linux) ----
 static void *worker_loop_linux(void *arg) {
     int listen_fd = ((http_worker_arg *)arg)->listen_fd;
@@ -5035,6 +5034,7 @@ static void *worker_loop_linux(void *arg) {
     close(epfd);
     return NULL;
 }
+#endif
 
 // ---- Poll worker loop (macOS / POSIX) ----
 // poll() is available on both Linux and macOS; we use it on macOS since
