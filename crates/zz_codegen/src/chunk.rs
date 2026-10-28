@@ -4682,9 +4682,10 @@ pub fn build_module(
     // Link flags from the referenced natives (same helpers as HIR).
     let native_names: HashSet<String> = em.used_natives.iter().map(|(n, _, _)| n.clone()).collect();
     // Headers + user code only: the TU links the precompiled runtime
-    // archive (`-lzz_rt`), exactly like the HIR backend's precompiled
-    // path. Quoted includes are concatenated-header residue — strip
-    // them (system includes like <math.h> stay).
+    // archive (passed by path — see `compile::push_link_inputs`), exactly
+    // like the HIR backend's precompiled path. Quoted includes are
+    // concatenated-header residue — strip them (system includes like
+    // <math.h> stay).
     let raw = format!(
         "{runtime_h}\n{chunk_pre}\n// ---- chunk-compiled code ----\n{bodies}\nvoid zz_main(void) {{\n    zz_value _t = {entry_sym}(NULL, 0);\n    zz_release(&_t);\n}}\n\nint zz_call_main(void) {{\n    zz_value _r = {main_call};\n    return zz_main_result_code(_r);\n}}\n",
         runtime_h = crate::RUNTIME_H,

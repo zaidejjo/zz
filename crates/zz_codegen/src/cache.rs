@@ -28,6 +28,12 @@ fn cache_dir() -> PathBuf {
     zz_pm::paths::build_cache_dir()
 }
 
+/// The cache root as a display string, for error hints (the cache path is
+/// user-visible: it honors `ZZ_HOME` and appears in `zz cache clean`).
+pub fn cache_dir_display() -> String {
+    cache_dir().display().to_string()
+}
+
 /// SHA256-like fingerprint of the C runtime sources.
 ///
 /// Concatenates `RUNTIME_H` + `RUNTIME_C` and hashes them. This covers all
@@ -132,6 +138,21 @@ pub fn ensure_rt_a(
         return compile_rt_a(opts, clang, target, None);
     }
 
+    // One retry on IO errors: a transient filesystem hiccup (a cache
+    // directory removed by a parallel `zz cache clean`, a momentarily
+    // unwritable temp dir) must not fail a native build. Compile failures
+    // are *not* retried — they are deterministic.
+    match ensure_rt_a_once(opts, clang, target) {
+        Err(BuildError::Io(_)) => ensure_rt_a_once(opts, clang, target),
+        other => other,
+    }
+}
+
+fn ensure_rt_a_once(
+    opts: &BuildOptions,
+    clang: &Clang,
+    target: Option<&str>,
+) -> Result<PathBuf, BuildError> {
     let key = cache_key(
         target,
         opts.optimize,
@@ -141,7 +162,8 @@ pub fn ensure_rt_a(
         links_pg(opts),
         links_float_fmt(opts),
     );
-    // Per-key subdirectory with a fixed archive name — allows `-lzz_rt`.
+    // Per-key subdirectory with a fixed archive name (a readable,
+    // human-grepable layout per cache key).
     let dir = cache_dir().join(&key);
     std::fs::create_dir_all(&dir).map_err(BuildError::Io)?;
 
@@ -333,9 +355,10 @@ fn compile_rt_a(
     // Build the archive at a unique temp path, then atomically rename over
     // the cache entry: concurrent compilers never observe (or publish) a
     // half-written archive. The pid + counter keep parallel processes and
-    // threads from colliding.
+    // threads from colliding. The `.a` suffix is kept so linkers that sniff
+    // by extension still treat the unpublished fallback as an archive.
     let tmp_archive =
-        archive_path.with_file_name(format!(".libzz_rt.{}.{}.tmp", std::process::id(), uniq));
+        archive_path.with_file_name(format!(".libzz_rt.{}.{}.tmp.a", std::process::id(), uniq));
     let ar_out = Command::new("ar")
         .args([
             "rcs",
@@ -352,16 +375,24 @@ fn compile_rt_a(
             stderr: String::from_utf8_lossy(&ar_out.stderr).into_owned(),
         });
     }
-    if std::fs::rename(&tmp_archive, archive_path).is_err() {
-        // Lost a publish race with an identical archive: adopt whatever won.
-        let _ = std::fs::remove_file(&tmp_archive);
-    }
-
+    let published = std::fs::rename(&tmp_archive, archive_path).is_ok();
     // Cleanup temporaries.
     let _ = std::fs::remove_file(&c_path);
     let _ = std::fs::remove_file(&o_path);
-
-    Ok(archive_path.to_path_buf())
+    if published {
+        return Ok(archive_path.to_path_buf());
+    }
+    if archive_path.exists() {
+        // Lost a publish race with an identical archive: adopt the winner.
+        let _ = std::fs::remove_file(&tmp_archive);
+        return Ok(archive_path.to_path_buf());
+    }
+    // The cache directory vanished mid-build (e.g. a concurrent
+    // `zz cache clean`). The archive we just built is still valid, and
+    // callers link it by path — hand it back instead of a missing cache
+    // entry. `zz cache clean` (or the cache's LRU reclaim) removes the
+    // leftover temporary later.
+    Ok(tmp_archive)
 }
 
 /// True when this link provides the Postgres backend from the Rust
