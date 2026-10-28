@@ -948,10 +948,16 @@ zz_value zz_fail(zz_value v, int *err) {
     fprintf(stderr, "error: fail: %s\n", s);
     fflush(stderr);
     // Panic inside a task: return an error result so task.join surfaces it
-    // as .err (VM parity), instead of killing the whole process.
+    // as .err (VM parity). VM formats panic as "fail: <message>"; match it.
     if (zz_current_task) {
-        zz_value err_val = zz_variant_err(zz_str_new(s, strlen(s)));
+        size_t s_len = strlen(s);
+        char *fail_s = malloc(s_len + 7);
+        memcpy(fail_s, "fail: ", 6);
+        memcpy(fail_s + 6, s, s_len);
+        fail_s[s_len + 6] = '\0';
+        zz_value err_val = zz_variant_err(zz_str_new(fail_s, s_len + 6));
         free(s);
+        free(fail_s);
         return err_val;
     }
     free(s);

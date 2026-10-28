@@ -392,6 +392,9 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "http_hijack_p3" => {
             Some("P3 AOT: hijack is VM-only; native returns error")
         }
+        // NOTE: `fs_comprehensive` embeds process.pid() in temp paths, which
+        // differ between VM and native processes.
+        "fs_comprehensive" => Some("PID-embedded temp paths differ between VM and native"),
         _ => None,
     }
 }
