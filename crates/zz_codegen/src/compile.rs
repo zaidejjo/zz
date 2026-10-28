@@ -1141,7 +1141,9 @@ pub fn build_with(
     for flag in &cflags {
         cmd.arg(flag);
     }
-    cmd.arg("-o").arg(output_path).arg(&src_path);
+    cmd.arg("-o")
+        .arg(zz_pm::pathsafe::strip_verbatim(output_path))
+        .arg(&src_path);
     // libm is unconditional off Windows (archive members like float
     // binops need it regardless of position). The MSVC CRT has no `m.lib`
     // and ships the math routines in its default libraries.
@@ -1212,7 +1214,10 @@ fn push_link_inputs(
     match crate::cache::ensure_rt_a(opts, clang, target) {
         Ok(rt_a) => {
             if let Some(parent) = rt_a.parent() {
-                cmd.arg(format!("-L{}", parent.display()));
+                cmd.arg(format!(
+                    "-L{}",
+                    zz_pm::pathsafe::strip_verbatim(parent).display()
+                ));
             }
             cmd.arg("-lzz_rt");
         }
@@ -1276,7 +1281,9 @@ fn push_link_inputs(
     }
     // Link plugin package artifacts (compiled .o / .a from build hooks).
     for artifact in &opts.plugin_artifacts {
-        cmd.arg(artifact);
+        // Windows `canonicalize` adds a `\\?\` prefix; the MSVC linker
+        // rejects that spelling.
+        cmd.arg(zz_pm::pathsafe::strip_verbatim(artifact));
     }
     // Link plugin dependency libraries (e.g. `-lvips` from ldflags.txt).
     for arg in &opts.plugin_link_args {
@@ -1585,7 +1592,7 @@ pub fn emit_c_plus_script(
     let mut extra_inputs = String::new();
     for a in &opts.plugin_artifacts {
         extra_inputs.push(' ');
-        extra_inputs.push_str(&a.display().to_string());
+        extra_inputs.push_str(&zz_pm::pathsafe::strip_verbatim(a).display().to_string());
     }
     for a in &opts.plugin_link_args {
         extra_inputs.push(' ');

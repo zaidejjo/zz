@@ -1960,6 +1960,10 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let src = base.join("no-such-file.zz");
         let cwd = std::env::current_dir().unwrap();
+        // Project discovery canonicalizes the root, and on macOS the temp
+        // dir is a symlink (`/var` → `/private/var`), so every expectation
+        // that goes through `find_project_root` must be canonical too.
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         assert_eq!(output_dir_for(&src), cwd);
         assert_eq!(
             planned_dest_for(&src, None, None),
@@ -1975,23 +1979,25 @@ mod tests {
         .unwrap();
         let entry = root.join("src").join("main.zz");
         std::fs::write(&entry, "println(\"hi\")\n").unwrap();
-        assert_eq!(output_dir_for(&entry), root.join("bin"));
+        // Discovery canonicalizes the root; compare against the real path.
+        let root_out = canon(&root);
+        assert_eq!(output_dir_for(&entry), root_out.join("bin"));
         assert_eq!(default_stem_for(&entry), "demo-pkg");
         assert_eq!(
             planned_dest_for(&entry, None, None),
-            root.join("bin").join(bin_name("demo-pkg", None))
+            root_out.join("bin").join(bin_name("demo-pkg", None))
         );
         // Explicit non-entry file in a project: project `bin/` + stem.
         let other = root.join("src").join("tool.zz");
         std::fs::write(&other, "println(\"tool\")\n").unwrap();
         assert_eq!(
             planned_dest_for(&other, None, None),
-            root.join("bin").join(bin_name("tool", None))
+            root_out.join("bin").join(bin_name("tool", None))
         );
         // Bare `-o` stays in the resolved dir; path-like `-o` is CWD-exact.
         assert_eq!(
             planned_dest_for(&entry, Some(Path::new("server")), None),
-            root.join("bin").join(bin_name("server", None))
+            root_out.join("bin").join(bin_name("server", None))
         );
         assert_eq!(
             planned_dest_for(&entry, Some(Path::new("out/server")), None),
@@ -2002,7 +2008,9 @@ mod tests {
         let win = Some("x86_64-pc-windows-gnu");
         assert_eq!(
             planned_dest_for(&entry, None, win),
-            root.join("bin").join("demo-pkg-x86_64-pc-windows-gnu.exe")
+            root_out
+                .join("bin")
+                .join("demo-pkg-x86_64-pc-windows-gnu.exe")
         );
         assert_eq!(
             planned_dest_for(&src, None, win),
@@ -2023,11 +2031,15 @@ mod tests {
         .unwrap();
         let cli = cfg.join("src").join("cli.zz");
         std::fs::write(&cli, "println(\"hi\")\n").unwrap();
-        assert_eq!(resolve_entry(&cfg).unwrap(), cli);
+        let cfg_out = canon(&cfg);
+        assert_eq!(
+            resolve_entry(&cfg).unwrap(),
+            cfg_out.join("src").join("cli.zz")
+        );
         assert_eq!(default_stem_for(&cli), "cfg-pkg");
         assert_eq!(
             planned_dest_for(&cli, None, None),
-            cfg.join("bin").join(bin_name("cfg-pkg", None))
+            cfg_out.join("bin").join(bin_name("cfg-pkg", None))
         );
         // A configured-but-missing entry is a loud error, not a silent
         // conventional fallback.
