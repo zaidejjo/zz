@@ -4,16 +4,128 @@
 //! - Linux/macOS: `$HOME/.zz/`
 //! - Windows: `%USERPROFILE%\.zz\`
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
+
+// Thread-local: `ENV_OVERRIDES` maps a variable name to an optional value
+// (`Some(None)` = explicitly unset).
+thread_local! {
+    static ENV_OVERRIDES: RefCell<HashMap<String, Option<OsString>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Guard returned by [`env_scope`]: restores the previous thread-local
+/// values on drop (innermost scope wins, nesting is supported).
+#[derive(Debug)]
+#[must_use = "the override only lasts as long as the guard"]
+pub struct EnvScope {
+    prev: Vec<(String, Option<Option<OsString>>)>,
+}
+
+impl Drop for EnvScope {
+    fn drop(&mut self) {
+        ENV_OVERRIDES.with(|cell| {
+            let mut map = cell.borrow_mut();
+            // Reverse order: repeated keys in one call restore correctly.
+            for (key, prev) in self.prev.drain(..).rev() {
+                match prev {
+                    Some(v) => {
+                        map.insert(key, v);
+                    }
+                    None => {
+                        map.remove(&key);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Thread-scoped environment overrides (test hook).
+///
+/// Override `pairs` (`None` = explicitly unset) on the current thread.
+///
+/// `std::env::set_var` mutates process globals: concurrent readers in the
+/// same test binary may observe a torn value — Rust 2024 makes the call
+/// `unsafe` for exactly this reason. That is not theoretical here: a test
+/// that redirected `ZZ_HOME` while a parallel test built an AOT binary sent
+/// that build's runtime-archive cache into the other test's temp directory,
+/// surfacing as `io error: Invalid argument (os error 22)` and a bogus
+/// `Undefined symbols: _main` link error.
+///
+/// Tests therefore scope values here and read them through [`env_var_os`] /
+/// [`env_home_dir`] / [`env_cache_dir`]. No process state is touched, so
+/// parallel tests and the builds they run cannot observe each other's
+/// values; spawned threads and child processes deliberately do not inherit
+/// the override, so background builds keep the real environment. Callers
+/// keep the returned guard alive for the scope that should see it.
+#[doc(hidden)]
+pub fn env_scope(pairs: &[(&str, Option<OsString>)]) -> EnvScope {
+    let mut prev = Vec::with_capacity(pairs.len());
+    ENV_OVERRIDES.with(|cell| {
+        let mut map = cell.borrow_mut();
+        for (key, value) in pairs {
+            let key = (*key).to_string();
+            prev.push((key.clone(), map.insert(key, value.clone())));
+        }
+    });
+    EnvScope { prev }
+}
+
+/// `std::env::var_os` with the current thread's [`env_scope`] applied.
+///
+/// Production callers see the process environment unchanged (the override
+/// map is empty); tests see their own thread's values.
+pub fn env_var_os(key: &str) -> Option<OsString> {
+    match ENV_OVERRIDES.with(|cell| cell.borrow().get(key).cloned()) {
+        Some(value) => value,
+        None => std::env::var_os(key),
+    }
+}
+
+/// `dirs::home_dir` with the current thread's [`env_scope`] applied.
+///
+/// Only the override is consulted (`HOME`, then `USERPROFILE` on Windows);
+/// without an override this is exactly `dirs::home_dir()`, so non-test
+/// behavior — including Windows' known-folder resolution — is unchanged.
+pub fn env_home_dir() -> Option<PathBuf> {
+    let overridden = ENV_OVERRIDES.with(|cell| {
+        let map = cell.borrow();
+        map.get("HOME")
+            .cloned()
+            .or_else(|| map.get("USERPROFILE").cloned())
+            .flatten()
+    });
+    match overridden {
+        Some(home) => Some(PathBuf::from(home)),
+        None => dirs::home_dir(),
+    }
+}
+
+/// `dirs::cache_dir` with the current thread's [`env_scope`] applied.
+///
+/// On Linux `dirs::cache_dir` already honors `XDG_CACHE_HOME`, but macOS
+/// (`~/Library/Caches`) and Windows (`%LOCALAPPDATA%`) ignore it — so tests
+/// scoping `XDG_CACHE_HOME` were only isolated on Linux. The override is
+/// platform-independent; without one this is exactly `dirs::cache_dir()`.
+pub fn env_cache_dir() -> Option<PathBuf> {
+    let overridden = ENV_OVERRIDES.with(|cell| cell.borrow().get("XDG_CACHE_HOME").cloned());
+    match overridden {
+        Some(dir) => dir.map(PathBuf::from),
+        None => dirs::cache_dir(),
+    }
+}
 
 /// Resolve the ZZ home directory.
 ///
 /// Priority: `ZZ_HOME` env var > platform default (`~/.zz/`).
 pub fn zz_home() -> PathBuf {
-    if let Ok(home) = std::env::var("ZZ_HOME") {
+    if let Some(home) = env_var_os("ZZ_HOME") {
         return PathBuf::from(home);
     }
-    let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let base = env_home_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join(".zz")
 }
 
@@ -92,11 +204,12 @@ pub fn dir_usage(dir: &std::path::Path) -> (usize, u64) {
 
 #[cfg(test)]
 pub(crate) mod test_sync {
-    //! Serialize tests that mutate process-global env (`ZZ_HOME`).
+    //! Serialize the tests that still mutate process-global env (`ZZ_HOME`).
     //!
-    //! `std::env::set_var` is process-wide, so tests touching `ZZ_HOME`
-    //! must hold this lock for their whole body — otherwise two tests
-    //! redirect each other's CAS/home paths mid-flight.
+    //! New tests should prefer [`super::env_scope`]: it is thread-scoped and
+    //! cannot feed another test's path into a concurrent build. The lock
+    //! remains for the older suites in this crate (link/resolve/remote) that
+    //! mutate `ZZ_HOME` process-wide, so at least the mutations serialize.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
@@ -107,54 +220,67 @@ pub(crate) mod test_sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn zz_home_respects_env_var() {
-        let _guard = crate::paths::test_sync::lock_env();
         let tmp = std::env::temp_dir().join("zz_pm_test_home");
-        env::set_var("ZZ_HOME", &tmp);
+        let _scope = env_scope(&[("ZZ_HOME", Some(tmp.clone().into_os_string()))]);
         assert_eq!(zz_home(), tmp);
-        env::remove_var("ZZ_HOME");
     }
 
     #[test]
     fn zz_home_default() {
-        let _guard = crate::paths::test_sync::lock_env();
-        env::remove_var("ZZ_HOME");
+        let _scope = env_scope(&[("ZZ_HOME", None)]);
         let home = zz_home();
         assert!(home.ends_with(".zz"), "should end with .zz: {home:?}");
     }
 
     #[test]
     fn packages_dir_under_home() {
-        let _guard = crate::paths::test_sync::lock_env();
-        env::remove_var("ZZ_HOME");
+        let _scope = env_scope(&[("ZZ_HOME", None)]);
         assert!(packages_dir().ends_with("packages"));
     }
 
     #[test]
     fn cache_objects_dir_under_home() {
-        let _guard = crate::paths::test_sync::lock_env();
-        env::remove_var("ZZ_HOME");
+        let _scope = env_scope(&[("ZZ_HOME", None)]);
         let p = cache_objects_dir();
         assert!(p.ends_with("objects"), "should end with objects: {p:?}");
     }
 
     #[test]
     fn build_cache_dir_under_home() {
-        let _guard = crate::paths::test_sync::lock_env();
-        env::remove_var("ZZ_HOME");
+        let _scope = env_scope(&[("ZZ_HOME", None)]);
         assert!(build_cache_dir().ends_with("cache"));
         let tmp = std::env::temp_dir().join("zz_pm_test_home_cache");
-        env::set_var("ZZ_HOME", &tmp);
+        let _tmp_scope = env_scope(&[("ZZ_HOME", Some(tmp.clone().into_os_string()))]);
         assert_eq!(build_cache_dir(), tmp.join("cache"));
-        env::remove_var("ZZ_HOME");
+    }
+
+    #[test]
+    fn env_scope_is_thread_local_and_nests() {
+        let a = std::env::temp_dir().join("zz_pm_scope_a");
+        let b = std::env::temp_dir().join("zz_pm_scope_b");
+        let outer = env_scope(&[("ZZ_HOME", Some(a.clone().into_os_string()))]);
+        assert_eq!(zz_home(), a);
+        {
+            let _inner = env_scope(&[("ZZ_HOME", Some(b.clone().into_os_string()))]);
+            assert_eq!(zz_home(), b, "innermost scope wins");
+        }
+        assert_eq!(zz_home(), a, "inner drop restores the outer value");
+        drop(outer);
+        // Other threads never see the override: a spawned thread resolves
+        // the process environment instead (the property that keeps parallel
+        // builds out of a test's temp home).
+        let scoped = env_scope(&[("ZZ_HOME", Some(a.clone().into_os_string()))]);
+        let seen = std::thread::spawn(zz_home).join().unwrap();
+        assert_ne!(seen, a, "override must not leak to other threads");
+        drop(scoped);
+        assert_eq!(zz_home(), seen, "after drop the base env is back");
     }
 
     #[test]
     fn dir_usage_counts() {
-        let _guard = crate::paths::test_sync::lock_env();
         let tmp = std::env::temp_dir().join("zz_pm_test_dusage");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("sub")).unwrap();
@@ -167,8 +293,7 @@ mod tests {
 
     #[test]
     fn bin_dir_under_home() {
-        let _guard = crate::paths::test_sync::lock_env();
-        env::remove_var("ZZ_HOME");
+        let _scope = env_scope(&[("ZZ_HOME", None)]);
         assert!(bin_dir().ends_with("bin"));
     }
 }

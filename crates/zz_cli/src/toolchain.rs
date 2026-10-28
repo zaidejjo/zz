@@ -713,10 +713,13 @@ mod tests {
 
     #[test]
     fn pin_round_trips_through_env_root() {
-        // Hermetic: point the toolchain root at a temp dir.
+        // Hermetic: point the toolchain root at a temp dir (thread-scoped —
+        // a process-wide mutation would steer parallel builds' runtime cache
+        // keys, and is a data race on the environment block).
         let root = std::env::temp_dir().join(format!("zz_toolchain_root_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::env::set_var("ZZ_TOOLCHAIN_ROOT", &root);
+        let _root =
+            zz_pm::paths::env_scope(&[("ZZ_TOOLCHAIN_ROOT", Some(root.clone().into_os_string()))]);
         assert!(zz_codegen::compile::toolchain_pin().is_none());
         write_pin("0.17.0").unwrap();
         assert_eq!(
@@ -726,7 +729,6 @@ mod tests {
         // Garbage pins are treated as unpinned, never fatal.
         std::fs::write(pin_file(), "../evil\n").unwrap();
         assert!(zz_codegen::compile::toolchain_pin().is_none());
-        std::env::remove_var("ZZ_TOOLCHAIN_ROOT");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

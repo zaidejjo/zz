@@ -12,11 +12,13 @@ use std::io::IsTerminal;
 
 /// True when styled output is appropriate on stderr.
 pub fn color_enabled() -> bool {
-    if std::env::var_os("NO_COLOR").is_some() {
+    if zz_pm::paths::env_var_os("NO_COLOR").is_some() {
         return false;
     }
-    if std::env::var("TERM").as_deref() == Ok("dumb") {
-        return false;
+    if let Some(term) = zz_pm::paths::env_var_os("TERM") {
+        if term == "dumb" {
+            return false;
+        }
     }
     std::io::stderr().is_terminal()
 }
@@ -172,40 +174,42 @@ impl Drop for Spinner {
 mod tests {
     use super::*;
 
+    /// Thread-scoped `NO_COLOR`: never touches the process environment, so
+    /// a parallel test's styled output is unaffected.
+    fn no_color() -> zz_pm::paths::EnvScope {
+        zz_pm::paths::env_scope(&[("NO_COLOR", Some("1".into()))])
+    }
+
     #[test]
     fn bar_full_when_total_zero() {
-        std::env::set_var("NO_COLOR", "1");
+        let _c = no_color();
         let b = bar(0, 0, 8);
         assert_eq!(b, "[████████] 0/0");
-        std::env::remove_var("NO_COLOR");
     }
 
     #[test]
     fn bar_scales_with_progress() {
-        std::env::set_var("NO_COLOR", "1");
+        let _c = no_color();
         assert_eq!(bar(0, 4, 8), "[────────] 0/4");
         assert_eq!(bar(2, 4, 8), "[████────] 2/4");
         assert_eq!(bar(4, 4, 8), "[████████] 4/4");
         // Over-full clamps.
         assert_eq!(bar(9, 4, 8), "[████████] 9/4");
-        std::env::remove_var("NO_COLOR");
     }
 
     #[test]
     fn no_color_env_disables_styling() {
-        std::env::set_var("NO_COLOR", "1");
+        let _c = no_color();
         assert!(!color_enabled());
         assert_eq!(bold("x"), "x");
-        std::env::remove_var("NO_COLOR");
     }
 
     #[test]
     fn human_bytes_formats() {
-        std::env::set_var("NO_COLOR", "1");
+        let _c = no_color();
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KB");
         assert_eq!(human_bytes(2 * 1024 * 1024), "2.0 MB");
-        std::env::remove_var("NO_COLOR");
     }
 
     #[test]

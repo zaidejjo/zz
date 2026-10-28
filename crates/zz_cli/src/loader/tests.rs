@@ -1689,8 +1689,9 @@ fn check_cache_rechecks_only_dependents() {
 #[test]
 fn check_cache_disabled_via_env() {
     super::cache::with_isolated_cache(|| {
-        // ZZ_CHECK_CACHE=0 forces fresh checks (restored by the helper).
-        std::env::set_var("ZZ_CHECK_CACHE", "0");
+        // ZZ_CHECK_CACHE=0 forces fresh checks (thread-scoped: parallel tests
+        // keep their own cache).
+        let _off = zz_pm::paths::env_scope(&[("ZZ_CHECK_CACHE", Some("0".into()))]);
         let dir = temp_project(&[
             ("main.zz", "import config\nx := config.base + 1"),
             ("config.zz", "pub base := 41"),
