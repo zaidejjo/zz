@@ -61,10 +61,13 @@ jobs:
         # shellcheck is pinned too: runners ship some version of it, and
         # actionlint enables it automatically when found, so an image
         # refresh could turn this step red with no change here. Reproduce
-        # locally with the same two binaries.
+        # locally with the same two binaries. actionlint's runner-label
+        # table is compiled in, so this pin must know every label the
+        # matrices use: 1.7.12 carries macos-26, macos-26-intel and
+        # windows-11-arm; 1.7.7 rejected them.
         run: |
           set -euo pipefail
-          version=1.7.7
+          version=1.7.12
           sc_version=0.10.0
           curl -fsSL -o /tmp/actionlint.tar.gz \
             "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
@@ -92,9 +95,9 @@ jobs:
 
   # --- macos: apple silicon + intel --------------------------------------
   # Runner labels verified 2026: Apple silicon is `macos-26` (`macos-latest`
-  # also points at macOS 26 arm64); Intel is `macos-26-intel`. The older
-  # `macos-14` arm64 image is retired from this matrix because it is slow to
-  # schedule and two OS releases behind the Intel leg.
+  # also points at macOS 26 arm64); Intel is `macos-26-intel`. The old arm64
+  # image was `macos-14`: a release behind its `macos-15-intel` counterpart
+  # and slow to schedule, so the pair never matched.
   macos:
     name: macos
     uses: ./.github/workflows/ci-test.yml
