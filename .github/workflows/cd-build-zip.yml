@@ -187,23 +187,27 @@ jobs:
           fi
           cp "$STD_RLIB" dist/lib/
           cp LICENSE README.md dist/
-          (cd dist && zip -6 -r "../$ZIP" zz zz-lsp zig LICENSE README.md lib)
+          (cd dist && zip -q -6 -r "../$ZIP" zz zz-lsp zig LICENSE README.md lib)
           # Audit: compiler, its LSP, bundled toolchain and prebuilt runtime
           # must all ship. `zz upgrade` replaces the zz + zz-lsp pair in one
           # transaction and refuses a zip that lacks either binary.
-          members="$(unzip -Z1 "$ZIP")"
+          #
+          # Written to a file first: piping 20k member names into `grep -q`
+          # makes the writer take SIGPIPE the moment grep finds a match,
+          # which `set -o pipefail` turns into "member missing".
+          unzip -Z1 "$ZIP" > members.txt
           for required in zz zz-lsp zig lib/libzz_native_rt.a lib/std/std.zig \
                           LICENSE README.md; do
-            if ! printf '%s\n' "$members" | grep -qxF "$required"; then
+            if ! grep -qxF "$required" members.txt; then
               echo "error: $ZIP is missing $required" >&2
               exit 1
             fi
           done
-          if ! printf '%s\n' "$members" | grep -qE '^lib/libstd-[0-9a-f]+\.rlib$'; then
+          if ! grep -qE '^lib/libstd-[0-9a-f]+\.rlib$' members.txt; then
             echo "error: $ZIP is missing lib/libstd-<hash>.rlib" >&2
             exit 1
           fi
-          printf '%s\n' "$members"
+          cat members.txt
           # `sha256sum` is GNU coreutils (absent on stock macOS); `shasum`
           # is the Perl one-liner macOS ships. Both print `<hash>  <file>`.
           if command -v sha256sum > /dev/null 2>&1; then
