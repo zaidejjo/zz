@@ -308,6 +308,13 @@ pub(crate) fn tcp_shutdown(
         .map_err(|e| EvalError::new(format!("std.net.tcp_shutdown: lock poisoned: {e}"), span))?;
     match lock.shutdown(std::net::Shutdown::Both) {
         Ok(()) => Ok(Value::Result(Box::new(Ok(Value::Unit)))),
+        // macOS returns ENOTCONN when `shutdown(SHUT_BOTH)` is called on a
+        // socket whose peer has already closed (Linux reports success).
+        // The goal — no more I/O on the socket — is already true, so treat
+        // it as success to keep VM and AOT semantics identical.
+        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+            Ok(Value::Result(Box::new(Ok(Value::Unit))))
+        }
         Err(e) => Ok(Value::Result(Box::new(Err(Value::Str(
             format!("tcp_shutdown failed: {e}").into(),
         ))))),

@@ -1,24 +1,34 @@
-// features: assert, break-continue, closures, comparison, func-call, imports, int-arith, locals, match, option-result, print, std-http, std-task, std-time, string-literal, vm-only, while-loop
+// features: assert, break-continue, closures, comparison, func-call, imports, int-arith, locals, match, option-result, print, std-env, std-http, std-net, std-process, std-str, std-task, std-time, string-literal, vm-only, while-loop
 // tests/fixtures/stdlib/http_tls_p3.zz — Phase 3 TLS listener
 // Self-signed localhost cert: 200 over HTTPS + HSTS injection.
+// Port is pid/token-derived (band 32000) so concurrent instances of this
+// fixture (dedicated test + discovery sweep run in one process) cannot
+// collide on the loopback bind.
+import std.env
 import std.http
+import std.process(pid)
+import std.str
 import std.task
 import std.time
 
 func main() -> Result<int, str> {
     s := http.server()
     s = s.route("GET", "/hello", |_req| "tls-ok")
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    port := 32000 + (pid() * 2654435761 + tok_num * 40503) % 2000
+    addr := "127.0.0.1:{port}"
     task.spawn(|_| {
-        http.listen_tls(s, 8144, "tests/fixtures/stdlib/data/p3_tls/cert.pem", "tests/fixtures/stdlib/data/p3_tls/key.pem")
+        http.listen_tls(s, port, "tests/fixtures/stdlib/data/p3_tls/cert.pem", "tests/fixtures/stdlib/data/p3_tls/key.pem")
     })
     tries := 0
-    r := http.fetch_insecure("https://127.0.0.1:8144/hello")
+    r := http.fetch_insecure("https://{addr}/hello")
     while tries < 50 {
         match r {
             .ok(_) => break
             .err(_) => {
                 time.sleep_ms(100)
-                r = http.fetch_insecure("https://127.0.0.1:8144/hello")
+                r = http.fetch_insecure("https://{addr}/hello")
                 tries = tries + 1
             }
         }

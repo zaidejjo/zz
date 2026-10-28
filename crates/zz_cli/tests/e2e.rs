@@ -11,6 +11,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonically increasing sweep token handed out to every `run_zz` call
+/// (dedicated per-fixture tests and the discovery sweep share one process,
+/// so without this both instances of the same fixture compute identical
+/// pid/token-derived ports and collide on loopback bind).
+static SWEEP_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 mod support;
 
@@ -33,7 +40,11 @@ fn fixtures_dir() -> PathBuf {
 /// shifted sweep token (which moves the fixture to another slot in its
 /// band) before reporting the failure.
 fn run_zz(file: &Path) -> (i32, String, String) {
-    let first = run_zz_with_token(file, None);
+    // Every `zz run` child gets a unique sweep token so concurrent
+    // instances of the same fixture (dedicated test + discovery sweep in
+    // one test process) bind disjoint loopback ports instead of colliding.
+    let tok = SWEEP_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let first = run_zz_with_token(file, Some(&tok.to_string()));
     if first.0 == 0 || !is_bind_collision(&first.2) {
         return first;
     }

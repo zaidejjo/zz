@@ -389,11 +389,20 @@ mod tests {
     fn selective_import_resolves_defining_file() {
         let state = test_state();
         let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
-        let lib = open(&state, "file:///lib.zz", lib_src);
+        let tmp = std::env::temp_dir().join(format!("zz_lsp_sym_{}", std::process::id()));
+        let lib = open(
+            &state,
+            Url::from_file_path(tmp.join("lib.zz")).unwrap().as_ref(),
+            lib_src,
+        );
         index_file(&state, &lib, "lib", lib_src);
         let main_src =
             "import lib(circle)\nfunc main() {\n    y := circle(1.0)\n    println(y)\n}\n";
-        let main = open(&state, "file:///main.zz", main_src);
+        let main = open(
+            &state,
+            Url::from_file_path(tmp.join("main.zz")).unwrap().as_ref(),
+            main_src,
+        );
 
         let scope =
             resolve_symbol_scope(&state, &main, offset_of(main_src, "circle(1.0)")).expect("scope");

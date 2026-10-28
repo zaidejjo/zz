@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn resolve_import_basic() {
-        let root = PathBuf::from("/tmp/test_ws");
+        let root = std::env::temp_dir().join(format!("zz_lsp_xf_basic_{}", std::process::id()));
         // Create a temporary workspace with a .zz file.
         std::fs::create_dir_all(root.join("math")).unwrap();
         std::fs::write(
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn resolve_import_mod_file() {
-        let root = PathBuf::from("/tmp/test_ws_mod");
+        let root = std::env::temp_dir().join(format!("zz_lsp_xf_mod_{}", std::process::id()));
         std::fs::create_dir_all(root.join("math")).unwrap();
         std::fs::write(
             root.join("math/mod.zz"),

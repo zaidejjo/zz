@@ -1,8 +1,14 @@
-// features: assert, bool-logic, break-continue, bytes, closures, comparison, func-call, if-else, imports, int-arith, locals, match, option-result, print, return, short-circuit, std-http, std-net, std-task, std-time, string-literal, string-ops, vm-only, while-loop
+// features: assert, bool-logic, break-continue, bytes, closures, comparison, func-call, if-else, imports, int-arith, locals, match, option-result, print, return, short-circuit, std-env, std-http, std-net, std-process, std-str, std-task, std-time, string-literal, string-ops, vm-only, while-loop
 // tests/fixtures/stdlib/http_hijack_p3.zz — Phase 3 WebSocket upgrade
 // 101 + RFC 6455 accept vector, same-path GET coexistence, handoff close.
+// Port is pid/token-derived (band 34000) so concurrent instances of this
+// fixture (dedicated test + discovery sweep run in one process) cannot
+// collide on the loopback bind.
+import std.env
 import std.http
 import std.net
+import std.process(pid)
+import std.str
 import std.task
 import std.time
 
@@ -12,24 +18,27 @@ func main() -> Result<int, str> {
     s = http.hijack(s, "/chat", |req, stream| {
         return "owned"
     })
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    port := 34000 + (pid() * 2654435761 + tok_num * 40503) % 2000
+    addr := "127.0.0.1:{port}"
     task.spawn(|_| {
-        http.listen(s, 8142)
+        http.listen(s, port)
     })
     tries := 0
-    stream := net.tcp_connect("127.0.0.1:8142", 200)
+    stream := net.tcp_connect(addr, 200)
     while tries < 50 {
         match stream {
             .ok(_) => break
             .err(_) => {
                 time.sleep_ms(100)
-                stream = net.tcp_connect("127.0.0.1:8142", 200)
+                stream = net.tcp_connect(addr, 200)
                 tries = tries + 1
             }
         }
     }
     c := stream?
     c.set_read_timeout(5000)?
-
     // plain GET on the same path: normal dispatch, no upgrade
     c.write("GET /chat HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")?
     st1 := c.read_line()?
@@ -43,7 +52,6 @@ func main() -> Result<int, str> {
     b1 := c.read_bytes(9)?
     assert(b1.len() == 9)
     println("coexist_ok")
-
     // RFC 6455 §1.2 test vector key → exact accept hash
     c.write("GET /chat HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")?
     st2 := c.read_line()?
@@ -60,13 +68,11 @@ func main() -> Result<int, str> {
     }
     assert(accept.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="))
     println("handshake_ok")
-
     // handler returned without spawning: socket closes, no hang
     match c.read_line() {
         .ok(_) => println("ERROR: conn should be closed")
         .err(_) => println("handoff_close_ok")
     }
-
     println("http_hijack_p3_ok")
     return .ok(0)
 }

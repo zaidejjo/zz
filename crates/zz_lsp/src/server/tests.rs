@@ -55,28 +55,30 @@ async fn initialize_returns_capabilities() {
 #[tokio::test(flavor = "current_thread")]
 async fn initialize_sets_root_from_workspace_folders() {
     let (service, state) = setup();
+    let ws_root = std::env::temp_dir().join(format!("zz_lsp_root_ws_{}", std::process::id()));
     let params = InitializeParams {
         workspace_folders: Some(vec![WorkspaceFolder {
-            uri: Url::from_file_path("/tmp/myproject").unwrap(),
+            uri: Url::from_file_path(&ws_root).unwrap(),
             name: "myproject".to_string(),
         }]),
         ..Default::default()
     };
     service.inner().initialize(params).await.unwrap();
     let root = state.root.read().unwrap();
-    assert_eq!(*root, Some(std::path::PathBuf::from("/tmp/myproject")));
+    assert_eq!(*root, Some(ws_root));
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn initialize_sets_root_from_root_uri() {
     let (service, state) = setup();
+    let alt_root = std::env::temp_dir().join(format!("zz_lsp_root_alt_{}", std::process::id()));
     let params = InitializeParams {
-        root_uri: Some(Url::from_file_path("/tmp/alt").unwrap()),
+        root_uri: Some(Url::from_file_path(&alt_root).unwrap()),
         ..Default::default()
     };
     service.inner().initialize(params).await.unwrap();
     let root = state.root.read().unwrap();
-    assert_eq!(*root, Some(std::path::PathBuf::from("/tmp/alt")));
+    assert_eq!(*root, Some(alt_root));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -589,12 +591,13 @@ async fn execute_unknown_command_rejected() {
 async fn goto_selective_member_jumps_to_def() {
     let (service, state) = setup();
     let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
-    let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+    let tmp = std::env::temp_dir().join(format!("zz_lsp_goto_{}", std::process::id()));
+    let lib_uri = Url::from_file_path(tmp.join("lib.zz")).unwrap();
     open_and_check(&state, &lib_uri, lib_src);
     index_test_file(&state, &lib_uri, "lib", lib_src);
 
     let main_src = "import lib(circle)\nfunc main() {\n    y := circle(1.0)\n    println(y)\n}\n";
-    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    let main_uri = Url::from_file_path(tmp.join("main.zz")).unwrap();
     open_and_check(&state, &main_uri, main_src);
 
     let def = service
@@ -918,17 +921,18 @@ fn index_test_file(state: &GlobalState, uri: &Url, module: &str, src: &str) {
 async fn rename_reaches_importing_file_not_unrelated() {
     let (service, state) = setup();
     let lib_src = "pub func circle(r: float) -> float {\n    return r\n}\n";
-    let lib_uri: Url = "file:///lib.zz".parse().unwrap();
+    let tmp = std::env::temp_dir().join(format!("zz_lsp_rename_{}", std::process::id()));
+    let lib_uri = Url::from_file_path(tmp.join("lib.zz")).unwrap();
     open_and_check(&state, &lib_uri, lib_src);
     index_test_file(&state, &lib_uri, "lib", lib_src);
 
     let main_src = "import lib(circle)\nfunc main() {\n    y := circle(1.0)\n    println(y)\n}\n";
-    let main_uri: Url = "file:///main.zz".parse().unwrap();
+    let main_uri = Url::from_file_path(tmp.join("main.zz")).unwrap();
     open_and_check(&state, &main_uri, main_src);
 
     // Same name, no import: must not be touched.
     let other_src = "func circle() -> int {\n    return 1\n}\nc := circle()\n";
-    let other_uri: Url = "file:///other.zz".parse().unwrap();
+    let other_uri = Url::from_file_path(tmp.join("other.zz")).unwrap();
     open_and_check(&state, &other_uri, other_src);
 
     let edit = service
@@ -1624,7 +1628,7 @@ async fn workspace_symbol_includes_indexed_files() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn initialize_scans_workspace() {
-    let root = std::path::PathBuf::from("/tmp/test_ws_init");
+    let root = std::env::temp_dir().join(format!("zz_lsp_init_ws_{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("helper.zz"),
@@ -1655,7 +1659,7 @@ async fn initialize_scans_workspace() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn workspace_folder_change_triggers_rescan() {
-    let root = std::path::PathBuf::from("/tmp/test_ws_folders");
+    let root = std::env::temp_dir().join(format!("zz_lsp_folders_ws_{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("a.zz"), "x := 1\n").unwrap();
 
