@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::manifest::{validate_cflag, validate_pkg_config_token, BuildCcSpec, BuildRustSpec};
+use crate::pathsafe::{escapes_root, strip_verbatim};
 use crate::rust_lock;
 
 /// Fixed build timestamp for reproducibility (recorded in the lock;
@@ -393,6 +394,69 @@ pub fn pkg_config_versions(modules: &[String]) -> String {
     pairs.join(",")
 }
 
+/// Environment variables a Windows child process needs in order to run at
+/// all, inherited verbatim when present. Unix stays fully hermetic.
+///
+/// - `SystemRoot`/`windir`: without them the loader cannot resolve DLLs.
+/// - `TEMP`/`TMP`: `TMPDIR` is meaningless on Windows; MSVC and rustc both
+///   read `TMP`/`TEMP` for intermediate files.
+/// - `INCLUDE`/`LIB`/`LIBPATH` and the toolchain roots: `link.exe` locates
+///   `kernel32.lib` & friends through `LIB`. Dropping it produces
+///   `LNK1181: cannot open input file 'kernel32.lib'` — the hermetic cargo
+///   build used to fail exactly that way.
+/// - The rest are toolchain discovery (`rustup`, `vswhere`-style layouts)
+///   and `cmd`-style shims; none of them carry user cargo configuration,
+///   which stays isolated because `CARGO_HOME` is always replaced.
+pub const WINDOWS_ENV_ALLOWLIST: &[&str] = &[
+    "SystemRoot",
+    "SYSTEMROOT",
+    "windir",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "INCLUDE",
+    "LIB",
+    "LIBPATH",
+    "VCToolsInstallDir",
+    "VCINSTALLDIR",
+    "VSINSTALLDIR",
+    "WindowsSdkDir",
+    "WindowsSDKVersion",
+    "UCRTVersion",
+    "VSCMD_ARG_TGT_ARCH",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "PATHEXT",
+    "COMSPEC",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "RUSTUP_TOOLCHAIN",
+];
+
+/// Append every allowlisted variable that is set in this process.
+fn push_allowlisted(env: &mut Vec<(String, String)>, keys: &[&str]) {
+    for key in keys {
+        if let Ok(value) = std::env::var(key) {
+            env.push(((*key).to_string(), value));
+        }
+    }
+}
+
+/// Complement `env` with the Windows platform variables, if on Windows.
+/// A no-op elsewhere so the Unix child env gains nothing.
+fn push_platform_env(env: &mut Vec<(String, String)>) {
+    #[cfg(windows)]
+    push_allowlisted(env, WINDOWS_ENV_ALLOWLIST);
+    #[cfg(not(windows))]
+    let _ = env;
+}
+
 /// Hermetic environment for `cc`/`ar`/`nm`: cleared, then only `PATH`
 /// (inherited so the driver finds `as`/`ld`), `CC`, an isolated `TMPDIR`
 /// under the build dir (`HOME` deliberately unset), and the fixed
@@ -413,24 +477,7 @@ fn hermetic_env(tmpdir: &Path) -> Vec<(String, String)> {
     // Windows children need the system root to load DLLs at all, plus the
     // MSVC/SDK search paths when clang drives `link.exe`. Only forwarded
     // when present, so Unix stays as hermetic as before.
-    #[cfg(windows)]
-    for key in [
-        "SystemRoot",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "INCLUDE",
-        "LIB",
-        "VCToolsInstallDir",
-        "WindowsSdkDir",
-        "UCRTVersion",
-        "WindowsSDKVersion",
-        "VSCMD_ARG_TGT_ARCH",
-    ] {
-        if let Ok(v) = std::env::var(key) {
-            env.push((key.to_string(), v));
-        }
-    }
+    push_platform_env(&mut env);
     env
 }
 
@@ -712,19 +759,24 @@ pub fn ensure_cc(
     spec: &BuildCcSpec,
     target_tag: Option<&str>,
 ) -> Result<CcBuildOutput, String> {
-    let pkg_dir = std::fs::canonicalize(pkg_dir)
+    // `canonicalize` returns `\\?\C:\…` on Windows; `cl.exe`, `link.exe`,
+    // `lib.exe` and `nm` reject verbatim paths in some arguments, and the
+    // spelling leaks into error text. Keep the canonical form for the
+    // containment check only, and hand tools the plain form.
+    let pkg_dir_canon = std::fs::canonicalize(pkg_dir)
         .map_err(|e| format!("cannot resolve {}: {e}", pkg_dir.display()))?;
+    let pkg_dir = strip_verbatim(&pkg_dir_canon);
     // Re-validate defensively: callers pass manifest structs that may not
     // have gone through NativeSpec::validate (path deps, CAS checkouts).
     for s in &spec.sources {
-        if Path::new(s).is_absolute() || s.split('/').any(|c| c == "..") || !s.ends_with(".c") {
+        if escapes_root(Path::new(s)) || !s.ends_with(".c") {
             return Err(format!(
                 "invalid source `{s}`: must be a contained `.c` path"
             ));
         }
     }
     for d in &spec.include_dirs {
-        if Path::new(d).is_absolute() || d.split('/').any(|c| c == "..") {
+        if escapes_root(Path::new(d)) {
             return Err(format!(
                 "invalid include_dir `{d}`: must stay inside the package"
             ));
@@ -785,10 +837,10 @@ pub fn ensure_cc(
         let joined = pkg_dir.join(rel);
         let canon =
             std::fs::canonicalize(&joined).map_err(|e| format!("cannot resolve `{rel}`: {e}"))?;
-        if !canon.starts_with(&pkg_dir) {
+        if !canon.starts_with(&pkg_dir_canon) {
             return Err(format!("`{rel}` escapes the package root"));
         }
-        Ok(canon)
+        Ok(strip_verbatim(&canon))
     };
 
     let mut objects = Vec::new();
@@ -960,11 +1012,10 @@ impl ChildPlan {
 /// offline switch for build (vendor fetch keeps it false).
 fn rust_hermetic_env(cargo_home: &Path, tmpdir: &Path, offline: bool) -> Vec<(String, String)> {
     let mut env = Vec::new();
-    for key in RUST_ENV_ALLOWLIST {
-        if let Ok(value) = std::env::var(key) {
-            env.push(((*key).to_string(), value));
-        }
-    }
+    push_allowlisted(&mut env, RUST_ENV_ALLOWLIST);
+    // Windows: MSVC `link.exe` needs `LIB`/`INCLUDE` from the host, which
+    // `env_clear()` would otherwise remove (LNK1181 on `kernel32.lib`).
+    push_platform_env(&mut env);
     env.push((
         "CARGO_HOME".to_string(),
         cargo_home.to_string_lossy().into_owned(),
@@ -1185,8 +1236,11 @@ pub fn ensure_rust(
     spec: &BuildRustSpec,
     target_tag: Option<&str>,
 ) -> Result<RustBuildOutput, String> {
-    let pkg_dir = std::fs::canonicalize(pkg_dir)
+    // Cargo and rustc accept verbatim paths, but `link.exe` and the MSVC
+    // library tooling behind it do not: strip `\\?\` before planning.
+    let pkg_dir_canon = std::fs::canonicalize(pkg_dir)
         .map_err(|e| format!("cannot resolve {}: {e}", pkg_dir.display()))?;
+    let pkg_dir = strip_verbatim(&pkg_dir_canon);
     let crate_dir = rust_lock::crate_dir_for(&pkg_dir, &spec.crate_path)?;
     let (_crate_manifest, closure) = rust_lock::load_validated(&crate_dir)?;
 
@@ -2497,8 +2551,12 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
             Some("true")
         );
         for (k, _) in &plan.env {
+            // On Windows the platform allowlist is inherited too (MSVC
+            // linker/sdk discovery); Unix must stay fully hermetic.
+            let platform_allowlisted = cfg!(windows) && WINDOWS_ENV_ALLOWLIST.contains(&k.as_str());
             assert!(
                 RUST_ENV_ALLOWLIST.contains(&k.as_str())
+                    || platform_allowlisted
                     || matches!(
                         k.as_str(),
                         "CARGO_HOME"
@@ -2509,6 +2567,49 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
                             | "CARGO_NET_OFFLINE"
                     ),
                 "unexpected inherited env `{k}`"
+            );
+        }
+    }
+
+    /// The Windows allowlist must carry the MSVC linker search paths:
+    /// dropping `LIB` is what produced
+    /// `LNK1181: cannot open input file 'kernel32.lib'`.
+    #[test]
+    fn windows_env_allowlist_keeps_linker_paths() {
+        for key in ["SystemRoot", "TEMP", "TMP", "INCLUDE", "LIB"] {
+            assert!(
+                WINDOWS_ENV_ALLOWLIST.contains(&key),
+                "`{key}` must be forwarded to Windows children"
+            );
+        }
+    }
+
+    /// `push_allowlisted` forwards only keys that are set, verbatim.
+    #[test]
+    fn allowlisted_env_forwarded_only_when_set() {
+        // Unique name so parallel tests cannot collide; not a real env var.
+        let probe = "ZZ_TEST_ALLOWLIST_PROBE";
+        std::env::set_var(probe, "value-1");
+        let mut env = Vec::new();
+        push_allowlisted(&mut env, &[probe, "ZZ_TEST_ALLOWLIST_ABSENT"]);
+        std::env::remove_var(probe);
+        assert_eq!(
+            env,
+            vec![(probe.to_string(), "value-1".to_string())],
+            "unset keys must be skipped, set keys forwarded"
+        );
+    }
+
+    /// Unix children get nothing beyond the fixed set: the platform
+    /// allowlist is Windows-only by construction.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_cargo_env_stays_hermetic() {
+        let env = rust_hermetic_env(Path::new("/pkg/cargo-home"), Path::new("/pkg/tmp"), true);
+        for key in WINDOWS_ENV_ALLOWLIST {
+            assert!(
+                !env.iter().any(|(k, _)| k == key),
+                "`{key}` must not leak into a Unix child env"
             );
         }
     }
