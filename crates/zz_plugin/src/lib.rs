@@ -3,8 +3,8 @@
 //! Loads and validates `.zzi` plugin manifests, providing external function
 //! signatures to the type checker without modifying `zz_lang` source.
 //!
-//! For the VM interpreter path, provides dlopen-based loading of plugin
-//! `.so`/`.dylib` libraries.
+//! For the VM interpreter path, provides dynamic loading of plugin
+//! `.so`/`.dylib`/`.dll` libraries.
 
 pub mod loader;
 pub mod manifest;

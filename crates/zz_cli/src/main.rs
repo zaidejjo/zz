@@ -941,15 +941,19 @@ fn load_vm_plugins(
             continue;
         }
 
-        // Try common shared library names, then any .so/.dylib the
-        // build hook actually produced (e.g. libzimg_native.so — never
-        // assume lib<name>.so).
+        // Try the platform's canonical shared-library names, then any
+        // `.so`/`.dylib`/`.dll` the build hook actually produced (e.g.
+        // libzimg_native.so — never assume lib<name>.so). Windows PE has no
+        // `lib` prefix, so both forms are probed everywhere.
         let mut lib_paths: Vec<std::path::PathBuf> = Vec::new();
+        let base = dep.name.replace('-', "_");
         let lib_names = [
-            format!("lib{}.so", dep.name.replace('-', "_")),
-            format!("lib{}.dylib", dep.name.replace('-', "_")),
-            format!("{}.so", dep.name.replace('-', "_")),
-            format!("{}.dylib", dep.name.replace('-', "_")),
+            format!(
+                "{}{base}{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ),
+            format!("{base}{}", std::env::consts::DLL_SUFFIX),
         ];
 
         for lib_name in &lib_names {
@@ -959,12 +963,15 @@ fn load_vm_plugins(
             }
         }
         if let Ok(entries) = std::fs::read_dir(&build_dir) {
+            let wanted = std::env::consts::DLL_SUFFIX.trim_start_matches('.');
             let mut scanned: Vec<std::path::PathBuf> = entries
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| {
-                    matches!(p.extension().and_then(|e| e.to_str()), Some("so" | "dylib"))
-                        && !lib_paths.contains(p)
+                    matches!(
+                        p.extension().and_then(|e| e.to_str()),
+                        Some(ext) if ext == wanted
+                    ) && !lib_paths.contains(p)
                 })
                 .collect();
             scanned.sort();

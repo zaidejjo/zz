@@ -981,6 +981,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Same `HOME` caveat as `setup_check_passes_when_wired_pending_restart`.
+    #[cfg(unix)]
     #[test]
     fn setup_check_reports_missing_then_ok() {
         let _g = TEST_LOCK.lock().unwrap();
@@ -1034,6 +1036,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `dirs::home_dir()` reads `USERPROFILE` on Windows, so `HOME` cannot
+    /// be redirected there — and bash/zsh/fish wiring is a Unix feature.
+    #[cfg(unix)]
     #[test]
     fn setup_check_passes_when_wired_pending_restart() {
         let _g = TEST_LOCK.lock().unwrap();
@@ -1107,13 +1112,21 @@ mod tests {
         let dir = isolated_home("path");
         let bin = dir.join("bin");
         let old = std::env::var_os("PATH");
+        // Build the entry list with the host separator (`:` on Unix,
+        // `;` on Windows) instead of hardcoding a colon.
+        let system_dir = if cfg!(windows) {
+            Path::new(r"C:\Windows")
+        } else {
+            Path::new("/usr/bin")
+        };
+        let joined = std::env::join_paths([system_dir, bin.as_path()]).unwrap();
         // Absolute entry.
-        std::env::set_var("PATH", format!("/usr/bin:{}", bin.display()));
+        std::env::set_var("PATH", &joined);
         // bin_on_path compares against ZZ_HOME/bin and ~/.zz/bin; point
         // ZZ_HOME at the temp dir so the temp bin matches.
         std::env::set_var("ZZ_HOME", &dir);
         assert!(bin_on_path(&bin));
-        std::env::set_var("PATH", "/usr/bin:/bin");
+        std::env::set_var("PATH", system_dir);
         assert!(!bin_on_path(&bin));
         if let Some(p) = old {
             std::env::set_var("PATH", p);
