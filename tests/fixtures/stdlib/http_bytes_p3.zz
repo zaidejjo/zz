@@ -1,29 +1,39 @@
-// features: assert, bool-logic, break-continue, bytes, closures, comparison, func-call, if-else, imports, int-arith, locals, match, option-result, print, return, short-circuit, std-encoding, std-http, std-net, std-task, std-time, string-literal, while-loop
+// features: assert, bool-logic, break-continue, bytes, closures, comparison, func-call, if-else, imports, int-arith, locals, match, option-result, print, return, selective-import, short-circuit, std-encoding, std-env, std-http, std-net, std-process, std-str, std-task, std-time, string-literal, while-loop
 // tests/fixtures/stdlib/http_bytes_p3.zz — Phase 3 binary bodies
 // Non-UTF8 POST bytes survive socket → handler exact via body_bytes().
+import std.env
 import std.http
 import std.net
+import std.str
 import std.task
 import std.time
 import std.encoding
+import std.process(pid)
 
 func main() -> Result<int, str> {
+    // Port band 36000 (see the chart in http_keepalive_p1): a pid/token
+    // derived port keeps concurrent sweep instances (and stray local
+    // servers) from colliding on a hardcoded one.
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    port := 36000 + (pid() * 2654435761 + tok_num * 40503) % 2000
+    addr := "127.0.0.1:{port}"
     s := http.server()
     s = s.route("POST", "/bin", |req| {
         b := req.body_bytes()
         return "{b.len()}:{b[0]}:{b[4]}:{b[7]}"
     })
     task.spawn(|_| {
-        http.listen(s, 8141)
+        http.listen(s, port)
     })
     tries := 0
-    stream := net.tcp_connect("127.0.0.1:8141", 200)
+    stream := net.tcp_connect(addr, 200)
     while tries < 50 {
         match stream {
             .ok(_) => break
             .err(_) => {
                 time.sleep_ms(100)
-                stream = net.tcp_connect("127.0.0.1:8141", 200)
+                stream = net.tcp_connect(addr, 200)
                 tries = tries + 1
             }
         }

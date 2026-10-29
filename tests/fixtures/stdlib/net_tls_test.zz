@@ -28,6 +28,8 @@ func main() -> Result<int, str> {
     //   20000 http_keepalive_p1   22000 net_tcp_test
     //   24000 tcp_method_on_try   26000 net_write_after_close_test
     //   28000 net_dns_test        30000 net_tls_test
+    //   32000 http_tls_p3          34000 http_hijack_p3
+    //   36000 http_bytes_p3       38000 http_limits_p2
     // TLS needs this base port plus its neighbours, so the band is 2000
     // wide and `off` stays below 1990.
     sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
