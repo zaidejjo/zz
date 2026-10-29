@@ -3760,7 +3760,10 @@ version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
+ "zz_diag_core",
  "zz_frontend",
+ "zz_span_ast",
+ "zz_suggest",
 ]
 
 [[package]]

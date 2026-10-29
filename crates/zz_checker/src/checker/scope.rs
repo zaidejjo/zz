@@ -2,9 +2,9 @@
 
 use crate::checker::{Checker, DefinedBinding};
 use crate::type_::Type;
-use zz_frontend::diag::{error_at, warning_at, FixIt};
-use zz_frontend::levenshtein::{suggest_all, suggest_dotted};
-use zz_frontend::span::Span;
+use zz_diag_core::{error_at, warning_at, FixIt};
+use zz_span_ast::span::Span;
+use zz_suggest::{suggest_all, suggest_dotted};
 
 // Import suggestions and canonical resolution derive from the single
 // `super::STD_MODULES` source (see `is_std_module_head`) — no parallel

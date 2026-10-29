@@ -16,10 +16,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use zz_frontend::ast::Expr;
-use zz_frontend::diag::{error_at, warning_at};
-use zz_frontend::levenshtein::suggest_all;
-use zz_frontend::span::Span;
+use zz_diag_core::{error_at, warning_at};
+use zz_span_ast::ast::Expr;
+use zz_span_ast::span::Span;
+use zz_suggest::suggest_all;
 
 use crate::checker::Checker;
 use crate::type_::Type;
@@ -330,7 +330,7 @@ impl HttpLintState {
         pattern: &str,
         params: Vec<String>,
         span: Span,
-        push_diag: &mut impl FnMut(zz_frontend::diag::RawDiag),
+        push_diag: &mut impl FnMut(zz_diag_core::RawDiag),
     ) {
         for p in &params {
             self.params.insert(p.clone());
@@ -341,7 +341,7 @@ impl HttpLintState {
             if prev.method == method && prev.pattern == pattern {
                 push_diag(
                     error_at(format!("duplicate route `{method} {pattern}`"), span).with_secondary(
-                        zz_frontend::diag::SecondaryLabel {
+                        zz_diag_core::SecondaryLabel {
                             span: prev.span,
                             message: "first registered here".to_string(),
                         },
@@ -365,7 +365,7 @@ impl HttpLintState {
                         ),
                         span,
                     )
-                    .with_secondary(zz_frontend::diag::SecondaryLabel {
+                    .with_secondary(zz_diag_core::SecondaryLabel {
                         span: prev.span,
                         message: "earlier same-shape route".to_string(),
                     }),

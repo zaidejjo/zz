@@ -15,9 +15,9 @@ pub mod value_lint;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zz_frontend::ast::{Program, Stmt, Ty};
-use zz_frontend::diag::RawDiag;
-use zz_frontend::span::Span;
+use zz_diag_core::RawDiag;
+use zz_span_ast::ast::{Program, Stmt, Ty};
+use zz_span_ast::span::Span;
 
 use crate::type_::Type;
 
@@ -56,7 +56,7 @@ impl SpanKey {
 pub struct FuncSig {
     pub generics: Vec<String>,
     /// Trait bounds per generic parameter name (e.g. `T` → `[Num, Ord]`).
-    pub bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)>,
+    pub bounds: Vec<(String, Vec<zz_span_ast::ast::TraitBound>)>,
     pub params: Vec<(String, Type)>,
     pub has_default: Vec<bool>,
     pub ret: Type,
@@ -399,7 +399,7 @@ fn check_program_impl(
         {
             let full_name = name.join(".");
             if checker.structs.contains_key(&full_name) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!(
                         "duplicate definition of `{}` (a struct with the same name exists)",
                         full_name
@@ -408,21 +408,20 @@ fn check_program_impl(
                 ));
             }
             if let Some(prev) = seen_aliases.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!("duplicate definition of type alias `{}`", full_name),
                     *span,
                 ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
             }
             // Reject duplicate type parameters (`type P[T, T] = ...`).
             let mut seen = std::collections::HashSet::new();
             let mut gen_names = Vec::new();
             for g in generics {
                 if !seen.insert(g.name.clone()) {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "duplicate type parameter `{}` in alias `{}`",
                             g.name, full_name
@@ -455,14 +454,13 @@ fn check_program_impl(
         {
             let full_name = name.join(".");
             if let Some(prev) = seen_structs.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!("duplicate definition of struct `{}`", full_name),
                     *span,
                 ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
             }
             checker.collect_struct(stmt);
             if *pub_ {
@@ -490,7 +488,7 @@ fn check_program_impl(
         {
             let full_name = name.join(".");
             if checker.structs.contains_key(&full_name) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!(
                         "duplicate definition of `{}` (a struct with the same name exists)",
                         full_name
@@ -499,7 +497,7 @@ fn check_program_impl(
                 ));
             }
             if checker.alias_asts.contains_key(&full_name) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!(
                         "duplicate definition of `{}` (a type alias with the same name exists)",
                         full_name
@@ -508,21 +506,20 @@ fn check_program_impl(
                 ));
             }
             if let Some(prev) = seen_enums.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!("duplicate definition of enum `{}`", full_name),
                     *span,
                 ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
             }
             // Reject duplicate type parameters (`enum P[T, T]`).
             let mut seen_params = std::collections::HashSet::new();
             let mut gen_names = Vec::new();
             for g in generics {
                 if !seen_params.insert(g.name.clone()) {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "duplicate type parameter `{}` in enum `{}`",
                             g.name, full_name
@@ -606,7 +603,7 @@ fn check_program_impl(
                 impl_generics.iter().map(|g| g.name.clone()).collect();
             if is_extension {
                 if !impl_gen_names.is_empty() {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "generic `impl` requires a generic struct (`{type_name}` is not one)"
                         ),
@@ -621,14 +618,14 @@ fn check_program_impl(
                     "struct"
                 };
                 if struct_generics.is_empty() {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "{kind} `{type_name}` is not generic (expected `impl {type_name}` without type parameters)"
                         ),
                         stmt.span(),
                     ));
                 } else {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "generic {kind} `{type_name}` takes {} type parameter{} (expected `impl {type_name}[{}]`)",
                             struct_generics.len(),
@@ -644,7 +641,7 @@ fn check_program_impl(
                 let mut seen_gen = std::collections::HashSet::new();
                 for g in &impl_gen_names {
                     if !seen_gen.insert(g.clone()) {
-                        checker.errors.push(zz_frontend::diag::error_at(
+                        checker.errors.push(zz_diag_core::error_at(
                             format!("duplicate type parameter `{g}` in `impl {type_name}`"),
                             stmt.span(),
                         ));
@@ -672,7 +669,7 @@ fn check_program_impl(
                     // would collapse two distinct variables; reject it.
                     for g in generics {
                         if impl_gen_names.contains(&g.name.name) {
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 format!(
                                     "type parameter `{}` shadows an `impl {}` parameter (rename one)",
                                     g.name.name, type_name
@@ -686,7 +683,7 @@ fn check_program_impl(
                         .cloned()
                         .chain(method_gens.iter().cloned())
                         .collect();
-                    let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
+                    let gen_bounds: Vec<(String, Vec<zz_span_ast::ast::TraitBound>)> = generics
                         .iter()
                         .map(|g| (g.name.name.clone(), g.bounds.clone()))
                         .collect();
@@ -745,12 +742,12 @@ fn check_program_impl(
                     // `convert_to_X` methods double as error-conversion impls.
                     if let Some(to_name) = method_name.strip_prefix("convert_to_") {
                         if to_name.is_empty() {
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 "`convert_to_` must name a target type (e.g. `convert_to_MyErr`)",
                                 method.span(),
                             ));
                         } else if matches!(sig_ret, Type::Var(_)) {
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 "conversion method must declare an explicit return type",
                                 method.span(),
                             ));
@@ -762,14 +759,14 @@ fn check_program_impl(
                             // V1: one conversion per source type (covers the
                             // spec's same-pair ambiguity and keeps runtime
                             // single-candidate dispatch sound).
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 format!(
                                     "ambiguous conversion from `{}`: already converts to `{}`",
                                     type_key, prev.to_name
                                 ),
                                 method.span(),
                             ));
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 "previous conversion here",
                                 prev.span,
                             ));
@@ -785,14 +782,13 @@ fn check_program_impl(
                         }
                     }
                     if let Some(prev) = seen.insert(full_name.clone(), method.span()) {
-                        checker.errors.push(zz_frontend::diag::error_at(
+                        checker.errors.push(zz_diag_core::error_at(
                             format!("duplicate definition of method `{}`", full_name),
                             method.span(),
                         ));
-                        checker.errors.push(zz_frontend::diag::error_at(
-                            "previous definition here",
-                            prev,
-                        ));
+                        checker
+                            .errors
+                            .push(zz_diag_core::error_at("previous definition here", prev));
                         continue;
                     }
                     if !is_extension {
@@ -816,7 +812,7 @@ fn check_program_impl(
                             } else {
                                 "already defined in another module (orphan rule: same (Type, method) in two modules)"
                             };
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 format!(
                                     "extension method `{}` conflicts with an existing method {}",
                                     full_name, origin
@@ -829,11 +825,11 @@ fn check_program_impl(
                             .ext_methods
                             .get(&(type_key.clone(), method_name.clone()))
                         {
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 format!("duplicate extension method `{}` (orphan rule)", full_name),
                                 method.span(),
                             ));
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 "previous definition here",
                                 *prev_span,
                             ));
@@ -865,14 +861,13 @@ fn check_program_impl(
         {
             let full_name = name.join(".");
             if let Some(prev) = seen.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!("duplicate definition of function `{}`", full_name),
                     *span,
                 ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
             }
             checker.collect_func(stmt);
             if *pub_ {
@@ -883,14 +878,13 @@ fn check_program_impl(
         if let Stmt::ExternBlock { items, .. } = stmt {
             for item in items {
                 if let Some(prev) = seen.insert(item.name.name.clone(), item.span) {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!("duplicate definition of function `{}`", item.name.name),
                         item.span,
                     ));
-                    checker.errors.push(zz_frontend::diag::error_at(
-                        "previous definition here",
-                        prev,
-                    ));
+                    checker
+                        .errors
+                        .push(zz_diag_core::error_at("previous definition here", prev));
                 }
                 checker.collect_extern(&item.name, &item.params, &item.ret, item.c_symbol.clone());
             }
@@ -1098,13 +1092,13 @@ struct CheckerOutcome {
 /// removed without changing the closure's arity.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DefinedBinding {
-    pub(crate) span: zz_frontend::span::Span,
+    pub(crate) span: zz_span_ast::span::Span,
     pub(crate) warn_unused: bool,
 }
 
 pub(crate) struct Checker {
     pub(crate) unifier: crate::unify::Unifier,
-    pub(crate) errors: Vec<zz_frontend::diag::RawDiag>,
+    pub(crate) errors: Vec<zz_diag_core::RawDiag>,
     pub(crate) funcs: HashMap<String, FuncSig>,
     pub(crate) structs: HashMap<String, StructSig>,
     /// Type aliases (`type Tokens = [Token]`): exported, resolved targets.
@@ -1132,14 +1126,14 @@ pub(crate) struct Checker {
     /// span (for the "defined as immutable here" secondary label). Parallel
     /// to `env` — a name is immutable iff the scope that binds it also
     /// contains it here.
-    pub(crate) const_env: Vec<HashMap<String, zz_frontend::span::Span>>,
+    pub(crate) const_env: Vec<HashMap<String, zz_span_ast::span::Span>>,
     /// Top-level let bindings discovered this run: name → type.
     pub(crate) new_bindings: HashMap<String, Type>,
     pub(crate) current_ret: Option<Type>,
     pub(crate) current_generics: Vec<String>,
     /// Trait bounds for the generic parameters currently in scope (set while
     /// checking a generic function body).
-    pub(crate) current_bounds: HashMap<String, Vec<zz_frontend::ast::TraitBound>>,
+    pub(crate) current_bounds: HashMap<String, Vec<zz_span_ast::ast::TraitBound>>,
     /// Nesting depth of `for`/`while` loops (for `break`/`continue`).
     pub(crate) loop_depth: usize,
     /// Names that were used (looked up) — for unused-import warnings and
@@ -1186,7 +1180,7 @@ pub(crate) struct Checker {
     /// Block arm bodies are covered by the normal statement path.
     pub(crate) direct_discard: bool,
     /// Imported namespaces: (alias, span). Used to detect unused imports.
-    pub(crate) imports: Vec<(String, zz_frontend::span::Span)>,
+    pub(crate) imports: Vec<(String, zz_span_ast::span::Span)>,
     /// Selective-import aliases: bare name → qualified `ns.sym`, from
     /// `import m(x)` / `import m(x as y)` statements (kept intact by the
     /// loader). Used ONLY on total miss: locals, seed entries and value
@@ -1506,7 +1500,7 @@ mod cache_serde_tests {
     fn func_sig_roundtrips() {
         let sig = FuncSig {
             generics: vec!["T".to_string()],
-            bounds: vec![("T".to_string(), vec![zz_frontend::ast::TraitBound::Display])],
+            bounds: vec![("T".to_string(), vec![zz_span_ast::ast::TraitBound::Display])],
             params: vec![
                 ("x".to_string(), Type::Int),
                 (

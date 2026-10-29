@@ -2,9 +2,9 @@
 
 use crate::checker::Checker;
 use crate::type_::Type;
-use zz_frontend::ast::{Block, Expr, Stmt};
-use zz_frontend::diag::{error_at, warning_at, FixIt};
-use zz_frontend::span::Span;
+use zz_diag_core::{error_at, warning_at, FixIt};
+use zz_span_ast::ast::{Block, Expr, Stmt};
+use zz_span_ast::span::Span;
 
 impl Checker {
     pub(crate) fn collect_func(&mut self, stmt: &Stmt) {
@@ -25,7 +25,7 @@ impl Checker {
             }
         };
         let gen_names: Vec<String> = generics.iter().map(|g| g.name.name.clone()).collect();
-        let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
+        let gen_bounds: Vec<(String, Vec<zz_span_ast::ast::TraitBound>)> = generics
             .iter()
             .map(|g| (g.name.name.clone(), g.bounds.clone()))
             .collect();
@@ -63,9 +63,9 @@ impl Checker {
     /// return types must be C-compatible (int/float/bool/pointer/void/unit).
     pub(crate) fn collect_extern(
         &mut self,
-        name: &zz_frontend::ast::Ident,
-        params: &[zz_frontend::ast::Param],
-        ret: &Option<zz_frontend::ast::Ty>,
+        name: &zz_span_ast::ast::Ident,
+        params: &[zz_span_ast::ast::Param],
+        ret: &Option<zz_span_ast::ast::Ty>,
         c_symbol: Option<String>,
     ) {
         let mut sig_params = Vec::with_capacity(params.len());
@@ -74,7 +74,7 @@ impl Checker {
                 Some(t) => {
                     let ct = self.ast_to_type(t, &[]);
                     if !Self::is_c_abi_type(&ct) {
-                        self.errors.push(zz_frontend::diag::error_at(
+                        self.errors.push(zz_diag_core::error_at(
                             format!(
                                 "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, str, bytes, *const T, *mut T, void, ())",
                                 name.name, p.name.name, ct
@@ -85,7 +85,7 @@ impl Checker {
                     ct
                 }
                 None => {
-                    self.errors.push(zz_frontend::diag::error_at(
+                    self.errors.push(zz_diag_core::error_at(
                         format!(
                             "extern function `{}`: parameter `{}` needs an explicit C type",
                             name.name, p.name.name
@@ -101,7 +101,7 @@ impl Checker {
             Some(t) => {
                 let ct = self.ast_to_type(t, &[]);
                 if matches!(ct, Type::Str) {
-                    self.errors.push(zz_frontend::diag::error_at(
+                    self.errors.push(zz_diag_core::error_at(
                         format!(
                             "plugin extern function `{}` returns str, which is not yet supported — return an int status code and use a getter pattern instead",
                             name.name
@@ -109,7 +109,7 @@ impl Checker {
                         t.span,
                     ));
                 } else if !Self::is_c_abi_type(&ct) {
-                    self.errors.push(zz_frontend::diag::error_at(
+                    self.errors.push(zz_diag_core::error_at(
                         format!(
                             "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, str, bytes, *const T, *mut T, void, ())",
                             name.name, ct
@@ -123,7 +123,7 @@ impl Checker {
         };
         let full_name = name.name.clone();
         if self.funcs.contains_key(&full_name) {
-            self.errors.push(zz_frontend::diag::error_at(
+            self.errors.push(zz_diag_core::error_at(
                 format!("duplicate definition of function `{full_name}`"),
                 name.span,
             ));

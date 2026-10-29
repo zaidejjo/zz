@@ -6,6 +6,9 @@ license.workspace = true
 
 [dependencies]
 zz_frontend = { path = "../zz_frontend" }
+zz_span_ast = { path = "../zz_span_ast" }
+zz_diag_core = { path = "../zz_diag_core" }
+zz_suggest = { path = "../zz_suggest" }
 # S1 arena-scale: module check-cache serializes pub signatures.
 serde = { workspace = true }
 

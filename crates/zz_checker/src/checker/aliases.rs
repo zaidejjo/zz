@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 
-use zz_frontend::ast::Ty;
-use zz_frontend::diag::error_at;
-use zz_frontend::span::Span;
+use zz_diag_core::error_at;
+use zz_span_ast::ast::Ty;
+use zz_span_ast::span::Span;
 
 use super::inference::subst;
 use super::{AliasSig, Checker};

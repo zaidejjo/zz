@@ -20,9 +20,9 @@
 
 use std::collections::HashMap;
 
-use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt};
-use zz_frontend::diag::RawDiag;
-use zz_frontend::span::Span;
+use zz_diag_core::RawDiag;
+use zz_span_ast::ast::{Block, Expr, FmtPart, Pattern, Stmt};
+use zz_span_ast::span::Span;
 
 /// Value types whose in-place mutation a caller can never observe.
 fn is_value_type(ty: &crate::Type) -> bool {
@@ -378,7 +378,7 @@ pub(crate) fn lint_dead_param_mutation(
     walk.pop();
     for (name, span) in walk.finish() {
         errors.push(
-            zz_frontend::diag::warning_at(
+            zz_diag_core::warning_at(
                 format!(
                     "mutating parameter `{name}` which is never returned — the mutation is lost (parameters are values)"
                 ),

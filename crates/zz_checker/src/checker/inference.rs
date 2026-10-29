@@ -2,10 +2,10 @@
 
 use crate::checker::Checker;
 use crate::type_::Type;
-use zz_frontend::ast::Ty;
-use zz_frontend::diag::error_at;
-use zz_frontend::levenshtein::suggest;
-use zz_frontend::span::Span;
+use zz_diag_core::error_at;
+use zz_span_ast::ast::Ty;
+use zz_span_ast::span::Span;
+use zz_suggest::suggest;
 
 impl Checker {
     /// Merge element types into a single type: identical types collapse to
@@ -49,15 +49,15 @@ impl Checker {
     // --- generics ---------------------------------------------------------
 
     /// Does the generic parameter currently in scope carry the given bound?
-    pub(crate) fn has_bound(&self, name: &str, bound: zz_frontend::ast::TraitBound) -> bool {
+    pub(crate) fn has_bound(&self, name: &str, bound: zz_span_ast::ast::TraitBound) -> bool {
         self.current_bounds
             .get(name)
             .is_some_and(|bs| bs.contains(&bound))
     }
 
     /// Does a concrete type satisfy a trait bound?
-    pub(crate) fn satisfies_bound(&self, ty: &Type, bound: zz_frontend::ast::TraitBound) -> bool {
-        use zz_frontend::ast::TraitBound as B;
+    pub(crate) fn satisfies_bound(&self, ty: &Type, bound: zz_span_ast::ast::TraitBound) -> bool {
+        use zz_span_ast::ast::TraitBound as B;
         match ty {
             Type::Union(ms) => ms.iter().all(|m| self.satisfies_bound(m, bound)),
             Type::Var(_) | Type::Named(_) | Type::Error | Type::Never => false,
@@ -123,7 +123,7 @@ impl Checker {
     }
 
     pub(crate) fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type {
-        use zz_frontend::ast::TyKind;
+        use zz_span_ast::ast::TyKind;
         match &ty.kind {
             TyKind::Int => Type::Int,
             TyKind::Float => Type::Float,

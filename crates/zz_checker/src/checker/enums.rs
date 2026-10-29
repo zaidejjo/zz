@@ -11,9 +11,9 @@
 
 use std::collections::HashMap;
 
-use zz_frontend::diag::error_at;
-use zz_frontend::levenshtein::suggest_all;
-use zz_frontend::span::Span;
+use zz_diag_core::error_at;
+use zz_span_ast::span::Span;
+use zz_suggest::suggest_all;
 
 use super::Checker;
 use crate::type_::Type;
@@ -78,8 +78,8 @@ impl Checker {
         &mut self,
         enum_name: &str,
         variant: &str,
-        args: &[zz_frontend::ast::Expr],
-        named: &[(zz_frontend::ast::Ident, zz_frontend::ast::Expr)],
+        args: &[zz_span_ast::ast::Expr],
+        named: &[(zz_span_ast::ast::Ident, zz_span_ast::ast::Expr)],
         span: Span,
     ) -> Option<Type> {
         let sig = self.enums.get(enum_name).cloned()?;

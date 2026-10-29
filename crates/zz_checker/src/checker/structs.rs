@@ -14,8 +14,8 @@
 
 use crate::checker::{Checker, FuncSig};
 use crate::type_::Type;
-use zz_frontend::ast::Stmt;
-use zz_frontend::diag::error_at;
+use zz_diag_core::error_at;
+use zz_span_ast::ast::Stmt;
 
 impl Checker {
     pub(crate) fn collect_struct(&mut self, stmt: &Stmt) {

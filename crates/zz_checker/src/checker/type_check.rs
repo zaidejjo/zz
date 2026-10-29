@@ -5,10 +5,10 @@ use std::sync::Arc;
 use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::Checker;
 use crate::type_::Type;
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
-use zz_frontend::diag::{error_at, warning_at, FixIt};
-use zz_frontend::levenshtein::suggest_all;
-use zz_frontend::span::Span;
+use zz_diag_core::{error_at, warning_at, FixIt};
+use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
+use zz_span_ast::span::Span;
+use zz_suggest::suggest_all;
 
 /// Cheap static sanity check over the literal SQL text: balanced
 /// single/double quotes and parens. Returns an error message when the
@@ -274,7 +274,7 @@ impl Checker {
                         .unwrap_or_default();
                     for item in items {
                         let name = match item {
-                            zz_frontend::ast::ImportItem::Wildcard { .. } => {
+                            zz_span_ast::ast::ImportItem::Wildcard { .. } => {
                                 // Wildcard: track the module namespace.
                                 for k in self.funcs.keys().cloned().collect::<Vec<_>>() {
                                     if let Some(bare) = k.strip_prefix(&format!("{eff_ns}.")) {
@@ -287,7 +287,7 @@ impl Checker {
                                 }
                                 eff_ns.clone()
                             }
-                            zz_frontend::ast::ImportItem::Named {
+                            zz_span_ast::ast::ImportItem::Named {
                                 name,
                                 alias: item_alias,
                                 ..
@@ -309,7 +309,7 @@ impl Checker {
                 let sig = match crate::lookup_std(&self.funcs, &fname) {
                     Some(s) => s.clone(),
                     None => {
-                        self.errors.push(zz_frontend::diag::error_at(
+                        self.errors.push(zz_diag_core::error_at(
                             format!(
                                 "nested function `{}` is not supported; use a closure (`|params| body`) instead",
                                 fname
@@ -752,7 +752,7 @@ impl Checker {
                         format!("cannot assign to immutable variable `{}`", display),
                         target.span(),
                     )
-                    .with_secondary(zz_frontend::diag::SecondaryLabel {
+                    .with_secondary(zz_diag_core::SecondaryLabel {
                         span: def_span,
                         message: "variable defined as immutable here".to_string(),
                     })
@@ -1813,7 +1813,7 @@ impl Checker {
                 Type::Int => Type::Int,
                 Type::Float => Type::Float,
                 Type::Named(n) => {
-                    if self.has_bound(&n, zz_frontend::ast::TraitBound::Num) {
+                    if self.has_bound(&n, zz_span_ast::ast::TraitBound::Num) {
                         Type::Named(n)
                     } else {
                         self.errors.push(error_at(
@@ -1891,7 +1891,7 @@ impl Checker {
                 }
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                use zz_frontend::ast::TraitBound;
+                use zz_span_ast::ast::TraitBound;
                 let lt = self.check_expr(left);
                 let lt = self.unifier.resolve(&lt);
                 let rt = self.check_expr(right);
@@ -2027,7 +2027,7 @@ impl Checker {
     }
 
     pub(crate) fn check_arith(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type {
-        use zz_frontend::ast::TraitBound;
+        use zz_span_ast::ast::TraitBound;
         let lt = self.check_expr(left);
         let lt = self.unifier.resolve(&lt);
         let rt = self.check_expr(right);
@@ -3795,7 +3795,7 @@ impl Checker {
     pub(crate) fn check_match(
         &mut self,
         scrutinee: &Expr,
-        arms: &[zz_frontend::ast::MatchArm],
+        arms: &[zz_span_ast::ast::MatchArm],
         span: Span,
     ) -> Type {
         let st = self.check_expr(scrutinee);
@@ -3805,11 +3805,11 @@ impl Checker {
         // disqualifies the catch-all (it may fail and fall through), so
         // only guard-free `_`/binding patterns count. Warning, not error:
         // the program still runs, but the arm is dead code.
-        fn pat_is_catchall(pat: &zz_frontend::ast::Pattern) -> bool {
+        fn pat_is_catchall(pat: &zz_span_ast::ast::Pattern) -> bool {
             match pat {
-                zz_frontend::ast::Pattern::Wildcard { .. } => true,
-                zz_frontend::ast::Pattern::Binding { .. } => true,
-                zz_frontend::ast::Pattern::Or { pats, .. } => pats.iter().any(pat_is_catchall),
+                zz_span_ast::ast::Pattern::Wildcard { .. } => true,
+                zz_span_ast::ast::Pattern::Binding { .. } => true,
+                zz_span_ast::ast::Pattern::Or { pats, .. } => pats.iter().any(pat_is_catchall),
                 _ => false,
             }
         }
@@ -4493,7 +4493,7 @@ impl Checker {
     pub(crate) fn check_exhaustive(
         &mut self,
         st: &Type,
-        arms: &[zz_frontend::ast::MatchArm],
+        arms: &[zz_span_ast::ast::MatchArm],
         span: Span,
     ) {
         // Poisoned scrutinee: the root error is already reported; skip

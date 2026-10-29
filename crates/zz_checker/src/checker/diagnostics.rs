@@ -3,8 +3,8 @@
 use crate::checker::Checker;
 use crate::type_::Type;
 use crate::unify::UnifyError;
-use zz_frontend::diag::error_at;
-use zz_frontend::span::Span;
+use zz_diag_core::error_at;
+use zz_span_ast::span::Span;
 
 impl Checker {
     // --- errors -----------------------------------------------------------
