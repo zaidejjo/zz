@@ -462,6 +462,29 @@ impl Lowerer {
                     return Some(params);
                 }
             }
+            // Impl methods: the AST stores `method` inside `impl Type`, while
+            // `tp.funcs` keys them as `Type.method`.
+            if let Stmt::Impl {
+                name: iname,
+                methods,
+                ..
+            } = stmt
+            {
+                for m in methods {
+                    if let Stmt::Func {
+                        name: mname,
+                        params,
+                        ..
+                    } = m
+                    {
+                        let short = mname.join(".");
+                        let qualified = format!("{}.{short}", iname.join("."));
+                        if qualified == name || short == name {
+                            return Some(params);
+                        }
+                    }
+                }
+            }
         }
         None
     }

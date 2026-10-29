@@ -16,6 +16,7 @@
 #ifndef ZZ_RUNTIME_CORE_H
 #define ZZ_RUNTIME_CORE_H
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -897,9 +898,16 @@ zz_value zz_closure_make_ex_typed(
 // (`f := add`). The target rides in a RAW env cell (plain bytes — never
 // freed as an object; heap-owned so release stays sound) behind a thunk
 // adapting it to the dispatch convention. Only for regular functions:
-// methods need a receiver and externs need a C ABI, neither of which a
-// value can carry (both keep their existing behavior).
+// externs need a C ABI a value cannot carry, and methods take a separate
+// `self` (see `zz_func_of_static_method` below).
 zz_value zz_func_of_static(zz_native_fn f);
+
+// Box an impl method as a first-class callable value (`f := Box.show__inner`).
+// Methods take `self` separately from the args array, so the thunk extracts
+// self = args[0] and passes args[1..] as the method's arg array. Needed for
+// decorators and higher-order calls that receive methods as values.
+typedef zz_value (*zz_value_method_fn)(zz_value *self, zz_value *args, size_t argc);
+zz_value zz_func_of_static_method(zz_value_method_fn f);
 // Extract the generated function pointer from a closure value.
 zz_dispatch_fn zz_closure_target(zz_value v);
 // Suspendable-frame (B3) constructors: like the plain makers, but the
@@ -1174,18 +1182,25 @@ zz_value zz_http_route_put_fast(zz_value server, zz_value path, zz_value handler
 zz_value zz_http_route_delete_fast(zz_value server, zz_value path, zz_value handler, int *err);
 zz_value zz_http_route_fast(zz_value server, zz_value method, zz_value path, zz_value handler, int *err);
 zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err);  // 2 args
+zz_value zz_http_pipe_post(zz_value server, zz_value middleware, int *err);  // 2 args
 zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
 zz_value zz_http_rate_limit(zz_value server, zz_value max_requests, zz_value window_ms, int *err);  // 3 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
 zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *err);  // 3 args
+zz_value zz_http_serve_dir_at(zz_value server, zz_value prefix, zz_value dir, int *err);  // 3 args
+zz_value zz_http_serve_dir(zz_value server, zz_value dir, int *err);  // 2 args → prefix "/"
 zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
+zz_value zz_http_test_req(zz_value server, zz_value method, zz_value path,
+                          zz_value headers, zz_value body, int *err);  // 5 args
 zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *err);  // 3 args
+zz_value zz_http_with_headers(zz_value resp, zz_value extra_headers_dict, int *err);  // 3 args
 zz_value zz_http_param(zz_value req, zz_value name, int *err);  // 2 args
 zz_value zz_http_query(zz_value req, int *err);  // 1 arg
 zz_value zz_http_header(zz_value req, zz_value name, int *err);  // 2 args
 zz_value zz_http_body_json(zz_value req, int *err);  // 1 arg
 zz_value zz_http_body_form(zz_value req, int *err);  // 1 arg
+zz_value zz_http_body_bytes(zz_value req, int *err);  // 1 arg
 
 // HTTP client stubs (native mode — returns mock responses)
 zz_value zz_http_get(zz_value url, zz_value headers, int *err);

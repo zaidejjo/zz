@@ -4480,20 +4480,33 @@ impl Lowerer {
     }
 
     /// Box a resolved plain function as a first-class value, or `None`.
-    /// Only non-generic, non-extern, non-method functions with an emitted
-    /// definition qualify: generics are rejected by the checker, externs
-    /// need a C ABI and methods need a receiver, neither of which a value
-    /// can carry (both keep their existing behavior).
+    /// Only non-generic, non-extern functions with an emitted definition
+    /// qualify: generics are rejected by the checker, externs need a C ABI
+    /// neither of which a value can carry. Impl methods are boxed with
+    /// `zz_func_of_static_method` so decorators/higher-order calls can
+    /// receive them as values (self extracted from args[0] at call time).
     fn static_func_value(&self, name: &str) -> Option<String> {
-        let sig = self.tp.funcs.get(name)?;
-        if !sig.generics.is_empty() || sig.is_extern {
+        if !self.is_body_backed_func(name) {
             return None;
         }
         if self.is_impl_method(name) {
-            return None;
+            Some(format!("zz_func_of_static_method(&zz_fn_{})", mangle(name)))
+        } else {
+            Some(format!("zz_func_of_static(&zz_fn_{})", mangle(name)))
         }
-        self.find_func_def(name)?;
-        Some(format!("zz_func_of_static(&zz_fn_{})", mangle(name)))
+    }
+
+    /// True when `name` is a real, non-generic, non-extern function *with an
+    /// emitted definition*. `tp.funcs` also holds constants (`math.PI`) and
+    /// module exports without a body; boxing those would reference a symbol
+    /// that does not exist (`undefined reference to zz_fn_math__PI`).
+    fn is_body_backed_func(&self, name: &str) -> bool {
+        match self.tp.funcs.get(name) {
+            Some(sig) if sig.generics.is_empty() && !sig.is_extern => {
+                self.find_func_def(name).is_some()
+            }
+            _ => false,
+        }
     }
 
     /// Resolve a bare function reference (`f := join`): selective-import
@@ -4530,8 +4543,25 @@ impl Lowerer {
             if let Some(stripped) = joined.strip_prefix("std.") {
                 cands.push(stripped.to_string());
             }
+            // Impl methods are stored under `Type.method`, not `module.Type.method`.
+            // Try stripping the module prefix so `mod.Box.method` resolves to
+            // `Box.method` in `tp.funcs`.
+            if parts.len() >= 3 {
+                cands.push(parts[1..].join("."));
+            }
         }
-        cands.into_iter().find_map(|c| self.static_func_value(&c))
+        // The matching candidate *is* the `tp.funcs` key and therefore the
+        // emitted symbol (`emit_function` mangles that key) — mangle it, not
+        // the written spelling. Impl methods take `self` separately; use the
+        // method thunk only for the `{Type}.{method}` shape the emitter also
+        // recognizes (module-qualified impls emit plain `args[0] == self`).
+        let found = cands.iter().find(|c| self.is_body_backed_func(c))?;
+        let prefix = if self.is_impl_method(found) {
+            "zz_func_of_static_method"
+        } else {
+            "zz_func_of_static"
+        };
+        Some(format!("{prefix}(&zz_fn_{})", mangle(found)))
     }
 
     /// Box a struct field value for `zz_object_set_field` given the field
