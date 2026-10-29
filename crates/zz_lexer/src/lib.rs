@@ -11,7 +11,7 @@
 //! - Block comments nest.
 
 mod cursor;
-mod token;
+pub mod token;
 
 use std::borrow::Cow;
 
@@ -1670,7 +1670,7 @@ pub(crate) fn is_ident_start(c: char) -> bool {
 /// a digit, or `(`. `{{`, `{}` and JSON-like `{"key"...` stay literal text.
 /// Callers test this on the first char after `{`, spaces and tabs skipped
 /// (#516 — see [`Lexer::interp_starts_after_brace`]).
-pub(crate) fn is_interp_start(c: Option<char>) -> bool {
+pub fn is_interp_start(c: Option<char>) -> bool {
     match c {
         Some(ch) if is_ident_start(ch) => true,
         Some(ch) if ch.is_ascii_digit() => true,

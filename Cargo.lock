@@ -3984,6 +3984,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_parser"
+version = "0.4.0"
+dependencies = [
+ "zz_diag",
+ "zz_lexer",
+ "zz_span_ast",
+ "zz_suggest",
+]
+
+[[package]]
 name = "zz_plugin"
 version = "0.1.0"
 dependencies = [

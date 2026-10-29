@@ -1,0 +1,1689 @@
+//! Expression parsing.
+
+use zz_diag::{error_at, warning_at, FixIt};
+use zz_lexer::token::{Token, TokenKind};
+use zz_span_ast::ast::{
+    BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Stmt, UnOp,
+};
+use zz_span_ast::Span;
+
+use super::Parser;
+
+impl<'a> Parser<'a> {
+    // --- expressions ------------------------------------------------------
+
+    pub(crate) fn parse_expr(&mut self) -> Expr {
+        self.parse_elvis()
+    }
+
+    /// `a |> f(b)` — pipeline. Binds tighter than `??` but looser than
+    /// range `..`. The right side must be a function call or name; it
+    /// receives the left side as its first argument (`a |> f(b)` desugars
+    /// to `f(a, b)`).
+    pub(crate) fn parse_pipe(&mut self) -> Expr {
+        let mut left = self.parse_range();
+        while self.at(TokenKind::PipeGt) {
+            self.advance();
+            let rhs = self.parse_range();
+            left = self.desugar_pipe(left, rhs);
+        }
+        left
+    }
+
+    pub(crate) fn desugar_pipe(&mut self, lhs: Expr, rhs: Expr) -> Expr {
+        let span = lhs.span().join(rhs.span());
+        match rhs {
+            Expr::Call {
+                callee,
+                mut args,
+                named,
+                ..
+            } => {
+                args.insert(0, lhs);
+                Expr::Call {
+                    callee,
+                    args,
+                    named,
+                    span,
+                }
+            }
+            Expr::Ident { name, span } => Expr::Call {
+                callee: Box::new(Expr::Ident { name, span }),
+                args: vec![lhs.clone()],
+                named: vec![],
+                // The span must cover the piped operand too, not just the
+                // rhs identifier.
+                span: lhs.span().join(span),
+            },
+            Expr::Path { parts, span } => Expr::Call {
+                callee: Box::new(Expr::Path { parts, span }),
+                args: vec![lhs.clone()],
+                named: vec![],
+                span: lhs.span().join(span),
+            },
+            other => {
+                self.error_here("right side of `|>` must be a function call or name");
+                other
+            }
+        }
+    }
+
+    /// `a..b` — integer range. Binds tighter than pipe `|>` but looser
+    /// than arithmetic. So `a + b |> f` pipes the sum, and `0..n |> f`
+    /// pipes the range.
+    pub(crate) fn parse_range(&mut self) -> Expr {
+        let start = self.parse_or();
+        if !self.at(TokenKind::DotDot) {
+            return start;
+        }
+        self.advance();
+        let end = self.parse_or();
+        let span = start.span().join(end.span());
+        Expr::Range {
+            start: Box::new(start),
+            end: Box::new(end),
+            span,
+        }
+    }
+
+    /// `left ?? right` — Elvis operator. Lowest precedence. Unwraps
+    /// Option or Result; falls back to `right` on None/Err.
+    pub(crate) fn parse_elvis(&mut self) -> Expr {
+        let mut left = self.parse_pipe();
+        while self.at(TokenKind::QuestionQuestion) {
+            self.advance();
+            let right = self.parse_pipe();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::Elvis,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    pub(crate) fn parse_or(&mut self) -> Expr {
+        let mut left = self.parse_and();
+        while self.at(TokenKind::OrOr) {
+            self.advance();
+            let right = self.parse_and();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::Or,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    pub(crate) fn parse_and(&mut self) -> Expr {
+        let mut left = self.parse_equality();
+        while self.at(TokenKind::AndAnd) {
+            self.advance();
+            let right = self.parse_equality();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::And,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    pub(crate) fn parse_equality(&mut self) -> Expr {
+        let mut left = self.parse_relational();
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::Eq => BinOp::Eq,
+                TokenKind::Ne => BinOp::Ne,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_relational();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    pub(crate) fn parse_relational(&mut self) -> Expr {
+        let mut left = self.parse_bitor();
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::Lt => BinOp::Lt,
+                TokenKind::Gt => BinOp::Gt,
+                TokenKind::Le => BinOp::Le,
+                TokenKind::Ge => BinOp::Ge,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_bitor();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a | b` — bitwise OR. Binds tighter than comparisons and
+    /// `&&`/`||`, but looser than `^`, `&`, shifts and arithmetic, so
+    /// `flags & mask == expected` parses as `(flags & mask) == expected`.
+    /// The single-`|` token doubles as the closure delimiter and pattern
+    /// `|` in their own parse contexts — no ambiguity here.
+    pub(crate) fn parse_bitor(&mut self) -> Expr {
+        let mut left = self.parse_bitxor();
+        while self.at(TokenKind::Pipe) {
+            self.advance();
+            let right = self.parse_bitxor();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitOr,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a ^ b` — bitwise XOR. Between `|` and `&`.
+    pub(crate) fn parse_bitxor(&mut self) -> Expr {
+        let mut left = self.parse_bitand();
+        while self.at(TokenKind::Caret) {
+            self.advance();
+            let right = self.parse_bitand();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitXor,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a & b` — bitwise AND. Between `^` and shifts.
+    pub(crate) fn parse_bitand(&mut self) -> Expr {
+        let mut left = self.parse_shift();
+        while self.at(TokenKind::Amp) {
+            self.advance();
+            let right = self.parse_shift();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op: BinOp::BitAnd,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    /// `a << b` / `a >> b` — shifts. Tighter than `&` (so
+    /// `x & 0xFF << 8` is `x & (0xFF << 8)`), looser than additive
+    /// (so `a + b << c` is `(a + b) << c`).
+    pub(crate) fn parse_shift(&mut self) -> Expr {
+        let mut left = self.parse_additive();
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::Shl => BinOp::Shl,
+                TokenKind::Shr => BinOp::Shr,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_additive();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    pub(crate) fn parse_additive(&mut self) -> Expr {
+        let mut left = self.parse_multiplicative();
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::Plus => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_multiplicative();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    pub(crate) fn parse_power(&mut self) -> Expr {
+        let base = self.parse_unary();
+        if self.at(TokenKind::StarStar) {
+            self.advance();
+            let exp = self.parse_power(); // right-associative
+            let span = base.span().join(exp.span());
+            Expr::Binary {
+                op: BinOp::Pow,
+                left: Box::new(base),
+                right: Box::new(exp),
+                span,
+            }
+        } else {
+            base
+        }
+    }
+
+    pub(crate) fn parse_multiplicative(&mut self) -> Expr {
+        let mut left = self.parse_power();
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::Star => BinOp::Mul,
+                TokenKind::Slash => BinOp::Div,
+                TokenKind::Percent => BinOp::Rem,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_power();
+            let span = left.span().join(right.span());
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    pub(crate) fn parse_unary(&mut self) -> Expr {
+        // Prefix `try <postfix-chain>` — sugar for postfix `?`.
+        // `try a.b().c()` = `Try(a.b().c())`; `try a.b() + c` = `Try(a.b()) + c`
+        // because we only consume one postfix chain here.
+        // `try try x` nests via recursion. Bare `try` as identifier (followed
+        // by a terminator) still parses as `Ident` to avoid breaking existing code.
+        if self.at_ident("try") && !self.try_is_bare_ident() {
+            let try_tok = self.advance();
+            let inner = self.parse_unary();
+            let span = try_tok.span.join(inner.span());
+            return Expr::Try {
+                expr: Box::new(inner),
+                span,
+            };
+        }
+        let op = match self.peek_kind() {
+            TokenKind::Minus => UnOp::Neg,
+            TokenKind::Plus => UnOp::Pos,
+            TokenKind::Bang => UnOp::Not,
+            TokenKind::Tilde => UnOp::BitNot,
+            _ => return self.parse_postfix(),
+        };
+        let op_tok = self.advance();
+        // Fold `-9223372036854775808` (i64::MIN): the positive counterpart
+        // is out of range as a literal, but negated it is exactly MIN.
+        // Only the exact boundary value folds; anything larger still errors
+        // at the literal below. Underscores are ignored, like elsewhere.
+        if matches!(op, UnOp::Neg) && self.peek_kind() == TokenKind::Int {
+            let lit = self.peek().clone();
+            let cleaned = lit.text.replace('_', "");
+            if cleaned.parse::<u64>().ok() == Some(i64::MAX as u64 + 1) {
+                self.advance();
+                let span = op_tok.span.join(lit.span);
+                return Expr::Int {
+                    value: i64::MIN,
+                    span,
+                };
+            }
+        }
+        let expr = self.parse_unary();
+        let span = op_tok.span.join(expr.span());
+        Expr::Unary {
+            op,
+            expr: Box::new(expr),
+            span,
+        }
+    }
+
+    pub(crate) fn parse_postfix(&mut self) -> Expr {
+        let mut expr = self.parse_primary();
+        loop {
+            match self.peek_kind() {
+                TokenKind::LParen => {
+                    self.advance();
+                    let (args, named) = self.parse_call_args();
+                    let end = if self.eat_close(TokenKind::RParen) {
+                        self.previous().span
+                    } else {
+                        self.error_missing_close(")", "expected `)` to close call");
+                        expr.span()
+                    };
+                    let span = expr.span().join(end);
+                    expr = Expr::Call {
+                        callee: Box::new(expr),
+                        args,
+                        named,
+                        span,
+                    };
+                }
+                TokenKind::Question => {
+                    let q = self.advance();
+                    let span = expr.span().join(q.span);
+                    expr = Expr::Try {
+                        expr: Box::new(expr),
+                        span,
+                    };
+                }
+                // Field access on a non-trivial base: `makePoint().x`. Pure
+                // identifier chains are consumed as `Path` in `parse_primary`.
+                // A dot that opens the next match arm (`... .err(_) => ...`)
+                // must not chain: `=>` never continues an expression.
+                TokenKind::Dot if self.peek_kind_at(1) == TokenKind::Ident => {
+                    if self.dot_starts_match_arm() {
+                        break;
+                    }
+                    self.advance(); // `.`
+                    let member = self.advance(); // identifier
+                    let span = expr.span().join(member.span);
+                    expr = Expr::Field {
+                        obj: Box::new(expr),
+                        name: member.text.into_owned(),
+                        span,
+                    };
+                }
+                // Indexing and slicing: `arr[0]`, `dict["k"]`, `s[1:3]`.
+                TokenKind::LBracket => {
+                    self.advance(); // `[`
+                    let mut start = None;
+                    let mut end = None;
+                    let mut index = None;
+                    let mut is_slice = false;
+                    if self.at(TokenKind::Colon) {
+                        // `[:end]` — start omitted.
+                        is_slice = true;
+                        self.advance();
+                        if !self.at(TokenKind::RBracket) {
+                            end = Some(Box::new(self.parse_expr()));
+                        }
+                    } else {
+                        let first = self.parse_expr();
+                        if self.eat(TokenKind::Colon) {
+                            // `[start:end]` or `[start:]`.
+                            is_slice = true;
+                            start = Some(Box::new(first));
+                            if !self.at(TokenKind::RBracket) {
+                                end = Some(Box::new(self.parse_expr()));
+                            }
+                        } else {
+                            index = Some(first);
+                        }
+                    }
+                    let close = if self.eat_close(TokenKind::RBracket) {
+                        self.previous().span
+                    } else {
+                        self.error_missing_close("]", "expected `]` to close index");
+                        expr.span()
+                    };
+                    let span = expr.span().join(close);
+                    expr = if is_slice {
+                        Expr::Slice {
+                            obj: Box::new(expr),
+                            start,
+                            end,
+                            span,
+                        }
+                    } else {
+                        Expr::Index {
+                            obj: Box::new(expr),
+                            index: Box::new(index.unwrap()),
+                            span,
+                        }
+                    };
+                }
+                _ => break,
+            }
+        }
+        expr
+    }
+
+    /// `try` followed by a terminator is a plain identifier, not the prefix operator.
+    fn try_is_bare_ident(&self) -> bool {
+        matches!(
+            self.peek_kind_at(1),
+            TokenKind::Eof
+                | TokenKind::StmtEnd
+                | TokenKind::RParen
+                | TokenKind::RBracket
+                | TokenKind::RBrace
+                | TokenKind::Comma
+                | TokenKind::Colon
+                | TokenKind::Arrow
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn parse_expr_list(&mut self) -> Vec<Expr> {
+        let mut args = Vec::new();
+        if self.at(TokenKind::RParen) {
+            return args;
+        }
+        loop {
+            args.push(self.parse_expr());
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+        args
+    }
+
+    /// Parse call arguments: `(pos1, pos2, name1: val1, name2: val2)`.
+    /// Returns `(positional_args, named_args)`.
+    pub(crate) fn parse_call_args(&mut self) -> (Vec<Expr>, Vec<(Ident, Expr)>) {
+        let mut args = Vec::new();
+        let mut named = Vec::new();
+        if self.at(TokenKind::RParen) {
+            return (args, named);
+        }
+        loop {
+            // Peek for `IDENT : expr` or `IDENT = expr` pattern (named argument).
+            // `:` is canonical ZZ syntax (`greeting: "Hi"`); `=` is accepted as an
+            // alias so `@test(should_panic = true)` (spec style) also parses.
+            let is_named = self.at(TokenKind::Ident)
+                && matches!(self.peek_kind_at(1), TokenKind::Colon | TokenKind::Assign);
+            if is_named {
+                let tok = self.advance();
+                let name = Ident {
+                    name: tok.text.into_owned(),
+                    span: tok.span,
+                };
+                self.advance(); // consume `:` or `=`
+                let value = self.parse_expr();
+                named.push((name, value));
+            } else {
+                args.push(self.parse_expr());
+            }
+            if self.eat(TokenKind::Comma) {
+                // Trailing comma: `f(a, b,)` ends the list here, matching
+                // array/tuple/dict literals. Newlines inside parens are
+                // lexer trivia, so multi-line trailing commas just work.
+                // (No StmtEnd skipping: an explicit `;` must still error.)
+                if self.at(TokenKind::RParen) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        (args, named)
+    }
+
+    /// Assemble an interpolated string from the token sequence produced by
+    /// the lexer: `StrFmt (LBrace expr [: fmt_spec] RBrace StrFmt)* [Str]`.
+    pub(crate) fn parse_fmt_string(&mut self, first: Token) -> Expr {
+        let first_text = first.text.into_owned();
+        let mut parts = vec![FmtPart::Text(first_text.clone())];
+        // Raw text chunks with their token spans, for the literal-brace
+        // lint below (FmtPart::Text carries no span).
+        let mut chunks = vec![(first_text, first.span)];
+        let mut end = first.span;
+        loop {
+            if !self.at(TokenKind::LBrace) {
+                break;
+            }
+            self.advance();
+            let expr = self.parse_expr();
+            // Optional format spec: `{val:.2f}`, `{val:x}`, etc.
+            let fmt_spec = if self.eat(TokenKind::Colon) {
+                // Consume everything up to `}` as the format spec.
+                // The spec is a simple identifier, `?` (debug), or
+                // dot-prefixed like `.2f`.
+                let mut spec = String::new();
+                if self.at(TokenKind::Dot) {
+                    spec.push('.');
+                    self.advance();
+                    // Consume digits after the dot.
+                    while self.at(TokenKind::Int) {
+                        let t = self.advance();
+                        spec.push_str(&t.text);
+                    }
+                    // Consume trailing letter like 'f', 'e', etc.
+                    if self.at(TokenKind::Ident) {
+                        let t = self.advance();
+                        spec.push_str(&t.text);
+                    }
+                } else if self.at(TokenKind::Ident) {
+                    let t = self.advance();
+                    spec.push_str(&t.text);
+                } else if self.at(TokenKind::Question) {
+                    // Rust-style debug spec `{x:?}` preserves wrappers.
+                    self.advance();
+                    spec.push('?');
+                }
+                Some(spec)
+            } else {
+                None
+            };
+            if !self.eat(TokenKind::RBrace) {
+                self.error_missing_close("}", "expected `}` to close interpolation");
+            }
+            parts.push(FmtPart::Expr(Box::new(expr), fmt_spec));
+            // After `}`, the next token is either StrFmt (more interpolation
+            // segments follow) or Str (final segment, end of string).
+            match self.peek_kind() {
+                TokenKind::StrFmt => {
+                    let t = self.advance();
+                    let text = t.text.into_owned();
+                    parts.push(FmtPart::Text(text.clone()));
+                    chunks.push((text, t.span));
+                    end = t.span;
+                }
+                TokenKind::Str => {
+                    let t = self.advance();
+                    let text = t.text.into_owned();
+                    parts.push(FmtPart::Text(text.clone()));
+                    chunks.push((text, t.span));
+                    end = t.span;
+                    break;
+                }
+                _ => {
+                    self.error_here("expected string continuation after interpolation");
+                    break;
+                }
+            }
+        }
+        let string_span = first.span.join(end);
+        self.check_literal_braces(&chunks, &parts, string_span);
+        Expr::Fmt {
+            parts,
+            span: string_span,
+        }
+    }
+
+    /// Sherlock for #249: `{ident`, `{1`, and `{(…` open interpolations —
+    /// every other `{...}` stays literal text. Inside a string that DOES
+    /// interpolate elsewhere (template mode), a bare `{` that cannot expand
+    /// is almost certainly a mistake: warn once with the exact rule.
+    /// Mirrors the triple-quoted rule: `{{`, `{}`, and JSON-like `{"key"`
+    /// stay silent. Spaces and tabs after `{` are insignificant (#516), so
+    /// they are skipped before every one of these tests.
+    pub(crate) fn check_literal_braces(
+        &mut self,
+        chunks: &[(String, Span)],
+        parts: &[FmtPart],
+        string_span: Span,
+    ) {
+        use zz_lexer::is_interp_start;
+        if !parts.iter().any(|p| matches!(p, FmtPart::Expr(..))) {
+            return; // No interpolation: presumably intentional literals.
+        }
+        for (text, _span) in chunks {
+            let mut chars = text.char_indices().peekable();
+            while let Some((idx, c)) = chars.next() {
+                if c != '{' {
+                    continue;
+                }
+                // #516: `{ n}` expands like `{n}`, so the deciding char is
+                // the first one that is not a space or tab.
+                let mut rest = chars.clone();
+                let after = loop {
+                    match rest.next() {
+                        Some((_, c)) if c == ' ' || c == '\t' => continue,
+                        other => break other,
+                    }
+                };
+                match after {
+                    // `{{` escape, or `{` at chunk end (escape boundary).
+                    Some((_, '{')) | None => {
+                        chars.next();
+                        continue;
+                    }
+                    // Expands, or is a deliberate literal (`{}`, `{"key"`).
+                    Some((_, next))
+                        if is_interp_start(Some(next)) || next == '"' || next == '}' =>
+                    {
+                        continue;
+                    }
+                    _ => {
+                        let snippet: String = text[idx..].chars().take(14).collect();
+                        self.push_error(
+                            warning_at(
+                                format!(
+                                    "this string also contains `{snippet}`, which will NOT interpolate"
+                                ),
+                                string_span,
+                            )
+                            .with_note(
+                                "single-line strings expand `{name}`, `{1 + 2}`, `{(x)}` (spaces after `{` are fine) — `{{`, `{}`, and `{\"key\"` stay literal; use `{{` for a literal `{`",
+                            ),
+                        );
+                        return; // One warning per string.
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn parse_primary(&mut self) -> Expr {
+        let tok = self.peek().clone();
+        match tok.kind {
+            TokenKind::Break => {
+                self.advance();
+                Expr::Break { span: tok.span }
+            }
+            TokenKind::Continue => {
+                self.advance();
+                Expr::Continue { span: tok.span }
+            }
+            TokenKind::Int => {
+                self.advance();
+                let text = tok.text.as_ref();
+                // Detect a base prefix: `0x`/`0X` hex, `0b`/`0B` binary,
+                // `0o`/`0O` octal. Plain decimals use radix 10.
+                let (radix, digits) = if let Some(rest) =
+                    text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                {
+                    (16, rest)
+                } else if let Some(rest) =
+                    text.strip_prefix("0b").or_else(|| text.strip_prefix("0B"))
+                {
+                    (2, rest)
+                } else if let Some(rest) =
+                    text.strip_prefix("0o").or_else(|| text.strip_prefix("0O"))
+                {
+                    (8, rest)
+                } else {
+                    (10, text)
+                };
+                let cleaned = digits.replace('_', "");
+                match i64::from_str_radix(&cleaned, radix) {
+                    Ok(value) => Expr::Int {
+                        value,
+                        span: tok.span,
+                    },
+                    Err(_) => {
+                        self.errors
+                            .push(error_at("integer literal out of range", tok.span));
+                        Expr::Int {
+                            value: 0,
+                            span: tok.span,
+                        }
+                    }
+                }
+            }
+            TokenKind::Float => {
+                self.advance();
+                let cleaned = tok.text.replace('_', "");
+                let value = cleaned.parse::<f64>().unwrap_or(f64::NAN);
+                Expr::Float {
+                    value,
+                    span: tok.span,
+                }
+            }
+            TokenKind::Str => {
+                self.advance();
+                Expr::Str {
+                    value: tok.text.into_owned(),
+                    span: tok.span,
+                }
+            }
+            TokenKind::StrFmt => {
+                self.advance();
+                self.parse_fmt_string(tok)
+            }
+            TokenKind::True => {
+                self.advance();
+                Expr::Bool {
+                    value: true,
+                    span: tok.span,
+                }
+            }
+            TokenKind::False => {
+                self.advance();
+                Expr::Bool {
+                    value: false,
+                    span: tok.span,
+                }
+            }
+            TokenKind::Ident if tok.text == "_" => {
+                self.advance();
+                // `_ = expr` — evaluate `expr` for effect, drop the value.
+                // `_` is never a real binding, so the checker treats it as a
+                // discard target and never resolves it as a variable.
+                if self.at(TokenKind::Assign) {
+                    Expr::Ident {
+                        name: "_".to_string(),
+                        span: tok.span,
+                    }
+                } else {
+                    self.errors
+                        .push(error_at("`_` is only valid in patterns", tok.span));
+                    dummy_expr(tok.span)
+                }
+            }
+            TokenKind::Ident => {
+                self.advance();
+                let mut parts = vec![tok.text.into_owned()];
+                let mut end = tok.span;
+                // Member access: `a.b.c` becomes a dotted path. Only chains
+                // of identifiers are supported (no arbitrary member access).
+                while self.at(TokenKind::Dot) && self.peek_kind_at(1) == TokenKind::Ident {
+                    self.advance(); // `.`
+                    let member = self.advance(); // identifier
+                    parts.push(member.text.into_owned());
+                    end = member.span;
+                }
+                // sqlz! macro: `sqlz!{db, """SELECT ... {x}"""}` desugars
+                // directly to `db.query("""...""")` so the whole downstream
+                // pipeline (checker param extraction, runtime bound args,
+                // codegen prepared statements) stays unified.
+                if parts.len() == 1 && parts[0] == "sqlz" && self.at(TokenKind::Bang) {
+                    return self.parse_sqlz_macro(tok.span.join(end));
+                }
+                // Struct construction: `Point{ x: 1 }` or `Point { x: 1 }`.
+                // A `{` is treated as a struct literal when its contents look
+                // like fields (`ident : ...`). Adjacency alone is not enough
+                // because `if x == y{ ... }` would be misparsed as struct init.
+                // Nor is `{ Ident :` alone: a block opening with an annotated
+                // declaration (`for x in xs {\n r: int = ... }`, `if c {
+                // x: int = ... }`, `while r < nrows { row: [str] = ... }`)
+                // looks identical through the colon (the newline after `{`
+                // is not a StmtEnd token). But `=` never continues an
+                // expression, so `{ Ident : <type> =` is always a block
+                // with a declaration, never a struct field. The type may
+                // be any shape (`int`, `[str]`, `{str: int}`,
+                // `Map<str, int>`, ...), so disambiguate by speculatively
+                // parsing one type after the colon and checking for `=`.
+                if self.at(TokenKind::LBrace)
+                    && self.peek_kind_at(1) == TokenKind::Ident
+                    && (self.peek_kind_at(2) == TokenKind::Colon
+                        || self.peek_kind_at(2) == TokenKind::LBrace)
+                {
+                    let is_decl_block = self.peek_kind_at(2) == TokenKind::Colon
+                        && self.brace_starts_typed_decl_block();
+                    if !is_decl_block {
+                        return self.parse_struct_init(parts, tok.span.join(end));
+                    }
+                }
+                // Recover from common mistake: `User{ id = 1 }` instead of
+                // `User{ id: 1 }`.  Detect `{ Ident =` and route to struct
+                // init so `parse_struct_init` can emit a clear error and
+                // recover by consuming `=` as if it were `:`.
+                //
+                // Only trigger when `{` is adjacent to the type name (no
+                // whitespace gap), to avoid false positives like
+                // `for x in xs { total = total + x }` where `{` starts the
+                // loop body.
+                if self.at(TokenKind::LBrace)
+                    && self.peek_kind_at(1) == TokenKind::Ident
+                    && self.peek_kind_at(2) == TokenKind::Assign
+                    && end.end == self.peek().span.start
+                {
+                    return self.parse_struct_init(parts, tok.span.join(end));
+                }
+                if parts.len() == 1 {
+                    Expr::Ident {
+                        name: parts.pop().unwrap(),
+                        span: tok.span,
+                    }
+                } else {
+                    Expr::Path {
+                        parts,
+                        span: tok.span.join(end),
+                    }
+                }
+            }
+            TokenKind::LParen => {
+                let lparen = self.advance();
+                self.push_delim(TokenKind::LParen, lparen.span);
+                // Check for empty tuple `()`
+                if self.at(TokenKind::RParen) {
+                    let rparen = self.advance().span;
+                    self.pop_delim(TokenKind::RParen, rparen);
+                    return Expr::Tuple {
+                        items: vec![],
+                        span: tok.span.join(rparen),
+                    };
+                }
+                let first = self.parse_expr();
+                let first_span = first.span();
+                // Check for tuple: `(expr, ...)`
+                if self.at(TokenKind::Comma) {
+                    let mut items = vec![first];
+                    while self.eat(TokenKind::Comma) {
+                        if self.at(TokenKind::RParen) {
+                            break;
+                        }
+                        items.push(self.parse_expr());
+                    }
+                    let end = if self.eat_close(TokenKind::RParen) {
+                        let rparen = self.previous().span;
+                        self.pop_delim(TokenKind::RParen, rparen);
+                        rparen
+                    } else {
+                        self.error_missing_close(")", "expected `)` to close tuple expression");
+                        items.last().map(|e| e.span()).unwrap_or(first_span)
+                    };
+                    return Expr::Tuple {
+                        items,
+                        span: tok.span.join(end),
+                    };
+                }
+                // Grouped expression: `(expr)`
+                let end = if self.eat_close(TokenKind::RParen) {
+                    let rparen = self.previous().span;
+                    self.pop_delim(TokenKind::RParen, rparen);
+                    rparen
+                } else {
+                    self.error_missing_close(")", "expected `)` to close parenthesized expression");
+                    first.span()
+                };
+                let span = tok.span.join(end);
+                Expr::Paren {
+                    expr: Box::new(first),
+                    span,
+                }
+            }
+            TokenKind::LBrace => self.parse_dict_or_block(),
+            TokenKind::LBracket => self.parse_array_literal(),
+            TokenKind::Pipe => self.parse_closure(),
+            TokenKind::If => self.parse_if(),
+            TokenKind::While => {
+                let w = self.advance();
+                let cond = self.parse_expr();
+                self.check_assign_in_condition();
+                let body = self.parse_block();
+                let span = w.span.join(body.span);
+                Expr::While {
+                    cond: Box::new(cond),
+                    body,
+                    span,
+                }
+            }
+            TokenKind::Match => self.parse_match(),
+            TokenKind::Dot => self.parse_variant(),
+            _ => {
+                // A stray closing bracket in expression position (e.g. the
+                // second `]` in `[1, 2]]`): remove it and continue.
+                if matches!(
+                    tok.kind,
+                    TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket
+                ) {
+                    self.error_stray_close(tok.kind);
+                    return dummy_expr(tok.span);
+                }
+                self.error_here(format!(
+                    "expected expression, found {}",
+                    tok.kind.describe()
+                ));
+                dummy_expr(tok.span)
+            }
+        }
+    }
+
+    pub(crate) fn parse_struct_init(&mut self, parts: Vec<String>, start: Span) -> Expr {
+        self.advance(); // `{`
+        let mut fields = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let start_pos = self.pos;
+            self.skip_stmt_ends();
+            if self.at(TokenKind::RBrace) {
+                break;
+            }
+            let fname = self
+                .expect_ident()
+                .unwrap_or_else(|| dummy_ident(self.peek().span));
+            // Embedded shorthand: `User{Base{id: 1}, age: 30}` means
+            // `User{Base: Base{id: 1}, age: 30}` — a bare `Ident{...}`
+            // with no `:` supplies the embedded field's value directly.
+            if self.at(TokenKind::LBrace) {
+                let value = self.parse_struct_init(vec![fname.name.clone()], fname.span);
+                fields.push((fname.name, value));
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
+                self.skip_stmt_ends();
+                if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    self.error_here("expected `,` or `}` after field");
+                }
+                if self.pos == start_pos {
+                    self.advance();
+                }
+                continue;
+            }
+            if !self.eat(TokenKind::Colon) {
+                if self.at(TokenKind::Assign) {
+                    self.error_here(
+                        "expected `:` in struct initialization, found `=` — did you mean `:`?",
+                    );
+                    self.advance(); // consume `=`
+                } else {
+                    self.error_here("expected `:` after field name");
+                }
+            }
+            let value = self.parse_expr();
+            fields.push((fname.name, value));
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            self.skip_stmt_ends();
+            if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                self.error_here("expected `,` or `}` after field");
+            }
+            // Progress guard: if an error path failed to consume anything,
+            // force-advance so recovery always terminates.
+            if self.pos == start_pos {
+                self.advance();
+            }
+        }
+        let end = if self.eat(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_missing_close("}", "expected `}` to close struct literal");
+            self.peek().span
+        };
+        Expr::StructInit {
+            name: parts.join("."),
+            fields,
+            span: start.join(end),
+        }
+    }
+
+    /// `sqlz!{db, """SELECT ... {x}"""}` — desugars to `db.query(sql)`.
+    /// Also accepts `sqlz!(db, sql)` paren form. The `db` receiver may be
+    /// any expression (ident or path); the SQL arg is any expression but
+    /// is normally an interpolated (Fmt) string so `{expr}` segments
+    /// become bound parameters downstream.
+    pub(crate) fn parse_sqlz_macro(&mut self, start: Span) -> Expr {
+        self.advance(); // `!`
+        let is_brace = self.at(TokenKind::LBrace);
+        let is_paren = self.at(TokenKind::LParen);
+        if !is_brace && !is_paren {
+            self.error_here("expected `{` or `(` after `sqlz!`");
+            return dummy_expr(start);
+        }
+        self.advance(); // `{` or `(`
+        self.skip_stmt_ends();
+        let db_expr = self.parse_expr();
+        if !self.eat(TokenKind::Comma) {
+            self.error_here("expected `,` after db handle in `sqlz!{db, sql}`");
+        }
+        self.skip_stmt_ends();
+        let sql_expr = self.parse_expr();
+        self.skip_stmt_ends();
+        let end = if is_brace {
+            if self.eat_close(TokenKind::RBrace) {
+                self.previous().span
+            } else {
+                self.error_missing_close("}", "expected `}` to close `sqlz!{...}`");
+                sql_expr.span()
+            }
+        } else if self.eat_close(TokenKind::RParen) {
+            self.previous().span
+        } else {
+            self.error_missing_close(")", "expected `)` to close `sqlz!(...)`");
+            sql_expr.span()
+        };
+        let span = start.join(end);
+        // Desugar: `sqlz!{db, sql}` -> `db.query(sql)`.
+        let callee = match db_expr {
+            Expr::Ident { name, span: s } => Expr::Path {
+                parts: vec![name, "query".to_string()],
+                span: s.join(span),
+            },
+            Expr::Path { mut parts, span: s } => {
+                parts.push("query".to_string());
+                Expr::Path {
+                    parts,
+                    span: s.join(span),
+                }
+            }
+            other => Expr::Field {
+                obj: Box::new(other),
+                name: "query".to_string(),
+                span,
+            },
+        };
+        Expr::Call {
+            callee: Box::new(callee),
+            args: vec![sql_expr],
+            named: vec![],
+            span,
+        }
+    }
+
+    pub(crate) fn parse_closure(&mut self) -> Expr {
+        let pipe_tok = self.advance(); // `|`
+        let mut params = Vec::new();
+        // Reclaim `|` from union parsing for the parameter list: a pipe at
+        // the top level of a parameter type (including nested function
+        // returns like `func(int) -> int`) closes the list. Unions stay
+        // forbidden there (genuinely ambiguous); delimited positions keep
+        // full unions. Save/restore: closures nest.
+        let save_no_union = self.no_union;
+        self.no_union = true;
+        if !self.at(TokenKind::Pipe) {
+            loop {
+                let name = self
+                    .expect_ident()
+                    .unwrap_or_else(|| dummy_ident(self.peek().span));
+                let ty = if self.eat(TokenKind::Colon) {
+                    Some(self.parse_type_base())
+                } else {
+                    None
+                };
+                let span = name
+                    .span
+                    .join(ty.as_ref().map(|t| t.span).unwrap_or(name.span));
+                params.push(Param {
+                    name,
+                    ty,
+                    default: None,
+                    span,
+                });
+
+                if self.eat(TokenKind::Comma) {
+                    // Trailing comma: `|x, y,| body` ends the list here.
+                    if self.at(TokenKind::Pipe) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+        self.no_union = save_no_union;
+        if !self.eat(TokenKind::Pipe) {
+            self.error_here("expected `|` to close closure parameters");
+        }
+        // Optional return type annotation: `|x: int| -> int { ... }`
+        let ret_ty = if self.eat(TokenKind::Arrow) {
+            Some(self.parse_type())
+        } else {
+            None
+        };
+        let body = self.parse_expr();
+        let span = pipe_tok.span.join(body.span());
+        Expr::Closure {
+            params,
+            ret_ty,
+            body: Box::new(body),
+            span,
+        }
+    }
+
+    pub(crate) fn parse_dict_or_block(&mut self) -> Expr {
+        let save_pos = self.pos;
+        let save_errs = self.errors.len();
+        if let Some(dict) = self.try_parse_dict() {
+            return dict;
+        }
+        self.pos = save_pos;
+        self.errors.truncate(save_errs);
+        let block = self.parse_block();
+        Expr::Block(block)
+    }
+
+    /// True when `{` at the cursor opens a block whose first statement is
+    /// a typed declaration (`{ name: <type> = ... }`) rather than a struct
+    /// literal (`Point{ x: 1 }`). The caller must have verified the
+    /// `{ Ident :` prefix. Disambiguates by speculatively parsing one
+    /// type after the colon: a trailing `=` proves a declaration
+    /// (`row: [str] = []`, `r: int = 0`, `m: {str: int} = ...`,
+    /// `v: Map<str, int> = ...`), since `=` never continues an
+    /// expression. All speculative state (position, diagnostics,
+    /// delimiter tracking) is restored.
+    pub(crate) fn brace_starts_typed_decl_block(&mut self) -> bool {
+        let save_pos = self.pos;
+        let save_errs = self.errors.len();
+        let save_delims = self.delim_stack.len();
+        let save_gt = self.pending_gt;
+        // Skip `{`, field/block name, and `:`.
+        self.advance();
+        self.advance();
+        self.advance();
+        self.skip_stmt_ends();
+        let _ = self.parse_type();
+        let is_decl = self.at(TokenKind::Assign);
+        self.pos = save_pos;
+        self.errors.truncate(save_errs);
+        self.delim_stack.truncate(save_delims);
+        self.pending_gt = save_gt;
+        is_decl
+    }
+
+    /// Parse a dict literal `{ key: value, ... }`. Returns `None` (leaving
+    /// the position at the `{`) when the braces are actually a block.
+    pub(crate) fn try_parse_dict(&mut self) -> Option<Expr> {
+        let lbrace = self.peek().clone();
+        if !self.eat(TokenKind::LBrace) {
+            return None;
+        }
+        let mut entries = Vec::new();
+        if self.eat_close(TokenKind::RBrace) {
+            let span = lbrace.span.join(self.previous().span);
+            return Some(Expr::Dict { entries, span });
+        }
+        let key = self.parse_expr();
+        if !self.eat(TokenKind::Colon) {
+            return None;
+        }
+        let value = self.parse_expr();
+        entries.push((key, value));
+        // A dict entry must be followed by `,` or `}`. `=` / `:=` here
+        // means this is a block opening with a typed declaration
+        // (`name: Type = ...`), not a dict — backtrack so the caller
+        // falls through to `parse_block` (e.g. match-arm bodies like
+        // `_ => { xs: [T] = ... }`).
+        if self.at(TokenKind::Assign) || self.at(TokenKind::ColonEq) {
+            return None;
+        }
+        while self.eat(TokenKind::Comma) {
+            if self.at(TokenKind::RBrace) {
+                break; // trailing comma
+            }
+            let k = self.parse_expr();
+            if !self.eat(TokenKind::Colon) {
+                self.error_here("expected `:` after dict key");
+                break;
+            }
+            let v = self.parse_expr();
+            entries.push((k, v));
+        }
+        let end = if self.eat_close(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_missing_close("}", "expected `}` to close dict literal");
+            lbrace.span
+        };
+        Some(Expr::Dict {
+            entries,
+            span: lbrace.span.join(end),
+        })
+    }
+
+    pub(crate) fn parse_array_literal(&mut self) -> Expr {
+        let lbracket = self.advance();
+        self.push_delim(TokenKind::LBracket, lbracket.span);
+        // Empty array: `[]`.
+        if self.eat(TokenKind::RBracket) {
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            let span = lbracket.span.join(rbracket);
+            return Expr::Array {
+                elems: Vec::new(),
+                span,
+            };
+        }
+        // Detect the wrong comprehension order: `[for x in iter: body]`.
+        // ZZ writes the body first: `[body for x in iter]`. Name the
+        // supported form and recover by skipping to the closing `]` so a
+        // single clear diagnostic is emitted instead of a cascade.
+        if self.at(TokenKind::For) {
+            let for_tok = self.peek();
+            self.push_error(error_at(
+                "expected expression before `for` — list comprehension body comes first: \
+                 `[expr for x in iter]`",
+                for_tok.span,
+            ));
+            while !self.at(TokenKind::RBracket)
+                && !self.at(TokenKind::Eof)
+                && !self.at(TokenKind::StmtEnd)
+            {
+                self.advance();
+            }
+            let end = if self.eat(TokenKind::RBracket) {
+                let rbracket = self.previous().span;
+                self.pop_delim(TokenKind::RBracket, rbracket);
+                rbracket
+            } else {
+                self.pop_delim(TokenKind::RBracket, lbracket.span);
+                lbracket.span
+            };
+            return Expr::Array {
+                elems: Vec::new(),
+                span: lbracket.span.join(end),
+            };
+        }
+        // Parse first expression — could be a comprehension body or array element.
+        let first = self.parse_expr();
+        // List comprehension: `[expr for x in iter]` / `[expr for x in iter if cond]`.
+        if self.at(TokenKind::For) {
+            return self.parse_list_comp_body(lbracket, first);
+        }
+        // Normal array literal: `[a, b, c]`.
+        let mut elems = vec![first];
+        while self.eat(TokenKind::Comma) {
+            if self.at(TokenKind::RBracket) {
+                break; // trailing comma
+            }
+            elems.push(self.parse_expr());
+        }
+        let end = if self.eat_close(TokenKind::RBracket) {
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            rbracket
+        } else {
+            self.error_missing_close("]", "expected `]` to close array literal");
+            lbracket.span
+        };
+        Expr::Array {
+            elems,
+            span: lbracket.span.join(end),
+        }
+    }
+
+    /// Parse the `for x in iter [if cond]` part of a list comprehension.
+    /// `first` is the already-parsed body expression.
+    pub(crate) fn parse_list_comp_body(&mut self, lbracket: Token, first: Expr) -> Expr {
+        self.advance(); // `for`
+        let var = self
+            .expect_ident()
+            .unwrap_or_else(|| dummy_ident(self.peek().span));
+        if !self.eat(TokenKind::In) {
+            self.error_here("expected `in` after loop variable");
+        }
+        let iter = self.parse_expr();
+        let filter = if self.at(TokenKind::If) {
+            self.advance();
+            Some(Box::new(self.parse_expr()))
+        } else {
+            None
+        };
+        let end = if self.eat_close(TokenKind::RBracket) {
+            let rbracket = self.previous().span;
+            self.pop_delim(TokenKind::RBracket, rbracket);
+            rbracket
+        } else {
+            self.error_missing_close("]", "expected `]` to close list comprehension");
+            lbracket.span
+        };
+        Expr::ListComp {
+            body: Box::new(first),
+            var,
+            iter: Box::new(iter),
+            filter,
+            span: lbracket.span.join(end),
+        }
+    }
+
+    pub(crate) fn parse_if(&mut self) -> Expr {
+        let if_tok = self.advance();
+        if self.at_ident("let") {
+            return self.parse_if_let(if_tok);
+        }
+        let cond = self.parse_expr();
+        self.check_assign_in_condition();
+        let then = self.parse_block();
+        let els = self.parse_else();
+        let span = if_tok
+            .span
+            .join(els.as_ref().map(|e| e.span()).unwrap_or(then.span));
+        Expr::If {
+            cond: Box::new(cond),
+            then,
+            els,
+            span,
+        }
+    }
+
+    pub(crate) fn parse_if_let(&mut self, if_tok: Token) -> Expr {
+        self.advance(); // `let`
+        let pat = self.parse_pattern();
+        if !self.eat(TokenKind::Assign) {
+            self.error_here("expected `=` in if-let");
+        }
+        let value = self.parse_expr();
+        let then = self.parse_block();
+        let els = self.parse_else();
+        let span = if_tok
+            .span
+            .join(els.as_ref().map(|e| e.span()).unwrap_or(then.span));
+        Expr::IfLet {
+            pat,
+            value: Box::new(value),
+            then,
+            els,
+            span,
+        }
+    }
+
+    pub(crate) fn parse_else(&mut self) -> Option<Box<Expr>> {
+        if !self.eat(TokenKind::Else) {
+            return None;
+        }
+        if self.at(TokenKind::If) {
+            Some(Box::new(self.parse_if()))
+        } else {
+            let block = self.parse_block();
+            Some(Box::new(Expr::Block(block)))
+        }
+    }
+
+    /// `=` in `if`/`while` condition position is almost always a typo for
+    /// `==`. Emit one targeted error with a fix, consume `= RHS` for
+    /// recovery, and let checking continue so independent errors (e.g. a
+    /// typoed variable earlier in the file) are still reported (#244).
+    pub(crate) fn check_assign_in_condition(&mut self) {
+        if !self.at(TokenKind::Assign) {
+            return;
+        }
+        let span = self.peek().span;
+        self.push_error(
+            error_at(
+                "`=` in condition does assignment; use `==` to compare",
+                span,
+            )
+            .with_fixit(FixIt::safe(span, "==", "replace with `==`")),
+        );
+        self.advance(); // consume `=`
+        let _ = self.parse_expr(); // RHS for recovery; condition keeps LHS
+    }
+
+    pub(crate) fn parse_match(&mut self) -> Expr {
+        let match_tok = self.advance();
+        let scrutinee = self.parse_expr();
+        self.skip_stmt_ends();
+        if !self.eat(TokenKind::LBrace) {
+            self.error_here("expected `{` after match scrutinee");
+        }
+        let mut arms = Vec::new();
+        loop {
+            self.skip_stmt_ends();
+            if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
+                break;
+            }
+            let pat = self.parse_pattern();
+            // Match guard: `pat if guard => body`
+            let guard = if self.at(TokenKind::If) && !self.at(TokenKind::Arrow) {
+                self.advance(); // consume `if`
+                Some(self.parse_expr())
+            } else {
+                None
+            };
+            if !self.eat(TokenKind::Arrow) {
+                self.error_here("expected `=>` after match pattern");
+            }
+            // Arm bodies accept any statement (`y = v`, `x := 1`,
+            // `return`, `defer f()`) as well as expressions. A bare
+            // `return` reads naturally as an arm body but is a
+            // statement, not an expression — and so is assignment
+            // (`whole = v`), which previously died with a confusing
+            // "expected `,` or `}` after match arm". Recover by
+            // wrapping the single statement in a block — identical AST
+            // to the braced form, so the checker and both runtimes
+            // need no changes.
+            // (`break`/`continue` are already expressions via
+            // `parse_primary`, with diverge handling in `check_match` —
+            // they must keep parsing as expressions, not blocks, so
+            // convert the statement forms back.)
+            // Anything else parses as an expression as before.
+            let start_span = pat.span();
+            let body = if self.at(TokenKind::Comma)
+                || self.at(TokenKind::RBrace)
+                || self.at(TokenKind::Eof)
+            {
+                // Empty arm body (`pat => ,` / `pat => }`): a noop that
+                // evaluates to unit, so exhaustive matches can have an
+                // intentional no-op arm without a throwaway `noop()`.
+                Expr::Tuple {
+                    items: vec![],
+                    span: start_span.join(self.peek().span),
+                }
+            } else {
+                let stmt = self.parse_stmt();
+                match stmt {
+                    Stmt::Expr(e) => e,
+                    Stmt::Break { span } => Expr::Break { span },
+                    Stmt::Continue { span } => Expr::Continue { span },
+                    other => {
+                        let span = start_span.join(other.span());
+                        Expr::Block(Block {
+                            stmts: vec![other],
+                            span,
+                        })
+                    }
+                }
+            };
+            let end_span = body.span();
+            let span = start_span.join(end_span);
+            arms.push(MatchArm {
+                pat,
+                guard,
+                body,
+                span,
+            });
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            if self.at(TokenKind::StmtEnd) {
+                self.advance();
+                continue;
+            }
+            if self.at(TokenKind::RBrace) {
+                break;
+            }
+            // Sherlock: `.name` here almost always starts the next arm
+            // whose separator was forgotten (`{ n } .err(_) => ...`) —
+            // name it, offer the comma, and keep parsing arms instead of
+            // dropping the rest of the match.
+            if self.at(TokenKind::Dot) && self.peek_kind_at(1) == TokenKind::Ident {
+                let dot = self.peek().span;
+                let at = Span::new(dot.start, dot.start);
+                self.push_error(
+                    error_at("expected `,` or newline between match arms", dot)
+                        .with_note("separate arms with a comma or put each arm on its own line")
+                        .with_fixit(FixIt::safe(at, ", ".to_string(), "insert missing comma")),
+                );
+                continue;
+            }
+            self.error_here("expected `,` or `}` after match arm");
+            self.skip_to_rbrace();
+        }
+        let end = if self.eat(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.peek().span
+        };
+        let span = match_tok.span.join(end);
+        Expr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms,
+            span,
+        }
+    }
+
+    pub(crate) fn parse_variant(&mut self) -> Expr {
+        let dot = self.advance();
+        let name_tok = self.peek().clone();
+        if name_tok.kind != TokenKind::Ident {
+            self.error_here("expected variant name after `.`");
+            return dummy_expr(dot.span);
+        }
+        self.advance();
+        let arg = if self.eat(TokenKind::LParen) {
+            let e = self.parse_expr();
+            let end = if self.eat_close(TokenKind::RParen) {
+                self.previous().span
+            } else {
+                self.error_missing_close(")", "expected `)` to close variant argument");
+                e.span()
+            };
+            Some((Box::new(e), end))
+        } else {
+            None
+        };
+        let span = dot
+            .span
+            .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
+        Expr::Variant {
+            name: name_tok.text.into_owned(),
+            arg: arg.map(|(e, _)| e),
+            span,
+        }
+    }
+
+    // --- patterns ---------------------------------------------------------
+
+    pub(crate) fn parse_pattern(&mut self) -> Pattern {
+        let first = self.parse_single_pattern();
+        if !self.at(TokenKind::Pipe) {
+            return first;
+        }
+        let mut pats = vec![first];
+        while self.eat(TokenKind::Pipe) {
+            pats.push(self.parse_single_pattern());
+        }
+        let span = pats
+            .first()
+            .map(|p| p.span())
+            .unwrap_or(self.peek().span)
+            .join(pats.last().map(|p| p.span()).unwrap_or(self.peek().span));
+        Pattern::Or { pats, span }
+    }
+
+    fn parse_single_pattern(&mut self) -> Pattern {
+        let tok = self.peek().clone();
+        match tok.kind {
+            TokenKind::Ident if tok.text == "_" => {
+                self.advance();
+                Pattern::Wildcard { span: tok.span }
+            }
+            TokenKind::Ident => {
+                self.advance();
+                Pattern::Binding {
+                    name: Ident {
+                        name: tok.text.into_owned(),
+                        span: tok.span,
+                    },
+                }
+            }
+            TokenKind::Int => {
+                self.advance();
+                let cleaned = tok.text.replace('_', "");
+                let value = cleaned.parse::<i64>().unwrap_or(0);
+                Pattern::Literal {
+                    value: Lit::Int(value),
+                    span: tok.span,
+                }
+            }
+            TokenKind::Float => {
+                self.advance();
+                let cleaned = tok.text.replace('_', "");
+                let value = cleaned.parse::<f64>().unwrap_or(f64::NAN);
+                Pattern::Literal {
+                    value: Lit::Float(value),
+                    span: tok.span,
+                }
+            }
+            TokenKind::Str => {
+                self.advance();
+                Pattern::Literal {
+                    value: Lit::Str(tok.text.into_owned()),
+                    span: tok.span,
+                }
+            }
+            TokenKind::True => {
+                self.advance();
+                Pattern::Literal {
+                    value: Lit::Bool(true),
+                    span: tok.span,
+                }
+            }
+            TokenKind::False => {
+                self.advance();
+                Pattern::Literal {
+                    value: Lit::Bool(false),
+                    span: tok.span,
+                }
+            }
+            TokenKind::Dot => {
+                self.advance();
+                let name_tok = self.peek().clone();
+                if name_tok.kind != TokenKind::Ident {
+                    self.error_here("expected variant name after `.`");
+                    return Pattern::Wildcard { span: tok.span };
+                }
+                self.advance();
+                let arg = if self.eat(TokenKind::LParen) {
+                    let p = self.parse_pattern();
+                    let end = if self.eat_close(TokenKind::RParen) {
+                        self.previous().span
+                    } else {
+                        self.error_missing_close(")", "expected `)` to close pattern");
+                        p.span()
+                    };
+                    Some((Box::new(p), end))
+                } else {
+                    None
+                };
+                let span = tok
+                    .span
+                    .join(arg.as_ref().map(|(_, end)| *end).unwrap_or(name_tok.span));
+                Pattern::Variant {
+                    name: name_tok.text.into_owned(),
+                    arg: arg.map(|(p, _)| p),
+                    span,
+                }
+            }
+            TokenKind::LParen => {
+                self.advance(); // consume `(`
+                let mut pats = Vec::new();
+                if !self.at(TokenKind::RParen) {
+                    pats.push(self.parse_pattern());
+                    while self.eat(TokenKind::Comma) {
+                        if self.at(TokenKind::RParen) {
+                            break;
+                        }
+                        pats.push(self.parse_pattern());
+                    }
+                }
+                let end = if self.eat(TokenKind::RParen) {
+                    self.previous().span
+                } else {
+                    self.error_missing_close(")", "expected `)` to close tuple pattern");
+                    self.peek().span
+                };
+                let span = tok.span.join(end);
+                Pattern::Tuple { pats, span }
+            }
+            _ => {
+                self.error_here(format!("expected pattern, found {}", tok.kind.describe()));
+                Pattern::Wildcard { span: tok.span }
+            }
+        }
+    }
+}
+
+fn dummy_expr(span: Span) -> Expr {
+    Expr::Int { value: 0, span }
+}
+
+fn dummy_ident(span: Span) -> Ident {
+    Ident {
+        name: String::new(),
+        span,
+    }
+}
