@@ -12,7 +12,7 @@
 //! syntax (`Base,`) and the explicit-but-equivalent form (`Base: Base`),
 //! so no AST flag is needed and all downstream passes keep working.
 
-use crate::checker::{Checker, FuncSig};
+use zz_checker_core::{Checker, FuncSig};
 use zz_diag_core::{error_at, FixIt};
 use zz_infer::InferOps;
 use zz_span_ast::ast::Stmt;
@@ -132,7 +132,7 @@ impl StructOps for Checker {
         // plain-struct path reports it elsewhere, so only check arity here.
         self.structs.insert(
             full_name,
-            crate::checker::StructSig {
+            zz_checker_core::StructSig {
                 generics: gen_names,
                 fields: sig_fields,
             },

@@ -3,12 +3,12 @@
 //! Route shape validation and shadow detection live in `zz_http_routes`;
 //! this module wires them into the checker's expression walk.
 
-use crate::checker::scope::ScopeOps;
 use zz_diag_core::{error_at, warning_at};
 use zz_http_routes::{
     is_param_call, is_route_method, route_call_kind, validate_pattern, RouteCall, HIJACK_METHOD,
     ROUTE_METHODS,
 };
+use zz_scope::ScopeOps;
 use zz_span_ast::ast::Expr;
 use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;

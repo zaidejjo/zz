@@ -1,6 +1,6 @@
 //! Function registration and body checking.
 
-use crate::checker::Checker;
+use zz_checker_core::{Checker, FuncSig};
 use zz_diag_core::error_at;
 use zz_infer::InferOps;
 use zz_span_ast::ast::Stmt;
@@ -65,7 +65,7 @@ impl FuncOps for Checker {
         let full_name = name.join(".");
         self.funcs.insert(
             full_name,
-            crate::checker::FuncSig {
+            FuncSig {
                 generics: gen_names,
                 bounds: gen_bounds,
                 params: sig_params,
@@ -92,7 +92,7 @@ impl FuncOps for Checker {
                 Some(t) => {
                     let ct = self.ast_to_type(t, &[]);
                     if !Self::is_c_abi_type(&ct) {
-                        self.errors.push(zz_diag_core::error_at(
+                        self.errors.push(error_at(
                             format!(
                                 "extern function `{}`: parameter `{}` has non-C type `{}` (allowed: int, float, bool, str, bytes, *const T, *mut T, void, ())",
                                 name.name, p.name.name, ct
@@ -103,7 +103,7 @@ impl FuncOps for Checker {
                     ct
                 }
                 None => {
-                    self.errors.push(zz_diag_core::error_at(
+                    self.errors.push(error_at(
                         format!(
                             "extern function `{}`: parameter `{}` needs an explicit C type",
                             name.name, p.name.name
@@ -119,7 +119,7 @@ impl FuncOps for Checker {
             Some(t) => {
                 let ct = self.ast_to_type(t, &[]);
                 if matches!(ct, Type::Str) {
-                    self.errors.push(zz_diag_core::error_at(
+                    self.errors.push(error_at(
                         format!(
                             "plugin extern function `{}` returns str, which is not yet supported — return an int status code and use a getter pattern instead",
                             name.name
@@ -127,7 +127,7 @@ impl FuncOps for Checker {
                         t.span,
                     ));
                 } else if !Self::is_c_abi_type(&ct) {
-                    self.errors.push(zz_diag_core::error_at(
+                    self.errors.push(error_at(
                         format!(
                             "extern function `{}` has non-C return type `{}` (allowed: int, float, bool, str, bytes, *const T, *mut T, void, ())",
                             name.name, ct
@@ -141,14 +141,14 @@ impl FuncOps for Checker {
         };
         let full_name = name.name.clone();
         if self.funcs.contains_key(&full_name) {
-            self.errors.push(zz_diag_core::error_at(
+            self.errors.push(error_at(
                 format!("duplicate definition of function `{full_name}`"),
                 name.span,
             ));
         }
         self.funcs.insert(
             full_name,
-            crate::checker::FuncSig {
+            FuncSig {
                 generics: Vec::new(),
                 bounds: Vec::new(),
                 params: sig_params,

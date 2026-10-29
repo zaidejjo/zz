@@ -1,16 +1,16 @@
 //! Core type-checking logic: statements, expressions, patterns.
 
-use crate::checker::scope::ScopeOps;
 use std::sync::Arc;
+use zz_scope::ScopeOps;
 
-use crate::checker::enums::EnumOps;
 use crate::checker::http_lint::HttpLintOps;
-use crate::checker::structs::StructOps;
 use crate::checker::Checker;
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_infer::{contains_var, default_variant_vars, InferOps};
+use zz_sigs::enums::EnumOps;
 use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_span_ast::span::Span;
+use zz_structs::StructOps;
 use zz_suggest::suggest_all;
 use zz_types::Type;
 

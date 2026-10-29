@@ -3765,7 +3765,10 @@ dependencies = [
  "zz_frontend",
  "zz_http_routes",
  "zz_infer",
+ "zz_scope",
+ "zz_sigs",
  "zz_span_ast",
+ "zz_structs",
  "zz_suggest",
  "zz_types",
  "zz_unify",
@@ -3994,6 +3997,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_scope"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_span_ast",
+ "zz_structs",
+ "zz_suggest",
+ "zz_types",
+]
+
+[[package]]
+name = "zz_sigs"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_infer",
+ "zz_span_ast",
+ "zz_suggest",
+ "zz_types",
+]
+
+[[package]]
 name = "zz_span_ast"
 version = "0.4.0"
 dependencies = [
@@ -4024,6 +4051,18 @@ dependencies = [
  "zz_hir",
  "zz_native_rt",
  "zz_runtime",
+]
+
+[[package]]
+name = "zz_structs"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_infer",
+ "zz_span_ast",
+ "zz_suggest",
+ "zz_types",
 ]
 
 [[package]]

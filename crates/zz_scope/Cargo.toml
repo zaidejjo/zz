@@ -1,0 +1,13 @@
+[package]
+name = "zz_scope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zz_checker_core = { path = "../zz_checker_core" }
+zz_types = { path = "../zz_types" }
+zz_structs = { path = "../zz_structs" }
+zz_span_ast = { path = "../zz_span_ast" }
+zz_diag_core = { path = "../zz_diag_core" }
+zz_suggest = { path = "../zz_suggest" }

@@ -1,7 +1,7 @@
 //! Scope management and variable lookup.
 
-use crate::checker::structs::StructOps;
-use crate::checker::{Checker, DefinedBinding};
+use zz_checker_core::{Checker, DefinedBinding};
+use zz_structs::StructOps;
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_span_ast::span::Span;
 use zz_suggest::{suggest_all, suggest_dotted};
@@ -76,7 +76,7 @@ pub trait ScopeOps {
 
     /// Stop observing and return every probe whose initializer read the
     /// binding it shadows, outermost first.
-    fn finish_shadow_probes(&mut self, mark: usize) -> Vec<crate::checker::ShadowProbe>;
+    fn finish_shadow_probes(&mut self, mark: usize) -> Vec<zz_checker_core::ShadowProbe>;
 
     /// Like [`Checker::lookup`] but without the error: returns `None` when
     /// the name is not bound anywhere.
@@ -321,7 +321,7 @@ impl ScopeOps for Checker {
                 t
             }
             None => {
-                if let Some(sig) = crate::lookup_std(&self.funcs, name) {
+                if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name) {
                     if !sig.generics.is_empty() {
                         self.errors.push(error_at(
                             format!(
@@ -375,7 +375,7 @@ impl ScopeOps for Checker {
                 // If the name looks like `module.func` and matches a known
                 // stdlib pattern, suggest adding the import.
                 if let Some((module, _func)) = name.split_once('.') {
-                    let std_module = if super::is_std_module_head(module) {
+                    let std_module = if zz_checker_core::is_std_module_head(module) {
                         Some(module.to_string())
                     } else {
                         // Generalized: any other std module present in the
@@ -446,7 +446,7 @@ impl ScopeOps for Checker {
     /// Returns the marker for [`Checker::finish_shadow_probes`].
     fn begin_shadow_probe(&mut self, name: String, span: Span) -> usize {
         let mark = self.shadow_probes.len();
-        self.shadow_probes.push(crate::checker::ShadowProbe {
+        self.shadow_probes.push(zz_checker_core::ShadowProbe {
             name,
             span,
             depth: self.env.len().saturating_sub(1),
@@ -457,7 +457,7 @@ impl ScopeOps for Checker {
 
     /// Stop observing and return every probe whose initializer read the
     /// binding it shadows, outermost first.
-    fn finish_shadow_probes(&mut self, mark: usize) -> Vec<crate::checker::ShadowProbe> {
+    fn finish_shadow_probes(&mut self, mark: usize) -> Vec<zz_checker_core::ShadowProbe> {
         let mut out = Vec::new();
         while self.shadow_probes.len() > mark {
             let probe = self.shadow_probes.pop().expect("probe above the mark");
@@ -489,7 +489,7 @@ impl ScopeOps for Checker {
                 return Some(t);
             }
         }
-        if let Some(sig) = crate::lookup_std(&self.funcs, name) {
+        if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name) {
             self.used_names.insert(name.to_string());
             if !sig.generics.is_empty() {
                 return None;
@@ -545,7 +545,7 @@ impl ScopeOps for Checker {
             // so a known module name is necessarily unimported. Attached
             // before the typo branches because the dotted branch returns
             // early.
-            if parts.len() >= 2 && super::is_std_module_head(&parts[0]) {
+            if parts.len() >= 2 && zz_checker_core::is_std_module_head(&parts[0]) {
                 let import_stmt = format!("import std.{}", parts[0]);
                 diag = diag.with_note(format!(
                     "add `{import_stmt}` at the top of the file to use `{joined}`"
@@ -636,7 +636,7 @@ impl ScopeOps for Checker {
                     // without `import std.sqlz`): suggest the import even
                     // when the root name itself is bound to something else
                     // (partial binding / alias).
-                    if parts.len() >= 2 && super::is_std_module_head(&parts[0]) {
+                    if parts.len() >= 2 && zz_checker_core::is_std_module_head(&parts[0]) {
                         let import_stmt = format!("import std.{}", parts[0]);
                         diag = diag.with_note(format!(
                             "add `{import_stmt}` at the top of the file to use `{joined}`"

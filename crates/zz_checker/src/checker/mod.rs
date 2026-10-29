@@ -1,28 +1,24 @@
 //! Type checker: HM-lite inference, generics, patterns, exhaustiveness.
 
-pub mod enums;
-pub mod funcs;
 pub mod http_lint;
-pub mod scope;
 pub mod std_gate;
-pub mod structs;
 pub mod type_check;
 pub mod value_lint;
 
 // State and shared helper types live in `zz_checker_core`.
 pub use zz_checker_core::*;
 
-use crate::checker::scope::ScopeOps;
 use std::collections::HashMap;
 use std::sync::Arc;
+use zz_scope::ScopeOps;
 
 use zz_span_ast::ast::{Program, Stmt};
 use zz_span_ast::span::Span;
 
-use crate::checker::funcs::FuncOps;
-use crate::checker::structs::StructOps;
 use crate::checker::type_check::TypeCheckOps;
 use zz_infer::InferOps;
+use zz_sigs::funcs::FuncOps;
+use zz_structs::StructOps;
 use zz_types::Type;
 
 /// Type-check a whole program, seeded with bindings/funcs/structs from prior
