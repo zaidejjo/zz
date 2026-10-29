@@ -532,8 +532,6 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.http.delete", "http fixtures skipped in parity"),
     ("std.http.put", "http fixtures skipped in parity"),
     // HTTP helpers (pure-ZZ, compiled from zz/http/mod.zz)
-    ("std.http.use", "pure ZZ; no C codegen"),
-    ("http.use", "pure ZZ alias"),
     ("std.http.ok", "pure ZZ; no C codegen"),
     ("http.ok", "pure ZZ alias"),
     ("std.http.created", "pure ZZ; no C codegen"),
@@ -577,6 +575,9 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // around the closure body); no native C implementation needed.
     ("std.sqlz.transaction", "AOT-inlined; no native C impl"),
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
+    // Listener shutdown — VM-only, no C socket listener shutdown twin.
+    ("std.tls_listener.shutdown", "VM-only; no C listener shutdown twin"),
+    ("std.unix_listener.shutdown", "VM-only; no C listener shutdown twin"),
 ];
 
 #[test]

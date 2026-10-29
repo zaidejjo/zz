@@ -27,7 +27,6 @@ for arg in env.args() { println(arg) }
 | Function | Notes |
 |---|---|
 | `get(key)` | `str?` — `.none` when absent |
-| `get_var` | legacy alias shape |
 | `var(name)` | value or `.err` |
 | `set/remove` | process-wide, POSIX-like; bad key is `.err` |
 | `vars()` | all, sorted by key |

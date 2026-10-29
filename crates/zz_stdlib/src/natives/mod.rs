@@ -1438,13 +1438,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
 
     // std.env
     m.insert(
-        "std.env.get_var".into(),
-        NativeEntry {
-            arity: 1,
-            f: env::env_get_var,
-        },
-    );
-    m.insert(
         "std.env.var".into(),
         NativeEntry {
             arity: 1,
@@ -2171,7 +2164,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("read_exact", 2, net::tcp_read_exact),
         ("write", 2, net::tcp_write),
         ("write_bytes", 2, net::tcp_write_bytes),
-        ("close", 1, net::tcp_shutdown),
         ("shutdown", 1, net::tcp_shutdown),
         ("peer_addr", 1, net::peer_addr),
         ("local_addr", 1, net::local_addr),
@@ -2290,6 +2282,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             net::unix::unix_accept as zz_runtime::NativeFn,
         ),
         ("close", 1, net::unix::unix_listener_close),
+        ("shutdown", 1, net::unix::unix_listener_close),
     ] {
         m.insert(
             format!("std.unix_listener.{name}"),
@@ -2324,6 +2317,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             net::tls::tls_accept as zz_runtime::NativeFn,
         ),
         ("close", 1, net::tls::tls_listener_close),
+        ("shutdown", 1, net::tls::tls_listener_close),
     ] {
         m.insert(
             format!("std.tls_listener.{name}"),

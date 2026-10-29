@@ -1645,32 +1645,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("req", Type::HttpRequest)], Type::Bytes),
     );
 
-    // std.http — middleware alias + single-entry routing + response helpers.
-    // `use` is the `pipe` spelling without the `|>` concept collision;
-    // `route` collapses the four verb entries behind one method dispatch.
-    // Helpers are pure-ZZ (`zz/http/mod.zz`), signatures live here so both
-    // spellings type-check import-free like every other `std.*` name.
-    m.insert(
-        "std.http.use".into(),
-        sig(
-            vec![
-                ("server", Type::HttpServer),
-                (
-                    "middleware",
-                    Type::Func(
-                        vec![Type::HttpRequest],
-                        Box::new(Type::Result(
-                            Box::new(Type::HttpRequest),
-                            // Short-circuit: `.err(response)` answers directly.
-                            Box::new(Type::Response),
-                        )),
-                    ),
-                ),
-            ],
-            Type::HttpServer,
-        ),
-    );
-
     m.insert(
         "std.http.route".into(),
         sig(
@@ -1883,11 +1857,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         let s = sig(params, ret);
         m.insert(format!("std.net.{short}"), s.clone());
     }
-    // `close` is the real shutdown under its ergonomic name.
-    m.insert(
-        "std.net.close".into(),
-        sig(vec![("stream", Type::TcpStream)], result_unit()),
-    );
 
     // std.cell — shared-mutable slots (pool-backed handles; each op
     // takes the pool lock once). Generic over the stored value type.
@@ -2016,6 +1985,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             vec![("listener", unix_listener_t.clone())],
             result_bool(),
         ),
+        (
+            "shutdown",
+            vec![("listener", unix_listener_t.clone())],
+            result_bool(),
+        ),
     ] {
         let s = sig(params, ret);
         m.insert(format!("std.unix_listener.{method}"), s);
@@ -2063,6 +2037,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
         (
             "close",
+            vec![("listener", tls_listener_t.clone())],
+            result_bool(),
+        ),
+        (
+            "shutdown",
             vec![("listener", tls_listener_t.clone())],
             result_bool(),
         ),
@@ -2489,10 +2468,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // std.env
     m.insert(
-        "std.env.get_var".into(),
-        sig(vec![("name", Type::Str)], Type::Option(Box::new(Type::Str))),
-    );
-    m.insert(
         "std.env.var".into(),
         sig(
             vec![("name", Type::Str)],
@@ -2762,8 +2737,8 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
 
     // Pure-ZZ stdlib: math helpers (compiled from zz/math/mod.zz)
-    // min/max are generic <T>; min_arr/max_arr return Option<T>;
-    // sum_f/product_f/mean_f/median_f handle float arrays with Kahan precision.
+    // min/max are generic <T>; count counts occurrences.
+    // sum/product/sum_f/product_f/min_val/max_val live in std.vec instead.
     m.insert(
         "std.math.sum".into(),
         sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
@@ -2799,7 +2774,15 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.math.is_odd".into(),
         sig(vec![("n", Type::Int)], Type::Bool),
     );
-    // Generic array min/max — return Option for empty safety
+    // Float aggregation — Kahan compensated summation
+    m.insert(
+        "std.math.sum_f".into(),
+        sig(vec![("arr", float_arr.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.product_f".into(),
+        sig(vec![("arr", float_arr.clone())], Type::Float),
+    );
     m.insert(
         "std.math.min_arr".into(),
         sig_t(
@@ -2814,27 +2797,17 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Option(Box::new(t.clone())),
         ),
     );
-    // Float aggregation — Kahan compensated summation
-    let float_arr = || Type::Array(Box::new(Type::Float));
-    m.insert(
-        "std.math.sum_f".into(),
-        sig(vec![("arr", float_arr())], Type::Float),
-    );
-    m.insert(
-        "std.math.product_f".into(),
-        sig(vec![("arr", float_arr())], Type::Float),
-    );
     m.insert(
         "std.math.mean_f".into(),
         sig(
-            vec![("arr", float_arr())],
+            vec![("arr", float_arr.clone())],
             Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
         ),
     );
     m.insert(
         "std.math.median_f".into(),
         sig(
-            vec![("arr", float_arr())],
+            vec![("arr", float_arr.clone())],
             Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
         ),
     );
@@ -3879,7 +3852,6 @@ mod tests {
         assert!(funcs.contains_key("file.seek"));
         assert!(funcs.contains_key("file.flush"));
         assert!(funcs.contains_key("file.close"));
-        assert!(funcs.contains_key("std.env.get_var"));
         assert!(funcs.contains_key("std.env.var"));
         assert!(funcs.contains_key("std.env.args"));
         assert!(funcs.contains_key("std.math.abs"));
@@ -3979,7 +3951,6 @@ mod tests {
             "std.net.read_bytes",
             "std.net.write",
             "std.net.write_bytes",
-            "std.net.close",
             "std.net.peer_addr",
             "std.net.local_addr",
             "std.net.set_read_timeout",
@@ -3995,7 +3966,6 @@ mod tests {
         }
         // http helpers (pure-ZZ, compiled from zz/http/mod.zz).
         for name in [
-            "std.http.use",
             "std.http.route",
             "std.http.ok",
             "std.http.created",
@@ -4135,7 +4105,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 683);
+        assert_eq!(funcs.len(), 682);
     }
 
     #[test]

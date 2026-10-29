@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn std_env_in_session() {
         let mut s = Session::new("<test>");
-        let out = s.eval("import std.env\nenv.get_var(\"ZZ_NO_SUCH_VAR_12345\")");
+        let out = s.eval("import std.env\nenv.get(\"ZZ_NO_SUCH_VAR_12345\")");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
         assert_eq!(out.output, ".none");
     }

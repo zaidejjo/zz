@@ -629,7 +629,6 @@ import std.env
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `env.get` | `env.get(key: str) -> str?` | Value or `.none` |
-| `env.get_var` | `env.get_var(name: str)` | Get env var (legacy alias shape) |
 | `env.var` | `env.var(name: str)` | Value or `.err` |
 | `env.set` | `env.set(key: str, val: str)` | Set (`.err` on bad key) |
 | `env.remove` | `env.remove(key: str)` | Remove (total no-op when absent) |

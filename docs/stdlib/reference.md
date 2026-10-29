@@ -245,7 +245,6 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.env.cwd` | `cwd() -> Result<str, str>` |
 | `std.env.exe_path` | `exe_path() -> Result<str, str>` |
 | `std.env.get` | `get(key: str) -> Option<str>` |
-| `std.env.get_var` | `get_var(name: str) -> Option<str>` |
 | `std.env.home_dir` | `home_dir() -> Option<str>` |
 | `std.env.os` | `os() -> str` |
 | `std.env.remove` | `remove(key: str) -> unit` |
@@ -370,7 +369,6 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.http.test` | `test(server: http.server, method: str, path: str, body: str) -> http.response` |
 | `std.http.test_req` | `test_req(server: http.server, method: str, path: str, headers: {str: str}, body: str) -> http.response` |
 | `std.http.text` | `text(res: http.response) -> str` |
-| `std.http.use` | `use(server: http.server, middleware: func(http.request) -> Result<http.request, http.response>) -> http.server` |
 | `std.http.with_headers` | `with_headers(res: http.response, extra: {str: str}) -> http.response` |
 
 ## `json` — 28 entries ([guide](data.md))
@@ -491,17 +489,13 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.math.magnitude` | `magnitude(v: [float]) -> float` |
 | `std.math.matrix_mul` | `matrix_mul(m1: [[float]], m2: [[float]]) -> Result<[[float]], str>` |
 | `std.math.max` | `max<T>(a: T, b: T) -> T` |
-| `std.math.max_arr` | `max_arr<T>(arr: [T]) -> Option<T>` |
 | `std.math.mean` | `mean(list: [float]) -> Result<float, str>` |
 | `std.math.mean_f` | `mean_f(arr: [float]) -> Result<float, str>` |
 | `std.math.median` | `median(list: [float]) -> Result<float, str>` |
 | `std.math.median_f` | `median_f(arr: [float]) -> Result<float, str>` |
 | `std.math.min` | `min<T>(a: T, b: T) -> T` |
-| `std.math.min_arr` | `min_arr<T>(arr: [T]) -> Option<T>` |
 | `std.math.pow` | `pow<T>(base: T, exp: T) -> float` |
-| `std.math.product` | `product(arr: [int]) -> int` |
-| `std.math.product_f` | `product_f(arr: [float]) -> float` |
-| `std.math.rand_range` | `rand_range<T>(min: T, max: T) -> float` |
+| `std.math.pow` | `pow<T>(base: T, exp: T) -> float` |
 | `std.math.random` | `random() -> float` |
 | `std.math.root` | `root<T>(x: T, n: T) -> float` |
 | `std.math.round` | `round<T>(x: T) -> float` |
@@ -509,8 +503,6 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.math.sin` | `sin<T>(x: T) -> float` |
 | `std.math.sin_deg` | `sin_deg<T>(x: T) -> float` |
 | `std.math.sqrt` | `sqrt<T>(v: T) -> float` |
-| `std.math.sum` | `sum(arr: [int]) -> int` |
-| `std.math.sum_f` | `sum_f(arr: [float]) -> float` |
 | `std.math.tan` | `tan<T>(x: T) -> float` |
 | `std.math.tan_deg` | `tan_deg<T>(x: T) -> float` |
 | `std.math.to_degrees` | `to_degrees<T>(rad: T) -> float` |
@@ -522,7 +514,6 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | Function | Signature |
 |---|---|
 | `std.net.accept` | `accept(listener: tcp.listener) -> Result<tcp.stream, str>` |
-| `std.net.close` | `close(stream: tcp.stream) -> Result<unit, str>` |
 | `std.net.local_addr` | `local_addr(stream: tcp.stream) -> Result<str, str>` |
 | `std.net.peer_addr` | `peer_addr(stream: tcp.stream) -> Result<str, str>` |
 | `std.net.read` | `read(stream: tcp.stream, max_bytes: int) -> Result<str, str>` |

@@ -449,8 +449,6 @@ fn every_funcs_key_has_a_native() {
         "path.is_absolute",
         "path.extension",
         // http helpers (pure-ZZ, compiled from zz/http/mod.zz)
-        "std.http.use",
-        "http.use",
         "std.http.ok",
         "std.http.created",
         "std.http.not_found",
