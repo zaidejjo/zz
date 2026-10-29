@@ -6381,21 +6381,29 @@ static int http_hex_digit(char c) {
     return -1;
 }
 
-// Percent-decode like `urlencoding::decode`: `+` stays literal and a
-// malformed escape keeps the `%` (decoding continues after it).
+// Percent-decode like `urlencoding::decode`: `+` stays literal, and any
+// malformed escape (`%zz`, a truncated `%4`) makes the whole decode fail
+// (returns NULL) so the caller can fall back to the raw path, exactly like
+// the VM's `unwrap_or_else(|_| rel.to_string())`.
 static char *http_pct_decode(const char *s, size_t n, size_t *out_len) {
     char *out = (char *)malloc(n + 1);
     if (!out) return NULL;
     size_t w = 0;
     for (size_t i = 0; i < n; i++) {
-        if (s[i] == '%' && i + 2 < n) {
+        if (s[i] == '%') {
+            if (i + 2 >= n) {
+                free(out);
+                return NULL;
+            }
             int hi = http_hex_digit(s[i + 1]);
             int lo = http_hex_digit(s[i + 2]);
-            if (hi >= 0 && lo >= 0) {
-                out[w++] = (char)((hi << 4) | lo);
-                i += 2;
-                continue;
+            if (hi < 0 || lo < 0) {
+                free(out);
+                return NULL;
             }
+            out[w++] = (char)((hi << 4) | lo);
+            i += 2;
+            continue;
         }
         out[w++] = s[i];
     }
@@ -6473,11 +6481,24 @@ static int http_is_dir(const struct stat *st) {
 #endif
 }
 
+// Canonical paths use the host separator (`realpath`/`_fullpath` both
+// normalize to it), so `\` counts as one on Windows only.
+static int http_is_path_sep(char c) {
+#ifdef ZZ_OS_WINDOWS
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
 // `guess_mime` from static_files.rs (lowercase extension match).
 static const char *http_static_mime(const char *path) {
     // Extension of the final path segment only (`/a.b/file` has none).
-    const char *slash = strrchr(path, '/');
-    const char *dot = strrchr(slash ? slash + 1 : path, '.');
+    const char *base = path;
+    for (const char *p = path; *p; p++) {
+        if (http_is_path_sep(*p)) base = p + 1;
+    }
+    const char *dot = strrchr(base, '.');
     if (!dot) return "application/octet-stream";
     const char *ext = dot + 1;
     if (strcasecmp(ext, "html") == 0 || strcasecmp(ext, "htm") == 0) return "text/html; charset=utf-8";
@@ -6655,10 +6676,10 @@ static zz_value http_serve_static_file(const char *path, size_t pathlen,
     if (memchr(rel, '\0', rlen)) return http_static_plain(400, "Bad Request", NULL);
 
     size_t dlen = 0;
+    // Malformed escapes (and, below, invalid UTF-8) fall back to the raw
+    // path exactly like the VM's `urlencoding::decode(..).unwrap_or_else`.
     char *decoded = http_pct_decode(rel, rlen, &dlen);
-    if (!decoded) return http_static_plain(500, "Internal Server Error", NULL);
-    if (!zz_utf8_valid((const unsigned char *)decoded, dlen)) {
-        // VM: `urlencoding::decode` failures fall back to the raw path.
+    if (!decoded || !zz_utf8_valid((const unsigned char *)decoded, dlen)) {
         free(decoded);
         decoded = (char *)malloc(rlen + 1);
         if (!decoded) return http_static_plain(500, "Internal Server Error", NULL);
@@ -6715,9 +6736,12 @@ static zz_value http_serve_static_file(const char *path, size_t pathlen,
         return http_static_plain(404, "Not Found", NULL);
     }
     size_t clen = strlen(canon);
+    // Component-wise containment (VM: `canon.starts_with(&root)`): an exact
+    // match or a real separator after the root prefix — never a mere
+    // string prefix (`/root2` must not pass for root `/root`).
     int contained = (clen == rootlen && memcmp(canon, root, rootlen) == 0)
                  || (clen > rootlen && memcmp(canon, root, rootlen) == 0
-                     && canon[rootlen] == '/');
+                     && http_is_path_sep(canon[rootlen]));
     free(root);
     if (!contained) {
         free(canon);
