@@ -3755,6 +3755,23 @@ name = "zz_arena"
 version = "0.4.0"
 
 [[package]]
+name = "zz_build"
+version = "0.4.0"
+dependencies = [
+ "toml",
+ "zz_checker",
+ "zz_codegen",
+ "zz_frontend",
+ "zz_hir",
+ "zz_ir",
+ "zz_loader",
+ "zz_plugin",
+ "zz_pm",
+ "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_checker"
 version = "0.4.0"
 dependencies = [

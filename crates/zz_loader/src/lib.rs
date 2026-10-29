@@ -414,7 +414,7 @@ pub fn validate_feature_selection(
 
 /// Walk up from `start` (a file or directory) to the project root —
 /// the nearest ancestor (or self) holding `zz.toml`.
-pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
+pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     // Canonicalize so relative starts (e.g. `src/main.zz` with cwd at
     // the project root) walk up through real ancestors. Both the
     // canonicalization and the walk memoize process-wide (#233): every
