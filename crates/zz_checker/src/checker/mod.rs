@@ -1,7 +1,5 @@
 //! Type checker: HM-lite inference, generics, patterns, exhaustiveness.
 
-pub mod type_check;
-
 // State and shared helper types live in `zz_checker_core`.
 pub use zz_checker_core::*;
 
@@ -12,10 +10,10 @@ use zz_scope::ScopeOps;
 use zz_span_ast::ast::{Program, Stmt};
 use zz_span_ast::span::Span;
 
-use crate::checker::type_check::TypeCheckOps;
 use zz_infer::InferOps;
 use zz_sigs::funcs::FuncOps;
 use zz_structs::StructOps;
+use zz_type_check::TypeCheckOps;
 use zz_types::Type;
 
 /// Type-check a whole program, seeded with bindings/funcs/structs from prior

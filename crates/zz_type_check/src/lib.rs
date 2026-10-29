@@ -1,12 +1,11 @@
 //! Core type-checking logic: statements, expressions, patterns.
 
 use std::sync::Arc;
-use zz_scope::ScopeOps;
-
-use zz_lints::http_lint::HttpLintOps;
-use crate::checker::Checker;
+use zz_checker_core::{Checker, FuncSig};
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_infer::{contains_var, default_variant_vars, InferOps};
+use zz_lints::http_lint::HttpLintOps;
+use zz_scope::ScopeOps;
 use zz_sigs::enums::EnumOps;
 use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_span_ast::span::Span;
@@ -71,7 +70,7 @@ fn index_range_hint(len: usize) -> String {
 
 /// A method invocation: resolved signature plus receiver, args, and span.
 pub struct MethodCall<'a> {
-    pub sig: &'a super::FuncSig,
+    pub sig: &'a FuncSig,
     pub recv_t: &'a Type,
     /// Embedded-promoted receiver (struct embedding only), if any.
     pub promoted_recv: Option<Type>,
@@ -136,7 +135,7 @@ pub trait TypeCheckOps {
         span: Span,
     ) -> Option<Type>;
 
-    fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig);
+    fn check_func_body(&mut self, stmt: &Stmt, sig: &FuncSig);
     /// Report a missing-return diagnostic with improved diagnostics:
     /// - unit-tail functions (println, match, etc.) get the message only, no fixit.
     /// - annotated non-unit functions that can fall through get error + fixit.
@@ -548,7 +547,7 @@ impl TypeCheckOps for Checker {
             }
             Stmt::Func { span, .. } => {
                 let fname = Self::func_name(stmt);
-                let sig = match crate::lookup_std(&self.funcs, &fname) {
+                let sig = match zz_checker_core::lookup_std(&self.funcs, &fname) {
                     Some(s) => s.clone(),
                     None => {
                         self.errors.push(zz_diag_core::error_at(
@@ -588,7 +587,9 @@ impl TypeCheckOps for Checker {
                     if let Stmt::Func { .. } = method {
                         let method_name = Self::func_name(method);
                         let full_name = format!("{}.{}", type_name, method_name);
-                        let sig = crate::lookup_std(&self.funcs, &full_name).unwrap().clone();
+                        let sig = zz_checker_core::lookup_std(&self.funcs, &full_name)
+                            .unwrap()
+                            .clone();
                         self.scope.push(Arc::from(full_name));
                         self.check_func_body(method, &sig);
                         self.scope.pop();
@@ -1330,7 +1331,7 @@ impl TypeCheckOps for Checker {
     /// stay `Named` (using one as a value errors at lookup).
     fn resolve_fn_value(&mut self, t: Type) -> Type {
         match t {
-            Type::Named(ref n) => match crate::lookup_std(&self.funcs, n).cloned() {
+            Type::Named(ref n) => match zz_checker_core::lookup_std(&self.funcs, n).cloned() {
                 Some(sig) if sig.generics.is_empty() => {
                     let (ps, ret, _) = self.instantiate(&sig);
                     Type::Func(ps, Box::new(ret))
@@ -1440,7 +1441,8 @@ impl TypeCheckOps for Checker {
                         };
                         if let Some(ns) = ns {
                             if let Some(sig) =
-                                crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned()
+                                zz_checker_core::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                    .cloned()
                             {
                                 let (ps, ret, subs) = self.instantiate(&sig);
                                 if !ps.is_empty() {
@@ -2375,7 +2377,7 @@ impl TypeCheckOps for Checker {
         if parts.len() != 2 {
             return false;
         }
-        let Some(sig) = crate::lookup_std(&self.funcs, &parts.join(".")).cloned() else {
+        let Some(sig) = zz_checker_core::lookup_std(&self.funcs, &parts.join(".")).cloned() else {
             return false;
         };
         // The head must be a real local binding — module namespaces never
@@ -2430,7 +2432,7 @@ impl TypeCheckOps for Checker {
         let recv = self.unifier.resolve_deep(recv);
         match &recv {
             Type::Struct(name, _) | Type::Enum(name, _) => {
-                crate::lookup_std(&self.funcs, &format!("{name}.{method}")).is_some()
+                zz_checker_core::lookup_std(&self.funcs, &format!("{name}.{method}")).is_some()
             }
             _ => false,
         }
@@ -2499,96 +2501,137 @@ impl TypeCheckOps for Checker {
                 // The free signature is restored below when nothing matches,
                 // so its mismatch diagnostics are unchanged.
                 let impl_owned = self.receiver_impl_method(&recv_t, &method);
-                let free_sig = crate::lookup_std(&self.funcs, &method).cloned();
+                let free_sig = zz_checker_core::lookup_std(&self.funcs, &method).cloned();
                 let mut sig = if impl_owned { None } else { free_sig.clone() };
                 if sig.is_none() {
                     match &self.unifier.resolve(&recv_t) {
                         Type::Str => {
-                            sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}"))
+                                .cloned()
                         }
                         Type::Array(_) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}"))
+                                .cloned()
                         }
                         Type::Bytes => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("bytes.{method}")).cloned()
+                                zz_checker_core::lookup_std(&self.funcs, &format!("bytes.{method}"))
+                                    .cloned()
                         }
                         Type::Option(_) => {
-                            sig =
-                                crate::lookup_std(&self.funcs, &format!("option.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("option.{method}"),
+                            )
+                            .cloned()
                         }
                         Type::Result(_, _) => {
-                            sig =
-                                crate::lookup_std(&self.funcs, &format!("result.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("result.{method}"),
+                            )
+                            .cloned()
                         }
                         // Scalar extensions (`impl int/float/bool`) live in
                         // the same merged table; no stdlib namespace here.
                         Type::Int => {
-                            sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}"))
+                                .cloned()
                         }
                         Type::Float => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned()
+                                zz_checker_core::lookup_std(&self.funcs, &format!("float.{method}"))
+                                    .cloned()
                         }
                         Type::Bool => {
-                            sig = crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}"))
+                                    .cloned()
                         }
                         Type::Response => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned()
                         }
                         Type::HttpRequest => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned()
                         }
                         Type::TcpStream => {
-                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
+                                .cloned()
                         }
                         Type::TcpListener => {
-                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
+                                .cloned()
                         }
                         Type::HttpServer => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned()
                         }
                         Type::Json => {
-                            sig = crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}"))
+                                    .cloned()
                         }
                         Type::Db => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}"))
+                                    .cloned();
                         }
                         Type::Chan => {
-                            sig = crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}"))
+                                    .cloned()
                         }
                         Type::TaskJoin => {
-                            sig = crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}"))
+                                    .cloned()
                         }
                         // Opaque handles dispatch on their module tag, e.g.
                         // an `Opaque("regex")` receiver resolves
                         // `regex.is_match`.
                         Type::Opaque(tag) => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned()
+                                zz_checker_core::lookup_std(&self.funcs, &format!("{tag}.{method}"))
+                                    .cloned()
                         }
                         Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
-                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{sname}.{method}"),
+                            )
+                            .cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
-                                        .cloned();
+                                    sig = zz_checker_core::lookup_std(
+                                        &self.funcs,
+                                        &format!("{ns}.{method}"),
+                                    )
+                                    .cloned();
                                 }
                             }
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
                         Type::Enum(ename, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{ename}.{method}"),
+                            )
+                            .cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
-                                        .cloned();
+                                    sig = zz_checker_core::lookup_std(
+                                        &self.funcs,
+                                        &format!("{ns}.{method}"),
+                                    )
+                                    .cloned();
                                 }
                             }
                         }
@@ -2851,7 +2894,7 @@ impl TypeCheckOps for Checker {
                 || name == "std.sqlz.transaction"
                 || is_pg_call
             {
-                if let Some(sig) = crate::lookup_std(&self.funcs, name).cloned() {
+                if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name).cloned() {
                     // Only take this path when the leading component really
                     // is the module namespace (NOT a local variable).
                     // Otherwise fall through to method dispatch.
@@ -2907,7 +2950,7 @@ impl TypeCheckOps for Checker {
             // is user code (e.g. a `@route` decorator) — linting it would
             // false-positive (see `syntax/decorators.zz`).
             if !self.method_shadow_call(callee, args, named) {
-                if let Some(sig) = crate::lookup_std(&self.funcs, name).cloned() {
+                if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name).cloned() {
                     self.used_names.insert(name.clone());
                     let (ps, ret, subs) = self.instantiate(&sig);
                     if name == "input" {
@@ -3140,7 +3183,7 @@ impl TypeCheckOps for Checker {
                                     .cloned();
                                 if sig.is_none() {
                                     if let Some((ns, _)) = canonical_head2.rsplit_once('.') {
-                                        sig = crate::lookup_std(
+                                        sig = zz_checker_core::lookup_std(
                                             &self.funcs,
                                             &format!("{ns}.{method2}"),
                                         )
@@ -3219,7 +3262,7 @@ impl TypeCheckOps for Checker {
                                     }
                                     Type::Named(ref nname) => {
                                         if let Some(sig) =
-                                            crate::lookup_std(&self.funcs, nname).cloned()
+                                            zz_checker_core::lookup_std(&self.funcs, nname).cloned()
                                         {
                                             let (ps, ret, subs) = self.instantiate(&sig);
                                             let pnames: Vec<String> =
@@ -3270,94 +3313,136 @@ impl TypeCheckOps for Checker {
                 // restored at the end when nothing matches, so its mismatch
                 // diagnostics are unchanged.
                 let impl_owned = self.receiver_impl_method(&recv_t_resolved, method);
-                let free_sig = crate::lookup_std(&self.funcs, method).cloned();
+                let free_sig = zz_checker_core::lookup_std(&self.funcs, method).cloned();
                 let mut sig = if impl_owned { None } else { free_sig.clone() };
                 if sig.is_none() {
                     match &recv_t_resolved {
                         Type::Str => {
-                            sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}"))
+                                    .cloned();
                         }
                         Type::Array(_) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}"))
+                                    .cloned();
                         }
                         Type::Option(_) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("option.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("option.{method}"),
+                            )
+                            .cloned();
                         }
                         Type::Result(_, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("result.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("result.{method}"),
+                            )
+                            .cloned();
                         }
                         Type::Int => {
-                            sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}"))
+                                    .cloned();
                         }
                         Type::Float => {
-                            sig =
-                                crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("float.{method}"),
+                            )
+                            .cloned();
                         }
                         Type::Bool => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}"))
+                                    .cloned();
                         }
                         Type::Response => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned();
                         }
                         Type::HttpRequest => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned();
                         }
                         Type::TcpStream => {
-                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
+                                    .cloned();
                         }
                         Type::TcpListener => {
-                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
+                                    .cloned();
                         }
                         Type::HttpServer => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned();
                         }
                         Type::Json => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}"))
+                                    .cloned();
                         }
                         Type::Db => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}"))
+                                    .cloned();
                         }
                         Type::Chan => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}"))
+                                    .cloned();
                         }
                         Type::TaskJoin => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}"))
+                                    .cloned();
                         }
                         Type::Opaque(tag) => {
-                            sig =
-                                crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{tag}.{method}"),
+                            )
+                            .cloned();
                         }
                         Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
-                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{sname}.{method}"),
+                            )
+                            .cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
-                                        .cloned();
+                                    sig = zz_checker_core::lookup_std(
+                                        &self.funcs,
+                                        &format!("{ns}.{method}"),
+                                    )
+                                    .cloned();
                                 }
                             }
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
                         Type::Enum(ename, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{ename}.{method}"),
+                            )
+                            .cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
-                                        .cloned();
+                                    sig = zz_checker_core::lookup_std(
+                                        &self.funcs,
+                                        &format!("{ns}.{method}"),
+                                    )
+                                    .cloned();
                                 }
                             }
                         }
@@ -3488,7 +3573,7 @@ impl TypeCheckOps for Checker {
                 self.check_args_against(None, &pnames, &ps, &[], args, named, span);
                 *ret
             }
-            Type::Named(name) => match crate::lookup_std(&self.funcs, &name).cloned() {
+            Type::Named(name) => match zz_checker_core::lookup_std(&self.funcs, &name).cloned() {
                 Some(sig) => {
                     let (ps, ret, subs) = self.instantiate(&sig);
                     let param_names: Vec<String> =
@@ -3774,7 +3859,7 @@ impl TypeCheckOps for Checker {
                     // `Named` vs `Func`.
                     let at = match (&at, &expected) {
                         (Type::Named(n), Type::Func(_, _)) => {
-                            match crate::lookup_std(&self.funcs, n).cloned() {
+                            match zz_checker_core::lookup_std(&self.funcs, n).cloned() {
                                 Some(sig) => {
                                     let (sps, sret, _) = self.instantiate(&sig);
                                     Type::Func(sps, Box::new(sret))
@@ -4864,7 +4949,7 @@ impl TypeCheckOps for Checker {
         ))
     }
 
-    fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig) {
+    fn check_func_body(&mut self, stmt: &Stmt, sig: &FuncSig) {
         let (name, params, body) = match stmt {
             Stmt::Func {
                 name, params, body, ..

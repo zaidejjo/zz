@@ -3771,6 +3771,7 @@ dependencies = [
  "zz_span_ast",
  "zz_structs",
  "zz_suggest",
+ "zz_type_check",
  "zz_types",
  "zz_unify",
 ]
@@ -4082,6 +4083,24 @@ dependencies = [
 [[package]]
 name = "zz_suggest"
 version = "0.4.0"
+
+[[package]]
+name = "zz_type_check"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_http_routes",
+ "zz_infer",
+ "zz_lints",
+ "zz_scope",
+ "zz_sigs",
+ "zz_span_ast",
+ "zz_structs",
+ "zz_suggest",
+ "zz_types",
+ "zz_unify",
+]
 
 [[package]]
 name = "zz_types"
