@@ -3830,6 +3830,7 @@ dependencies = [
  "codespan-reporting",
  "colored",
  "serde",
+ "zz_span_ast",
 ]
 
 [[package]]
@@ -3940,6 +3941,13 @@ dependencies = [
  "zz_checker",
  "zz_frontend",
  "zz_native_rt",
+]
+
+[[package]]
+name = "zz_span_ast"
+version = "0.4.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

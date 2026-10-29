@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+zz_span_ast = { path = "../zz_span_ast" }
 codespan-reporting = "0.11"
 colored = "2"
 serde = { version = "1", features = ["derive"] }
