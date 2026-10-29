@@ -126,6 +126,18 @@ pub trait TypeCheckOps {
     /// compound assignment so both reject `const` identically.
     fn reject_const_target(&mut self, target: &Expr);
 
+    /// Check an enum construction `Enum.Variant(args)` where `enum_name`
+    /// is the already-canonicalized enum and `variant` the trailing call
+    /// path component. Returns the enum type on success.
+    fn check_enum_construction(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[zz_span_ast::ast::Expr],
+        named: &[(zz_span_ast::ast::Ident, zz_span_ast::ast::Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
     fn check_assign_target(&mut self, target: &Expr) -> Type;
 
     /// Element type of a tuple index, shared by reads and writes.
@@ -4747,5 +4759,93 @@ impl TypeCheckOps for Checker {
                 span,
             ));
         }
+    }
+
+    /// Check an enum construction `Enum.Variant(args)` where `enum_name`
+    /// is the already-canonicalized enum and `variant` the trailing call
+    /// path component. Returns the enum type on success.
+    fn check_enum_construction(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[zz_span_ast::ast::Expr],
+        named: &[(zz_span_ast::ast::Ident, zz_span_ast::ast::Expr)],
+        span: Span,
+    ) -> Option<Type> {
+        let sig = self.enums.get(enum_name).cloned()?;
+        let Some((_, payload)) = sig.variants.iter().find(|(v, _)| v == variant) else {
+            let known: Vec<&str> = sig.variants.iter().map(|(v, _)| v.as_str()).collect();
+            self.errors.push(error_at(
+                format!(
+                    "unknown variant `{variant}` for enum `{enum_name}` (expected one of: {})",
+                    known.join(", "),
+                ),
+                span,
+            ));
+            return Some(Type::Enum(
+                enum_name.to_string(),
+                sig.generics
+                    .iter()
+                    .map(|_| self.unifier.fresh_var())
+                    .collect(),
+            ));
+        };
+        // Generic parameters instantiate to fresh variables, filled in
+        // by unifying the payload below (struct-literal rule).
+        let (gen_vars, gen_map) = self.fresh_enum_vars(enum_name);
+        match payload {
+            Some(pty) => {
+                if !named.is_empty() {
+                    self.errors.push(error_at(
+                        format!(
+                            "variant `{enum_name}.{variant}` takes one positional argument, not named arguments"
+                        ),
+                        span,
+                    ));
+                }
+                if args.len() != 1 {
+                    self.errors.push(error_at(
+                        format!(
+                            "variant `{enum_name}.{variant}` takes 1 argument but {} given",
+                            args.len(),
+                        ),
+                        span,
+                    ));
+                    // Still check the args so nested errors surface.
+                    for arg in args {
+                        self.check_expr(arg);
+                    }
+                } else {
+                    let at = self.check_expr(&args[0]);
+                    let exp = super::inference::subst(pty, &gen_map);
+                    if let Err(e) = self.unifier.unify(&at, &exp) {
+                        self.report_mismatch(e, args[0].span());
+                    }
+                }
+            }
+            None => {
+                if !args.is_empty() || !named.is_empty() {
+                    self.errors.push(error_at(
+                        format!(
+                            "variant `{enum_name}.{variant}` takes no arguments but {} given",
+                            args.len() + named.len(),
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+        // A value construction counts as using the enum's name (marks
+        // imports used when the path is qualified).
+        if enum_name.contains('.') {
+            self.used_names.insert(enum_name.to_string());
+        }
+        Some(Type::Enum(
+            enum_name.to_string(),
+            gen_vars
+                .iter()
+                .map(|v| self.unifier.resolve_deep(v))
+                .collect(),
+        ))
     }
 }
