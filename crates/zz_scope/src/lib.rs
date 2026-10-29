@@ -1,9 +1,9 @@
 //! Scope management and variable lookup.
 
 use zz_checker_core::{Checker, DefinedBinding};
-use zz_structs::StructOps;
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_span_ast::span::Span;
+use zz_structs::StructOps;
 use zz_suggest::{suggest_all, suggest_dotted};
 use zz_types::Type;
 
