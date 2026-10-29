@@ -63,6 +63,7 @@ const HISTORY_MAX: usize = 10_000;
 // ZZCompleter — context-aware autocompletion
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::new_without_default)]
 pub struct ZZCompleter {
     keywords: Vec<String>,
     builtins: Vec<String>,
@@ -72,6 +73,7 @@ pub struct ZZCompleter {
     module_members: HashMap<String, Vec<String>>,
 }
 
+#[allow(clippy::new_without_default)]
 impl ZZCompleter {
     pub fn new() -> Self {
         Self {
@@ -580,10 +582,12 @@ impl Validator for ZZValidator {
 // ZZPrompt — custom two-line prompt
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::new_without_default)]
 pub struct ZZPrompt {
     had_error: bool,
 }
 
+#[allow(clippy::new_without_default)]
 impl ZZPrompt {
     pub fn new() -> Self {
         Self { had_error: false }

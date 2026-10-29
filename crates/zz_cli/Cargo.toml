@@ -19,6 +19,12 @@ zz_codegen = { path = "../zz_codegen" }
 zz_fmt = { path = "../zz_fmt" }
 zz_pm = { path = "../zz_pm" }
 zz_plugin = { path = "../zz_plugin" }
+zz_build = { path = "../zz_build" }
+zz_loader = { path = "../zz_loader" }
+zz_run_cache = { path = "../zz_run_cache" }
+zz_session = { path = "../zz_session" }
+zz_test_runner = { path = "../zz_test_runner" }
+zz_repl = { path = "../zz_repl" }
 codespan-reporting = "0.11"
 reedline = "0.51"
 dirs = "6"

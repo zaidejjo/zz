@@ -186,7 +186,7 @@ fn cover_tests_mode(
     html_path: Option<String>,
     fail_under: Option<f64>,
 ) -> Result<(), String> {
-    let (cov, failed) = crate::test_runner::cover_tests(path.as_deref())?;
+    let (cov, failed) = zz_test_runner::cover_tests(path.as_deref())?;
     for name in &failed {
         eprintln!("cover: test failed (coverage kept): {name}");
     }

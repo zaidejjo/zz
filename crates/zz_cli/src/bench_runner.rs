@@ -27,7 +27,7 @@ use zz_frontend::diag::{render_to_string, Files};
 use zz_frontend::span::Span;
 use zz_runtime::{Interp, Value};
 
-use crate::loader;
+use zz_loader::{find_project_root, load_program};
 
 /// Default timed iterations / warmup when neither CLI nor decorator sets them.
 const DEFAULT_ITERS: u64 = 1000;
@@ -614,7 +614,7 @@ fn apply_filters(benches: &mut Vec<BenchInfo>, config: &BenchConfig) {
 // ---------------------------------------------------------------------------
 
 fn discover_benches(path: &Path) -> Result<Vec<BenchInfo>, String> {
-    let loaded = loader::load_program(path)?;
+    let loaded = load_program(path)?;
 
     let mut errors = false;
     for e in &loaded.errors {
@@ -783,19 +783,19 @@ fn discover_in_stmt(stmt: &Stmt, file: &Path, module_index: usize) -> Vec<BenchI
 fn setup_bench_interp(bench: &BenchInfo) -> Result<(Interp, Value), String> {
     use std::sync::Arc;
 
-    let loaded = loader::load_program(&bench.file)?;
+    let loaded = load_program(&bench.file)?;
 
     // Native plugins: same as `zz run` / `zz test`.
     let mut natives = loaded.natives.clone();
     {
-        let project_root = loader::find_project_root(&bench.file).unwrap_or_else(|| {
+        let project_root = find_project_root(&bench.file).unwrap_or_else(|| {
             bench
                 .file
                 .parent()
                 .unwrap_or(std::path::Path::new("."))
                 .to_path_buf()
         });
-        let plugin_funcs = crate::build::discover_plugin_manifests(&bench.file);
+        let plugin_funcs = zz_build::discover_plugin_manifests(&bench.file);
         crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs).map(|_| ())?;
     }
 
@@ -1068,16 +1068,16 @@ fn build_bench_harness(
         .map_err(|e| format!("cannot write AOT harness `{}`: {e}", harness_path.display()))?;
 
     let mode = if config.native_release {
-        crate::build::BuildMode::Release
+        zz_build::BuildMode::Release
     } else {
-        crate::build::BuildMode::Dev
+        zz_build::BuildMode::Dev
     };
-    let rel = crate::build::ReleaseOptions {
+    let rel = zz_build::ReleaseOptions {
         allow_source_builds: config.allow_source_builds,
         allow_hooks: config.allow_hooks,
         ..Default::default()
     };
-    let bin = match crate::build::build_release(&harness_path, mode, &rel) {
+    let bin = match zz_build::build_release(&harness_path, mode, &rel) {
         Ok(b) => b,
         Err(e) => {
             let _ = std::fs::remove_file(&harness_path);

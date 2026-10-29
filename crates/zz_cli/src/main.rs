@@ -10,16 +10,10 @@
 use std::process::ExitCode;
 
 mod bench_runner;
-mod build;
 mod cover;
 mod doctor;
-mod loader;
 mod pm;
-mod repl;
-mod run_cache;
-mod session;
 mod setup;
-mod test_runner;
 mod toolchain;
 mod ui;
 mod upgrade;
@@ -30,27 +24,10 @@ use zz_frontend::diag::{error_at, render_to_string, Files};
 use zz_frontend::span::Span;
 use zz_runtime::{Interp, Value};
 
-use session::Session;
+use zz_session::Session;
+use zz_test_runner::{enforce_project_zz, load_vm_plugins};
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Enforce the project's `[package] zz` minimum-compiler requirement, if
-/// any. No manifest or no `zz` key → pass. Called by the run/build/test
-/// entries so an outdated compiler fails fast with an upgrade hint
-/// instead of cryptic backend errors.
-pub(crate) fn enforce_project_zz(start: &std::path::Path) -> Result<(), String> {
-    let Some(root) = loader::find_project_root(start) else {
-        return Ok(());
-    };
-    let manifest_path = root.join("zz.toml");
-    if !manifest_path.exists() {
-        return Ok(());
-    }
-    let Ok(manifest) = zz_pm::manifest::Manifest::load(&manifest_path) else {
-        return Ok(()); // unloadable: the normal flow reports it better
-    };
-    manifest.check_zz_version(VERSION)
-}
 
 const USAGE: &str = "\
 zz — the ZZ programming language
@@ -264,7 +241,7 @@ fn main_inner() -> ExitCode {
     let rest = args.get(1..).unwrap_or(&[]);
 
     match cmd {
-        None => match repl::run() {
+        None => match zz_repl::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("zz: repl error: {e}");
@@ -580,7 +557,7 @@ fn main_inner() -> ExitCode {
                 }
             }
         }
-        Some("test") => match test_runner::test_command(rest) {
+        Some("test") => match zz_test_runner::test_command(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("zz: {msg}");
@@ -909,220 +886,6 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// Load plugin shared libraries for VM-based native dispatch.
-///
-/// Reads `zz.lock` and `zz.toml` from the project directory, finds dependencies
-/// with `plugin.zzi` and shared libraries in their `build/` directory, loads
-/// them via dlopen, and registers their native functions.
-///
-/// `plugin_funcs` carries the manifest signatures keyed by ZZ-visible name;
-/// after loading, C-symbol registrations are aliased to those ZZ names so
-/// VM dispatch and AOT lowering resolve identically.
-///
-/// Returns the number of plugin libraries loaded (0 with no plugins, or
-/// when every candidate failed — failures warn per-library above).
-#[cfg(unix)]
-fn load_vm_plugins(
-    project_dir: &std::path::Path,
-    natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
-    plugin_funcs: &[(String, zz_checker::FuncSig)],
-) -> Result<usize, String> {
-    use zz_pm::lock::Lockfile;
-
-    // Canonicalize: callers pass roots derived from relative script paths
-    // (possibly empty = CWD); every join below must be unambiguous.
-    let project_dir =
-        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
-
-    let lock_path = project_dir.join("zz.lock");
-    let lock = match Lockfile::load(&lock_path) {
-        Ok(l) => l,
-        Err(_) => return Ok(0), // no lock file, no plugins
-    };
-
-    // Load manifest to resolve path deps
-    let manifest_path = project_dir.join("zz.toml");
-    let manifest = zz_pm::manifest::Manifest::load(&manifest_path).ok();
-
-    let mut loaded_count = 0;
-    for dep in &lock.deps {
-        // Resolve package directory (canonicalized: a relative dep path
-        // must never leak `..` into hook/dlsym paths downstream).
-        let Some(pkg_dir) = crate::build::resolve_pkg_dir(&project_dir, dep, manifest.as_ref())
-        else {
-            continue;
-        };
-
-        // Only load plugins that have a plugin.zzi manifest
-        let zzi_path = pkg_dir.join("plugin.zzi");
-        if !zzi_path.exists() {
-            continue;
-        }
-
-        // C-only plugins (`// C-ABI: 1` header) resolve symbols directly
-        // with dlsym — no Rust shim. Their manifest functions register in
-        // the runtime C-ABI registry under ZZ-visible names.
-        let c_funcs: Option<std::collections::HashMap<String, zz_checker::FuncSig>> =
-            match zz_plugin::load_manifest(&zzi_path) {
-                Ok(manifest) if manifest.meta.c_abi.is_some() => Some(manifest.funcs),
-                _ => None,
-            };
-
-        // Look for shared library in build/ directory
-        let build_dir = pkg_dir.join("build");
-        if !build_dir.exists() {
-            continue;
-        }
-
-        // Try the platform's canonical shared-library names, then any
-        // `.so`/`.dylib`/`.dll` the build hook actually produced (e.g.
-        // libzimg_native.so — never assume lib<name>.so). Windows PE has no
-        // `lib` prefix, so both forms are probed everywhere.
-        let mut lib_paths: Vec<std::path::PathBuf> = Vec::new();
-        let base = dep.name.replace('-', "_");
-        let lib_names = [
-            format!(
-                "{}{base}{}",
-                std::env::consts::DLL_PREFIX,
-                std::env::consts::DLL_SUFFIX
-            ),
-            format!("{base}{}", std::env::consts::DLL_SUFFIX),
-        ];
-
-        for lib_name in &lib_names {
-            let lib_path = build_dir.join(lib_name);
-            if lib_path.exists() && !lib_paths.contains(&lib_path) {
-                lib_paths.push(lib_path);
-            }
-        }
-        if let Ok(entries) = std::fs::read_dir(&build_dir) {
-            // Accept every shared-library spelling the build hook may have
-            // produced (`libctoy_native.so` on a Linux-flavored hook, `.dylib`
-            // on macOS, `.dll` on Windows) — never assume the host's
-            // `DLL_SUFFIX` matches what the hook actually emitted.
-            let is_shared_lib = |p: &std::path::Path| {
-                matches!(
-                    p.extension().and_then(|e| e.to_str()),
-                    Some(ext) if ext == "so" || ext == "dylib" || ext == "dll"
-                )
-            };
-            let mut scanned: Vec<std::path::PathBuf> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| is_shared_lib(p) && !lib_paths.contains(p))
-                .collect();
-            scanned.sort();
-            lib_paths.extend(scanned);
-        }
-
-        for lib_path in &lib_paths {
-            // Both paths retain the dlopen handle: dropping it unloads the
-            // library, unmapping registered pointers (Rust entries and raw
-            // C-registry symbol addresses alike).
-            let loaded: Result<(), String> = match &c_funcs {
-                Some(funcs) => match zz_plugin::load_c_plugin(lib_path, funcs) {
-                    Ok(handle) => {
-                        keep_plugin_alive(handle);
-                        Ok(())
-                    }
-                    // Not a C plugin (e.g. a transitional Rust cdylib next
-                    // to the C .so): try the next library silently.
-                    Err(zz_plugin::LoadError::MissingSymbol { symbol, .. })
-                        if symbol == "ZZ_C_PLUGIN_ABI_VERSION" =>
-                    {
-                        continue;
-                    }
-                    Err(e) => Err(e.to_string()),
-                },
-                None => zz_plugin::load_plugin(lib_path, natives)
-                    .map(|handle| {
-                        // The handle MUST stay alive (see keep_plugin_alive).
-                        keep_plugin_alive(handle);
-                    })
-                    .map_err(|e| e.to_string()),
-            };
-            match loaded {
-                Ok(()) => {
-                    // Progress chatter only under ZZ_VERBOSE: everyday runs
-                    // (and program output) stay clean; piped runs especially.
-                    if std::env::var("ZZ_VERBOSE").is_ok() {
-                        eprintln!("zz: loaded plugin `{}`", dep.name);
-                    }
-                    loaded_count += 1;
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("zz: warning: failed to load plugin `{}`: {e}", dep.name);
-                }
-            }
-        }
-    }
-
-    // Alias C-symbol registrations to ZZ-visible dotted names so VM
-    // dispatch resolves exactly what AOT lowering calls.
-    for (zz_name, sig) in plugin_funcs {
-        if natives.contains_key(zz_name) {
-            continue;
-        }
-        let c_sym = sig.c_symbol(zz_name);
-        if let Some(entry) = natives.get(&c_sym).cloned() {
-            natives.insert(zz_name.clone(), entry);
-        }
-    }
-
-    Ok(loaded_count)
-}
-
-/// Loaded plugin libraries, kept alive for the process lifetime.
-/// Dropping a `PluginLib` unloads its `.so`, unmapping every registered
-/// function pointer — so handles are never released once loaded.
-/// Capped at `MAX_PLUGIN_LIBS` so a single-process test suite (all 283
-/// bin tests run in one libtest process) cannot grow RSS without bound
-/// and get OOM-killed.
-static PLUGIN_LIBS: std::sync::OnceLock<std::sync::Mutex<Vec<zz_plugin::PluginLib>>> =
-    std::sync::OnceLock::new();
-
-/// Cap on retained plugin handles; oldest are dropped when full.
-const MAX_PLUGIN_LIBS: usize = 64;
-
-/// Retain a loaded plugin library for the rest of the process.
-fn keep_plugin_alive(handle: zz_plugin::PluginLib) {
-    let mut g = PLUGIN_LIBS
-        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
-        .lock()
-        .expect("plugin registry lock");
-    if g.len() >= MAX_PLUGIN_LIBS {
-        // Drop the oldest handle so its `.so` is unmapped before adding
-        // the new one, keeping RSS bounded in long-running processes.
-        g.remove(0);
-    }
-    g.push(handle);
-}
-
-/// Drop all retained plugin handles so their `.so` mappings are released.
-/// Test-only: call in test teardown to keep RSS flat across the 283 bin
-/// tests that share one libtest process.
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn clear_plugin_libs_for_test() {
-    if let Some(m) = PLUGIN_LIBS.get() {
-        if let Ok(mut g) = m.lock() {
-            g.clear();
-        }
-    }
-}
-
-/// Non-Unix stub for VM plugin loading.
-#[cfg(not(unix))]
-fn load_vm_plugins(
-    _project_dir: &std::path::Path,
-    _natives: &mut std::collections::HashMap<String, zz_runtime::NativeEntry>,
-    _plugin_funcs: &[(String, zz_checker::FuncSig)],
-) -> Result<usize, String> {
-    // dlopen not supported on this platform yet
-    Ok(0)
-}
-
 /// A `.zz` program ready to execute: loaded modules, HIR types, and a
 /// fully seeded interpreter (natives, consts, pure-ZZ stdlib, aliases).
 pub(crate) struct PreparedRun {
@@ -1144,7 +907,7 @@ pub(crate) struct PreparedRun {
     /// closure (any import kind) + selective/wildcard replays for bare-name
     /// natives. Hits execute only these modules' pure-ZZ programs.
     stdlib_modules: Vec<String>,
-    stdlib_selectives: crate::loader::StdlibSelectives,
+    stdlib_selectives: zz_loader::StdlibSelectives,
     stdlib_wildcards: Vec<String>,
 }
 
@@ -1161,7 +924,7 @@ fn setup_interp(
     plugin_funcs: &[(String, zz_checker::FuncSig)],
     script_args: &[String],
     embed: Option<&std::path::Path>,
-    mut timer: Option<&mut run_cache::StageTimer>,
+    mut timer: Option<&mut zz_run_cache::StageTimer>,
     // Scoped pure-ZZ stdlib: loader-module namespaces to execute
     // (`None` = all, for the `.zzc` loader which lacks import info).
     // Unimported stdlib code is unreachable by checked programs; the
@@ -1178,7 +941,7 @@ fn setup_interp(
         }
     };
     if !plugin_funcs.is_empty() && first_try == 0 {
-        crate::build::ensure_native_hooks(project_root);
+        zz_build::ensure_native_hooks(project_root);
         if let Err(e) = crate::load_vm_plugins(project_root, &mut natives, plugin_funcs) {
             eprintln!("zz: warning: {e}");
         }
@@ -1197,7 +960,7 @@ fn setup_interp(
 
     // `--embed <dir>`: serve the asset tree to `fs.embedfs()` for this run.
     if let Some(dir) = embed {
-        let files = build::collect_embed(dir)?;
+        let files = zz_build::collect_embed(dir)?;
         zz_stdlib::natives::fs::vfs::set_embed(
             files
                 .into_iter()
@@ -1314,7 +1077,7 @@ pub(crate) fn prepare_run_with_features(
     let script_path = std::path::Path::new(path);
     // Project root: walk up from the script (entry files usually live in
     // `src/`; `zz.lock` sits at the root). Falls back to the script dir.
-    let project_root = loader::find_project_root(script_path).unwrap_or_else(|| {
+    let project_root = zz_loader::find_project_root(script_path).unwrap_or_else(|| {
         script_path
             .parent()
             .unwrap_or(std::path::Path::new("."))
@@ -1322,15 +1085,15 @@ pub(crate) fn prepare_run_with_features(
     });
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(script_path)?;
-    loader::validate_feature_selection(script_path, features)?;
+    zz_loader::validate_feature_selection(script_path, features)?;
     // Discover plugin manifest signatures so `zz run` type-checks the
     // same dotted names the AOT path merges.
-    let plugin_funcs = crate::build::discover_plugin_manifests(script_path);
+    let plugin_funcs = zz_build::discover_plugin_manifests(script_path);
 
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program_with_features(script_path, features)?
+        zz_loader::load_program_with_features(script_path, features)?
     } else {
-        loader::load_program_with_plugins_and_features(script_path, &plugin_funcs, features)?
+        zz_loader::load_program_with_plugins_and_features(script_path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -1368,7 +1131,7 @@ pub(crate) fn prepare_run_with_features(
         stmts: merged_stmts,
         span: merged_span,
     };
-    let crate::loader::LoadResult {
+    let zz_loader::LoadResult {
         programs,
         files,
         funcs,
@@ -1451,8 +1214,8 @@ fn compile_prep(prep: &PreparedRun) -> Option<Vec<Vec<u8>>> {
 
 /// Run-cache metadata from a prepared program: interpreter inputs that
 /// cannot be derived from `.zzc` bytes.
-fn meta_from_prep(prep: &PreparedRun) -> run_cache::RunMeta {
-    run_cache::RunMeta {
+fn meta_from_prep(prep: &PreparedRun) -> zz_run_cache::RunMeta {
+    zz_run_cache::RunMeta {
         consts: prep.consts.clone(),
         import_aliases: prep.import_aliases.clone(),
         stdlib_aliases: prep.stdlib_aliases.clone(),
@@ -1473,19 +1236,19 @@ pub(crate) fn prewarm_run_cache(
     root: &std::path::Path,
     features: &zz_pm::manifest::FeatureSelection,
 ) {
-    if !run_cache::cache_enabled() {
+    if !zz_run_cache::cache_enabled() {
         return;
     }
-    let entry = match crate::build::resolve_entry(root) {
+    let entry = match zz_build::resolve_entry(root) {
         Ok(p) => p,
         Err(_) => return, // no entry (lib-only package): nothing to warm
     };
-    let plugin_funcs = crate::build::discover_plugin_manifests(&entry);
-    let slug = match run_cache::run_key_with_features(&entry, &plugin_funcs, None, features) {
+    let plugin_funcs = zz_build::discover_plugin_manifests(&entry);
+    let slug = match zz_run_cache::run_key_with_features(&entry, &plugin_funcs, None, features) {
         Ok(s) => s,
         Err(_) => return,
     };
-    if run_cache::lookup(&slug).is_some() {
+    if zz_run_cache::lookup(&slug).is_some() {
         return;
     }
     let path = entry.to_string_lossy().into_owned();
@@ -1494,7 +1257,7 @@ pub(crate) fn prewarm_run_cache(
         Err(_) => return, // check errors: `zz run` reports them
     };
     if let Some(modules) = compile_prep(&prep) {
-        run_cache::store(&slug, &modules, &meta_from_prep(&prep));
+        zz_run_cache::store(&slug, &modules, &meta_from_prep(&prep));
         println!("pre-compiled entry cache for instant runs");
     }
 }
@@ -1861,16 +1624,18 @@ fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
 /// then `main.zz`) under the project discovered from the current working
 /// directory. An explicit argument is returned unchanged (its owning
 /// project — resolved from the source path itself — decides the output
-/// destination; see [`build::planned_dest_for`]).
+/// destination; see [`zz_build::planned_dest_for`]).
 fn resolve_default_entry(usage: &str, hint: &str) -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
-    let Some(root) = loader::find_project_root(&cwd) else {
+    let Some(root) = zz_loader::find_project_root(&cwd) else {
         return Err(format!(
             "missing file argument\n\nusage: {usage}\nhint: {hint}"
         ));
     };
     // resolve_entry carries actionable hints for every failure shape.
-    Ok(build::resolve_entry(&root)?.to_string_lossy().into_owned())
+    Ok(zz_build::resolve_entry(&root)?
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Resolve the entry file for `run` / `run --native`: explicit argument
@@ -1899,22 +1664,22 @@ fn run_file(
         "provide the path to a .zz file to execute",
     )?;
     let path = &resolved;
-    loader::validate_feature_selection(std::path::Path::new(path), features)?;
+    zz_loader::validate_feature_selection(std::path::Path::new(path), features)?;
 
     // One-time-compiler fast path: the key is content-addressed over the
     // whole closure, so a hit executes cached IR with no frontend work.
     // Plugin discovery is cheap (manifest scan) and must precede the key.
     let entry_path = std::path::Path::new(path);
-    let mut timer = run_cache::StageTimer::start();
-    let plugin_funcs = crate::build::discover_plugin_manifests(entry_path);
+    let mut timer = zz_run_cache::StageTimer::start();
+    let plugin_funcs = zz_build::discover_plugin_manifests(entry_path);
     timer.stage("plugin discovery");
     if let Ok(slug) =
-        run_cache::run_key_with_features(entry_path, &plugin_funcs, embed.as_deref(), features)
+        zz_run_cache::run_key_with_features(entry_path, &plugin_funcs, embed.as_deref(), features)
     {
         timer.stage("run key");
-        if let Some(hit) = run_cache::lookup(&slug) {
+        if let Some(hit) = zz_run_cache::lookup(&slug) {
             timer.stage("lookup");
-            run_cache::log_hit(&slug);
+            zz_run_cache::log_hit(&slug);
             match run_cached(
                 &slug,
                 &hit,
@@ -1935,8 +1700,8 @@ fn run_file(
                 }
             }
         } else {
-            if run_cache::cache_enabled() {
-                run_cache::log_miss(&slug);
+            if zz_run_cache::cache_enabled() {
+                zz_run_cache::log_miss(&slug);
             }
         }
         // Miss: full pipeline, then store the compiled IR for next time.
@@ -1989,7 +1754,7 @@ fn run_file(
             }
         }
         if let Some(modules) = cached_modules {
-            run_cache::store(&slug, &modules, &meta_from_prep(&prep));
+            zz_run_cache::store(&slug, &modules, &meta_from_prep(&prep));
         }
         return run_entry_main(
             &mut prep.interp,
@@ -2060,15 +1825,15 @@ fn run_file(
 /// `.zzc` loader — no AST is available on this path.
 fn run_cached(
     slug: &str,
-    hit: &run_cache::RunHit,
+    hit: &zz_run_cache::RunHit,
     entry_path: &str,
     script_args: &[String],
     embed: Option<&std::path::Path>,
     plugin_funcs: &[(String, zz_checker::FuncSig)],
-    timer: &mut run_cache::StageTimer,
+    timer: &mut zz_run_cache::StageTimer,
 ) -> Result<(), String> {
     let path = std::path::Path::new(entry_path);
-    let project_root = loader::find_project_root(path).unwrap_or_else(|| {
+    let project_root = zz_loader::find_project_root(path).unwrap_or_else(|| {
         path.parent()
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf()
@@ -2160,17 +1925,17 @@ fn run_native(
     let p = std::path::Path::new(path);
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(p)?;
-    loader::validate_feature_selection(p, features)?;
+    zz_loader::validate_feature_selection(p, features)?;
     // Release mode for true native speed — unless `ZZ_NATIVE_DEV=1`
     // (parity sweeps: `-O0 -g`, no LTO, ~4x faster clang per fixture;
     // same generated C, separate cache entries via the fingerprint).
     let mode = if std::env::var("ZZ_NATIVE_DEV").is_ok() {
-        build::BuildMode::Dev
+        zz_build::BuildMode::Dev
     } else {
-        build::BuildMode::Release
+        zz_build::BuildMode::Release
     };
     let auto_output = output.is_none();
-    let rel = build::ReleaseOptions {
+    let rel = zz_build::ReleaseOptions {
         embed,
         output,
         features: features.clone(),
@@ -2188,7 +1953,7 @@ fn run_native(
         let uniq = RUN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let tmp = std::env::temp_dir().join(format!("zz-run-native-{}-{uniq}", std::process::id()));
         auto_tmp = Some(tmp.clone());
-        build::ReleaseOptions {
+        zz_build::ReleaseOptions {
             output: Some(tmp.join("zz_out")),
             ..rel
         }
@@ -2198,9 +1963,9 @@ fn run_native(
     // Publish through the normal destination, then execute a private
     // staged copy: concurrent same-named publishes can never swap the
     // binary mid-exec.
-    let built = build::build_release(p, mode, &rel)?;
-    let (bin, cleanup) = build::stage_exec_copy(&built)?;
-    let code = match build::exec_binary(&bin, script_args) {
+    let built = zz_build::build_release(p, mode, &rel)?;
+    let (bin, cleanup) = zz_build::stage_exec_copy(&built)?;
+    let code = match zz_build::exec_binary(&bin, script_args) {
         Ok(code) => code,
         Err(e) => {
             cleanup();
@@ -2421,7 +2186,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
 
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     crate::enforce_project_zz(p)?;
-    loader::validate_feature_selection(p, &features)?;
+    zz_loader::validate_feature_selection(p, &features)?;
 
     // Default (no flags) is a static self-contained build; `--full`
     // selects max optimization (full LTO; plus PGO when training args
@@ -2431,19 +2196,19 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     // apply uniformly; default-static downgrade paths (macOS, missing
     // static syslibs) fall back to dynamic with a note instead.
     let mode = if is_pgo {
-        build::BuildMode::Pgo
+        zz_build::BuildMode::Pgo
     } else if is_static {
-        build::BuildMode::Static
+        zz_build::BuildMode::Static
     } else if is_full {
-        build::BuildMode::Full
+        zz_build::BuildMode::Full
     } else if release {
-        build::BuildMode::Release
+        zz_build::BuildMode::Release
     } else if is_dynamic {
-        build::BuildMode::Dev
+        zz_build::BuildMode::Dev
     } else {
-        build::BuildMode::Static
+        zz_build::BuildMode::Static
     };
-    let allow_downgrade = mode == build::BuildMode::Static && !is_static;
+    let allow_downgrade = mode == zz_build::BuildMode::Static && !is_static;
     let provider = match cc.as_deref() {
         None => zz_codegen::ClangProvider::Any,
         Some(name) => zz_codegen::ClangProvider::parse(name).ok_or_else(|| {
@@ -2453,7 +2218,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             )
         })?,
     };
-    let rel = build::ReleaseOptions {
+    let rel = zz_build::ReleaseOptions {
         target,
         provider,
         verbose,
@@ -2469,11 +2234,11 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         features: features.clone(),
     };
     let mode_str = match mode {
-        build::BuildMode::Dev => "dev",
-        build::BuildMode::Release => "release",
-        build::BuildMode::Static => "static",
-        build::BuildMode::Pgo | build::BuildMode::PgoUse => "pgo",
-        build::BuildMode::Full | build::BuildMode::FullPgo => "full",
+        zz_build::BuildMode::Dev => "dev",
+        zz_build::BuildMode::Release => "release",
+        zz_build::BuildMode::Static => "static",
+        zz_build::BuildMode::Pgo | zz_build::BuildMode::PgoUse => "pgo",
+        zz_build::BuildMode::Full | zz_build::BuildMode::FullPgo => "full",
     };
     // `--full -- <train args>`: max optimization with PGO —
     // instrument, train, merge, rebuild optimized (mirrors `zz profile`
@@ -2487,7 +2252,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     // elapsed time so a big build never looks frozen. Cache hits finish
     // instantly, so the spinner is just one extra line there.
     let spinner = crate::ui::Spinner::start(&format!("Compiling {mode_str}"));
-    let dest = match build::build_release(p, mode, &rel) {
+    let dest = match zz_build::build_release(p, mode, &rel) {
         Ok(dest) => {
             let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
             spinner.finish(&format!(
@@ -2513,7 +2278,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
 /// `FullPgo` output instead of plain `PgoUse`.
 fn build_full_with_training(
     path: &str,
-    rel: &build::ReleaseOptions,
+    rel: &zz_build::ReleaseOptions,
     train_args: &[String],
 ) -> Result<(), String> {
     // Fail fast: merging needs llvm-profdata, and there is no point
@@ -2534,7 +2299,7 @@ fn build_full_with_training(
     crate::ui::header(&format!("building {path} (full+profile)"));
     crate::ui::step(1, 4, "Instrumented build");
     let spinner = crate::ui::Spinner::start("Compiling (instrumented)");
-    let instrumented = match build::build_release(p, build::BuildMode::Pgo, rel) {
+    let instrumented = match zz_build::build_release(p, zz_build::BuildMode::Pgo, rel) {
         Ok(bin) => {
             spinner.finish("instrumented build done");
             bin
@@ -2603,7 +2368,7 @@ fn build_full_with_training(
 
     crate::ui::step(4, 4, "Optimized build (full LTO + PGO)");
     let spinner = crate::ui::Spinner::start("Compiling (full+profile)");
-    let dest = match build::build_release(p, build::BuildMode::FullPgo, rel) {
+    let dest = match zz_build::build_release(p, zz_build::BuildMode::FullPgo, rel) {
         Ok(dest) => {
             let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
             spinner.finish(&format!(
@@ -2667,12 +2432,12 @@ fn profile_cmd(args: &[String]) -> Result<(), String> {
             .to_string());
     }
     let p = std::path::Path::new(path.as_str());
-    let rel = build::ReleaseOptions::default();
+    let rel = zz_build::ReleaseOptions::default();
 
     crate::ui::header(&format!("profiling {path}"));
     crate::ui::step(1, 4, "Instrumented build");
     let spinner = crate::ui::Spinner::start("Compiling (instrumented)");
-    let instrumented = match build::build_release(p, build::BuildMode::Pgo, &rel) {
+    let instrumented = match zz_build::build_release(p, zz_build::BuildMode::Pgo, &rel) {
         Ok(bin) => {
             spinner.finish("instrumented build done");
             bin
@@ -2741,7 +2506,7 @@ fn profile_cmd(args: &[String]) -> Result<(), String> {
 
     crate::ui::step(4, 4, "Optimized build");
     let spinner = crate::ui::Spinner::start("Compiling (optimized)");
-    let dest = match build::build_release(p, build::BuildMode::PgoUse, &rel) {
+    let dest = match zz_build::build_release(p, zz_build::BuildMode::PgoUse, &rel) {
         Ok(dest) => {
             let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
             spinner.finish(&format!(
@@ -3197,7 +2962,7 @@ fn check_or_fix_path(
     let plugin_root = files.first().and_then(|p| {
         std::fs::canonicalize(p)
             .ok()
-            .and_then(|c| loader::find_project_root(&c))
+            .and_then(|c| zz_loader::find_project_root(&c))
     });
     if let Some(root) = &plugin_root {
         if root.join("plugin.zzi").exists() {
@@ -3229,8 +2994,8 @@ fn check_or_fix_path(
             std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
 
         let file_start = std::time::Instant::now();
-        loader::validate_feature_selection(path, features)?;
-        let loaded = loader::load_program_check_with_features(path, features)?;
+        zz_loader::validate_feature_selection(path, features)?;
+        let loaded = zz_loader::load_program_check_with_features(path, features)?;
         let file_ms = file_start.elapsed().as_secs_f64() * 1000.0;
         if show_stats {
             stat_files += 1;
@@ -3508,7 +3273,7 @@ mod tests {
     /// process-global cache env with the loader's cache-counting tests
     /// otherwise pollutes their entry counts mid-flight.
     fn check_isolated(path: &str) -> Result<(), String> {
-        super::loader::cache::with_isolated_cache(|| {
+        zz_loader::cache::with_isolated_cache(|| {
             check_or_fix_path(
                 &Some(path.to_string()),
                 false,
@@ -3523,7 +3288,7 @@ mod tests {
 
     /// Run `zz check --fix` (fix mode) under the isolated cache env.
     fn fix_isolated(path: &str) -> Result<(), String> {
-        super::loader::cache::with_isolated_cache(|| {
+        zz_loader::cache::with_isolated_cache(|| {
             check_or_fix_path(
                 &Some(path.to_string()),
                 true,
@@ -3671,7 +3436,7 @@ mod tests {
             "no fixture files were checked; directory discovery may be broken"
         );
         // Clear memory caches so RSS stays flat for the rest of the suite.
-        super::loader::cache::clear_all_caches_for_test();
+        zz_loader::cache::clear_all_caches_for_test();
     }
 }
 

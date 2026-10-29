@@ -31,11 +31,7 @@ pub struct Rewriter<'a> {
 }
 
 impl<'a> Rewriter<'a> {
-    pub fn new(
-        ns: &'a str,
-        top: &'a HashSet<String>,
-        top_bindings: &'a HashSet<String>,
-    ) -> Self {
+    pub fn new(ns: &'a str, top: &'a HashSet<String>, top_bindings: &'a HashSet<String>) -> Self {
         Rewriter {
             ns,
             top,

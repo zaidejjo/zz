@@ -422,8 +422,7 @@ pub(crate) fn dep_consumers(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
 /// Clear every in-process memo table so RSS stays flat across the
 /// single-process test suite (all 283 bin tests run in one libtest
 /// process). Called in test teardown; a no-op in release builds.
-#[cfg(test)]
-pub(crate) fn clear_all_caches_for_test() {
+pub fn clear_all_caches_for_test() {
     if let Some(m) = MEM_CACHE.get() {
         let _ = m.lock().map(|mut g| g.map.clear());
     }
@@ -602,8 +601,7 @@ pub(crate) fn submodule_in_memo(
 /// nothing depends on mutual exclusion. Isolation also makes storage
 /// assertions deterministic (fresh dir per test — growth/contents prove
 /// hits, not luck); cleanup removes only the test's own dir.
-#[cfg(test)]
-pub(crate) fn with_isolated_cache<T>(f: impl FnOnce() -> T) -> T {
+pub fn with_isolated_cache<T>(f: impl FnOnce() -> T) -> T {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(

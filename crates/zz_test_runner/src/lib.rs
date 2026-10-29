@@ -2331,9 +2331,7 @@ pub(crate) fn run_test_covered(
 /// all states. Ignored tests are skipped like the runner skips them.
 /// Returns the merged state plus the failing test names (empty = all
 /// passed); failures still contribute their partial coverage.
-pub(crate) fn cover_tests(
-    root: Option<&str>,
-) -> Result<(zz_runtime::CoverageState, Vec<String>), String> {
+pub fn cover_tests(root: Option<&str>) -> Result<(zz_runtime::CoverageState, Vec<String>), String> {
     let roots = match root {
         Some(r) => vec![r.to_string()],
         None => vec![default_test_path()],
@@ -3504,7 +3502,7 @@ static PLUGIN_LIBS: std::sync::OnceLock<std::sync::Mutex<Vec<PluginLib>>> =
 const MAX_PLUGIN_LIBS: usize = 64;
 
 /// Retain a loaded plugin library for the rest of the process.
-fn keep_plugin_alive(handle: PluginLib) {
+pub fn keep_plugin_alive(handle: PluginLib) {
     let mut g = PLUGIN_LIBS
         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
         .lock()
@@ -3516,7 +3514,7 @@ fn keep_plugin_alive(handle: PluginLib) {
 }
 
 /// Check `zz.toml` compiler version requirement for the project at `start`.
-fn enforce_project_zz(start: &Path) -> Result<(), String> {
+pub fn enforce_project_zz(start: &Path) -> Result<(), String> {
     let Some(root) = find_project_root(start) else {
         return Ok(());
     };
@@ -3531,7 +3529,7 @@ fn enforce_project_zz(start: &Path) -> Result<(), String> {
 }
 
 /// Load VM plugins from the project's lockfile.
-fn load_vm_plugins(
+pub fn load_vm_plugins(
     project_dir: &Path,
     natives: &mut std::collections::HashMap<String, NativeEntry>,
     plugin_funcs: &[(String, FuncSig)],
@@ -3668,7 +3666,7 @@ fn load_vm_plugins(
 
 /// Non-Unix stub for VM plugin loading.
 #[cfg(not(unix))]
-fn load_vm_plugins(
+pub fn load_vm_plugins(
     _project_dir: &Path,
     _natives: &mut std::collections::HashMap<String, NativeEntry>,
     _plugin_funcs: &[(String, FuncSig)],

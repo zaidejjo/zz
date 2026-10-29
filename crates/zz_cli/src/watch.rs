@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use zz_loader::find_project_root;
+
 /// Tick granularity of the watch loop.
 const TICK_MS: u64 = 100;
 /// How long a replaced generation gets to drain before SIGKILL.
@@ -381,14 +383,13 @@ pub fn run_watch(
     }
     // Watch root: owning project when the entry lives in one, else the
     // entry's own directory (standalone scripts).
-    let scan_root: PathBuf =
-        match crate::loader::find_project_root(entry_abs.parent().unwrap_or(Path::new("."))) {
-            Some(root) => root,
-            None => entry_abs
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from(".")),
-        };
+    let scan_root: PathBuf = match find_project_root(entry_abs.parent().unwrap_or(Path::new("."))) {
+        Some(root) => root,
+        None => entry_abs
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(".")),
+    };
     let scan_embed = embed
         .as_ref()
         .map(|e| std::path::absolute(e).map_err(|err| format!("cannot resolve --embed dir: {err}")))

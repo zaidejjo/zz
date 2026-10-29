@@ -899,7 +899,7 @@ fn resolve_module_key(
 /// True when `name` is usable as a ZZ identifier (and hence a C
 /// symbol): leading letter/underscore, then alphanumerics/underscores.
 /// Mirrors the codegen-side `c_ident_valid` for the alias gate.
-pub(crate) fn is_zz_ident(name: &str) -> bool {
+pub fn is_zz_ident(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}

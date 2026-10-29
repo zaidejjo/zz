@@ -457,7 +457,7 @@ pub fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker
 
 /// Gates for native builds (CLI flags).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct NativeBuildOpts {
+pub struct NativeBuildOpts {
     /// `--allow-source-builds`: compile transitive `[native]` deps from
     /// source when no prebuilt covers the host tag.
     pub allow_source_builds: bool,
@@ -479,7 +479,7 @@ impl NativeBuildOpts {
 
 /// Output of [`build_native_deps`]: link inputs plus per-dep audit
 /// records for `zz.lock`.
-pub(crate) struct NativeBuild {
+pub struct NativeBuild {
     pub artifacts: Vec<PathBuf>,
     pub link_args: Vec<String>,
     pub audits: Vec<(String, zz_pm::lock::LockedNative)>,
@@ -489,7 +489,7 @@ pub(crate) struct NativeBuild {
 ///
 /// `zz run` calls this post-link (permissive: warn-only) so VM dlopen
 /// works without a prior `zz build`.
-pub(crate) fn ensure_native_hooks(project_root: &Path) {
+pub fn ensure_native_hooks(project_root: &Path) {
     // Build_native_deps walks up from its argument's parent looking for
     // zz.lock — anchor inside the canonical root.
     let project_root =
@@ -515,7 +515,7 @@ pub(crate) fn ensure_native_hooks(project_root: &Path) {
 /// - `hook` on transitive deps always errors. On direct deps it errors
 ///   unless `allow_hooks`, and warns on every allowed use. Allowed hook
 ///   failures keep the historical warn-and-continue behavior.
-pub(crate) fn build_native_deps(
+pub fn build_native_deps(
     project_path: &Path,
     opts: NativeBuildOpts,
 ) -> Result<NativeBuild, String> {

@@ -3823,16 +3823,22 @@ dependencies = [
  "tempfile",
  "toml",
  "ureq",
+ "zz_build",
  "zz_checker",
  "zz_codegen",
  "zz_fmt",
  "zz_frontend",
  "zz_hir",
  "zz_ir",
+ "zz_loader",
  "zz_plugin",
  "zz_pm",
+ "zz_repl",
+ "zz_run_cache",
  "zz_runtime",
+ "zz_session",
  "zz_stdlib",
+ "zz_test_runner",
 ]
 
 [[package]]
