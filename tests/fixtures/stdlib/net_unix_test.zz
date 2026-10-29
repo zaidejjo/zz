@@ -1,4 +1,4 @@
-// features: bytes, closures, func-call, imports, int-arith, locals, match, option-result, print, std-chan, std-env, std-net, std-process, std-str, std-task, std-time, std-unix, string-literal, string-ops
+// features: bytes, closures, func-call, imports, int-arith, known-divergence, locals, match, option-result, print, std-chan, std-env, std-net, std-process, std-str, std-task, std-time, std-unix, string-literal, string-ops
 // tests/fixtures/stdlib/net_unix_test.zz — Unix-domain socket transport.
 // Loopback listener on a pid/tok-keyed socket file + client handshake
 // matrix. Accepts run in spawned tasks (like TLS: the server app must

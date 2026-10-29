@@ -1823,7 +1823,6 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
             "native process terminated abnormally (no exit code reported)"
         ));
     }
-    Ok(-1)
 }
 
 /// Short name for a Unix signal number (common cases; else "unknown").
@@ -1848,6 +1847,7 @@ fn signal_name(sig: i32) -> &'static str {
 /// Short name for a Windows termination status code (common cases;
 /// else the raw hex value).
 #[cfg(windows)]
+#[allow(dead_code)]
 fn windows_status_name(code: u32) -> &'static str {
     match code {
         0xC0000005 => "STATUS_ACCESS_VIOLATION (segfault)",

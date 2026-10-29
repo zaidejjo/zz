@@ -3529,6 +3529,7 @@ pub fn enforce_project_zz(start: &Path) -> Result<(), String> {
 }
 
 /// Load VM plugins from the project's lockfile.
+#[cfg(unix)]
 pub fn load_vm_plugins(
     project_dir: &Path,
     natives: &mut std::collections::HashMap<String, NativeEntry>,
