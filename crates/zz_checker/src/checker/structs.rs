@@ -13,9 +13,9 @@
 //! so no AST flag is needed and all downstream passes keep working.
 
 use crate::checker::{Checker, FuncSig};
-use crate::type_::Type;
 use zz_diag_core::error_at;
 use zz_span_ast::ast::Stmt;
+use zz_type_::Type;
 
 impl Checker {
     pub(crate) fn collect_struct(&mut self, stmt: &Stmt) {

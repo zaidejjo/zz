@@ -15,7 +15,7 @@ use zz_span_ast::span::Span;
 
 use super::inference::subst;
 use super::{AliasSig, Checker};
-use crate::type_::Type;
+use zz_type_::Type;
 
 impl Checker {
     /// Convert one raw alias target to a resolved [`AliasSig`].

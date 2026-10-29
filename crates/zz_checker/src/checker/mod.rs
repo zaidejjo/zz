@@ -19,7 +19,7 @@ use zz_diag_core::RawDiag;
 use zz_span_ast::ast::{Program, Stmt, Ty};
 use zz_span_ast::span::Span;
 
-use crate::type_::Type;
+use zz_type_::Type;
 
 /// Pseudo-scope owning all top-level (non-function) statements. Mirrors
 /// `zz_hir::callgraph::TOP`: expression spans are only unique *within* one
@@ -1494,7 +1494,7 @@ mod cache_serde_tests {
     // S1 arena-scale: pub signatures must survive a JSON roundtrip exactly
     // (module check-cache stores these on disk).
     use super::*;
-    use crate::type_::Type;
+    use zz_type_::Type;
 
     #[test]
     fn func_sig_roundtrips() {

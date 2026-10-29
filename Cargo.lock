@@ -3764,6 +3764,7 @@ dependencies = [
  "zz_frontend",
  "zz_span_ast",
  "zz_suggest",
+ "zz_type_",
 ]
 
 [[package]]
@@ -3992,3 +3993,10 @@ dependencies = [
 [[package]]
 name = "zz_suggest"
 version = "0.4.0"
+
+[[package]]
+name = "zz_type_"
+version = "0.4.0"
+dependencies = [
+ "serde",
+]

@@ -1,10 +1,10 @@
 //! Diagnostic helpers for the type checker.
 
 use crate::checker::Checker;
-use crate::type_::Type;
 use crate::unify::UnifyError;
 use zz_diag_core::error_at;
 use zz_span_ast::span::Span;
+use zz_type_::Type;
 
 impl Checker {
     // --- errors -----------------------------------------------------------
