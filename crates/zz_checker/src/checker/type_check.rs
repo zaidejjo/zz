@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use zz_scope::ScopeOps;
 
-use crate::checker::http_lint::HttpLintOps;
+use zz_lints::http_lint::HttpLintOps;
 use crate::checker::Checker;
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_infer::{contains_var, default_variant_vars, InferOps};
@@ -4901,7 +4901,7 @@ impl TypeCheckOps for Checker {
         // Dead-mutation lint (#278): value-typed params mutated without
         // ever being observed. Runs on the AST after the body checks so
         // it sees the final program even when type errors exist.
-        super::value_lint::lint_dead_param_mutation(&sig.params, body, &mut self.errors);
+        zz_lints::value_lint::lint_dead_param_mutation(&sig.params, body, &mut self.errors);
         let _ = name;
         // A named function yields a value only through `return`, so its
         // fall-through type is `unit` unless every path diverges (`Never`,

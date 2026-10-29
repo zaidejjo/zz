@@ -1,9 +1,6 @@
 //! Type checker: HM-lite inference, generics, patterns, exhaustiveness.
 
-pub mod http_lint;
-pub mod std_gate;
 pub mod type_check;
-pub mod value_lint;
 
 // State and shared helper types live in `zz_checker_core`.
 pub use zz_checker_core::*;
@@ -196,7 +193,7 @@ fn check_program_impl(
     if !module_ns.is_empty() {
         checker
             .errors
-            .extend(std_gate::lint_std_imports(program, module_ns));
+            .extend(zz_lints::std_gate::lint_std_imports(program, module_ns));
     }
 
     // Track which items are pub (for cross-module export).

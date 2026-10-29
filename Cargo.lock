@@ -3765,6 +3765,7 @@ dependencies = [
  "zz_frontend",
  "zz_http_routes",
  "zz_infer",
+ "zz_lints",
  "zz_scope",
  "zz_sigs",
  "zz_span_ast",
@@ -3902,6 +3903,19 @@ dependencies = [
  "zz_frontend",
  "zz_runtime",
  "zz_stdlib",
+]
+
+[[package]]
+name = "zz_lints"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_http_routes",
+ "zz_scope",
+ "zz_span_ast",
+ "zz_suggest",
+ "zz_types",
 ]
 
 [[package]]

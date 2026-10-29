@@ -357,7 +357,7 @@ impl Lint {
 /// the matching import (#227). No-op when `module_ns` is empty (stdlib
 /// internals, REPL, merged programs). Returns diagnostics to merge into
 /// the check result.
-pub(crate) fn lint_std_imports(program: &Program, module_ns: &str) -> Vec<RawDiag> {
+pub fn lint_std_imports(program: &Program, module_ns: &str) -> Vec<RawDiag> {
     if module_ns.is_empty() {
         return Vec::new();
     }

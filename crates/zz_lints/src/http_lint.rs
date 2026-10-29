@@ -14,7 +14,7 @@ use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;
 use zz_types::Type;
 
-use crate::checker::Checker;
+use zz_checker_core::Checker;
 
 // ── Checker hooks ────────────────────────────────────────────────────────
 

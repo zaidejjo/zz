@@ -16,6 +16,7 @@ zz_infer = { path = "../zz_infer" }
 zz_structs = { path = "../zz_structs" }
 zz_scope = { path = "../zz_scope" }
 zz_sigs = { path = "../zz_sigs" }
+zz_lints = { path = "../zz_lints" }
 zz_checker_core = { path = "../zz_checker_core" }
 # S1 arena-scale: module check-cache serializes pub signatures.
 serde = { workspace = true }
