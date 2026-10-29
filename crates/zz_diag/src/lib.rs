@@ -380,7 +380,7 @@ pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::span::Span;
+    use zz_span_ast::Span;
 
     #[test]
     fn render_replacement_spells_backticks_by_name() {

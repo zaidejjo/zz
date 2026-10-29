@@ -16,8 +16,8 @@
 //! `@test`/`@setup`/`@teardown`) are rejected.
 
 use crate::ast::{Decorator, Expr};
-use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
+use zz_diag::{error_at, RawDiag};
 
 /// Parsed `@bench` metadata. One per `@bench`-decorated function.
 #[derive(Debug, Clone, PartialEq)]

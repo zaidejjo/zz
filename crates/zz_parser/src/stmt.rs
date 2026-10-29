@@ -1,13 +1,13 @@
 //! Statement parsing.
 
-use crate::ast::{
+use zz_diag::{error_at, FixIt};
+use zz_lexer::token::TokenKind;
+use zz_span_ast::ast::{
     BinOp, Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound,
     TypeParam,
 };
-use crate::diag::{error_at, FixIt};
-use crate::levenshtein::suggest_all;
-use crate::span::Span;
-use crate::token::TokenKind;
+use zz_span_ast::Span;
+use zz_suggest::suggest_all;
 
 use super::Parser;
 
@@ -495,9 +495,9 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Ident) && self.is_embedded_field_start() {
                 let fty = self.parse_type_base();
                 match &fty.kind {
-                    crate::ast::TyKind::Named(full, _) => {
+                    zz_span_ast::ast::TyKind::Named(full, _) => {
                         let base = full.rsplit('.').next().unwrap_or(full).to_string();
-                        let fname = crate::ast::Ident {
+                        let fname = zz_span_ast::ast::Ident {
                             name: base,
                             span: fty.span,
                         };
@@ -562,7 +562,7 @@ impl<'a> Parser<'a> {
     /// Parse `<T, U>` after a struct/impl name. Plain identifiers only:
     /// storage and receivers need no trait bounds (`<T: Num>` is rejected
     /// with a hint to bound at the function instead).
-    pub(crate) fn parse_struct_generics(&mut self) -> Vec<crate::ast::Ident> {
+    pub(crate) fn parse_struct_generics(&mut self) -> Vec<zz_span_ast::ast::Ident> {
         if !self.eat(TokenKind::Lt) {
             // Rust-style `struct Box[T]`: ZZ declares type parameters with
             // `<T>` (`[T]` makes an array type).
@@ -1353,7 +1353,9 @@ impl<'a> Parser<'a> {
 
     /// Recover `struct Box[T]`: parse the bracketed names into real type
     /// parameters, then report the right syntax with an `<...>` fix.
-    pub(crate) fn parse_misplaced_bracket_struct_generics(&mut self) -> Vec<crate::ast::Ident> {
+    pub(crate) fn parse_misplaced_bracket_struct_generics(
+        &mut self,
+    ) -> Vec<zz_span_ast::ast::Ident> {
         let open = self.advance(); // `[`
         let mut gs = Vec::new();
         loop {
@@ -1672,7 +1674,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
 #[cfg(test)]
 mod import_segment_tests {
     use super::*;
-    use crate::parser::parse;
+    use crate::parse;
 
     fn import_of(src: &str) -> (Vec<String>, Option<String>) {
         let parsed = parse(src);

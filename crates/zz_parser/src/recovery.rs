@@ -1,8 +1,8 @@
 //! Error recovery and helper functions.
 
-use crate::diag::{error_at, FixIt, RawDiag};
-use crate::span::Span;
-use crate::token::{Token, TokenKind};
+use zz_diag::{error_at, FixIt, RawDiag};
+use zz_lexer::token::{Token, TokenKind};
+use zz_span_ast::Span;
 
 use super::Parser;
 
@@ -52,10 +52,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub(crate) fn expect_ident(&mut self) -> Option<crate::ast::Ident> {
+    pub(crate) fn expect_ident(&mut self) -> Option<zz_span_ast::ast::Ident> {
         if self.at(TokenKind::Ident) {
             let tok = self.advance();
-            Some(crate::ast::Ident {
+            Some(zz_span_ast::ast::Ident {
                 name: tok.text.into_owned(),
                 span: tok.span,
             })

@@ -10,13 +10,29 @@
 //! - A newline after an operator or `=` is dropped (Go-style continuation).
 //! - Block comments nest.
 
-pub mod cursor;
+mod cursor;
+pub mod token;
 
 use std::borrow::Cow;
 
-use crate::diag::{error_at, render_replacement, FixIt, RawDiag};
-use crate::span::Span;
 use crate::token::{Token, TokenKind, Trivia, TriviaKind};
+use zz_diag_core::{error_at, FixIt, RawDiag};
+use zz_span_ast::Span;
+
+/// Render a fixit replacement for display: backtick-quoted, except a
+/// replacement made solely of backticks (e.g. a raw-string closer),
+/// which would render ambiguously as ``` — spell those by name (#414).
+pub(crate) fn render_replacement(rep: &str) -> String {
+    if !rep.is_empty() && rep.chars().all(|c| c == '`') {
+        if rep.len() == 1 {
+            "a backtick".to_string()
+        } else {
+            format!("{} backticks", rep.len())
+        }
+    } else {
+        format!("`{rep}`")
+    }
+}
 
 pub struct Lexed<'a> {
     pub tokens: Vec<Token<'a>>,
@@ -1654,7 +1670,7 @@ pub(crate) fn is_ident_start(c: char) -> bool {
 /// a digit, or `(`. `{{`, `{}` and JSON-like `{"key"...` stay literal text.
 /// Callers test this on the first char after `{`, spaces and tabs skipped
 /// (#516 — see [`Lexer::interp_starts_after_brace`]).
-pub(crate) fn is_interp_start(c: Option<char>) -> bool {
+pub fn is_interp_start(c: Option<char>) -> bool {
     match c {
         Some(ch) if is_ident_start(ch) => true,
         Some(ch) if ch.is_ascii_digit() => true,

@@ -29,9 +29,9 @@ use std::collections::HashSet;
 
 use crate::ast::{Block, Decorator, Expr, FmtPart, Program, Stmt};
 use crate::bench_attr as bench_attr_mod;
-use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
 use crate::test_attr as test_attr_mod;
+use zz_diag::{error_at, RawDiag};
 /// True when any function definition carries decorators — top-level, methods,
 /// or nested in blocks. Callers use this to skip [`expand_program`] on the
 /// common decorator-free path (expansion would only deep-clone).

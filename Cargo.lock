@@ -3834,6 +3834,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_diag"
+version = "0.4.0"
+dependencies = [
+ "codespan-reporting",
+ "colored",
+ "zz_diag_core",
+ "zz_span_ast",
+]
+
+[[package]]
 name = "zz_diag_core"
 version = "0.4.0"
 dependencies = [
@@ -3858,10 +3868,11 @@ dependencies = [
 name = "zz_frontend"
 version = "0.4.0"
 dependencies = [
- "codespan-reporting",
- "colored",
  "serde",
+ "zz_diag",
  "zz_diag_core",
+ "zz_lexer",
+ "zz_parser",
  "zz_span_ast",
  "zz_suggest",
 ]
@@ -3902,6 +3913,14 @@ dependencies = [
  "zz_frontend",
  "zz_runtime",
  "zz_stdlib",
+]
+
+[[package]]
+name = "zz_lexer"
+version = "0.4.0"
+dependencies = [
+ "zz_diag_core",
+ "zz_span_ast",
 ]
 
 [[package]]
@@ -3963,6 +3982,16 @@ dependencies = [
  "sysinfo",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "zz_parser"
+version = "0.4.0"
+dependencies = [
+ "zz_diag",
+ "zz_lexer",
+ "zz_span_ast",
+ "zz_suggest",
 ]
 
 [[package]]

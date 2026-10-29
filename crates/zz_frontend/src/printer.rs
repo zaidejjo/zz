@@ -40,7 +40,7 @@ impl<'a> Printer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
+    use zz_parser::parse;
 
     /// Round-trip: parse → print must reproduce the source exactly.
     fn round_trips(src: &str) {

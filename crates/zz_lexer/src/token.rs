@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use crate::span::Span;
+use zz_span_ast::span::Span;
 
 /// Trivia: text that carries no syntax meaning but must be preserved.
 ///

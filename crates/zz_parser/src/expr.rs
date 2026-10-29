@@ -1,9 +1,11 @@
 //! Expression parsing.
 
-use crate::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Stmt, UnOp};
-use crate::diag::{error_at, warning_at, FixIt};
-use crate::span::Span;
-use crate::token::{Token, TokenKind};
+use zz_diag::{error_at, warning_at, FixIt};
+use zz_lexer::token::{Token, TokenKind};
+use zz_span_ast::ast::{
+    BinOp, Block, Expr, FmtPart, Ident, Lit, MatchArm, Param, Pattern, Stmt, UnOp,
+};
+use zz_span_ast::Span;
 
 use super::Parser;
 
@@ -633,7 +635,7 @@ impl<'a> Parser<'a> {
         parts: &[FmtPart],
         string_span: Span,
     ) {
-        use crate::lexer::is_interp_start;
+        use zz_lexer::is_interp_start;
         if !parts.iter().any(|p| matches!(p, FmtPart::Expr(..))) {
             return; // No interpolation: presumably intentional literals.
         }

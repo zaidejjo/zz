@@ -7,7 +7,8 @@ license.workspace = true
 [dependencies]
 zz_span_ast = { path = "../zz_span_ast" }
 zz_diag_core = { path = "../zz_diag_core" }
+zz_diag = { path = "../zz_diag" }
+zz_lexer = { path = "../zz_lexer" }
+zz_parser = { path = "../zz_parser" }
 zz_suggest = { path = "../zz_suggest" }
-codespan-reporting = "0.11"
-colored = "2"
 serde = { version = "1", features = ["derive"] }

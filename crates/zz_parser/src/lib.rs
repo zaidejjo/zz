@@ -56,11 +56,10 @@ pub mod expr;
 pub mod recovery;
 pub mod stmt;
 
-use crate::ast::Program;
-use crate::diag::{error_at, FixIt, RawDiag};
-use crate::lexer::lex;
-use crate::span::Span;
-use crate::token::{Token, TokenKind};
+use zz_diag::{error_at, FixIt, RawDiag};
+use zz_lexer::lex;
+use zz_lexer::token::{Token, TokenKind};
+use zz_span_ast::{ast::Program, Span};
 
 pub struct Parsed {
     pub program: Program,

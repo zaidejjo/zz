@@ -1,9 +1,11 @@
 //! Type declaration parsing.
 
-use crate::ast::{Ty, TyKind};
-use crate::diag::error_at;
-use crate::span::Span;
-use crate::token::TokenKind;
+use zz_diag::error_at;
+use zz_lexer::token::TokenKind;
+use zz_span_ast::{
+    ast::{Ty, TyKind},
+    Span,
+};
 
 use super::Parser;
 
@@ -427,8 +429,8 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn dummy_ident(span: Span) -> crate::ast::Ident {
-    crate::ast::Ident {
+fn dummy_ident(span: Span) -> zz_span_ast::ast::Ident {
+    zz_span_ast::ast::Ident {
         name: String::new(),
         span,
     }

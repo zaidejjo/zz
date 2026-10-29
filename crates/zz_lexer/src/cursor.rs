@@ -1,6 +1,6 @@
 //! Character cursor helpers for the lexer.
 
-use crate::span::Span;
+use zz_span_ast::span::Span;
 
 #[allow(dead_code)]
 pub(crate) struct Cursor<'a> {
