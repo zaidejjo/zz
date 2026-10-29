@@ -73,7 +73,7 @@ impl EnumOps for Checker {
             return payload.clone();
         }
         let map: HashMap<String, Type> = generics.into_iter().zip(args.iter().cloned()).collect();
-        super::inference::subst(payload, &map)
+        zz_infer::subst(payload, &map)
     }
 
     /// Resolve a `.Variant` pattern against an enum scrutinee: returns

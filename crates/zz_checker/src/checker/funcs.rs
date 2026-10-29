@@ -1,8 +1,8 @@
 //! Function registration and body checking.
 
-use crate::checker::inference::InferOps;
 use crate::checker::Checker;
 use zz_diag_core::error_at;
+use zz_infer::InferOps;
 use zz_span_ast::ast::Stmt;
 use zz_types::Type;
 

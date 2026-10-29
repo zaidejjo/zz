@@ -3764,6 +3764,7 @@ dependencies = [
  "zz_diag_core",
  "zz_frontend",
  "zz_http_routes",
+ "zz_infer",
  "zz_span_ast",
  "zz_suggest",
  "zz_types",
@@ -3876,6 +3877,18 @@ version = "0.4.0"
 dependencies = [
  "zz_diag_core",
  "zz_span_ast",
+]
+
+[[package]]
+name = "zz_infer"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_span_ast",
+ "zz_suggest",
+ "zz_types",
+ "zz_unify",
 ]
 
 [[package]]

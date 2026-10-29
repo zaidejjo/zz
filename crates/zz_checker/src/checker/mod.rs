@@ -3,7 +3,6 @@
 pub mod enums;
 pub mod funcs;
 pub mod http_lint;
-pub mod inference;
 pub mod scope;
 pub mod std_gate;
 pub mod structs;
@@ -21,9 +20,9 @@ use zz_span_ast::ast::{Program, Stmt};
 use zz_span_ast::span::Span;
 
 use crate::checker::funcs::FuncOps;
-use crate::checker::inference::InferOps;
 use crate::checker::structs::StructOps;
 use crate::checker::type_check::TypeCheckOps;
+use zz_infer::InferOps;
 use zz_types::Type;
 
 /// Type-check a whole program, seeded with bindings/funcs/structs from prior
@@ -172,7 +171,7 @@ fn check_program_impl(
     {
         let mut max_seen: Option<u32> = None;
         let bump = |max_seen: &mut Option<u32>, t: &Type| {
-            if let Some(id) = inference::max_var_id(t) {
+            if let Some(id) = zz_infer::max_var_id(t) {
                 *max_seen = Some(max_seen.map_or(id, |m| m.max(id)));
             }
         };
@@ -771,7 +770,7 @@ fn check_program_impl(
     let mut bindings = HashMap::new();
     for (name, ty) in &checker.new_bindings {
         let rt = checker.unifier.resolve_deep(ty);
-        if !inference::contains_var(&rt) {
+        if !zz_infer::contains_var(&rt) {
             bindings.insert(name.clone(), rt);
         }
     }
@@ -859,12 +858,12 @@ fn check_program_impl(
     let mut span_types: std::collections::HashMap<SpanKey, Type> = std::collections::HashMap::new();
     for (key, ty) in &checker.span_types {
         let mut rt = checker.unifier.resolve_deep(ty);
-        if inference::contains_var(&rt)
+        if zz_infer::contains_var(&rt)
             && matches!(rt, Type::Option(_) | Type::Result(_, _) | Type::Enum(_, _))
         {
-            inference::default_variant_vars(&mut rt);
+            zz_infer::default_variant_vars(&mut rt);
         }
-        if !inference::contains_var(&rt) {
+        if !zz_infer::contains_var(&rt) {
             span_types.insert(key.clone(), rt);
         }
     }

@@ -5,11 +5,10 @@ use std::sync::Arc;
 
 use crate::checker::enums::EnumOps;
 use crate::checker::http_lint::HttpLintOps;
-use crate::checker::inference::InferOps;
-use crate::checker::inference::{contains_var, default_variant_vars};
 use crate::checker::structs::StructOps;
 use crate::checker::Checker;
 use zz_diag_core::{error_at, warning_at, FixIt};
+use zz_infer::{contains_var, default_variant_vars, InferOps};
 use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;
@@ -1517,7 +1516,7 @@ impl TypeCheckOps for Checker {
                     if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == fname) {
                         let vt = self.check_expr(fval);
                         let vt = self.resolve_fn_value(vt);
-                        let exp = crate::checker::inference::subst(ft, &gen_map);
+                        let exp = zz_infer::subst(ft, &gen_map);
                         if let Err(e) = self.unifier.unify(&vt, &exp) {
                             self.report_mismatch(e, fval.span());
                         }
@@ -3126,7 +3125,7 @@ impl TypeCheckOps for Checker {
                                 // instantiate fresh, as in construction.
                                 let (gen_vars, gen_map) = self.fresh_enum_vars(&canonical_head2);
                                 let at = self.check_expr(&args[0]);
-                                let exp = super::inference::subst(&pty, &gen_map);
+                                let exp = zz_infer::subst(&pty, &gen_map);
                                 if let Err(e) = self.unifier.unify(&at, &exp) {
                                     self.report_mismatch(e, args[0].span());
                                 }
@@ -4833,7 +4832,7 @@ impl TypeCheckOps for Checker {
                     }
                 } else {
                     let at = self.check_expr(&args[0]);
-                    let exp = super::inference::subst(pty, &gen_map);
+                    let exp = zz_infer::subst(pty, &gen_map);
                     if let Err(e) = self.unifier.unify(&at, &exp) {
                         self.report_mismatch(e, args[0].span());
                     }

@@ -1,6 +1,6 @@
 //! Type inference helpers: unification, type variables, generics.
 
-use crate::checker::{AliasSig, Checker};
+use zz_checker_core::{AliasSig, Checker};
 use zz_diag_core::error_at;
 use zz_span_ast::ast::Ty;
 use zz_span_ast::span::Span;
@@ -26,14 +26,14 @@ pub trait InferOps {
     /// are skipped — the body's operator checks already validated them.
     fn validate_bounds(
         &mut self,
-        sig: &crate::checker::FuncSig,
+        sig: &zz_checker_core::FuncSig,
         subs: &std::collections::HashMap<String, Type>,
         span: Span,
     );
 
     fn instantiate(
         &mut self,
-        sig: &crate::checker::FuncSig,
+        sig: &zz_checker_core::FuncSig,
     ) -> (Vec<Type>, Type, std::collections::HashMap<String, Type>);
 
     fn ast_to_type(&mut self, ty: &Ty, generics: &[String]) -> Type;
@@ -152,7 +152,7 @@ impl InferOps for Checker {
     /// are skipped — the body's operator checks already validated them.
     fn validate_bounds(
         &mut self,
-        sig: &crate::checker::FuncSig,
+        sig: &zz_checker_core::FuncSig,
         subs: &std::collections::HashMap<String, Type>,
         span: Span,
     ) {
@@ -178,7 +178,7 @@ impl InferOps for Checker {
 
     fn instantiate(
         &mut self,
-        sig: &crate::checker::FuncSig,
+        sig: &zz_checker_core::FuncSig,
     ) -> (Vec<Type>, Type, std::collections::HashMap<String, Type>) {
         let subs: std::collections::HashMap<String, Type> = sig
             .generics
@@ -611,7 +611,7 @@ fn opaque_handle_tag(name: &str) -> Option<&'static str> {
 }
 
 /// Check if a type contains any unresolved inference variables.
-pub(crate) fn contains_var(t: &Type) -> bool {
+pub fn contains_var(t: &Type) -> bool {
     match t {
         Type::Var(_) => true,
         Type::Void => false,
@@ -633,7 +633,7 @@ pub(crate) fn contains_var(t: &Type) -> bool {
 /// Largest inference-variable id inside a type (`None` when var-free).
 /// Used to offset a fresh checker's unifier above ids imported from
 /// already-checked modules (see `Unifier::reserve_vars_above`).
-pub(crate) fn max_var_id(t: &Type) -> Option<u32> {
+pub fn max_var_id(t: &Type) -> Option<u32> {
     match t {
         Type::Var(id) => Some(*id),
         Type::Void => None,
@@ -654,7 +654,7 @@ pub(crate) fn max_var_id(t: &Type) -> Option<u32> {
 
 /// Replace unresolved type variables inside `Option`/`Result` with `unit`
 /// so `.none`/`.ok`/`.err` bindings type-check without annotations.
-pub(crate) fn default_variant_vars(t: &mut Type) {
+pub fn default_variant_vars(t: &mut Type) {
     match t {
         Type::Option(inner) => {
             if contains_var(inner) {

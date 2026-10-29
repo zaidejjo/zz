@@ -12,9 +12,9 @@
 //! syntax (`Base,`) and the explicit-but-equivalent form (`Base: Base`),
 //! so no AST flag is needed and all downstream passes keep working.
 
-use crate::checker::inference::InferOps;
 use crate::checker::{Checker, FuncSig};
 use zz_diag_core::{error_at, FixIt};
+use zz_infer::InferOps;
 use zz_span_ast::ast::Stmt;
 use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;
@@ -174,7 +174,7 @@ impl StructOps for Checker {
         let sig = self.structs.get(sname)?;
         let (_, ft) = sig.fields.iter().find(|(n, _)| n == field)?;
         let map = self.struct_arg_map(sname, args);
-        Some(crate::checker::inference::subst(ft, &map))
+        Some(zz_infer::subst(ft, &map))
     }
 
     /// Like [`Checker::direct_field_type`], but also returns the path of
@@ -196,10 +196,10 @@ impl StructOps for Checker {
             let sig = self.structs.get(&cur)?;
             let map = self.struct_arg_map(&cur, &cur_args);
             if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == field) {
-                return Some((path, crate::checker::inference::subst(ft, &map)));
+                return Some((path, zz_infer::subst(ft, &map)));
             }
             for (fname, fty) in &sig.fields {
-                let concrete = crate::checker::inference::subst(fty, &map);
+                let concrete = zz_infer::subst(fty, &map);
                 if let Type::Struct(inner, inner_args) = &concrete {
                     if Self::is_embedded_field(fname, &concrete) && !visited.contains(inner) {
                         visited.push(inner.clone());
@@ -227,7 +227,7 @@ impl StructOps for Checker {
             let sig = self.structs.get(&cur)?;
             let map = self.struct_arg_map(&cur, &cur_args);
             for (fname, fty) in &sig.fields {
-                let concrete = crate::checker::inference::subst(fty, &map);
+                let concrete = zz_infer::subst(fty, &map);
                 if let Type::Struct(inner, inner_args) = &concrete {
                     if inner == defining {
                         return Some(concrete.clone());
