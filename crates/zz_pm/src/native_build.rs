@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::manifest::{validate_cflag, validate_pkg_config_token, BuildCcSpec, BuildRustSpec};
+use crate::pathsafe::{escapes_root, strip_verbatim};
 use crate::rust_lock;
 
 /// Fixed build timestamp for reproducibility (recorded in the lock;
@@ -93,7 +94,16 @@ pub fn host_tag() -> Result<String, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        return Ok("windows-x86_64-msvc".to_string());
+        let normalized = match arch {
+            "x86_64" => "x86_64",
+            "aarch64" => "aarch64",
+            _ => {
+                return Err(format!(
+                    "unsupported windows arch `{arch}` for native builds"
+                ))
+            }
+        };
+        return Ok(format!("windows-{normalized}-msvc"));
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -116,7 +126,7 @@ pub fn tags_compatible(artifact: &str, host: &str) -> bool {
         (["macos", a_arch, a_floor], ["macos", h_arch, h_floor]) => {
             a_arch == h_arch && floor_le(a_floor, h_floor, "min")
         }
-        (["windows", "x86_64", "msvc"], ["windows", "x86_64", "msvc"]) => true,
+        (["windows", a_arch, "msvc"], ["windows", h_arch, "msvc"]) => a_arch == h_arch,
         _ => false,
     }
 }
@@ -133,8 +143,16 @@ fn floor_le(artifact: &str, host: &str, prefix: &str) -> bool {
 }
 
 fn parse_dotted(s: &str) -> Option<(u32, u32)> {
-    let (a, b) = s.split_once('.')?;
-    Some((a.parse().ok()?, b.parse().ok()?))
+    // `sw_vers -productVersion` is `major.minor.patch` (`15.6.1`) and the
+    // patch is non-zero on every real runner, so parse the leading two
+    // components and ignore the rest.
+    let mut parts = s.split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = match parts.next() {
+        Some(m) => m.trim().parse().ok()?,
+        None => 0,
+    };
+    Some((major, minor))
 }
 
 /// LLVM triple for a platform tag (used as clang `--target=`).
@@ -145,7 +163,8 @@ pub fn llvm_triple_for_tag(tag: &str) -> Result<&'static str, String> {
         ["linux", "aarch64", ..] => Ok("aarch64-unknown-linux-gnu"),
         ["macos", "arm64", ..] => Ok("aarch64-apple-darwin"),
         ["macos", "x86_64", ..] => Ok("x86_64-apple-darwin"),
-        ["windows", "x86_64", ..] => Ok("x86_64-pc-windows-gnu"),
+        ["windows", "x86_64", ..] => Ok("x86_64-pc-windows-msvc"),
+        ["windows", "aarch64", ..] => Ok("aarch64-pc-windows-msvc"),
         _ => Err(format!("no LLVM triple for platform tag `{tag}`")),
     }
 }
@@ -167,6 +186,7 @@ pub fn rust_triple_for_tag(tag: &str) -> Result<&'static str, String> {
         ["macos", "arm64", _] => Ok("aarch64-apple-darwin"),
         ["macos", "x86_64", _] => Ok("x86_64-apple-darwin"),
         ["windows", "x86_64", "msvc"] => Ok("x86_64-pc-windows-msvc"),
+        ["windows", "aarch64", "msvc"] => Ok("aarch64-pc-windows-msvc"),
         _ => Err(format!(
             "no Rust target triple for platform tag `{tag}`\n\
              hint: supported tags are linux-{{x86_64,aarch64}}-{{gnu-glibc*,musl}}, \
@@ -374,6 +394,69 @@ pub fn pkg_config_versions(modules: &[String]) -> String {
     pairs.join(",")
 }
 
+/// Environment variables a Windows child process needs in order to run at
+/// all, inherited verbatim when present. Unix stays fully hermetic.
+///
+/// - `SystemRoot`/`windir`: without them the loader cannot resolve DLLs.
+/// - `TEMP`/`TMP`: `TMPDIR` is meaningless on Windows; MSVC and rustc both
+///   read `TMP`/`TEMP` for intermediate files.
+/// - `INCLUDE`/`LIB`/`LIBPATH` and the toolchain roots: `link.exe` locates
+///   `kernel32.lib` & friends through `LIB`. Dropping it produces
+///   `LNK1181: cannot open input file 'kernel32.lib'` — the hermetic cargo
+///   build used to fail exactly that way.
+/// - The rest are toolchain discovery (`rustup`, `vswhere`-style layouts)
+///   and `cmd`-style shims; none of them carry user cargo configuration,
+///   which stays isolated because `CARGO_HOME` is always replaced.
+pub const WINDOWS_ENV_ALLOWLIST: &[&str] = &[
+    "SystemRoot",
+    "SYSTEMROOT",
+    "windir",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "INCLUDE",
+    "LIB",
+    "LIBPATH",
+    "VCToolsInstallDir",
+    "VCINSTALLDIR",
+    "VSINSTALLDIR",
+    "WindowsSdkDir",
+    "WindowsSDKVersion",
+    "UCRTVersion",
+    "VSCMD_ARG_TGT_ARCH",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "PATHEXT",
+    "COMSPEC",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "RUSTUP_TOOLCHAIN",
+];
+
+/// Append every allowlisted variable that is set in this process.
+fn push_allowlisted(env: &mut Vec<(String, String)>, keys: &[&str]) {
+    for key in keys {
+        if let Ok(value) = std::env::var(key) {
+            env.push(((*key).to_string(), value));
+        }
+    }
+}
+
+/// Complement `env` with the Windows platform variables, if on Windows.
+/// A no-op elsewhere so the Unix child env gains nothing.
+fn push_platform_env(env: &mut Vec<(String, String)>) {
+    #[cfg(windows)]
+    push_allowlisted(env, WINDOWS_ENV_ALLOWLIST);
+    #[cfg(not(windows))]
+    let _ = env;
+}
+
 /// Hermetic environment for `cc`/`ar`/`nm`: cleared, then only `PATH`
 /// (inherited so the driver finds `as`/`ld`), `CC`, an isolated `TMPDIR`
 /// under the build dir (`HOME` deliberately unset), and the fixed
@@ -391,7 +474,56 @@ fn hermetic_env(tmpdir: &Path) -> Vec<(String, String)> {
         "SOURCE_DATE_EPOCH".to_string(),
         SOURCE_DATE_EPOCH.to_string(),
     ));
+    // Windows children need the system root to load DLLs at all, plus the
+    // MSVC/SDK search paths when clang drives `link.exe`. Only forwarded
+    // when present, so Unix stays as hermetic as before.
+    push_platform_env(&mut env);
     env
+}
+
+/// First tool from `candidates` that can be spawned and reports a version.
+///
+/// Windows MSVC tooling (`lib.exe`, `nm`-equivalents) does not speak GNU
+/// `--version`, so a failed version probe still counts as "spawnable" —
+/// the real invocation surfaces the error if the tool is unusable.
+fn find_tool(candidates: &[&str]) -> Option<String> {
+    for cand in candidates {
+        if let Ok(out) = Command::new(cand).arg("--version").output() {
+            if out.status.success() {
+                return Some((*cand).to_string());
+            }
+            // Spawnable, just not a GNU tool (e.g. MSVC `lib`).
+            return Some((*cand).to_string());
+        }
+    }
+    None
+}
+
+/// Create a static archive from `objects` with whatever archiver the
+/// platform ships: `ar`/`llvm-ar` (`rcs`) or MSVC `lib` (`/OUT:`).
+fn archive_objects(archive: &Path, objects: &[PathBuf], tmpdir: &Path) -> Result<(), String> {
+    if let Some(ar) = find_tool(&["llvm-ar", "ar"]) {
+        let mut cmd = Command::new(&ar);
+        cmd.arg("rcs").arg(archive);
+        for o in objects {
+            cmd.arg(o);
+        }
+        return run_hermetic(cmd, tmpdir, "ar rcs").map(|_| ());
+    }
+    if let Some(lib) = find_tool(&["lib"]) {
+        let mut cmd = Command::new(&lib);
+        cmd.arg("/nologo")
+            .arg(format!("/OUT:{}", archive.display()));
+        for o in objects {
+            cmd.arg(o);
+        }
+        return run_hermetic(cmd, tmpdir, "lib /OUT").map(|_| ());
+    }
+    Err(
+        "no static archiver found (need `ar`, `llvm-ar`, or MSVC `lib`)\n\
+         hint: install the LLVM binutils (`llvm-ar`) or Visual Studio Build Tools"
+            .to_string(),
+    )
 }
 
 /// Run `cmd` with the hermetic environment, returning stdout on success
@@ -463,26 +595,141 @@ pub fn expected_c_symbols(zzi_path: &Path) -> Result<Vec<String>, String> {
     Ok(syms)
 }
 
-/// Defined global symbols of an object/archive/shared lib
-/// (`nm -g --defined-only`), preserving multiplicity so the ABI stamp can
-/// be required exactly once.
-fn defined_symbols(path: &Path, tmpdir: &Path) -> Result<Vec<String>, String> {
-    let mut cmd = Command::new("nm");
-    cmd.arg("-g").arg("--defined-only").arg(path);
-    let out = run_hermetic(cmd, tmpdir, &format!("nm {}", path.display()))?;
-    let mut symbols = Vec::new();
-    for line in String::from_utf8_lossy(&out).lines() {
-        let line = line.trim();
-        if line.is_empty() || line.ends_with(':') {
-            continue; // archive member headers
-        }
-        // `addr TYPE name` or `TYPE name` or bare `name`.
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if let Some(name) = cols.last() {
-            symbols.push(name.to_string());
+/// Outcome of one symbol-dump invocation (stdout is useful even when the
+/// tool exits non-zero: `nm` reports unreadable archive members on stderr
+/// but still lists the rest).
+struct DumpOutput {
+    ok: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run `cmd` hermetically, keeping stdout/stderr/status instead of
+/// collapsing a non-zero exit into an error.
+fn run_hermetic_raw(mut cmd: Command, tmpdir: &Path, what: &str) -> Result<DumpOutput, String> {
+    let prog = cmd.get_program().to_string_lossy().into_owned();
+    let out = cmd
+        .env_clear()
+        .envs(hermetic_env(tmpdir))
+        .output()
+        .map_err(|e| format!("{what} failed to spawn `{prog}`: {e}"))?;
+    Ok(DumpOutput {
+        ok: out.status.success(),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    })
+}
+
+/// Symbol dumpers, best first. `llvm-nm` reads objects built by newer
+/// LLVM than Apple's cctools `nm` can (the Xcode 16.4 `nm` rejects
+/// rustc/LLVM 23 archives with "Unknown attribute kind"), so prefer it
+/// and locate Xcode's copy through `xcrun` when it is not on `PATH`.
+fn symbol_dumpers() -> Vec<String> {
+    let mut tools: Vec<String> = Vec::new();
+    if let Some(t) = find_tool(&["llvm-nm"]) {
+        tools.push(t);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(t) = xcrun_tool("llvm-nm") {
+        if !tools.contains(&t) {
+            tools.push(t);
         }
     }
-    Ok(symbols)
+    if let Some(t) = find_tool(&["nm"]) {
+        if !tools.contains(&t) {
+            tools.push(t);
+        }
+    }
+    tools
+}
+
+/// Resolve a tool inside the active Xcode toolchain (`xcrun -f <name>`),
+/// which is where `llvm-nm` lives on macOS.
+#[cfg(target_os = "macos")]
+fn xcrun_tool(name: &str) -> Option<String> {
+    let out = Command::new("xcrun").arg("-f").arg(name).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() || !Path::new(&path).is_file() {
+        return None;
+    }
+    Some(path)
+}
+
+/// `nm -g` symbol names, dropping undefined entries. Mach-O prefixes
+/// every C symbol with `_`, so `strip_macho_underscore` normalises
+/// `_my_add` back to `my_add`.
+fn parse_symbol_names(raw: &[u8], strip_macho_underscore: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in String::from_utf8_lossy(raw).lines() {
+        let line = line.trim();
+        if line.is_empty() || line.ends_with(':') || line.contains(": no symbols") {
+            continue; // archive member headers / empty members
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // `addr TYPE name` / `TYPE name` / bare `name`; `U` = undefined.
+        if cols.contains(&"U") {
+            continue;
+        }
+        let Some(name) = cols.last() else { continue };
+        if name.is_empty() || name.chars().all(|c| c.is_ascii_punctuation()) {
+            continue;
+        }
+        let name = if strip_macho_underscore {
+            name.strip_prefix('_').unwrap_or(name)
+        } else {
+            name
+        };
+        names.push(name.to_string());
+    }
+    names
+}
+
+/// Defined global symbols of an object/archive/shared lib, preserving
+/// multiplicity so the ABI stamp can be required exactly once.
+fn defined_symbols(
+    path: &Path,
+    tmpdir: &Path,
+    strip_macho_underscore: bool,
+) -> Result<Vec<String>, String> {
+    let tools = symbol_dumpers();
+    if tools.is_empty() {
+        return Err("no symbol dumper found (need `nm` or `llvm-nm`)\n\
+                    hint: install binutils (`nm`) or LLVM (`llvm-nm`)"
+            .to_string());
+    }
+    let mut last_err = String::new();
+    for tool in &tools {
+        let mut cmd = Command::new(tool);
+        cmd.arg("-g").arg(path);
+        let out = run_hermetic_raw(cmd, tmpdir, &format!("nm {}", path.display()))?;
+        let names = parse_symbol_names(&out.stdout, strip_macho_underscore);
+        if !names.is_empty() {
+            // Some members may be unreadable (newer LLVM objects under an
+            // older `nm`); the symbols we can see are still authoritative
+            // for the names the plugin actually exports.
+            if !out.ok {
+                eprintln!(
+                    "note: `{tool}` could not read every member of {}; verifying against the {} symbol(s) it listed",
+                    path.display(),
+                    names.len()
+                );
+            }
+            return Ok(names);
+        }
+        last_err = format!(
+            "nm {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Err(format!(
+        "{last_err}\nhint: no symbol dumper could read {} ({} tried)",
+        path.display(),
+        tools.join(", ")
+    ))
 }
 
 /// Count the ABI version stamp across both accepted spellings.
@@ -512,19 +759,24 @@ pub fn ensure_cc(
     spec: &BuildCcSpec,
     target_tag: Option<&str>,
 ) -> Result<CcBuildOutput, String> {
-    let pkg_dir = std::fs::canonicalize(pkg_dir)
+    // `canonicalize` returns `\\?\C:\…` on Windows; `cl.exe`, `link.exe`,
+    // `lib.exe` and `nm` reject verbatim paths in some arguments, and the
+    // spelling leaks into error text. Keep the canonical form for the
+    // containment check only, and hand tools the plain form.
+    let pkg_dir_canon = std::fs::canonicalize(pkg_dir)
         .map_err(|e| format!("cannot resolve {}: {e}", pkg_dir.display()))?;
+    let pkg_dir = strip_verbatim(&pkg_dir_canon);
     // Re-validate defensively: callers pass manifest structs that may not
     // have gone through NativeSpec::validate (path deps, CAS checkouts).
     for s in &spec.sources {
-        if Path::new(s).is_absolute() || s.split('/').any(|c| c == "..") || !s.ends_with(".c") {
+        if escapes_root(Path::new(s)) || !s.ends_with(".c") {
             return Err(format!(
                 "invalid source `{s}`: must be a contained `.c` path"
             ));
         }
     }
     for d in &spec.include_dirs {
-        if Path::new(d).is_absolute() || d.split('/').any(|c| c == "..") {
+        if escapes_root(Path::new(d)) {
             return Err(format!(
                 "invalid include_dir `{d}`: must stay inside the package"
             ));
@@ -585,10 +837,10 @@ pub fn ensure_cc(
         let joined = pkg_dir.join(rel);
         let canon =
             std::fs::canonicalize(&joined).map_err(|e| format!("cannot resolve `{rel}`: {e}"))?;
-        if !canon.starts_with(&pkg_dir) {
+        if !canon.starts_with(&pkg_dir_canon) {
             return Err(format!("`{rel}` escapes the package root"));
         }
-        Ok(canon)
+        Ok(strip_verbatim(&canon))
     };
 
     let mut objects = Vec::new();
@@ -621,16 +873,15 @@ pub fn ensure_cc(
         objects.push(obj);
     }
 
-    // Static archive (AOT input).
-    let archive = build_dir.join(format!("lib{stem}.a"));
-    {
-        let mut cmd = Command::new("ar");
-        cmd.arg("rcs").arg(&archive);
-        for o in &objects {
-            cmd.arg(o);
-        }
-        run_hermetic(cmd, &tmpdir, "ar rcs")?;
-    }
+    // Static archive (AOT input). MSVC toolchains use `.lib`; everything
+    // else uses `.a` (llvm-ar writes a COFF archive either way).
+    let archive_ext = if tag.starts_with("windows-") {
+        "lib"
+    } else {
+        "a"
+    };
+    let archive = build_dir.join(format!("lib{stem}.{archive_ext}"));
+    archive_objects(&archive, &objects, &tmpdir)?;
 
     // Shared library (VM dlopen input).
     let suffix = shared_suffix_for_tag(&tag);
@@ -695,7 +946,7 @@ pub fn ensure_cc(
 /// Output of a hermetic Rust crate build (all paths absolute).
 #[derive(Debug, Clone)]
 pub struct RustBuildOutput {
-    /// Static archive (`build/lib<name>.a`) — AOT link input.
+    /// Static archive (`build/lib<name>.a|.lib`) — AOT link input.
     pub archive: PathBuf,
     /// Shared library (`build/lib<name>.so|.dylib|.dll`) — VM dlopen input.
     pub shared: PathBuf,
@@ -761,11 +1012,10 @@ impl ChildPlan {
 /// offline switch for build (vendor fetch keeps it false).
 fn rust_hermetic_env(cargo_home: &Path, tmpdir: &Path, offline: bool) -> Vec<(String, String)> {
     let mut env = Vec::new();
-    for key in RUST_ENV_ALLOWLIST {
-        if let Ok(value) = std::env::var(key) {
-            env.push(((*key).to_string(), value));
-        }
-    }
+    push_allowlisted(&mut env, RUST_ENV_ALLOWLIST);
+    // Windows: MSVC `link.exe` needs `LIB`/`INCLUDE` from the host, which
+    // `env_clear()` would otherwise remove (LNK1181 on `kernel32.lib`).
+    push_platform_env(&mut env);
     env.push((
         "CARGO_HOME".to_string(),
         cargo_home.to_string_lossy().into_owned(),
@@ -814,12 +1064,30 @@ pub fn plan_cargo_build(
         args.push("--features".to_string());
         args.push(features.join(","));
     }
+    let mut env = rust_hermetic_env(cargo_home, tmpdir, true);
+    // An explicit linker pin is the one cargo setting that must survive the
+    // allowlist: CI sets it because Git for Windows ships a `link.exe` that
+    // shadows the MSVC one. Only the exact key for this triple is read —
+    // no other ambient `CARGO_*` variable is inherited.
+    let linker_key = linker_pin_key(triple);
+    if let Ok(value) = std::env::var(&linker_key) {
+        env.push((linker_key, value));
+    }
     ChildPlan {
         program: cargo.to_string(),
         args,
         cwd: cwd.to_path_buf(),
-        env: rust_hermetic_env(cargo_home, tmpdir, true),
+        env,
     }
+}
+
+/// Cargo's per-target linker variable, e.g. `x86_64-pc-windows-msvc` →
+/// `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER`.
+fn linker_pin_key(triple: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_LINKER",
+        triple.to_uppercase().replace('-', "_")
+    )
 }
 
 /// Plan the closure vendor fetch (`cargo vendor --locked`). This is the
@@ -986,8 +1254,11 @@ pub fn ensure_rust(
     spec: &BuildRustSpec,
     target_tag: Option<&str>,
 ) -> Result<RustBuildOutput, String> {
-    let pkg_dir = std::fs::canonicalize(pkg_dir)
+    // Cargo and rustc accept verbatim paths, but `link.exe` and the MSVC
+    // library tooling behind it do not: strip `\\?\` before planning.
+    let pkg_dir_canon = std::fs::canonicalize(pkg_dir)
         .map_err(|e| format!("cannot resolve {}: {e}", pkg_dir.display()))?;
+    let pkg_dir = strip_verbatim(&pkg_dir_canon);
     let crate_dir = rust_lock::crate_dir_for(&pkg_dir, &spec.crate_path)?;
     let (_crate_manifest, closure) = rust_lock::load_validated(&crate_dir)?;
 
@@ -1156,7 +1427,7 @@ pub fn ensure_rust(
             built_archive.display()
         ));
     }
-    if !windows && !built_shared.is_file() {
+    if !built_shared.is_file() {
         return Err(format!(
             "cargo build for `{pkg_name}` produced no cdylib at {}\n\
              hint: [lib] crate-type must include \"cdylib\"",
@@ -1164,12 +1435,14 @@ pub fn ensure_rust(
         ));
     }
 
-    let archive = build_dir.join(format!("lib{stem}.a"));
+    // Same naming rule as `ensure_cc`: MSVC linkers want `.lib`, and the
+    // DLL is staged so VM loaders and tooling see one stable layout per
+    // platform.
+    let archive_ext = if windows { "lib" } else { "a" };
+    let archive = build_dir.join(format!("lib{stem}.{archive_ext}"));
     let shared = build_dir.join(format!("lib{stem}.{suffix}"));
     copy_replace(&built_archive, &archive)?;
-    if !windows {
-        copy_replace(&built_shared, &shared)?;
-    }
+    copy_replace(&built_shared, &shared)?;
 
     let mut cflag_record = vec![format!("--target={triple}")];
     if !spec.cargo_features.is_empty() {
@@ -1302,10 +1575,13 @@ fn verify_engine_parity(
     probe_tmp: &Path,
 ) -> Result<(), String> {
     let expected = expected_c_symbols(zzi_path)?;
+    // Mach-O prefixes C symbols with `_`; normalise so `plugin.zzi`
+    // names (`my_add`) match what `nm` prints on macOS (`_my_add`).
+    let macho = tag.starts_with("macos-");
     let mut arch_syms: HashSet<String> = HashSet::new();
     let mut arch_stamps = 0usize;
     for archive in archives {
-        let set = defined_symbols(archive, probe_tmp)
+        let set = defined_symbols(archive, probe_tmp, macho)
             .map_err(|e| format!("static verification failed for `{pkg_name}`: {e}"))?;
         arch_stamps += abi_stamp_count(&set);
         arch_syms.extend(set);
@@ -1328,7 +1604,7 @@ fn verify_engine_parity(
         eprintln!("note: `{pkg_name}` on windows is AOT-only (VM dlopen deferred)");
         return Ok(());
     }
-    let shared_syms = defined_symbols(shared, probe_tmp)
+    let shared_syms = defined_symbols(shared, probe_tmp, macho)
         .map_err(|e| format!("shared verification failed for `{pkg_name}`: {e}"))?;
     for s in &expected {
         if !shared_syms.contains(s) {
@@ -1756,6 +2032,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_dotted_accepts_patch_component() {
+        // `sw_vers -productVersion` reports `major.minor.patch` (15.6.1)
+        // on every real runner; the old parser required exactly two parts
+        // and failed every macOS host-tag call.
+        assert_eq!(parse_dotted("15.6.1"), Some((15, 6)));
+        assert_eq!(parse_dotted("26.0"), Some((26, 0)));
+        assert_eq!(parse_dotted("15"), Some((15, 0)));
+        assert_eq!(parse_dotted("15."), None);
+        assert_eq!(parse_dotted("x.y"), None);
+    }
+
+    #[test]
+    fn host_tag_macos_shape() {
+        #[cfg(target_os = "macos")]
+        {
+            let tag = host_tag().expect("host tag detects");
+            assert!(
+                tag.starts_with("macos-arm64-") || tag.starts_with("macos-x86_64-"),
+                "{tag}"
+            );
+            crate::manifest::validate_platform_tag(&tag).expect("host tag valid");
+        }
+    }
+
     /// Build a `cc` record matching the live machine (no drift expected).
     fn live_cc_record() -> crate::lock::LockedNative {
         crate::lock::LockedNative {
@@ -1882,7 +2183,11 @@ mod tests {
         );
         assert_eq!(
             llvm_triple_for_tag("windows-x86_64-msvc").unwrap(),
-            "x86_64-pc-windows-gnu"
+            "x86_64-pc-windows-msvc"
+        );
+        assert_eq!(
+            llvm_triple_for_tag("windows-aarch64-msvc").unwrap(),
+            "aarch64-pc-windows-msvc"
         );
     }
 
@@ -2215,6 +2520,10 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
             rust_triple_for_tag("windows-x86_64-msvc").unwrap(),
             "x86_64-pc-windows-msvc"
         );
+        assert_eq!(
+            rust_triple_for_tag("windows-aarch64-msvc").unwrap(),
+            "aarch64-pc-windows-msvc"
+        );
         let err = rust_triple_for_tag("plan9-arm64-none").unwrap_err();
         assert!(err.contains("no Rust target triple"), "{err}");
     }
@@ -2260,8 +2569,15 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
             Some("true")
         );
         for (k, _) in &plan.env {
+            // On Windows the platform allowlist is inherited too (MSVC
+            // linker/sdk discovery); Unix must stay fully hermetic.
+            let platform_allowlisted = cfg!(windows) && WINDOWS_ENV_ALLOWLIST.contains(&k.as_str());
+            // Only the exact per-target linker pin may ride along.
+            let linker_pin = k == &linker_pin_key("x86_64-unknown-linux-gnu");
             assert!(
                 RUST_ENV_ALLOWLIST.contains(&k.as_str())
+                    || platform_allowlisted
+                    || linker_pin
                     || matches!(
                         k.as_str(),
                         "CARGO_HOME"
@@ -2272,6 +2588,62 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
                             | "CARGO_NET_OFFLINE"
                     ),
                 "unexpected inherited env `{k}`"
+            );
+        }
+    }
+
+    /// The Windows allowlist must carry the MSVC linker search paths:
+    /// dropping `LIB` is what produced
+    /// `LNK1181: cannot open input file 'kernel32.lib'`.
+    #[test]
+    fn windows_env_allowlist_keeps_linker_paths() {
+        for key in ["SystemRoot", "TEMP", "TMP", "INCLUDE", "LIB"] {
+            assert!(
+                WINDOWS_ENV_ALLOWLIST.contains(&key),
+                "`{key}` must be forwarded to Windows children"
+            );
+        }
+    }
+
+    /// Cargo's linker pin must keep the triple's exact spelling.
+    #[test]
+    fn linker_pin_key_shape() {
+        assert_eq!(
+            linker_pin_key("x86_64-pc-windows-msvc"),
+            "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"
+        );
+        assert_eq!(
+            linker_pin_key("aarch64-apple-darwin"),
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
+        );
+    }
+
+    /// `push_allowlisted` forwards only keys that are set, verbatim.
+    #[test]
+    fn allowlisted_env_forwarded_only_when_set() {
+        // Unique name so parallel tests cannot collide; not a real env var.
+        let probe = "ZZ_TEST_ALLOWLIST_PROBE";
+        std::env::set_var(probe, "value-1");
+        let mut env = Vec::new();
+        push_allowlisted(&mut env, &[probe, "ZZ_TEST_ALLOWLIST_ABSENT"]);
+        std::env::remove_var(probe);
+        assert_eq!(
+            env,
+            vec![(probe.to_string(), "value-1".to_string())],
+            "unset keys must be skipped, set keys forwarded"
+        );
+    }
+
+    /// Unix children get nothing beyond the fixed set: the platform
+    /// allowlist is Windows-only by construction.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_cargo_env_stays_hermetic() {
+        let env = rust_hermetic_env(Path::new("/pkg/cargo-home"), Path::new("/pkg/tmp"), true);
+        for key in WINDOWS_ENV_ALLOWLIST {
+            assert!(
+                !env.iter().any(|(k, _)| k == key),
+                "`{key}` must not leak into a Unix child env"
             );
         }
     }
@@ -2324,7 +2696,17 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
         assert_eq!(out.profile, "release");
         assert!(out.vendor_key.is_empty(), "no deps means no vendor key");
         // Artifacts live in the package build dir, never the crate tree.
-        assert!(out.archive.starts_with(pkg.join("build")));
+        // `ensure_rust` canonicalises the package dir, and macOS resolves
+        // `/var` → `/private/var`; compare canonical paths on both sides so
+        // the assertion holds on every host.
+        let build_dir = std::fs::canonicalize(pkg.join("build")).expect("build dir");
+        let archive = std::fs::canonicalize(&out.archive).expect("archive path");
+        assert!(
+            archive.starts_with(&build_dir),
+            "archive {} escaped {}",
+            archive.display(),
+            build_dir.display()
+        );
         let _ = std::fs::remove_dir_all(&pkg);
     }
 
@@ -2354,5 +2736,30 @@ pub extern "C" fn rplug_add(a: i64, b: i64) -> i64 {
             C_ABI_STAMP.to_string(),
         ];
         assert_eq!(abi_stamp_count(&mixed), 3);
+    }
+
+    /// Mach-O prints `_my_add` where ELF prints `my_add`, archive member
+    /// headers and `U` (undefined) lines must not become symbols, and
+    /// `nm`'s "no symbols" line for an empty member is noise.
+    #[test]
+    fn parse_symbol_names_normalises_macho_and_skips_noise() {
+        let raw = b"archive.a(member.o):\n\
+                    0000000000000000 T _my_add\n\
+                    0000000000000000 T my_sub\n\
+                    \x20                U _puts\n\
+                    archive.a(empty.o): no symbols\n\
+                    0000000000000000 D _ZZ_C_PLUGIN_ABI_VERSION\n";
+        let elvish = parse_symbol_names(raw, false);
+        assert!(elvish.contains(&"_my_add".to_string()));
+        assert!(elvish.contains(&"my_sub".to_string()));
+        assert!(!elvish.iter().any(|s| s == "_puts"), "undefined leaked");
+        assert!(
+            !elvish.iter().any(|s| s == "symbols" || s == "no"),
+            "member noise leaked: {elvish:?}"
+        );
+        let macho = parse_symbol_names(raw, true);
+        assert!(macho.contains(&"my_add".to_string()));
+        assert!(macho.contains(&"my_sub".to_string()));
+        assert_eq!(abi_stamp_count(&macho), 1, "{macho:?}");
     }
 }

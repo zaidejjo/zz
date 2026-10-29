@@ -18,6 +18,8 @@ use zz_cli::fixture_meta;
 #[path = "batch_lists.rs"]
 mod batch_lists;
 
+mod support;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -304,6 +306,9 @@ fn utf8_len(first: u8) -> usize {
 
 /// Returns `Some(reason)` if the fixture should be skipped entirely.
 fn native_skip_reason(file: &Path) -> Option<&'static str> {
+    if !support::fixture_supported_here(file) {
+        return Some("Unix-only fixture: `// platform: unix` (stdlib surface missing on Windows)");
+    }
     let stem = file.file_stem()?.to_str()?;
     match stem {
         "http_server_test" | "http_client_test" | "http_phase5b_test" | "concurrent_http_test" => {
@@ -358,10 +363,8 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // (issue #215) fixed it — sweep reports FIXED.
 
         // --- Output differences (native runs but output differs) ---
-        "concurrency_panic_test" => Some("native: panic/fail inside task closures lowers to unit (no err plumbing through zz_call_closure); VM yields .err"),
         "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
-        "decorators" => Some("DEFERRED to HIR->IR lowering: only the final marker prints; decorator wrapper output missing"),
         "extension_methods" => {
             Some("DEFERRED to HIR->IR lowering: extension-method call results missing + spurious conflict diagnostics on stderr")
         }
@@ -375,24 +378,23 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // via silent-unit leniency); all three now fail loudly like the
         // VM and pass as strict error fixtures.
 
+        // NOTE: `http_middleware_p2` (serve_dir_at) and `http_static_p2`
+        // (serve_dir) are now implemented in C and run as strict parity.
+        // `http_bytes_p3` (body_bytes) is also implemented.
+        // `http_tls_p3`, `http_hijack_p3` still need rustls/curl in C.
+
         // --- Phase 2/3 HTTP: VM-only natives abort loudly on AOT ---
-        // `listen_tls`, `fetch_insecure`, `body_bytes`, `hijack`,
-        // `serve_dir_at`, and `test_req` et al have no C impl yet
-        // (tracked in zz_codegen/tests.rs KNOWN_CODEGEN_GAPS as "P3
-        // AOT"). Native legs return a catchable ZZ error via
-        // `zz_unimplemented_native` (issue #644) instead of aborting the
-        // process; output diverges from the VM which implements them.
+        // `listen_tls`, `fetch_insecure` are VM-only (need rustls in C).
+        // `hijack` is VM-only (needs WebSocket handshake in C).
         "http_tls_p3" => Some(
             "P3 AOT: listen_tls + fetch_insecure are VM-only; native returns error",
         ),
-        "http_hijack_p3" | "http_bytes_p3" => {
-            Some("P3 AOT: hijack / body_bytes are VM-only; native returns error")
+        "http_hijack_p3" => {
+            Some("P3 AOT: hijack is VM-only; native returns error")
         }
-        // `http_limits_p2` is strict parity now: AOT implements
-        // `http.listen_cfg` with the same limits/shutdown behavior as the VM.
-        "http_middleware_p2" | "http_static_p2" => {
-            Some("P3 AOT: serve_dir_at / test_req are VM-only; native returns error")
-        }
+        // NOTE: `fs_comprehensive` was listed here (PID-embedded temp
+        // paths) but the sweep reports FIXED — scratch paths are masked
+        // by `mask_scratch_paths`, so it runs as strict parity now.
         _ => None,
     }
 }
@@ -410,55 +412,81 @@ fn norm_stream(s: &str) -> String {
     strip_numeric_lines(&mask_scratch_paths(&normalize_addrs(s)))
 }
 
-/// Mask per-run scratch segments in `/tmp/zz_*` paths: fixtures isolate
+/// Scratch-directory prefixes masked per run: fixtures create their
+/// scratch dirs in the system temp dir with a `zz_` stem plus per-run
+/// suffixes. The literal `/tmp/zz_` stays for fixtures that spell it out;
+/// the real temp dir is added in both separator styles so Windows
+/// (`C:\...\Temp\zz_...`) masks too.
+fn scratch_prefixes() -> Vec<String> {
+    let mut prefixes = vec!["/tmp/zz_".to_string()];
+    let tmp = std::env::temp_dir();
+    let raw = tmp.to_string_lossy();
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    for prefix in [format!("{trimmed}/zz_"), format!("{trimmed}\\zz_")] {
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    prefixes
+}
+
+/// Mask per-run scratch segments in temp-dir paths: fixtures isolate
 /// parallel runners with `..._<pid>_<token>` suffixes, and VM vs native
 /// legs are always different processes, so these segments can never
 /// match byte-for-byte. Only the trailing `_digits_digits` run is
 /// masked; real output numbers elsewhere are untouched.
 fn mask_scratch_paths(s: &str) -> String {
     let bytes = s.as_bytes();
+    let prefixes = scratch_prefixes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         // Byte-slice prefix check (never `s[i..]`: `i` may sit inside a
         // multibyte char while scanning).
-        if bytes[i..].starts_with(b"/tmp/zz_") {
-            // Consume the stem: [A-Za-z0-9_]+, then strip up to two
-            // trailing _<alnum-with-digit> groups (pid, sweep token),
-            // which become _<run>. The digit requirement keeps real
-            // name parts (`_test`, `_nonexist`) intact.
-            let mut j = i + "/tmp/zz_".len();
-            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                j += 1;
+        let prefix = match prefixes
+            .iter()
+            .find(|p| bytes[i..].starts_with(p.as_bytes()))
+        {
+            Some(p) => p,
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+                continue;
             }
-            let mut k = j;
-            for _ in 0..2 {
-                let mut d = k;
-                while d > i && bytes[d - 1].is_ascii_alphanumeric() {
-                    d -= 1;
-                }
-                let run = &bytes[d..k];
-                if !run.is_empty()
-                    && d > i
-                    && bytes[d - 1] == b'_'
-                    && run.iter().any(|b| b.is_ascii_digit())
-                {
-                    k = d - 1;
-                } else {
-                    break;
-                }
-            }
-            if k < j {
-                out.extend_from_slice(&bytes[i..k]);
-                out.extend_from_slice(b"_<run>");
-            } else {
-                out.extend_from_slice(&bytes[i..j]);
-            }
-            i = j;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
+        };
+        // Consume the stem: [A-Za-z0-9_]+, then strip up to two
+        // trailing _<alnum-with-digit> groups (pid, sweep token),
+        // which become _<run>. The digit requirement keeps real
+        // name parts (`_test`, `_nonexist`) intact.
+        let stem_start = i + prefix.len();
+        let mut j = stem_start;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
         }
+        let mut k = j;
+        for _ in 0..2 {
+            let mut d = k;
+            while d > stem_start && bytes[d - 1].is_ascii_alphanumeric() {
+                d -= 1;
+            }
+            let run = &bytes[d..k];
+            if !run.is_empty()
+                && d > stem_start
+                && bytes[d - 1] == b'_'
+                && run.iter().any(|b| b.is_ascii_digit())
+            {
+                k = d - 1;
+            } else {
+                break;
+            }
+        }
+        if k < j {
+            out.extend_from_slice(&bytes[i..k]);
+            out.extend_from_slice(b"_<run>");
+        } else {
+            out.extend_from_slice(&bytes[i..j]);
+        }
+        i = j;
     }
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
@@ -592,6 +620,10 @@ macro_rules! parity_strict_error {
             let fixtures = fixtures_dir();
             let path = fixtures.join("errors").join($file);
             assert!(path.exists(), "fixture not found: {}", path.display());
+            if !support::fixture_supported_here(&path) {
+                eprintln!("SKIP [{}]: Unix-only fixture", path.display());
+                return;
+            }
 
             let vm = run_zz_vm(&path);
             if vm_only() {
@@ -1319,13 +1351,6 @@ parity_strict!(
     "stdlib",
     "concurrency_recall_test.zz"
 );
-parity_known_failure!(
-    parity_stdlib_concurrency_panic_test,
-    "stdlib",
-    "concurrency_panic_test.zz"
-);
-
-// Error fixtures (both must error)
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
 parity_strict_error!(parity_err_alias_cycle, "alias_cycle.zz");
 parity_strict_error!(parity_err_alias_dup, "alias_dup.zz");
@@ -2117,6 +2142,9 @@ fn parity_discover_all_fixtures() {
         // tried and reverted (8 procs on 4 cores thrashed clang to ~140s
         // wall and a native fixture died by signal under the load).
         let file = &task.file;
+        if !support::fixture_supported_here(file) {
+            return SweepOutcome::Skipped;
+        }
         if task.errors_bucket {
             if let Some(bug) = known_native_failure(file) {
                 if vm_only() {
@@ -2361,6 +2389,18 @@ fn mask_scratch_paths_masks_pid_token_suffixes() {
     assert_eq!(
         mask_scratch_paths("see /tmp/zz_phase4a_nonexist.txt"),
         "see /tmp/zz_phase4a_nonexist.txt"
+    );
+    // Platform temp dir, both separator styles (Windows runners).
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.to_string_lossy();
+    let tmp = tmp.trim_end_matches(['/', '\\']);
+    assert_eq!(
+        mask_scratch_paths(&format!("{tmp}/zz_fs_x_123_4/missing")),
+        format!("{tmp}/zz_fs_x_<run>/missing")
+    );
+    assert_eq!(
+        mask_scratch_paths(&format!("{tmp}\\zz_fs_x_123_t9\\missing")),
+        format!("{tmp}\\zz_fs_x_<run>\\missing")
     );
     // Unrelated numbers untouched.
     assert_eq!(

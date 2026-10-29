@@ -563,17 +563,37 @@ fn wrapper_func(
         })
         .collect();
     let call_span = chain.span().join(span);
+    // Workaround: `return <closure_call>(args)` returns empty in AOT codegen.
+    // Assign the closure to a temp variable first, then call it.
+    let tmp_name = format!("__wrapped_{}", name.join("_"));
+    let assign = Stmt::Decl {
+        ty: None,
+        name: crate::ast::Ident {
+            name: tmp_name.clone(),
+            span: call_span,
+        },
+        value: chain,
+        span: call_span,
+        pub_: false,
+        is_const: false,
+    };
     let call = Expr::Call {
-        callee: Box::new(chain),
+        callee: Box::new(Expr::Ident {
+            name: tmp_name,
+            span: call_span,
+        }),
         args: forward,
         named: Vec::new(),
         span: call_span,
     };
     let body = Block {
-        stmts: vec![Stmt::Return {
-            value: Some(call),
-            span: call_span,
-        }],
+        stmts: vec![
+            assign,
+            Stmt::Return {
+                value: Some(call),
+                span: call_span,
+            },
+        ],
         span: call_span,
     };
     Stmt::Func {

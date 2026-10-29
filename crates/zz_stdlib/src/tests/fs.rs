@@ -1,11 +1,11 @@
-use super::run;
+use super::{run, zz_path};
 use zz_runtime::Value;
 
 #[test]
 fn fs_write_and_read_file() {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("zz_stdlib_test_{}.txt", std::process::id()));
-    let path_str = path.to_string_lossy().to_string();
+    let path_str = zz_path(&path);
 
     let v = run(&format!(
         "import std.fs\nfs.write(\"{path_str}\", \"hello fs\")"
@@ -54,7 +54,7 @@ fn fs_exists_missing_is_false() {
 fn fs_append_copy_move_dirs_and_stat() {
     let dir = std::env::temp_dir().join(format!("zz_fs_unit_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let base = dir.to_string_lossy().to_string();
+    let base = zz_path(&dir);
     let sub = format!("{base}/sub/nested");
 
     let v = run(&format!("import std.fs\nfs.mkdir_all(\"{sub}\")")).unwrap();
@@ -158,7 +158,7 @@ fn fs_append_copy_move_dirs_and_stat() {
 fn fs_streaming_handle_roundtrip() {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("zz_fs_stream_{}.txt", std::process::id()));
-    let path_str = path.to_string_lossy().to_string();
+    let path_str = zz_path(&path);
 
     let v = run(&format!("import std.fs\nFile.open(\"{path_str}\", \"w\")")).unwrap();
     let id = match v {

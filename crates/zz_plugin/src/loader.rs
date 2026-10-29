@@ -1,8 +1,10 @@
-//! VM-based plugin loader using dlopen.
+//! VM-based plugin loader using the platform dynamic loader
+//! (`dlopen` / `LoadLibrary`).
 //!
-//! Loads `.so` (Linux) / `.dylib` (macOS) plugin libraries at runtime,
-//! validates version stamps, and calls the well-known `zz_plugin_register`
-//! entrypoint to populate the VM's native function dispatch table.
+//! Loads `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) plugin
+//! libraries at runtime, validates version stamps, and calls the
+//! well-known `zz_plugin_register` entrypoint to populate the VM's native
+//! function dispatch table.
 
 use std::collections::HashMap;
 use std::ffi::c_char;

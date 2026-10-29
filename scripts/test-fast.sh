@@ -12,11 +12,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "== fmt =="
-cargo fmt --check
+# CI runs fmt/clippy once in the `lint` job; the per-platform legs set
+# ZZ_CI_SKIP_LINT=1 to avoid repeating the same source-only checks six
+# times. Local runs keep both.
+if [ -z "${ZZ_CI_SKIP_LINT:-}" ]; then
+	echo "== fmt =="
+	cargo fmt --check
 
-echo "== clippy (-D warnings) =="
-cargo clippy --all-targets -- -D warnings
+	echo "== clippy (-D warnings) =="
+	cargo clippy --all-targets -- -D warnings
+fi
 
 echo "== unit tests (all crates) =="
 cargo test --workspace --exclude zz_cli --lib

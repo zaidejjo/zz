@@ -1,68 +1,91 @@
-// features: arrays, comparison, imports, locals, match, option-result, print, std-process, string-literal
+// features: arrays, comparison, if-else, imports, locals, match, option-result, print, std-env, std-process, string-literal
 // E2E: std.process — run, spawn/wait, env overlay, pid, error paths
+//
+// `echo`, `false`, and `sh` are Unix executables. Windows ships none of
+// them and `process.run` execs directly (no shell lookup), so the Windows
+// branch drives `cmd /c` and asserts the same status/stdout/stderr
+// contract. `env.os()` is the platform probe (identical in both engines);
+// command + argv are plain data, so both spellings live in one place.
+//
+// NOTE: process.exit is NOT exercised here (it would kill the harness) — it
+// is verified manually via process_exit_test.zz expecting exit code 42.
+import std.env
 import std.process
 
-// NOTE: top-level bindings only (VM scope limitation); `.err` arms use
-// wildcards (bound err vars do not resolve in interpolation).
-// process.exit is NOT exercised here (it would kill the harness) — it is
-// verified manually via process_exit_test.zz expecting exit code 42.
-echo_cmd := "echo"
-hello := "hello-child"
-empty_argv := []
-false_cmd := "false"
-missing := "zz-no-such-bin"
-dash_c := "-c"
-sh_cmd := "sh"
-sh_body := "echo $ZZ_PROC_TEST"
-env_kv := "ZZ_PROC_TEST=env-ok"
-
-// ── run echo: status + stdout + stderr ──
-r := process.run(echo_cmd, [hello])
-match r {
-    .ok(t) => println("run_status: {t[0]}"),
-    .err(_) => println("run_bad"),
+func main() -> Result<int, str> {
+    win := env.os() == "windows"
+    hello := "hello-child"
+    missing := "zz-no-such-bin"
+    env_kv := "ZZ_PROC_TEST=env-ok"
+    echo_cmd := if win {
+        "cmd"
+    } else {
+        "echo"
+    }
+    echo_argv := if win {
+        ["/c", "echo", hello]
+    } else {
+        [hello]
+    }
+    fail_cmd := if win {
+        "cmd"
+    } else {
+        "false"
+    }
+    fail_argv := if win {
+        ["/c", "exit", "1"]
+    } else {
+        []
+    }
+    env_cmd := if win {
+        "cmd"
+    } else {
+        "sh"
+    }
+    env_argv := if win {
+        ["/c", "echo", "%ZZ_PROC_TEST%"]
+    } else {
+        ["-c", "echo $ZZ_PROC_TEST"]
+    }
+    // ── run echo: status + stdout + stderr ──
+    r := process.run(echo_cmd, echo_argv)
+    match r {
+        .ok(t) => {
+            println("run_status: {t[0]}")
+            println("run_out: {t[1]}")
+            println("run_err: [{t[2]}]")
+        }
+        .err(_) => println("run_bad")
+    }
+    // ── failing child keeps non-zero status (not .err) ──
+    f := process.run(fail_cmd, fail_argv)
+    match f {
+        .ok(t) => println("false_status: {t[0]}")
+        .err(_) => println("false_bad")
+    }
+    // ── env overlay ──
+    e := process.run_with_env(env_cmd, env_argv, [env_kv])
+    match e {
+        .ok(t) => println("env_out: {t[1]}")
+        .err(_) => println("env_bad")
+    }
+    // ── spawn + wait ──
+    s := process.spawn(echo_cmd, echo_argv)
+    match s {
+        .ok(child) => match process.wait(child) {
+            .ok(t) => println("spawn_status: {t[0]}")
+            .err(_) => println("wait_bad")
+        }
+        .err(_) => println("spawn_bad")
+    }
+    // ── missing binary is .err ──
+    match process.run(missing, []) {
+        .ok(_) => println("missing_bad")
+        .err(_) => println("missing_ok")
+    }
+    // ── pid + std spelling ──
+    println("pid_ok: {process.pid() > 0}")
+    println("std_spell: {std.process.pid() > 0}")
+    println("process_ok")
+    return .ok(0)
 }
-match r {
-    .ok(t) => println("run_out: {t[1]}"),
-    .err(_) => println("run_bad"),
-}
-match r {
-    .ok(t) => println("run_err: [{t[2]}]"),
-    .err(_) => println("run_bad"),
-}
-
-// ── failing child keeps non-zero status (not .err) ──
-f := process.run(false_cmd, empty_argv)
-match f {
-    .ok(t) => println("false_status: {t[0]}"),
-    .err(_) => println("false_bad"),
-}
-
-// ── env overlay ──
-e := process.run_with_env(sh_cmd, [dash_c, sh_body], [env_kv])
-match e {
-    .ok(t) => println("env_out: {t[1]}"),
-    .err(_) => println("env_bad"),
-}
-
-// ── spawn + wait ──
-s := process.spawn(echo_cmd, [hello])
-match s {
-    .ok(child) => match process.wait(child) {
-        .ok(t) => println("spawn_status: {t[0]}"),
-        .err(_) => println("wait_bad"),
-    },
-    .err(_) => println("spawn_bad"),
-}
-
-// ── missing binary is .err ──
-match process.run(missing, empty_argv) {
-    .ok(_) => println("missing_bad"),
-    .err(_) => println("missing_ok"),
-}
-
-// ── pid + std spelling ──
-println("pid_ok: {process.pid() > 0}")
-println("std_spell: {std.process.pid() > 0}")
-
-println("process_ok")

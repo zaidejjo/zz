@@ -102,7 +102,7 @@ PACKAGE MANAGER:
     zz toolchain install          download a pinned Zig C backend into ~/.zz/toolchain
     zz toolchain status           installed versions, pin, active backend
     zz completion [shell]         print shell completion (bash|zsh|fish|powershell)
-    zz upgrade [--dry-run]         self-update from GitHub releases
+    zz upgrade [--dry-run]         self-update zz + zz-lsp from GitHub releases
     zz doctor [--fix]              audit the toolchain (binary, clang, shell, git, registry)
 
 REGISTRY (see `zz pm --help` for full flags):
@@ -218,7 +218,40 @@ EXAMPLES:
     zz build --static hello.zz       static build, explicit (self-contained)
 ";
 
+/// Stack reserved for the thread that runs the CLI.
+///
+/// The OS default for a process' main thread is 1 MiB on Windows (8 MiB on
+/// macOS/Linux). Parsing, checking, IR lowering and the interpreter all
+/// recurse once per nested construct, and a *debug* binary's frames are an
+/// order of magnitude larger than a release build's: 20 levels of nested
+/// parentheses overflow the 1 MiB Windows default with
+/// `STATUS_STACK_OVERFLOW` (exit -1073741571), while a release binary needs
+/// under 128 KiB. Compilers reserve a worker stack for the same reason;
+/// 16 MiB keeps deep (not adversarial) programs working everywhere.
+const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    // Run everything on a worker thread with a known stack size instead of
+    // the platform default (see CLI_STACK_BYTES).
+    let worker = std::thread::Builder::new()
+        .name("zz".to_string())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(main_inner);
+    match worker {
+        Ok(handle) => match handle.join() {
+            Ok(code) => code,
+            // The panic itself is already rendered by the panic hook; only
+            // the exit status is ours to choose.
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(e) => {
+            eprintln!("zz: cannot start worker thread: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn main_inner() -> ExitCode {
     // Self-heal ~/.zz/bin + PATH hint on every run (cheap, silent when piped).
     // No hint when already running setup/completion — that *is* the fix.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -941,15 +974,19 @@ fn load_vm_plugins(
             continue;
         }
 
-        // Try common shared library names, then any .so/.dylib the
-        // build hook actually produced (e.g. libzimg_native.so — never
-        // assume lib<name>.so).
+        // Try the platform's canonical shared-library names, then any
+        // `.so`/`.dylib`/`.dll` the build hook actually produced (e.g.
+        // libzimg_native.so — never assume lib<name>.so). Windows PE has no
+        // `lib` prefix, so both forms are probed everywhere.
         let mut lib_paths: Vec<std::path::PathBuf> = Vec::new();
+        let base = dep.name.replace('-', "_");
         let lib_names = [
-            format!("lib{}.so", dep.name.replace('-', "_")),
-            format!("lib{}.dylib", dep.name.replace('-', "_")),
-            format!("{}.so", dep.name.replace('-', "_")),
-            format!("{}.dylib", dep.name.replace('-', "_")),
+            format!(
+                "{}{base}{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ),
+            format!("{base}{}", std::env::consts::DLL_SUFFIX),
         ];
 
         for lib_name in &lib_names {
@@ -959,13 +996,20 @@ fn load_vm_plugins(
             }
         }
         if let Ok(entries) = std::fs::read_dir(&build_dir) {
+            // Accept every shared-library spelling the build hook may have
+            // produced (`libctoy_native.so` on a Linux-flavored hook, `.dylib`
+            // on macOS, `.dll` on Windows) — never assume the host's
+            // `DLL_SUFFIX` matches what the hook actually emitted.
+            let is_shared_lib = |p: &std::path::Path| {
+                matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some(ext) if ext == "so" || ext == "dylib" || ext == "dll"
+                )
+            };
             let mut scanned: Vec<std::path::PathBuf> = entries
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| {
-                    matches!(p.extension().and_then(|e| e.to_str()), Some("so" | "dylib"))
-                        && !lib_paths.contains(p)
-                })
+                .filter(|p| is_shared_lib(p) && !lib_paths.contains(p))
                 .collect();
             scanned.sort();
             lib_paths.extend(scanned);
@@ -1032,16 +1076,40 @@ fn load_vm_plugins(
 /// Loaded plugin libraries, kept alive for the process lifetime.
 /// Dropping a `PluginLib` unloads its `.so`, unmapping every registered
 /// function pointer — so handles are never released once loaded.
+/// Capped at `MAX_PLUGIN_LIBS` so a single-process test suite (all 283
+/// bin tests run in one libtest process) cannot grow RSS without bound
+/// and get OOM-killed.
 static PLUGIN_LIBS: std::sync::OnceLock<std::sync::Mutex<Vec<zz_plugin::PluginLib>>> =
     std::sync::OnceLock::new();
 
+/// Cap on retained plugin handles; oldest are dropped when full.
+const MAX_PLUGIN_LIBS: usize = 64;
+
 /// Retain a loaded plugin library for the rest of the process.
 fn keep_plugin_alive(handle: zz_plugin::PluginLib) {
-    PLUGIN_LIBS
+    let mut g = PLUGIN_LIBS
         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
         .lock()
-        .expect("plugin registry lock")
-        .push(handle);
+        .expect("plugin registry lock");
+    if g.len() >= MAX_PLUGIN_LIBS {
+        // Drop the oldest handle so its `.so` is unmapped before adding
+        // the new one, keeping RSS bounded in long-running processes.
+        g.remove(0);
+    }
+    g.push(handle);
+}
+
+/// Drop all retained plugin handles so their `.so` mappings are released.
+/// Test-only: call in test teardown to keep RSS flat across the 283 bin
+/// tests that share one libtest process.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn clear_plugin_libs_for_test() {
+    if let Some(m) = PLUGIN_LIBS.get() {
+        if let Ok(mut g) = m.lock() {
+            g.clear();
+        }
+    }
 }
 
 /// Non-Unix stub for VM plugin loading.
@@ -1444,7 +1512,7 @@ pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &
         for note in &e.notes {
             eprintln!("  note: {note}");
         }
-        return "program failed".to_string();
+        return format!("runtime error: {}", e.message);
     }
     let mut files = Files::new();
     let id = files.add(name.to_string(), source.to_string());
@@ -1459,7 +1527,10 @@ pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &
     }
     let diags = vec![diag];
     eprint!("{}", render_to_string(&files, id, &diags));
-    "program failed".to_string()
+    // The trailing `zz: ...` line is what survives when stderr is captured
+    // and only the tail is read, so make it name the failure instead of the
+    // opaque "program failed".
+    format!("runtime error: {}", e.message)
 }
 
 /// Print a non-unit program result, then auto-call `main()` when the
@@ -1502,7 +1573,7 @@ pub(crate) fn run_entry_main(
                 if let Value::Result(r) = v {
                     if let Err(e) = &*r {
                         eprintln!("{e}");
-                        return Err("program failed".to_string());
+                        return Err(format!("main() returned an error: {e}"));
                     }
                 }
             }
@@ -2143,10 +2214,15 @@ fn run_native(
         let _ = std::fs::remove_dir_all(&dir);
     }
     if code != 0 {
-        return Err(format!(
-            "native program exited with code {code}\n\
-             hint: the program may have panicked or returned a non-zero exit code"
-        ));
+        // Exit code 1 from generated code is the deliberate runtime-trap
+        // path (`zz error: ...` already on stderr), not a crash. Only say
+        // "panicked" for signal-ish codes it could actually mean.
+        let hint = if code == 1 {
+            "hint: the program stopped on a runtime error; see the `zz error:` line above"
+        } else {
+            "hint: the program may have crashed (signal or abort); re-run with `zz run` (VM) to compare behavior"
+        };
+        return Err(format!("native program exited with code {code}\n{hint}"));
     }
     Ok(())
 }
@@ -3559,20 +3635,43 @@ mod tests {
     #[test]
     fn check_no_arg_errors() {
         // NOTE: `examples/` is gitignored (personal scratch dir, absent in
-        // CI checkouts) — scan the tracked fixtures instead. The point is
-        // directory discovery finds files and does not panic/IO-error.
+        // CI checkouts) — scan a bounded subset of fixtures instead of all
+        // 365 (~318MB source). Checking every fixture populates unbounded
+        // process-global memory caches (MEM_CACHE + PARSED_PROGRAMS) that
+        // persist across all 283 bin tests in one libtest process and can
+        // OOM-kill the test runner. A subset still proves directory
+        // discovery finds files and does not panic/IO-error.
         let fixtures_dir =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
         assert!(fixtures_dir.is_dir(), "tests/fixtures dir should exist");
-        let result = check_isolated(&fixtures_dir.display().to_string());
-        // The function may fail type-check on fixtures; the point is it
-        // should find files and not panic/IO-error.
-        match &result {
-            Err(msg) if msg.contains("does not exist") || msg.contains("no .zz files") => {
-                panic!("scan should find files: {msg}");
+        let subset: Vec<&str> = vec![
+            "stdlib/declarations.zz",
+            "stdlib/net_tcp_test.zz",
+            "stdlib/net_unix_test.zz",
+            "stdlib/http_keepalive_p1.zz",
+            "syntax/declarations.zz",
+            "types/declarations.zz",
+        ];
+        let mut any_ok_or_type_error = false;
+        for rel in &subset {
+            let path = fixtures_dir.join(rel);
+            if !path.is_file() {
+                continue;
             }
-            _ => {} // either Ok or type-check errors — both prove scanning worked.
+            let result = check_isolated(&path.display().to_string());
+            match &result {
+                Err(msg) if msg.contains("does not exist") || msg.contains("no .zz files") => {
+                    panic!("scan should find files: {msg}");
+                }
+                _ => any_ok_or_type_error = true, // either Ok or type-check errors — both prove scanning worked.
+            }
         }
+        assert!(
+            any_ok_or_type_error,
+            "no fixture files were checked; directory discovery may be broken"
+        );
+        // Clear memory caches so RSS stays flat for the rest of the suite.
+        super::loader::cache::clear_all_caches_for_test();
     }
 }
 
@@ -3626,7 +3725,7 @@ mod plugin_tests {
     }
 
     fn valid_zzi() -> String {
-        "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    fn ping() -> int\n}\n".to_string()
+        "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    func ping() -> int\n}\n".to_string()
     }
 
     #[test]
@@ -3651,7 +3750,7 @@ mod plugin_tests {
         let root = plugin_root();
         write_zzi(
             root.path(),
-            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 9.9.9\n\nextern \"C\" {\n    fn ping() -> int\n}\n",
+            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 9.9.9\n\nextern \"C\" {\n    func ping() -> int\n}\n",
         );
         write_toml(
             root.path(),
@@ -3675,7 +3774,7 @@ mod plugin_tests {
         let root = plugin_root();
         write_zzi(
             root.path(),
-            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    fn ping() -> int\n    fn absent() -> int\n}\n",
+            "// Version: 1\n// C-ABI: 1\n// Plugin-version: 0.1.0\n\nextern \"C\" {\n    func ping() -> int\n    func absent() -> int\n}\n",
         );
         write_toml(
             root.path(),

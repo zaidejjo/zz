@@ -13,6 +13,7 @@
 //!   triples fail with the exact CLI-contract errors; bad `--full`
 //!   combos (`--static`, `--dynamic`, `--pgo`) fail with hints.
 //! - removed `--dev` flag is rejected with a hint.
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,6 +52,10 @@ fn run(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, S
 
 #[test]
 fn static_default_builds_native_binary() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, stdout, stderr) = run(&dir, &["build", "hello.zz"], &[]);
     if !stdout.contains("(static,") && stderr.contains("no clang found") {
@@ -69,7 +74,7 @@ fn static_default_builds_native_binary() {
         stderr.contains("(static,"),
         "static marker missing.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     assert!(
         !dir.join("bin").exists(),
@@ -83,6 +88,10 @@ fn static_default_builds_native_binary() {
 
 #[test]
 fn dynamic_flag_builds_dynamic_dev_binary() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, _stdout, stderr) = run(&dir, &["build", "--dynamic", "hello.zz"], &[]);
     assert_eq!(code, 0, "dynamic build must pass.\nstderr:\n{stderr}");
@@ -90,7 +99,7 @@ fn dynamic_flag_builds_dynamic_dev_binary() {
         stderr.contains("(dev,"),
         "dev marker missing for --dynamic.\nstderr:\n{stderr}"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -138,16 +147,17 @@ fn release_without_clang_emits_c_and_scripts() {
 #[test]
 fn pgo_cross_target_rejected() {
     let dir = temp_project();
+    // Must be foreign to the *host* arch, not hardcoded x86_64 — on an
+    // aarch64 runner `aarch64-unknown-linux-gnu` is the native target and
+    // PGO legitimately succeeds.
+    let foreign = if std::env::consts::ARCH == "aarch64" {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        "aarch64-unknown-linux-gnu"
+    };
     let (code, _stdout, stderr) = run(
         &dir,
-        &[
-            "build",
-            "-p",
-            "--pgo",
-            "--target",
-            "aarch64-unknown-linux-gnu",
-            "hello.zz",
-        ],
+        &["build", "-p", "--pgo", "--target", foreign, "hello.zz"],
         &[],
     );
     assert_eq!(code, 1, "pgo+cross must fail.\nstderr:\n{stderr}");
@@ -195,6 +205,10 @@ fn removed_dev_flag_is_rejected() {
 
 #[test]
 fn release_native_builds_and_runs() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, stdout, stderr) = run(&dir, &["build", "-p", "hello.zz"], &[]);
     if !stdout.contains("release") && stderr.contains("no clang found") {
@@ -206,7 +220,7 @@ fn release_native_builds_and_runs() {
         code, 0,
         "release build must pass.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
@@ -358,6 +372,10 @@ fn has_llvm_profdata() -> bool {
 
 #[test]
 fn full_builds_max_opt_binary() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, _stdout, stderr) = run(&dir, &["build", "--full", "hello.zz"], &[]);
     if code != 0 && stderr.contains("no clang found") {
@@ -370,7 +388,7 @@ fn full_builds_max_opt_binary() {
         stderr.contains("(full,"),
         "full marker missing.\nstderr:\n{stderr}"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(out.status.code(), Some(0));
@@ -398,6 +416,10 @@ fn full_flag_conflicts_error_with_hints() {
 
 #[test]
 fn output_flag_names_binary() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let (code, _stdout, stderr) = run(&dir, &["build", "-o", "myapp", "hello.zz"], &[]);
     if code != 0 && stderr.contains("no clang found") {
@@ -406,20 +428,24 @@ fn output_flag_names_binary() {
         return;
     }
     assert_eq!(code, 0, "build -o must pass.\nstderr:\n{stderr}");
-    let bin = dir.join("myapp");
+    let bin = support::exe_in(&dir, "myapp");
     assert!(bin.is_file(), "./myapp missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");
     // Path-like -o is used as-is relative to the project dir.
     let (code, _stdout, stderr) = run(&dir, &["build", "-o", "sub/dir/app", "hello.zz"], &[]);
     assert_eq!(code, 0, "build -o path must pass.\nstderr:\n{stderr}");
-    let bin = dir.join("sub/dir/app");
+    let bin = support::exe_in(&dir, "sub/dir/app");
     assert!(bin.is_file(), "sub/dir/app missing");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn full_pgo_flow_trains_and_optimizes() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     if !has_llvm_profdata() {
         eprintln!("SKIP: llvm-profdata not on PATH");
         return;
@@ -437,7 +463,7 @@ fn full_pgo_flow_trains_and_optimizes() {
         !dir.join("default.profdata").exists(),
         "profdata must be cleaned up on success"
     );
-    let bin = dir.join("hello");
+    let bin = support::exe_in(&dir, "hello");
     assert!(bin.is_file(), "./hello missing");
     let out = Command::new(&bin).output().expect("run binary");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "build_ok\n");

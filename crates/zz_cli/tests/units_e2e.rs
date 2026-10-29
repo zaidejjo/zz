@@ -2,6 +2,7 @@
 //! must behave identically to single-TU ones. The fixture exercises what
 //! partitioning can break: cross-module calls, module globals + top-level
 //! init, closures, and scalar twin-eligible functions.
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -75,7 +76,8 @@ fn zz() -> PathBuf {
 }
 
 fn build(dir: &Path, units: bool) -> PathBuf {
-    let out = dir.join(if units { "app_units" } else { "app_single" });
+    let stem = if units { "app_units" } else { "app_single" };
+    let out = support::exe_in(dir, stem);
     let mut cmd = Command::new(zz());
     cmd.args(["build", "main.zz", "-o"])
         .arg(&out)
@@ -102,6 +104,10 @@ fn run_bin(bin: &Path) -> (i32, String) {
 
 #[test]
 fn units_split_matches_single_tu() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let dir = temp_project();
     let single = build(&dir, false);
     let split = build(&dir, true);

@@ -2,11 +2,16 @@ use super::*;
 use std::fs;
 
 /// Create a unique temp dir with the given (relative path → contents).
+///
+/// The pid matters: libtest runs these in one process (counter separates
+/// them), but `cargo nextest` gives every test its own process, so the
+/// counter alone restarts at 0 in each worker and two tests would share
+/// `/tmp/zz_loader_test_0` — one wiping the other's project mid-run.
 fn temp_project(files: &[(&str, &str)]) -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("zz_loader_test_{}", n));
+    let dir = std::env::temp_dir().join(format!("zz_loader_test_{}_{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     for (rel, contents) in files {
@@ -1684,8 +1689,9 @@ fn check_cache_rechecks_only_dependents() {
 #[test]
 fn check_cache_disabled_via_env() {
     super::cache::with_isolated_cache(|| {
-        // ZZ_CHECK_CACHE=0 forces fresh checks (restored by the helper).
-        std::env::set_var("ZZ_CHECK_CACHE", "0");
+        // ZZ_CHECK_CACHE=0 forces fresh checks (thread-scoped: parallel tests
+        // keep their own cache).
+        let _off = zz_pm::paths::env_scope(&[("ZZ_CHECK_CACHE", Some("0".into()))]);
         let dir = temp_project(&[
             ("main.zz", "import config\nx := config.base + 1"),
             ("config.zz", "pub base := 41"),
@@ -1987,7 +1993,12 @@ fn package_mapping_beats_relative_lookalike() {
     let result = load_program(&dir.join("main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
     assert!(
-        result.files.iter().any(|(n, _)| n.ends_with("src/main.zz")),
+        result.files.iter().any(|(n, _)| {
+            let comps: Vec<_> = std::path::Path::new(n).components().collect();
+            comps.len() >= 2
+                && comps[comps.len() - 2].as_os_str() == "src"
+                && comps[comps.len() - 1].as_os_str() == "main.zz"
+        }),
         "expected src/main.zz in load set, got: {:?}",
         result.files.iter().map(|(n, _)| n).collect::<Vec<_>>(),
     );
@@ -2157,7 +2168,7 @@ fn dep_style_warnings_collapse_to_one_note() {
         ),
         (
             "app/src/main.zz",
-            "import ask.editor\nx := editor.edit()",
+            "import ask.editor\nprintln(editor.edit())",
         ),
         ("askpkg/zz.toml", "[package]\nname = \"ask\"\nversion = \"0.1.0\"\n"),
         (
@@ -2165,10 +2176,10 @@ fn dep_style_warnings_collapse_to_one_note() {
             "pub func get() -> int { return 1 }",
         ),
         (
-            // `ed` shadows the `ed` import head: the #381 lint fires
-            // inside the dep (same shape as ask's `ed := env.get(..)`).
+            // Two style lints inside the dep (an unused import and an
+            // unused local). Neither may reach the consumer.
             "askpkg/src/editor.zz",
-            "import ask.helper as ed\npub func edit() -> int {\n    ed := 1\n    return ed\n}",
+            "import ask.helper\npub func edit() -> int {\n    unused := 1\n    return 2\n}",
         ),
     ]);
     let mut lock = zz_pm::lock::Lockfile::new();
@@ -2189,12 +2200,12 @@ fn dep_style_warnings_collapse_to_one_note() {
         .iter()
         .flat_map(|e| e.diags.iter().map(|d| d.message.as_str()))
         .collect();
-    // The raw per-site warning must not reach the consumer ...
+    // The raw per-site warnings must not reach the consumer ...
     assert!(
         !msgs
             .iter()
-            .any(|m| m.contains("shadows a module namespace")),
-        "dep shadow warning must collapse, got: {:?}",
+            .any(|m| m.contains("unused variable") || m.contains("unused import")),
+        "dep style warnings must collapse, got: {:?}",
         msgs
     );
     // ... but the collapse note names the dependency.
@@ -2204,32 +2215,32 @@ fn dep_style_warnings_collapse_to_one_note() {
         "expected collapse note, got: {:?}",
         msgs
     );
+    assert!(
+        msgs.iter().any(|m| m.contains("inside dependency")
+            && m.contains("`editor`")
+            && m.contains("hidden")),
+        "collapse note must name the dependency, got: {:?}",
+        msgs
+    );
 }
 
 #[test]
-fn first_party_shadow_warning_still_fires() {
+fn first_party_style_warning_still_fires() {
     // #387 companion: first-party files keep the raw per-site warning.
     let dir = temp_project(&[
         (
             "zz.toml",
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
         ),
-        (
-            "src/main.zz",
-            "import math.utils\nfunc f(utils: str) -> str {\n    return utils\n}",
-        ),
-        (
-            "src/math/utils.zz",
-            "pub func double(n: int) -> int { return n * 2 }",
-        ),
+        ("src/main.zz", "unused := 1"),
     ]);
     let result = load_program(&dir.join("src/main.zz")).unwrap();
     assert!(no_errors(&result), "errors: {:?}", result.errors);
     assert!(
         diag_texts(&result)
             .iter()
-            .any(|m| m.contains("shadows a module namespace")),
-        "first-party shadow warning must fire, got: {:?}",
+            .any(|m| m.contains("unused variable")),
+        "first-party style warning must fire, got: {:?}",
         diag_texts(&result)
     );
 }

@@ -226,12 +226,18 @@ func math.lcm(a: int, b: int) -> int {
     return (abs_a / math.gcd(abs_a, abs_b)) * abs_b
 }
 
-func math.factorial(n: int) -> int {
+func math.factorial(n: int) -> Result<int, str> {
+    if n < 0 {
+        return .err("factorial: negative input")
+    }
+    if n > 20 {
+        return .err("factorial: input too large (max 20)")
+    }
     result := 1
     i := 2
     while i <= n {
         result = result * i
         i = i + 1
     }
-    return result
+    return .ok(result)
 }

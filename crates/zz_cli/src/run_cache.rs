@@ -67,7 +67,7 @@ pub struct RunHit {
 
 /// Disabled via `ZZ_RUN_CACHE=0`.
 pub fn cache_enabled() -> bool {
-    std::env::var("ZZ_RUN_CACHE")
+    zz_pm::paths::env_var_os("ZZ_RUN_CACHE")
         .map(|v| v != "0")
         .unwrap_or(true)
 }
@@ -589,32 +589,25 @@ pub(crate) fn log_miss(slug: &str) {
 mod tests {
     use super::*;
 
-    /// Isolated `ZZ_HOME` + enabled cache for run-cache tests. Serializes
-    /// via its own mutex (parallel tests share process env).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_isolated_home<T>(f: impl FnOnce() -> T) -> T {
+    /// Isolated `ZZ_HOME` + enabled cache for run-cache tests.
+    ///
+    /// Thread-scoped (`zz_pm::paths::env_scope`), never process-global:
+    /// parallel tests in this binary run native builds that resolve their
+    /// cache through `zz_home()`, and a redirected global home sent them
+    /// into this temp dir while it was being deleted.
+    fn with_isolated_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
-        let _guard = ENV_LOCK.lock().unwrap();
-        let prev_home = std::env::var("ZZ_HOME").ok();
-        let prev_flag = std::env::var("ZZ_RUN_CACHE").ok();
         let dir = std::env::temp_dir().join(format!(
             "zz-run-cache-test-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        std::env::set_var("ZZ_HOME", &dir);
-        std::env::remove_var("ZZ_RUN_CACHE");
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        match prev_home {
-            Some(v) => std::env::set_var("ZZ_HOME", v),
-            None => std::env::remove_var("ZZ_HOME"),
-        }
-        match prev_flag {
-            Some(v) => std::env::set_var("ZZ_RUN_CACHE", v),
-            None => std::env::remove_var("ZZ_RUN_CACHE"),
-        }
+        let _scope = zz_pm::paths::env_scope(&[
+            ("ZZ_HOME", Some(dir.clone().into_os_string())),
+            ("ZZ_RUN_CACHE", None),
+        ]);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&dir)));
         let _ = std::fs::remove_dir_all(&dir);
         match r {
             Ok(v) => v,
@@ -622,9 +615,8 @@ mod tests {
         }
     }
 
-    fn write_proj(files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::var("ZZ_HOME").unwrap();
-        let proj = PathBuf::from(format!("{dir}/proj"));
+    fn write_proj(home: &std::path::Path, files: &[(&str, &str)]) -> PathBuf {
+        let proj = home.join("proj");
         for (rel, content) in files {
             let p = proj.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -635,8 +627,8 @@ mod tests {
 
     #[test]
     fn key_changes_on_entry_edit() {
-        with_isolated_home(|| {
-            let proj = write_proj(&[("main.zz", "func main() {\n    println(1)\n}\n")]);
+        with_isolated_home(|home| {
+            let proj = write_proj(home, &[("main.zz", "func main() {\n    println(1)\n}\n")]);
             let entry = proj.join("main.zz");
             let k1 = run_key(&entry, &[], None).unwrap();
             std::fs::write(&entry, "func main() {\n    println(2)\n}\n").unwrap();
@@ -647,8 +639,8 @@ mod tests {
 
     #[test]
     fn key_covers_plugins_embed_and_ir_version() {
-        with_isolated_home(|| {
-            let proj = write_proj(&[("main.zz", "func main() {\n    println(1)\n}\n")]);
+        with_isolated_home(|home| {
+            let proj = write_proj(home, &[("main.zz", "func main() {\n    println(1)\n}\n")]);
             let entry = proj.join("main.zz");
             let base = run_key(&entry, &[], None).unwrap();
             // Plugin shape joins the key.
@@ -696,7 +688,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_corrupt_is_miss() {
-        with_isolated_home(|| {
+        with_isolated_home(|_home| {
             let slug = "testslug roundtrip must be path-safe";
             assert!(lookup(slug).is_none(), "path-unsafe slug never hits");
             let slug = "abc123-test-slug";
@@ -732,15 +724,14 @@ mod tests {
 
     #[test]
     fn disabled_cache_never_hits() {
-        with_isolated_home(|| {
+        with_isolated_home(|_home| {
             let slug = "disabled-slug";
             let meta = RunMeta::default();
             store(slug, &[b"ZZC1-x".to_vec()], &meta);
             assert!(lookup(slug).is_some());
-            std::env::set_var("ZZ_RUN_CACHE", "0");
+            let _off = zz_pm::paths::env_scope(&[("ZZ_RUN_CACHE", Some("0".into()))]);
             assert!(lookup(slug).is_none(), "ZZ_RUN_CACHE=0 must miss");
             store("other", &[b"ZZC1-y".to_vec()], &meta);
-            std::env::remove_var("ZZ_RUN_CACHE");
             assert!(lookup("other").is_none(), "ZZ_RUN_CACHE=0 must not store");
         });
     }
@@ -749,12 +740,15 @@ mod tests {
     /// only (no source reads), and bust on any content change.
     #[test]
     fn fp_sidecar_reuses_and_busts() {
-        with_isolated_home(|| {
-            let proj = write_proj(&[
-                ("zz.toml", "[package]\nname = \"fp\"\nversion = \"0.1.0\"\n"),
-                ("main.zz", "func main() {\n    println(1)\n}\n"),
-                ("lib/help.zz", "pub func aid() -> int { return 1 }\n"),
-            ]);
+        with_isolated_home(|home| {
+            let proj = write_proj(
+                home,
+                &[
+                    ("zz.toml", "[package]\nname = \"fp\"\nversion = \"0.1.0\"\n"),
+                    ("main.zz", "func main() {\n    println(1)\n}\n"),
+                    ("lib/help.zz", "pub func aid() -> int { return 1 }\n"),
+                ],
+            );
             // Backdate mtimes past the granularity guard (fresh files
             // always take the canonical path — that is the safe default).
             let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);

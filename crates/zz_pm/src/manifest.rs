@@ -36,6 +36,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+use crate::pathsafe::escapes_root;
+
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
@@ -166,15 +168,7 @@ impl CollectionSpec {
             ));
         }
         let rel = Path::new(&self.dir);
-        if self.dir.is_empty()
-            || rel.is_absolute()
-            || rel.components().any(|c| {
-                matches!(
-                    c,
-                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
-                )
-            })
-        {
+        if self.dir.is_empty() || escapes_root(rel) {
             return Err(format!(
                 "invalid [collect]: `dir = \"{}\"` must be relative and stay inside the package",
                 self.dir
@@ -582,14 +576,7 @@ fn validate_feature_module(feature: &str, module: &str) -> Result<(), String> {
         return Err(bad("must not be empty"));
     }
     let p = Path::new(module);
-    if p.is_absolute()
-        || p.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
-    {
+    if escapes_root(p) {
         return Err(bad("must be relative and stay inside the package"));
     }
     Ok(())
@@ -1088,14 +1075,7 @@ fn check_contained(pkg_root: &Path, rel: &str, field: &str) -> Result<(), String
         return Err(format!("invalid [native]: `{field}` must not be empty"));
     }
     let p = Path::new(rel);
-    if p.is_absolute()
-        || p.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
-    {
+    if escapes_root(p) {
         return Err(format!(
             "invalid [native]: `{field}` entry `{rel}` must be relative and stay inside the package\n\
              hint: use a path like \"csrc/wrapper.c\""
@@ -1244,12 +1224,12 @@ pub fn validate_pkg_config_token(tok: &str) -> Result<(), String> {
 /// Accepted: `linux-{x86_64,aarch64}-gnu-glibc<major>.<minor>`
 /// (e.g. `linux-x86_64-gnu-glibc2.28`), `linux-{x86_64,aarch64}-musl`,
 /// `macos-{x86_64,arm64}-min<major>.<minor>` (e.g. `macos-arm64-min11.0`),
-/// `windows-x86_64-msvc`. Anything else is a manifest error.
+/// `windows-{x86_64,aarch64}-msvc`. Anything else is a manifest error.
 pub fn validate_platform_tag(tag: &str) -> Result<(), String> {
     fn bad(tag: &str) -> String {
         format!(
             "invalid platform tag `{tag}`\n\
-             hint: e.g. linux-x86_64-gnu-glibc2.28, linux-x86_64-musl, macos-arm64-min11.0, windows-x86_64-msvc"
+             hint: e.g. linux-x86_64-gnu-glibc2.28, linux-x86_64-musl, macos-arm64-min11.0, windows-x86_64-msvc, windows-aarch64-msvc"
         )
     }
     let parts: Vec<&str> = tag.split('-').collect();
@@ -1264,7 +1244,11 @@ pub fn validate_platform_tag(tag: &str) -> Result<(), String> {
             parse_dotted(&floor[3..]).ok_or_else(|| bad(tag))?;
             Ok(())
         }
-        ["windows", "x86_64", "msvc"] => Ok(()),
+        // Both Windows architectures are first-class: `host_tag()` emits
+        // `windows-aarch64-msvc` on ARM64 and the release pipeline builds
+        // it, so rejecting the tag made native packages unpublishable
+        // there.
+        ["windows", "x86_64" | "aarch64", "msvc"] => Ok(()),
         _ => Err(bad(tag)),
     }
 }
@@ -1835,14 +1819,7 @@ impl Manifest {
             return Err(bad("must not be empty"));
         }
         let p = Path::new(rel);
-        if p.is_absolute()
-            || p.components().any(|c| {
-                matches!(
-                    c,
-                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
-                )
-            })
-        {
+        if escapes_root(p) {
             return Err(bad("must be relative and stay inside the package"));
         }
         if p.extension().and_then(|e| e.to_str()) != Some("zz") {
@@ -2866,6 +2843,35 @@ foo = "^1.0"
         assert!(validate_cc(&spec).is_err());
     }
 
+    /// Every spelling a Windows or Unix host could call absolute must be
+    /// refused on *both* — a manifest accepted on Linux must not become an
+    /// escape when the same package is built on Windows.
+    #[test]
+    fn path_escape_spellings_rejected_everywhere() {
+        for evil in [
+            "/abs.c",
+            "\\abs.c",
+            "C:\\abs.c",
+            "C:/abs.c",
+            "C:abs.c",
+            "\\\\server\\share\\evil.c",
+            "../x.c",
+            "a/../../x.c",
+        ] {
+            let mut spec = cc_spec();
+            spec.sources = vec![evil.to_string()];
+            let err = validate_cc(&spec).expect_err(evil);
+            assert!(
+                err.contains("must be relative and stay inside the package"),
+                "`{evil}` rejected for the wrong reason: {err}"
+            );
+            // include_dirs take the same guard.
+            let mut spec = cc_spec();
+            spec.include_dirs = vec![evil.to_string()];
+            assert!(validate_cc(&spec).is_err(), "include_dir `{evil}`");
+        }
+    }
+
     #[test]
     fn non_c_source_rejected() {
         let mut spec = cc_spec();
@@ -3049,6 +3055,7 @@ version = "0.1.0"
             "macos-arm64-min11.0",
             "macos-x86_64-min12.0",
             "windows-x86_64-msvc",
+            "windows-aarch64-msvc",
         ] {
             assert!(validate_platform_tag(t).is_ok(), "`{t}` allowed");
         }
@@ -3064,6 +3071,8 @@ version = "0.1.0"
             "linux-x86_64-gnu",
             "linux-x86_64-gnu-glibc",
             "windows-x86_64",
+            "windows-aarch64",
+            "windows-aarch64-gnu",
             "freebsd-x86_64-gnu-glibc2.28",
         ] {
             assert!(validate_platform_tag(t).is_err(), "`{t}` must be rejected");

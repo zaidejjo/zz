@@ -9,12 +9,13 @@
 //! Auth tokens live only in request headers and are never included in
 //! errors or `Debug` output.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
+use crate::pathsafe::escapes_root;
 
 /// Default registry (mirrors `SITE_DOMAIN` in `zz-website/wrangler.toml`).
 pub const DEFAULT_REGISTRY: &str = "https://zz-registry.onrender.com";
@@ -125,6 +126,36 @@ fn map_ureq(err: ureq::Error, context: &str) -> RemoteError {
     }
 }
 
+/// Retry a whole HTTP exchange when the OS interrupted a blocking syscall.
+///
+/// `EINTR` is not a network fault: a signal from an unrelated child (a
+/// test harness's local server, an editor file watcher) can land in
+/// `connect`/`read`, and the request simply has to be issued again. ureq
+/// surfaces it verbatim, so one stray `SIGCHLD` used to fail `zz search`
+/// or `zz install` with "registry unreachable".
+fn retry_interrupted<T>(mut op: impl FnMut() -> Result<T, RemoteError>) -> Result<T, RemoteError> {
+    const MAX_ATTEMPTS: u32 = 4;
+    let mut backoff = Duration::from_millis(25);
+    for attempt in 1..=MAX_ATTEMPTS {
+        match op() {
+            Err(e) if attempt < MAX_ATTEMPTS && is_interrupted(&e) => {
+                std::thread::sleep(backoff);
+                backoff *= 4;
+            }
+            other => return other,
+        }
+    }
+    unreachable!("the final attempt always returns")
+}
+
+/// True when the failure is an OS interrupt rather than a network fault.
+fn is_interrupted(e: &RemoteError) -> bool {
+    match e {
+        RemoteError::Network(detail) => detail.contains("Interrupted system call"),
+        _ => false,
+    }
+}
+
 /// Thin wrapper over `ureq` with a fixed base URL and timeout.
 ///
 /// The token is supplied per call (publish) so one client serves both
@@ -172,6 +203,10 @@ impl RegistryClient {
 
     /// `GET /api/pkg/search?q=&limit=` (public).
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>, RemoteError> {
+        retry_interrupted(|| self.search_once(query, limit))
+    }
+
+    fn search_once(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>, RemoteError> {
         let url = format!("{}/api/pkg/search", self.base);
         let mut resp = self
             .agent()
@@ -190,6 +225,10 @@ impl RegistryClient {
 
     /// `GET /api/pkg/{name}` (public). 404 maps to `NotFound`.
     pub fn fetch_metadata(&self, name: &str) -> Result<PackageInfo, RemoteError> {
+        retry_interrupted(|| self.fetch_metadata_once(name))
+    }
+
+    fn fetch_metadata_once(&self, name: &str) -> Result<PackageInfo, RemoteError> {
         let url = format!("{}/api/pkg/{name}", self.base);
         let mut resp = self.agent().get(&url).call().map_err(|e| match e {
             ureq::Error::StatusCode(404) => RemoteError::NotFound(name.to_string()),
@@ -204,6 +243,10 @@ impl RegistryClient {
 
     /// `GET /api/pkg/{name}/{version}.tgz` (public). 404 maps to `NotFound`.
     pub fn download_tarball(&self, name: &str, version: &str) -> Result<Vec<u8>, RemoteError> {
+        retry_interrupted(|| self.download_tarball_once(name, version))
+    }
+
+    fn download_tarball_once(&self, name: &str, version: &str) -> Result<Vec<u8>, RemoteError> {
         let url = format!("{}/api/pkg/{name}/{version}.tgz", self.base);
         let mut resp = self.agent().get(&url).call().map_err(|e| match e {
             ureq::Error::StatusCode(404) => {
@@ -269,6 +312,11 @@ impl RegistryClient {
     }
 
     /// `POST /api/pkg/publish` (authenticated). Maps 401/409 precisely.
+    ///
+    /// Deliberately *not* wrapped in [`retry_interrupted`]: a replay could
+    /// publish twice when only the response read was interrupted. The
+    /// registry answers 409 on the duplicate, so a manual retry is safe
+    /// and visible instead of silently duplicated.
     pub fn publish(
         &self,
         token: &str,
@@ -487,8 +535,8 @@ pub fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), RemoteError> {
             .path()
             .map_err(|e| RemoteError::Tarball(format!("bad entry path: {e}")))?
             .into_owned();
-        // Reject escapes before joining: absolute paths and any `..`.
-        if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        // Reject escapes before joining: absolute (any host spelling) or `..`.
+        if escapes_root(&path) {
             return Err(RemoteError::Tarball(format!(
                 "entry escapes package root: {}",
                 path.display()
@@ -517,6 +565,44 @@ pub fn parse_registry_source(source: &str) -> Option<(String, String, String)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn retry_interrupted_retries_only_eintr() {
+        let mut calls = 0;
+        let ok: Result<u32, RemoteError> = retry_interrupted(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(RemoteError::Network(
+                    "search failed: io: Interrupted system call (os error 4)".to_string(),
+                ))
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(ok.ok(), Some(7));
+        assert_eq!(calls, 3, "EINTR must be retried until it succeeds");
+
+        let mut attempts = 0;
+        let err: Result<u32, RemoteError> = retry_interrupted(|| {
+            attempts += 1;
+            Err(RemoteError::Network("connection refused".to_string()))
+        });
+        assert!(err.is_err());
+        assert_eq!(attempts, 1, "real network errors must not be retried");
+    }
+
+    #[test]
+    fn retry_interrupted_has_a_bound() {
+        let mut attempts = 0;
+        let err: Result<u32, RemoteError> = retry_interrupted(|| {
+            attempts += 1;
+            Err(RemoteError::Network(
+                "io: Interrupted system call".to_string(),
+            ))
+        });
+        assert!(err.is_err(), "persistent EINTR must eventually surface");
+        assert_eq!(attempts, 4, "bounded attempts, no infinite loop");
+    }
 
     #[test]
     fn registry_base_default_and_env() {
@@ -695,6 +781,36 @@ pub(crate) mod tests {
             "{err:?}"
         );
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// A tarball built on Linux with Windows-style names must not unpack
+    /// into `C:\...`-relative escapes when extracted on Windows, and a
+    /// Windows-built tarball must not escape on Linux either.
+    #[test]
+    fn extract_rejects_hostile_spellings_on_every_host() {
+        for name in [
+            "\\evil.zz",
+            "C:\\evil.zz",
+            "C:/evil.zz",
+            "C:evil.zz",
+            "\\\\server\\share\\evil.zz",
+            "../evil.zz",
+            "a/../../evil.zz",
+        ] {
+            let bytes = make_raw_tarball(name, b"x\n");
+            let dest = std::env::temp_dir().join(format!(
+                "zz_rm_hostile_{}_{}",
+                std::process::id(),
+                name.len()
+            ));
+            let _ = std::fs::remove_dir_all(&dest);
+            let err = extract_tarball(&bytes, &dest).unwrap_err();
+            assert!(
+                matches!(err, RemoteError::Tarball(ref m) if m.contains("escapes package root")),
+                "`{name}`: {err:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dest);
+        }
     }
 
     #[test]

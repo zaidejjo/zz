@@ -8,7 +8,7 @@ import std.process(pid)
 
 // write
 tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
-scratch := "/tmp/zz_phase4a_test_{pid()}_{tok}.txt"
+scratch := "{env.temp_dir()}/zz_phase4a_test_{pid()}_{tok}.txt"
 match fs.write(scratch, "hello phase4a") {
     .ok(_) => println("write_ok")
     .err(e) => println("write_err: {e}")
@@ -22,7 +22,7 @@ match fs.read(scratch) {
 
 // exists
 println(fs.exists(scratch))
-println(fs.exists("/tmp/zz_phase4a_nonexist.txt"))
+println(fs.exists("{env.temp_dir()}/zz_phase4a_nonexist.txt"))
 
 // remove
 match fs.remove(scratch) {

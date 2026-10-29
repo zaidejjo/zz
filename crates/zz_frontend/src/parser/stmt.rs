@@ -229,7 +229,7 @@ impl<'a> Parser<'a> {
                         self.advance(); // `:=`
                         let value = self.parse_expr();
                         let span = ty.span.join(value.span());
-                        self.errors.push(error_at(
+                        self.push_error(error_at(
                             format!(
                                 "invalid declaration: use `{}: {} = expr` (explicit type) or `{} := expr` (inferred type)",
                                 name.text, type_name, name.text,
@@ -344,7 +344,7 @@ impl<'a> Parser<'a> {
             String::new()
         };
         if abi != "C" {
-            self.errors.push(error_at(
+            self.push_error(error_at(
                 format!("unsupported extern ABI `{abi}` (expected `\"C\"`)"),
                 abi_tok.span,
             ));
@@ -359,9 +359,34 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
                 break;
             }
+            // A stray closer is not a sync point: `skip_to_stmt_end` stops
+            // on any closing bracket, so the `func` fallback below would
+            // re-report the same `)`/`]` forever. Consume it explicitly.
+            if self.at_close() {
+                self.error_stray_close(self.peek_kind());
+                continue;
+            }
             if !self.at(TokenKind::Func) {
-                self.error_here("expected `func` signature in extern block");
-                self.skip_to_stmt_end();
+                let before = self.pos;
+                if self.at_ident("fn") {
+                    self.error_here(
+                        "extern functions are declared with `func`, not `fn`\n\
+                         hint: write `func ping() -> int`",
+                    );
+                    // Rust spelling: swallow the whole signature. Stopping
+                    // at the `)` inside `fn ping()` would turn one mistake
+                    // into a stray-closer cascade.
+                    while !self.at(TokenKind::StmtEnd)
+                        && !self.at(TokenKind::RBrace)
+                        && !self.at(TokenKind::Eof)
+                    {
+                        self.advance();
+                    }
+                } else {
+                    self.error_here("expected `func` signature in extern block");
+                    self.skip_to_stmt_end();
+                }
+                self.ensure_progress(before);
                 continue;
             }
             let func_tok = self.advance(); // `func`
@@ -479,7 +504,7 @@ impl<'a> Parser<'a> {
                         fields.push((fname, fty));
                     }
                     _ => {
-                        self.errors.push(error_at(
+                        self.push_error(error_at(
                             "embedded struct field must be a struct type",
                             fty.span,
                         ));
@@ -773,7 +798,7 @@ impl<'a> Parser<'a> {
                 // targeted message naming the supported form and offer a
                 // one-token replacement, then consume `:=` so the value
                 // still parses instead of cascading.
-                self.errors.push(
+                self.push_error(
                     error_at(
                         "expected `=` after `const` name — `const` uses `=`, not `:=`",
                         span,
@@ -998,7 +1023,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             let Some(vname) = self.expect_ident() else {
+                let before = self.pos;
                 self.skip_to_stmt_end();
+                self.ensure_progress(before);
                 continue;
             };
             // Duplicate variant names report here (clearer than a
@@ -1008,7 +1035,7 @@ impl<'a> Parser<'a> {
                 .iter()
                 .any(|(v, _): &(Ident, _)| v.name == vname.name)
             {
-                self.errors.push(error_at(
+                self.push_error(error_at(
                     format!(
                         "duplicate variant `{}` in enum `{}`",
                         vname.name,
@@ -1042,7 +1069,7 @@ impl<'a> Parser<'a> {
             }
         }
         if variants.is_empty() {
-            self.errors.push(error_at(
+            self.push_error(error_at(
                 "enum must declare at least one variant (e.g. `enum Token { Eof }`)",
                 enum_tok.span,
             ));
@@ -1237,7 +1264,7 @@ impl<'a> Parser<'a> {
                                         ));
                                 }
                             }
-                            self.errors.push(diag);
+                            self.push_error(diag);
                         }
                     }
                 }
@@ -1311,7 +1338,7 @@ impl<'a> Parser<'a> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        self.errors.push(
+        self.push_error(
             error_at(
                 "generic parameters are declared with `<T>`, not `[T]`",
                 bracket_span,
@@ -1364,7 +1391,7 @@ impl<'a> Parser<'a> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        self.errors.push(
+        self.push_error(
             error_at(
                 "type parameters are declared with `<T>`, not `[T]`",
                 bracket_span,

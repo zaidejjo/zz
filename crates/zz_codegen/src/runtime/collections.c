@@ -2061,14 +2061,49 @@ zz_value zz_result_unwrap_or(zz_value res, zz_value def, int *err) {
 // enclosing function, so native failures locate themselves without a
 // VM bisection run. `func` is a ZZ identifier (safe for %s).
 //
-// *err is already set to 1 by the caller (zz_array_get / zz_array_set) before
-// this runs. Do NOT abort the process — return so execution continues with
-// the error flag set and the user can catch it with .err()/match (VM parity).
-// Old behavior called exit(1), killing the whole program on a catchable OOB.
+// Direct `obj[i]` indexing is NOT catchable in ZZ: the VM raises a hard
+// runtime error (`normalize_index`), and `try`/`match` do not turn it into
+// a Result. So the native trap must abort too, or the AOT program would
+// keep running with a bogus unit. Catchable OOB reads go through
+// `zz_array_at`/`vec.get`, which set *err and return unit without calling
+// this. (#691 made this a no-op by mistake — that silently dropped the
+// bounds trap and broke VM/native parity.)
 void zz_index_trap(zz_value obj, zz_value idx, const char *func) {
-    (void)obj;
-    (void)idx;
-    (void)func;
+    if (idx.tag == ZZ_INT) {
+        long long i = (long long)idx.i;
+        long long n = -1;
+        if (obj.tag == ZZ_ARRAY && obj.arr)
+            n = (long long)obj.arr->len;
+        else if (obj.tag == ZZ_BYTES && obj.bytes)
+            n = (long long)obj.bytes->len;
+        else if (obj.tag == ZZ_STR && obj.s)
+            n = (long long)obj.s->len;
+        if (n >= 0) {
+            fprintf(stderr, "zz error: index %lld out of bounds for length %lld in %s\n",
+                    i, n, func);
+            // Mirror the VM's `normalize_index` note so native and VM runs
+            // explain the same failure the same way.
+            if (n == 0)
+                fprintf(stderr,
+                        "hint: the value is empty, so no index is valid (check `len(...)` first)\n");
+            else
+                fprintf(stderr,
+                        "hint: valid indices are 0..=%lld (or -1..=-%lld, counting from the end)\n",
+                        n - 1, n);
+            exit(1);
+        }
+        fprintf(stderr, "zz error: index %lld out of bounds in %s\n", i, func);
+        exit(1);
+    }
+    if (idx.tag == ZZ_STR && obj.tag == ZZ_DICT && idx.s) {
+        fprintf(stderr, "zz error: key `");
+        size_t klen = idx.s->len < 64 ? idx.s->len : 64;
+        fwrite(zz_str_cptr(idx.s), 1, klen, stderr);
+        fprintf(stderr, "` not found in dict in %s\n", func);
+        exit(1);
+    }
+    fprintf(stderr, "zz error: index out of bounds in %s\n", func);
+    exit(1);
 }
 
 // fs.read(path)

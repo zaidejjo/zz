@@ -65,6 +65,11 @@ pub mod time_ext;
 /// `net.tls_connect` rustls TLS client shared by VM and AOT.
 pub mod tls_conn;
 /// `net.unix_connect` Unix-domain client shared by VM and AOT.
+#[cfg(unix)]
+pub mod unix_conn;
+/// `net.unix_connect` Windows stub: identical API, `unix:unsupported:` errors.
+#[cfg(not(unix))]
+#[path = "unix_conn_stub.rs"]
 pub mod unix_conn;
 /// `std.uuid` identifier generation (v4 random, v7 time-ordered).
 pub mod uuid;

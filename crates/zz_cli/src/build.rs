@@ -737,8 +737,9 @@ pub(crate) fn build_native_deps(
         }
 
         eprintln!("zz: building plugin `{}` via {hook_rel}...", dep.name);
-        let output = std::process::Command::new("bash")
-            .arg(&build_script)
+        let (interpreter, interp_args) = hook_interpreter(&build_script);
+        let output = std::process::Command::new(&interpreter)
+            .args(&interp_args)
             .current_dir(&pkg_dir)
             .output();
 
@@ -751,8 +752,13 @@ pub(crate) fn build_native_deps(
                 }
             }
             Err(e) => {
+                let hint = if e.kind() == std::io::ErrorKind::NotFound && cfg!(windows) {
+                    "\n                 hint: `.sh` hooks need Git Bash or WSL on Windows; ship a `.cmd`/`.bat`/`.ps1` hook instead"
+                } else {
+                    ""
+                };
                 eprintln!(
-                    "warning: failed to run plugin `{}` build hook: {e}",
+                    "warning: failed to run plugin `{}` build hook: {e}{hint}",
                     dep.name
                 );
                 continue;
@@ -817,6 +823,35 @@ fn discover_native_artifacts(
 ) -> Result<(Vec<PathBuf>, Vec<String>), String> {
     let built = build_native_deps(project_path, opts)?;
     Ok((built.artifacts, built.link_args))
+}
+
+/// Interpreter for a legacy `[native] build = "<script>"` hook.
+///
+/// No silent bash assumption: `.cmd`/`.bat` run under `cmd /C`, `.ps1`
+/// under `powershell -File`, everything else (`.sh`, shebang scripts)
+/// under `bash`. Windows users without Git Bash/WSL get a diagnostic
+/// from the caller instead of a confusing spawn failure.
+fn hook_interpreter(script: &Path) -> (String, Vec<String>) {
+    let ext = script
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let path = script.display().to_string();
+    match ext.as_str() {
+        "cmd" | "bat" => ("cmd".to_string(), vec!["/C".to_string(), path]),
+        "ps1" => (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                path,
+            ],
+        ),
+        _ => ("bash".to_string(), vec![path]),
+    }
 }
 
 /// Merge whitespace-split flags from an `ldflags.txt` into `link_args`,
@@ -1225,11 +1260,12 @@ pub fn default_stem_for(src: &Path) -> String {
 pub fn planned_dest_for(src: &Path, output: Option<&Path>, target: Option<&str>) -> PathBuf {
     match output {
         Some(o) if o.components().count() > 1 => {
+            // Explicit user path (`-o out/server`): honor it verbatim for a
+            // host build (`target == None`), but append `.exe` when
+            // cross-compiling to an explicit Windows target — the user is
+            // targeting Windows, so the output needs `.exe` to run there.
             let mut dest = o.to_path_buf();
-            let windows = match target {
-                Some(t) => zz_codegen::is_windows_target(t),
-                None => cfg!(windows),
-            };
+            let windows = target.is_some_and(zz_codegen::is_windows_target);
             if windows && dest.extension().is_none() {
                 dest.set_extension("exe");
             }
@@ -1260,6 +1296,16 @@ pub fn bin_name(stem: &str, target: Option<&str>) -> String {
         name.push_str(".exe");
     }
     name
+}
+
+/// True when `p` is a native-runtime shared-library sidecar (`libstd-*`)
+/// staged next to a built binary by the codegen link step. Uses the
+/// platform-aware extensions so Windows (`dll`) isn't silently skipped.
+fn is_native_rt_sidecar(name: &str) -> bool {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str());
+    name.starts_with("libstd-") && matches!(ext, Some("so") | Some("dylib") | Some("dll"))
 }
 
 /// True when `p` is a file that can be executed: present, non-empty, and
@@ -1592,8 +1638,7 @@ fn publish_to_bin(
             if let Ok(entries) = std::fs::read_dir(from_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    let is_sidecar = name.starts_with("libstd-")
-                        && (name.ends_with(".so") || name.ends_with(".dylib"));
+                    let is_sidecar = is_native_rt_sidecar(&name);
                     if is_sidecar && !to_dir.join(&name).is_file() {
                         let _ = std::fs::copy(entry.path(), to_dir.join(&name));
                     }
@@ -1683,8 +1728,7 @@ pub fn stage_exec_copy(built: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Str
         if let Ok(entries) = std::fs::read_dir(from_dir) {
             for entry in entries.flatten() {
                 let side = entry.file_name().to_string_lossy().into_owned();
-                let is_sidecar = side.starts_with("libstd-")
-                    && (side.ends_with(".so") || side.ends_with(".dylib"));
+                let is_sidecar = is_native_rt_sidecar(&side);
                 if is_sidecar {
                     let _ = std::fs::copy(entry.path(), dir.join(&side));
                 }
@@ -1820,10 +1864,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hook_interpreter_is_extension_driven() {
+        let (prog, args) = hook_interpreter(Path::new("build.sh"));
+        assert_eq!(prog, "bash");
+        assert_eq!(args, vec!["build.sh".to_string()]);
+
+        let (prog, args) = hook_interpreter(Path::new("build.cmd"));
+        assert_eq!(prog, "cmd");
+        assert_eq!(args, vec!["/C".to_string(), "build.cmd".to_string()]);
+
+        let (prog, args) = hook_interpreter(Path::new("build.bat"));
+        assert_eq!(prog, "cmd");
+        assert_eq!(args[0], "/C");
+
+        let (prog, args) = hook_interpreter(Path::new("build.ps1"));
+        assert_eq!(prog, "powershell");
+        assert_eq!(args[0], "-NoProfile");
+        assert_eq!(args.last().map(String::as_str), Some("build.ps1"));
+
+        // No extension: shebang scripts go through bash like `.sh`.
+        let (prog, _) = hook_interpreter(Path::new("build"));
+        assert_eq!(prog, "bash");
+    }
+
+    #[test]
     fn transient_builds_are_isolated_across_threads() {
         // Regression: transient dir was pid-only, so parallel native runs
         // overwrote one `zz_out` and tests executed each other's binaries
         // (rotating VM-vs-native mismatches in bug_hunter).
+        //
+        // Windows runs the VM only: the AOT runtime is POSIX (see the
+        // windows legs in `.github/workflows/ci.yml`), so there is no
+        // transient native binary to race here.
+        if cfg!(windows) {
+            return;
+        }
         if zz_codegen::compile::detect_clang().is_none() {
             return;
         }
@@ -1894,6 +1969,10 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let src = base.join("no-such-file.zz");
         let cwd = std::env::current_dir().unwrap();
+        // Project discovery canonicalizes the root, and on macOS the temp
+        // dir is a symlink (`/var` → `/private/var`), so every expectation
+        // that goes through `find_project_root` must be canonical too.
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         assert_eq!(output_dir_for(&src), cwd);
         assert_eq!(
             planned_dest_for(&src, None, None),
@@ -1909,23 +1988,25 @@ mod tests {
         .unwrap();
         let entry = root.join("src").join("main.zz");
         std::fs::write(&entry, "println(\"hi\")\n").unwrap();
-        assert_eq!(output_dir_for(&entry), root.join("bin"));
+        // Discovery canonicalizes the root; compare against the real path.
+        let root_out = canon(&root);
+        assert_eq!(output_dir_for(&entry), root_out.join("bin"));
         assert_eq!(default_stem_for(&entry), "demo-pkg");
         assert_eq!(
             planned_dest_for(&entry, None, None),
-            root.join("bin").join(bin_name("demo-pkg", None))
+            root_out.join("bin").join(bin_name("demo-pkg", None))
         );
         // Explicit non-entry file in a project: project `bin/` + stem.
         let other = root.join("src").join("tool.zz");
         std::fs::write(&other, "println(\"tool\")\n").unwrap();
         assert_eq!(
             planned_dest_for(&other, None, None),
-            root.join("bin").join(bin_name("tool", None))
+            root_out.join("bin").join(bin_name("tool", None))
         );
         // Bare `-o` stays in the resolved dir; path-like `-o` is CWD-exact.
         assert_eq!(
             planned_dest_for(&entry, Some(Path::new("server")), None),
-            root.join("bin").join(bin_name("server", None))
+            root_out.join("bin").join(bin_name("server", None))
         );
         assert_eq!(
             planned_dest_for(&entry, Some(Path::new("out/server")), None),
@@ -1936,7 +2017,9 @@ mod tests {
         let win = Some("x86_64-pc-windows-gnu");
         assert_eq!(
             planned_dest_for(&entry, None, win),
-            root.join("bin").join("demo-pkg-x86_64-pc-windows-gnu.exe")
+            root_out
+                .join("bin")
+                .join("demo-pkg-x86_64-pc-windows-gnu.exe")
         );
         assert_eq!(
             planned_dest_for(&src, None, win),
@@ -1957,11 +2040,16 @@ mod tests {
         .unwrap();
         let cli = cfg.join("src").join("cli.zz");
         std::fs::write(&cli, "println(\"hi\")\n").unwrap();
+        let cfg_out = canon(&cfg);
+        // `resolve_entry` joins the configured entry onto the root it was
+        // given (no canonicalization), while destination planning goes
+        // through discovery, which does canonicalize — hence `cli` here and
+        // `cfg_out` below.
         assert_eq!(resolve_entry(&cfg).unwrap(), cli);
         assert_eq!(default_stem_for(&cli), "cfg-pkg");
         assert_eq!(
             planned_dest_for(&cli, None, None),
-            cfg.join("bin").join(bin_name("cfg-pkg", None))
+            cfg_out.join("bin").join(bin_name("cfg-pkg", None))
         );
         // A configured-but-missing entry is a loud error, not a silent
         // conventional fallback.

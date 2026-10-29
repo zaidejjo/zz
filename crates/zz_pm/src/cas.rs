@@ -574,6 +574,10 @@ mod tests {
         let _ = fs::remove_dir_all(&project);
     }
 
+    /// Symlinks need Developer Mode/admin on Windows, so this half is
+    /// Unix-only; `hardlink_removal_after_readonly` above covers the
+    /// shared removal logic on every platform.
+    #[cfg(unix)]
     #[test]
     fn symlink_removal_after_readonly() {
         // Verify symlink removal works when target is read-only CAS.
@@ -590,18 +594,15 @@ mod tests {
         // Create project dir and symlink
         let project = tmp_dir("sl_rm_project");
         let link_path = project.join("data.zz");
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&cas_file, &link_path).unwrap();
-            assert!(link_path.exists());
+        std::os::unix::fs::symlink(&cas_file, &link_path).unwrap();
+        assert!(link_path.exists());
 
-            // Remove symlink — should succeed
-            fs::remove_file(&link_path).unwrap();
-            assert!(!link_path.exists());
+        // Remove symlink — should succeed
+        fs::remove_file(&link_path).unwrap();
+        assert!(!link_path.exists());
 
-            // CAS original still exists
-            assert!(cas_file.exists());
-        }
+        // CAS original still exists
+        assert!(cas_file.exists());
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&cas_path);

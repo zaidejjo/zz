@@ -131,13 +131,27 @@ fn check_fixture(cat: &str, file: &str) -> Result<(), String> {
 #[test]
 fn bytecode_parity_all() {
     assert!(!ELIGIBLE.is_empty());
+    // `fs_scan_counts_test.zz` embeds `process.pid()` in its temp path and
+    // exercises fifos, which Windows doesn't have — so the two parity
+    // processes (`run` vs `run --bytecode`, different PIDs) emit different
+    // error paths and the exact stdout comparison fails. It's covered by
+    // the VM suite on every platform; exclude only from bytecode parity on
+    // Windows.
+    let eligible: Vec<(&str, &str, bool)> = ELIGIBLE
+        .iter()
+        .copied()
+        .filter(|&(cat, file, _)| {
+            !(cfg!(windows) && cat == "stdlib" && file == "fs_scan_counts_test.zz")
+        })
+        .collect();
+    assert!(!eligible.is_empty());
     let n_workers: usize = std::env::var("ZZ_BYTECODE_JOBS")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(8)
-        .min(ELIGIBLE.len().max(1));
-    let slots: Vec<std::sync::Mutex<Option<Result<(), String>>>> = (0..ELIGIBLE.len())
+        .min(eligible.len().max(1));
+    let slots: Vec<std::sync::Mutex<Option<Result<(), String>>>> = (0..eligible.len())
         .map(|_| std::sync::Mutex::new(None))
         .collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -145,10 +159,10 @@ fn bytecode_parity_all() {
         for _ in 0..n_workers {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if i >= ELIGIBLE.len() {
+                if i >= eligible.len() {
                     break;
                 }
-                let (cat, file, _) = ELIGIBLE[i];
+                let (cat, file, _) = eligible[i];
                 *slots[i].lock().expect("slot") = Some(check_fixture(cat, file));
             });
         }
@@ -159,7 +173,7 @@ fn bytecode_parity_all() {
             Some(Ok(())) => {}
             Some(Err(msg)) => failures.push(msg),
             None => {
-                let (cat, file, _) = ELIGIBLE[i];
+                let (cat, file, _) = eligible[i];
                 failures.push(format!("{cat}/{file}: worker left fixture unrun"));
             }
         }

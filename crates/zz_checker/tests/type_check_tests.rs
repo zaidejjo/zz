@@ -2873,6 +2873,33 @@ fn tuple_index_out_of_bounds_errors() {
 }
 
 #[test]
+fn tuple_oob_hint_names_valid_range() {
+    errors_contain(
+        "t := (1, 2)\nx := t[5]",
+        "valid indices are 0..=1 (or -1..=-2",
+    );
+}
+
+#[test]
+fn array_literal_constant_index_out_of_bounds_errors() {
+    // Decidable at check time: the runtime would trap on this read anyway.
+    errors_contain("[1, 2, 3][5]", "index 5 out of bounds for length 3");
+    errors_contain("[1, 2, 3][5]", "valid indices are 0..=2 (or -1..=-3");
+}
+
+#[test]
+fn array_literal_negative_index_in_bounds_is_ok() {
+    let r = check_src("[1, 2, 3][-1]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    errors_contain("[1, 2, 3][-4]", "index -4 out of bounds for length 3");
+}
+
+#[test]
+fn empty_array_literal_index_hint_says_empty() {
+    errors_contain("[][0]", "the value is empty, so no index is valid");
+}
+
+#[test]
 fn tuple_dynamic_index_errors_with_hint() {
     errors_contain(
         "t := (1, 2)\ni := 0\nx := t[i]",

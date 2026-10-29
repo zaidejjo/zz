@@ -26,8 +26,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::compile::is_windows_target;
-
 /// FFI protocol version. Re-exported from `zz_native_rt` (single source of
 /// truth); AOT binaries built against a mismatched static library must be
 /// rebuilt.
@@ -744,40 +742,108 @@ pub fn native_rt_archive_path() -> Option<PathBuf> {
     None
 }
 
-/// Shipped static libstd in a release lib dir (`libstd-<hash>.rlib`).
-/// Same newest-wins pick as the rustc-libdir scan. `None` when the dir
-/// ships none (old releases shipped only the shared object).
+/// Platform family for a `--target` triple (or the host when `None`).
+///
+/// Every linker-facing decision goes through this instead of `cfg!(...)`
+/// so cross builds (`zz build --target ...`) emit the *target's* flags,
+/// never the host's. `cfg!` remains the fallback only when no triple is
+/// given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetOs {
+    Linux,
+    Macos,
+    Windows,
+    Other,
+}
+
+/// Classify a target triple (or the host when `None`) into a platform family.
+pub fn target_os(target: Option<&str>) -> TargetOs {
+    match target {
+        Some(t) => {
+            let t = t.to_ascii_lowercase();
+            if t.contains("windows") {
+                TargetOs::Windows
+            } else if t.contains("darwin") || t.contains("macos") || t.contains("apple") {
+                TargetOs::Macos
+            } else if t.contains("linux") {
+                TargetOs::Linux
+            } else {
+                TargetOs::Other
+            }
+        }
+        None => {
+            if cfg!(windows) {
+                TargetOs::Windows
+            } else if cfg!(target_os = "macos") {
+                TargetOs::Macos
+            } else if cfg!(target_os = "linux") {
+                TargetOs::Linux
+            } else {
+                TargetOs::Other
+            }
+        }
+    }
+}
+
+/// C name → linker symbol name for a `-u`/`--undefined` request.
+///
+/// `ld -u` (and the `--undefined`/`-U` family) name a *linker* symbol,
+/// not a C identifier. Mach-O prefixes every C symbol with `_`, so a
+/// bare `-u zz_float_format_raw` on Darwin only invents a phantom
+/// undefined: the link fails with `<initial-undefines>` /
+/// `symbol(s) not found` even though the archive defines the C symbol
+/// (seen on macOS CI for the float formatter).
+pub fn force_undef_symbol(sym: &str, target: Option<&str>) -> String {
+    match target_os(target) {
+        TargetOs::Macos => format!("_{sym}"),
+        _ => sym.to_string(),
+    }
+}
+
+/// True when `name` is a Rust std static archive.
+///
+/// Unix and GNU Windows ship `libstd-<hash>.rlib`; the MSVC toolchain
+/// ships `std-<hash>.rlib` with no `lib` prefix. Accept both so a
+/// Windows release zip (or a rustc libdir on Windows) is linkable.
+fn is_std_rlib_name(name: &str) -> bool {
+    name.ends_with(".rlib") && (name.starts_with("libstd-") || name.starts_with("std-"))
+}
+
+/// Shipped static libstd in a release lib dir (`libstd-<hash>.rlib`,
+/// `std-<hash>.rlib` on MSVC). Same newest-wins pick as the rustc-libdir
+/// scan. `None` when the dir ships none (old releases shipped only the
+/// shared object).
 fn find_shipped_std_rlib(libdir: &std::path::Path) -> Option<String> {
     let entries = std::fs::read_dir(libdir).ok()?;
     let mut found: Vec<String> = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with("libstd-") && n.ends_with(".rlib"))
+        .filter(|n| is_std_rlib_name(n))
         .collect();
     found.sort();
     found.pop()
 }
 
 /// Shipped shared libstd in a release lib dir (`libstd-<hash>.so`,
-/// `.dylib` on macOS), newest pick like the rustc-libdir scan.
+/// `.dylib` on macOS, `std-<hash>.dll`/`libstd-<hash>.dll` on Windows),
+/// newest pick like the rustc-libdir scan.
 /// `None` when the dir ships none (dev target dirs never do).
 /// Kept as a fallback for pre-#303 releases that shipped only the
 /// shared object; new releases ship the static rlib instead.
-fn find_shipped_libstd(libdir: &std::path::Path) -> Option<String> {
-    let (prefix, suffix) = if cfg!(target_os = "macos") {
-        ("libstd-", ".dylib")
-    } else if cfg!(windows) {
-        // MSVC names the shared libstd `std-<hash>.dll` (no `lib` prefix);
-        // GNU/mingw uses `libstd-<hash>.dll`. Probe both.
-        ("std-", ".dll")
-    } else {
-        ("libstd-", ".so")
+fn find_shipped_libstd(libdir: &std::path::Path, os: TargetOs) -> Option<String> {
+    let suffixes: &[&str] = match os {
+        TargetOs::Macos => &[".dylib"],
+        TargetOs::Windows => &[".dll"],
+        TargetOs::Linux | TargetOs::Other => &[".so"],
     };
     let entries = std::fs::read_dir(libdir).ok()?;
     let mut found: Vec<String> = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with(prefix) && n.ends_with(suffix))
+        .filter(|n| {
+            (n.starts_with("libstd-") || n.starts_with("std-"))
+                && suffixes.iter().any(|s| n.ends_with(s))
+        })
         .collect();
     found.sort();
     found.pop()
@@ -838,6 +904,20 @@ fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, Ffi
     // link cost: `snapshot_staticlib` strips the copy it publishes and
     // never mutates the cargo output (a linker may be reading it).
     snapshot_staticlib(&lib, release)
+}
+
+/// Copy `src` to `dst` through a share-all read handle.
+///
+/// `std::fs::copy` uses `CopyFileExW` on Windows, which opens the source
+/// without `FILE_SHARE_WRITE`: a concurrent producer rewriting the archive
+/// (cargo replacing the static lib) then fails with
+/// `ERROR_SHARING_VIOLATION`, and so does the copy. `File::open` asks for
+/// full sharing on Windows and behaves like `open(2)` on POSIX, so a
+/// snapshot never blocks the writer.
+fn copy_shared(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<u64> {
+    let mut from = std::fs::File::open(src)?;
+    let mut to = std::fs::File::create(dst)?;
+    std::io::copy(&mut from, &mut to)
 }
 
 /// Immutable snapshot of the cargo-built archive, for linking.
@@ -921,7 +1001,7 @@ fn snapshot_staticlib(lib: &std::path::Path, strip: bool) -> Result<PathBuf, Ffi
             std::process::id(),
             TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
-        let copied = std::fs::copy(lib, &tmp).ok().and_then(|_| stamp(&tmp));
+        let copied = copy_shared(lib, &tmp).ok().and_then(|_| stamp(&tmp));
         let after = stamp(lib);
         let stable = match (before, copied, after) {
             (Some(b), Some(c), Some(a)) if b == a && c.0 == b.0 && c.0 > 0 => {
@@ -1061,42 +1141,68 @@ fn src_dir_mtime_newer_than(dir: &std::path::Path, threshold: std::time::SystemT
     false
 }
 
-/// Static library file name for the current platform.
+/// Static library file name for the current host platform.
 pub fn lib_file_name() -> &'static str {
-    if cfg!(windows) {
-        "zz_native_rt.lib"
-    } else {
-        "libzz_native_rt.a"
+    lib_file_name_for(target_os(None))
+}
+
+/// Static library file name for a platform family.
+pub fn lib_file_name_for(os: TargetOs) -> &'static str {
+    match os {
+        TargetOs::Windows => "zz_native_rt.lib",
+        _ => "libzz_native_rt.a",
     }
 }
 
 /// System libraries appended after the Rust archives on every link.
 ///
-/// Linux/macOS keep the historical set (`-lpthread -ldl -lm`). The BSDs
-/// ship `dlopen` in libc — there is no `libdl`, and passing `-ldl`
-/// breaks the link — so they get `-lpthread -lm` only. The rlib name
-/// (`libstd-*.rlib`) and the `.so` fallback suffix are identical on
-/// Linux and the BSDs; only macOS differs (`.dylib`, `@loader_path`).
-fn sys_link_libs() -> &'static [&'static str] {
-    if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
-        &["-lpthread", "-ldl", "-lm"]
-    } else {
+/// Linux keeps the historical set (`-lpthread -ldl -lm`). The BSDs ship
+/// `dlopen` in libc — there is no `libdl`, and passing `-ldl` breaks the
+/// link — so they get `-lpthread -lm` only. macOS is Unix but its C
+/// stacks live in frameworks, not flat libraries: `sysinfo` (memory/disk
+/// stats) needs CoreFoundation and IOKit, and `ring`'s RNG path can call
+/// into Security, so those are added explicitly (an unused `-framework`
+/// costs nothing). The rlib name (`std-*.rlib` / `libstd-*.rlib`) and the
+/// shared-object suffix are resolved by the target platform, never the
+/// host.
+fn sys_link_libs(os: TargetOs) -> &'static [&'static str] {
+    match os {
+        TargetOs::Linux => &["-lpthread", "-ldl", "-lm"],
+        TargetOs::Macos => &[
+            "-lpthread",
+            "-ldl",
+            "-lm",
+            "-framework",
+            "CoreFoundation",
+            "-framework",
+            "IOKit",
+            "-framework",
+            "Security",
+        ],
         // FreeBSD / OpenBSD / NetBSD / DragonFly: no libdl.
-        &["-lpthread", "-lm"]
+        TargetOs::Other => &["-lpthread", "-lm"],
+        // Windows never reaches here (MSVC-style branch above); kept
+        // total so the match is exhaustive.
+        TargetOs::Windows => &[],
     }
 }
 
 /// System libraries for Windows/MSVC native FFI links.
 ///
-/// These are .lib import libraries that the MSVC linker (or clang/zig in
-/// MSVC-compatible mode on Windows) understands.
+/// Windows system import libraries.
+///
+/// `-l<name>` (not bare `<name>.lib`): bare file names only resolve when
+/// the MSVC `LIB` directory happens to be in the environment, so a
+/// clang/GNU-ABI link on Windows failed with "no such file or directory:
+/// 'kernel32.lib'". clang maps `-l` to the right import library for both
+/// the MSVC and the GNU driver.
 fn sys_link_libs_windows() -> &'static [&'static str] {
     &[
-        "kernel32.lib",
-        "user32.lib",
-        "advapi32.lib",
-        "ws2_32.lib",
-        "crypt32.lib",
+        "-lkernel32",
+        "-luser32",
+        "-ladvapi32",
+        "-lws2_32",
+        "-lcrypt32",
     ]
 }
 
@@ -1122,22 +1228,22 @@ fn rustc_libdir_for_target(target: Option<&str>) -> Result<PathBuf, FfiError> {
 }
 
 /// Exact `libstd` static archive file name in `libdir`
-/// (`libstd-<hash>.rlib`, same on every platform). The rlib links
-/// directly through `cc` like a normal archive (verified: `clang
-/// main.c libstd-<hash>.rlib` yields no `libstd` NEEDED entry), so AOT
-/// binaries carry no libstd dependency and no RUNPATH.
+/// (`libstd-<hash>.rlib` on Unix/GNU, `std-<hash>.rlib` on MSVC). The
+/// rlib links directly through `cc` like a normal archive (verified:
+/// `clang main.c libstd-<hash>.rlib` yields no `libstd` NEEDED entry), so
+/// AOT binaries carry no libstd dependency and no RUNPATH.
 fn find_std_rlib(libdir: &std::path::Path) -> Result<String, FfiError> {
     let entries =
         std::fs::read_dir(libdir).map_err(|e| FfiError(format!("cannot read {libdir:?}: {e}")))?;
     let mut found: Vec<String> = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with("libstd-") && n.ends_with(".rlib"))
+        .filter(|n| is_std_rlib_name(n))
         .collect();
     found.sort();
     found.pop().ok_or_else(|| {
         FfiError(format!(
-            "no libstd-*.rlib in {} (rustc libdir); native FFI link needs the static libstd",
+            "no std-*.rlib in {} (rustc libdir); native FFI link needs the static libstd",
             libdir.display()
         ))
     })
@@ -1146,23 +1252,23 @@ fn find_std_rlib(libdir: &std::path::Path) -> Result<String, FfiError> {
 /// Exact `libstd` shared-object file name in `libdir` (`-l:` needs the full
 /// name because rustc hashes it: `libstd-<hash>.so`).
 /// Fallback for pre-#303 toolchains that shipped only the shared object.
-fn find_libstd(libdir: &std::path::Path) -> Result<String, FfiError> {
-    let (prefix, suffix) = if cfg!(target_os = "macos") {
-        ("libstd-", ".dylib")
-    } else {
-        ("libstd-", ".so")
+fn find_libstd(libdir: &std::path::Path, os: TargetOs) -> Result<String, FfiError> {
+    let suffix = match os {
+        TargetOs::Macos => ".dylib",
+        TargetOs::Windows => ".dll",
+        _ => ".so",
     };
     let entries =
         std::fs::read_dir(libdir).map_err(|e| FfiError(format!("cannot read {libdir:?}: {e}")))?;
     let mut found: Vec<String> = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with(prefix) && n.ends_with(suffix))
+        .filter(|n| (n.starts_with("libstd-") || n.starts_with("std-")) && n.ends_with(suffix))
         .collect();
     found.sort();
     found.pop().ok_or_else(|| {
         FfiError(format!(
-            "no {prefix}*{suffix} in {} (rustc libdir); native FFI link needs the shared libstd",
+            "no std-*{suffix} in {} (rustc libdir); native FFI link needs the shared libstd",
             libdir.display()
         ))
     })
@@ -1173,7 +1279,8 @@ fn find_libstd(libdir: &std::path::Path) -> Result<String, FfiError> {
 /// thread/dl helpers.
 ///
 /// Returned flags are appended after the program object on the `cc` command
-/// line. Supports Windows via MSVC-style `/LIBPATH:` and `.lib` flags.
+/// line. Windows targets get the archive by absolute path plus MSVC import
+/// libraries (the driver is GNU-flavoured `clang`/`zig cc`, not clang-cl).
 pub fn link_args(release: bool) -> Result<(Vec<String>, PathBuf), FfiError> {
     link_args_for_target(release, None)
 }
@@ -1191,21 +1298,17 @@ pub fn link_args_for_target(
         .ok_or_else(|| FfiError(format!("static library has no parent: {}", lib.display())))?;
 
     // Target-aware platform detection: use the --target triple when
-    // provided, otherwise fall back to the host cfg. This matters for
+    // provided, otherwise fall back to the host. This matters for
     // cross-compilation (e.g. building Windows targets from Linux).
-    let is_windows = target
-        .map(is_windows_target)
-        .unwrap_or_else(|| cfg!(windows));
+    let os = target_os(target);
 
-    // Windows/MSVC linking: /LIBPATH: and .lib import/static libraries.
-    // zig cc on Windows and clang-cl both accept these flags.
-    if is_windows {
-        let lib_name = if target.is_some() {
-            "zz_native_rt.lib".to_string()
-        } else {
-            lib_file_name().to_string()
-        };
-        let mut base = vec![format!("/LIBPATH:{}", libdir.display()), lib_name];
+    // Windows/MSVC linking. The compiler driver is the GNU-flavoured
+    // `clang` (or `zig cc`), not clang-cl: only `-L`/`-l` are translated to
+    // `/LIBPATH:`/`foo.lib`. Passing `/LIBPATH:` or a bare relative
+    // `foo.lib` makes the driver treat them as input files
+    // (`error: no such file`), so the archive goes in by absolute path.
+    if os == TargetOs::Windows {
+        let mut base = vec![libdir.join(lib_file_name_for(os)).display().to_string()];
         base.extend(sys_link_libs_windows().iter().map(|s| s.to_string()));
         // Release installs ship the static libstd next to the archive.
         if let Some(shipped) = find_shipped_std_rlib(&libdir) {
@@ -1221,7 +1324,7 @@ pub fn link_args_for_target(
             }
         }
         return Err(FfiError(format!(
-            "no libstd-*.rlib in {} or rustc libdir; native FFI link on Windows needs the static libstd",
+            "no std-*.rlib in {} or rustc libdir; native FFI link on Windows needs the static libstd",
             libdir.display()
         )));
     }
@@ -1234,7 +1337,7 @@ pub fn link_args_for_target(
         format!("-L{}", libdir.display()),
         "-lzz_native_rt".to_string(),
     ];
-    base.extend(sys_link_libs().iter().map(|s| s.to_string()));
+    base.extend(sys_link_libs(os).iter().map(|s| s.to_string()));
     // Release installs ship the static libstd next to the archive: link
     // it by absolute path — no rustc, no RUNPATH, no sidecar. The `ldd`
     // output shows no `libstd` line (glibc/libm dynamic is fine).
@@ -1254,7 +1357,7 @@ pub fn link_args_for_target(
     // zips, or a toolchain without rlibs). Native-only like the static
     // shipped path above — cross builds error loudly on the target
     // sysroot instead of mixing host objects.
-    if let Some(shipped) = find_shipped_libstd(&libdir) {
+    if let Some(shipped) = find_shipped_libstd(&libdir, os) {
         let mut flags = base.clone();
         flags.insert(2, format!("-L{}", libdir.display()));
         flags.insert(3, format!("-l:{shipped}"));
@@ -1274,7 +1377,7 @@ pub fn link_args_for_target(
         flags.insert(2, rustc_dir.join(&rlib).display().to_string());
         return Ok((flags, lib));
     }
-    if let Ok(libstd) = find_libstd(&rustc_dir) {
+    if let Ok(libstd) = find_libstd(&rustc_dir, os) {
         let mut flags = base;
         flags.insert(2, format!("-L{}", rustc_dir.display()));
         flags.insert(3, format!("-l:{libstd}"));
@@ -1295,15 +1398,20 @@ pub fn link_args_for_target(
 /// is no shared object to sidecar. Only the legacy shared-libstd
 /// fallback produces a sidecar; dev checkouts keep the rustc rpath from
 /// [`link_args`] in that fallback.
-#[cfg(not(windows))]
+///
+/// Target-aware: a cross build stages the *target's* sidecar and emits
+/// the target's loader flag (`@loader_path` on macOS, `$ORIGIN` on
+/// Linux/BSD, nothing on Windows — the exe directory is searched first).
 pub fn stage_shared_libs(
     lib_path: &std::path::Path,
     out_bin: &std::path::Path,
+    target: Option<&str>,
 ) -> Result<Vec<String>, FfiError> {
+    let os = target_os(target);
     let Some(libdir) = lib_path.parent() else {
         return Ok(vec![]);
     };
-    let Some(shipped) = find_shipped_libstd(libdir) else {
+    let Some(shipped) = find_shipped_libstd(libdir, os) else {
         return Ok(vec![]);
     };
     let Some(out_dir) = out_bin.parent() else {
@@ -1321,47 +1429,15 @@ pub fn stage_shared_libs(
         std::fs::copy(libdir.join(&shipped), &dest)
             .map_err(|e| FfiError(format!("cannot stage {}: {e}", dest.display())))?;
     }
-    // `$ORIGIN` (Linux) / `@loader_path` (macOS): the binary finds its
-    // sidecar wherever the user puts the pair. No LD_LIBRARY_PATH, no
-    // absolute toolchain paths.
-    let token = if cfg!(target_os = "macos") {
-        "@loader_path"
-    } else {
-        "$ORIGIN"
-    };
-    Ok(vec![format!("-Wl,-rpath,{token}")])
-}
-
-/// Windows DLL sidecar: copy the `.dll` next to the `.exe`. Windows
-/// searches the executable's directory first, so no rpath is needed.
-#[cfg(windows)]
-pub fn stage_shared_libs(
-    lib_path: &std::path::Path,
-    out_bin: &std::path::Path,
-) -> Result<Vec<String>, FfiError> {
-    let Some(libdir) = lib_path.parent() else {
-        return Ok(vec![]);
-    };
-    let Some(shipped) = find_shipped_libstd(libdir) else {
-        return Ok(vec![]);
-    };
-    let Some(out_dir) = out_bin.parent() else {
-        return Ok(vec![]);
-    };
-    let dest = out_dir.join(&shipped);
-    let copy = match (
-        std::fs::metadata(libdir.join(&shipped)),
-        std::fs::metadata(&dest),
-    ) {
-        (Ok(src), Ok(dst)) => src.len() != dst.len(),
-        _ => true,
-    };
-    if copy {
-        std::fs::copy(libdir.join(&shipped), &dest)
-            .map_err(|e| FfiError(format!("cannot stage {}: {e}", dest.display())))?;
+    match os {
+        // Windows searches the exe directory for DLLs — no rpath needed.
+        TargetOs::Windows => Ok(vec![]),
+        // `$ORIGIN` (Linux/BSD) / `@loader_path` (macOS): the binary finds
+        // its sidecar wherever the user puts the pair. No LD_LIBRARY_PATH,
+        // no absolute toolchain paths.
+        TargetOs::Macos => Ok(vec!["-Wl,-rpath,@loader_path".to_string()]),
+        TargetOs::Linux | TargetOs::Other => Ok(vec!["-Wl,-rpath,$ORIGIN".to_string()]),
     }
-    // Windows searches the exe directory for DLLs — no rpath needed.
-    Ok(vec![])
 }
 
 #[cfg(test)]
@@ -1409,11 +1485,12 @@ mod tests {
         std::fs::create_dir_all(&libdir).expect("mkdir");
         // Empty dir: no shipped libstd of either kind.
         assert_eq!(find_shipped_std_rlib(&libdir), None);
-        assert_eq!(find_shipped_libstd(&libdir), None);
+        let host_os = target_os(None);
+        assert_eq!(find_shipped_libstd(&libdir, host_os), None);
         // Archive alone: still no shared objects.
         std::fs::write(libdir.join(lib_file_name()), b"fake-archive").expect("write");
         assert_eq!(find_shipped_std_rlib(&libdir), None);
-        assert_eq!(find_shipped_libstd(&libdir), None);
+        assert_eq!(find_shipped_libstd(&libdir, host_os), None);
         // Shipped static rlib detected, newest wins (#303 default).
         std::fs::write(libdir.join("libstd-aaa.rlib"), b"old").expect("write");
         std::fs::write(libdir.join("libstd-zzz.rlib"), b"new").expect("write");
@@ -1421,19 +1498,64 @@ mod tests {
             find_shipped_std_rlib(&libdir),
             Some("libstd-zzz.rlib".to_string())
         );
+        // MSVC ships `std-<hash>.rlib` (no `lib` prefix) — must be found too.
+        std::fs::write(libdir.join("std-mmm.rlib"), b"msvc").expect("write");
+        assert_eq!(
+            find_shipped_std_rlib(&libdir),
+            Some("std-mmm.rlib".to_string())
+        );
+        std::fs::remove_file(libdir.join("std-mmm.rlib")).ok();
         // Legacy shared object still detected as a fallback.
-        let (prefix, suffix) = if cfg!(target_os = "macos") {
-            ("libstd-", ".dylib")
-        } else {
-            ("libstd-", ".so")
+        let (prefix, suffix) = match host_os {
+            TargetOs::Macos => ("libstd-", ".dylib"),
+            TargetOs::Windows => ("std-", ".dll"),
+            _ => ("libstd-", ".so"),
         };
         std::fs::write(libdir.join(format!("{prefix}aaa{suffix}")), b"old").expect("write");
         std::fs::write(libdir.join(format!("{prefix}zzz{suffix}")), b"new").expect("write");
         assert_eq!(
-            find_shipped_libstd(&libdir),
+            find_shipped_libstd(&libdir, host_os),
             Some(format!("{prefix}zzz{suffix}"))
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn std_rlib_names_cover_msvc_and_gnu() {
+        assert!(is_std_rlib_name("libstd-1a2b.rlib"));
+        assert!(is_std_rlib_name("std-1a2b.rlib"));
+        assert!(!is_std_rlib_name("libstd-1a2b.rlib.bak"));
+        assert!(!is_std_rlib_name("std-1a2b.dll"));
+        assert!(!is_std_rlib_name("other.rlib"));
+    }
+
+    #[test]
+    fn target_os_classifies_triples() {
+        assert_eq!(target_os(Some("x86_64-pc-windows-msvc")), TargetOs::Windows);
+        assert_eq!(
+            target_os(Some("aarch64-pc-windows-msvc")),
+            TargetOs::Windows
+        );
+        assert_eq!(target_os(Some("aarch64-apple-darwin")), TargetOs::Macos);
+        assert_eq!(target_os(Some("x86_64-unknown-linux-gnu")), TargetOs::Linux);
+        assert_eq!(target_os(Some("x86_64-unknown-freebsd")), TargetOs::Other);
+    }
+
+    #[test]
+    fn force_undef_symbol_underscores_on_darwin() {
+        // `ld -u` takes the linker symbol: Mach-O prefixes C names with `_`.
+        assert_eq!(
+            force_undef_symbol("zz_float_format_raw", Some("aarch64-apple-darwin")),
+            "_zz_float_format_raw"
+        );
+        assert_eq!(
+            force_undef_symbol("zz_float_format_raw", Some("x86_64-unknown-linux-gnu")),
+            "zz_float_format_raw"
+        );
+        assert_eq!(
+            force_undef_symbol("zz_float_format_raw", Some("x86_64-pc-windows-msvc")),
+            "zz_float_format_raw"
+        );
     }
 
     #[test]
@@ -1470,27 +1592,43 @@ mod tests {
         std::fs::create_dir_all(&libdir).expect("mkdir");
         std::fs::create_dir_all(&outdir).expect("mkdir");
         std::fs::write(libdir.join(lib_file_name()), b"fake-archive").expect("write");
-        let (prefix, suffix) = if cfg!(target_os = "macos") {
-            ("libstd-", ".dylib")
-        } else {
-            ("libstd-", ".so")
+        let host_os = target_os(None);
+        let (prefix, suffix) = match host_os {
+            TargetOs::Macos => ("libstd-", ".dylib"),
+            TargetOs::Windows => ("std-", ".dll"),
+            _ => ("libstd-", ".so"),
         };
         let so = format!("{prefix}zzz{suffix}");
         std::fs::write(libdir.join(&so), b"fake-so").expect("write");
         let out_bin = outdir.join("prog");
-        let flags = stage_shared_libs(&libdir.join(lib_file_name()), &out_bin).expect("stage");
+        let flags =
+            stage_shared_libs(&libdir.join(lib_file_name()), &out_bin, None).expect("stage");
         assert!(outdir.join(&so).is_file(), "sidecar copied");
-        if cfg!(target_os = "macos") {
-            assert_eq!(flags, vec!["-Wl,-rpath,@loader_path".to_string()]);
-        } else {
-            assert_eq!(flags, vec!["-Wl,-rpath,$ORIGIN".to_string()]);
+        match host_os {
+            TargetOs::Macos => {
+                assert_eq!(flags, vec!["-Wl,-rpath,@loader_path".to_string()])
+            }
+            TargetOs::Windows => assert!(flags.is_empty(), "no rpath on Windows: {flags:?}"),
+            _ => assert_eq!(flags, vec!["-Wl,-rpath,$ORIGIN".to_string()]),
         }
         // No shipped objects: empty flags, nothing copied.
         std::fs::remove_file(libdir.join(&so)).ok();
         std::fs::remove_file(outdir.join(&so)).ok();
-        let flags = stage_shared_libs(&libdir.join(lib_file_name()), &out_bin).expect("stage");
+        let flags =
+            stage_shared_libs(&libdir.join(lib_file_name()), &out_bin, None).expect("stage");
         assert!(flags.is_empty());
         assert!(!outdir.join(&so).is_file());
+        // Cross-target: a Windows target stages a `.dll` and emits no rpath,
+        // regardless of the host.
+        std::fs::write(libdir.join("std-cross.dll"), b"fake-dll").expect("write");
+        let flags = stage_shared_libs(
+            &libdir.join(lib_file_name()),
+            &out_bin,
+            Some("x86_64-pc-windows-msvc"),
+        )
+        .expect("stage");
+        assert!(flags.is_empty(), "Windows cross build needs no rpath");
+        assert!(outdir.join("std-cross.dll").is_file());
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -1545,14 +1683,26 @@ mod tests {
     /// with the real flags, run it, and check handle alloc/tag/drop plus a
     /// crypto call (which exercises the linkable `zz_str_*` constructors)
     /// across the language boundary.
+    ///
+    /// Gated on Windows for the same reason `mod tests` is (see `lib.rs`):
+    /// the runtime TU includes `<pthread.h>` and the socket layer is POSIX,
+    /// so it cannot compile with MSVC there yet. Windows CI still covers
+    /// the FFI surface through the pure string/flag tests above and the
+    /// CLI-level VM suites.
     #[test]
+    #[cfg(not(windows))]
     fn link_staticlib_from_c() {
         let (mut args, _rt_lib) = match link_args(false) {
             Ok(a) => a,
             Err(e) => panic!("link_args failed: {e}"),
         };
-        // Same runtime deps as compile::build.
-        args.push("-lcurl".to_string());
+        // Same runtime deps as compile::build (vcpkg names curl's import
+        // library `libcurl.lib` on Windows).
+        args.push(if cfg!(windows) {
+            "-llibcurl".to_string()
+        } else {
+            "-lcurl".to_string()
+        });
         args.push("-lsqlite3".to_string());
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1583,7 +1733,8 @@ mod tests {
             cmd.arg("cc");
         }
         cmd.arg("-O1")
-            .arg("-DZZ_HAS_SQLITE3")
+            .arg("-DZZ_HAS_CURL=0")
+            .arg("-DZZ_HAS_SQLITE3=0")
             .arg("-o")
             .arg(&bin_path)
             .arg(&c_path);

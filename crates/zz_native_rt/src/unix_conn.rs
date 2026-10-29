@@ -11,9 +11,12 @@
 //! classes: `refused | timeout | closed | io`, prefixed `unix:<reason>:`.
 
 use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use libc::{poll, pollfd, POLLIN, POLLOUT};
 
 use crate::cabi::{cvalue_bytes, cvalue_str, cvalue_to_bytes, cvalue_to_string, CValue};
 use crate::{alloc, payload, Handle};
@@ -24,9 +27,144 @@ pub const TAG: &str = "unix";
 pub const LISTENER_TAG: &str = "unix_listener";
 
 /// A live Unix-domain connection.
+///
+/// IO timeouts are applied in userspace with `poll(2)` before each
+/// blocking read/write: Darwin rejects `SO_RCVTIMEO`/`SO_SNDTIMEO` on
+/// `AF_UNIX` sockets (`EINVAL`), so the kernel cannot be relied on to
+/// enforce them. The timeout is stored here and also handed to the kernel
+/// as a best-effort hint (harmless where supported).
 pub struct UnixConn {
     pub stream: UnixStream,
     pub peer: String,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+}
+
+/// Wait up to `timeout` for the socket to be readable (or writable when
+/// `write` is true). Returns `io::ErrorKind::TimedOut` ("timed out") on
+/// expiry so `classify` maps it to `unix:timeout:`.
+fn poll_ready(stream: &UnixStream, write: bool, timeout: Option<Duration>) -> std::io::Result<()> {
+    let Some(dur) = timeout else { return Ok(()) };
+    // Round up so a sub-millisecond timeout still polls at least 1 ms.
+    let mut ms = dur.as_millis() as i32;
+    if ms < 1 {
+        ms = 1;
+    }
+    let mut pfd = pollfd {
+        fd: stream.as_raw_fd(),
+        events: if write { POLLOUT } else { POLLIN },
+        revents: 0,
+    };
+    loop {
+        let r = unsafe { poll(&mut pfd, 1, ms) };
+        if r < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if r == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out",
+            ));
+        }
+        return Ok(());
+    }
+}
+
+impl UnixConn {
+    /// Store an IO timeout (best-effort kernel hint too) and enforce it in
+    /// userspace via `poll` on every read/write.
+    pub fn set_read_timeout(&mut self, dur: Option<Duration>) -> std::io::Result<()> {
+        let _ = self.stream.set_read_timeout(dur);
+        self.read_timeout = dur;
+        Ok(())
+    }
+
+    pub fn set_write_timeout(&mut self, dur: Option<Duration>) -> std::io::Result<()> {
+        let _ = self.stream.set_write_timeout(dur);
+        self.write_timeout = dur;
+        Ok(())
+    }
+
+    pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        poll_ready(&self.stream, false, self.read_timeout)?;
+        self.stream.read(buf)
+    }
+
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        let mut pos = 0;
+        while pos < buf.len() {
+            poll_ready(&self.stream, false, self.read_timeout)?;
+            match self.stream.read(&mut buf[pos..]) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "failed to fill whole buffer",
+                    ))
+                }
+                Ok(n) => pos += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        let mut pos = 0;
+        while pos < buf.len() {
+            poll_ready(&self.stream, true, self.write_timeout)?;
+            match self.stream.write(&buf[pos..]) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "write zero bytes",
+                    ))
+                }
+                Ok(n) => pos += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Read until `\n` (inclusive), returning the line without it.
+    /// `UnexpectedEof` with an empty line means the peer closed first.
+    pub fn read_line(&mut self) -> std::io::Result<String> {
+        let mut line: Vec<u8> = Vec::new();
+        let mut one = [0u8; 1];
+        loop {
+            match self.read_exact(&mut one) {
+                Ok(()) => {
+                    if one[0] == b'\n' {
+                        break;
+                    }
+                    line.push(one[0]);
+                    if line.len() > 64 * 1024 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "line too long (max 64 KiB)",
+                        ));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    if line.is_empty() {
+                        return Err(e);
+                    }
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        Ok(String::from_utf8_lossy(&line).into_owned())
+    }
 }
 
 fn classify(path: &str, e: &str) -> String {
@@ -68,15 +206,15 @@ pub fn connect(path: &str, timeout_ms: u64) -> Result<Handle, String> {
         Duration::from_millis(timeout_ms)
     };
     let stream = UnixStream::connect(path).map_err(|e| classify(path, &e.to_string()))?;
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
-    Ok(alloc(
-        TAG,
-        Arc::new(Mutex::new(UnixConn {
-            stream,
-            peer: path.to_string(),
-        })),
-    ))
+    let mut conn = UnixConn {
+        stream,
+        peer: path.to_string(),
+        read_timeout: None,
+        write_timeout: None,
+    };
+    let _ = conn.set_read_timeout(Some(timeout));
+    let _ = conn.set_write_timeout(Some(timeout));
+    Ok(alloc(TAG, Arc::new(Mutex::new(conn))))
 }
 
 /// Run `f` on the connection for `id`. `None` for unknown/dropped ids and
@@ -121,15 +259,15 @@ pub fn accept(id: u64) -> Result<Handle, String> {
     let (sock, _) = listener
         .accept()
         .map_err(|e| format!("unix:io: accept failed ({e})"))?;
-    let _ = sock.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = sock.set_write_timeout(Some(Duration::from_secs(10)));
-    Ok(alloc(
-        TAG,
-        Arc::new(Mutex::new(UnixConn {
-            stream: sock,
-            peer: String::new(),
-        })),
-    ))
+    let mut conn = UnixConn {
+        stream: sock,
+        peer: String::new(),
+        read_timeout: None,
+        write_timeout: None,
+    };
+    let _ = conn.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = conn.set_write_timeout(Some(Duration::from_secs(10)));
+    Ok(alloc(TAG, Arc::new(Mutex::new(conn))))
 }
 
 fn set_err(err: *mut std::ffi::c_int) {
@@ -210,7 +348,7 @@ pub extern "C" fn zz_unix_write(id: CValue, data: CValue, err: *mut std::ffi::c_
         set_err(err);
         return err_str("unix:io: expected (unix, data: str)".to_string());
     };
-    match with(n as u64, |c| c.stream.write_all(text.as_bytes())) {
+    match with(n as u64, |c| c.write_all(text.as_bytes())) {
         Some(Ok(())) => unsafe { crate::cabi::zz_variant_ok(CValue::int(text.len() as i64)) },
         Some(Err(e)) => err_str(classify("peer", &e.to_string())),
         None => {
@@ -232,7 +370,7 @@ pub extern "C" fn zz_unix_write_bytes(
         return err_str("unix:io: expected (unix, data: bytes)".to_string());
     };
     let len = bytes.len();
-    match with(n as u64, |c| c.stream.write_all(&bytes)) {
+    match with(n as u64, |c| c.write_all(&bytes)) {
         Some(Ok(())) => unsafe { crate::cabi::zz_variant_ok(CValue::int(len as i64)) },
         Some(Err(e)) => err_str(classify("peer", &e.to_string())),
         None => {
@@ -251,7 +389,7 @@ pub extern "C" fn zz_unix_read(id: CValue, max: CValue, err: *mut std::ffi::c_in
     };
     let cap = cap.clamp(1, 8 * 1024 * 1024) as usize;
     let mut buf = vec![0u8; cap];
-    match with(n as u64, |c| c.stream.read(&mut buf)) {
+    match with(n as u64, |c| c.read(&mut buf)) {
         Some(Ok(0)) => err_str("unix:closed: connection closed".to_string()),
         Some(Ok(got)) => {
             buf.truncate(got);
@@ -275,7 +413,7 @@ pub extern "C" fn zz_unix_read_bytes(id: CValue, max: CValue, err: *mut std::ffi
     };
     let cap = cap.clamp(1, 8 * 1024 * 1024) as usize;
     let mut buf = vec![0u8; cap];
-    match with(n as u64, |c| c.stream.read(&mut buf)) {
+    match with(n as u64, |c| c.read(&mut buf)) {
         Some(Ok(0)) => err_str("unix:closed: connection closed".to_string()),
         Some(Ok(got)) => {
             buf.truncate(got);
@@ -306,7 +444,7 @@ pub extern "C" fn zz_unix_read_exact(
     }
     let k = k as usize;
     let mut out = vec![0u8; k];
-    let res = with(n as u64, |c| c.stream.read_exact(&mut out));
+    let res = with(n as u64, |c| c.read_exact(&mut out));
     match res {
         Some(Ok(())) => unsafe { crate::cabi::zz_variant_ok(cvalue_bytes(&out)) },
         Some(Err(e)) => err_str(classify("peer", &e.to_string())),
@@ -327,7 +465,7 @@ pub extern "C" fn zz_unix_read_line(id: CValue, err: *mut std::ffi::c_int) -> CV
     let mut line: Vec<u8> = Vec::new();
     let mut one = [0u8; 1];
     loop {
-        let r = with(n as u64, |c| c.stream.read_exact(&mut one));
+        let r = with(n as u64, |c| c.read_exact(&mut one));
         match r {
             Some(Ok(())) => {
                 if one[0] == b'\n' {
@@ -373,7 +511,7 @@ pub extern "C" fn zz_unix_set_read_timeout(
     } else {
         Some(Duration::from_millis(v as u64))
     };
-    match with(n as u64, |c| c.stream.set_read_timeout(dur)) {
+    match with(n as u64, |c| c.set_read_timeout(dur)) {
         Some(Ok(())) => unsafe { crate::cabi::zz_variant_ok(CValue::boolean(true)) },
         Some(Err(e)) => err_str(format!("unix:io: set_read_timeout failed ({e})")),
         None => {
@@ -399,7 +537,7 @@ pub extern "C" fn zz_unix_set_write_timeout(
     } else {
         Some(Duration::from_millis(v as u64))
     };
-    match with(n as u64, |c| c.stream.set_write_timeout(dur)) {
+    match with(n as u64, |c| c.set_write_timeout(dur)) {
         Some(Ok(())) => unsafe { crate::cabi::zz_variant_ok(CValue::boolean(true)) },
         Some(Err(e)) => err_str(format!("unix:io: set_write_timeout failed ({e})")),
         None => {

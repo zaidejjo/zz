@@ -1,0 +1,314 @@
+name: CI test leg
+
+# Reusable OS-family test workflow. `ci.yml` calls it once per OS family
+# (linux/macos/windows) and passes that family's legs as JSON; the matrix
+# here expands them, so the UI groups both architectures under one OS job.
+#
+# The caller (`ci.yml`) has already selected the tier and passes exactly the
+# legs that should run for this event, so this file only expands the matrix.
+#
+# Why a reusable workflow instead of one big ci.yml: each file stays small
+# and reviewable, and the runner labels stay visible in the caller.
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      family:
+        description: "`linux` | `macos` | `windows` — selects dependency install."
+        required: true
+        type: string
+      legs:
+        description: >-
+          JSON array of legs for this family. Each entry carries
+          `name`, `runner`, `native`, `tier`, `timeout`, `clang_pin`,
+          `docker_smoke`.
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      # One architecture failing must not hide the other: we want all logs.
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.legs) }}
+    env:
+      # Empty is fine: clang_pin() filters it out. Kept job-level so every
+      # step (fast suite, parity, sanitizers) sees the pinned clang.
+      ZZ_CLANG_VERSION: ${{ matrix.clang_pin }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache per platform leg: MSVC/GNU artifacts must never
+          # leak between legs.
+          key: ${{ matrix.name }}
+
+      - name: free runner disk (linux)
+        if: inputs.family == 'linux'
+        run: |
+          set -euo pipefail
+          # Hosted images ship toolchains this repo never uses (Android
+          # SDK, .NET, GHC, CodeQL) — ~20 GB. A cold debug build of this
+          # workspace plus its ~20 test binaries needs more room than the
+          # image baseline leaves; when the disk fills, the runner gets a
+          # shutdown signal mid-step and the leg dies with no cargo error
+          # (seen on both Linux legs, runs 40607605907 / 40611973038 /
+          # 40614658084). Reclaim the unused toolchains and log the head
+          # room so a future regression is visible.
+          df -h /
+          free -m
+          for dir in /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                     /opt/hostedtoolcache/CodeQL; do
+            sudo rm -rf "$dir" || true
+          done
+          df -h /
+
+      - name: install native deps (linux)
+        if: inputs.family == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          if [ -n "${{ matrix.clang_pin }}" ]; then
+            # The pinned sanitizer leg needs apt.llvm.org (Noble's archive
+            # tops out at clang-18).
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+              | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+            echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{
+              matrix.clang_pin }} main" \
+              | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+            sudo apt-get update
+            sudo apt-get install -y "clang-${{ matrix.clang_pin }}"
+          else
+            sudo apt-get install -y clang
+          fi
+          # Native codegen links -lcurl -lsqlite3 and compiles with clang.
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev zip unzip xz-utils
+          clang --version
+
+      - name: install native deps (macos)
+        if: inputs.family == 'macos'
+        run: |
+          set -euo pipefail
+          # The SDK ships curl + sqlite3 headers/libs; xz is needed for
+          # the bundled zig tarball at release time.
+          brew install xz || true
+          clang --version
+          clang -E -x c - <<< '#include <curl/curl.h>' > /dev/null
+          clang -E -x c - <<< '#include <sqlite3.h>' > /dev/null
+
+      # clang-cl/MSVC need the Visual Studio toolchain on INCLUDE/LIB even
+      # for cross-arch compiles (the ARM64 ring build failed on a missing
+      # <assert.h> without it). This also puts cl.exe on PATH for the
+      # `cc`-built Windows link shim.
+      - name: MSVC developer environment (windows)
+        if: inputs.family == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+
+      # Git for Windows ships coreutils `/usr/bin/link.exe`. That directory
+      # precedes the MSVC toolchain on PATH, so rustc's `link.exe` lookup
+      # picks the coreutils binary and every build dies with
+      # `link: extra operand ...` (both Windows legs, run 40559424218).
+      # Pin the toolchain linker via CARGO_TARGET_*_LINKER *and* remove the
+      # shadow, then prove the lookup resolves to MSVC.
+      - name: unshadow the MSVC linker (windows)
+        if: inputs.family == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vctools = $env:VCToolsInstallDir
+          if (-not $vctools) { throw "VCToolsInstallDir unset; msvc-dev-cmd did not run" }
+          $arch = "${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}"
+          $link = Join-Path $vctools "bin\Host$arch\$arch\link.exe"
+          if (-not (Test-Path $link)) { throw "MSVC linker not found: $link" }
+          Write-Host "MSVC linker: $link"
+          $triple = "${{ runner.arch == 'ARM64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}"
+          $var = "CARGO_TARGET_" + ($triple.ToUpper() -replace '-', '_') + "_LINKER"
+          "$var=$link" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $gitLink = "C:\Program Files\Git\usr\bin\link.exe"
+          if (Test-Path $gitLink) { Remove-Item $gitLink -Force }
+          $resolved = (Get-Command link.exe -ErrorAction SilentlyContinue).Source
+          Write-Host "link.exe -> $resolved"
+          if (-not $resolved -or $resolved -notmatch 'VC\\Tools\\MSVC') {
+            throw "MSVC link.exe does not win the PATH lookup (got '$resolved')"
+          }
+
+      - name: cache vcpkg (windows)
+        if: inputs.family == 'windows'
+        uses: actions/cache@v4
+        with:
+          # Headers/libs and sources survive between runs: curl pulls a few
+          # dependencies, and a warm cache takes the install step to
+          # seconds instead of ~10 minutes.
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\downloads
+          key: vcpkg-${{ runner.arch }}-curl-sqlite3-v2
+          restore-keys: |
+            vcpkg-${{ runner.arch }}-
+
+      - name: install native deps (windows)
+        if: inputs.family == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # LLVM: the image normally ships it, but not always on PATH.
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvm) {
+            $llvm | Out-File -FilePath $env:GITHUB_PATH -Append
+            # GITHUB_PATH only affects *later* steps; the checks below run
+            # in this one.
+            $env:PATH = "$llvm;$env:PATH"
+          }
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+            $llvm | Out-File -FilePath $env:GITHUB_PATH -Append
+            $env:PATH = "$llvm;$env:PATH"
+          }
+          clang --version
+          # curl + sqlite3 headers/libs: the C runtime includes them by
+          # default (ZZ_HAS_CURL/ZZ_HAS_SQLITE3), so native legs need them.
+          # `msvc-dev-cmd` may leave VCPKG_INSTALLATION_ROOT pointing at the
+          # VS-bundled (read-only) tree; fall back to the image's C:\vcpkg
+          # when that path has no usable vcpkg.exe.
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkg -or -not (Test-Path "$vcpkg\vcpkg.exe")) {
+            if (Test-Path "C:\vcpkg\vcpkg.exe") { $vcpkg = "C:\vcpkg" }
+          }
+          $triplet = if ("${{ runner.arch }}" -eq "ARM64") {
+            "arm64-windows"
+          } else {
+            "x64-windows"
+          }
+          if (Test-Path "$vcpkg\vcpkg.exe") {
+            & "$vcpkg\vcpkg.exe" install "curl:$triplet" "sqlite3:$triplet" --clean-after-build
+            # Append, never replace: the MSVC step above owns the toolchain
+            # and Windows SDK search paths in INCLUDE/LIB.
+            $inc = "$vcpkg\installed\$triplet\include"
+            $lib = "$vcpkg\installed\$triplet\lib"
+            "INCLUDE=$inc;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "LIB=$lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            Write-Warning "vcpkg not found; curl/sqlite3 natives may fail to link"
+          }
+
+      - name: 'docker smoke fixture (AOT compile + run)'
+        if: matrix.docker_smoke
+        run: |
+          cargo run -q -p zz_cli -- build -p docker/smoke/hello.zz -o /tmp/zz-docker-smoke
+          out=$(/tmp/zz-docker-smoke)
+          echo "$out"
+          echo "$out" | grep -qx 'smoke-ok'
+
+      # --- PR signal: fast suite (VM) + batched native + sanitizers -----
+      - name: 'test (PR: fast suite, native allowed)'
+        if: github.event_name == 'pull_request' && matrix.native
+        shell: bash
+        env:
+          ZZ_CI_SKIP_LINT: "1"
+        run: ./scripts/test-fast.sh
+
+      - name: 'test (PR: fast suite, native skipped)'
+        if: github.event_name == 'pull_request' && !matrix.native
+        shell: bash
+        env:
+          ZZ_CI_SKIP_LINT: "1"
+          ZZ_SKIP_NATIVE: "1"
+        run: ./scripts/test-fast.sh
+
+      - name: 'test (PR: zz_cli unit tests inside the binary)'
+        # `test-fast.sh` runs `-p zz_cli --lib` (5 tests); the CLI's own
+        # unit tests (upgrade, doctor, setup, arg parsing — ~280) live in
+        # the binary target and only ran on push via `cargo test --all`,
+        # so PRs could break them unnoticed. CI-only: the debug binary is
+        # large and this is heavy for a laptop.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          ZZ_CI_SKIP_LINT: "1"
+        run: cargo test -p zz_cli --bins
+
+      - name: 'test (PR: batched native parity)'
+        if: github.event_name == 'pull_request' && matrix.native
+        shell: bash
+        run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
+
+      - name: 'ASan+UBSan AOT leg (pinned clang leg only)'
+        if: matrix.clang_pin != ''
+        shell: bash
+        run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
+
+      # --- merge/push: full suite --------------------------------------
+      - name: 'test (merge: full suite, native allowed)'
+        if: github.event_name != 'pull_request' && matrix.native
+        shell: bash
+        run: ZZ_BATCH_NATIVE=1 cargo test --all
+
+      - name: 'test (merge: full suite, native skipped)'
+        if: github.event_name != 'pull_request' && !matrix.native
+        shell: bash
+        env:
+          ZZ_SKIP_NATIVE: "1"
+        run: ZZ_BATCH_NATIVE=1 cargo test --all
+
+      - name: 'lsp parity (LSP ↔ checker diagnostics)'
+        shell: bash
+        run: |
+          cargo build -p zz_cli
+          cargo test -p zz_lsp --test check_parity
+
+      # --- coverage honesty --------------------------------------------
+      # A green leg must state whether it exercised the AOT backend. The
+      # probe builds and runs one tiny program (`--native` needs no output
+      # path, so exe naming is the CLI's problem, not this step's); the
+      # gate then fails a leg declared `native: true` if the probe cannot
+      # build — otherwise a native-capable runner could silently skip the
+      # AOT suites and still report success.
+      - name: native capability probe
+        id: native_probe
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -uo pipefail
+          src="$RUNNER_TEMP/zz-native-probe.zz"
+          printf 'func main() { println("native-ok") }\n' > "$src"
+          # Capture instead of piping: `grep -q` closing early would SIGPIPE
+          # the producer and trip `pipefail` on a *successful* probe.
+          out=$(cargo run -q -p zz_cli -- run --native "$src" 2>/dev/null) || out=""
+          if [ "$out" = "native-ok" ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+            echo "native AOT: available on this leg (AOT suites ran)"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "native AOT: unavailable on this leg (AOT suites reported skip)"
+          fi
+
+      - name: native capability gate
+        if: always()
+        shell: bash
+        run: |
+          ok="${{ steps.native_probe.outputs.ok }}"
+          if [ "${{ matrix.native }}" = "true" ] && [ "$ok" != "1" ]; then
+            echo "::error::leg '${{ matrix.name }}' is declared native-capable but cannot build an AOT binary"
+            exit 1
+          fi
+          if [ "${{ matrix.native }}" = "false" ] && [ "$ok" = "1" ]; then
+            echo "::warning::native AOT works on '${{ matrix.name }}' but the leg sets native: false; flip it once its AOT suites pass"
+          fi

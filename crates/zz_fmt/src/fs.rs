@@ -131,21 +131,27 @@ mod tests {
         setup_tree(&tmp);
 
         let mut found = discover(std::slice::from_ref(&tmp)).unwrap();
-        // Strip the temp prefix for assertion clarity.
+        // Strip the temp prefix for assertion clarity. Compare `Path`s, not
+        // strings: Windows separates with `\`, and `Path` equality is
+        // component-wise, so one spelling works on every host.
         found.sort();
 
         // Should find exactly src/main.zz and src/util.zz.
-        let names: Vec<String> = found
+        let names: Vec<std::path::PathBuf> = found
             .iter()
-            .map(|p| p.strip_prefix(&tmp).unwrap().to_string_lossy().into_owned())
+            .map(|p| p.strip_prefix(&tmp).unwrap().to_path_buf())
             .collect();
 
         assert!(
-            names.contains(&"src/main.zz".to_string()),
+            names
+                .iter()
+                .any(|p| p == std::path::Path::new("src/main.zz")),
             "expected src/main.zz in {names:?}"
         );
         assert!(
-            names.contains(&"src/util.zz".to_string()),
+            names
+                .iter()
+                .any(|p| p == std::path::Path::new("src/util.zz")),
             "expected src/util.zz in {names:?}"
         );
         assert_eq!(
@@ -167,12 +173,12 @@ mod tests {
         fs::write(tmp.join(".zzignore"), "src/b.zz\n").unwrap();
 
         let found = discover(std::slice::from_ref(&tmp)).unwrap();
-        let names: Vec<String> = found
+        let names: Vec<std::path::PathBuf> = found
             .iter()
-            .map(|p| p.strip_prefix(&tmp).unwrap().to_string_lossy().into_owned())
+            .map(|p| p.strip_prefix(&tmp).unwrap().to_path_buf())
             .collect();
 
-        assert_eq!(names, vec!["src/a.zz"]);
+        assert_eq!(names, vec![std::path::PathBuf::from("src/a.zz")]);
         let _ = fs::remove_dir_all(&tmp);
     }
 

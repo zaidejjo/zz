@@ -2859,22 +2859,18 @@ impl<'a> Emitter<'a> {
             .pop()
             .ok_or_else(|| ChunkError::op("idxread stack"))?;
         // Bounds exactly like `zz_array_get`: normalize once, then check.
-        // OOB yields `zz_unit()` (`.i == 0`) so callers observe a defined
-        // value instead of trapping — matches HIR (`zz_array_get` returns
-        // unit on OOB) and avoids aborting the whole process (#646).
+        // OOB traps (exit 1), matching the VM's hard `normalize_index`
+        // error and the HIR backend's `zz_index_trap` — `a[i]` is not a
+        // catchable operation in ZZ. (#691 briefly made this yield unit,
+        // which silently diverged from the VM.)
         out.push_str("      int64_t _qn = (int64_t)_qb.arr->len;\n");
-        out.push_str("      zz_value _qe;\n");
         out.push_str(&format!(
-            "      int64_t _qx = {top}; if (_qx < 0) _qx += _qn;\n",
+            "      int64_t _qx = {top}; if (_qx < 0) _qx += _qn; if (_qx < 0 || _qx >= _qn) {};\n",
+            ftrap("index out of bounds")
         ));
-        out.push_str(
-            "      if (_qx < 0 || _qx >= _qn) { _qe = zz_unit(); } else { _qe = _qb.arr->items[_qx]; ",
-        );
         if rd.elem_bool {
-            out.push_str(&format!(
-                "if (_qe.tag != ZZ_BOOL) {};\n",
-                ftrap("array element is not a bool")
-            ));
+            out.push_str("      zz_value _qe = _qb.arr->items[_qx]; if (_qe.tag != ZZ_BOOL) ");
+            out.push_str(&format!("{};\n", ftrap("array element is not a bool")));
             match rd.tail {
                 IdxTail::Branch(t, false) => {
                     out.push_str(&format!("      if (!_qe.b) goto L{t};\n"));
@@ -2885,10 +2881,8 @@ impl<'a> Emitter<'a> {
                 IdxTail::Store(_) => return Err(ChunkError::op("idxread tail")),
             }
         } else {
-            out.push_str(&format!(
-                "if (_qe.tag != ZZ_INT) {};\n",
-                ftrap("array element is not an int")
-            ));
+            out.push_str("      zz_value _qe = _qb.arr->items[_qx]; if (_qe.tag != ZZ_INT) ");
+            out.push_str(&format!("{};\n", ftrap("array element is not an int")));
             tstack.push("_qe.i".to_string());
             for op in &code[rest_pc..rest_pc + rd.rest_len] {
                 emit_int_op(module, op, &mut tstack, &mut tmp, out)?;
@@ -2904,7 +2898,6 @@ impl<'a> Emitter<'a> {
                 IdxTail::Branch(_, _) => return Err(ChunkError::op("idxread tail")),
             }
         }
-        out.push_str("      }\n");
         out.push_str("    }\n");
         Ok(())
     }
@@ -4689,9 +4682,10 @@ pub fn build_module(
     // Link flags from the referenced natives (same helpers as HIR).
     let native_names: HashSet<String> = em.used_natives.iter().map(|(n, _, _)| n.clone()).collect();
     // Headers + user code only: the TU links the precompiled runtime
-    // archive (`-lzz_rt`), exactly like the HIR backend's precompiled
-    // path. Quoted includes are concatenated-header residue — strip
-    // them (system includes like <math.h> stay).
+    // archive (passed by path — see `compile::push_link_inputs`), exactly
+    // like the HIR backend's precompiled path. Quoted includes are
+    // concatenated-header residue — strip them (system includes like
+    // <math.h> stay).
     let raw = format!(
         "{runtime_h}\n{chunk_pre}\n// ---- chunk-compiled code ----\n{bodies}\nvoid zz_main(void) {{\n    zz_value _t = {entry_sym}(NULL, 0);\n    zz_release(&_t);\n}}\n\nint zz_call_main(void) {{\n    zz_value _r = {main_call};\n    return zz_main_result_code(_r);\n}}\n",
         runtime_h = crate::RUNTIME_H,

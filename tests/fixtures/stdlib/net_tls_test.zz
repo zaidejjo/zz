@@ -23,9 +23,18 @@ func tls_echo(c: tls, line: str) -> Result<str, str> {
 }
 
 func main() -> Result<int, str> {
+    // Port band chart (keep the bands disjoint: overlapping ranges are
+    // what made parallel fixtures bind the same port):
+    //   20000 http_keepalive_p1   22000 net_tcp_test
+    //   24000 tcp_method_on_try   26000 net_write_after_close_test
+    //   28000 net_dns_test        30000 net_tls_test
+    //   32000 http_tls_p3          34000 http_hijack_p3
+    //   36000 http_bytes_p3       38000 http_limits_p2
+    // TLS needs this base port plus its neighbours, so the band is 2000
+    // wide and `off` stays below 1990.
     sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
     tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
-    base_port := 60000 + pid() % 2000 + tok_num % 2000
+    base_port := 30000 + (pid() * 2654435761 + tok_num * 40503) % 1990
     tls_port := base_port
     plain_port := base_port + 1
     refused_port := base_port + 2

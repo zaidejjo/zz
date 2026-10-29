@@ -666,7 +666,7 @@ impl<'a> Parser<'a> {
                     }
                     _ => {
                         let snippet: String = text[idx..].chars().take(14).collect();
-                        self.errors.push(
+                        self.push_error(
                             warning_at(
                                 format!(
                                     "this string also contains `{snippet}`, which will NOT interpolate"
@@ -1241,7 +1241,7 @@ impl<'a> Parser<'a> {
         // single clear diagnostic is emitted instead of a cascade.
         if self.at(TokenKind::For) {
             let for_tok = self.peek();
-            self.errors.push(error_at(
+            self.push_error(error_at(
                 "expected expression before `for` — list comprehension body comes first: \
                  `[expr for x in iter]`",
                 for_tok.span,
@@ -1389,7 +1389,7 @@ impl<'a> Parser<'a> {
             return;
         }
         let span = self.peek().span;
-        self.errors.push(
+        self.push_error(
             error_at(
                 "`=` in condition does assignment; use `==` to compare",
                 span,
@@ -1490,7 +1490,7 @@ impl<'a> Parser<'a> {
             if self.at(TokenKind::Dot) && self.peek_kind_at(1) == TokenKind::Ident {
                 let dot = self.peek().span;
                 let at = Span::new(dot.start, dot.start);
-                self.errors.push(
+                self.push_error(
                     error_at("expected `,` or newline between match arms", dot)
                         .with_note("separate arms with a comma or put each arm on its own line")
                         .with_fixit(FixIt::safe(at, ", ".to_string(), "insert missing comma")),

@@ -330,10 +330,21 @@ pub(crate) fn normalize_index(i: i64, len: usize, span: Span) -> Result<usize, E
     let len_i = len as i64;
     let idx = if i < 0 { len_i + i } else { i };
     if idx < 0 || idx >= len_i {
-        return Err(EvalError::new(
-            format!("index {i} out of bounds for length {len}"),
-            span,
-        ));
+        // Say what *would* have been valid: an OOB index is nearly always
+        // an off-by-one or a stale length, and the range makes both obvious
+        // without the reader having to count elements by hand.
+        let hint = if len == 0 {
+            "the value is empty, so no index is valid (check `len(...)` first)".to_string()
+        } else {
+            format!(
+                "valid indices are 0..={} (or -1..=-{len}, counting from the end)",
+                len - 1
+            )
+        };
+        return Err(
+            EvalError::new(format!("index {i} out of bounds for length {len}"), span)
+                .with_note(hint),
+        );
     }
     Ok(idx as usize)
 }

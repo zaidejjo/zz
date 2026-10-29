@@ -13,6 +13,29 @@ use std::path::{Path, PathBuf};
 
 use crate::manifest::Manifest;
 
+/// Render a path with `/` separators on every host.
+///
+/// Tarball member names, docs headings and the sort order derived from them
+/// must be byte-identical whether the package was packed on Windows or Unix;
+/// `Path::display()` is not (`docs\a.md` vs `docs/a.md`). Only `Normal`
+/// components are expected here — inputs are project-relative.
+fn slash_path(p: &Path) -> String {
+    debug_assert!(
+        !p.is_absolute(),
+        "slash_path renders project-relative paths, got {}",
+        p.display()
+    );
+    let mut out = String::new();
+    for c in p.components() {
+        let piece = c.as_os_str().to_string_lossy();
+        if !out.is_empty() && !out.ends_with('/') {
+            out.push('/');
+        }
+        out.push_str(&piece);
+    }
+    out
+}
+
 /// Errors during publish validation.
 #[derive(Debug)]
 pub enum PublishError {
@@ -252,6 +275,18 @@ pub fn pack(project_dir: &Path, manifest: &Manifest) -> Result<PathBuf, PublishE
         ));
     }
 
+    // Deterministic tarball: `read_dir` order is host- and filesystem-
+    // dependent, so sort by the normalized member name (not by `PathBuf`,
+    // whose ordering differs between Windows and Unix spellings).
+    let mut members: Vec<(String, PathBuf)> = files_to_pack
+        .into_iter()
+        .map(|f| {
+            let rel = f.strip_prefix(project_dir).unwrap_or(&f);
+            (slash_path(rel), f)
+        })
+        .collect();
+    members.sort_by(|a, b| a.0.cmp(&b.0));
+
     // Create tarball
     let tar_gz = std::fs::File::create(&tarball_path)
         .map_err(|e| PublishError::Io(format!("cannot create tarball: {e}")))?;
@@ -259,11 +294,9 @@ pub fn pack(project_dir: &Path, manifest: &Manifest) -> Result<PathBuf, PublishE
     let enc = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
     let mut tar = tar::Builder::new(enc);
 
-    for file in &files_to_pack {
-        let rel_path = file.strip_prefix(project_dir).unwrap_or(file);
-        tar.append_path_with_name(file, rel_path).map_err(|e| {
-            PublishError::Io(format!("cannot add {} to tarball: {e}", rel_path.display()))
-        })?;
+    for (name, file) in &members {
+        tar.append_path_with_name(file, name.as_str())
+            .map_err(|e| PublishError::Io(format!("cannot add {name} to tarball: {e}")))?;
     }
 
     tar.finish()
@@ -340,18 +373,23 @@ pub fn docs_md_for(project_dir: &Path) -> Option<String> {
     }
     let mut files: Vec<PathBuf> = Vec::new();
     collect_md_files(&docs, &mut files);
-    files.sort();
+    // Sort (and head) by the `/`-separated name so the bundle is identical
+    // on Windows and Unix.
+    let mut files: Vec<(String, PathBuf)> = files
+        .into_iter()
+        .map(|f| (slash_path(f.strip_prefix(project_dir).unwrap_or(&f)), f))
+        .collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
     if files.is_empty() {
         return None;
     }
     let mut out = String::new();
-    for f in &files {
-        let rel = f.strip_prefix(project_dir).unwrap_or(f);
+    for (rel, f) in &files {
         let body = std::fs::read_to_string(f).unwrap_or_default();
         if !out.is_empty() {
             out.push_str("\n\n");
         }
-        out.push_str(&format!("# {}\n\n{body}", rel.display()));
+        out.push_str(&format!("# {rel}\n\n{body}"));
         if out.len() >= MAX_BYTES {
             break;
         }
@@ -693,6 +731,38 @@ mod tests {
                 .any(|n| n.contains("target") || n.ends_with(".o")),
             "build outputs must not ship: {names:?}"
         );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Tarballs must be byte-stable across hosts: members sorted by their
+    /// `/`-separated name, never by `read_dir` order or `\` spellings.
+    #[test]
+    fn pack_members_sorted_and_slash_separated() {
+        let d = tmp();
+        let mut manifest = Manifest::default();
+        manifest.package.name = "sorted_pkg".to_string();
+        manifest.package.version = "0.1.0".to_string();
+        fs::write(d.join("zz.toml"), "").unwrap();
+        for rel in ["src/z.zz", "src/a.zz", "src/sub/m.zz"] {
+            let p = d.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, "x\n").unwrap();
+        }
+
+        let tarball = pack(&d, &manifest).unwrap();
+        let names = list_tarball(&tarball);
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "members must be sorted: {names:?}");
+        assert!(
+            names.iter().all(|n| !n.contains('\\')),
+            "member names must use `/`: {names:?}"
+        );
+        assert!(names.contains(&"src/sub/m.zz".to_string()), "{names:?}");
+
+        // Re-packing the same tree yields the same member order.
+        let tarball2 = pack(&d, &manifest).unwrap();
+        assert_eq!(names, list_tarball(&tarball2), "pack must be deterministic");
         let _ = fs::remove_dir_all(&d);
     }
 

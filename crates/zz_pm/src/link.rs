@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::lock::Lockfile;
 use crate::manifest::Manifest;
+use crate::pathsafe::strip_verbatim;
 
 /// Errors during linking.
 #[derive(Debug)]
@@ -404,8 +405,8 @@ pub fn re_link_project(
 /// with different content at the same path, the symlink would still "exist"
 /// but point to wrong content. We check both existence AND target match.
 fn is_valid_symlink(link_path: &Path, expected_target: &Path) -> bool {
-    // Must exist
-    if !link_path.exists() && !link_path.symlink_metadata().is_ok() {
+    // Must exist (a dangling link fails here: `exists()` follows it).
+    if !link_path.exists() {
         return false;
     }
 
@@ -424,16 +425,31 @@ fn is_valid_symlink(link_path: &Path, expected_target: &Path) -> bool {
         Err(_) => return false,
     };
 
-    // Compare — normalize both paths for comparison
-    let expected = normalize_path(expected_target);
-    let actual = normalize_path(&actual_target);
+    // A relative link target resolves against the link's own directory, not
+    // the process cwd. Windows stores targets verbatim, so normalizing here
+    // keeps both host spellings comparable.
+    let actual_abs = if actual_target.is_absolute() {
+        actual_target.clone()
+    } else {
+        link_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&actual_target)
+    };
 
-    // Also verify the target actually exists and is accessible
-    if !link_path.exists() {
-        return false;
+    // Compare real identities first: canonicalization absorbs `..`,
+    // symlinked path parents (`/var` → `/private/var` on macOS) and the
+    // `\\?\` prefix Windows adds on one side only.
+    if let (Ok(actual), Ok(expected)) = (
+        std::fs::canonicalize(&actual_abs),
+        std::fs::canonicalize(expected_target),
+    ) {
+        return strip_verbatim(&actual) == strip_verbatim(&expected);
     }
 
-    actual == expected
+    // One side is gone (racing prune, missing CAS entry): fall back to a
+    // lexical comparison of the normalized absolute forms.
+    strip_verbatim(&normalize_path(&actual_abs)) == strip_verbatim(&normalize_path(expected_target))
 }
 
 /// Create a link (symlink, hardlink, or copy) from source to target.
@@ -551,6 +567,53 @@ mod tests {
     /// mid-test (flaky `re_link_skips_unchanged_symlinks` failures).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Poison-tolerant guard: one failing test must not cascade into
+    /// `PoisonError` failures for every test that runs after it.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Create a directory symlink with the platform-appropriate call.
+    fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no symlink support",
+            ))
+        }
+    }
+
+    /// Windows only allows symlinks in Developer Mode or for elevated
+    /// processes. Tests that exist purely to exercise symlinks skip
+    /// themselves (with a note) when the privilege is missing, rather than
+    /// failing with an unrelated `os error 1314`.
+    fn symlinks_supported() -> bool {
+        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SUPPORTED.get_or_init(|| {
+            let probe =
+                std::env::temp_dir().join(format!("zz_pm_symlink_probe_{}", std::process::id()));
+            let target = probe.join("target");
+            let link = probe.join("link");
+            let _ = fs::remove_dir_all(&probe);
+            if fs::create_dir_all(&target).is_err() {
+                return false;
+            }
+            let ok = symlink_dir(&target, &link).is_ok();
+            let _ = fs::remove_dir_all(&probe);
+            ok
+        })
+    }
+
     fn tmp() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -563,14 +626,20 @@ mod tests {
 
     #[test]
     fn valid_symlink_detected() {
+        if !symlinks_supported() {
+            eprintln!("skipping valid_symlink_detected: symlinks unavailable");
+            return;
+        }
         let d = tmp();
         let target = d.join("target");
         let link = d.join("link");
         fs::create_dir_all(&target).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        symlink_dir(&target, &link).unwrap();
 
         assert!(is_valid_symlink(&link, &target));
+        // A verbatim-prefixed spelling (what Windows canonicalize returns)
+        // must compare equal to the plain one.
+        assert!(is_valid_symlink(&link, &strip_verbatim(&target)));
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -585,14 +654,17 @@ mod tests {
 
     #[test]
     fn wrong_target_not_valid() {
+        if !symlinks_supported() {
+            eprintln!("skipping wrong_target_not_valid: symlinks unavailable");
+            return;
+        }
         let d = tmp();
         let target1 = d.join("target1");
         let target2 = d.join("target2");
         let link = d.join("link");
         fs::create_dir_all(&target1).unwrap();
         fs::create_dir_all(&target2).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target1, &link).unwrap();
+        symlink_dir(&target1, &link).unwrap();
 
         // Points to target1, not target2
         assert!(!is_valid_symlink(&link, &target2));
@@ -612,7 +684,11 @@ mod tests {
 
     #[test]
     fn link_project_creates_symlinks() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
+        if !symlinks_supported() {
+            eprintln!("skipping link_project_creates_symlinks: symlinks unavailable");
+            return;
+        }
         let d = tmp();
         // Set ZZ_HOME so CAS paths point to our temp dir
         std::env::set_var("ZZ_HOME", &d);
@@ -649,7 +725,11 @@ mod tests {
     fn links_valid_after_link_project() {
         // #323: a linked project reads as materialized; a wiped vendor/
         // (fresh clone) reads as needing fetch + link.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
+        if !symlinks_supported() {
+            eprintln!("skipping links_valid_after_link_project: symlinks unavailable");
+            return;
+        }
         let d = tmp();
         std::env::set_var("ZZ_HOME", &d);
 
@@ -693,7 +773,7 @@ mod tests {
     fn links_valid_false_without_cas_entry() {
         // #323: a registry pin with no CAS entry is not materialized —
         // install must fall through to fetch, not short-circuit.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let d = tmp();
         std::env::set_var("ZZ_HOME", &d);
 
@@ -737,7 +817,11 @@ mod tests {
         // root → mid (path) → leaf (path): the lock holds both path pins;
         // link creates vendor/leaf pointing at the mid-relative dir, and
         // the tree validates.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
+        if !symlinks_supported() {
+            eprintln!("skipping link_project_links_transitive_path_pins: symlinks unavailable");
+            return;
+        }
         let d = tmp();
         std::env::set_var("ZZ_HOME", &d);
 
@@ -787,7 +871,11 @@ mod tests {
     fn link_project_prunes_orphan_vendor_entries() {
         // A stale vendor/ link outside the closure fails validity and is
         // pruned by the next link.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
+        if !symlinks_supported() {
+            eprintln!("skipping link_project_prunes_orphan_vendor_entries: symlinks unavailable");
+            return;
+        }
         let d = tmp();
         std::env::set_var("ZZ_HOME", &d);
 
@@ -814,8 +902,7 @@ mod tests {
         assert!(links_valid(&project, &manifest, &lock));
 
         // Simulate a removed transitive dep lingering in vendor/.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(d.join("mid"), project.join("vendor/old")).unwrap();
+        symlink_dir(&d.join("mid"), &project.join("vendor/old")).unwrap();
         assert!(
             !links_valid(&project, &manifest, &lock),
             "orphan busts validity"
@@ -830,7 +917,11 @@ mod tests {
 
     #[test]
     fn re_link_skips_unchanged_symlinks() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
+        if !symlinks_supported() {
+            eprintln!("skipping re_link_skips_unchanged_symlinks: symlinks unavailable");
+            return;
+        }
         let d = tmp();
         // Set ZZ_HOME so CAS paths point to our temp dir
         std::env::set_var("ZZ_HOME", &d);

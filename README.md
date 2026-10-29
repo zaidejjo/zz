@@ -92,7 +92,7 @@ zz install --path .
 Keep the toolchain healthy:
 
 ```bash
-zz upgrade   # self-update to the latest release
+zz upgrade   # self-update zz + zz-lsp (+ bundled runtime/lib) to the latest release
 zz doctor    # audit binary, clang, shell, git, registry (add --fix)
 ```
 
@@ -108,9 +108,37 @@ root automatically and builds `libzz_native_rt.a` via cargo — no
 `ZZ_NATIVE_RT_DIR`, no system C library, no stub shell variables.
 
 **Release zip:** ships a prebuilt `libzz_native_rt.a` (`.lib` on
-Windows) plus a bundled ~25MB `zig` binary, so `zz build` works
-immediately after download with zero external tools. `zz toolchain
-install` stays optional for pinned zig updates.
+Windows) plus a bundled Zig toolchain (`zig` + its `lib/`, the std/libc
+sources Zig loads from `<exe>/lib`; ~65MB unpacked), so `zz build` works
+immediately after download with zero external tools on Linux and macOS.
+`zz toolchain install` stays optional for pinned zig updates.
+
+**Supported platforms:** Linux, macOS, and Windows on both `x86_64` and
+`aarch64` (six release zips, same command on all of them). VM mode
+(`zz run`, `zz check`, `zz test`, the REPL, `zz-lsp`, `zz pm`) works on
+all six; the AOT backend (`zz build`, `zz run --native`) works on Linux
+and macOS. On Windows it is still pending: the C runtime is POSIX-thread
+based (`<pthread.h>`, `fcntl`/`poll` sockets), so it needs a Win32 port
+before `zz build` can ship there. Windows CI exercises the VM suites and
+the CLI/PM tests (`ZZ_SKIP_NATIVE`).
+
+Two caveats, both tied to optional system libraries rather than the
+toolchain:
+
+- AOT programs that reach the HTTP *client* (`http.fetch`, `http.post`)
+  or SQL (`sqlz`) link `libcurl`/`sqlite3` and need their dev headers
+  (`libcurl4-openssl-dev libsqlite3-dev` on Debian/Ubuntu, `brew install
+  curl sqlite` on macOS, `vcpkg install curl sqlite3` on Windows).
+  Programs that do not touch those natives compile with neither.
+- The AOT HTTP *server* (`http.server`, `http.listen`) is Linux-only
+  today: it is a fork+epoll design. On macOS/Windows those calls return a
+  clear "requires Linux" error; VM mode serves fine everywhere.
+- Loading native plugins in **VM mode** (`zz run` with a `plugin.zzi`
+  dependency) is Unix-only: the loader is built on `dlopen`. Windows
+  reaching that path is blocked by the missing AOT/unix runtime port
+  described above (`zz build` is not available there yet); the
+  declarative `backend = "cc"` / `backend = "rust"` builds produce a
+  `.lib` + `.dll` pair on Windows hosts for packages that target them.
 
 **VM mode** (`zz run` without `--native`) needs nothing extra — it's
 pure Rust bytecode interpretation, no linking involved.

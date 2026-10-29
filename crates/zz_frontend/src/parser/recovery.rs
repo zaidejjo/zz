@@ -1,13 +1,56 @@
 //! Error recovery and helper functions.
 
-use crate::diag::{error_at, FixIt};
+use crate::diag::{error_at, FixIt, RawDiag};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
 use super::Parser;
 
+/// Hard cap on diagnostics recorded by one parse.
+///
+/// Recovery bugs (a loop that re-reports the same token) used to allocate
+/// until the process OOM'd. Once the cap is hit the parser records one
+/// "too many errors" diagnostic and jumps to Eof, so the failure is bounded
+/// and fast instead of fatal.
+pub(crate) const MAX_PARSE_ERRORS: usize = 1000;
+
 impl<'a> Parser<'a> {
     // --- helpers ----------------------------------------------------------
+
+    /// Record one diagnostic, enforcing [`MAX_PARSE_ERRORS`].
+    ///
+    /// At the cap we push a single "aborting parse" diagnostic, set
+    /// `aborted`, and move the cursor to the Eof token. Every enclosing
+    /// parse loop breaks on Eof, so the parse unwinds immediately. Later
+    /// diagnostics are dropped — they are fallout of the same recovery
+    /// failure and no consumer reads thousands of errors.
+    pub(crate) fn push_error(&mut self, diag: RawDiag) {
+        if self.aborted {
+            return;
+        }
+        if self.errors.len() >= MAX_PARSE_ERRORS {
+            self.aborted = true;
+            self.errors.push(error_at(
+                format!("too many errors ({MAX_PARSE_ERRORS}); aborting parse"),
+                self.peek().span,
+            ));
+            self.pos = self.toks.len().saturating_sub(1);
+            return;
+        }
+        self.errors.push(diag);
+    }
+
+    /// Guarantee forward progress after a recovery attempt.
+    ///
+    /// Skip helpers stop on sync tokens (close brackets, Eof) that the
+    /// caller may not handle, so `error_here(..); skip_*(); continue;` can
+    /// spin forever. If nothing was consumed since `before`, force-consume
+    /// one token.
+    pub(crate) fn ensure_progress(&mut self, before: usize) {
+        if self.pos == before && !self.at(TokenKind::Eof) {
+            self.advance();
+        }
+    }
 
     pub(crate) fn expect_ident(&mut self) -> Option<crate::ast::Ident> {
         if self.at(TokenKind::Ident) {
@@ -27,7 +70,7 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn error_here(&mut self, msg: impl Into<String>) -> Span {
         let span = self.peek().span;
-        self.errors.push(error_at(msg, span));
+        self.push_error(error_at(msg, span));
         span
     }
 
@@ -37,7 +80,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn error_missing_close(&mut self, close: &str, msg: impl Into<String>) -> Span {
         let span = self.peek().span;
         let at = Span::new(span.start, span.start);
-        self.errors.push(error_at(msg, span).with_fixit(FixIt::safe(
+        self.push_error(error_at(msg, span).with_fixit(FixIt::safe(
             at,
             close,
             format!("add `{close}` here"),
@@ -49,7 +92,7 @@ impl<'a> Parser<'a> {
     /// it"). Consumes the bracket so parsing continues after it.
     pub(crate) fn error_stray_close(&mut self, close: TokenKind) -> Span {
         let span = self.peek().span;
-        self.errors.push(
+        self.push_error(
             error_at(
                 format!(
                     "unexpected `{}` with no matching opening — remove it",

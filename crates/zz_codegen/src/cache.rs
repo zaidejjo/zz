@@ -28,6 +28,12 @@ fn cache_dir() -> PathBuf {
     zz_pm::paths::build_cache_dir()
 }
 
+/// The cache root as a display string, for error hints (the cache path is
+/// user-visible: it honors `ZZ_HOME` and appears in `zz cache clean`).
+pub fn cache_dir_display() -> String {
+    cache_dir().display().to_string()
+}
+
 /// SHA256-like fingerprint of the C runtime sources.
 ///
 /// Concatenates `RUNTIME_H` + `RUNTIME_C` and hashes them. This covers all
@@ -55,11 +61,11 @@ fn clang_id(clang: &Clang) -> String {
 
 /// Compile-flag generation for the cached runtime archive. Bump on ANY
 /// change to `build_compile_flags` (the key does not hash flags).
-const RT_CACHE_VERSION: &str = "rt6";
+const RT_CACHE_VERSION: &str = "rt7";
 
-/// Assemble the 6-field cache key.
+/// Assemble the 8-field cache key.
 ///
-/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{pin}-{rt_version}-{san}`
+/// Format: `{target}-{mode}-{src_hash}-{clang_id}-{pin}-{rt_version}-{san}-{deps}`
 /// `pin` is the managed-toolchain pin (`nopin` when none): switching the
 /// `zz toolchain` pin must never reuse an archive built by another
 /// toolchain, even when the resolved `clang_id` hash collides in theory.
@@ -68,7 +74,22 @@ const RT_CACHE_VERSION: &str = "rt6";
 /// `san` is the requested sanitizer set (`nosan` normally): a
 /// sanitizer-instrumented archive must never satisfy a plain link (or
 /// vice versa).
-pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String {
+/// `deps` records whether the runtime was compiled with curl/sqlite3
+/// headers enabled and with the optional staticlib backends referenced
+/// (`c1s0p0f1`): the archive embeds those branches, so a program with
+/// `http.fetch` must never link a no-curl archive, and an archive that
+/// references `zz_pg_*` / `zz_float_format_raw` must never satisfy a
+/// program that does not link `libzz_native_rt.a` (Darwin rejects an
+/// undefined `weak_import` in an executable).
+pub fn cache_key(
+    target: Option<&str>,
+    optimize: bool,
+    clang: &Clang,
+    curl: bool,
+    sqlite: bool,
+    pg: bool,
+    float_fmt: bool,
+) -> String {
     let fallback_triple = crate::compile::host_triple();
     let triple = target.unwrap_or(&fallback_triple);
     let mode = if optimize { "rel" } else { "dev" };
@@ -79,8 +100,15 @@ pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String 
     } else {
         san
     };
+    let deps = format!(
+        "c{}s{}p{}f{}",
+        u8::from(curl),
+        u8::from(sqlite),
+        u8::from(pg),
+        u8::from(float_fmt)
+    );
     format!(
-        "{}-{}-{}-{}-{}-{}-{}",
+        "{}-{}-{}-{}-{}-{}-{}-{}",
         triple,
         mode,
         runtime_src_hash(),
@@ -88,6 +116,7 @@ pub fn cache_key(target: Option<&str>, optimize: bool, clang: &Clang) -> String 
         pin,
         RT_CACHE_VERSION,
         san,
+        deps,
     )
 }
 
@@ -109,8 +138,32 @@ pub fn ensure_rt_a(
         return compile_rt_a(opts, clang, target, None);
     }
 
-    let key = cache_key(target, opts.optimize, clang);
-    // Per-key subdirectory with a fixed archive name — allows `-lzz_rt`.
+    // One retry on IO errors: a transient filesystem hiccup (a cache
+    // directory removed by a parallel `zz cache clean`, a momentarily
+    // unwritable temp dir) must not fail a native build. Compile failures
+    // are *not* retried — they are deterministic.
+    match ensure_rt_a_once(opts, clang, target) {
+        Err(BuildError::Io(_)) => ensure_rt_a_once(opts, clang, target),
+        other => other,
+    }
+}
+
+fn ensure_rt_a_once(
+    opts: &BuildOptions,
+    clang: &Clang,
+    target: Option<&str>,
+) -> Result<PathBuf, BuildError> {
+    let key = cache_key(
+        target,
+        opts.optimize,
+        clang,
+        opts.curl_link,
+        opts.sqlite_link,
+        links_pg(opts),
+        links_float_fmt(opts),
+    );
+    // Per-key subdirectory with a fixed archive name (a readable,
+    // human-grepable layout per cache key).
     let dir = cache_dir().join(&key);
     std::fs::create_dir_all(&dir).map_err(BuildError::Io)?;
 
@@ -226,7 +279,15 @@ fn compile_rt_a(
     target: Option<&str>,
     dest: Option<&Path>,
 ) -> Result<PathBuf, BuildError> {
-    let key = cache_key(target, opts.optimize, clang);
+    let key = cache_key(
+        target,
+        opts.optimize,
+        clang,
+        opts.curl_link,
+        opts.sqlite_link,
+        links_pg(opts),
+        links_float_fmt(opts),
+    );
 
     // Assemble the runtime TU (same as the current single-TU approach).
     let raw = format!("{}\n{}", crate::RUNTIME_H, crate::RUNTIME_C);
@@ -269,7 +330,8 @@ fn compile_rt_a(
         }
         cmd.arg(flag);
     }
-    cmd.arg("-DZZ_HAS_SQLITE3");
+    cmd.arg(format!("-DZZ_HAS_CURL={}", u8::from(opts.curl_link)));
+    cmd.arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
     cmd.arg("-c");
     cmd.arg(&c_path);
     cmd.arg("-o");
@@ -293,9 +355,10 @@ fn compile_rt_a(
     // Build the archive at a unique temp path, then atomically rename over
     // the cache entry: concurrent compilers never observe (or publish) a
     // half-written archive. The pid + counter keep parallel processes and
-    // threads from colliding.
+    // threads from colliding. The `.a` suffix is kept so linkers that sniff
+    // by extension still treat the unpublished fallback as an archive.
     let tmp_archive =
-        archive_path.with_file_name(format!(".libzz_rt.{}.{}.tmp", std::process::id(), uniq));
+        archive_path.with_file_name(format!(".libzz_rt.{}.{}.tmp.a", std::process::id(), uniq));
     let ar_out = Command::new("ar")
         .args([
             "rcs",
@@ -312,16 +375,37 @@ fn compile_rt_a(
             stderr: String::from_utf8_lossy(&ar_out.stderr).into_owned(),
         });
     }
-    if std::fs::rename(&tmp_archive, archive_path).is_err() {
-        // Lost a publish race with an identical archive: adopt whatever won.
-        let _ = std::fs::remove_file(&tmp_archive);
-    }
-
+    let published = std::fs::rename(&tmp_archive, archive_path).is_ok();
     // Cleanup temporaries.
     let _ = std::fs::remove_file(&c_path);
     let _ = std::fs::remove_file(&o_path);
+    if published {
+        return Ok(archive_path.to_path_buf());
+    }
+    if archive_path.exists() {
+        // Lost a publish race with an identical archive: adopt the winner.
+        let _ = std::fs::remove_file(&tmp_archive);
+        return Ok(archive_path.to_path_buf());
+    }
+    // The cache directory vanished mid-build (e.g. a concurrent
+    // `zz cache clean`). The archive we just built is still valid, and
+    // callers link it by path — hand it back instead of a missing cache
+    // entry. `zz cache clean` (or the cache's LRU reclaim) removes the
+    // leftover temporary later.
+    Ok(tmp_archive)
+}
 
-    Ok(archive_path.to_path_buf())
+/// True when this link provides the Postgres backend from the Rust
+/// staticlib. `pg_link` only force-extracts archive members inside the
+/// `native_rt || float_link` block, so it is meaningless without it.
+fn links_pg(opts: &BuildOptions) -> bool {
+    opts.pg_link && (opts.native_rt || opts.float_link)
+}
+
+/// True when this link provides `zz_float_format_raw` (`float_link`
+/// implies the staticlib link in `push_link_inputs`).
+fn links_float_fmt(opts: &BuildOptions) -> bool {
+    opts.float_link
 }
 
 /// Build the compile-only flags for the C runtime archive.
@@ -332,6 +416,12 @@ fn compile_rt_a(
 /// `-ffunction-sections -fdata-sections` are unconditional: the final
 /// link already passes `--gc-sections`, so per-function sections let it
 /// drop unreferenced runtime features (e.g. fetch/sql) wholesale.
+///
+/// `ZZ_LINK_PG` / `ZZ_LINK_FLOAT` tell the runtime whether the optional
+/// staticlib backends are part of *this* link. They default to 1 (the
+/// historical weak-reference shape); 0 compiles the references out, which
+/// Darwin needs because ld64 treats an unresolved `weak_import` in an
+/// executable as a hard error (ELF permits it).
 /// If you change this list, bump `RT_CACHE_VERSION` below or stale
 /// archives will poison the cache.
 fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String> {
@@ -365,6 +455,13 @@ fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String>
     // Sanitizer leg: the archive must be instrumented with the same
     // flags as the program, or ASan/UBSan miss every runtime bug.
     flags.extend(crate::compile::sanitize_flags());
+    // Optional staticlib backends: only reference their symbols when this
+    // link actually provides them (see the doc comment above).
+    flags.push(format!("-DZZ_LINK_PG={}", u8::from(links_pg(opts))));
+    flags.push(format!(
+        "-DZZ_LINK_FLOAT={}",
+        u8::from(links_float_fmt(opts))
+    ));
     flags
 }
 
@@ -380,6 +477,39 @@ mod tests {
             std::env::temp_dir().join(format!("zz-rt-lock-{tag}-{}-{uniq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn optional_backend_defines_follow_the_link_gates() {
+        // Default/dev link: no staticlib, so the archive must carry zero
+        // references to the Rust backends. This is the Darwin fix: ld64
+        // rejects unresolved weak imports in an executable.
+        let mut opts = BuildOptions::dev();
+        let flags = build_compile_flags(&opts, None);
+        assert!(flags.iter().any(|f| f == "-DZZ_LINK_PG=0"), "{flags:?}");
+        assert!(flags.iter().any(|f| f == "-DZZ_LINK_FLOAT=0"), "{flags:?}");
+
+        // PG gate: staticlib linked and members force-extracted.
+        opts.native_rt = true;
+        opts.pg_link = true;
+        let flags = build_compile_flags(&opts, None);
+        assert!(flags.iter().any(|f| f == "-DZZ_LINK_PG=1"), "{flags:?}");
+        // float was not gated in this link.
+        assert!(flags.iter().any(|f| f == "-DZZ_LINK_FLOAT=0"), "{flags:?}");
+
+        // `float_link` alone already links the staticlib.
+        let mut float_only = BuildOptions::dev();
+        float_only.float_link = true;
+        let flags = build_compile_flags(&float_only, None);
+        assert!(flags.iter().any(|f| f == "-DZZ_LINK_FLOAT=1"), "{flags:?}");
+        assert!(flags.iter().any(|f| f == "-DZZ_LINK_PG=0"), "{flags:?}");
+
+        // `pg_link` without a staticlib link cannot provide the symbols;
+        // keep them compiled out rather than emit a dangling reference.
+        let mut dangling = BuildOptions::dev();
+        dangling.pg_link = true;
+        let flags = build_compile_flags(&dangling, None);
+        assert!(flags.iter().any(|f| f == "-DZZ_LINK_PG=0"), "{flags:?}");
     }
 
     #[test]

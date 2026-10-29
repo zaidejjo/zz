@@ -11,6 +11,8 @@
 //! All tests isolate `ZZ_HOME` to a temp dir (per-process paths), so they
 //! never touch the developer's real `~/.zz`.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,6 +138,10 @@ fn clean_stays_quiet_without_cache() {
 
 #[test]
 fn native_build_honors_zz_home() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let home = fresh_dir("buildhome");
     let work = fresh_dir("buildwork");
     std::fs::write(work.join("hello.zz"), "println(\"zzhome_ok\")\n").expect("fixture");

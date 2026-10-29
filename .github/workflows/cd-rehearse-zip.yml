@@ -1,0 +1,102 @@
+name: CD rehearse zip
+
+# Packaging rehearsal: build the real release zips for all six targets
+# without cutting a release.
+#
+# The zip layout (bundled zig + its `lib/`, prebuilt native runtime, std
+# rlib) is otherwise only exercised by `release.yml`, i.e. the first time a
+# broken package surfaces is a tag cut — with users on the other end. Run
+# this before a release, or on any change that touches packaging.
+#
+# Triggers:
+# * label `packaging` on a pull request (works before merge: a workflow
+#   added by the PR runs for `pull_request` events);
+# * `workflow_dispatch` once this file is on the default branch.
+#
+# Never publishes: artifacts only.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to package (empty = the dispatched ref).
+        required: false
+        type: string
+
+concurrency:
+  group: rehearse-zip-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: packaging target
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'packaging'
+    runs-on: ubuntu-latest
+    outputs:
+      pkgver: ${{ steps.ver.outputs.pkgver }}
+      ref: ${{ steps.ver.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || inputs.ref || github.ref_name }}
+      - name: read workspace version
+        id: ver
+        run: |
+          set -euo pipefail
+          PKGVER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ -z "$PKGVER" ]; then
+            echo "error: could not read the workspace version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "pkgver=$PKGVER" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ github.event.pull_request.head.sha || inputs.ref || github.ref_name }}" \
+            >> "$GITHUB_OUTPUT"
+          echo "rehearsing zz-$PKGVER-<os>-<arch>.zip"
+
+  package:
+    name: rehearse zip (${{ matrix.os }}-${{ matrix.arch }})
+    needs: [select]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-24.04
+            timeout: 60
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            timeout: 60
+          - os: macos
+            arch: x86_64
+            runner: macos-26-intel
+            timeout: 60
+          - os: macos
+            arch: aarch64
+            runner: macos-26
+            timeout: 60
+          - os: windows
+            arch: x86_64
+            runner: windows-2025
+            timeout: 90
+          - os: windows
+            arch: aarch64
+            runner: windows-11-arm
+            timeout: 90
+    uses: ./.github/workflows/cd-build-zip.yml
+    with:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      runner: ${{ matrix.runner }}
+      pkgver: ${{ needs.select.outputs.pkgver }}
+      timeout: ${{ matrix.timeout }}
+      ref: ${{ needs.select.outputs.ref }}

@@ -13,13 +13,19 @@ func main() -> Result<int, str> {
     s := http.server()
     s = s.route("GET", "/ping", |_req| "pong")
     s = s.route("GET", "/users/:id", |req| "user-{http.param(req, "id").expect("id")}")
-    // Per (process, sweep task) so parallel runners never share the
-    // port (net_tcp_test uses 20000+). The sweep token looks like
-    // "t{n}" ("0" outside the sweep), so strip the prefix before
-    // parsing — bare int(token) never parses and silently mixes 0.
+    // Port band chart (keep the bands disjoint: overlapping ranges are
+    // what made parallel fixtures bind the same port):
+    //   20000 http_keepalive_p1   22000 net_tcp_test
+    //   24000 tcp_method_on_try   26000 net_write_after_close_test
+    //   28000 net_dns_test        30000 net_tls_test
+    //   32000 http_tls_p3          34000 http_hijack_p3
+    //   36000 http_bytes_p3       38000 http_limits_p2
+    // The sweep token looks like "t{n}" ("0" outside the sweep), so strip
+    // the prefix before parsing — bare int(token) never parses and
+    // silently mixes 0.
     sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
     tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
-    port := 10000 + pid() % 5000 + tok_num % 5000
+    port := 20000 + (pid() * 2654435761 + tok_num * 40503) % 2000
     addr := "127.0.0.1:{port}"
     task.spawn(|_| {
         http.listen(s, port)

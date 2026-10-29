@@ -9,8 +9,9 @@ zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }
 zz_runtime = { path = "../zz_runtime" }
 thiserror = "1"
-
-[target.'cfg(unix)'.dependencies]
+# dlopen/LoadLibrary: one API covers `.so`, `.dylib` and `.dll`, and the
+# loader below is not platform-gated — gating the crate made every
+# Windows build fail with E0433.
 libloading = "0.8"
 
 [dev-dependencies]

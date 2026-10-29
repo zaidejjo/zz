@@ -109,11 +109,13 @@ jobs:
           SHA_ARM="$(sha256sum /tmp/zz-aarch64.zip | cut -d' ' -f1)"
           echo "sha_x64=$SHA_X64"
           echo "sha_arm=$SHA_ARM"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "pkgver=$PKGVER" >> "$GITHUB_OUTPUT"
-          echo "pkgrel=$PKGREL" >> "$GITHUB_OUTPUT"
-          echo "sha_x64=$SHA_X64" >> "$GITHUB_OUTPUT"
-          echo "sha_arm=$SHA_ARM" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "pkgver=$PKGVER"
+            echo "pkgrel=$PKGREL"
+            echo "sha_x64=$SHA_X64"
+            echo "sha_arm=$SHA_ARM"
+          } >> "$GITHUB_OUTPUT"
 
       - name: render PKGBUILD
         run: |

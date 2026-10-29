@@ -161,7 +161,7 @@ fn hex_of(h: Sha256) -> String {
 /// Cache directory: `$XDG_CACHE/zz/check/v1`, tempdir fallback (never fail
 /// the compile when the cache is unusable — callers treat errors as miss).
 fn cache_dir() -> PathBuf {
-    dirs::cache_dir()
+    zz_pm::paths::env_cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("zz")
         .join("check")
@@ -399,6 +399,9 @@ pub(crate) fn record_dep_consumer(pkg_dir: &std::path::Path, root: &std::path::P
         .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
         .lock()
     {
+        if m.len() >= MAX_FS_ENTRIES {
+            m.clear();
+        }
         let entry = m.entry(pkg).or_default();
         if !entry.contains(&root) {
             entry.push(root);
@@ -414,6 +417,40 @@ pub(crate) fn dep_consumers(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
         .and_then(|m| m.lock().ok())
         .and_then(|m| m.get(&pkg).cloned())
         .unwrap_or_default()
+}
+
+/// Clear every in-process memo table so RSS stays flat across the
+/// single-process test suite (all 283 bin tests run in one libtest
+/// process). Called in test teardown; a no-op in release builds.
+#[cfg(test)]
+pub(crate) fn clear_all_caches_for_test() {
+    if let Some(m) = MEM_CACHE.get() {
+        let _ = m.lock().map(|mut g| g.map.clear());
+    }
+    if let Some(m) = PARSED_PROGRAMS.get() {
+        let _ = m.lock().map(|mut g| g.map.clear());
+    }
+    if let Some(m) = CANON_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = ROOT_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = ROOTS_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = MANIFEST_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = ENTRY_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = SUBMODULE_MEMO.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
+    if let Some(m) = DEP_CONSUMERS.get() {
+        let _ = m.lock().map(|mut g| g.clear());
+    }
 }
 
 /// Memoized manifest+lock loads per project root, validated by both
@@ -558,42 +595,26 @@ pub(crate) fn submodule_in_memo(
     v
 }
 
-/// Isolated cache dir + serialized env for cache-behavior tests.
+/// Isolated cache dir for cache-behavior tests.
 ///
-/// Parallel tests share the process env, so XDG flips must be mutually
-/// exclusive; isolation also makes storage assertions deterministic
-/// (fresh dir per test — growth/contents prove hits, not luck).
-/// Cleanup removes only the test's own dir.
-/// Serializes tests that mutate process-global cache env. Parallel tests
-/// otherwise observe each other's flips.
-#[cfg(test)]
-pub(crate) static CACHE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+/// Thread-scoped via `zz_pm::paths::env_scope`: no process env is touched,
+/// so a parallel test's cache / `ZZ_CHECK_CACHE` reads are unaffected and
+/// nothing depends on mutual exclusion. Isolation also makes storage
+/// assertions deterministic (fresh dir per test — growth/contents prove
+/// hits, not luck); cleanup removes only the test's own dir.
 #[cfg(test)]
 pub(crate) fn with_isolated_cache<T>(f: impl FnOnce() -> T) -> T {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
-    let _guard = CACHE_ENV_LOCK.lock().unwrap();
-    let prev_xdg = std::env::var("XDG_CACHE_HOME").ok();
-    let prev_flag = std::env::var("ZZ_CHECK_CACHE").ok();
     let dir = std::env::temp_dir().join(format!(
         "zz-cache-test-{}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    std::env::set_var("XDG_CACHE_HOME", &dir);
-    // Catch panics so process env is always restored and the lock never
-    // poisons: one failing test must not cascade into opaque `PoisonError`
-    // failures in every other cache test.
+    let _scope = zz_pm::paths::env_scope(&[("XDG_CACHE_HOME", Some(dir.clone().into_os_string()))]);
+    // Catch panics so the temp dir is always removed: one failing test must
+    // not leak storage or cascade into later assertions.
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    match prev_xdg {
-        Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
-        None => std::env::remove_var("XDG_CACHE_HOME"),
-    }
-    match prev_flag {
-        Some(v) => std::env::set_var("ZZ_CHECK_CACHE", v),
-        None => std::env::remove_var("ZZ_CHECK_CACHE"),
-    }
     let _ = std::fs::remove_dir_all(&dir);
     match r {
         Ok(v) => v,
@@ -611,7 +632,7 @@ pub(crate) fn entry_count() -> usize {
 
 /// Disabled via `ZZ_CHECK_CACHE=0` (diagnosing weirdness, benchmarking).
 pub fn cache_enabled() -> bool {
-    std::env::var("ZZ_CHECK_CACHE")
+    zz_pm::paths::env_var_os("ZZ_CHECK_CACHE")
         .map(|v| v != "0")
         .unwrap_or(true)
 }

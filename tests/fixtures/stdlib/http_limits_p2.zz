@@ -1,26 +1,35 @@
-// features: assert, bool-logic, break-continue, bytes, closures, comparison, dicts, func-call, if-else, imports, int-arith, locals, match, option-result, print, short-circuit, std-http, std-net, std-task, std-time, string-literal, while-loop
+// features: assert, bool-logic, break-continue, bytes, closures, comparison, dicts, func-call, if-else, imports, int-arith, locals, match, option-result, print, selective-import, short-circuit, std-env, std-http, std-net, std-process, std-str, std-task, std-time, string-literal, while-loop
 // tests/fixtures/stdlib/http_limits_p2.zz — Phase 2 listen_cfg over live TCP
 // Single server (one blocking listen): max_body_bytes 413 vs 200 echo,
 // max_reqs_conn close-after-N — all reconnections explicit.
+import std.env
 import std.http
 import std.net
+import std.process(pid)
+import std.str
 import std.task
 import std.time
 
 func main() -> Result<int, str> {
+    // Port band 38000 (see the chart in http_keepalive_p1): derived, so a
+    // concurrent instance can never steal the hardcoded port.
+    sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
+    tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
+    port := 38000 + (pid() * 2654435761 + tok_num * 40503) % 2000
+    addr := "127.0.0.1:{port}"
     s := http.server()
     s = s.route("POST", "/echo", |req| req.body)
     task.spawn(|_| {
-        http.listen_cfg(s, 8138, {"max_body_bytes": 16, "max_reqs_conn": 1})
+        http.listen_cfg(s, port, {"max_body_bytes": 16, "max_reqs_conn": 1})
     })
     tries := 0
-    stream := net.tcp_connect("127.0.0.1:8138", 200)
+    stream := net.tcp_connect(addr, 200)
     while tries < 50 {
         match stream {
             .ok(_) => break
             .err(_) => {
                 time.sleep_ms(100)
-                stream = net.tcp_connect("127.0.0.1:8138", 200)
+                stream = net.tcp_connect(addr, 200)
                 tries = tries + 1
             }
         }
@@ -48,7 +57,7 @@ func main() -> Result<int, str> {
     assert(b1.len() == 17)
     println("cap413_ok")
     // under the cap -> 200 echo on a fresh connection (max 1 req/conn)
-    c2 := net.tcp_connect("127.0.0.1:8138", 5000)?
+    c2 := net.tcp_connect(addr, 5000)?
     c2.set_read_timeout(5000)?
     c2.write("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello")?
     st2 := c2.read_line()?

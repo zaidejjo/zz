@@ -31,6 +31,10 @@
 //! - `native_build` — declarative C/Rust plugin builds (no shell, no scripts)
 //! - `rust_lock` — focused Cargo manifest/lockfile model for Rust plugins
 
+/// Host-independent path containment checks shared by the package
+/// manager, the CLI and the AOT backends.
+pub mod pathsafe;
+
 pub mod auth;
 pub mod build_cache;
 pub mod cache_key;

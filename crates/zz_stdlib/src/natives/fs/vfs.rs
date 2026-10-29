@@ -236,6 +236,10 @@ pub(crate) struct VfsHandle {
     kind: Mutex<Provider>,
 }
 
+/// Cap on VFS pool entries so tests that open many filesystem providers
+/// cannot grow RSS without bound across the single-process test suite.
+const MAX_VFS_ENTRIES: usize = 4096;
+
 static VFS_POOL: OnceLock<Mutex<HashMap<u64, std::sync::Arc<VfsHandle>>>> = OnceLock::new();
 static NEXT_VFS_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -245,6 +249,11 @@ fn vfs_pool() -> &'static Mutex<HashMap<u64, std::sync::Arc<VfsHandle>>> {
 
 fn vfs_alloc(kind: Provider) -> u64 {
     use std::sync::atomic::Ordering;
+    let mut pool = vfs_pool().lock().unwrap();
+    if pool.len() >= MAX_VFS_ENTRIES {
+        pool.clear();
+    }
+    drop(pool);
     let id = NEXT_VFS_ID.fetch_add(1, Ordering::SeqCst);
     assert!(id != 0, "fs provider id counter exhausted");
     vfs_pool().lock().unwrap().insert(
@@ -254,6 +263,14 @@ fn vfs_alloc(kind: Provider) -> u64 {
         }),
     );
     id
+}
+
+/// Drop a VFS handle from the pool, releasing its `Arc` and allowing the
+/// underlying filesystem provider to be dropped. Without this, VFS handles
+/// created during tests remain in the pool for the process lifetime.
+#[allow(dead_code)]
+pub(crate) fn vfs_drop(id: u64) -> bool {
+    vfs_pool().lock().unwrap().remove(&id).is_some()
 }
 
 fn vfs_lookup(id: u64) -> Option<std::sync::Arc<VfsHandle>> {

@@ -44,6 +44,34 @@ pub(super) fn run(src: &str) -> Result<Value, String> {
         .map_err(|e| e.message.to_string())
 }
 
+/// Render a host path for embedding inside a ZZ string literal.
+///
+/// Tests interpolate real temp paths into source. On Windows those carry
+/// `\`, which the lexer reads as an escape (`\U` from `C:\Users\…` failed
+/// with "unknown escape `\\U`"), so separators are normalized to `/` — the
+/// Windows file APIs accept them — and literal quotes are escaped. Unix
+/// paths are unaffected (no backslashes outside exotic file names).
+pub(super) fn zz_path(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/").replace('"', "\\\"")
+}
+
+/// The literal produced by [`zz_path`] must survive the lexer on every host;
+/// Windows temp paths are the case that used to fail.
+#[test]
+fn zz_path_is_a_valid_string_literal_body() {
+    let win = std::path::Path::new(r"C:\Users\me\AppData\Local\Temp\zz\a.txt");
+    assert_eq!(zz_path(win), "C:/Users/me/AppData/Local/Temp/zz/a.txt");
+    assert_eq!(
+        zz_path(std::path::Path::new("/tmp/zz/a.txt")),
+        "/tmp/zz/a.txt"
+    );
+    // Quotes (legal in Unix file names) are escaped, not dropped.
+    assert_eq!(
+        zz_path(std::path::Path::new("/tmp/od\"d.txt")),
+        "/tmp/od\\\"d.txt"
+    );
+}
+
 mod control_flow;
 mod conversions;
 mod env;

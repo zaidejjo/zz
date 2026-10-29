@@ -23,6 +23,11 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/zaidejjo/zz'
 license=('Apache')
 depends=('gcc-libs' 'curl' 'sqlite')
+# The release zip bundles a Zig toolchain for the standalone install; this
+# package ships only the binaries + runtime archive (no /usr/lib/zz std
+# tree next to the compiler), so AOT builds need a system C toolchain.
+optdepends=('clang: native builds (zz build, zz run --native)'
+            'zig: alternative native backend (zz build --cc zig)')
 makedepends=('unzip')
 conflicts=('@CONFLICTS@')
 source_x86_64=("$pkgname-$pkgver-$CARCH.zip::https://github.com/zaidejjo/zz/releases/download/v$pkgver/zz-$pkgver-linux-x86_64.zip")

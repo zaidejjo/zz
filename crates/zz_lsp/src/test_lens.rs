@@ -212,7 +212,10 @@ mod tests {
     fn lens_command_carries_uri_and_name() {
         let src = "@test\nfunc adds() {\n}\n";
         let program = zz_frontend::parse(src).program;
-        let uri: Url = "file:///tests.zz".parse().unwrap();
+        let uri = Url::from_file_path(
+            std::env::temp_dir().join(format!("zz_lsp_lens_{}.zz", std::process::id())),
+        )
+        .unwrap();
         let lenses = test_lenses_for(&program, src, &uri);
         assert_eq!(lenses.len(), 1);
         let command = lenses[0].command.clone().expect("command");

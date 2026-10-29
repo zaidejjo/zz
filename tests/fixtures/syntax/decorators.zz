@@ -1,4 +1,4 @@
-// features: bool-logic, closures, comparison, decorators, func-call, if-else, known-divergence, locals, methods, print, return, string-literal, struct-methods, structs
+// features: bool-logic, closures, comparison, decorators, func-call, if-else, locals, methods, print, return, string-literal, struct-methods, structs
 // E2E: explicit compile-time decorators (logging, route, login_required)
 
 // Logging middleware: wraps any `func(str) -> str`.
@@ -12,6 +12,7 @@ func logging(f: func(str) -> str) -> func(str) -> str {
 }
 
 // Route registration: target passed explicitly first.
+
 func route(f: func(str) -> str, path: str) -> func(str) -> str {
     return |name: str| {
         println("route {path}")
@@ -49,6 +50,7 @@ func secret(name: str) -> str {
 }
 
 // Method decorators receive the method value (including `self`) explicitly.
+
 func mlogging(f: func(Box, str) -> str) -> func(Box, str) -> str {
     return |s: Box, name: str| {
         println("m-enter")
@@ -58,7 +60,9 @@ func mlogging(f: func(Box, str) -> str) -> func(Box, str) -> str {
     }
 }
 
-struct Box { tag: str }
+struct Box {
+    tag: str,
+}
 
 impl Box {
     @mlogging
@@ -72,6 +76,6 @@ println(stacked("bob"))
 println(secret("bob"))
 authed = true
 println(secret("bob"))
-b := Box { tag: "t" }
+b := Box{tag: "t"}
 println(b.show("bob"))
 println("decorators_ok")

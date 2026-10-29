@@ -343,16 +343,26 @@ zz_value zz_str_new_arena(const char *src, size_t len, zz_arena *arena) {
 /// decimal string that round-trips, Rust `Display` semantics, never
 /// exponent notation. Produced by the Rust core (`zz_native_rt`
 /// `float_fmt`), never formatted in C — this TU must not contain its
-/// own float printer. Weak import: programs that can never hold a
-/// float-typed value link without the staticlib (the gate scans the
-/// typed program for `Float`); the guard below fails closed so a missed
-/// gate aborts loudly instead of diverging.
+/// own float printer. The archive is compiled per link profile:
+/// `-DZZ_LINK_FLOAT=1` when the program can hold a float-typed value
+/// (`float_link` links the staticlib), `0` otherwise. The 0 variant
+/// carries no reference at all: Darwin's ld64 rejects an unresolved
+/// `weak_import` in an executable, and a program that can never hold a
+/// float must still link without `libzz_native_rt.a`.
+/// `ZZ_LINK_FLOAT` is defined by `cache::build_compile_flags`; the
+/// default keeps the historical weak-reference shape for direct builds.
+#ifndef ZZ_LINK_FLOAT
+#define ZZ_LINK_FLOAT 1
+#endif
+
+#if ZZ_LINK_FLOAT
 #if defined(__APPLE__)
 #define ZZ_WEAK_IMPORT_FLOAT __attribute__((weak_import))
 #else
 #define ZZ_WEAK_IMPORT_FLOAT __attribute__((weak))
 #endif
 size_t zz_float_format_raw(double x, char *buf, size_t cap) ZZ_WEAK_IMPORT_FLOAT;
+#endif
 
 // Stack covers every f64 Display rendering (longest observed: 5e-324
 // at 326 bytes); the heap spill below is paranoia, never hot.
@@ -362,6 +372,17 @@ size_t zz_float_format_raw(double x, char *buf, size_t cap) ZZ_WEAK_IMPORT_FLOAT
 // (`stack`, or malloc'd `*heap` when the core reports more than fits).
 // Callers `free(*heap)` (`free(NULL)` is a no-op).
 static const char *zz_canonical_double(double x, char *stack, char **heap, size_t *out_len) {
+#if !ZZ_LINK_FLOAT
+    (void)x;
+    (void)stack;
+    (void)heap;
+    (void)out_len;
+    fprintf(stderr,
+            "zz error: float formatting needs the Rust core "
+            "(float-typed program linked without libzz_native_rt; "
+            "rebuild without --static)\n");
+    exit(1);
+#else
     if (!zz_float_format_raw) {
         fprintf(stderr,
                 "zz error: float formatting needs the Rust core "
@@ -382,6 +403,7 @@ static const char *zz_canonical_double(double x, char *stack, char **heap, size_
     }
     *out_len = zz_float_format_raw(x, *heap, n + 1);
     return *heap;
+#endif
 }
 
 /// Print a double canonically (see above).

@@ -20,9 +20,19 @@ func netdns_roundtrip(label: str, addr: str) -> Result<int, str> {
 }
 
 func main() -> Result<int, str> {
+    // Port band chart (keep the bands disjoint: overlapping ranges are
+    // what made parallel fixtures bind the same port):
+    //   20000 http_keepalive_p1   22000 net_tcp_test
+    //   24000 tcp_method_on_try   26000 net_write_after_close_test
+    //   28000 net_dns_test        30000 net_tls_test
+    //   32000 http_tls_p3          34000 http_hijack_p3
+    //   36000 http_bytes_p3       38000 http_limits_p2
+    // `off` spreads instances across the band; the sweep token looks like
+    // "t{n}" ("0" outside the sweep), so strip the prefix before parsing —
+    // bare int(token) never parses and silently mixes 0.
     sweep_tok := env.get("ZZ_SWEEP_TOKEN") ?? "0"
     tok_num := int(str.replace(sweep_tok, "t", "")) ?? 0
-    base_port := 26000 + pid() % 20000 + tok_num % 20000
+    base_port := 28000 + (pid() * 2654435761 + tok_num * 40503) % 2000
     listen_addr := "127.0.0.1:{base_port}"
     host_addr := "localhost:{base_port}"
     l := net.tcp_listen(listen_addr)?

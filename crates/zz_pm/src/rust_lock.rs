@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::hash;
+use crate::pathsafe::escapes_root;
 
 /// A package entry in `Cargo.lock`.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -569,14 +570,7 @@ pub fn crate_dir_for(pkg_root: &Path, rel: &str) -> Result<PathBuf, String> {
         return Err("[native.build-rust] `crate` must not be empty".to_string());
     }
     let p = Path::new(rel);
-    if p.is_absolute()
-        || p.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
-    {
+    if escapes_root(p) {
         return Err(format!(
             "[native.build-rust] crate `{rel}` must be a relative directory inside the package"
         ));

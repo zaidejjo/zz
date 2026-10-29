@@ -35,6 +35,15 @@ fn build_reachable(src: &str) -> (TypedProgram, ReachableSet) {
     (pruned, reach)
 }
 
+/// Temp output binary path carrying the platform executable suffix.
+///
+/// The link step writes exactly the name it is given; without `.exe` a
+/// Windows build would produce an extensionless file that the tests then
+/// fail to execute by path.
+fn native_bin(tmp: &std::path::Path, stem: &str) -> std::path::PathBuf {
+    tmp.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
+}
+
 /// Compile + run a source via native, returning exit + stdout.
 fn native_run(src: &str) -> (i32, String) {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,7 +52,7 @@ fn native_run(src: &str) -> (i32, String) {
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-test-{}-{uniq}-out", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let r = compile::run_binary(&bin, &[]).unwrap();
@@ -517,8 +526,9 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("colors.hex6", "pure ZZ alias"),
     ("colors.hex3", "pure ZZ alias"),
     // Parity-skipped modules (non-deterministic output):
-    ("std.http.serve_dir", "http fixtures skipped in parity"),
-    ("http.serve_dir", "http fixtures skipped in parity"),
+    // NOTE: `serve_dir`/`serve_dir_at` used to be listed here (no C
+    // implementation); both are implemented in the AOT runtime now, so the
+    // stale-gap check requires their removal.
     ("std.http.delete", "http fixtures skipped in parity"),
     ("std.http.put", "http fixtures skipped in parity"),
     // HTTP helpers (pure-ZZ, compiled from zz/http/mod.zz)
@@ -547,19 +557,8 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Phase 2/3 HTTP natives — deliberate AOT exclusions (VM-only). Each is
     // excluded because porting it to the C HTTP runtime needs infrastructure
     // that does not exist in AOT (rustls TLS, WebSocket handshake + TCP
-    // handoff, insecure curl client, closure-invoking post-middleware, Bytes
-    // request accessor, header-injecting test dispatch, prefix-scoped static
-    // roots). They abort loudly (`zz_unimplemented_native`) on AOT — never
-    // silently lower to unit.
-    ("std.http.pipe_post", "AOT exclusion (VM-only): post-middleware invokes ZZ closures after the handler; AOT dispatch has no post-response closure call"),
-    ("http.pipe_post", "AOT exclusion (VM-only): post-middleware invokes ZZ closures after the handler; AOT dispatch has no post-response closure call"),
-    ("std.http.with_headers", "AOT exclusion (VM-only): response header merge needs C HttpResponse clone + case-insensitive dict merge; not ported"),
-    ("http.with_headers", "AOT exclusion (VM-only): response header merge needs C HttpResponse clone + case-insensitive dict merge; not ported"),
-    ("std.http.serve_dir_at", "AOT exclusion (VM-only): prefix-scoped static roots extend the AOT static-dir table; not ported"),
-    ("http.serve_dir_at", "AOT exclusion (VM-only): prefix-scoped static roots extend the AOT static-dir table; not ported"),
-    ("std.http.test_req", "AOT exclusion (VM-only): header-injecting in-process test dispatch; zz_http_test exists but no header-carrying twin"),
-    ("std.http.body_bytes", "AOT exclusion (VM-only): exact raw request Bytes; C requests carry String bodies; no Bytes request accessor"),
-    ("http.body_bytes", "AOT exclusion (VM-only): exact raw request Bytes; C requests carry String bodies; no Bytes request accessor"),
+    // handoff, insecure curl client). They abort loudly (`zz_unimplemented_native`)
+    // on AOT — never silently lower to unit.
     ("std.http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
     ("http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
     ("std.http.listen_tls_cfg", "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C"),
@@ -982,7 +981,7 @@ func main() {
     let (pruned, reach) = build_reachable(src);
     let tmp = std::env::temp_dir().join(format!("zz-test-input-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
 
@@ -1030,7 +1029,7 @@ func main() {
     let (pruned, reach) = build_reachable(src);
     let tmp = std::env::temp_dir().join(format!("zz-test-range-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let (_, out) = compile::run_binary(&bin, &[]).unwrap();
@@ -1728,7 +1727,7 @@ func main() {
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-test-flush-{uniq}-{}-out", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let mut child = std::process::Command::new(&bin)
@@ -1924,7 +1923,7 @@ fn build_temp_bin(src: &str) -> (PathBuf, PathBuf) {
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-link-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let bin = tmp.join("zz_out");
+    let bin = native_bin(&tmp, "zz_out");
     build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}"));
     (tmp, bin)

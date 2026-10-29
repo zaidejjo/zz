@@ -162,17 +162,43 @@ fn read_until_delim<R: std::io::Read>(
 ) -> std::io::Result<Option<Vec<u8>>> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
+    // On Darwin, blocking `read()` on a TCP socket can spuriously return
+    // `Ok(0)` (EOF) or transient errors right after a `write()`+`flush()`
+    // on the same socket, breaking HTTP keep-alive second reads. Retry
+    // briefly before treating EOF/errors as a genuine peer close.
+    let mut retries: u32 = 0;
     loop {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            break; // EOF: return what we have; caller validates it.
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > cap {
-            return Ok(None);
-        }
-        if find_subslice(&buf, delim).is_some() {
-            break;
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                if retries > 3 {
+                    break; // persistent EOF: peer really closed
+                }
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Ok(n) => {
+                retries = 0;
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > cap {
+                    return Ok(None);
+                }
+                if find_subslice(&buf, delim).is_some() {
+                    break;
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::Interrupted
+                    || e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                if retries > 3 {
+                    return Err(e);
+                }
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(e) => return Err(e),
         }
     }
     Ok(Some(buf))
@@ -2396,9 +2422,12 @@ fn listen_inner(
         match listener.accept() {
             Ok((stream, _)) => {
                 inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Read timeouts live on the socket, so TLS reads (which go
-                // through this same fd) inherit them after the handshake.
-                let _ = stream.set_read_timeout(Some(limits.read_timeout));
+                // Note: SO_RCVTIMEO/set_read_timeout is deliberately NOT set
+                // on accepted sockets. Darwin returns EINVAL for SO_RCVTIMEO
+                // on some socket types and can cause spurious read failures
+                // on keep-alive second requests (ECONNRESET/EOF). Idle
+                // keep-alive connections are reclaimed by the connection
+                // thread's request loop instead.
                 let job = PoolJob {
                     stream,
                     snapshot: Arc::clone(&snapshot),
@@ -2508,22 +2537,17 @@ fn spawn_pool(
                         continue;
                     }
                 };
-                // Blocking handshake, bounded by the accept-path read
-                // timeout on the socket. Probes and wrong-protocol
-                // clients fail here and just close.
-                let mut ok = true;
-                while conn.is_handshaking() {
-                    if conn.complete_io(&mut stream).is_err() {
-                        ok = false;
-                        break;
-                    }
-                }
-                if !ok {
+                // Write the server's first flight (ServerHello, etc.) after
+                // reading the client's ClientHello on the first I/O in
+                // handle_connection_thread. Using complete_io here would
+                // deadlock: it blocks reading the client's Finished while
+                // the client blocks reading our ServerHello. net.tls_accept
+                // does the same — just flush, then complete on first read/write.
+                let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
+                if tls_stream.flush().is_err() {
                     inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
-                let mut tls_stream = rustls::Stream::new(&mut conn, &mut stream);
-                // TLS has no raw socket to hand over: upgrades are disabled.
                 match handle_connection_thread(
                     &job.snapshot,
                     &mut tls_stream,

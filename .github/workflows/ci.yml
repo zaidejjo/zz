@@ -4,123 +4,184 @@ name: CI
 # docker, AUR publishers) triggers off CI success or Release events and
 # never re-runs tests.
 #
+# This file is the orchestrator only: the per-platform work lives in
+# `ci-test.yml` (reusable). GitHub Actions loads only
+# `.github/workflows/*.yml` at the top level — subdirectories are ignored —
+# so "folders" are expressed as separate reusable workflows, not nested
+# directories.
+#
+# Jobs are grouped by OS family (linux/macos/windows). Each caller job
+# passes the legs for that family as JSON, and the reusable workflow builds
+# its matrix from them — so the UI shows one group per OS with the two
+# architectures nested underneath, instead of six unrelated top-level jobs.
+#
 # Triggers:
 #   push to dev or main (merge commits included — the merge itself is
 #     tested, so main is always green),
-#   PRs targeting dev or main (feature branches get checked before merge).
+#   PRs targeting dev or main (feature branches get checked before merge),
+#   nightly (full matrix against the default branch, so platform drift is
+#     never older than a day),
+#   manual dispatch (full matrix; `gh workflow run ci.yml --ref <branch>`
+#     runs all six legs against that branch).
+#
+# Two tiers. This repo is public, so runner minutes are free: the tier buys
+# *latency and signal*, not money. `macos-26-intel` and `windows-11-arm`
+# queue far longer and flake more often, and a PR does not need a second
+# architecture of the same OS to prove a change:
+#   PR        -> the three `"tier": "pr"` legs: one toolchain per OS family
+#                (GNU/Clang on Linux, Apple Clang on arm64 macOS, MSVC on
+#                x86_64 Windows).
+#   everything else -> all six (`"tier": "full"` included): adds linux
+#                aarch64, Intel macOS and Windows arm64, so a regression
+#                there surfaces within a day instead of at release.
+# It is not lower coverage: every merge, every night and every manual
+# dispatch run the full matrix. `gh workflow run ci.yml --ref <branch>` is
+# the escape hatch for "I need all six before merge".
 
 on:
   push:
     branches: [dev, main]
   pull_request:
     branches: [dev, main]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  # The event name is part of the group so a manual full run never queues
+  # behind (or cancels) the automatic PR run for the same branch.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
-  # Pinned Clang major for every native build below (`zz` probes
-  # `clang-<ver>` first via ZZ_CLANG_VERSION; the sanitizer leg asserts
-  # the match and logs the exact version).
-  ZZ_CLANG_VERSION: "23"
 
 jobs:
-  test:
-    name: test (ubuntu-latest)
-    runs-on: ubuntu-latest
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: install LLVM 23 repo
-        # Noble's archive tops out at clang-18; the pin needs clang-23,
-        # so add apt.llvm.org (verified: llvm-toolchain-noble-23 exists).
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-23 main" | sudo tee /etc/apt/sources.list.d/llvm-23.list > /dev/null
-      - name: install native deps
-        # Native codegen links -lcurl -lsqlite3 and compiles with clang.
-        # Runner images don't guarantee the headers — install explicitly
-        # so the --native test legs don't fail with `curl/curl.h not found`.
-        # Clang is version-pinned (matches ZZ_CLANG_VERSION above) so
-        # sanitizer/bench builds never drift with the runner image.
-        run: sudo apt-get update && sudo apt-get install -y clang-23 libcurl4-openssl-dev libsqlite3-dev
-      - name: log pinned toolchain
-        run: clang-23 --version
+        with:
+          key: lint
       - name: fmt check
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: 'docker smoke fixture (AOT compile + run)'
-        if: runner.os != 'Windows'
-        # docker-publish compiles this exact file inside the published
-        # builder image. Running it here too means a language change that
-        # breaks the fixture fails a normal PR, not the release.
+      - name: actionlint (workflow syntax + shellcheck)
+        # Not preinstalled on the Ubuntu images (exit 127 otherwise). Pinned
+        # release tarballs: no third-party action, no dangling "latest".
+        # Catches the class of error that fails a workflow at parse time
+        # (no jobs, no logs) before it lands.
+        #
+        # shellcheck is pinned too: runners ship some version of it, and
+        # actionlint enables it automatically when found, so an image
+        # refresh could turn this step red with no change here. Reproduce
+        # locally with the same two binaries. actionlint's runner-label
+        # table is compiled in, so this pin must know every label the
+        # matrices use: 1.7.12 carries macos-26, macos-26-intel and
+        # windows-11-arm; 1.7.7 rejected them.
         run: |
-          cargo run -q -p zz_cli -- build -p docker/smoke/hello.zz -o /tmp/zz-docker-smoke
-          out=$(/tmp/zz-docker-smoke)
-          echo "$out"
-          echo "$out" | grep -qx 'smoke-ok'
-      - name: 'test (PR: fast suite — VM legs only)'
-        if: runner.os != 'Windows' && github.event_name == 'pull_request'
-        # PR signal in minutes: unit + e2e (VM) + VM-only parity.
-        run: ./scripts/test-fast.sh
-      - name: 'test (PR: batched native parity)'
-        if: runner.os != 'Windows' && github.event_name == 'pull_request'
-        # All batchable strict fixtures' native legs in ~4 clang builds
-        # (same programs, same flags, demuxed per file). Individuals run
-        # VM-only inside test-fast.sh above.
-        run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
-      - name: 'test (PR: ASan+UBSan AOT leg)'
-        if: runner.os != 'Windows' && github.event_name == 'pull_request'
-        # Instrumented HIR→C and Chunk→C builds of the diff corpus + small
-        # programs (reports are fatal). Asserts the ZZ_CLANG_VERSION pin
-        # and logs the exact toolchain. Not in test-fast.sh: clang builds
-        # are minutes, not seconds.
-        run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
-      - name: 'test (merge: full suite, strict natives via batch)'
-        if: runner.os != 'Windows' && github.event_name != 'pull_request'
-        # `ZZ_BATCH_NATIVE=1`: strict-success natives run batched
-        # (same programs, same flags); quad, error, and known-failure
-        # natives stay individual. Full coverage, no duplicated builds.
-        run: ZZ_BATCH_NATIVE=1 cargo test --all
-      - name: 'test (windows: VM-only, native backend unsupported)'
-        if: runner.os == 'Windows'
-        # The native backend is POSIX/Linux-only (epoll/fork AOT server, no
-        # Windows FFI link — see ffi.rs). ZZ_SKIP_NATIVE keeps the VM legs
-        # running while the native legs report skips.
-        run: cargo test --all
+          set -euo pipefail
+          version=1.7.12
+          sc_version=0.10.0
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${sc_version}/shellcheck-v${sc_version}.linux.x86_64.tar.xz"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          /tmp/actionlint -version
+          /tmp/shellcheck-v${sc_version}/shellcheck --version | head -2
+          /tmp/actionlint -shellcheck=/tmp/shellcheck-v${sc_version}/shellcheck
+
+  # --- plan: which legs run for *this* event -----------------------------
+  # GitHub expressions cannot filter arrays, and `matrix` is not available
+  # in a job-level `if`, so selection happens here once and each family
+  # workflow receives an already-filtered list (a `"skipped"` matrix entry
+  # would still spin up a runner).
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      linux: ${{ steps.pick.outputs.linux }}
+      macos: ${{ steps.pick.outputs.macos }}
+      windows: ${{ steps.pick.outputs.windows }}
+    steps:
+      - id: pick
         env:
-          ZZ_SKIP_NATIVE: 1
+          FULL: ${{ github.event_name != 'pull_request' }}
+          LEGS: |
+            {
+              "linux": [
+                {"name": "linux-x86_64", "runner": "ubuntu-24.04", "native": true,
+                 "tier": "pr", "timeout": 30, "clang_pin": "23", "docker_smoke": true},
+                {"name": "linux-aarch64", "runner": "ubuntu-24.04-arm", "native": true,
+                 "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
+              ],
+              "macos": [
+                {"name": "macos-aarch64", "runner": "macos-26", "native": true,
+                 "tier": "pr", "timeout": 45, "clang_pin": "", "docker_smoke": false},
+                {"name": "macos-x86_64", "runner": "macos-26-intel", "native": true,
+                 "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
+              ],
+              "windows": [
+                {"name": "windows-x86_64", "runner": "windows-2025", "native": false,
+                 "tier": "pr", "timeout": 60, "clang_pin": "", "docker_smoke": false},
+                {"name": "windows-aarch64", "runner": "windows-11-arm", "native": false,
+                 "tier": "full", "timeout": 60, "clang_pin": "", "docker_smoke": false}
+              ]
+            }
+        run: |
+          set -euo pipefail
+          for family in linux macos windows; do
+            picked=$(jq -c --argjson full "${FULL:-true}" --arg f "$family" \
+              '{include: [.[$f][] | select($full or .tier == "pr")]}' <<<"$LEGS")
+            echo "$family: $picked"
+            echo "$family=$picked" >> "$GITHUB_OUTPUT"
+          done
 
-  check-arm:
-    name: check (aarch64)
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: install native deps
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev
-      - name: check workspace for aarch64
-        # Native ARM runner (real gcc, no cross toolchain needed).
-        # Type-checks every crate for the arch AUR ships — catches
-        # arch-dependent breakage (e.g. c_char signedness) x86_64 can
-        # never see. No linking, no tests: pure type gate, stays fast.
-        run: cargo check --workspace --all-targets
+  # --- linux: x86_64 (full incl. sanitizer/docker) + aarch64 -------------
+  linux:
+    name: linux
+    needs: plan
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: linux
+      legs: ${{ needs.plan.outputs.linux }}
 
-  lsp-parity:
-    name: lsp-parity
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: build zz binary (check side of the gate)
-        # The gate shells out to a freshly built `zz check`; the LSP
-        # side runs in-process. Check-only: no clang, no native deps.
-        run: cargo build -p zz_cli
-      - name: lsp-vs-check diagnostic parity gate (#264)
-        run: cargo test -p zz_lsp --test check_parity
+  # --- macos: apple silicon + intel --------------------------------------
+  # Runner labels verified 2026: Apple silicon is `macos-26` (`macos-latest`
+  # also points at macOS 26 arm64); Intel is `macos-26-intel`. The old arm64
+  # image was `macos-14`: a release behind its `macos-15-intel` counterpart
+  # and slow to schedule, so the pair never matched.
+  macos:
+    name: macos
+    needs: plan
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: macos
+      legs: ${{ needs.plan.outputs.macos }}
+
+  # --- windows: x86_64 + arm64 -------------------------------------------
+  # `native: false`: the AOT backend cannot build on Windows yet (the C
+  # runtime includes <pthread.h> and its socket layer is POSIX
+  # `fcntl`/`poll`), so these legs set `ZZ_SKIP_NATIVE=1` and run every VM,
+  # CLI, PM and LSP suite. `support::native_unsupported()` in the CLI
+  # integration tests makes the AOT cases report "skip" instead of failing
+  # on a limitation the platform cannot fix, and the leg's final
+  # `native capability` step says so in the log. Tracked as the Windows
+  # runtime port; flip the flag with that work, not before.
+  windows:
+    name: windows
+    needs: plan
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: windows
+      legs: ${{ needs.plan.outputs.windows }}

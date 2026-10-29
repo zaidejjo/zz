@@ -198,12 +198,12 @@ pub fn detect_shell() -> &'static str {
 /// True when `bin` (or its `$HOME`-relative spelling) is on `PATH`.
 pub fn bin_on_path(bin: &Path) -> bool {
     let home_bin = home_dir().join(".zz").join("bin");
-    std::env::var_os("PATH")
+    zz_pm::paths::env_var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|p| p == bin || p == home_bin))
 }
 
 fn home_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"))
+    zz_pm::paths::env_home_dir().unwrap_or_else(|| PathBuf::from("~"))
 }
 
 /// PATH export line for a bin dir: `$HOME`-relative when it is the default
@@ -892,13 +892,12 @@ mod tests {
     fn hint_stamp_suppresses_repeats() {
         let _g = TEST_LOCK.lock().unwrap();
         let dir = isolated_home("hint");
-        std::env::set_var("ZZ_HOME", &dir);
+        let _home = zz_pm::paths::env_scope(&[("ZZ_HOME", Some(dir.clone().into_os_string()))]);
         assert!(!hint_already_shown());
         mark_hint_shown();
         assert!(hint_already_shown());
         clear_hint_stamp();
         assert!(!hint_already_shown());
-        std::env::remove_var("ZZ_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -981,14 +980,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Same `HOME` caveat as `setup_check_passes_when_wired_pending_restart`.
+    #[cfg(unix)]
     #[test]
     fn setup_check_reports_missing_then_ok() {
         let _g = TEST_LOCK.lock().unwrap();
         let dir = isolated_home("check");
-        let old_home = std::env::var_os("HOME");
-        let old_zz = std::env::var_os("ZZ_HOME");
-        std::env::set_var("HOME", &dir);
-        std::env::set_var("ZZ_HOME", dir.join(".zz"));
+        let _env = zz_pm::paths::env_scope(&[
+            ("HOME", Some(dir.clone().into_os_string())),
+            ("USERPROFILE", Some(dir.clone().into_os_string())),
+            ("ZZ_HOME", Some(dir.join(".zz").into_os_string())),
+        ]);
 
         // Fresh home: everything missing.
         let st = status();
@@ -1021,29 +1023,22 @@ mod tests {
                 .completion_installed
         );
 
-        if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(z) = old_zz {
-            std::env::set_var("ZZ_HOME", z);
-        } else {
-            std::env::remove_var("ZZ_HOME");
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `dirs::home_dir()` reads `USERPROFILE` on Windows, so `HOME` cannot
+    /// be redirected there — and bash/zsh/fish wiring is a Unix feature.
+    #[cfg(unix)]
     #[test]
     fn setup_check_passes_when_wired_pending_restart() {
         let _g = TEST_LOCK.lock().unwrap();
         let dir = isolated_home("check-ok");
-        let old_home = std::env::var_os("HOME");
-        let old_zz = std::env::var_os("ZZ_HOME");
-        let old_path = std::env::var_os("PATH");
-        std::env::set_var("HOME", &dir);
-        std::env::set_var("ZZ_HOME", dir.join(".zz"));
-        std::env::set_var("PATH", "/usr/bin:/bin");
+        let _env = zz_pm::paths::env_scope(&[
+            ("HOME", Some(dir.clone().into_os_string())),
+            ("USERPROFILE", Some(dir.clone().into_os_string())),
+            ("ZZ_HOME", Some(dir.join(".zz").into_os_string())),
+            ("PATH", Some("/usr/bin:/bin".into())),
+        ]);
 
         // Bin dir exists, every rc wired, every completion exact — but the
         // session PATH lacks the bin dir: activation pending, not failure.
@@ -1085,19 +1080,6 @@ mod tests {
         assert!(!st.on_path, "sandbox PATH must not contain the bin dir");
         assert!(check().is_ok());
 
-        if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(z) = old_zz {
-            std::env::set_var("ZZ_HOME", z);
-        } else {
-            std::env::remove_var("ZZ_HOME");
-        }
-        if let Some(p) = old_path {
-            std::env::set_var("PATH", p);
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1106,19 +1088,25 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap();
         let dir = isolated_home("path");
         let bin = dir.join("bin");
-        let old = std::env::var_os("PATH");
-        // Absolute entry.
-        std::env::set_var("PATH", format!("/usr/bin:{}", bin.display()));
+        // Build the entry list with the host separator (`:` on Unix,
+        // `;` on Windows) instead of hardcoding a colon.
+        let system_dir = if cfg!(windows) {
+            Path::new(r"C:\Windows")
+        } else {
+            Path::new("/usr/bin")
+        };
+        let joined = std::env::join_paths([system_dir, bin.as_path()]).unwrap();
         // bin_on_path compares against ZZ_HOME/bin and ~/.zz/bin; point
         // ZZ_HOME at the temp dir so the temp bin matches.
-        std::env::set_var("ZZ_HOME", &dir);
+        let _env = zz_pm::paths::env_scope(&[
+            ("PATH", Some(joined)),
+            ("ZZ_HOME", Some(dir.clone().into_os_string())),
+        ]);
+        // Absolute entry.
         assert!(bin_on_path(&bin));
-        std::env::set_var("PATH", "/usr/bin:/bin");
+        let _env =
+            zz_pm::paths::env_scope(&[("PATH", Some(system_dir.as_os_str().to_os_string()))]);
         assert!(!bin_on_path(&bin));
-        if let Some(p) = old {
-            std::env::set_var("PATH", p);
-        }
-        std::env::remove_var("ZZ_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

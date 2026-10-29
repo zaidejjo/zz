@@ -5,8 +5,6 @@
 //! Connections are [`Value::Opaque`] handles under tag `"unix"`, listeners
 //! under `"unix_listener"`, so method syntax works through tag dispatch.
 
-use std::io::{Read, Write};
-
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 use crate::natives::{arg, expect_int, expect_str};
@@ -114,7 +112,7 @@ pub(crate) fn unix_write(
 ) -> Result<Value, EvalError> {
     let h = expect_unix(args, 0, "std.net.unix_write", span)?;
     let data = expect_str(args, 1, "std.net.unix_write")?;
-    match zz_native_rt::unix_conn::with(h.id, |c| c.stream.write_all(data.as_bytes())) {
+    match zz_native_rt::unix_conn::with(h.id, |c| c.write_all(data.as_bytes())) {
         Some(Ok(())) => Ok(ok_wrap(Value::Int(data.len() as i64))),
         Some(Err(e)) => Ok(err_wrap(format!("unix:io: write failed ({e})"))),
         None => Err(gone("std.net.unix_write", span)),
@@ -138,7 +136,7 @@ pub(crate) fn unix_write_bytes(
     };
     let len = data.len();
     let bytes = data.as_slice().to_vec();
-    match zz_native_rt::unix_conn::with(h.id, |c| c.stream.write_all(&bytes)) {
+    match zz_native_rt::unix_conn::with(h.id, |c| c.write_all(&bytes)) {
         Some(Ok(())) => Ok(ok_wrap(Value::Int(len as i64))),
         Some(Err(e)) => Ok(err_wrap(format!("unix:io: write failed ({e})"))),
         None => Err(gone("std.net.unix_write_bytes", span)),
@@ -153,7 +151,7 @@ pub(crate) fn unix_read(
     let h = expect_unix(args, 0, "std.net.unix_read", span)?;
     let max = expect_int(args, 1, "std.net.unix_read")?.clamp(1, 8 * 1024 * 1024) as usize;
     let mut buf = vec![0u8; max];
-    match zz_native_rt::unix_conn::with(h.id, |c| c.stream.read(&mut buf)) {
+    match zz_native_rt::unix_conn::with(h.id, |c| c.read(&mut buf)) {
         Some(Ok(0)) => Ok(err_wrap("unix:closed: connection closed".to_string())),
         Some(Ok(n)) => {
             buf.truncate(n);
@@ -174,7 +172,7 @@ pub(crate) fn unix_read_bytes(
     let h = expect_unix(args, 0, "std.net.unix_read_bytes", span)?;
     let max = expect_int(args, 1, "std.net.unix_read_bytes")?.clamp(1, 8 * 1024 * 1024) as usize;
     let mut buf = vec![0u8; max];
-    match zz_native_rt::unix_conn::with(h.id, |c| c.stream.read(&mut buf)) {
+    match zz_native_rt::unix_conn::with(h.id, |c| c.read(&mut buf)) {
         Some(Ok(0)) => Ok(err_wrap("unix:closed: connection closed".to_string())),
         Some(Ok(n)) => {
             buf.truncate(n);
@@ -200,7 +198,7 @@ pub(crate) fn unix_read_exact(
         )));
     }
     let mut out = vec![0u8; n as usize];
-    match zz_native_rt::unix_conn::with(h.id, |c| c.stream.read_exact(&mut out)) {
+    match zz_native_rt::unix_conn::with(h.id, |c| c.read_exact(&mut out)) {
         Some(Ok(())) => Ok(ok_wrap(Value::Bytes(Box::new(
             zz_runtime::BytesData::from_vec(out),
         )))),
@@ -218,7 +216,7 @@ pub(crate) fn unix_readline(
     let mut line: Vec<u8> = Vec::new();
     let mut one = [0u8; 1];
     loop {
-        let r = zz_native_rt::unix_conn::with(h.id, |c| c.stream.read_exact(&mut one));
+        let r = zz_native_rt::unix_conn::with(h.id, |c| c.read_exact(&mut one));
         match r {
             Some(Ok(())) => {
                 if one[0] == b'\n' {
@@ -258,7 +256,7 @@ pub(crate) fn unix_set_read_timeout(
     } else {
         Some(std::time::Duration::from_millis(ms as u64))
     };
-    match zz_native_rt::unix_conn::with(h.id, |c| c.stream.set_read_timeout(dur)) {
+    match zz_native_rt::unix_conn::with(h.id, |c| c.set_read_timeout(dur)) {
         Some(Ok(())) => Ok(ok_wrap(Value::Bool(true))),
         Some(Err(e)) => Ok(err_wrap(format!("unix:io: set_read_timeout failed ({e})"))),
         None => Err(gone("std.net.unix_set_read_timeout", span)),
@@ -277,7 +275,7 @@ pub(crate) fn unix_set_write_timeout(
     } else {
         Some(std::time::Duration::from_millis(ms as u64))
     };
-    match zz_native_rt::unix_conn::with(h.id, |c| c.stream.set_write_timeout(dur)) {
+    match zz_native_rt::unix_conn::with(h.id, |c| c.set_write_timeout(dur)) {
         Some(Ok(())) => Ok(ok_wrap(Value::Bool(true))),
         Some(Err(e)) => Ok(err_wrap(format!("unix:io: set_write_timeout failed ({e})"))),
         None => Err(gone("std.net.unix_set_write_timeout", span)),

@@ -3,6 +3,11 @@
 //! `zz run` (VM dlopen). Covers dotted ZZ names, explicit C-symbol
 //! overrides (`= "..."`), str params, and ABI-mismatch refusal.
 
+// `zz run` cannot dlopen plugins on non-Unix hosts (`load_vm_plugins` is a
+// no-op stub there), so every assertion below is Unix-only by construction.
+// The declarative AOT half is covered on Windows by `zz_pm`'s build tests.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

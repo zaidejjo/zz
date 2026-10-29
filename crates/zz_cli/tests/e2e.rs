@@ -11,6 +11,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonically increasing sweep token handed out to every `run_zz` call
+/// (dedicated per-fixture tests and the discovery sweep share one process,
+/// so without this both instances of the same fixture compute identical
+/// pid/token-derived ports and collide on loopback bind).
+static SWEEP_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+mod support;
 
 /// Locate the workspace root (where `tests/fixtures/` lives).
 fn fixtures_dir() -> PathBuf {
@@ -23,18 +32,64 @@ fn fixtures_dir() -> PathBuf {
 /// Stdin comes from the `<stem>.stdin` sibling file when present,
 /// otherwise closed (EOF): fixtures calling `input()` behave
 /// identically everywhere instead of hanging on a TTY.
+///
+/// Network fixtures bind loopback ports derived from (pid, sweep token).
+/// Bands are disjoint by construction, but an unrelated service on the
+/// machine can still hold the exact port; a bind collision is transient
+/// and environment-specific, never a program bug, so retry once with a
+/// shifted sweep token (which moves the fixture to another slot in its
+/// band) before reporting the failure.
 fn run_zz(file: &Path) -> (i32, String, String) {
+    // Every `zz run` child gets a unique sweep token so concurrent
+    // instances of the same fixture (dedicated test + discovery sweep in
+    // one test process) bind disjoint loopback ports instead of colliding.
+    let tok = SWEEP_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let first = run_zz_with_token(file, Some(&tok.to_string()));
+    if first.0 == 0 || !is_bind_collision(&first.2) {
+        return first;
+    }
+    let shift = std::process::id() % 997 + 1;
+    let retry = run_zz_with_token(file, Some(&shift.to_string()));
+    if retry.0 == 0 {
+        return retry;
+    }
+    // Report the retry (the meaningful attempt) but keep both stderrs.
+    (
+        retry.0,
+        retry.1,
+        format!("{}\n--- retry (token {shift}) ---\n{}", first.2, retry.2),
+    )
+}
+
+/// True when a fixture failed because its loopback port was taken.
+fn is_bind_collision(stderr: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "Address already in use",                // POSIX
+        "os error 98",                           // Linux EADDRINUSE
+        "os error 48",                           // macOS EADDRINUSE
+        "Only one usage of each socket address", // Winsock WSAEADDRINUSE
+        "os error 10048",                        // Windows WSAEADDRINUSE
+        "EADDRINUSE",
+    ];
+    NEEDLES.iter().any(|n| stderr.contains(n))
+}
+
+fn run_zz_with_token(file: &Path, sweep_token: Option<&str>) -> (i32, String, String) {
     use std::io::Write as _;
     let zz_bin = env!("CARGO_BIN_EXE_zz");
     let stdin_path = file.with_extension("stdin");
     let input = std::fs::read(stdin_path).unwrap_or_default();
-    let mut child = Command::new(zz_bin)
-        .arg("run")
+    let mut cmd = Command::new(zz_bin);
+    cmd.arg("run")
         .arg(file)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    if let Some(tok) = sweep_token {
+        cmd.env("ZZ_SWEEP_TOKEN", tok);
+    }
+    let mut child = cmd
         .spawn()
         .unwrap_or_else(|e| panic!("failed to exec `zz run {file:?}`: {e}"));
     if !input.is_empty() {
@@ -53,6 +108,27 @@ fn run_zz(file: &Path) -> (i32, String, String) {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     (exit_code, stdout, stderr)
+}
+
+#[test]
+fn e2e_bind_collision_detection_is_platform_complete() {
+    // Every platform's EADDRINUSE wording must trigger the retry, and
+    // unrelated failures must not.
+    for msg in [
+        "tcp_listen failed: Address already in use (os error 98)",
+        "tcp_listen failed: Address already in use (os error 48)",
+        "bind: Only one usage of each socket address (os error 10048)",
+        "EADDRINUSE",
+    ] {
+        assert!(is_bind_collision(msg), "missing needle: {msg}");
+    }
+    for msg in [
+        "tcp_listen failed: Permission denied (os error 13)",
+        "tcp_connect failed: Connection refused (os error 111)",
+        "",
+    ] {
+        assert!(!is_bind_collision(msg), "false positive: {msg}");
+    }
 }
 
 /// Run `zz eval <src>` and return (exit_code, stdout, stderr).
@@ -144,6 +220,10 @@ macro_rules! e2e_success_test {
             let fixtures = fixtures_dir();
             let path = fixtures.join($category).join($file);
             assert!(path.exists(), "fixture not found: {}", path.display());
+            if !support::fixture_supported_here(&path) {
+                eprintln!("skip {}: fixture is Unix-only", path.display());
+                return;
+            }
 
             let (exit, stdout, stderr) = run_zz(&path);
             assert_eq!(
@@ -1264,6 +1344,10 @@ fn e2e_discover_all_success_fixtures() {
             continue;
         }
         for file in find_fixtures(&dir) {
+            if !support::fixture_supported_here(&file) {
+                eprintln!("skip {}: fixture is Unix-only", file.display());
+                continue;
+            }
             let (exit, stdout, stderr) = run_zz(&file);
             if exit != 0 {
                 failures.push(format!(
@@ -1295,6 +1379,10 @@ fn e2e_discover_all_error_fixtures() {
 
     let mut failures = Vec::new();
     for file in find_fixtures(&err_dir) {
+        if !support::fixture_supported_here(&file) {
+            eprintln!("skip {}: fixture is Unix-only", file.display());
+            continue;
+        }
         let (exit, stdout, _stderr) = run_zz(&file);
         if exit == 0 {
             failures.push(format!(
@@ -1696,10 +1784,20 @@ fn e2e_package_map_cwd_independent() {
     let run_abs = run_file.display().to_string();
     let test_abs = test_file.display().to_string();
 
-    let (exit, stdout, stderr) = run_zz_in(Path::new("/tmp"), &["run", run_abs.as_str()]);
+    // Unrelated cwd (the system temp dir) and the filesystem root, both
+    // platform-neutral: `/tmp` does not exist on Windows, and the root is
+    // `C:\` there (the last ancestor of the temp dir on every platform).
+    let elsewhere = std::env::temp_dir();
+    let fs_root = elsewhere
+        .ancestors()
+        .last()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| elsewhere.clone());
+
+    let (exit, stdout, stderr) = run_zz_in(&elsewhere, &["run", run_abs.as_str()]);
     assert_eq!(
         exit, 0,
-        "abs path from /tmp should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "abs path from an unrelated cwd should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(stdout.lines().last().unwrap_or("").contains("42"));
 
@@ -1710,10 +1808,10 @@ fn e2e_package_map_cwd_independent() {
     );
     assert!(stdout.lines().last().unwrap_or("").contains("42"));
 
-    let (exit, stdout, stderr) = run_zz_in(Path::new("/"), &["test", test_abs.as_str()]);
+    let (exit, stdout, stderr) = run_zz_in(&fs_root, &["test", test_abs.as_str()]);
     assert_eq!(
         exit, 0,
-        "`zz test` from / should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "`zz test` from the filesystem root should exit 0.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 
@@ -1752,6 +1850,10 @@ fn e2e_bench_basic_vm() {
 
 #[test]
 fn e2e_bench_basic_native() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let fixtures = fixtures_dir();
     let path = fixtures.join("bench").join("basic_bench.zz");
     assert!(path.exists(), "fixture not found: {}", path.display());
@@ -2007,6 +2109,10 @@ fn e2e_test_doctest_json_kind() {
 
 #[test]
 fn e2e_test_doctest_native() {
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on this host");
+        return;
+    }
     let fixtures = fixtures_dir();
     let path = fixtures.join("test").join("doctests.zz");
     assert!(path.exists(), "fixture not found: {}", path.display());
