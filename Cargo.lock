@@ -3811,6 +3811,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_diag_core"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "zz_span_ast",
+]
+
+[[package]]
 name = "zz_fmt"
 version = "0.4.0"
 dependencies = [
@@ -3830,6 +3838,7 @@ dependencies = [
  "codespan-reporting",
  "colored",
  "serde",
+ "zz_diag_core",
  "zz_span_ast",
 ]
 
