@@ -1,0 +1,18 @@
+[package]
+name = "zz_test_runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zz_build = { path = "../zz_build" }
+zz_checker = { path = "../zz_checker" }
+zz_frontend = { path = "../zz_frontend" }
+zz_hir = { path = "../zz_hir" }
+zz_loader = { path = "../zz_loader" }
+zz_plugin = { path = "../zz_plugin" }
+zz_pm = { path = "../zz_pm" }
+zz_runtime = { path = "../zz_runtime" }
+zz_stdlib = { path = "../zz_stdlib" }
+toml = "0.8"
+serde_json = "1"

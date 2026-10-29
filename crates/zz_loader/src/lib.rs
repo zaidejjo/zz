@@ -31,8 +31,8 @@ use zz_stdlib::{
     stdlib_funcs, stdlib_natives, STDLIB_MODULES,
 };
 
-pub(crate) mod cache;
-pub(crate) mod rewrite;
+pub mod cache;
+pub mod rewrite;
 
 #[cfg(test)]
 mod tests;

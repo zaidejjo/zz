@@ -379,7 +379,7 @@ fn canonical_project_root(project_path: &Path) -> Option<PathBuf> {
 
 /// Resolve a locked dependency to its package directory, canonicalized
 /// (same `..` rationale as [`canonical_project_root`]).
-pub(crate) fn resolve_pkg_dir(
+pub fn resolve_pkg_dir(
     project_root: &Path,
     dep: &zz_pm::lock::LockedDep,
     manifest: Option<&zz_pm::manifest::Manifest>,
@@ -412,7 +412,7 @@ pub(crate) fn resolve_pkg_dir(
 /// dependency's package directory (CAS for git deps, `vendor/<name>/` for path
 /// deps), and loads any `plugin.zzi` file found. Returns a flat list of
 /// `(function_name, FuncSig)` pairs ready to merge into the checker.
-pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::FuncSig)> {
+pub fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::FuncSig)> {
     let mut plugin_funcs = Vec::new();
 
     let Some(project_root) = canonical_project_root(project_path) else {
