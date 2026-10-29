@@ -1,0 +1,219 @@
+//! Token definitions for the lossless lexer.
+//!
+//! The lexer produces a stream of significant tokens, each carrying its
+//! `leading` trivia (whitespace, newlines inside brackets, comments). This
+//! preserves the original source text exactly — the foundation for the
+//! formatter later.
+
+use std::borrow::Cow;
+
+use zz_span_ast::span::Span;
+
+/// Trivia: text that carries no syntax meaning but must be preserved.
+///
+/// The text borrows the source buffer — trivia is never rewritten, so no
+/// allocation is needed. This kills one heap allocation per whitespace run
+/// and comment (tens of thousands per large file).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trivia<'a> {
+    pub kind: TriviaKind,
+    pub text: &'a str,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriviaKind {
+    Whitespace,
+    Newline,
+    Comment,
+}
+
+/// A significant token.
+///
+/// `text` borrows the source for verbatim tokens (identifiers, numbers,
+/// keywords, operators) and owns only processed strings (escape expansion,
+/// triple-quote dedent). `Cow` keeps the common path allocation-free while
+/// `into_owned()` moves already-owned values into the AST without copying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token<'a> {
+    pub kind: TokenKind,
+    pub text: Cow<'a, str>,
+    pub span: Span,
+    pub leading: Vec<Trivia<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    // Keywords
+    Import,
+    As,
+    Func,
+    Return,
+    If,
+    Else,
+    While,
+    Match,
+    True,
+    False,
+    Struct,
+    For,
+    In,
+    Break,
+    Continue,
+    Defer,
+    Pub,
+    Impl,
+    Const,
+    Extern,
+    Mut,
+    // Literals
+    Int,
+    Float,
+    Str,
+    /// Interpolation segment inside a format string (`"hello {name}"`).
+    /// Emitted by the lexer for text segments that are part of an
+    /// interpolated string. The parser uses this to unambiguously
+    /// distinguish interpolation from a string followed by a block.
+    StrFmt,
+    Ident,
+    // Operators
+    Plus,
+    Minus,
+    Star,
+    StarStar,
+    Slash,
+    Percent,
+    Assign,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    AndAnd,
+    OrOr,
+    Bang,
+    Question,
+    QuestionQuestion,
+    Colon,
+    ColonEq,
+    Comma,
+    Dot,
+    DotDot,
+    Pipe,
+    PipeGt,
+    Arrow,
+    Amp,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
+    // Compound assignment (`x += 1`). Lexed greedily: `**=`/`<<=`/`>>=`
+    // before their two-char prefixes; spaced `+ =` stays two tokens.
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    StarStarEq,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
+    // Delimiters
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    At,
+    // Statement terminator: `;` or a newline at bracket depth 0
+    StmtEnd,
+    Eof,
+}
+
+impl TokenKind {
+    pub fn describe(self) -> &'static str {
+        match self {
+            TokenKind::Import => "`import`",
+            TokenKind::As => "`as`",
+            TokenKind::Func => "`func`",
+            TokenKind::Return => "`return`",
+            TokenKind::If => "`if`",
+            TokenKind::Else => "`else`",
+            TokenKind::While => "`while`",
+            TokenKind::Match => "`match`",
+            TokenKind::True => "`true`",
+            TokenKind::False => "`false`",
+            TokenKind::Struct => "`struct`",
+            TokenKind::For => "`for`",
+            TokenKind::In => "`in`",
+            TokenKind::Break => "`break`",
+            TokenKind::Continue => "`continue`",
+            TokenKind::Defer => "`defer`",
+            TokenKind::Pub => "`pub`",
+            TokenKind::Impl => "`impl`",
+            TokenKind::Const => "`const`",
+            TokenKind::Extern => "`extern`",
+            TokenKind::Mut => "`mut`",
+            TokenKind::Int => "integer literal",
+            TokenKind::Float => "float literal",
+            TokenKind::Str => "string literal",
+            TokenKind::StrFmt => "interpolated string segment",
+            TokenKind::Ident => "identifier",
+            TokenKind::Plus => "`+`",
+            TokenKind::Minus => "`-`",
+            TokenKind::Star => "`*`",
+            TokenKind::StarStar => "`**`",
+            TokenKind::Slash => "`/`",
+            TokenKind::Percent => "`%`",
+            TokenKind::Assign => "`=`",
+            TokenKind::Eq => "`==`",
+            TokenKind::Ne => "`!=`",
+            TokenKind::Lt => "`<`",
+            TokenKind::Gt => "`>`",
+            TokenKind::Le => "`<=`",
+            TokenKind::Ge => "`>=`",
+            TokenKind::AndAnd => "`&&`",
+            TokenKind::OrOr => "`||`",
+            TokenKind::Bang => "`!`",
+            TokenKind::Question => "`?`",
+            TokenKind::QuestionQuestion => "`??`",
+            TokenKind::Colon => "`:`",
+            TokenKind::ColonEq => "`:=`",
+            TokenKind::Comma => "`,`",
+            TokenKind::Dot => "`.`",
+            TokenKind::DotDot => "`..`",
+            TokenKind::Pipe => "`|`",
+            TokenKind::PipeGt => "`|>`",
+            TokenKind::Arrow => "`->`",
+            TokenKind::Amp => "`&`",
+            TokenKind::Caret => "`^`",
+            TokenKind::Tilde => "`~`",
+            TokenKind::Shl => "`<<`",
+            TokenKind::Shr => "`>>`",
+            TokenKind::PlusEq => "`+=`",
+            TokenKind::MinusEq => "`-=`",
+            TokenKind::StarEq => "`*=`",
+            TokenKind::SlashEq => "`/=`",
+            TokenKind::PercentEq => "`%=`",
+            TokenKind::StarStarEq => "`**=`",
+            TokenKind::AmpEq => "`&=`",
+            TokenKind::PipeEq => "`|=`",
+            TokenKind::CaretEq => "`^=`",
+            TokenKind::ShlEq => "`<<=`",
+            TokenKind::ShrEq => "`>>=`",
+            TokenKind::LParen => "`(`",
+            TokenKind::RParen => "`)`",
+            TokenKind::LBrace => "`{`",
+            TokenKind::RBrace => "`}`",
+            TokenKind::LBracket => "`[`",
+            TokenKind::RBracket => "`]`",
+            TokenKind::At => "`@`",
+            TokenKind::StmtEnd => "end of statement",
+            TokenKind::Eof => "end of input",
+        }
+    }
+}

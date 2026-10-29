@@ -3905,6 +3905,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_lexer"
+version = "0.4.0"
+dependencies = [
+ "zz_diag_core",
+ "zz_span_ast",
+]
+
+[[package]]
 name = "zz_lints"
 version = "0.4.0"
 dependencies = [
