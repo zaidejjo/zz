@@ -395,9 +395,7 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // NOTE: `fs_comprehensive` was listed here (PID-embedded temp
         // paths) but the sweep reports FIXED — scratch paths are masked
         // by `mask_scratch_paths`, so it runs as strict parity now.
-        "fs_comprehensive" => Some(
-            "macOS/Linux: temp dir PID component differs between VM and native runs",
-        ),
+
         // --- Sandbox native socket failures (environmental, not bugs) ---
         // Native engine cannot shut down TCP sockets in sandboxed CI runners:
         // `tcp_shutdown failed: not a stream`. VM passes; only native exits 1.
