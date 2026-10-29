@@ -575,6 +575,9 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // around the closure body); no native C implementation needed.
     ("std.sqlz.transaction", "AOT-inlined; no native C impl"),
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
+    // Listener shutdown — VM-only, no C socket listener shutdown twin.
+    ("std.tls_listener.shutdown", "VM-only; no C listener shutdown twin"),
+    ("std.unix_listener.shutdown", "VM-only; no C listener shutdown twin"),
 ];
 
 #[test]
