@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use zz_type_::Type;
+use zz_types::Type;
 
 #[derive(Debug, Default, Clone)]
 pub struct Unifier {

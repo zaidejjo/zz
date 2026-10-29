@@ -5,7 +5,7 @@ use zz_diag_core::error_at;
 use zz_span_ast::ast::Ty;
 use zz_span_ast::span::Span;
 use zz_suggest::suggest;
-use zz_type_::Type;
+use zz_types::Type;
 
 impl Checker {
     /// Merge element types into a single type: identical types collapse to

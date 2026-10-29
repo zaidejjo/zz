@@ -3,7 +3,7 @@
 use crate::checker::Checker;
 use zz_diag_core::error_at;
 use zz_span_ast::span::Span;
-use zz_type_::Type;
+use zz_types::Type;
 use zz_unify::UnifyError;
 
 impl Checker {

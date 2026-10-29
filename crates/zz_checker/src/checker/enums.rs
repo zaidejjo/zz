@@ -16,7 +16,7 @@ use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;
 
 use super::Checker;
-use zz_type_::Type;
+use zz_types::Type;
 
 impl Checker {
     /// Canonical enum name, mirroring

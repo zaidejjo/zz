@@ -1,5 +1,5 @@
 [package]
-name = "zz_type_"
+name = "zz_types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

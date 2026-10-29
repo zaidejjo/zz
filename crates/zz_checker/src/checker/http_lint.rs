@@ -22,7 +22,7 @@ use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;
 
 use crate::checker::Checker;
-use zz_type_::Type;
+use zz_types::Type;
 
 /// One validated registration, kept for dup/shape checks.
 #[derive(Debug, Clone)]

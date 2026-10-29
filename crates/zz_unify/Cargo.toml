@@ -5,4 +5,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-zz_type_ = { path = "../zz_type_" }
+zz_types = { path = "../zz_types" }

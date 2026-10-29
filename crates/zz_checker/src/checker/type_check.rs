@@ -8,7 +8,7 @@ use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;
-use zz_type_::Type;
+use zz_types::Type;
 
 /// Cheap static sanity check over the literal SQL text: balanced
 /// single/double quotes and parens. Returns an error message when the

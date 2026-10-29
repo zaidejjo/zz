@@ -4,7 +4,7 @@ use crate::checker::Checker;
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_span_ast::ast::{Block, Expr, Stmt};
 use zz_span_ast::span::Span;
-use zz_type_::Type;
+use zz_types::Type;
 
 impl Checker {
     pub(crate) fn collect_func(&mut self, stmt: &Stmt) {
