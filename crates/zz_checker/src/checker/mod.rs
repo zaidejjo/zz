@@ -1199,7 +1199,7 @@ pub(crate) struct Checker {
     /// Native libraries requested via `@link`, in source order, deduped.
     pub(crate) link_libs: Vec<String>,
     /// `std.http` route registrations per server-var root (Phase 2.2 lint).
-    pub(crate) http_lint: http_lint::HttpLintState,
+    pub(crate) http_lint: zz_http_routes::HttpLintState,
     /// Enclosing-item scope stack for [`SpanKey`] recording. Holds the
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
@@ -1261,7 +1261,7 @@ impl Checker {
             span_types: std::collections::HashMap::new(),
             scope: Vec::new(),
             link_libs: Vec::new(),
-            http_lint: http_lint::HttpLintState::default(),
+            http_lint: zz_http_routes::HttpLintState::default(),
         }
     }
 

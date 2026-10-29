@@ -11,6 +11,7 @@ zz_types = { path = "../zz_types" }
 zz_unify = { path = "../zz_unify" }
 zz_diag_core = { path = "../zz_diag_core" }
 zz_suggest = { path = "../zz_suggest" }
+zz_http_routes = { path = "../zz_http_routes" }
 # S1 arena-scale: module check-cache serializes pub signatures.
 serde = { workspace = true }
 

@@ -2304,7 +2304,7 @@ impl Checker {
                 let method = name.clone();
                 // Phase 2.2: `std.http` route + param lint on typed receivers.
                 if matches!(self.unifier.resolve(&recv_t), Type::HttpServer)
-                    && crate::checker::http_lint::is_route_method(&method)
+                    && zz_http_routes::is_route_method(&method)
                 {
                     let root = match obj.as_ref() {
                         Expr::Ident { name, .. } => Some(name.clone()),
