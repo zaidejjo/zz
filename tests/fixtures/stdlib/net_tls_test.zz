@@ -1,4 +1,4 @@
-// features: bytes, closures, func-call, imports, int-arith, locals, match, option-result, print, std-chan, std-env, std-net, std-process, std-str, std-task, std-time, string-literal, string-ops
+// features: bytes, closures, func-call, imports, int-arith, known-divergence, locals, match, option-result, print, std-chan, std-env, std-net, std-process, std-str, std-task, std-time, string-literal, string-ops
 // tests/fixtures/stdlib/net_tls_test.zz — TLS client transport (Track T).
 // Loopback rustls server (p3 localhost cert) + client handshake matrix.
 // Ports derive from (pid, sweep task) so parallel runners never share them

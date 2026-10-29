@@ -3755,6 +3755,23 @@ name = "zz_arena"
 version = "0.4.0"
 
 [[package]]
+name = "zz_build"
+version = "0.4.0"
+dependencies = [
+ "toml",
+ "zz_checker",
+ "zz_codegen",
+ "zz_frontend",
+ "zz_hir",
+ "zz_ir",
+ "zz_loader",
+ "zz_plugin",
+ "zz_pm",
+ "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_checker"
 version = "0.4.0"
 dependencies = [
@@ -3806,16 +3823,22 @@ dependencies = [
  "tempfile",
  "toml",
  "ureq",
+ "zz_build",
  "zz_checker",
  "zz_codegen",
  "zz_fmt",
  "zz_frontend",
  "zz_hir",
  "zz_ir",
+ "zz_loader",
  "zz_plugin",
  "zz_pm",
+ "zz_repl",
+ "zz_run_cache",
  "zz_runtime",
+ "zz_session",
  "zz_stdlib",
+ "zz_test_runner",
 ]
 
 [[package]]
@@ -3937,6 +3960,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_loader"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "zz_checker",
+ "zz_frontend",
+ "zz_ir",
+ "zz_plugin",
+ "zz_pm",
+ "zz_run_cache",
+ "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_lsp"
 version = "0.4.0"
 dependencies = [
@@ -4028,6 +4068,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_repl"
+version = "0.4.0"
+dependencies = [
+ "dirs",
+ "nu-ansi-term",
+ "reedline",
+ "zz_frontend",
+ "zz_runtime",
+ "zz_session",
+ "zz_stdlib",
+]
+
+[[package]]
+name = "zz_run_cache"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zz_checker",
+ "zz_ir",
+ "zz_pm",
+ "zz_span_ast",
+]
+
+[[package]]
 name = "zz_runtime"
 version = "0.4.0"
 dependencies = [
@@ -4048,6 +4113,16 @@ dependencies = [
  "zz_structs",
  "zz_suggest",
  "zz_types",
+]
+
+[[package]]
+name = "zz_session"
+version = "0.4.0"
+dependencies = [
+ "zz_checker",
+ "zz_frontend",
+ "zz_runtime",
+ "zz_stdlib",
 ]
 
 [[package]]
@@ -4110,6 +4185,23 @@ dependencies = [
 [[package]]
 name = "zz_suggest"
 version = "0.4.0"
+
+[[package]]
+name = "zz_test_runner"
+version = "0.4.0"
+dependencies = [
+ "serde_json",
+ "toml",
+ "zz_build",
+ "zz_checker",
+ "zz_frontend",
+ "zz_hir",
+ "zz_loader",
+ "zz_plugin",
+ "zz_pm",
+ "zz_runtime",
+ "zz_stdlib",
+]
 
 [[package]]
 name = "zz_type_check"

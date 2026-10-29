@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
 
-pub(crate) struct Rewriter<'a> {
+pub struct Rewriter<'a> {
     pub(crate) ns: &'a str,
     pub(crate) top: &'a HashSet<String>,
     /// Top-level value bindings (`x := ...` at module scope). They are
@@ -13,7 +13,7 @@ pub(crate) struct Rewriter<'a> {
     /// Imported namespace heads (`ops` from `import ops`, `io` from
     /// `import std.str`, explicit aliases). Calls through them
     /// (`ops.resize(...)`) already resolve and must not be rewritten.
-    pub(crate) imports: HashSet<String>,
+    pub imports: HashSet<String>,
     /// Same-file alias heads mapped to their canonical namespace
     /// (`tkeys` → `keys` when one file is bound under both, #380).
     /// References through an alias head rewrite to the canonical
@@ -31,11 +31,7 @@ pub(crate) struct Rewriter<'a> {
 }
 
 impl<'a> Rewriter<'a> {
-    pub(crate) fn new(
-        ns: &'a str,
-        top: &'a HashSet<String>,
-        top_bindings: &'a HashSet<String>,
-    ) -> Self {
+    pub fn new(ns: &'a str, top: &'a HashSet<String>, top_bindings: &'a HashSet<String>) -> Self {
         Rewriter {
             ns,
             top,
@@ -61,11 +57,11 @@ impl<'a> Rewriter<'a> {
         self.ns_aliases.get(head).map(String::as_str)
     }
 
-    pub(crate) fn push_scope(&mut self) {
+    pub fn push_scope(&mut self) {
         self.scopes.push(HashSet::new());
     }
 
-    pub(crate) fn pop_scope(&mut self) {
+    pub fn pop_scope(&mut self) {
         self.scopes.pop();
     }
 
@@ -251,7 +247,7 @@ impl<'a> Rewriter<'a> {
         }
     }
 
-    pub(crate) fn rewrite_block(&mut self, block: &mut Block) {
+    pub fn rewrite_block(&mut self, block: &mut Block) {
         self.push_scope();
         for stmt in &mut block.stmts {
             self.rewrite_stmt(stmt);

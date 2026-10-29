@@ -1,0 +1,18 @@
+[package]
+name = "zz_loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zz_checker = { path = "../zz_checker" }
+zz_frontend = { path = "../zz_frontend" }
+zz_ir = { path = "../zz_ir" }
+zz_pm = { path = "../zz_pm" }
+zz_plugin = { path = "../zz_plugin" }
+zz_runtime = { path = "../zz_runtime" }
+zz_stdlib = { path = "../zz_stdlib" }
+zz_run_cache = { path = "../zz_run_cache" }
+sha2 = "0.10"
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"

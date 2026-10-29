@@ -560,7 +560,7 @@ fn pascal_case(name: &str) -> String {
 pub fn clean(args: &[String]) -> Result<(), String> {
     let with_deps = args.iter().any(|a| a == "--deps");
     let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
-    let dir = crate::loader::find_project_root(&cwd).unwrap_or(cwd);
+    let dir = zz_loader::find_project_root(&cwd).unwrap_or(cwd);
     clean_in(&dir, with_deps)?;
     print_global_cache_hint();
     Ok(())
@@ -1235,11 +1235,11 @@ pub fn install(args: &[String]) -> Result<(), String> {
     // failures and gate violations fail the install; allowed legacy
     // hooks warn per-dependency inside the builder.
     crate::ui::step(4, 4, "Building native extensions");
-    let build_opts = crate::build::NativeBuildOpts {
+    let build_opts = zz_build::NativeBuildOpts {
         allow_source_builds: args.iter().any(|a| a == "--allow-source-builds"),
         allow_hooks: args.iter().any(|a| a == "--allow-hooks"),
     };
-    let built = crate::build::build_native_deps(&dir.join("zz.toml"), build_opts)?;
+    let built = zz_build::build_native_deps(&dir.join("zz.toml"), build_opts)?;
     if !built.audits.is_empty() {
         for (name, rec) in built.audits {
             if let Some(dep) = lock.deps.iter_mut().find(|d| d.name == name) {
@@ -1461,10 +1461,10 @@ fn build_and_install_bin(
     // The clang link can run for minutes silently — spin with elapsed
     // time so a big tool build never looks frozen.
     let spinner = crate::ui::Spinner::start("Compiling release");
-    let built = match crate::build::build_release(
+    let built = match zz_build::build_release(
         entry,
-        crate::build::BuildMode::Release,
-        &crate::build::ReleaseOptions::default(),
+        zz_build::BuildMode::Release,
+        &zz_build::ReleaseOptions::default(),
     ) {
         Ok(built) => {
             let size = std::fs::metadata(&built).map(|m| m.len()).unwrap_or(0);
@@ -2180,7 +2180,7 @@ pub fn generate_wrapper(args: &[String]) -> Result<(), String> {
         let sig = &plugin.funcs[name];
         let leaf = name.rsplit('.').next().unwrap_or(name);
         let alias = sig.c_symbol(name);
-        if !crate::loader::is_zz_ident(&alias) {
+        if !zz_loader::is_zz_ident(&alias) {
             out.push_str(&format!(
                 "// skipped `{name}`: no callable C-symbol spelling\n"
             ));

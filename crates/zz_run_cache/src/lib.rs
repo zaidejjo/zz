@@ -22,6 +22,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use zz_pm::paths;
+
 /// Cache format version: bump when `meta.json` or the module layout changes.
 /// Old entries are never read (safe: cold rebuild once, aged out via LRU).
 /// v2 adds scoped-stdlib metadata (imported modules + selective/wildcard
@@ -51,11 +53,14 @@ pub struct RunMeta {
     pub stdlib_modules: Vec<String>,
     /// Selective imports replayed for bare-name natives on hits.
     #[serde(default)]
-    pub stdlib_selectives: crate::loader::StdlibSelectives,
+    pub stdlib_selectives: StdlibSelectives,
     /// Wildcard imports replayed for bare-name natives on hits.
     #[serde(default)]
     pub stdlib_wildcards: Vec<String>,
 }
+
+/// Selective-import float constants (`pi` etc.), bare name → value.
+pub type StdlibSelectives = Vec<(String, Vec<(String, Option<String>)>)>;
 
 /// A cache hit: raw IR bytes per module (execution order) plus meta.
 /// Bytes are unverified here — the caller decodes/verifies/raises, and
@@ -79,7 +84,71 @@ fn verbose() -> bool {
 /// `<build-cache>/run-v1` (honors `ZZ_HOME` via `build_cache_dir`;
 /// `zz cache clean` clears the parent, so no separate gc path needed).
 pub fn run_cache_dir() -> PathBuf {
-    crate::build::cache_dir().join(format!("run-{CACHE_VERSION}"))
+    paths::build_cache_dir().join(format!("run-{CACHE_VERSION}"))
+}
+
+/// Content signature of an `--embed` tree for cache invalidation
+/// (names + sizes + mtimes + a byte hash — asset edits must rebuild).
+pub fn embed_sig(dir: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match collect_embed(dir) {
+        Err(_) => "embed-err".hash(&mut h),
+        Ok(files) => {
+            files.len().hash(&mut h);
+            for (name, bytes) in &files {
+                name.hash(&mut h);
+                bytes.hash(&mut h);
+            }
+        }
+    }
+    format!("{:016x}", h.finish())
+}
+
+/// Recursively collect all files under `dir` as `(relative_path, bytes)`,
+/// sorted, skipping symlinks. Capped at 256 MiB total.
+fn collect_embed(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    const MAX_TOTAL: u64 = 256 * 1024 * 1024;
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut total: u64 = 0;
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        let rd = std::fs::read_dir(&cur)
+            .map_err(|e| format!("cannot read --embed dir {}: {e}", cur.display()))?;
+        let mut entries: Vec<PathBuf> = Vec::new();
+        for e in rd {
+            let e = e.map_err(|e| format!("cannot list --embed dir: {e}"))?;
+            entries.push(e.path());
+        }
+        entries.sort();
+        for p in entries {
+            let ft = std::fs::symlink_metadata(&p)
+                .map_err(|e| format!("cannot stat {}: {e}", p.display()))?;
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let rel = p
+                .strip_prefix(dir)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+            let bytes =
+                std::fs::read(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+            total += bytes.len() as u64;
+            if total > MAX_TOTAL {
+                return Err(format!(
+                    "--embed tree exceeds {} MiB",
+                    MAX_TOTAL / 1024 / 1024
+                ));
+            }
+            out.push((rel, bytes));
+        }
+    }
+    out.sort_by_key(|(name, _)| name.clone());
+    Ok(out)
 }
 
 /// Toolchain fingerprint for the VM run key: CLI version + IR format
@@ -143,7 +212,7 @@ pub fn run_key_with_features(
     }
     let mut key = zz_pm::cache_key::CacheKey::compute(entry, &src, fp, Some("vm-run"), None)?;
     if let Some(dir) = embed {
-        key.artifact_hash = crate::build::embed_sig(dir);
+        key.artifact_hash = embed_sig(dir);
     }
     fp_store(entry, &key);
     Ok(key.to_slug())
@@ -355,7 +424,7 @@ fn fp_lookup(
     };
     let mut key = key;
     if let Some(dir) = embed {
-        key.artifact_hash = crate::build::embed_sig(dir);
+        key.artifact_hash = embed_sig(dir);
     }
     Ok(Some(key.to_slug()))
 }
@@ -543,7 +612,7 @@ fn touch(dir: &Path) {
     let _ = std::fs::remove_file(&lock);
 }
 
-pub(crate) fn log_hit(slug: &str) {
+pub fn log_hit(slug: &str) {
     if verbose() {
         eprintln!("zz: run cache hit {}", &slug[..8.min(slug.len())]);
     }
@@ -553,7 +622,7 @@ pub(crate) fn log_hit(slug: &str) {
 /// `zz: t=<ms since last stage> <label>` under `ZZ_VERBOSE=1` only;
 /// zero overhead otherwise (one `Instant::now` per stage). Permanent:
 /// startup regressions show up here first.
-pub(crate) struct StageTimer {
+pub struct StageTimer {
     last: std::time::Instant,
     active: bool,
 }
@@ -579,7 +648,7 @@ impl StageTimer {
     }
 }
 
-pub(crate) fn log_miss(slug: &str) {
+pub fn log_miss(slug: &str) {
     if verbose() {
         eprintln!("zz: run cache miss {}", &slug[..8.min(slug.len())]);
     }

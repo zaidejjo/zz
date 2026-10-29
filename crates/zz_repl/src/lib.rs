@@ -25,7 +25,7 @@ use reedline::{
 use zz_frontend::lexer::lex;
 use zz_frontend::token::TokenKind;
 
-use crate::session::Session;
+use zz_session::Session;
 
 // ---------------------------------------------------------------------------
 // Static data
@@ -63,6 +63,7 @@ const HISTORY_MAX: usize = 10_000;
 // ZZCompleter — context-aware autocompletion
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::new_without_default)]
 pub struct ZZCompleter {
     keywords: Vec<String>,
     builtins: Vec<String>,
@@ -72,6 +73,7 @@ pub struct ZZCompleter {
     module_members: HashMap<String, Vec<String>>,
 }
 
+#[allow(clippy::new_without_default)]
 impl ZZCompleter {
     pub fn new() -> Self {
         Self {
@@ -580,10 +582,12 @@ impl Validator for ZZValidator {
 // ZZPrompt — custom two-line prompt
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::new_without_default)]
 pub struct ZZPrompt {
     had_error: bool,
 }
 
+#[allow(clippy::new_without_default)]
 impl ZZPrompt {
     pub fn new() -> Self {
         Self { had_error: false }
@@ -784,7 +788,7 @@ fn needs_more_input_simple(src: &str) -> bool {
     )
 }
 
-fn display_eval_result(result: &crate::session::EvalOutput, prompt: &mut ZZPrompt) {
+fn display_eval_result(result: &zz_session::EvalOutput, prompt: &mut ZZPrompt) {
     if let Some(errs) = &result.errors {
         eprintln!("{errs}");
         prompt.set_error(true);
@@ -797,7 +801,7 @@ fn display_eval_result(result: &crate::session::EvalOutput, prompt: &mut ZZPromp
 }
 
 fn display_eval_result_with_timing(
-    result: &crate::session::EvalOutput,
+    result: &zz_session::EvalOutput,
     elapsed: std::time::Duration,
     prompt: &mut ZZPrompt,
 ) {

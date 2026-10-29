@@ -1,0 +1,14 @@
+[package]
+name = "zz_repl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zz_frontend = { path = "../zz_frontend" }
+zz_runtime = { path = "../zz_runtime" }
+zz_session = { path = "../zz_session" }
+zz_stdlib = { path = "../zz_stdlib" }
+reedline = "0.51"
+nu-ansi-term = "0.50"
+dirs = "6"

@@ -23,10 +23,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use zz_codegen::{BuildOptions, ClangProvider};
 use zz_frontend::span::Span;
 use zz_hir::TypedProgram;
+use zz_loader::{
+    find_project_root, load_program_with_features, load_program_with_plugins_and_features,
+};
 use zz_plugin::load_manifest;
 use zz_pm::manifest::FeatureSelection;
-
-use crate::loader;
 
 /// Build mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,7 +379,7 @@ fn canonical_project_root(project_path: &Path) -> Option<PathBuf> {
 
 /// Resolve a locked dependency to its package directory, canonicalized
 /// (same `..` rationale as [`canonical_project_root`]).
-pub(crate) fn resolve_pkg_dir(
+pub fn resolve_pkg_dir(
     project_root: &Path,
     dep: &zz_pm::lock::LockedDep,
     manifest: Option<&zz_pm::manifest::Manifest>,
@@ -411,7 +412,7 @@ pub(crate) fn resolve_pkg_dir(
 /// dependency's package directory (CAS for git deps, `vendor/<name>/` for path
 /// deps), and loads any `plugin.zzi` file found. Returns a flat list of
 /// `(function_name, FuncSig)` pairs ready to merge into the checker.
-pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::FuncSig)> {
+pub fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_checker::FuncSig)> {
     let mut plugin_funcs = Vec::new();
 
     let Some(project_root) = canonical_project_root(project_path) else {
@@ -456,7 +457,7 @@ pub(crate) fn discover_plugin_manifests(project_path: &Path) -> Vec<(String, zz_
 
 /// Gates for native builds (CLI flags).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct NativeBuildOpts {
+pub struct NativeBuildOpts {
     /// `--allow-source-builds`: compile transitive `[native]` deps from
     /// source when no prebuilt covers the host tag.
     pub allow_source_builds: bool,
@@ -478,7 +479,7 @@ impl NativeBuildOpts {
 
 /// Output of [`build_native_deps`]: link inputs plus per-dep audit
 /// records for `zz.lock`.
-pub(crate) struct NativeBuild {
+pub struct NativeBuild {
     pub artifacts: Vec<PathBuf>,
     pub link_args: Vec<String>,
     pub audits: Vec<(String, zz_pm::lock::LockedNative)>,
@@ -488,7 +489,7 @@ pub(crate) struct NativeBuild {
 ///
 /// `zz run` calls this post-link (permissive: warn-only) so VM dlopen
 /// works without a prior `zz build`.
-pub(crate) fn ensure_native_hooks(project_root: &Path) {
+pub fn ensure_native_hooks(project_root: &Path) {
     // Build_native_deps walks up from its argument's parent looking for
     // zz.lock — anchor inside the canonical root.
     let project_root =
@@ -514,7 +515,7 @@ pub(crate) fn ensure_native_hooks(project_root: &Path) {
 /// - `hook` on transitive deps always errors. On direct deps it errors
 ///   unless `allow_hooks`, and warns on every allowed use. Allowed hook
 ///   failures keep the historical warn-and-continue behavior.
-pub(crate) fn build_native_deps(
+pub fn build_native_deps(
     project_path: &Path,
     opts: NativeBuildOpts,
 ) -> Result<NativeBuild, String> {
@@ -974,9 +975,9 @@ fn typed_program_for(
     // function signatures into the checker's function table.
     let plugin_funcs = discover_plugin_manifests(path);
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program_with_features(path, features)?
+        load_program_with_features(path, features)?
     } else {
-        loader::load_program_with_plugins_and_features(path, &plugin_funcs, features)?
+        load_program_with_plugins_and_features(path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -1057,9 +1058,9 @@ fn chunk_module_for(
         .unwrap_or_default();
     let plugin_funcs = discover_plugin_manifests(path);
     let loaded = if plugin_funcs.is_empty() {
-        loader::load_program_with_features(path, features)?
+        load_program_with_features(path, features)?
     } else {
-        loader::load_program_with_plugins_and_features(path, &plugin_funcs, features)?
+        load_program_with_plugins_and_features(path, &plugin_funcs, features)?
     };
     let mut has_errors = false;
     for e in &loaded.errors {
@@ -1163,7 +1164,7 @@ fn chunk_module_for(
 /// directory), otherwise the current working directory (standalone builds
 /// place `./<stem>` next to the invocation, never `./bin/`).
 pub fn output_dir_for(src: &Path) -> PathBuf {
-    if let Some(root) = crate::loader::find_project_root(src) {
+    if let Some(root) = find_project_root(src) {
         return root.join("bin");
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -1232,7 +1233,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// fallback). Never reads CWD: only the source path and its owning
 /// project matter.
 pub fn default_stem_for(src: &Path) -> String {
-    if let Some(root) = crate::loader::find_project_root(src) {
+    if let Some(root) = find_project_root(src) {
         let entry = resolve_entry(&root)
             .ok()
             .unwrap_or_else(|| project_entry(&root));
@@ -1360,7 +1361,7 @@ pub fn build_release(
     // projects get this from `init`/`new`). Append-only, idempotent,
     // silent; failures (read-only checkouts) never fail the build.
     // Standalone builds leave the invocation dir alone.
-    if let Some(root) = crate::loader::find_project_root(path) {
+    if let Some(root) = find_project_root(path) {
         let _ = zz_pm::manifest::Manifest::ensure_gitignore(&root);
     }
     let mut opts = opts_for(mode);
@@ -1805,11 +1806,12 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        if let Some(sig) = status.signal() {
-            return Err(format!(
+        match status.signal() {
+            Some(sig) => Err(format!(
                 "native program killed by signal {sig} ({})",
                 signal_name(sig)
-            ));
+            )),
+            None => Err("native process terminated abnormally (no exit code)".to_string()),
         }
     }
     #[cfg(windows)]
@@ -1822,7 +1824,6 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
             "native process terminated abnormally (no exit code reported)"
         ));
     }
-    Ok(-1)
 }
 
 /// Short name for a Unix signal number (common cases; else "unknown").
@@ -1847,6 +1848,7 @@ fn signal_name(sig: i32) -> &'static str {
 /// Short name for a Windows termination status code (common cases;
 /// else the raw hex value).
 #[cfg(windows)]
+#[allow(dead_code)]
 fn windows_status_name(code: u32) -> &'static str {
     match code {
         0xC0000005 => "STATUS_ACCESS_VIOLATION (segfault)",

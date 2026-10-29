@@ -31,8 +31,8 @@ use zz_stdlib::{
     stdlib_funcs, stdlib_natives, STDLIB_MODULES,
 };
 
-pub(crate) mod cache;
-pub(crate) mod rewrite;
+pub mod cache;
+pub mod rewrite;
 
 #[cfg(test)]
 mod tests;
@@ -50,7 +50,7 @@ pub struct LoadError {
 /// A selective stdlib import replayed for bare-name natives on scoped
 /// runs: (module, [(name, alias)]). Alias for the nested vec (clippy
 /// `type_complexity` would otherwise fire at every use site).
-pub type StdlibSelectives = Vec<(String, Vec<(String, Option<String>)>)>;
+pub use zz_run_cache::StdlibSelectives;
 
 /// A fully loaded program: all modules in dependency order (imports first,
 /// the entry file last), plus the accumulated checker seed.
@@ -414,7 +414,7 @@ pub fn validate_feature_selection(
 
 /// Walk up from `start` (a file or directory) to the project root —
 /// the nearest ancestor (or self) holding `zz.toml`.
-pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
+pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     // Canonicalize so relative starts (e.g. `src/main.zz` with cwd at
     // the project root) walk up through real ancestors. Both the
     // canonicalization and the walk memoize process-wide (#233): every
@@ -899,7 +899,7 @@ fn resolve_module_key(
 /// True when `name` is usable as a ZZ identifier (and hence a C
 /// symbol): leading letter/underscore, then alphanumerics/underscores.
 /// Mirrors the codegen-side `c_ident_valid` for the alias gate.
-pub(crate) fn is_zz_ident(name: &str) -> bool {
+pub fn is_zz_ident(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}

@@ -27,14 +27,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use zz_build::{build_release, discover_plugin_manifests, BuildMode, ReleaseOptions};
+use zz_checker::FuncSig;
 use zz_frontend::ast::Stmt;
 use zz_frontend::diag::{render_to_string, Files};
 use zz_frontend::doctest;
 use zz_frontend::span::Span;
 use zz_frontend::test_attr::{self, TestMeta};
-use zz_runtime::{Interp, Value};
-
-use crate::loader;
+use zz_loader::rewrite::Rewriter;
+use zz_loader::{find_project_root, load_program, LoadResult};
+use zz_plugin::{load_c_plugin, load_manifest, load_plugin, LoadError, PluginLib};
+use zz_pm::lock::Lockfile;
+use zz_pm::manifest::Manifest;
+use zz_runtime::{Interp, NativeEntry, Value};
 
 /// Per-test time budget: overruns fail the test unless `--soft-timeout`
 /// restores notice-only mode. Configurable via `--timeout <ms>`.
@@ -635,7 +640,7 @@ pub fn test_command(args: &[String]) -> Result<(), String> {
 
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     for root in &config.paths {
-        crate::enforce_project_zz(std::path::Path::new(root))?;
+        enforce_project_zz(std::path::Path::new(root))?;
     }
 
     let mut files: Vec<PathBuf> = Vec::new();
@@ -1172,7 +1177,7 @@ fn parse_git_output(stdout: &[u8]) -> Result<Vec<PathBuf>, String> {
 // ---------------------------------------------------------------------------
 
 fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
-    let mut loaded = loader::load_program(path)?;
+    let mut loaded = load_program(path)?;
 
     let mut errors = false;
     for e in &loaded.errors {
@@ -1366,7 +1371,7 @@ fn doctest_rewrite_context(
 /// Returns func-name → display-name for grafted tests. Hard errors
 /// (bad fence, unparseable body) fail the file like load errors.
 fn graft_doctests(
-    loaded: &mut loader::LoadResult,
+    loaded: &mut LoadResult,
     path: &Path,
 ) -> Result<std::collections::HashMap<String, (String, bool)>, String> {
     use zz_frontend::ast::{Block, Decorator, Expr, Ident};
@@ -1523,7 +1528,7 @@ fn graft_doctests(
             // become qualified paths (locals shadow correctly — the real
             // rewriter tracks scopes). Script-mode modules skip this.
             if let Some(ns) = ns_opt.as_deref() {
-                let mut rw = crate::loader::rewrite::Rewriter::new(ns, &top, &top_bindings);
+                let mut rw = Rewriter::new(ns, &top, &top_bindings);
                 rw.imports = imports.clone();
                 rw.push_scope();
                 if let Stmt::Func { body, .. } = &mut func {
@@ -2147,7 +2152,7 @@ fn run_test_isolated(test: &TestInfo) -> Result<(), String> {
 /// calls themselves. With `cover`, the recorder is enabled and every user
 /// module is labeled from `loaded.files` (stdlib runs stay unlabeled).
 fn setup_test_interp(test: &TestInfo, cover: bool) -> Result<(Interp, Value, Vec<Value>), String> {
-    let mut loaded = loader::load_program(&test.file)?;
+    let mut loaded = load_program(&test.file)?;
 
     // Same doctest graft as discovery (deterministic): without it the
     // synthetic `__zz_doctest_*` functions would not exist at execution.
@@ -2162,14 +2167,14 @@ fn setup_test_interp(test: &TestInfo, cover: bool) -> Result<(Interp, Value, Vec
     // at runtime with "undefined variable").
     let mut natives = loaded.natives.clone();
     {
-        let project_root = loader::find_project_root(&test.file).unwrap_or_else(|| {
+        let project_root = find_project_root(&test.file).unwrap_or_else(|| {
             test.file
                 .parent()
                 .unwrap_or(std::path::Path::new("."))
                 .to_path_buf()
         });
-        let plugin_funcs = crate::build::discover_plugin_manifests(&test.file);
-        crate::load_vm_plugins(&project_root, &mut natives, &plugin_funcs).map(|_| ())?;
+        let plugin_funcs = discover_plugin_manifests(&test.file);
+        load_vm_plugins(&project_root, &mut natives, &plugin_funcs).map(|_| ())?;
     }
 
     let merged_stmts: Vec<_> = loaded
@@ -2326,15 +2331,13 @@ pub(crate) fn run_test_covered(
 /// all states. Ignored tests are skipped like the runner skips them.
 /// Returns the merged state plus the failing test names (empty = all
 /// passed); failures still contribute their partial coverage.
-pub(crate) fn cover_tests(
-    root: Option<&str>,
-) -> Result<(zz_runtime::CoverageState, Vec<String>), String> {
+pub fn cover_tests(root: Option<&str>) -> Result<(zz_runtime::CoverageState, Vec<String>), String> {
     let roots = match root {
         Some(r) => vec![r.to_string()],
         None => vec![default_test_path()],
     };
     for r in &roots {
-        crate::enforce_project_zz(std::path::Path::new(r))?;
+        enforce_project_zz(std::path::Path::new(r))?;
     }
     let mut files: Vec<PathBuf> = Vec::new();
     for r in &roots {
@@ -2692,16 +2695,16 @@ fn build_aot_harness(
         .map_err(|e| format!("cannot write AOT harness `{}`: {e}", harness_path.display()))?;
 
     let mode = if config.native_release {
-        crate::build::BuildMode::Release
+        BuildMode::Release
     } else {
-        crate::build::BuildMode::Dev
+        BuildMode::Dev
     };
-    let rel = crate::build::ReleaseOptions {
+    let rel = ReleaseOptions {
         allow_source_builds: config.allow_source_builds,
         allow_hooks: config.allow_hooks,
         ..Default::default()
     };
-    let bin = match crate::build::build_release(&harness_path, mode, &rel) {
+    let bin = match build_release(&harness_path, mode, &rel) {
         Ok(b) => b,
         Err(e) => {
             let _ = std::fs::remove_file(&harness_path);
@@ -3486,6 +3489,192 @@ fn collect_zz_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
 // ---------------------------------------------------------------------------
 
 use std::io::IsTerminal;
+
+// Loaded plugin libraries, kept alive for the process lifetime.
+// Dropping a `PluginLib` unloads its `.so`, unmapping every registered
+// function pointer — so handles are never released once loaded.
+// Capped at `MAX_PLUGIN_LIBS` so a single-process test suite cannot grow
+// RSS without bound.
+static PLUGIN_LIBS: std::sync::OnceLock<std::sync::Mutex<Vec<PluginLib>>> =
+    std::sync::OnceLock::new();
+
+/// Cap on retained plugin handles; oldest are dropped when full.
+const MAX_PLUGIN_LIBS: usize = 64;
+
+/// Retain a loaded plugin library for the rest of the process.
+pub fn keep_plugin_alive(handle: PluginLib) {
+    let mut g = PLUGIN_LIBS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .expect("plugin registry lock");
+    if g.len() >= MAX_PLUGIN_LIBS {
+        g.remove(0);
+    }
+    g.push(handle);
+}
+
+/// Check `zz.toml` compiler version requirement for the project at `start`.
+pub fn enforce_project_zz(start: &Path) -> Result<(), String> {
+    let Some(root) = find_project_root(start) else {
+        return Ok(());
+    };
+    let manifest_path = root.join("zz.toml");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let Ok(manifest) = Manifest::load(&manifest_path) else {
+        return Ok(()); // unloadable: the normal flow reports it better
+    };
+    manifest.check_zz_version(env!("CARGO_PKG_VERSION"))
+}
+
+/// Load VM plugins from the project's lockfile.
+#[cfg(unix)]
+pub fn load_vm_plugins(
+    project_dir: &Path,
+    natives: &mut std::collections::HashMap<String, NativeEntry>,
+    plugin_funcs: &[(String, FuncSig)],
+) -> Result<usize, String> {
+    // Canonicalize: callers pass roots derived from relative script paths
+    // (possibly empty = CWD); every join below must be unambiguous.
+    let project_dir =
+        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+
+    let lock_path = project_dir.join("zz.lock");
+    let lock = match Lockfile::load(&lock_path) {
+        Ok(l) => l,
+        Err(_) => return Ok(0), // no lock file, no plugins
+    };
+
+    // Load manifest to resolve path deps
+    let manifest_path = project_dir.join("zz.toml");
+    let manifest = Manifest::load(&manifest_path).ok();
+
+    let mut loaded_count = 0;
+    for dep in &lock.deps {
+        // Resolve package directory (canonicalized: a relative dep path
+        // must never leak `..` into hook/dlsym paths downstream).
+        let Some(pkg_dir) = zz_build::resolve_pkg_dir(&project_dir, dep, manifest.as_ref()) else {
+            continue;
+        };
+
+        // Only load plugins that have a plugin.zzi manifest
+        let zzi_path = pkg_dir.join("plugin.zzi");
+        if !zzi_path.exists() {
+            continue;
+        }
+
+        // C-only plugins (`// C-ABI: 1` header) resolve symbols directly
+        // with dlsym — no Rust shim. Their manifest functions register in
+        // the runtime C-ABI registry under ZZ-visible names.
+        let c_funcs: Option<std::collections::HashMap<String, FuncSig>> =
+            match load_manifest(&zzi_path) {
+                Ok(manifest) if manifest.meta.c_abi.is_some() => Some(manifest.funcs),
+                _ => None,
+            };
+
+        // Look for shared library in build/ directory
+        let build_dir = pkg_dir.join("build");
+        if !build_dir.exists() {
+            continue;
+        }
+
+        // Try the platform's canonical shared-library names, then any
+        // `.so`/`.dylib`/`.dll` the build hook actually produced.
+        let mut lib_paths: Vec<PathBuf> = Vec::new();
+        let base = dep.name.replace('-', "_");
+        let lib_names = [
+            format!(
+                "{}{base}{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ),
+            format!("{base}{}", std::env::consts::DLL_SUFFIX),
+        ];
+
+        for lib_name in &lib_names {
+            let lib_path = build_dir.join(lib_name);
+            if lib_path.exists() && !lib_paths.contains(&lib_path) {
+                lib_paths.push(lib_path);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&build_dir) {
+            let is_shared_lib = |p: &Path| {
+                matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some(ext) if ext == "so" || ext == "dylib" || ext == "dll"
+                )
+            };
+            let mut scanned: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| is_shared_lib(p) && !lib_paths.contains(p))
+                .collect();
+            scanned.sort();
+            lib_paths.extend(scanned);
+        }
+
+        for lib_path in &lib_paths {
+            let loaded: Result<(), String> = match &c_funcs {
+                Some(funcs) => match load_c_plugin(lib_path, funcs) {
+                    Ok(handle) => {
+                        keep_plugin_alive(handle);
+                        Ok(())
+                    }
+                    Err(LoadError::MissingSymbol { symbol, .. })
+                        if symbol == "ZZ_C_PLUGIN_ABI_VERSION" =>
+                    {
+                        continue;
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+                None => load_plugin(lib_path, natives)
+                    .map(|handle| {
+                        // The handle MUST stay alive (see keep_plugin_alive).
+                        keep_plugin_alive(handle);
+                    })
+                    .map_err(|e| e.to_string()),
+            };
+            match loaded {
+                Ok(()) => {
+                    if std::env::var("ZZ_VERBOSE").is_ok() {
+                        eprintln!("zz: loaded plugin `{}`", dep.name);
+                    }
+                    loaded_count += 1;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("zz: warning: failed to load plugin `{}`: {e}", dep.name);
+                }
+            }
+        }
+    }
+
+    // Alias C-symbol registrations to ZZ-visible dotted names so VM
+    // dispatch resolves exactly what AOT lowering calls.
+    for (zz_name, sig) in plugin_funcs {
+        if natives.contains_key(zz_name) {
+            continue;
+        }
+        let c_sym = sig.c_symbol(zz_name);
+        if let Some(entry) = natives.get(&c_sym).cloned() {
+            natives.insert(zz_name.clone(), entry);
+        }
+    }
+
+    Ok(loaded_count)
+}
+
+/// Non-Unix stub for VM plugin loading.
+#[cfg(not(unix))]
+pub fn load_vm_plugins(
+    _project_dir: &Path,
+    _natives: &mut std::collections::HashMap<String, NativeEntry>,
+    _plugin_funcs: &[(String, FuncSig)],
+) -> Result<usize, String> {
+    // dlopen not supported on this platform yet
+    Ok(0)
+}
 
 #[cfg(test)]
 mod tests {
