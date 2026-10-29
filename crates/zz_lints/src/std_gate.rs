@@ -9,9 +9,9 @@
 
 use std::collections::HashSet;
 
-use zz_frontend::ast::{Block, Expr, FmtPart, Program, Stmt, Ty, TyKind};
-use zz_frontend::diag::RawDiag;
-use zz_frontend::span::Span;
+use zz_diag_core::RawDiag;
+use zz_span_ast::ast::{Block, Expr, FmtPart, Program, Stmt, Ty, TyKind};
+use zz_span_ast::span::Span;
 
 /// Collect `std.*` import paths declared by the module: the full dotted
 /// path (`import std.sqlz.postgres` → `[std, sqlz, postgres]`), whatever
@@ -61,7 +61,7 @@ impl Lint {
             .map(|s| s.join("."))
             .unwrap_or_else(|| "std".to_string());
         self.diags.push(
-            zz_frontend::diag::error_at(format!("`{joined}` requires `import {module}`"), span)
+            zz_diag_core::error_at(format!("`{joined}` requires `import {module}`"), span)
                 .with_note(format!(
                     "add `import {module}` at the top of the file to use `{joined}`"
                 )),
@@ -357,7 +357,7 @@ impl Lint {
 /// the matching import (#227). No-op when `module_ns` is empty (stdlib
 /// internals, REPL, merged programs). Returns diagnostics to merge into
 /// the check result.
-pub(crate) fn lint_std_imports(program: &Program, module_ns: &str) -> Vec<RawDiag> {
+pub fn lint_std_imports(program: &Program, module_ns: &str) -> Vec<RawDiag> {
     if module_ns.is_empty() {
         return Vec::new();
     }

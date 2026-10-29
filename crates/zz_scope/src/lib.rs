@@ -1,19 +1,96 @@
 //! Scope management and variable lookup.
 
-use crate::checker::{Checker, DefinedBinding};
-use crate::type_::Type;
-use zz_frontend::diag::{error_at, warning_at, FixIt};
-use zz_frontend::levenshtein::{suggest_all, suggest_dotted};
-use zz_frontend::span::Span;
+use zz_checker_core::{Checker, DefinedBinding};
+use zz_diag_core::{error_at, warning_at, FixIt};
+use zz_span_ast::span::Span;
+use zz_structs::StructOps;
+use zz_suggest::{suggest_all, suggest_dotted};
+use zz_types::Type;
 
 // Import suggestions and canonical resolution derive from the single
 // `super::STD_MODULES` source (see `is_std_module_head`) — no parallel
 // list to drift.
 
-impl Checker {
+pub trait ScopeOps {
+    fn push_scope(&mut self);
+
+    /// Strip the module prefix from a name for display.
+    /// `"diag-typo.area"` → `"area"`, `"area"` → `"area"`.
+    fn display_name(name: &str) -> &str;
+
+    /// True when `name` spells a `std.math` numeric constant:
+    /// `std.math.PI`, `math.PI` (via `import std.math`), or bare `PI`
+    /// (via `import std.math(PI)` / `import std.math(*)`).
+    ///
+    /// Constants are true `Float` values, not zero-arg functions. Call sites
+    /// additionally require the name to be present in `funcs` so import
+    /// gating still applies (using `math.PI` without the import stays an
+    /// "undefined variable" error).
+    fn is_math_const(&self, name: &str) -> bool;
+
+    fn pop_scope(&mut self);
+
+    /// Emit `unused variable` warnings for one scope's recorded bindings,
+    /// in the caller-provided (source) order. Bindings marked
+    /// `warn_unused: false` (closure parameters) are skipped: their
+    /// position comes from the callee's signature, so there is nothing
+    /// the author could remove.
+    fn emit_unused_binding_warnings(
+        &mut self,
+        scope_index: usize,
+        entries: &[(String, DefinedBinding)],
+    );
+
+    fn define(&mut self, name: &str, ty: Type);
+
+    fn define_at(&mut self, name: &str, ty: Type, span: Span);
+
+    /// Define a binding, recording whether its unused-ness is worth
+    /// warning about. Closure parameters pass `warn_unused: false`: the
+    /// callee dictates the closure's arity, so a parameter cannot be
+    /// removed and `_name` would only hide what the API signature says.
+    fn define_binding_at(&mut self, name: &str, ty: Type, span: Span, warn_unused: bool);
+
+    /// Define a variable, recording its immutability when `is_const`.
+    fn define_var_at(&mut self, name: &str, ty: Type, span: Span, is_const: bool);
+
+    /// Define an immutable (`const`) variable, remembering its declaration
+    /// span so reassignment errors can point back at it.
+    fn define_const_at(&mut self, name: &str, ty: Type, span: Span);
+
+    /// If `name` resolves to a `const` binding, return its declaration span.
+    /// Shadowing-aware: only the scope that actually binds the name is
+    /// consulted, so an inner mutable shadow of an outer const is mutable.
+    fn lookup_const_span(&mut self, name: &str) -> Option<Span>;
+
+    /// Emit unused-variable warnings for the global scope (scope index 0).
+    /// The global scope is never popped, so `pop_scope`'s check does not
+    /// fire for top-level definitions. Also emits unused-import warnings.
+    fn emit_global_unused_warnings(&mut self);
+
+    fn lookup(&mut self, name: &str, span: Span) -> Type;
+
+    /// Start observing `name` while its `:=` initializer is checked (#518).
+    /// Returns the marker for [`Checker::finish_shadow_probes`].
+    fn begin_shadow_probe(&mut self, name: String, span: Span) -> usize;
+
+    /// Stop observing and return every probe whose initializer read the
+    /// binding it shadows, outermost first.
+    fn finish_shadow_probes(&mut self, mark: usize) -> Vec<zz_checker_core::ShadowProbe>;
+
+    /// Like [`Checker::lookup`] but without the error: returns `None` when
+    /// the name is not bound anywhere.
+    fn lookup_opt(&mut self, name: &str) -> Option<Type>;
+
+    /// Resolve a dotted path: first as a single qualified name (module
+    /// bindings/functions), then as a struct-field walk from the first part.
+    fn lookup_path(&mut self, parts: &[String], span: Span) -> Type;
+}
+
+impl ScopeOps for Checker {
     // --- environments -----------------------------------------------------
 
-    pub(crate) fn push_scope(&mut self) {
+    fn push_scope(&mut self) {
         self.env.push(std::collections::HashMap::new());
         self.defined_names.push(std::collections::HashMap::new());
         self.const_env.push(std::collections::HashMap::new());
@@ -21,7 +98,7 @@ impl Checker {
 
     /// Strip the module prefix from a name for display.
     /// `"diag-typo.area"` → `"area"`, `"area"` → `"area"`.
-    pub(crate) fn display_name(name: &str) -> &str {
+    fn display_name(name: &str) -> &str {
         match name.rfind('.') {
             Some(pos) => &name[pos + 1..],
             None => name,
@@ -36,7 +113,7 @@ impl Checker {
     /// additionally require the name to be present in `funcs` so import
     /// gating still applies (using `math.PI` without the import stays an
     /// "undefined variable" error).
-    pub(crate) fn is_math_const(&self, name: &str) -> bool {
+    fn is_math_const(&self, name: &str) -> bool {
         const LEAVES: &[&str] = &[
             "PI", "E", "TAU", "SQRT_2", "SQRT_1_2", "LN_2", "LN_10", "LOG10_E", "LOG2_E", "INF",
             "NAN",
@@ -65,7 +142,7 @@ impl Checker {
         false
     }
 
-    pub(crate) fn pop_scope(&mut self) {
+    fn pop_scope(&mut self) {
         // Warn about unused variables in this scope (skip the global scope).
         if let Some(defined) = self.defined_names.pop() {
             let scope_index = self.defined_names.len();
@@ -123,11 +200,11 @@ impl Checker {
         }
     }
 
-    pub(crate) fn define(&mut self, name: &str, ty: Type) {
+    fn define(&mut self, name: &str, ty: Type) {
         self.define_at(name, ty, Span::new(0, 0));
     }
 
-    pub(crate) fn define_at(&mut self, name: &str, ty: Type, span: Span) {
+    fn define_at(&mut self, name: &str, ty: Type, span: Span) {
         self.define_binding_at(name, ty, span, true);
     }
 
@@ -135,13 +212,7 @@ impl Checker {
     /// warning about. Closure parameters pass `warn_unused: false`: the
     /// callee dictates the closure's arity, so a parameter cannot be
     /// removed and `_name` would only hide what the API signature says.
-    pub(crate) fn define_binding_at(
-        &mut self,
-        name: &str,
-        ty: Type,
-        span: Span,
-        warn_unused: bool,
-    ) {
+    fn define_binding_at(&mut self, name: &str, ty: Type, span: Span, warn_unused: bool) {
         self.env.last_mut().unwrap().insert(name.to_string(), ty);
         // Record the definition span for unused-variable warnings.
         if let Some(scope) = self.defined_names.last_mut() {
@@ -150,7 +221,7 @@ impl Checker {
     }
 
     /// Define a variable, recording its immutability when `is_const`.
-    pub(crate) fn define_var_at(&mut self, name: &str, ty: Type, span: Span, is_const: bool) {
+    fn define_var_at(&mut self, name: &str, ty: Type, span: Span, is_const: bool) {
         if is_const {
             self.define_const_at(name, ty, span);
         } else {
@@ -160,7 +231,7 @@ impl Checker {
 
     /// Define an immutable (`const`) variable, remembering its declaration
     /// span so reassignment errors can point back at it.
-    pub(crate) fn define_const_at(&mut self, name: &str, ty: Type, span: Span) {
+    fn define_const_at(&mut self, name: &str, ty: Type, span: Span) {
         self.define_at(name, ty, span);
         if let Some(scope) = self.const_env.last_mut() {
             scope.insert(name.to_string(), span);
@@ -170,7 +241,7 @@ impl Checker {
     /// If `name` resolves to a `const` binding, return its declaration span.
     /// Shadowing-aware: only the scope that actually binds the name is
     /// consulted, so an inner mutable shadow of an outer const is mutable.
-    pub(crate) fn lookup_const_span(&mut self, name: &str) -> Option<Span> {
+    fn lookup_const_span(&mut self, name: &str) -> Option<Span> {
         for (i, scope) in self.env.iter().enumerate().rev() {
             if scope.contains_key(name) {
                 if let Some(s) = self.const_env[i].get(name) {
@@ -185,7 +256,7 @@ impl Checker {
     /// Emit unused-variable warnings for the global scope (scope index 0).
     /// The global scope is never popped, so `pop_scope`'s check does not
     /// fire for top-level definitions. Also emits unused-import warnings.
-    pub(crate) fn emit_global_unused_warnings(&mut self) {
+    fn emit_global_unused_warnings(&mut self) {
         // --- Unused variables ---
         {
             // Snapshot defined names to avoid borrow issues, sorted by
@@ -243,14 +314,14 @@ impl Checker {
         }
     }
 
-    pub(crate) fn lookup(&mut self, name: &str, span: Span) -> Type {
+    fn lookup(&mut self, name: &str, span: Span) -> Type {
         match self.lookup_opt(name) {
             Some(t) => {
                 self.used_names.insert(name.to_string());
                 t
             }
             None => {
-                if let Some(sig) = crate::lookup_std(&self.funcs, name) {
+                if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name) {
                     if !sig.generics.is_empty() {
                         self.errors.push(error_at(
                             format!(
@@ -304,7 +375,7 @@ impl Checker {
                 // If the name looks like `module.func` and matches a known
                 // stdlib pattern, suggest adding the import.
                 if let Some((module, _func)) = name.split_once('.') {
-                    let std_module = if super::is_std_module_head(module) {
+                    let std_module = if zz_checker_core::is_std_module_head(module) {
                         Some(module.to_string())
                     } else {
                         // Generalized: any other std module present in the
@@ -373,9 +444,9 @@ impl Checker {
 
     /// Start observing `name` while its `:=` initializer is checked (#518).
     /// Returns the marker for [`Checker::finish_shadow_probes`].
-    pub(crate) fn begin_shadow_probe(&mut self, name: String, span: Span) -> usize {
+    fn begin_shadow_probe(&mut self, name: String, span: Span) -> usize {
         let mark = self.shadow_probes.len();
-        self.shadow_probes.push(crate::checker::ShadowProbe {
+        self.shadow_probes.push(zz_checker_core::ShadowProbe {
             name,
             span,
             depth: self.env.len().saturating_sub(1),
@@ -386,7 +457,7 @@ impl Checker {
 
     /// Stop observing and return every probe whose initializer read the
     /// binding it shadows, outermost first.
-    pub(crate) fn finish_shadow_probes(&mut self, mark: usize) -> Vec<crate::checker::ShadowProbe> {
+    fn finish_shadow_probes(&mut self, mark: usize) -> Vec<zz_checker_core::ShadowProbe> {
         let mut out = Vec::new();
         while self.shadow_probes.len() > mark {
             let probe = self.shadow_probes.pop().expect("probe above the mark");
@@ -399,7 +470,7 @@ impl Checker {
 
     /// Like [`Checker::lookup`] but without the error: returns `None` when
     /// the name is not bound anywhere.
-    pub(crate) fn lookup_opt(&mut self, name: &str) -> Option<Type> {
+    fn lookup_opt(&mut self, name: &str) -> Option<Type> {
         for (depth, scope) in self.env.iter().enumerate().rev() {
             if let Some(t) = scope.get(name) {
                 let t = t.clone();
@@ -418,7 +489,7 @@ impl Checker {
                 return Some(t);
             }
         }
-        if let Some(sig) = crate::lookup_std(&self.funcs, name) {
+        if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name) {
             self.used_names.insert(name.to_string());
             if !sig.generics.is_empty() {
                 return None;
@@ -438,7 +509,7 @@ impl Checker {
 
     /// Resolve a dotted path: first as a single qualified name (module
     /// bindings/functions), then as a struct-field walk from the first part.
-    pub(crate) fn lookup_path(&mut self, parts: &[String], span: Span) -> Type {
+    fn lookup_path(&mut self, parts: &[String], span: Span) -> Type {
         let joined = parts.join(".");
         if let Some(t) = self.lookup_opt(&joined) {
             return t;
@@ -474,7 +545,7 @@ impl Checker {
             // so a known module name is necessarily unimported. Attached
             // before the typo branches because the dotted branch returns
             // early.
-            if parts.len() >= 2 && super::is_std_module_head(&parts[0]) {
+            if parts.len() >= 2 && zz_checker_core::is_std_module_head(&parts[0]) {
                 let import_stmt = format!("import std.{}", parts[0]);
                 diag = diag.with_note(format!(
                     "add `{import_stmt}` at the top of the file to use `{joined}`"
@@ -565,7 +636,7 @@ impl Checker {
                     // without `import std.sqlz`): suggest the import even
                     // when the root name itself is bound to something else
                     // (partial binding / alias).
-                    if parts.len() >= 2 && super::is_std_module_head(&parts[0]) {
+                    if parts.len() >= 2 && zz_checker_core::is_std_module_head(&parts[0]) {
                         let import_stmt = format!("import std.{}", parts[0]);
                         diag = diag.with_note(format!(
                             "add `{import_stmt}` at the top of the file to use `{joined}`"
@@ -582,20 +653,5 @@ impl Checker {
             }
         }
         ty
-    }
-
-    /// Canonical struct name: a selectively-imported bare name resolves to
-    /// its qualified form (`Product` → `product.Product`), exactly as if
-    /// written qualified — methods, conversions and type identity all key
-    /// off the qualified form. Miss-only: locals and seed entries (which
-    /// have no alias mapping) keep their name. Display still prints the
-    /// bare form; only types canonicalize.
-    pub(crate) fn canonical_struct_name(&self, name: &str) -> String {
-        if let Some(qualified) = self.import_aliases.get(name) {
-            if self.structs.contains_key(qualified) {
-                return qualified.clone();
-            }
-        }
-        name.to_string()
     }
 }

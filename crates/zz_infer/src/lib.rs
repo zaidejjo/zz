@@ -1,18 +1,92 @@
 //! Type inference helpers: unification, type variables, generics.
 
-use crate::checker::Checker;
-use crate::type_::Type;
-use zz_frontend::ast::Ty;
-use zz_frontend::diag::error_at;
-use zz_frontend::levenshtein::suggest;
-use zz_frontend::span::Span;
+use zz_checker_core::{AliasSig, Checker};
+use zz_diag_core::error_at;
+use zz_span_ast::ast::Ty;
+use zz_span_ast::span::Span;
+use zz_suggest::suggest;
+use zz_types::Type;
 
-impl Checker {
+pub trait InferOps {
     /// Merge element types into a single type: identical types collapse to
     /// one; differing types form a union. Divergent (`Never`) elements
     /// vanish from the join — an array whose every element diverges is
     /// itself `Never`.
-    pub(crate) fn merge_types(&mut self, types: Vec<Type>) -> Type {
+    fn merge_types(&mut self, types: Vec<Type>) -> Type;
+
+    /// Does the generic parameter currently in scope carry the given bound?
+    fn has_bound(&self, name: &str, bound: zz_span_ast::ast::TraitBound) -> bool;
+
+    /// Does a concrete type satisfy a trait bound?
+    fn satisfies_bound(&self, ty: &Type, bound: zz_span_ast::ast::TraitBound) -> bool;
+
+    /// Validate that every generic parameter with a bound was instantiated
+    /// with a concrete type satisfying that bound. Called at call sites after
+    /// argument unification. Unresolved generics (never pinned by the call)
+    /// are skipped — the body's operator checks already validated them.
+    fn validate_bounds(
+        &mut self,
+        sig: &zz_checker_core::FuncSig,
+        subs: &std::collections::HashMap<String, Type>,
+        span: Span,
+    );
+
+    fn instantiate(
+        &mut self,
+        sig: &zz_checker_core::FuncSig,
+    ) -> (Vec<Type>, Type, std::collections::HashMap<String, Type>);
+
+    fn ast_to_type(&mut self, ty: &Ty, generics: &[String]) -> Type;
+
+    fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type;
+
+    /// Suggest the closest known type name for an unknown type, or a
+    /// builtin synonym (`string` → `str`) that falls outside the
+    /// Levenshtein threshold. Returns `None` when there is nothing close
+    /// enough to suggest, in which case the plain "unknown type" message
+    /// stands alone.
+    fn suggest_type_name(&self, name: &str) -> Option<String>;
+
+    /// Canonical struct name: a selectively-imported bare name resolves to
+    /// its qualified form (`Product` → `product.Product`), exactly as if
+    /// written qualified — methods, conversions and type identity all key
+    /// off the qualified form. Miss-only: locals and seed entries (which
+    /// have no alias mapping) keep their name. Display still prints the
+    /// bare form; only types canonicalize.
+    fn canonical_struct_name(&self, name: &str) -> String;
+
+    /// Canonical enum name, mirroring [`Self::canonical_struct_name`]: a
+    /// selectively-imported bare name resolves to its qualified form.
+    fn canonical_enum_name(&self, name: &str) -> String;
+
+    /// Convert one raw alias target to a resolved [`AliasSig`].
+    /// Idempotent: already-converted names return immediately (also
+    /// breaks re-entrant conversion during cycle reporting).
+    fn convert_alias(&mut self, name: &str);
+
+    /// Canonical alias name, mirroring [`Self::canonical_struct_name`]: a
+    /// selectively-imported bare name resolves to its qualified form.
+    fn canonical_alias_name(&self, name: &str) -> String;
+
+    /// Expand an alias use `Name[args]` to its resolved [`Type`].
+    /// Arity is checked like generic structs; mismatches report and
+    /// resolve with the provided prefix (missing parameters stay
+    /// `Named`, which surfaces as a generic — never a silent hole).
+    fn expand_alias(
+        &mut self,
+        name: &str,
+        args: &[Ty],
+        outer_generics: &[String],
+        span: Span,
+    ) -> Type;
+}
+
+impl InferOps for Checker {
+    /// Merge element types into a single type: identical types collapse to
+    /// one; differing types form a union. Divergent (`Never`) elements
+    /// vanish from the join — an array whose every element diverges is
+    /// itself `Never`.
+    fn merge_types(&mut self, types: Vec<Type>) -> Type {
         if types.is_empty() {
             return self.unifier.fresh_var();
         }
@@ -49,15 +123,15 @@ impl Checker {
     // --- generics ---------------------------------------------------------
 
     /// Does the generic parameter currently in scope carry the given bound?
-    pub(crate) fn has_bound(&self, name: &str, bound: zz_frontend::ast::TraitBound) -> bool {
+    fn has_bound(&self, name: &str, bound: zz_span_ast::ast::TraitBound) -> bool {
         self.current_bounds
             .get(name)
             .is_some_and(|bs| bs.contains(&bound))
     }
 
     /// Does a concrete type satisfy a trait bound?
-    pub(crate) fn satisfies_bound(&self, ty: &Type, bound: zz_frontend::ast::TraitBound) -> bool {
-        use zz_frontend::ast::TraitBound as B;
+    fn satisfies_bound(&self, ty: &Type, bound: zz_span_ast::ast::TraitBound) -> bool {
+        use zz_span_ast::ast::TraitBound as B;
         match ty {
             Type::Union(ms) => ms.iter().all(|m| self.satisfies_bound(m, bound)),
             Type::Var(_) | Type::Named(_) | Type::Error | Type::Never => false,
@@ -76,9 +150,9 @@ impl Checker {
     /// with a concrete type satisfying that bound. Called at call sites after
     /// argument unification. Unresolved generics (never pinned by the call)
     /// are skipped — the body's operator checks already validated them.
-    pub(crate) fn validate_bounds(
+    fn validate_bounds(
         &mut self,
-        sig: &crate::checker::FuncSig,
+        sig: &zz_checker_core::FuncSig,
         subs: &std::collections::HashMap<String, Type>,
         span: Span,
     ) {
@@ -102,9 +176,9 @@ impl Checker {
         }
     }
 
-    pub(crate) fn instantiate(
+    fn instantiate(
         &mut self,
-        sig: &crate::checker::FuncSig,
+        sig: &zz_checker_core::FuncSig,
     ) -> (Vec<Type>, Type, std::collections::HashMap<String, Type>) {
         let subs: std::collections::HashMap<String, Type> = sig
             .generics
@@ -118,12 +192,12 @@ impl Checker {
 
     // --- type annotations -------------------------------------------------
 
-    pub(crate) fn ast_to_type(&mut self, ty: &Ty, generics: &[String]) -> Type {
+    fn ast_to_type(&mut self, ty: &Ty, generics: &[String]) -> Type {
         self.ast_to_type_inner(ty, generics)
     }
 
-    pub(crate) fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type {
-        use zz_frontend::ast::TyKind;
+    fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type {
+        use zz_span_ast::ast::TyKind;
         match &ty.kind {
             TyKind::Int => Type::Int,
             TyKind::Float => Type::Float,
@@ -399,6 +473,120 @@ impl Checker {
         }
         suggest(name, &candidates).map(|(s, _)| s.to_string())
     }
+
+    fn canonical_struct_name(&self, name: &str) -> String {
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.structs.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
+
+    fn canonical_enum_name(&self, name: &str) -> String {
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.enums.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
+
+    fn convert_alias(&mut self, name: &str) {
+        if self.aliases.contains_key(name) {
+            return;
+        }
+        if self.alias_expanding.iter().any(|n| n == name) {
+            let span = self
+                .alias_asts
+                .get(name)
+                .map(|(_, t)| t.span)
+                .unwrap_or(Span::new(0, 0));
+            self.errors.push(error_at(
+                format!(
+                    "cyclic type alias `{}`: {}",
+                    name,
+                    self.alias_expanding.join(" -> ")
+                ),
+                span,
+            ));
+            // Placeholder so the use site resolves instead of cascading
+            // a second "unknown type" error.
+            self.aliases.entry(name.to_string()).or_insert(AliasSig {
+                generics: Vec::new(),
+                target: Type::Unit,
+            });
+            return;
+        }
+        let Some((generics, target)) = self.alias_asts.get(name).cloned() else {
+            return;
+        };
+        self.alias_expanding.push(name.to_string());
+        let ty = self.ast_to_type_inner(&target, &generics);
+        self.alias_expanding.pop();
+        // A cycle during conversion leaves no entry: record the
+        // (possibly partial) type anyway so uses don't cascade
+        // "unknown type" on top of the cycle error.
+        self.aliases.entry(name.to_string()).or_insert(AliasSig {
+            generics,
+            target: ty,
+        });
+    }
+
+    fn canonical_alias_name(&self, name: &str) -> String {
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.aliases.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
+
+    fn expand_alias(
+        &mut self,
+        name: &str,
+        args: &[Ty],
+        outer_generics: &[String],
+        span: Span,
+    ) -> Type {
+        // Lazily convert: seeded aliases (cross-module) arrive converted,
+        // same-program aliases convert in pass 1a — but a use inside an
+        // alias target converts on demand through `convert_alias`.
+        self.convert_alias(name);
+        let Some(sig) = self.aliases.get(name).cloned() else {
+            self.errors
+                .push(error_at(format!("unknown type `{name}`"), span));
+            return Type::Unit;
+        };
+        if args.len() != sig.generics.len() {
+            if sig.generics.is_empty() {
+                self.errors.push(error_at(
+                    format!(
+                        "type alias `{name}` takes no type arguments but {} given",
+                        args.len(),
+                    ),
+                    span,
+                ));
+            } else {
+                self.errors.push(error_at(
+                    format!(
+                        "type alias `{name}` takes {} type argument{} but {} given",
+                        sig.generics.len(),
+                        if sig.generics.len() == 1 { "" } else { "s" },
+                        args.len(),
+                    ),
+                    span,
+                ));
+            }
+        }
+        let mut map = std::collections::HashMap::new();
+        for (i, g) in sig.generics.iter().enumerate() {
+            if let Some(a) = args.get(i) {
+                map.insert(g.clone(), self.ast_to_type_inner(a, outer_generics));
+            }
+        }
+        subst(&sig.target, &map)
+    }
 }
 
 /// Surface name of a native module-handle type (`tls`, `file`, ...).
@@ -423,7 +611,7 @@ fn opaque_handle_tag(name: &str) -> Option<&'static str> {
 }
 
 /// Check if a type contains any unresolved inference variables.
-pub(crate) fn contains_var(t: &Type) -> bool {
+pub fn contains_var(t: &Type) -> bool {
     match t {
         Type::Var(_) => true,
         Type::Void => false,
@@ -445,7 +633,7 @@ pub(crate) fn contains_var(t: &Type) -> bool {
 /// Largest inference-variable id inside a type (`None` when var-free).
 /// Used to offset a fresh checker's unifier above ids imported from
 /// already-checked modules (see `Unifier::reserve_vars_above`).
-pub(crate) fn max_var_id(t: &Type) -> Option<u32> {
+pub fn max_var_id(t: &Type) -> Option<u32> {
     match t {
         Type::Var(id) => Some(*id),
         Type::Void => None,
@@ -466,7 +654,7 @@ pub(crate) fn max_var_id(t: &Type) -> Option<u32> {
 
 /// Replace unresolved type variables inside `Option`/`Result` with `unit`
 /// so `.none`/`.ok`/`.err` bindings type-check without annotations.
-pub(crate) fn default_variant_vars(t: &mut Type) {
+pub fn default_variant_vars(t: &mut Type) {
     match t {
         Type::Option(inner) => {
             if contains_var(inner) {

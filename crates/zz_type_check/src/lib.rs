@@ -1,14 +1,17 @@
 //! Core type-checking logic: statements, expressions, patterns.
 
 use std::sync::Arc;
-
-use crate::checker::inference::{contains_var, default_variant_vars};
-use crate::checker::Checker;
-use crate::type_::Type;
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
-use zz_frontend::diag::{error_at, warning_at, FixIt};
-use zz_frontend::levenshtein::suggest_all;
-use zz_frontend::span::Span;
+use zz_checker_core::{Checker, FuncSig};
+use zz_diag_core::{error_at, warning_at, FixIt};
+use zz_infer::{contains_var, default_variant_vars, InferOps};
+use zz_lints::http_lint::HttpLintOps;
+use zz_scope::ScopeOps;
+use zz_sigs::enums::EnumOps;
+use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
+use zz_span_ast::span::Span;
+use zz_structs::StructOps;
+use zz_suggest::suggest_all;
+use zz_types::Type;
 
 /// Cheap static sanity check over the literal SQL text: balanced
 /// single/double quotes and parens. Returns an error message when the
@@ -66,8 +69,8 @@ fn index_range_hint(len: usize) -> String {
 }
 
 /// A method invocation: resolved signature plus receiver, args, and span.
-pub(crate) struct MethodCall<'a> {
-    pub sig: &'a super::FuncSig,
+pub struct MethodCall<'a> {
+    pub sig: &'a FuncSig,
     pub recv_t: &'a Type,
     /// Embedded-promoted receiver (struct embedding only), if any.
     pub promoted_recv: Option<Type>,
@@ -97,7 +100,245 @@ fn pattern_bindings(pat: &Pattern) -> Vec<(String, Span)> {
     out
 }
 
-impl Checker {
+pub trait TypeCheckOps {
+    /// Warn when a `:=` initializer read the binding the declaration shadows
+    /// (#518): `x := x + 1` in a loop body re-declares a body-scoped `x` from
+    /// the untouched outer value every pass, so the outer binding never
+    /// advances while `x = x + 1` does. Only the self-referential shape warns:
+    /// shadowing with a fresh value is deliberate and common.
+    fn warn_if_shadowed_decl(&mut self, mark: usize, value: &Expr, annotated: bool, is_const: bool);
+
+    /// Warn for destructuring declarations whose initializer read a binding
+    /// they shadow (#518). There is no one-token fix — a pattern cannot become
+    /// an assignment — so the note points at the two-step split instead.
+    fn warn_if_shadowed_destructure(&mut self, mark: usize);
+
+    fn check_stmt(&mut self, stmt: &Stmt) -> Type;
+
+    /// Type of an assignment target: a variable, a qualified name, or a
+    /// struct field path.
+    /// Reject assignment to immutable (`const`) variables. The target
+    /// is an `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
+    /// the loader namespaces top-level bindings. Shared by `=` and
+    /// compound assignment so both reject `const` identically.
+    fn reject_const_target(&mut self, target: &Expr);
+
+    /// Check an enum construction `Enum.Variant(args)` where `enum_name`
+    /// is the already-canonicalized enum and `variant` the trailing call
+    /// path component. Returns the enum type on success.
+    fn check_enum_construction(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[zz_span_ast::ast::Expr],
+        named: &[(zz_span_ast::ast::Ident, zz_span_ast::ast::Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
+    fn check_func_body(&mut self, stmt: &Stmt, sig: &FuncSig);
+    /// Report a missing-return diagnostic with improved diagnostics:
+    /// - unit-tail functions (println, match, etc.) get the message only, no fixit.
+    /// - annotated non-unit functions that can fall through get error + fixit.
+    /// - fixit is withheld for `if` without `else`, match arms, and `let`
+    ///   bindings whose name is used later (intentional shadowings).
+    fn report_missing_return(&mut self, body: &Block, ret_ty: &Type);
+    /// Extract an identifier name from a statement or expression for shadow-checking.
+    fn extract_name(stmt: &Stmt) -> Option<String>;
+    fn extract_name_from_block(block: &Block) -> Option<String>;
+    /// Extract all identifier names from a statement (for shadow checking).
+    fn extract_names(stmt: &Stmt) -> Vec<String>;
+    fn extract_names_from_block(block: &Block) -> Vec<String>;
+    fn block_has_return(block: &Block) -> bool;
+    fn stmt_has_return(stmt: &Stmt) -> bool;
+    fn expr_has_return(expr: &Expr) -> bool;
+
+    fn check_assign_target(&mut self, target: &Expr) -> Type;
+
+    /// Element type of a tuple index, shared by reads and writes.
+    /// Tuples index like arrays at runtime (AOT lowers them to arrays;
+    /// the VM stores them as `Tuple`), but the element type depends on
+    /// the position, so only integer literals type-check — negative
+    /// literals count from the end like arrays. Anything else should
+    /// destructure: `(a, b) := t`.
+    fn check_tuple_index(&mut self, elems: &[Type], index: &Expr) -> Type;
+
+    /// A constant index into an array *literal* is decidable at check time:
+    /// report the out-of-bounds before the program runs (the runtime would
+    /// trap on it anyway), with the valid range as the hint.
+    fn check_literal_array_index(&mut self, len: usize, index: &Expr);
+
+    /// Whether a loop body can leave through a `break` that targets this
+    /// loop. Nested loops capture their own breaks, so they are not
+    /// descended into.
+    fn block_has_break(block: &Block) -> bool;
+
+    fn expr_has_break(expr: &Expr) -> bool;
+
+    fn check_block(&mut self, block: &Block) -> Type;
+
+    /// Check a block whose value is discarded (loop bodies): tail
+    /// expressions are discards, so must-use warnings apply to them.
+    fn check_block_discarded(&mut self, block: &Block) -> Type;
+
+    /// Check a named function body: its tail expression is **discarded**.
+    /// A named function yields a value only through `return`; block
+    /// expressions and closures keep their tail-value semantics
+    /// (`check_fn_body_block`'s old behaviour). Discarding the tail also
+    /// gives `Result`/`Option` tails the must-use warning they deserve.
+    fn check_named_fn_body(&mut self, block: &Block) -> Type;
+
+    /// Sherlock: warn when a value-position expression discards a
+    /// `Result`/`Option`. Structural expressions (if/match/blocks) flow
+    /// from their inner statements, which are checked on their own.
+    /// Tail exemption lives with the caller: only `Stmt::Expr` tails
+    /// are block values (`defer` tails are not — its value is `unit`).
+    fn warn_if_discarded(&mut self, e: &Expr, t: &Type);
+
+    /// Check an expression, recording its resolved type keyed by scoped key
+    /// so the HIR could bindings can be built deterministically afterward.
+    /// The key pairs the span with the enclosing top-level item: bare spans
+    /// repeat across modules (offsets restart at 0 per file).
+    /// Resolve a named-function value type (`p1.greet` from using a bare
+    /// function name as a value) to its `Func` type so it unifies with
+    /// func-typed positions like struct fields (#385). Generic functions
+    /// stay `Named` (using one as a value errors at lookup).
+    fn resolve_fn_value(&mut self, t: Type) -> Type;
+
+    fn check_expr(&mut self, e: &Expr) -> Type;
+
+    fn check_expr_impl(&mut self, e: &Expr) -> Type;
+
+    fn check_unary(&mut self, op: UnOp, expr: &Expr, span: Span) -> Type;
+
+    fn check_binary(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type;
+
+    /// Bitwise operators are strictly `(int, int) -> int`. Unlike
+    /// [`Self::check_arith`] there is no float promotion, no string
+    /// overload, and no generic `Num` path — a float bit-pattern op is
+    /// almost always a bug, so it is a hard error with a cast hint.
+    fn check_bitwise(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type;
+
+    fn check_arith(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type;
+
+    /// True when a `head.method(args)` call must be read as a method call
+    /// even though `head.method` also names a seeded free function: the
+    /// head is a genuine local value, the direct reading is already
+    /// impossible (fewer args than its minimum), and the method reading
+    /// fits with a receiver type matching the first parameter. Because
+    /// diversion requires the direct reading to fail, previously-passing
+    /// programs are untouched by construction.
+    ///
+    /// Motivating case: `db.exec(sql)` with a *local* `db` must not match
+    /// the seeded `db.exec` free function at full arity (which rejects
+    /// the receiver-implicit form); a top-level `db` instead resolves
+    /// through the module-namespace path and is unaffected, as are all
+    /// qualified module calls (their heads never live in value scope).
+    fn method_shadow_call(&mut self, callee: &Expr, args: &[Expr], named: &[(Ident, Expr)])
+        -> bool;
+
+    /// True when a named receiver type carries its own `impl` method
+    /// called `method`. `impl W { func get(self) }` registers `W.get`, so
+    /// this is the dot-call form's own definition: it outranks a
+    /// same-named receiver-implicit free function (`get(w)`), which keeps
+    /// dot syntax from silently binding the free function and leaving the
+    /// method unreachable (#500). The free function stays callable by
+    /// name, so neither form is lost.
+    fn receiver_impl_method(&self, recv: &Type, method: &str) -> bool;
+
+    fn check_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Type;
+
+    /// Check that the given positional and named arguments match the parameter
+    /// types.  `has_default` indicates which trailing parameters have defaults;
+    /// callers may omit those.
+    fn check_method_call(&mut self, call: &MethodCall<'_>) -> Type;
+
+    /// Short display name for call diagnostics: `math.sin` → `sin`.
+    fn short_name(name: &str) -> &str;
+
+    /// Sherlock notes for an argument/parameter mismatch: name the
+    /// parameter and its expected type so the error points at the fix,
+    /// not just the conflict. Placeholder names (`_0`, from `func`
+    /// values) still show the type.
+    fn param_mismatch_notes(param_names: &[String], ps: &[Type], i: usize) -> Vec<String>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_args_against(
+        &mut self,
+        callee: Option<&str>,
+        param_names: &[String],
+        ps: &[Type],
+        has_default: &[bool],
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    );
+
+    /// Compile-time SQL verification for `db.query(sql)` / `db.exec(sql)`.
+    ///
+    /// The SQL arg is normally an interpolated string (`Fmt`): static text
+    /// segments stay in the prepared statement, `{expr}` segments become
+    /// `?N` bound parameters. This check ensures every bound expr is a
+    /// bindable scalar (int/float/str/bool) and rejects format specs
+    /// (`{x:.2f}` would render client-side, breaking parameterization).
+    /// Static text is scanned for balanced quotes/parens as a cheap
+    /// syntax sanity check; full schema verification happens at runtime
+    /// against the live connection.
+    fn verify_sql_params(&mut self, sql_arg: &Expr, span: Span);
+
+    /// `expected_params`: when a closure is passed to a function with a
+    /// known signature, the caller can provide the expected parameter types
+    /// here. For each unannotated param, if an expected type exists, the
+    /// fresh var is unified with it *before* checking the body — so the
+    /// body sees known param types and can resolve method calls (e.g.
+    /// `tx.exec(...)` when `tx: Db`).
+    fn check_closure(
+        &mut self,
+        params: &[Param],
+        ret_ty: Option<&Ty>,
+        body: &Expr,
+        _span: Span,
+        expected_params: Option<&[Type]>,
+    ) -> Type;
+
+    /// Innermost span of a match-guard subexpression the native backend
+    /// cannot lower (`None` when the whole guard is in the scalar subset:
+    /// idents, paths, int/float/bool literals, and binary/unary/paren
+    /// combinations). Native guard lowering folds anything else to a
+    /// constant while the VM evaluates it fully — a silent engine
+    /// divergence the caller turns into a loud check-time error.
+    fn native_unsupported_guard(e: &Expr) -> Option<Span>;
+
+    fn check_match(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[zz_span_ast::ast::MatchArm],
+        span: Span,
+    ) -> Type;
+
+    fn check_try(&mut self, expr: &Expr, span: Span) -> Type;
+
+    /// True when an expression tree contains a `Try` (`?` / `try`) node.
+    fn expr_contains_try(e: &Expr) -> bool;
+
+    fn stmt_contains_try(s: &Stmt) -> bool;
+
+    /// Find conversion impl spans from `from` to `to`.
+    /// Checks the local `convert_impls` registry plus seeded `ext_methods` /
+    /// `funcs` (cross-module `convert_to_` methods) so multi-file programs work.
+    fn find_converts(&self, from: &Type, to: &Type) -> Vec<Option<Span>>;
+
+    fn bind_pattern(&mut self, pat: &Pattern, ty: &Type);
+
+    fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span);
+}
+
+impl TypeCheckOps for Checker {
     // --- statements -------------------------------------------------------
 
     /// Warn when a `:=` initializer read the binding the declaration shadows
@@ -156,7 +397,7 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_stmt(&mut self, stmt: &Stmt) -> Type {
+    fn check_stmt(&mut self, stmt: &Stmt) -> Type {
         self.had_undefined_var = false;
         match stmt {
             Stmt::Decl {
@@ -274,7 +515,7 @@ impl Checker {
                         .unwrap_or_default();
                     for item in items {
                         let name = match item {
-                            zz_frontend::ast::ImportItem::Wildcard { .. } => {
+                            zz_span_ast::ast::ImportItem::Wildcard { .. } => {
                                 // Wildcard: track the module namespace.
                                 for k in self.funcs.keys().cloned().collect::<Vec<_>>() {
                                     if let Some(bare) = k.strip_prefix(&format!("{eff_ns}.")) {
@@ -287,7 +528,7 @@ impl Checker {
                                 }
                                 eff_ns.clone()
                             }
-                            zz_frontend::ast::ImportItem::Named {
+                            zz_span_ast::ast::ImportItem::Named {
                                 name,
                                 alias: item_alias,
                                 ..
@@ -306,10 +547,10 @@ impl Checker {
             }
             Stmt::Func { span, .. } => {
                 let fname = Self::func_name(stmt);
-                let sig = match crate::lookup_std(&self.funcs, &fname) {
+                let sig = match zz_checker_core::lookup_std(&self.funcs, &fname) {
                     Some(s) => s.clone(),
                     None => {
-                        self.errors.push(zz_frontend::diag::error_at(
+                        self.errors.push(zz_diag_core::error_at(
                             format!(
                                 "nested function `{}` is not supported; use a closure (`|params| body`) instead",
                                 fname
@@ -346,7 +587,9 @@ impl Checker {
                     if let Stmt::Func { .. } = method {
                         let method_name = Self::func_name(method);
                         let full_name = format!("{}.{}", type_name, method_name);
-                        let sig = crate::lookup_std(&self.funcs, &full_name).unwrap().clone();
+                        let sig = zz_checker_core::lookup_std(&self.funcs, &full_name)
+                            .unwrap()
+                            .clone();
                         self.scope.push(Arc::from(full_name));
                         self.check_func_body(method, &sig);
                         self.scope.pop();
@@ -738,7 +981,7 @@ impl Checker {
     /// is an `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
     /// the loader namespaces top-level bindings. Shared by `=` and
     /// compound assignment so both reject `const` identically.
-    pub(crate) fn reject_const_target(&mut self, target: &Expr) {
+    fn reject_const_target(&mut self, target: &Expr) {
         let tname: Option<String> = match target {
             Expr::Ident { name, .. } => Some(name.clone()),
             Expr::Path { parts, .. } => Some(parts.join(".")),
@@ -752,7 +995,7 @@ impl Checker {
                         format!("cannot assign to immutable variable `{}`", display),
                         target.span(),
                     )
-                    .with_secondary(zz_frontend::diag::SecondaryLabel {
+                    .with_secondary(zz_diag_core::SecondaryLabel {
                         span: def_span,
                         message: "variable defined as immutable here".to_string(),
                     })
@@ -765,61 +1008,7 @@ impl Checker {
         }
     }
 
-    /// Field read with generic arguments substituted: `Box<int>.v` where
-    /// `v: T` yields `int`. Direct fields hit first; otherwise the lookup
-    /// promotes through embedded structs (threading each level's arguments).
-    /// Error reporting (unknown struct/field, did-you-mean) matches the
-    /// historical inline blocks this replaces.
-    pub(crate) fn struct_field_access(
-        &mut self,
-        sname: &str,
-        args: &[Type],
-        name: &str,
-        span: Span,
-    ) -> Type {
-        match self.structs.get(sname).cloned() {
-            Some(_) => match self.direct_field_type(sname, args, name) {
-                Some(ft) => ft,
-                None => match self.resolve_struct_field_generic(sname, args, name) {
-                    // Promoted through an embedded struct.
-                    Some((_, ft)) => ft,
-                    None => {
-                        let visible = self.all_visible_fields(sname);
-                        let field_names: Vec<&str> = visible.iter().map(|n| n.as_str()).collect();
-                        let mut diag =
-                            error_at(format!("struct `{sname}` has no field `{name}`"), span);
-                        let all = suggest_all(name, &field_names);
-                        if let Some((suggestion, _)) = all.first() {
-                            diag = diag.with_note(format!("did you mean field `{suggestion}`?"));
-                            let field_span = Span::new(span.end - name.len() as u32, span.end);
-                            let alts: Vec<String> =
-                                all.iter().map(|(s, _)| s.to_string()).collect();
-                            let fixit = if all.len() == 1 {
-                                FixIt::safe(field_span, suggestion.to_string(), "replace field")
-                            } else {
-                                FixIt::ambiguous(
-                                    field_span,
-                                    suggestion.to_string(),
-                                    "replace field",
-                                    alts,
-                                )
-                            };
-                            diag = diag.with_fixit(fixit);
-                        }
-                        self.errors.push(diag);
-                        Type::Unit
-                    }
-                },
-            },
-            None => {
-                self.errors
-                    .push(error_at(format!("unknown struct `{sname}`"), span));
-                Type::Unit
-            }
-        }
-    }
-
-    pub(crate) fn check_assign_target(&mut self, target: &Expr) -> Type {
+    fn check_assign_target(&mut self, target: &Expr) -> Type {
         match target {
             Expr::Ident { name, span } => self.lookup(name, *span),
             Expr::Path { parts, span } => self.lookup_path(parts, *span),
@@ -907,7 +1096,7 @@ impl Checker {
     /// the position, so only integer literals type-check — negative
     /// literals count from the end like arrays. Anything else should
     /// destructure: `(a, b) := t`.
-    pub(crate) fn check_tuple_index(&mut self, elems: &[Type], index: &Expr) -> Type {
+    fn check_tuple_index(&mut self, elems: &[Type], index: &Expr) -> Type {
         let pos: Option<usize> = match index {
             Expr::Int { value, .. } if *value >= 0 => Some(*value as usize),
             // Literal `i64::MIN` (the negation fold) and other negatives
@@ -1017,7 +1206,7 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_block(&mut self, block: &Block) -> Type {
+    fn check_block(&mut self, block: &Block) -> Type {
         self.push_scope();
         let mut result = Type::Unit;
         // Sherlock: code after a diverging statement (`return`/`break`/
@@ -1071,7 +1260,7 @@ impl Checker {
 
     /// Check a block whose value is discarded (loop bodies): tail
     /// expressions are discards, so must-use warnings apply to them.
-    pub(crate) fn check_block_discarded(&mut self, block: &Block) -> Type {
+    fn check_block_discarded(&mut self, block: &Block) -> Type {
         let prev = std::mem::replace(&mut self.tail_is_value, false);
         let t = self.check_block(block);
         self.tail_is_value = prev;
@@ -1083,7 +1272,7 @@ impl Checker {
     /// expressions and closures keep their tail-value semantics
     /// (`check_fn_body_block`'s old behaviour). Discarding the tail also
     /// gives `Result`/`Option` tails the must-use warning they deserve.
-    pub(crate) fn check_named_fn_body(&mut self, block: &Block) -> Type {
+    fn check_named_fn_body(&mut self, block: &Block) -> Type {
         let prev = std::mem::replace(&mut self.tail_is_value, false);
         let t = self.check_block(block);
         self.tail_is_value = prev;
@@ -1095,7 +1284,7 @@ impl Checker {
     /// from their inner statements, which are checked on their own.
     /// Tail exemption lives with the caller: only `Stmt::Expr` tails
     /// are block values (`defer` tails are not — its value is `unit`).
-    pub(crate) fn warn_if_discarded(&mut self, e: &Expr, t: &Type) {
+    fn warn_if_discarded(&mut self, e: &Expr, t: &Type) {
         if matches!(
             e,
             Expr::If { .. }
@@ -1140,9 +1329,9 @@ impl Checker {
     /// function name as a value) to its `Func` type so it unifies with
     /// func-typed positions like struct fields (#385). Generic functions
     /// stay `Named` (using one as a value errors at lookup).
-    pub(crate) fn resolve_fn_value(&mut self, t: Type) -> Type {
+    fn resolve_fn_value(&mut self, t: Type) -> Type {
         match t {
-            Type::Named(ref n) => match crate::lookup_std(&self.funcs, n).cloned() {
+            Type::Named(ref n) => match zz_checker_core::lookup_std(&self.funcs, n).cloned() {
                 Some(sig) if sig.generics.is_empty() => {
                     let (ps, ret, _) = self.instantiate(&sig);
                     Type::Func(ps, Box::new(ret))
@@ -1153,7 +1342,7 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_expr(&mut self, e: &Expr) -> Type {
+    fn check_expr(&mut self, e: &Expr) -> Type {
         let ty = self.check_expr_impl(e);
         // Unresolved types stay as `Var`s during the walk; the typed map is
         // deep-resolved at the end (see `check_program_typed`).
@@ -1252,7 +1441,8 @@ impl Checker {
                         };
                         if let Some(ns) = ns {
                             if let Some(sig) =
-                                crate::lookup_std(&self.funcs, &format!("{ns}.{method}")).cloned()
+                                zz_checker_core::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                                    .cloned()
                             {
                                 let (ps, ret, subs) = self.instantiate(&sig);
                                 if !ps.is_empty() {
@@ -1328,7 +1518,7 @@ impl Checker {
                     if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == fname) {
                         let vt = self.check_expr(fval);
                         let vt = self.resolve_fn_value(vt);
-                        let exp = crate::checker::inference::subst(ft, &gen_map);
+                        let exp = zz_infer::subst(ft, &gen_map);
                         if let Err(e) = self.unifier.unify(&vt, &exp) {
                             self.report_mismatch(e, fval.span());
                         }
@@ -1776,7 +1966,7 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_unary(&mut self, op: UnOp, expr: &Expr, span: Span) -> Type {
+    fn check_unary(&mut self, op: UnOp, expr: &Expr, span: Span) -> Type {
         let t = self.check_expr(expr);
         let t = self.unifier.resolve(&t);
         match op {
@@ -1813,7 +2003,7 @@ impl Checker {
                 Type::Int => Type::Int,
                 Type::Float => Type::Float,
                 Type::Named(n) => {
-                    if self.has_bound(&n, zz_frontend::ast::TraitBound::Num) {
+                    if self.has_bound(&n, zz_span_ast::ast::TraitBound::Num) {
                         Type::Named(n)
                     } else {
                         self.errors.push(error_at(
@@ -1841,13 +2031,7 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_binary(
-        &mut self,
-        op: BinOp,
-        left: &Expr,
-        right: &Expr,
-        span: Span,
-    ) -> Type {
+    fn check_binary(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type {
         match op {
             BinOp::And | BinOp::Or => {
                 let lt = self.check_expr(left);
@@ -1891,7 +2075,7 @@ impl Checker {
                 }
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                use zz_frontend::ast::TraitBound;
+                use zz_span_ast::ast::TraitBound;
                 let lt = self.check_expr(left);
                 let lt = self.unifier.resolve(&lt);
                 let rt = self.check_expr(right);
@@ -1977,13 +2161,7 @@ impl Checker {
     /// [`Self::check_arith`] there is no float promotion, no string
     /// overload, and no generic `Num` path — a float bit-pattern op is
     /// almost always a bug, so it is a hard error with a cast hint.
-    pub(crate) fn check_bitwise(
-        &mut self,
-        op: BinOp,
-        left: &Expr,
-        right: &Expr,
-        span: Span,
-    ) -> Type {
+    fn check_bitwise(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type {
         let lt = self.check_expr(left);
         let lt = self.unifier.resolve(&lt);
         let rt = self.check_expr(right);
@@ -2026,8 +2204,8 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_arith(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type {
-        use zz_frontend::ast::TraitBound;
+    fn check_arith(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type {
+        use zz_span_ast::ast::TraitBound;
         let lt = self.check_expr(left);
         let lt = self.unifier.resolve(&lt);
         let rt = self.check_expr(right);
@@ -2187,7 +2365,7 @@ impl Checker {
     /// the receiver-implicit form); a top-level `db` instead resolves
     /// through the module-namespace path and is unaffected, as are all
     /// qualified module calls (their heads never live in value scope).
-    pub(crate) fn method_shadow_call(
+    fn method_shadow_call(
         &mut self,
         callee: &Expr,
         args: &[Expr],
@@ -2199,7 +2377,7 @@ impl Checker {
         if parts.len() != 2 {
             return false;
         }
-        let Some(sig) = crate::lookup_std(&self.funcs, &parts.join(".")).cloned() else {
+        let Some(sig) = zz_checker_core::lookup_std(&self.funcs, &parts.join(".")).cloned() else {
             return false;
         };
         // The head must be a real local binding — module namespaces never
@@ -2254,13 +2432,13 @@ impl Checker {
         let recv = self.unifier.resolve_deep(recv);
         match &recv {
             Type::Struct(name, _) | Type::Enum(name, _) => {
-                crate::lookup_std(&self.funcs, &format!("{name}.{method}")).is_some()
+                zz_checker_core::lookup_std(&self.funcs, &format!("{name}.{method}")).is_some()
             }
             _ => false,
         }
     }
 
-    pub(crate) fn check_call(
+    fn check_call(
         &mut self,
         callee: &Expr,
         args: &[Expr],
@@ -2304,7 +2482,7 @@ impl Checker {
                 let method = name.clone();
                 // Phase 2.2: `std.http` route + param lint on typed receivers.
                 if matches!(self.unifier.resolve(&recv_t), Type::HttpServer)
-                    && crate::checker::http_lint::is_route_method(&method)
+                    && zz_http_routes::is_route_method(&method)
                 {
                     let root = match obj.as_ref() {
                         Expr::Ident { name, .. } => Some(name.clone()),
@@ -2323,96 +2501,137 @@ impl Checker {
                 // The free signature is restored below when nothing matches,
                 // so its mismatch diagnostics are unchanged.
                 let impl_owned = self.receiver_impl_method(&recv_t, &method);
-                let free_sig = crate::lookup_std(&self.funcs, &method).cloned();
+                let free_sig = zz_checker_core::lookup_std(&self.funcs, &method).cloned();
                 let mut sig = if impl_owned { None } else { free_sig.clone() };
                 if sig.is_none() {
                     match &self.unifier.resolve(&recv_t) {
                         Type::Str => {
-                            sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}"))
+                                .cloned()
                         }
                         Type::Array(_) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}"))
+                                .cloned()
                         }
                         Type::Bytes => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("bytes.{method}")).cloned()
+                                zz_checker_core::lookup_std(&self.funcs, &format!("bytes.{method}"))
+                                    .cloned()
                         }
                         Type::Option(_) => {
-                            sig =
-                                crate::lookup_std(&self.funcs, &format!("option.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("option.{method}"),
+                            )
+                            .cloned()
                         }
                         Type::Result(_, _) => {
-                            sig =
-                                crate::lookup_std(&self.funcs, &format!("result.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("result.{method}"),
+                            )
+                            .cloned()
                         }
                         // Scalar extensions (`impl int/float/bool`) live in
                         // the same merged table; no stdlib namespace here.
                         Type::Int => {
-                            sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}"))
+                                .cloned()
                         }
                         Type::Float => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned()
+                                zz_checker_core::lookup_std(&self.funcs, &format!("float.{method}"))
+                                    .cloned()
                         }
                         Type::Bool => {
-                            sig = crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}"))
+                                    .cloned()
                         }
                         Type::Response => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned()
                         }
                         Type::HttpRequest => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned()
                         }
                         Type::TcpStream => {
-                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
+                                .cloned()
                         }
                         Type::TcpListener => {
-                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
+                                .cloned()
                         }
                         Type::HttpServer => {
-                            sig = crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned()
                         }
                         Type::Json => {
-                            sig = crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}"))
+                                    .cloned()
                         }
                         Type::Db => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}"))
+                                    .cloned();
                         }
                         Type::Chan => {
-                            sig = crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}"))
+                                    .cloned()
                         }
                         Type::TaskJoin => {
-                            sig = crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned()
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}"))
+                                    .cloned()
                         }
                         // Opaque handles dispatch on their module tag, e.g.
                         // an `Opaque("regex")` receiver resolves
                         // `regex.is_match`.
                         Type::Opaque(tag) => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned()
+                                zz_checker_core::lookup_std(&self.funcs, &format!("{tag}.{method}"))
+                                    .cloned()
                         }
                         Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
-                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{sname}.{method}"),
+                            )
+                            .cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
-                                        .cloned();
+                                    sig = zz_checker_core::lookup_std(
+                                        &self.funcs,
+                                        &format!("{ns}.{method}"),
+                                    )
+                                    .cloned();
                                 }
                             }
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
                         Type::Enum(ename, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{ename}.{method}"),
+                            )
+                            .cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
-                                        .cloned();
+                                    sig = zz_checker_core::lookup_std(
+                                        &self.funcs,
+                                        &format!("{ns}.{method}"),
+                                    )
+                                    .cloned();
                                 }
                             }
                         }
@@ -2675,7 +2894,7 @@ impl Checker {
                 || name == "std.sqlz.transaction"
                 || is_pg_call
             {
-                if let Some(sig) = crate::lookup_std(&self.funcs, name).cloned() {
+                if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name).cloned() {
                     // Only take this path when the leading component really
                     // is the module namespace (NOT a local variable).
                     // Otherwise fall through to method dispatch.
@@ -2731,7 +2950,7 @@ impl Checker {
             // is user code (e.g. a `@route` decorator) — linting it would
             // false-positive (see `syntax/decorators.zz`).
             if !self.method_shadow_call(callee, args, named) {
-                if let Some(sig) = crate::lookup_std(&self.funcs, name).cloned() {
+                if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name).cloned() {
                     self.used_names.insert(name.clone());
                     let (ps, ret, subs) = self.instantiate(&sig);
                     if name == "input" {
@@ -2949,7 +3168,7 @@ impl Checker {
                                 // instantiate fresh, as in construction.
                                 let (gen_vars, gen_map) = self.fresh_enum_vars(&canonical_head2);
                                 let at = self.check_expr(&args[0]);
-                                let exp = super::inference::subst(&pty, &gen_map);
+                                let exp = zz_infer::subst(&pty, &gen_map);
                                 if let Err(e) = self.unifier.unify(&at, &exp) {
                                     self.report_mismatch(e, args[0].span());
                                 }
@@ -2964,7 +3183,7 @@ impl Checker {
                                     .cloned();
                                 if sig.is_none() {
                                     if let Some((ns, _)) = canonical_head2.rsplit_once('.') {
-                                        sig = crate::lookup_std(
+                                        sig = zz_checker_core::lookup_std(
                                             &self.funcs,
                                             &format!("{ns}.{method2}"),
                                         )
@@ -3043,7 +3262,7 @@ impl Checker {
                                     }
                                     Type::Named(ref nname) => {
                                         if let Some(sig) =
-                                            crate::lookup_std(&self.funcs, nname).cloned()
+                                            zz_checker_core::lookup_std(&self.funcs, nname).cloned()
                                         {
                                             let (ps, ret, subs) = self.instantiate(&sig);
                                             let pnames: Vec<String> =
@@ -3094,94 +3313,136 @@ impl Checker {
                 // restored at the end when nothing matches, so its mismatch
                 // diagnostics are unchanged.
                 let impl_owned = self.receiver_impl_method(&recv_t_resolved, method);
-                let free_sig = crate::lookup_std(&self.funcs, method).cloned();
+                let free_sig = zz_checker_core::lookup_std(&self.funcs, method).cloned();
                 let mut sig = if impl_owned { None } else { free_sig.clone() };
                 if sig.is_none() {
                     match &recv_t_resolved {
                         Type::Str => {
-                            sig = crate::lookup_std(&self.funcs, &format!("str.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}"))
+                                    .cloned();
                         }
                         Type::Array(_) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("vec.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}"))
+                                    .cloned();
                         }
                         Type::Option(_) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("option.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("option.{method}"),
+                            )
+                            .cloned();
                         }
                         Type::Result(_, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("result.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("result.{method}"),
+                            )
+                            .cloned();
                         }
                         Type::Int => {
-                            sig = crate::lookup_std(&self.funcs, &format!("int.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}"))
+                                    .cloned();
                         }
                         Type::Float => {
-                            sig =
-                                crate::lookup_std(&self.funcs, &format!("float.{method}")).cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("float.{method}"),
+                            )
+                            .cloned();
                         }
                         Type::Bool => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("bool.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}"))
+                                    .cloned();
                         }
                         Type::Response => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned();
                         }
                         Type::HttpRequest => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned();
                         }
                         Type::TcpStream => {
-                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
+                                    .cloned();
                         }
                         Type::TcpListener => {
-                            sig = crate::lookup_std(&self.funcs, &format!("net.{method}")).cloned();
+                            sig =
+                                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
+                                    .cloned();
                         }
                         Type::HttpServer => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("http.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
+                                    .cloned();
                         }
                         Type::Json => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}"))
+                                    .cloned();
                         }
                         Type::Db => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}"))
+                                    .cloned();
                         }
                         Type::Chan => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("chan.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}"))
+                                    .cloned();
                         }
                         Type::TaskJoin => {
                             sig =
-                                crate::lookup_std(&self.funcs, &format!("task.{method}")).cloned();
+                                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}"))
+                                    .cloned();
                         }
                         Type::Opaque(tag) => {
-                            sig =
-                                crate::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{tag}.{method}"),
+                            )
+                            .cloned();
                         }
                         Type::Struct(sname, _) => {
                             // Try TypeName.method (impl block methods)
-                            sig = crate::lookup_std(&self.funcs, &format!("{sname}.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{sname}.{method}"),
+                            )
+                            .cloned();
                             if sig.is_none() {
                                 // Try namespace.method (cross-module)
                                 if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
-                                        .cloned();
+                                    sig = zz_checker_core::lookup_std(
+                                        &self.funcs,
+                                        &format!("{ns}.{method}"),
+                                    )
+                                    .cloned();
                                 }
                             }
                         }
                         // Enum values erase to `Object`s, so `impl Enum`
                         // methods dispatch exactly like struct methods.
                         Type::Enum(ename, _) => {
-                            sig = crate::lookup_std(&self.funcs, &format!("{ename}.{method}"))
-                                .cloned();
+                            sig = zz_checker_core::lookup_std(
+                                &self.funcs,
+                                &format!("{ename}.{method}"),
+                            )
+                            .cloned();
                             if sig.is_none() {
                                 if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = crate::lookup_std(&self.funcs, &format!("{ns}.{method}"))
-                                        .cloned();
+                                    sig = zz_checker_core::lookup_std(
+                                        &self.funcs,
+                                        &format!("{ns}.{method}"),
+                                    )
+                                    .cloned();
                                 }
                             }
                         }
@@ -3312,7 +3573,7 @@ impl Checker {
                 self.check_args_against(None, &pnames, &ps, &[], args, named, span);
                 *ret
             }
-            Type::Named(name) => match crate::lookup_std(&self.funcs, &name).cloned() {
+            Type::Named(name) => match zz_checker_core::lookup_std(&self.funcs, &name).cloned() {
                 Some(sig) => {
                     let (ps, ret, subs) = self.instantiate(&sig);
                     let param_names: Vec<String> =
@@ -3387,7 +3648,7 @@ impl Checker {
     /// Check that the given positional and named arguments match the parameter
     /// types.  `has_default` indicates which trailing parameters have defaults;
     /// callers may omit those.
-    pub(crate) fn check_method_call(&mut self, call: &MethodCall<'_>) -> Type {
+    fn check_method_call(&mut self, call: &MethodCall<'_>) -> Type {
         let (ps, ret, subs) = self.instantiate(call.sig);
         if ps.is_empty() {
             self.errors.push(error_at(
@@ -3420,7 +3681,7 @@ impl Checker {
     }
 
     /// Short display name for call diagnostics: `math.sin` → `sin`.
-    pub(crate) fn short_name(name: &str) -> &str {
+    fn short_name(name: &str) -> &str {
         name.rsplit('.').next().unwrap_or(name)
     }
 
@@ -3428,11 +3689,7 @@ impl Checker {
     /// parameter and its expected type so the error points at the fix,
     /// not just the conflict. Placeholder names (`_0`, from `func`
     /// values) still show the type.
-    pub(crate) fn param_mismatch_notes(
-        param_names: &[String],
-        ps: &[Type],
-        i: usize,
-    ) -> Vec<String> {
+    fn param_mismatch_notes(param_names: &[String], ps: &[Type], i: usize) -> Vec<String> {
         match (param_names.get(i), ps.get(i)) {
             (Some(name), Some(ty)) => {
                 vec![format!("parameter `{name}` expects `{ty}`")]
@@ -3444,7 +3701,7 @@ impl Checker {
     // Eight args is the honest shape here (callee + params + args + span);
     // a struct would churn every call site for no checking benefit.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn check_args_against(
+    fn check_args_against(
         &mut self,
         callee: Option<&str>,
         param_names: &[String],
@@ -3602,7 +3859,7 @@ impl Checker {
                     // `Named` vs `Func`.
                     let at = match (&at, &expected) {
                         (Type::Named(n), Type::Func(_, _)) => {
-                            match crate::lookup_std(&self.funcs, n).cloned() {
+                            match zz_checker_core::lookup_std(&self.funcs, n).cloned() {
                                 Some(sig) => {
                                     let (sps, sret, _) = self.instantiate(&sig);
                                     Type::Func(sps, Box::new(sret))
@@ -3634,7 +3891,7 @@ impl Checker {
     /// Static text is scanned for balanced quotes/parens as a cheap
     /// syntax sanity check; full schema verification happens at runtime
     /// against the live connection.
-    pub(crate) fn verify_sql_params(&mut self, sql_arg: &Expr, span: Span) {
+    fn verify_sql_params(&mut self, sql_arg: &Expr, span: Span) {
         let parts = match sql_arg {
             Expr::Fmt { parts, .. } => Some(parts.clone()),
             Expr::Str { .. } => None,
@@ -3703,7 +3960,7 @@ impl Checker {
     /// fresh var is unified with it *before* checking the body — so the
     /// body sees known param types and can resolve method calls (e.g.
     /// `tx.exec(...)` when `tx: Db`).
-    pub(crate) fn check_closure(
+    fn check_closure(
         &mut self,
         params: &[Param],
         ret_ty: Option<&Ty>,
@@ -3792,10 +4049,10 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_match(
+    fn check_match(
         &mut self,
         scrutinee: &Expr,
-        arms: &[zz_frontend::ast::MatchArm],
+        arms: &[zz_span_ast::ast::MatchArm],
         span: Span,
     ) -> Type {
         let st = self.check_expr(scrutinee);
@@ -3805,11 +4062,11 @@ impl Checker {
         // disqualifies the catch-all (it may fail and fall through), so
         // only guard-free `_`/binding patterns count. Warning, not error:
         // the program still runs, but the arm is dead code.
-        fn pat_is_catchall(pat: &zz_frontend::ast::Pattern) -> bool {
+        fn pat_is_catchall(pat: &zz_span_ast::ast::Pattern) -> bool {
             match pat {
-                zz_frontend::ast::Pattern::Wildcard { .. } => true,
-                zz_frontend::ast::Pattern::Binding { .. } => true,
-                zz_frontend::ast::Pattern::Or { pats, .. } => pats.iter().any(pat_is_catchall),
+                zz_span_ast::ast::Pattern::Wildcard { .. } => true,
+                zz_span_ast::ast::Pattern::Binding { .. } => true,
+                zz_span_ast::ast::Pattern::Or { pats, .. } => pats.iter().any(pat_is_catchall),
                 _ => false,
             }
         }
@@ -3892,7 +4149,7 @@ impl Checker {
         result.unwrap_or(Type::Never)
     }
 
-    pub(crate) fn check_try(&mut self, expr: &Expr, span: Span) -> Type {
+    fn check_try(&mut self, expr: &Expr, span: Span) -> Type {
         let ot = self.check_expr(expr);
         let ot = self.unifier.resolve(&ot);
         let ret = match &self.current_ret {
@@ -4172,7 +4429,7 @@ impl Checker {
 
     // --- patterns ---------------------------------------------------------
 
-    pub(crate) fn bind_pattern(&mut self, pat: &Pattern, ty: &Type) {
+    fn bind_pattern(&mut self, pat: &Pattern, ty: &Type) {
         match pat {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
@@ -4490,12 +4747,7 @@ impl Checker {
         }
     }
 
-    pub(crate) fn check_exhaustive(
-        &mut self,
-        st: &Type,
-        arms: &[zz_frontend::ast::MatchArm],
-        span: Span,
-    ) {
+    fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span) {
         // Poisoned scrutinee: the root error is already reported; skip
         // exhaustiveness noise (#246).
         if matches!(self.unifier.resolve(st), Type::Error) {
@@ -4606,6 +4858,301 @@ impl Checker {
                 format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
                 span,
             ));
+        }
+    }
+
+    /// Check an enum construction `Enum.Variant(args)` where `enum_name`
+    /// is the already-canonicalized enum and `variant` the trailing call
+    /// path component. Returns the enum type on success.
+    fn check_enum_construction(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[zz_span_ast::ast::Expr],
+        named: &[(zz_span_ast::ast::Ident, zz_span_ast::ast::Expr)],
+        span: Span,
+    ) -> Option<Type> {
+        let sig = self.enums.get(enum_name).cloned()?;
+        let Some((_, payload)) = sig.variants.iter().find(|(v, _)| v == variant) else {
+            let known: Vec<&str> = sig.variants.iter().map(|(v, _)| v.as_str()).collect();
+            self.errors.push(error_at(
+                format!(
+                    "unknown variant `{variant}` for enum `{enum_name}` (expected one of: {})",
+                    known.join(", "),
+                ),
+                span,
+            ));
+            return Some(Type::Enum(
+                enum_name.to_string(),
+                sig.generics
+                    .iter()
+                    .map(|_| self.unifier.fresh_var())
+                    .collect(),
+            ));
+        };
+        // Generic parameters instantiate to fresh variables, filled in
+        // by unifying the payload below (struct-literal rule).
+        let (gen_vars, gen_map) = self.fresh_enum_vars(enum_name);
+        match payload {
+            Some(pty) => {
+                if !named.is_empty() {
+                    self.errors.push(error_at(
+                        format!(
+                            "variant `{enum_name}.{variant}` takes one positional argument, not named arguments"
+                        ),
+                        span,
+                    ));
+                }
+                if args.len() != 1 {
+                    self.errors.push(error_at(
+                        format!(
+                            "variant `{enum_name}.{variant}` takes 1 argument but {} given",
+                            args.len(),
+                        ),
+                        span,
+                    ));
+                    // Still check the args so nested errors surface.
+                    for arg in args {
+                        self.check_expr(arg);
+                    }
+                } else {
+                    let at = self.check_expr(&args[0]);
+                    let exp = zz_infer::subst(pty, &gen_map);
+                    if let Err(e) = self.unifier.unify(&at, &exp) {
+                        self.report_mismatch(e, args[0].span());
+                    }
+                }
+            }
+            None => {
+                if !args.is_empty() || !named.is_empty() {
+                    self.errors.push(error_at(
+                        format!(
+                            "variant `{enum_name}.{variant}` takes no arguments but {} given",
+                            args.len() + named.len(),
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+        // A value construction counts as using the enum's name (marks
+        // imports used when the path is qualified).
+        if enum_name.contains('.') {
+            self.used_names.insert(enum_name.to_string());
+        }
+        Some(Type::Enum(
+            enum_name.to_string(),
+            gen_vars
+                .iter()
+                .map(|v| self.unifier.resolve_deep(v))
+                .collect(),
+        ))
+    }
+
+    fn check_func_body(&mut self, stmt: &Stmt, sig: &FuncSig) {
+        let (name, params, body) = match stmt {
+            Stmt::Func {
+                name, params, body, ..
+            } => (name, params, body),
+            _ => {
+                self.errors.push(error_at(
+                    "internal: check_func_body called with a non-Func statement",
+                    stmt.span(),
+                ));
+                return;
+            }
+        };
+        self.push_scope();
+        for (i, (pname, pty)) in sig.params.iter().enumerate() {
+            // Bind with the source span when available (powers precise
+            // diagnostics, e.g. the module-namespace shadow lint); the
+            // signature table itself carries no spans.
+            match params.get(i) {
+                Some(p) => self.define_var_at(&p.name.name, pty.clone(), p.name.span, false),
+                None => self.define(pname, pty.clone()),
+            }
+        }
+        let prev_ret = self.current_ret.replace(sig.ret.clone());
+        let prev_gen = std::mem::replace(&mut self.current_generics, sig.generics.clone());
+        let prev_bounds = std::mem::replace(
+            &mut self.current_bounds,
+            sig.bounds.iter().cloned().collect(),
+        );
+        let body_t = self.check_named_fn_body(body);
+        self.current_ret = prev_ret;
+        self.current_generics = prev_gen;
+        self.current_bounds = prev_bounds;
+        self.pop_scope();
+        // Dead-mutation lint (#278): value-typed params mutated without
+        // ever being observed. Runs on the AST after the body checks so
+        // it sees the final program even when type errors exist.
+        zz_lints::value_lint::lint_dead_param_mutation(&sig.params, body, &mut self.errors);
+        let _ = name;
+        // A named function yields a value only through `return`, so its
+        // fall-through type is `unit` unless every path diverges (`Never`,
+        // e.g. ending in `if c { return 1 } else { return 2 }`). The body's
+        // tail expression type is irrelevant here: it was discarded.
+        //
+        // A non-unit signature plus a fall-through is the missing-`return`
+        // error — with an insertion fixit so `zz fix` can migrate the
+        // corpus. An unresolved return (no annotation) is not "non-unit":
+        // unifying it with `unit` is how the signature becomes `unit`.
+        let resolved_body = self.unifier.resolve(&body_t);
+        if matches!(resolved_body, Type::Error) {
+            // The body already reported a type error: don't cascade a
+            // return-type complaint on top of it.
+            let _ = self.unifier.unify(&body_t, &sig.ret);
+            return;
+        }
+        let resolved_ret = self.unifier.resolve(&sig.ret);
+        // Implicit return type (no `->` annotation): warn when the body's
+        // tail expression has a non-unit type, since it is silently
+        // discarded and the function effectively returns `unit`.
+        if matches!(resolved_ret, Type::Var(_))
+            && !matches!(
+                resolved_body,
+                Type::Unit | Type::Void | Type::Never | Type::Error
+            )
+        {
+            let last = body.stmts.last();
+            let span = last.map(|s| s.span()).unwrap_or(body.span);
+            let body_ty = self.unifier.resolve(&body_t);
+            let diag = warning_at(
+                format!(
+                    "function has no `->` return type but its body yields `{body_ty}`; the last expression is discarded",
+                ),
+                span,
+            )
+            .with_note(
+                "add an explicit `->` return type, or end the body with `return` / `()` to silence this warning",
+            );
+            self.errors.push(diag);
+        }
+        let ret_takes_value = !matches!(
+            resolved_ret,
+            Type::Unit | Type::Void | Type::Error | Type::Var(_)
+        );
+        let diverges = matches!(resolved_body, Type::Never);
+        if ret_takes_value && !diverges {
+            self.report_missing_return(body, &resolved_ret);
+            return;
+        }
+        let fallthrough = if diverges { Type::Never } else { Type::Unit };
+        if let Err(e) = self.unifier.unify(&fallthrough, &sig.ret) {
+            self.report_mismatch(e, body.span);
+        }
+    }
+
+    /// Report a missing-return diagnostic with improved diagnostics:
+    /// - unit-tail functions (println, match, etc.) get the message only, no fixit.
+    /// - annotated non-unit functions that can fall through get error + fixit.
+    /// - fixit is withheld for `if` without `else`, match arms, and `let`
+    ///   bindings whose name is used later (intentional shadowings).
+    fn report_missing_return(&mut self, body: &Block, ret_ty: &Type) {
+        let last = body.stmts.last();
+        let span = last.map(|s| s.span()).unwrap_or(body.span);
+        // --- improved unit-tail detection using self.last_block_tail ---
+        let unit_tail = match &self.last_block_tail {
+            Some((_, ty)) => matches!(self.unifier.resolve(ty), Type::Unit | Type::Void),
+            None => false,
+        };
+        // --- value-tail fixit position ---
+        // withhold fixit for: if without else, match arms, let bindings
+        // whose name is used later (intentional shadowings).
+        let withhold_fixit = unit_tail
+            || match last {
+                Some(Stmt::Expr(Expr::If { els: None, .. })) => true,
+                Some(Stmt::Expr(Expr::Match { .. })) => true,
+                Some(Stmt::Decl { .. }) => {
+                    let outer_names = body
+                        .stmts
+                        .iter()
+                        .take(body.stmts.len() - 1)
+                        .flat_map(Self::extract_names)
+                        .collect::<std::collections::HashSet<_>>();
+                    let let_name = Self::extract_name(last.unwrap());
+                    outer_names.contains(&let_name.unwrap_or_default())
+                }
+                _ => false,
+            };
+        let value_tail = if withhold_fixit {
+            None
+        } else {
+            let s = last.map(|stmt| stmt.span()).unwrap_or(body.span).start;
+            Some(Span::new(s, s))
+        };
+        let mut diag = error_at(
+            format!("function returns `{ret_ty}` but its body can fall through; add `return `"),
+            span,
+        )
+        .with_note("named functions return a value only through `return`; the last expression is discarded");
+        if let Some(insert_at) = value_tail {
+            diag = diag.with_fixit(FixIt::safe(insert_at, "return ", "add `return`"));
+        }
+        self.errors.push(diag);
+    }
+
+    /// Extract an identifier name from a statement or expression for shadow-checking.
+    fn extract_name(stmt: &Stmt) -> Option<String> {
+        match stmt {
+            Stmt::Decl { name, .. } => Some(name.name.clone()),
+            Stmt::Expr(Expr::If { then, .. }) => Self::extract_name_from_block(then),
+            Stmt::Expr(Expr::Match { .. }) => None,
+            Stmt::Return {
+                value: Some(Expr::Ident { name, .. }),
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn extract_name_from_block(block: &Block) -> Option<String> {
+        block.stmts.last().and_then(Self::extract_name)
+    }
+
+    /// Extract all identifier names from a statement (for shadow checking).
+    fn extract_names(stmt: &Stmt) -> Vec<String> {
+        match stmt {
+            Stmt::Decl { name, .. } => vec![name.name.clone()],
+            Stmt::Expr(Expr::If { then, .. }) => Self::extract_names_from_block(then),
+            Stmt::For { body, .. } => Self::extract_names_from_block(body),
+            Stmt::Return {
+                value: Some(Expr::Ident { name, .. }),
+                ..
+            } => vec![name.clone()],
+            _ => vec![],
+        }
+    }
+
+    fn extract_names_from_block(block: &Block) -> Vec<String> {
+        block.stmts.iter().flat_map(Self::extract_names).collect()
+    }
+
+    fn block_has_return(block: &Block) -> bool {
+        block.stmts.iter().any(Self::stmt_has_return)
+    }
+
+    fn stmt_has_return(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return { .. } => true,
+            Stmt::For { body, .. } => Self::block_has_return(body),
+            Stmt::Expr(Expr::While { body, .. }) => Self::block_has_return(body),
+            Stmt::Expr(Expr::If { then, els, .. }) => {
+                Self::block_has_return(then)
+                    || els.as_ref().is_some_and(|e| Self::expr_has_return(e))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_has_return(expr: &Expr) -> bool {
+        match expr {
+            Expr::Block(b) => Self::block_has_return(b),
+            Expr::If { then, els, .. } => {
+                Self::block_has_return(then)
+                    || els.as_ref().is_some_and(|e| Self::expr_has_return(e))
+            }
+            _ => false,
         }
     }
 }

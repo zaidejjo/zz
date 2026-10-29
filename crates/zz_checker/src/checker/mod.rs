@@ -1,177 +1,20 @@
 //! Type checker: HM-lite inference, generics, patterns, exhaustiveness.
 
-pub mod aliases;
-pub mod diagnostics;
-pub mod enums;
-pub mod funcs;
-pub mod http_lint;
-pub mod inference;
-pub mod scope;
-pub mod std_gate;
-pub mod structs;
-pub mod type_check;
-pub mod value_lint;
+// State and shared helper types live in `zz_checker_core`.
+pub use zz_checker_core::*;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use zz_scope::ScopeOps;
 
-use zz_frontend::ast::{Program, Stmt, Ty};
-use zz_frontend::diag::RawDiag;
-use zz_frontend::span::Span;
+use zz_span_ast::ast::{Program, Stmt};
+use zz_span_ast::span::Span;
 
-use crate::type_::Type;
-
-/// Pseudo-scope owning all top-level (non-function) statements. Mirrors
-/// `zz_hir::callgraph::TOP`: expression spans are only unique *within* one
-/// function body (every module restarts offsets at 0), so span-keyed maps
-/// must always pair the span with its enclosing scope.
-pub const TOP_SCOPE: &str = "<top>";
-
-/// Scope-qualified expression key for the typed AST view. Plain `Span`
-/// keys collide across modules (and across stdlib files): two different
-/// nodes at the same offsets would overwrite each other in
-/// `span_types`, and native codegen would lower one with the other's
-/// type (e.g. a string accumulator lowered as `bool`, printing "false").
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SpanKey {
-    /// Enclosing top-level function (`Type.method` for methods,
-    /// [`TOP_SCOPE`] otherwise). Shared (`Arc`, not `String`): one key is
-    /// built per checked expression, and (atomic) refcounting kills an allocation
-    /// per node with zero hashing cost change.
-    pub func: Arc<str>,
-    pub span: Span,
-}
-
-impl SpanKey {
-    pub fn new(func: impl Into<Arc<str>>, span: Span) -> Self {
-        SpanKey {
-            func: func.into(),
-            span,
-        }
-    }
-}
-
-/// A registered function signature.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FuncSig {
-    pub generics: Vec<String>,
-    /// Trait bounds per generic parameter name (e.g. `T` → `[Num, Ord]`).
-    pub bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)>,
-    pub params: Vec<(String, Type)>,
-    pub has_default: Vec<bool>,
-    pub ret: Type,
-    /// True for `extern "C"` declarations — no ZZ body, linked natively.
-    pub is_extern: bool,
-    /// Explicit C symbol override from the manifest (`= "..."`). `None`
-    /// means "derive from the ZZ-visible name" via [`FuncSig::c_symbol`].
-    pub extern_c_symbol: Option<String>,
-}
-
-impl FuncSig {
-    /// Resolve the underlying C symbol for an extern signature keyed by
-    /// its ZZ-visible name: the explicit override when present, otherwise
-    /// the ZZ name with `.` replaced by `_` (`zimg.resize` → `zimg_resize`,
-    /// flat `add` → `add`).
-    pub fn c_symbol(&self, zz_name: &str) -> String {
-        self.extern_c_symbol
-            .clone()
-            .unwrap_or_else(|| zz_name.replace('.', "_"))
-    }
-}
-
-/// A registered struct definition: type parameters and field types
-/// (which may reference the parameters as `Type::Named`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct StructSig {
-    pub generics: Vec<String>,
-    pub fields: Vec<(String, Type)>,
-}
-
-/// A registered type alias: type parameters and the target type with
-/// parameters as `Type::Named` (e.g. `type Pair<T> = (T, T)` stores
-/// `Tuple([Named("T"), Named("T")])`). Uses resolve to the target, so
-/// aliases never appear at runtime.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AliasSig {
-    pub generics: Vec<String>,
-    pub target: Type,
-}
-/// A registered user enum: type parameters and variant names with
-/// optional payload types (`enum Box<T> { V(T), E }` stores
-/// `generics: ["T"]`, `variants: [("V", Some(Named("T"))),
-/// ("E", None)]`). Construction (`Box.V(1)`) and patterns (`.V(v)`)
-/// resolve against this table; values erase to `Object`s at runtime.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct EnumSig {
-    pub generics: Vec<String>,
-    pub variants: Vec<(String, Option<Type>)>,
-}
-/// Minimal error-conversion registration (V1, error-only — not a general trait system).
-/// Declared via `impl From { func convert_to_To(self) -> To { ... } }`.
-/// V1 rule: at most one conversion per source type (keeps runtime dispatch sound).
-#[derive(Debug, Clone)]
-pub struct ConvertImpl {
-    pub from: Type,
-    pub from_name: String,
-    pub to: Type,
-    pub to_name: String,
-    pub func_name: String,
-    pub span: Span,
-}
-
-/// A `:=` declaration whose initializer is being checked, while probing
-/// whether it reads the binding the declaration shadows (#518).
-#[derive(Debug, Clone)]
-pub struct ShadowProbe {
-    /// Declared name.
-    pub name: String,
-    /// Where the declaration binds (`x` in `x := …`) — the warning points here.
-    pub span: Span,
-    /// Index of the scope the declaration binds into. A read resolving to a
-    /// *shallower* scope hit the shadowed outer binding; one at the same or
-    /// deeper index is a binder inside the initializer (closure parameter,
-    /// nested block), which is not shadowing.
-    pub depth: usize,
-    /// Set once such an outer read is seen.
-    pub referenced: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct CheckResult {
-    pub errors: Vec<RawDiag>,
-    /// Top-level `let` bindings and their types (fully resolved).
-    pub bindings: HashMap<String, Type>,
-    /// Top-level function signatures.
-    pub funcs: HashMap<String, FuncSig>,
-    /// Top-level struct definitions.
-    pub structs: HashMap<String, StructSig>,
-    /// Top-level type aliases (`type Tokens = [Token]`), resolved targets.
-    pub aliases: HashMap<String, AliasSig>,
-    /// Top-level user enums (`enum Token { ... }`).
-    pub enums: HashMap<String, EnumSig>,
-    /// `try` site span → conversion impl span (`None` = identity).
-    pub try_resolutions: HashMap<Span, Option<Span>>,
-    /// `try` site span → conversion function name (`None` = identity).
-    /// Resolved from `try_resolutions` + the `convert_to_` registry so
-    /// downstream passes (HIR, native codegen) can emit the conversion
-    /// call without re-deriving it. Mirrors `try_resolutions` 1:1.
-    pub try_converts: HashMap<Span, Option<String>>,
-    /// Native libraries requested via `@link("lib")`, in source order, deduped.
-    pub link_libs: Vec<String>,
-    /// Top-level `const` bindings and their declaration spans. Used to seed
-    /// later REPL snippets so immutable names stay immutable across evals.
-    pub const_bindings: HashMap<String, Span>,
-    /// Only `pub` bindings (for cross-module export).
-    pub pub_bindings: HashMap<String, Type>,
-    /// Only `pub` functions (for cross-module export).
-    pub pub_funcs: HashMap<String, FuncSig>,
-    /// Only `pub` structs (for cross-module export).
-    pub pub_structs: HashMap<String, StructSig>,
-    /// Only `pub` type aliases (for cross-module export).
-    pub pub_aliases: HashMap<String, AliasSig>,
-    /// Only `pub` user enums (for cross-module export).
-    pub pub_enums: HashMap<String, EnumSig>,
-}
+use zz_infer::InferOps;
+use zz_sigs::funcs::FuncOps;
+use zz_structs::StructOps;
+use zz_type_check::TypeCheckOps;
+use zz_types::Type;
 
 /// Type-check a whole program, seeded with bindings/funcs/structs from prior
 /// REPL evals. Errors are collected (not fatal); the program should not run
@@ -319,7 +162,7 @@ fn check_program_impl(
     {
         let mut max_seen: Option<u32> = None;
         let bump = |max_seen: &mut Option<u32>, t: &Type| {
-            if let Some(id) = inference::max_var_id(t) {
+            if let Some(id) = zz_infer::max_var_id(t) {
                 *max_seen = Some(max_seen.map_or(id, |m| m.max(id)));
             }
         };
@@ -348,7 +191,7 @@ fn check_program_impl(
     if !module_ns.is_empty() {
         checker
             .errors
-            .extend(std_gate::lint_std_imports(program, module_ns));
+            .extend(zz_lints::std_gate::lint_std_imports(program, module_ns));
     }
 
     // Track which items are pub (for cross-module export).
@@ -399,7 +242,7 @@ fn check_program_impl(
         {
             let full_name = name.join(".");
             if checker.structs.contains_key(&full_name) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!(
                         "duplicate definition of `{}` (a struct with the same name exists)",
                         full_name
@@ -408,21 +251,20 @@ fn check_program_impl(
                 ));
             }
             if let Some(prev) = seen_aliases.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!("duplicate definition of type alias `{}`", full_name),
                     *span,
                 ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
             }
             // Reject duplicate type parameters (`type P[T, T] = ...`).
             let mut seen = std::collections::HashSet::new();
             let mut gen_names = Vec::new();
             for g in generics {
                 if !seen.insert(g.name.clone()) {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "duplicate type parameter `{}` in alias `{}`",
                             g.name, full_name
@@ -455,14 +297,13 @@ fn check_program_impl(
         {
             let full_name = name.join(".");
             if let Some(prev) = seen_structs.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!("duplicate definition of struct `{}`", full_name),
                     *span,
                 ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
             }
             checker.collect_struct(stmt);
             if *pub_ {
@@ -490,7 +331,7 @@ fn check_program_impl(
         {
             let full_name = name.join(".");
             if checker.structs.contains_key(&full_name) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!(
                         "duplicate definition of `{}` (a struct with the same name exists)",
                         full_name
@@ -499,7 +340,7 @@ fn check_program_impl(
                 ));
             }
             if checker.alias_asts.contains_key(&full_name) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!(
                         "duplicate definition of `{}` (a type alias with the same name exists)",
                         full_name
@@ -508,21 +349,20 @@ fn check_program_impl(
                 ));
             }
             if let Some(prev) = seen_enums.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!("duplicate definition of enum `{}`", full_name),
                     *span,
                 ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
             }
             // Reject duplicate type parameters (`enum P[T, T]`).
             let mut seen_params = std::collections::HashSet::new();
             let mut gen_names = Vec::new();
             for g in generics {
                 if !seen_params.insert(g.name.clone()) {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "duplicate type parameter `{}` in enum `{}`",
                             g.name, full_name
@@ -606,7 +446,7 @@ fn check_program_impl(
                 impl_generics.iter().map(|g| g.name.clone()).collect();
             if is_extension {
                 if !impl_gen_names.is_empty() {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "generic `impl` requires a generic struct (`{type_name}` is not one)"
                         ),
@@ -621,14 +461,14 @@ fn check_program_impl(
                     "struct"
                 };
                 if struct_generics.is_empty() {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "{kind} `{type_name}` is not generic (expected `impl {type_name}` without type parameters)"
                         ),
                         stmt.span(),
                     ));
                 } else {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!(
                             "generic {kind} `{type_name}` takes {} type parameter{} (expected `impl {type_name}[{}]`)",
                             struct_generics.len(),
@@ -644,7 +484,7 @@ fn check_program_impl(
                 let mut seen_gen = std::collections::HashSet::new();
                 for g in &impl_gen_names {
                     if !seen_gen.insert(g.clone()) {
-                        checker.errors.push(zz_frontend::diag::error_at(
+                        checker.errors.push(zz_diag_core::error_at(
                             format!("duplicate type parameter `{g}` in `impl {type_name}`"),
                             stmt.span(),
                         ));
@@ -672,7 +512,7 @@ fn check_program_impl(
                     // would collapse two distinct variables; reject it.
                     for g in generics {
                         if impl_gen_names.contains(&g.name.name) {
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 format!(
                                     "type parameter `{}` shadows an `impl {}` parameter (rename one)",
                                     g.name.name, type_name
@@ -686,7 +526,7 @@ fn check_program_impl(
                         .cloned()
                         .chain(method_gens.iter().cloned())
                         .collect();
-                    let gen_bounds: Vec<(String, Vec<zz_frontend::ast::TraitBound>)> = generics
+                    let gen_bounds: Vec<(String, Vec<zz_span_ast::ast::TraitBound>)> = generics
                         .iter()
                         .map(|g| (g.name.name.clone(), g.bounds.clone()))
                         .collect();
@@ -745,12 +585,12 @@ fn check_program_impl(
                     // `convert_to_X` methods double as error-conversion impls.
                     if let Some(to_name) = method_name.strip_prefix("convert_to_") {
                         if to_name.is_empty() {
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 "`convert_to_` must name a target type (e.g. `convert_to_MyErr`)",
                                 method.span(),
                             ));
                         } else if matches!(sig_ret, Type::Var(_)) {
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 "conversion method must declare an explicit return type",
                                 method.span(),
                             ));
@@ -762,14 +602,14 @@ fn check_program_impl(
                             // V1: one conversion per source type (covers the
                             // spec's same-pair ambiguity and keeps runtime
                             // single-candidate dispatch sound).
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 format!(
                                     "ambiguous conversion from `{}`: already converts to `{}`",
                                     type_key, prev.to_name
                                 ),
                                 method.span(),
                             ));
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 "previous conversion here",
                                 prev.span,
                             ));
@@ -785,14 +625,13 @@ fn check_program_impl(
                         }
                     }
                     if let Some(prev) = seen.insert(full_name.clone(), method.span()) {
-                        checker.errors.push(zz_frontend::diag::error_at(
+                        checker.errors.push(zz_diag_core::error_at(
                             format!("duplicate definition of method `{}`", full_name),
                             method.span(),
                         ));
-                        checker.errors.push(zz_frontend::diag::error_at(
-                            "previous definition here",
-                            prev,
-                        ));
+                        checker
+                            .errors
+                            .push(zz_diag_core::error_at("previous definition here", prev));
                         continue;
                     }
                     if !is_extension {
@@ -816,7 +655,7 @@ fn check_program_impl(
                             } else {
                                 "already defined in another module (orphan rule: same (Type, method) in two modules)"
                             };
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 format!(
                                     "extension method `{}` conflicts with an existing method {}",
                                     full_name, origin
@@ -829,11 +668,11 @@ fn check_program_impl(
                             .ext_methods
                             .get(&(type_key.clone(), method_name.clone()))
                         {
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 format!("duplicate extension method `{}` (orphan rule)", full_name),
                                 method.span(),
                             ));
-                            checker.errors.push(zz_frontend::diag::error_at(
+                            checker.errors.push(zz_diag_core::error_at(
                                 "previous definition here",
                                 *prev_span,
                             ));
@@ -865,14 +704,13 @@ fn check_program_impl(
         {
             let full_name = name.join(".");
             if let Some(prev) = seen.insert(full_name.clone(), *span) {
-                checker.errors.push(zz_frontend::diag::error_at(
+                checker.errors.push(zz_diag_core::error_at(
                     format!("duplicate definition of function `{}`", full_name),
                     *span,
                 ));
-                checker.errors.push(zz_frontend::diag::error_at(
-                    "previous definition here",
-                    prev,
-                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
             }
             checker.collect_func(stmt);
             if *pub_ {
@@ -883,14 +721,13 @@ fn check_program_impl(
         if let Stmt::ExternBlock { items, .. } = stmt {
             for item in items {
                 if let Some(prev) = seen.insert(item.name.name.clone(), item.span) {
-                    checker.errors.push(zz_frontend::diag::error_at(
+                    checker.errors.push(zz_diag_core::error_at(
                         format!("duplicate definition of function `{}`", item.name.name),
                         item.span,
                     ));
-                    checker.errors.push(zz_frontend::diag::error_at(
-                        "previous definition here",
-                        prev,
-                    ));
+                    checker
+                        .errors
+                        .push(zz_diag_core::error_at("previous definition here", prev));
                 }
                 checker.collect_extern(&item.name, &item.params, &item.ret, item.c_symbol.clone());
             }
@@ -924,7 +761,7 @@ fn check_program_impl(
     let mut bindings = HashMap::new();
     for (name, ty) in &checker.new_bindings {
         let rt = checker.unifier.resolve_deep(ty);
-        if !inference::contains_var(&rt) {
+        if !zz_infer::contains_var(&rt) {
             bindings.insert(name.clone(), rt);
         }
     }
@@ -1012,12 +849,12 @@ fn check_program_impl(
     let mut span_types: std::collections::HashMap<SpanKey, Type> = std::collections::HashMap::new();
     for (key, ty) in &checker.span_types {
         let mut rt = checker.unifier.resolve_deep(ty);
-        if inference::contains_var(&rt)
+        if zz_infer::contains_var(&rt)
             && matches!(rt, Type::Option(_) | Type::Result(_, _) | Type::Enum(_, _))
         {
-            inference::default_variant_vars(&mut rt);
+            zz_infer::default_variant_vars(&mut rt);
         }
-        if !inference::contains_var(&rt) {
+        if !zz_infer::contains_var(&rt) {
             span_types.insert(key.clone(), rt);
         }
     }
@@ -1090,374 +927,6 @@ struct CheckerOutcome {
     span_types: std::collections::HashMap<SpanKey, Type>,
 }
 
-/// One binding recorded for unused-variable warnings.
-///
-/// `warn_unused` is `false` for bindings whose existence is dictated by
-/// an external signature rather than by the author's choice — closure
-/// parameters, which the callee calls positionally and which cannot be
-/// removed without changing the closure's arity.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DefinedBinding {
-    pub(crate) span: zz_frontend::span::Span,
-    pub(crate) warn_unused: bool,
-}
-
-pub(crate) struct Checker {
-    pub(crate) unifier: crate::unify::Unifier,
-    pub(crate) errors: Vec<zz_frontend::diag::RawDiag>,
-    pub(crate) funcs: HashMap<String, FuncSig>,
-    pub(crate) structs: HashMap<String, StructSig>,
-    /// Type aliases (`type Tokens = [Token]`): exported, resolved targets.
-    pub(crate) aliases: HashMap<String, AliasSig>,
-    /// Raw alias targets (this program only), converted to `aliases`
-    /// after all structs are collected so targets may reference any
-    /// struct regardless of order. Not exported.
-    pub(crate) alias_asts: HashMap<String, (Vec<String>, Ty)>,
-    /// Alias expansion stack for cycle detection (`type A = B`,
-    /// `type B = A` reports instead of recursing forever).
-    pub(crate) alias_expanding: Vec<String>,
-    /// User enums (`enum Token { ... }`): exported, resolved payloads.
-    pub(crate) enums: HashMap<String, EnumSig>,
-    /// Extension methods (separate table): (TypeName, method) → (sig, def span).
-    /// Holds `impl` on builtins and cross-type extensions. Lookup priority:
-    /// inherent (`funcs`) → extension (here) → stdlib namespace.
-    pub(crate) ext_methods: HashMap<(String, String), (FuncSig, Span)>,
-    /// Minimal `convert_to_` registry for `try` error conversion.
-    pub(crate) convert_impls: Vec<ConvertImpl>,
-    /// `try` site span → convert impl span (`None` = identity, no conversion).
-    /// Consumed by LSP hover to show the resolved conversion.
-    pub(crate) try_resolutions: HashMap<Span, Option<Span>>,
-    pub(crate) env: Vec<HashMap<String, Type>>,
-    /// Names declared `const` in each scope, mapped to their declaration
-    /// span (for the "defined as immutable here" secondary label). Parallel
-    /// to `env` — a name is immutable iff the scope that binds it also
-    /// contains it here.
-    pub(crate) const_env: Vec<HashMap<String, zz_frontend::span::Span>>,
-    /// Top-level let bindings discovered this run: name → type.
-    pub(crate) new_bindings: HashMap<String, Type>,
-    pub(crate) current_ret: Option<Type>,
-    pub(crate) current_generics: Vec<String>,
-    /// Trait bounds for the generic parameters currently in scope (set while
-    /// checking a generic function body).
-    pub(crate) current_bounds: HashMap<String, Vec<zz_frontend::ast::TraitBound>>,
-    /// Nesting depth of `for`/`while` loops (for `break`/`continue`).
-    pub(crate) loop_depth: usize,
-    /// Names that were used (looked up) — for unused-import warnings and
-    /// module/type usage. Binding-level usage lives in `used_bindings`.
-    pub(crate) used_names: std::collections::HashSet<String>,
-    /// Bindings actually read, keyed by `(scope index, name)`.
-    ///
-    /// Name-only tracking was too coarse: an unused `x` in one function was
-    /// silenced whenever any other function read a *different* `x`, and a
-    /// shadowed binding inherited its shadow's reads. The scope index (the
-    /// position in `env`) is stable for a scope's lifetime, so a use marked
-    /// while the scope is live is seen by that scope's `pop_scope`.
-    pub(crate) used_bindings: std::collections::HashSet<(usize, String)>,
-    /// Declarations whose initializer is being checked right now, probing
-    /// whether it reads the very binding the declaration shadows from an
-    /// enclosing scope (#518). Innermost last — see `begin_shadow_probe`.
-    pub(crate) shadow_probes: Vec<ShadowProbe>,
-    /// Top-level names marked `pub` — should not emit unused warnings.
-    pub(crate) pub_names: std::collections::HashSet<String>,
-    /// Names defined in the current scope with their spans — for unused
-    /// variable warnings. Each scope level has its own map.
-    pub(crate) defined_names: Vec<HashMap<String, DefinedBinding>>,
-    /// Tracks whether the most recent `lookup()` produced an "undefined
-    /// variable" error.  Used by `check_call` to suppress the secondary
-    /// "cannot call a value of type unit" cascading error.
-    pub(crate) had_undefined_var: bool,
-    /// Whether a block tail in the current position is the block's
-    /// *value* (implicit return) rather than a discard. `false` at the
-    /// top level and inside loop bodies (their values are discarded),
-    /// `true` inside function/closure bodies. `check_block` ANDs this
-    /// with tail position, so `-> Result` tails never warn while loop
-    /// tails that drop errors do. Saved/restored across nested blocks.
-    pub(crate) tail_is_value: bool,
-    /// Span and resolved type of the last statement of the most recently
-    /// checked block. `check_block` sets it *after* any nested block has
-    /// been checked, so after a named function body it holds that body's
-    /// tail. The missing-return diagnostic uses it to avoid an insertion
-    /// fixit before a tail that yields `unit`.
-    pub(crate) last_block_tail: Option<(Span, Type)>,
-    /// Whether the statement currently being checked directly discards
-    /// a `match` value (`match ...` as a bare statement/defer, not the
-    /// tail). `check_match` uses this to warn on bare `Result`/`Option`
-    /// arm bodies, which never pass through `Stmt::Expr` themselves.
-    /// Block arm bodies are covered by the normal statement path.
-    pub(crate) direct_discard: bool,
-    /// Imported namespaces: (alias, span). Used to detect unused imports.
-    pub(crate) imports: Vec<(String, zz_frontend::span::Span)>,
-    /// Selective-import aliases: bare name → qualified `ns.sym`, from
-    /// `import m(x)` / `import m(x as y)` statements (kept intact by the
-    /// loader). Used ONLY on total miss: locals, seed entries and value
-    /// Decls all take precedence. This is how bare calls to *generic*
-    /// functions resolve — generics have no value type, so no binding
-    /// is ever created for them.
-    pub(crate) import_aliases: HashMap<String, String>,
-    /// Module-head aliases: `m` → `std.math` from `import std.math as m`.
-    /// Lets const/call diagnostics resolve aliased namespaces.
-    pub(crate) module_aliases: HashMap<String, String>,
-    /// Resolved type per scoped expression key, recorded during the type walk.
-    /// Used by the HIR builder to attach a resolved `Type` to every AST node.
-    /// Keyed by [`SpanKey`] (function + span): bare spans collide across
-    /// modules since every file restarts offsets at 0.
-    pub(crate) span_types: std::collections::HashMap<SpanKey, Type>,
-    /// Native libraries requested via `@link`, in source order, deduped.
-    pub(crate) link_libs: Vec<String>,
-    /// `std.http` route registrations per server-var root (Phase 2.2 lint).
-    pub(crate) http_lint: http_lint::HttpLintState,
-    /// Enclosing-item scope stack for [`SpanKey`] recording. Holds the
-    /// top-level function (or `Type.method`) whose body is being checked;
-    /// empty at top level (keys then use [`TOP_SCOPE`]).
-    pub(crate) scope: Vec<Arc<str>>,
-}
-
-impl Checker {
-    /// Scope-qualified key for an expression span under the item currently
-    /// being checked.
-    pub(crate) fn scope_key(&self, span: Span) -> SpanKey {
-        SpanKey::new(
-            self.scope
-                .last()
-                .cloned()
-                .unwrap_or_else(|| Arc::from(TOP_SCOPE)),
-            span,
-        )
-    }
-    pub(crate) fn new(
-        initial_bindings: HashMap<String, Type>,
-        funcs: HashMap<String, FuncSig>,
-        structs: HashMap<String, StructSig>,
-        aliases: HashMap<String, AliasSig>,
-        enums: HashMap<String, EnumSig>,
-        initial_consts: HashMap<String, Span>,
-    ) -> Self {
-        let env = vec![initial_bindings];
-        Checker {
-            unifier: crate::unify::Unifier::new(),
-            errors: Vec::new(),
-            funcs,
-            structs,
-            aliases,
-            alias_asts: HashMap::new(),
-            alias_expanding: Vec::new(),
-            enums,
-            ext_methods: HashMap::new(),
-            convert_impls: Vec::new(),
-            try_resolutions: HashMap::new(),
-            env,
-            const_env: vec![initial_consts],
-            new_bindings: HashMap::new(),
-            current_ret: None,
-            current_generics: Vec::new(),
-            current_bounds: HashMap::new(),
-            loop_depth: 0,
-            used_names: std::collections::HashSet::new(),
-            used_bindings: std::collections::HashSet::new(),
-            shadow_probes: Vec::new(),
-            pub_names: std::collections::HashSet::new(),
-            defined_names: vec![HashMap::new()],
-            had_undefined_var: false,
-            tail_is_value: false,
-            last_block_tail: None,
-            direct_discard: false,
-            imports: Vec::new(),
-            import_aliases: HashMap::new(),
-            module_aliases: HashMap::new(),
-            span_types: std::collections::HashMap::new(),
-            scope: Vec::new(),
-            link_libs: Vec::new(),
-            http_lint: http_lint::HttpLintState::default(),
-        }
-    }
-
-    /// Get the full name of a function statement.
-    pub(crate) fn func_name(stmt: &Stmt) -> String {
-        match stmt {
-            Stmt::Func { name, .. } => name.join("."),
-            _ => "<unknown>".to_string(),
-        }
-    }
-
-    /// Canonical extension key for builtin receiver names.
-    /// `str`→`str`, `Array`/`vec`→`vec`, `Option`/`option`→`option`,
-    /// `Result`/`result`→`result`, scalars map to themselves.
-    pub(crate) fn builtin_ext_key(type_name: &str) -> Option<String> {
-        match type_name {
-            "str" => Some("str".to_string()),
-            "int" => Some("int".to_string()),
-            "float" => Some("float".to_string()),
-            "bool" => Some("bool".to_string()),
-            "vec" | "Array" => Some("vec".to_string()),
-            "option" | "Option" => Some("option".to_string()),
-            "result" | "Result" => Some("result".to_string()),
-            _ => None,
-        }
-    }
-
-    /// Receiver type for `self` in an `impl` block.
-    pub(crate) fn self_type_for_impl(
-        type_name: &str,
-        type_key: &str,
-        impl_generics: &[String],
-        unifier: &mut crate::unify::Unifier,
-    ) -> Type {
-        match type_key {
-            "str" => Type::Str,
-            "int" => Type::Int,
-            "float" => Type::Float,
-            "bool" => Type::Bool,
-            "vec" => Type::Array(Box::new(unifier.fresh_var())),
-            "option" => Type::Option(Box::new(unifier.fresh_var())),
-            "result" => Type::Result(Box::new(unifier.fresh_var()), Box::new(unifier.fresh_var())),
-            _ => Type::Struct(
-                type_name.to_string(),
-                impl_generics
-                    .iter()
-                    .map(|g| Type::Named(g.clone()))
-                    .collect(),
-            ),
-        }
-    }
-
-    /// True when `Type.method` is a stdlib-provided builtin (builtin-wins).
-    /// The namespace list mirrors `STDLIB_MODULES` in `zz_stdlib/src/lib.rs`
-    /// plus the method-dispatch namespaces used by `check_call`
-    /// (`option`/`result`/`net`/`db`) — i.e. every namespace whose `ns.method`
-    /// keys can arrive via the seeded `funcs` map. Collision *coverage* does
-    /// not depend on this list (any seeded `funcs` key collides); this only
-    /// decides the message wording (stdlib vs another module).
-    pub(crate) fn is_stdlib_method(full_name: &str) -> bool {
-        if let Some((ns, _)) = full_name.rsplit_once('.') {
-            // Strip a leading `std.` (`std.str.length` → `str`) and compare
-            // the first segment (`sqlz.postgres.query` → `sqlz`).
-            let short = ns.strip_prefix("std.").unwrap_or(ns);
-            let head = short.split('.').next().unwrap_or(short);
-            let head = head.to_lowercase();
-            matches!(
-                head.as_str(),
-                "io" | "str"
-                    | "vec"
-                    | "json"
-                    | "http"
-                    | "fs"
-                    | "env"
-                    | "math"
-                    | "time"
-                    | "encoding"
-                    | "net"
-                    | "chan"
-                    | "task"
-                    | "regexp"
-                    | "regex"
-                    | "crypto"
-                    | "log"
-                    | "sys"
-                    | "args"
-                    | "process"
-                    | "uuid"
-                    | "sqlz"
-                    | "option"
-                    | "result"
-            )
-        } else {
-            false
-        }
-    }
-}
-
-/// Canonical std module list (dotted; nested modules included).
-/// SINGLE SOURCE for all module-name tables: `zz_stdlib::STDLIB_MODULES`
-/// re-exports this, and the helpers below derive from it — there is no
-/// second list to drift. Method-only namespaces (`option`, `result`,
-/// `file`, …) and type constructors (`ArgsParser`, `Regexp`) are absent
-/// on purpose — they were never duplicated and stay bare.
-pub const STD_MODULES: &[&str] = &[
-    "str",
-    "vec",
-    "json",
-    "http",
-    "fs",
-    "path",
-    "env",
-    "math",
-    "time",
-    "encoding",
-    "net",
-    "chan",
-    "task",
-    "regexp",
-    "crypto",
-    "log",
-    "sys",
-    "args",
-    "process",
-    "uuid",
-    "sqlz",
-    "sqlz.postgres",
-    "sqlz.mysql",
-    "colors",
-    "term",
-    "test",
-    "map",
-    "set",
-    "dec",
-    "bytes",
-    "csv",
-    "property",
-    "cell",
-    "unix",
-    "tls",
-    "tls_listener",
-    "unix_listener",
-];
-
-/// True when `head` is a top-level std module (`sqlz` in
-/// `sqlz.postgres.query`). Derives from [`STD_MODULES`] — no parallel
-/// list. Used by import suggestions and canonical resolution alike.
-pub fn is_std_module_head(head: &str) -> bool {
-    STD_MODULES
-        .iter()
-        .any(|m| m.split('.').next() == Some(head))
-}
-
-/// Look up a stdlib registry entry by either spelling: the name as-written
-/// first (covers orphans like `option.unwrap` and import-copied `ns.*`
-/// keys, which have no canonical form), then the canonical `std.*`
-/// spelling. Single choke point for the canonical-seeds-only tables —
-/// callers must use this instead of raw `HashMap::get` for stdlib names.
-pub fn lookup_std<'a, V>(
-    map: &'a std::collections::HashMap<String, V>,
-    name: &str,
-) -> Option<&'a V> {
-    map.get(name)
-        .or_else(|| canonical_std_name(name).and_then(|c| map.get(&c)))
-}
-
-/// Membership twin of [`lookup_std`] for precomputed name sets
-/// (`native_names`, seed-key sets, completion snapshots).
-pub fn contains_std(set: &std::collections::HashSet<String>, name: &str) -> bool {
-    set.contains(name) || canonical_std_name(name).is_some_and(|c| set.contains(&c))
-}
-
-/// Resolve a bare `module.func` name to its canonical `std.module.func`
-/// spelling: the single source of truth for the std alias (replaces the
-/// old per-crate inline copies). Returns `None` for already-canonical
-/// `std.*` names, bare builtins, unknown heads, and non-module
-/// namespaces. Nested modules compose (`sqlz.postgres.query` →
-/// `std.sqlz.postgres.query`). Callers gate on module position (a local
-/// binding with the same head always wins) before applying this.
-pub fn canonical_std_name(name: &str) -> Option<String> {
-    if name.starts_with("std.") || !name.contains('.') {
-        return None;
-    }
-    let head = name.split('.').next().unwrap_or(name);
-    if is_std_module_head(head) {
-        return Some(format!("std.{name}"));
-    }
-    None
-}
-
 #[cfg(test)]
 mod span_scope_tests {
     use super::*;
@@ -1500,13 +969,13 @@ mod cache_serde_tests {
     // S1 arena-scale: pub signatures must survive a JSON roundtrip exactly
     // (module check-cache stores these on disk).
     use super::*;
-    use crate::type_::Type;
+    use zz_types::Type;
 
     #[test]
     fn func_sig_roundtrips() {
         let sig = FuncSig {
             generics: vec!["T".to_string()],
-            bounds: vec![("T".to_string(), vec![zz_frontend::ast::TraitBound::Display])],
+            bounds: vec![("T".to_string(), vec![zz_span_ast::ast::TraitBound::Display])],
             params: vec![
                 ("x".to_string(), Type::Int),
                 (

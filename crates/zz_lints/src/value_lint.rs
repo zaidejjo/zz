@@ -20,13 +20,13 @@
 
 use std::collections::HashMap;
 
-use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt};
-use zz_frontend::diag::RawDiag;
-use zz_frontend::span::Span;
+use zz_diag_core::RawDiag;
+use zz_span_ast::ast::{Block, Expr, FmtPart, Pattern, Stmt};
+use zz_span_ast::span::Span;
+use zz_types::Type;
 
 /// Value types whose in-place mutation a caller can never observe.
-fn is_value_type(ty: &crate::Type) -> bool {
-    use crate::Type;
+fn is_value_type(ty: &zz_types::Type) -> bool {
     matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::Struct(_, _))
 }
 
@@ -39,7 +39,7 @@ struct Walk {
 }
 
 impl Walk {
-    fn new(params: &[(String, crate::Type)]) -> Self {
+    fn new(params: &[(String, zz_types::Type)]) -> Self {
         let mut root = HashMap::new();
         let mut watched = HashMap::new();
         for (name, ty) in params {
@@ -365,8 +365,8 @@ fn declare_pattern(pat: &Pattern, declare: &mut impl FnMut(&str)) {
 
 /// Lint one checked function body: warn for each value-typed parameter
 /// stored through but never otherwise observed.
-pub(crate) fn lint_dead_param_mutation(
-    params: &[(String, crate::Type)],
+pub fn lint_dead_param_mutation(
+    params: &[(String, zz_types::Type)],
     body: &Block,
     errors: &mut Vec<RawDiag>,
 ) {
@@ -378,7 +378,7 @@ pub(crate) fn lint_dead_param_mutation(
     walk.pop();
     for (name, span) in walk.finish() {
         errors.push(
-            zz_frontend::diag::warning_at(
+            zz_diag_core::warning_at(
                 format!(
                     "mutating parameter `{name}` which is never returned — the mutation is lost (parameters are values)"
                 ),

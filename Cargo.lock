@@ -3760,7 +3760,30 @@ version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
+ "zz_checker_core",
+ "zz_diag_core",
  "zz_frontend",
+ "zz_infer",
+ "zz_lints",
+ "zz_scope",
+ "zz_sigs",
+ "zz_span_ast",
+ "zz_structs",
+ "zz_type_check",
+ "zz_types",
+ "zz_unify",
+]
+
+[[package]]
+name = "zz_checker_core"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "zz_diag_core",
+ "zz_http_routes",
+ "zz_span_ast",
+ "zz_types",
+ "zz_unify",
 ]
 
 [[package]]
@@ -3811,6 +3834,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_diag_core"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "zz_span_ast",
+]
+
+[[package]]
 name = "zz_fmt"
 version = "0.4.0"
 dependencies = [
@@ -3830,6 +3861,9 @@ dependencies = [
  "codespan-reporting",
  "colored",
  "serde",
+ "zz_diag_core",
+ "zz_span_ast",
+ "zz_suggest",
 ]
 
 [[package]]
@@ -3841,6 +3875,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_http_routes"
+version = "0.4.0"
+dependencies = [
+ "zz_diag_core",
+ "zz_span_ast",
+]
+
+[[package]]
+name = "zz_infer"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_span_ast",
+ "zz_suggest",
+ "zz_types",
+ "zz_unify",
+]
+
+[[package]]
 name = "zz_ir"
 version = "0.4.0"
 dependencies = [
@@ -3848,6 +3902,19 @@ dependencies = [
  "zz_frontend",
  "zz_runtime",
  "zz_stdlib",
+]
+
+[[package]]
+name = "zz_lints"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_http_routes",
+ "zz_scope",
+ "zz_span_ast",
+ "zz_suggest",
+ "zz_types",
 ]
 
 [[package]]
@@ -3943,6 +4010,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_scope"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_span_ast",
+ "zz_structs",
+ "zz_suggest",
+ "zz_types",
+]
+
+[[package]]
+name = "zz_sigs"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_infer",
+ "zz_span_ast",
+ "zz_suggest",
+ "zz_types",
+]
+
+[[package]]
+name = "zz_span_ast"
+version = "0.4.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "zz_stdlib"
 version = "0.4.0"
 dependencies = [
@@ -3966,4 +4064,52 @@ dependencies = [
  "zz_hir",
  "zz_native_rt",
  "zz_runtime",
+]
+
+[[package]]
+name = "zz_structs"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_infer",
+ "zz_span_ast",
+ "zz_suggest",
+ "zz_types",
+]
+
+[[package]]
+name = "zz_suggest"
+version = "0.4.0"
+
+[[package]]
+name = "zz_type_check"
+version = "0.4.0"
+dependencies = [
+ "zz_checker_core",
+ "zz_diag_core",
+ "zz_http_routes",
+ "zz_infer",
+ "zz_lints",
+ "zz_scope",
+ "zz_sigs",
+ "zz_span_ast",
+ "zz_structs",
+ "zz_suggest",
+ "zz_types",
+ "zz_unify",
+]
+
+[[package]]
+name = "zz_types"
+version = "0.4.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "zz_unify"
+version = "0.4.0"
+dependencies = [
+ "zz_types",
 ]
