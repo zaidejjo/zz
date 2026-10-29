@@ -3937,6 +3937,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_loader"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "zz_checker",
+ "zz_frontend",
+ "zz_ir",
+ "zz_plugin",
+ "zz_pm",
+ "zz_run_cache",
+ "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_lsp"
 version = "0.4.0"
 dependencies = [
