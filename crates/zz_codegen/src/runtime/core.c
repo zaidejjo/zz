@@ -6722,7 +6722,14 @@ static zz_value http_serve_static_file(const char *path, size_t pathlen,
         free(norm);
         return http_static_plain(404, "Not Found", NULL);
     }
+    // Drop a trailing separator (`_fullpath` may keep the one the caller
+    // wrote): the containment check compares components, so `root\` would
+    // never match `root\file`. A filesystem root ("/", "C:\") keeps it.
     size_t rootlen = strlen(root);
+    while (rootlen > 1 && http_is_path_sep(root[rootlen - 1])
+           && !(rootlen == 3 && root[1] == ':')) {
+        root[--rootlen] = '\0';
+    }
     size_t flen = rootlen + 1 + nlen;
     char *fpath = (char *)malloc(flen + 1);
     if (!fpath) {
