@@ -20,11 +20,6 @@ use crate::checker::type_check::TypeCheckOps;
 use zz_types::Type;
 
 pub trait EnumOps {
-    /// Canonical enum name, mirroring
-    /// [`Checker::canonical_struct_name`]: a selectively-imported bare
-    /// name resolves to its qualified form.
-    fn canonical_enum_name(&self, name: &str) -> String;
-
     /// Fresh inference variables for an enum's parameters, with the
     /// substitution map (`T` → `?0`). Mirrors generic struct
     /// instantiation: the payload unifies against the substituted type,
@@ -62,18 +57,6 @@ pub trait EnumOps {
 }
 
 impl EnumOps for Checker {
-    /// Canonical enum name, mirroring
-    /// [`Checker::canonical_struct_name`]: a selectively-imported bare
-    /// name resolves to its qualified form.
-    fn canonical_enum_name(&self, name: &str) -> String {
-        if let Some(qualified) = self.import_aliases.get(name) {
-            if self.enums.contains_key(qualified) {
-                return qualified.clone();
-            }
-        }
-        name.to_string()
-    }
-
     /// Fresh inference variables for an enum's parameters, with the
     /// substitution map (`T` → `?0`). Mirrors generic struct
     /// instantiation: the payload unifies against the substituted type,

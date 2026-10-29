@@ -85,14 +85,6 @@ pub trait ScopeOps {
     /// Resolve a dotted path: first as a single qualified name (module
     /// bindings/functions), then as a struct-field walk from the first part.
     fn lookup_path(&mut self, parts: &[String], span: Span) -> Type;
-
-    /// Canonical struct name: a selectively-imported bare name resolves to
-    /// its qualified form (`Product` → `product.Product`), exactly as if
-    /// written qualified — methods, conversions and type identity all key
-    /// off the qualified form. Miss-only: locals and seed entries (which
-    /// have no alias mapping) keep their name. Display still prints the
-    /// bare form; only types canonicalize.
-    fn canonical_struct_name(&self, name: &str) -> String;
 }
 
 impl ScopeOps for Checker {
@@ -661,20 +653,5 @@ impl ScopeOps for Checker {
             }
         }
         ty
-    }
-
-    /// Canonical struct name: a selectively-imported bare name resolves to
-    /// its qualified form (`Product` → `product.Product`), exactly as if
-    /// written qualified — methods, conversions and type identity all key
-    /// off the qualified form. Miss-only: locals and seed entries (which
-    /// have no alias mapping) keep their name. Display still prints the
-    /// bare form; only types canonicalize.
-    fn canonical_struct_name(&self, name: &str) -> String {
-        if let Some(qualified) = self.import_aliases.get(name) {
-            if self.structs.contains_key(qualified) {
-                return qualified.clone();
-            }
-        }
-        name.to_string()
     }
 }

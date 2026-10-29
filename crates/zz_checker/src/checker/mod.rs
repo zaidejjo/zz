@@ -1,6 +1,5 @@
 //! Type checker: HM-lite inference, generics, patterns, exhaustiveness.
 
-pub mod aliases;
 pub mod enums;
 pub mod funcs;
 pub mod http_lint;
@@ -21,7 +20,6 @@ use std::sync::Arc;
 use zz_span_ast::ast::{Program, Stmt};
 use zz_span_ast::span::Span;
 
-use crate::checker::aliases::AliasOps;
 use crate::checker::funcs::FuncOps;
 use crate::checker::inference::InferOps;
 use crate::checker::structs::StructOps;

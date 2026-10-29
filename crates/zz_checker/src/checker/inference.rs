@@ -1,9 +1,6 @@
 //! Type inference helpers: unification, type variables, generics.
 
-use crate::checker::aliases::AliasOps;
-use crate::checker::enums::EnumOps;
-use crate::checker::scope::ScopeOps;
-use crate::checker::Checker;
+use crate::checker::{AliasSig, Checker};
 use zz_diag_core::error_at;
 use zz_span_ast::ast::Ty;
 use zz_span_ast::span::Span;
@@ -49,6 +46,39 @@ pub trait InferOps {
     /// enough to suggest, in which case the plain "unknown type" message
     /// stands alone.
     fn suggest_type_name(&self, name: &str) -> Option<String>;
+
+    /// Canonical struct name: a selectively-imported bare name resolves to
+    /// its qualified form (`Product` → `product.Product`), exactly as if
+    /// written qualified — methods, conversions and type identity all key
+    /// off the qualified form. Miss-only: locals and seed entries (which
+    /// have no alias mapping) keep their name. Display still prints the
+    /// bare form; only types canonicalize.
+    fn canonical_struct_name(&self, name: &str) -> String;
+
+    /// Canonical enum name, mirroring [`Self::canonical_struct_name`]: a
+    /// selectively-imported bare name resolves to its qualified form.
+    fn canonical_enum_name(&self, name: &str) -> String;
+
+    /// Convert one raw alias target to a resolved [`AliasSig`].
+    /// Idempotent: already-converted names return immediately (also
+    /// breaks re-entrant conversion during cycle reporting).
+    fn convert_alias(&mut self, name: &str);
+
+    /// Canonical alias name, mirroring [`Self::canonical_struct_name`]: a
+    /// selectively-imported bare name resolves to its qualified form.
+    fn canonical_alias_name(&self, name: &str) -> String;
+
+    /// Expand an alias use `Name[args]` to its resolved [`Type`].
+    /// Arity is checked like generic structs; mismatches report and
+    /// resolve with the provided prefix (missing parameters stay
+    /// `Named`, which surfaces as a generic — never a silent hole).
+    fn expand_alias(
+        &mut self,
+        name: &str,
+        args: &[Ty],
+        outer_generics: &[String],
+        span: Span,
+    ) -> Type;
 }
 
 impl InferOps for Checker {
@@ -442,6 +472,120 @@ impl InferOps for Checker {
             candidates.push(a.as_str());
         }
         suggest(name, &candidates).map(|(s, _)| s.to_string())
+    }
+
+    fn canonical_struct_name(&self, name: &str) -> String {
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.structs.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
+
+    fn canonical_enum_name(&self, name: &str) -> String {
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.enums.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
+
+    fn convert_alias(&mut self, name: &str) {
+        if self.aliases.contains_key(name) {
+            return;
+        }
+        if self.alias_expanding.iter().any(|n| n == name) {
+            let span = self
+                .alias_asts
+                .get(name)
+                .map(|(_, t)| t.span)
+                .unwrap_or(Span::new(0, 0));
+            self.errors.push(error_at(
+                format!(
+                    "cyclic type alias `{}`: {}",
+                    name,
+                    self.alias_expanding.join(" -> ")
+                ),
+                span,
+            ));
+            // Placeholder so the use site resolves instead of cascading
+            // a second "unknown type" error.
+            self.aliases.entry(name.to_string()).or_insert(AliasSig {
+                generics: Vec::new(),
+                target: Type::Unit,
+            });
+            return;
+        }
+        let Some((generics, target)) = self.alias_asts.get(name).cloned() else {
+            return;
+        };
+        self.alias_expanding.push(name.to_string());
+        let ty = self.ast_to_type_inner(&target, &generics);
+        self.alias_expanding.pop();
+        // A cycle during conversion leaves no entry: record the
+        // (possibly partial) type anyway so uses don't cascade
+        // "unknown type" on top of the cycle error.
+        self.aliases.entry(name.to_string()).or_insert(AliasSig {
+            generics,
+            target: ty,
+        });
+    }
+
+    fn canonical_alias_name(&self, name: &str) -> String {
+        if let Some(qualified) = self.import_aliases.get(name) {
+            if self.aliases.contains_key(qualified) {
+                return qualified.clone();
+            }
+        }
+        name.to_string()
+    }
+
+    fn expand_alias(
+        &mut self,
+        name: &str,
+        args: &[Ty],
+        outer_generics: &[String],
+        span: Span,
+    ) -> Type {
+        // Lazily convert: seeded aliases (cross-module) arrive converted,
+        // same-program aliases convert in pass 1a — but a use inside an
+        // alias target converts on demand through `convert_alias`.
+        self.convert_alias(name);
+        let Some(sig) = self.aliases.get(name).cloned() else {
+            self.errors
+                .push(error_at(format!("unknown type `{name}`"), span));
+            return Type::Unit;
+        };
+        if args.len() != sig.generics.len() {
+            if sig.generics.is_empty() {
+                self.errors.push(error_at(
+                    format!(
+                        "type alias `{name}` takes no type arguments but {} given",
+                        args.len(),
+                    ),
+                    span,
+                ));
+            } else {
+                self.errors.push(error_at(
+                    format!(
+                        "type alias `{name}` takes {} type argument{} but {} given",
+                        sig.generics.len(),
+                        if sig.generics.len() == 1 { "" } else { "s" },
+                        args.len(),
+                    ),
+                    span,
+                ));
+            }
+        }
+        let mut map = std::collections::HashMap::new();
+        for (i, g) in sig.generics.iter().enumerate() {
+            if let Some(a) = args.get(i) {
+                map.insert(g.clone(), self.ast_to_type_inner(a, outer_generics));
+            }
+        }
+        subst(&sig.target, &map)
     }
 }
 
