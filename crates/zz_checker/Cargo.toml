@@ -10,8 +10,6 @@ zz_span_ast = { path = "../zz_span_ast" }
 zz_types = { path = "../zz_types" }
 zz_unify = { path = "../zz_unify" }
 zz_diag_core = { path = "../zz_diag_core" }
-zz_suggest = { path = "../zz_suggest" }
-zz_http_routes = { path = "../zz_http_routes" }
 zz_infer = { path = "../zz_infer" }
 zz_structs = { path = "../zz_structs" }
 zz_scope = { path = "../zz_scope" }
