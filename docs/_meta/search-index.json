@@ -309,7 +309,7 @@
         "mysql",
         "sqlz"
       ],
-      "excerpt": "Canonical module is `std.sqlz`. There is no `std.db`/`db.*` \u2014 `sqlz` only."
+      "excerpt": "Canonical module is `std.sqlz`."
     },
     {
       "path": "stdlib/concurrency.md",

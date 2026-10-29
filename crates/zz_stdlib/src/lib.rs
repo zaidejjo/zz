@@ -5,7 +5,7 @@
 //! - [`stdlib_natives`]: Rust implementations consumed by the interpreter.
 //!
 //! Modules:
-//! - console I/O is builtin — `print`, `println`, `input` (no import, no `std.io`)
+//! - console I/O is builtin — `print`, `println`, `input` (no import)
 //! - `std.str`  — `length`, `split`, `contains`
 //! - `std.vec`  — `push`, `pop`, `len`
 //! - `std.json` — `parse`, `stringify`, `get`, `as_str`, `as_int`, `as_float`, `as_bool`

@@ -36,7 +36,7 @@ assert `passed == 0` via `--json`.
 Not in stdlib — external `toml` package (pure ZZ, versioned separately).
 
 **I upgraded and imports broke — migration?**
-Three renames cover most: `import std.io` → bare builtins (`println`, no import);
+Three renames cover most: bare builtins (`println`, no import);
 `http.pipe` → `http.use`; `[native] build = "hook"` → `[native.build-cc]`
 (see [Plugins](../tooling/plugins.md)). Stale lock pins after a manifest
 registry↔path flip are ignored with a note — run `zz install` to rewrite

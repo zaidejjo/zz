@@ -2376,9 +2376,6 @@ impl Checker {
                             sig = crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned()
                         }
                         Type::Db => {
-                            // Canonical `sqlz.*` only — the `db` module was
-                            // removed. Handle variables named `db` dispatch
-                            // here silently (method call, not module use).
                             sig =
                                 crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
                         }
@@ -2461,44 +2458,6 @@ impl Checker {
             _ => None,
         };
         if let Some(name) = &direct_name {
-            // Removed `db` module: `db.*` / `std.db.*` in module position
-            // is a hard error with a rename hint. Handle variables named
-            // `db` (`db := sqlz.open(..); db.exec(..)`) are method calls
-            // and stay silent — this fires only when the head has no
-            // local binding.
-            if (name.starts_with("std.db.") || name.starts_with("db."))
-                && !self.funcs.contains_key(name)
-            {
-                let head_is_module = match callee {
-                    Expr::Path { parts, .. } => {
-                        parts.len() >= 2 && self.lookup_opt(&parts[0]).is_none()
-                    }
-                    _ => false,
-                };
-                if head_is_module {
-                    for arg in args {
-                        self.check_expr(arg);
-                    }
-                    for (_, val) in named {
-                        self.check_expr(val);
-                    }
-                    self.errors.push(error_at(
-                        "no std module `db` — rename to `sqlz` (`db.open` → `sqlz.open`)",
-                        span,
-                    ));
-                    let ret = match name.rsplit('.').next().unwrap_or("") {
-                        "open" => Type::Db,
-                        "exec" => Type::Int,
-                        "close" => Type::Unit,
-                        "query" => Type::Array(Box::new(self.unifier.fresh_var())),
-                        "transaction" => {
-                            Type::Result(Box::new(self.unifier.fresh_var()), Box::new(Type::Str))
-                        }
-                        _ => Type::Array(Box::new(self.unifier.fresh_var())),
-                    };
-                    return ret;
-                }
-            }
             // Removed push spellings: `vec.append` / `std.vec.append` and the
             // bare `append` builtin are gone — `vec.push` plus the method form
             // `xs.push(x)` is the only spelling. Hard error with a hint
@@ -2678,9 +2637,7 @@ impl Checker {
                 ));
                 return Type::Float;
             }
-            // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` (the
-            // `db` module was removed — module-position `db.*` calls hard
-            // error with a rename hint above) take an
+            // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` take an
             // interpolated SQL string. `{expr}` segments are extracted as
             // bound parameters (never inlined), so verification here is:
             // receiver is `db`, SQL arg is `str`, each bound expr is a
@@ -3136,9 +3093,6 @@ impl Checker {
                                 crate::lookup_std(&self.funcs, &format!("json.{method}")).cloned();
                         }
                         Type::Db => {
-                            // Canonical `sqlz.*` only — the `db` module was
-                            // removed. Handle variables named `db` dispatch
-                            // here silently (method call, not module use).
                             sig =
                                 crate::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned();
                         }

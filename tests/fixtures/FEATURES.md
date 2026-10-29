@@ -48,7 +48,7 @@ Modules:
 Standard library (one per `std.*` module; `import std.math` implies both
 `imports` and `std-math`):
 `std-args`, `std-bytes`, `std-chan`, `std-colors`, `std-crypto`, `std-csv`,
-`std-db`, `std-dec`, `std-encoding`, `std-env`, `std-fs`, `std-http`,
+`std-dec`, `std-encoding`, `std-env`, `std-fs`, `std-http`,
 `std-json`, `std-log`, `std-map`, `std-math`, `std-net`, `std-path`,
 `std-process`, `std-regexp`, `std-sqlz`, `std-str`, `std-sys`, `std-task`,
 `std-term`, `std-time`, `std-uuid`, `std-vec`

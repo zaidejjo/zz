@@ -81,7 +81,7 @@ fn sig_defaults(params: Vec<(&str, Type)>, n_defaults: usize, ret: Type) -> Func
 
 /// All standard library function signatures, keyed by qualified name
 /// (e.g. `std.str.length`). Console I/O lives here as bare builtins
-/// (`print`, `println`, `input`) — there is no `std.io` module.
+/// (`print`, `println`, `input`).
 ///
 /// The table is built once per process and cloned on each call: building
 /// from scratch costs ~475 inserts with fresh `Type` trees, while cloning
@@ -3425,10 +3425,9 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // annotation (`let users: [User] = sqlz.query(...)`) so the runtime can
     // map columns positionally into that struct.
     //
-    // There is no `db` module: `sqlz` is the only SQLite module.
-    // Module-position `db.*` calls hard-error in the checker with a rename
-    // hint; handle variables named `db` (`db := sqlz.open(..); db.exec(..)`)
-    // are method calls and keep working.
+    // `sqlz` is the only SQLite module. Handle variables named `db`
+    // (`db := sqlz.open(..); db.exec(..)`) are method calls and keep
+    // working.
     let db_row_t = Type::Named("T".to_string());
     m.insert(
         "std.sqlz.open".into(),
@@ -3450,8 +3449,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("db", Type::Db)], Type::Unit),
     );
     // Method-dispatch aliases (`sqlz.open(...)` after `import std.sqlz`).
-    // NOTE: no `std.db.*` / `db.*` seeds exist (see above).
-
     // std.sqlz.postgres — async-minded PostgreSQL wire-protocol driver.
     //
     // `connect(conninfo) -> db` (URL or keyword form), `exec(db, sql)`,
@@ -3927,7 +3924,6 @@ mod tests {
         assert!(funcs.contains_key("std.sqlz.exec"));
         assert!(funcs.contains_key("std.sqlz.query"));
         assert!(funcs.contains_key("std.sqlz.close"));
-        // No `std.db.*` / `db.*` seeds exist — `sqlz` only.
         assert!(funcs.contains_key("std.sqlz.postgres.connect"));
         assert!(funcs.contains_key("std.sqlz.postgres.exec"));
         assert!(funcs.contains_key("std.sqlz.postgres.query"));

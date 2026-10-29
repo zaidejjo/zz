@@ -3892,7 +3892,7 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
 }
 
 // =====================================================================
-//  std.db SQLite — prepared-statement FFI (zero-alloc binding path)
+//  SQLite — prepared-statement FFI (zero-alloc binding path)
 // =====================================================================
 //
 //  Contract (mirrors the rusqlite natives in zz_stdlib):

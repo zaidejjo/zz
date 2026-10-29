@@ -61,7 +61,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // `SpawnClosure` op always finds it.
     let _ = zz_runtime::SPAWN_HOOK.get_or_init(|| concurrency::spawn_hook);
     let mut m = HashMap::new();
-    // Builtin console I/O — no import required, no `std.io` module.
+    // Builtin console I/O — no import required.
     m.insert(
         "print".into(),
         NativeEntry {
@@ -2414,7 +2414,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // `query`/`exec` take (db, template, ...bound_params); the VM's DbQuery
     // op splits the interpolated SQL into template + params so values are
     // bound via prepared statements, never concatenated.
-    // NOTE: no `std.db` / `db.*` seeds exist — `sqlz` only.
     m.insert(
         "std.sqlz.open".into(),
         NativeEntry {

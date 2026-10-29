@@ -3994,7 +3994,7 @@ impl Compiler {
     /// True when a Path-form call `recv.method` targets a db handle:
     /// either the module-qualified `sqlz.query`/`std.sqlz.query`
     /// (receiver is the module namespace) or a method on a local whose
-    /// checker type is `Db`. There is no `db` module anymore. Falls back to
+    /// checker type is `Db`. Falls back to
     /// name-only match when type info is absent (untyped
     /// `compile_program` path, e.g. tests/REPL snippets).
     fn is_db_path(&self, parts: &[String]) -> bool {

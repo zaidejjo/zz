@@ -35,8 +35,7 @@ pub enum Type {
     Union(Vec<Type>),
     /// Opaque JSON value (produced by `std.json.parse`).
     Json,
-    /// Opaque SQLite database handle (produced by `std.sqlz.open`;
-    /// `std.db.open` is a zero-overhead alias).
+    /// Opaque SQLite database handle (produced by `std.sqlz.open`).
     Db,
     /// Opaque HTTP server handle (produced by `std.http.server`).
     HttpServer,

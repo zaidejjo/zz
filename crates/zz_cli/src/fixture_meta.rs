@@ -68,7 +68,6 @@ pub const VOCABULARY: &[&str] = &[
     "std-colors",
     "std-crypto",
     "std-csv",
-    "std-db",
     "std-dec",
     "std-encoding",
     "std-env",

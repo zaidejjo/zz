@@ -136,9 +136,3 @@ import toml
 
 Exact `i64::MIN`/`MAX` boundary checks in that package are the reference pattern
 for guarding wrapping arithmetic at the edges.
-
-## `std.io` legacy note
-
-There is no `std.io` module — console I/O is built-ins (`print`, `println`, `input`).
-Old examples showing `import std.io` + `io.println` predate the namespace rule;
-replace with bare `println`. `funcs.rs` asserts no `std.io` seeds exist.

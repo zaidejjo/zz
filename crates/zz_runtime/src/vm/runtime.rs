@@ -3241,9 +3241,7 @@ impl Vm {
                                 interp.resolve_path_value(&parts[..parts.len() - 1], pspan)?;
                             // sqlz fast path (CallPath form): Db handle +
                             // query/exec/close dispatches straight to the
-                            // canonical sqlz.* native only (there is no
-                            // `db` module; module-position `db.*` is a
-                            // checker hard error).
+                            // canonical sqlz.* native only.
                             // lookup_method would also work via the Db
                             // method_namespace, but this avoids the
                             // object_field detour entirely.
@@ -3309,8 +3307,7 @@ impl Vm {
                     self.frames.last_mut().unwrap().ip = ip;
                     // sqlz fast path: `mydb.query/exec` on a Db handle
                     // bypasses object_field (Db has no struct fields) and
-                    // dispatches straight to the canonical sqlz.* native
-                    // (`db` module removed; see above).
+                    // dispatches straight to the canonical sqlz.* native.
                     if matches!(recv, Value::Db(_))
                         && matches!(name.as_str(), "query" | "exec" | "close")
                     {
