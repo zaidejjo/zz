@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zz_span_ast", "crates/zz_diag_core", "crates/zz_diag", "crates/zz_lexer", "crates/zz_parser", "crates/zz_run_cache", "crates/zz_loader", "crates/zz_build", "crates/zz_session", "crates/zz_test_runner", "crates/zz_types", "crates/zz_unify", "crates/zz_suggest", "crates/zz_http_routes",
+members = ["crates/zz_span_ast", "crates/zz_diag_core", "crates/zz_diag", "crates/zz_lexer", "crates/zz_parser", "crates/zz_run_cache", "crates/zz_loader", "crates/zz_build", "crates/zz_session", "crates/zz_test_runner", "crates/zz_repl", "crates/zz_types", "crates/zz_unify", "crates/zz_suggest", "crates/zz_http_routes",
   "crates/zz_infer",
   "crates/zz_structs",
   "crates/zz_scope",

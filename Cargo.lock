@@ -4062,6 +4062,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_repl"
+version = "0.4.0"
+dependencies = [
+ "dirs",
+ "nu-ansi-term",
+ "reedline",
+ "zz_frontend",
+ "zz_runtime",
+ "zz_session",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_run_cache"
 version = "0.4.0"
 dependencies = [
