@@ -1806,11 +1806,18 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        if let Some(sig) = status.signal() {
-            return Err(format!(
-                "native program killed by signal {sig} ({})",
-                signal_name(sig)
-            ));
+        match status.signal() {
+            Some(sig) => {
+                return Err(format!(
+                    "native program killed by signal {sig} ({})",
+                    signal_name(sig)
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "native process terminated abnormally (no exit code)"
+                ));
+            }
         }
     }
     #[cfg(windows)]
