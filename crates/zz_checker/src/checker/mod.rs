@@ -1097,7 +1097,7 @@ pub(crate) struct DefinedBinding {
 }
 
 pub(crate) struct Checker {
-    pub(crate) unifier: crate::unify::Unifier,
+    pub(crate) unifier: zz_unify::Unifier,
     pub(crate) errors: Vec<zz_diag_core::RawDiag>,
     pub(crate) funcs: HashMap<String, FuncSig>,
     pub(crate) structs: HashMap<String, StructSig>,
@@ -1228,7 +1228,7 @@ impl Checker {
     ) -> Self {
         let env = vec![initial_bindings];
         Checker {
-            unifier: crate::unify::Unifier::new(),
+            unifier: zz_unify::Unifier::new(),
             errors: Vec::new(),
             funcs,
             structs,
@@ -1294,7 +1294,7 @@ impl Checker {
         type_name: &str,
         type_key: &str,
         impl_generics: &[String],
-        unifier: &mut crate::unify::Unifier,
+        unifier: &mut zz_unify::Unifier,
     ) -> Type {
         match type_key {
             "str" => Type::Str,

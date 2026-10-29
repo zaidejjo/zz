@@ -5,7 +5,7 @@
 
 pub mod checker;
 pub use zz_type_ as type_;
-pub mod unify;
+pub use zz_unify as unify;
 
 pub use checker::inference::subst as subst_type;
 pub use checker::{
@@ -13,5 +13,5 @@ pub use checker::{
     check_program_with_module_ns, contains_std, is_std_module_head, lookup_std, AliasSig,
     CheckResult, ConvertImpl, EnumSig, FuncSig, SpanKey, StructSig, STD_MODULES, TOP_SCOPE,
 };
-pub use unify::{Unifier, UnifyError};
 pub use zz_type_::Type;
+pub use zz_unify::{Unifier, UnifyError};

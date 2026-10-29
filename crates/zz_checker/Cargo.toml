@@ -8,6 +8,7 @@ license.workspace = true
 zz_frontend = { path = "../zz_frontend" }
 zz_span_ast = { path = "../zz_span_ast" }
 zz_type_ = { path = "../zz_type_" }
+zz_unify = { path = "../zz_unify" }
 zz_diag_core = { path = "../zz_diag_core" }
 zz_suggest = { path = "../zz_suggest" }
 # S1 arena-scale: module check-cache serializes pub signatures.
