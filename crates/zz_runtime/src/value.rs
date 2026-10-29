@@ -338,8 +338,7 @@ pub enum Value {
     TcpStream(Arc<Mutex<TcpStream>>),
     /// A TCP listener (opaque, wrapped in Arc<Mutex> for clone safety).
     TcpListener(Arc<Mutex<TcpListener>>),
-    /// An opaque SQLite database handle (`std.sqlz.open`;
-    /// `std.db.open` alias).
+    /// An opaque SQLite database handle (`std.sqlz.open`).
     Db(DbHandle),
     /// A generic opaque handle into the `zz_native_rt` pool (regex patterns,
     /// arg parsers, log spans, …). The tag selects the method namespace.

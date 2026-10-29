@@ -60,7 +60,7 @@ def check_stdlib_coverage() -> list[str]:
         return ["funcs.rs not found, skipping coverage"]
     mods = sorted(set(STD_RE.findall(FUNCS.read_text(encoding="utf-8"))))
     # Modules that are intentionally undocumented as user API.
-    skip = {"io", "module", "span", "toml", "db"}
+    skip = {"module", "span", "toml"}
     corpus = "\n".join(p.read_text(encoding="utf-8") for p in DOCS.rglob("*.md"))
     for mod in mods:
         if mod in skip:

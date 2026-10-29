@@ -1212,7 +1212,7 @@ zz_value zz_http_response_text(zz_value resp, int *err);
 zz_value zz_http_response_json(zz_value resp, int *err);
 zz_value zz_http_response_headers(zz_value resp, int *err);
 
-// ---- std.db SQL backends (sqlite embedded, postgres via staticlib) ----
+// ---- SQL backends (sqlite embedded, postgres via staticlib) ----
 // Opaque handle: a heap `zz_db_handle` recording the backend (sqlite3*
 // or staticlib pool id) boxed as ZZ_DB. `sqlz.open` sniffs the scheme
 // once (postgres:// → PG); query/exec/close dispatch on the handle.

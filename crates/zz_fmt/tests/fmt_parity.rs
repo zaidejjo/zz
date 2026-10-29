@@ -122,15 +122,11 @@ fn ztasks_imports_grouped_at_top() {
     let src = std::fs::read_to_string(fmt_parity_fixture()).unwrap();
     let (once, _) = format_twice(&src);
     let lines: Vec<&str> = once.lines().collect();
-    let io_pos = lines
-        .iter()
-        .position(|l| l.starts_with("import std.io"))
-        .unwrap();
     let sqlz_pos = lines
         .iter()
         .position(|l| l.starts_with("import std.sqlz"))
         .unwrap();
-    // Both imports precede any non-import, non-comment, non-blank line.
+    // The std import precedes any non-import, non-comment, non-blank line.
     let first_code = lines
         .iter()
         .position(|l| {
@@ -141,38 +137,36 @@ fn ztasks_imports_grouped_at_top() {
                 && !t.starts_with("import ")
         })
         .unwrap();
-    assert!(
-        io_pos < first_code && sqlz_pos < first_code,
-        "imports not hoisted:\n{once}"
-    );
+    assert!(sqlz_pos < first_code, "imports not hoisted:\n{once}");
 }
 
 #[test]
 fn imports_sorted_std_first_then_external() {
     // Source order deliberately scrambled: external first, std unsorted.
-    let src = "import zimg\nimport std.vec\nimport std.io\nimport helpers.math\nx := 1\n";
+    let src = "import zimg\nimport std.vec\nimport std.math\nimport helpers.math\nx := 1\n";
     let (once, twice) = format_twice(src);
-    let expected = "import std.io\nimport std.vec\n\nimport helpers.math\nimport zimg\n\nx := 1\n";
+    let expected =
+        "import std.math\nimport std.vec\n\nimport helpers.math\nimport zimg\n\nx := 1\n";
     assert_eq!(once, expected, "import sorting wrong:\n{once}");
     assert_eq!(once, twice);
 }
 
 #[test]
 fn imports_sorted_single_group_has_no_blank_separator() {
-    let (std_only, _) = format_twice("import std.vec\nimport std.io\nx := 1\n");
-    assert_eq!(std_only, "import std.io\nimport std.vec\n\nx := 1\n");
+    let (std_only, _) = format_twice("import std.vec\nimport std.math\nx := 1\n");
+    assert_eq!(std_only, "import std.math\nimport std.vec\n\nx := 1\n");
     let (ext_only, _) = format_twice("import zimg\nimport aaa\nx := 1\n");
     assert_eq!(ext_only, "import aaa\nimport zimg\n\nx := 1\n");
 }
 
 #[test]
 fn imports_sorted_keeps_attached_comments_with_import() {
-    let src = "import zimg\nx := 1\n// docs for db\nimport std.db\ny := 2\n";
+    let src = "import zimg\nx := 1\n// docs for math\nimport std.math\ny := 2\n";
     let (once, twice) = format_twice(src);
-    let db_pos = once.find("import std.db").unwrap();
-    let comment_pos = once.find("// docs for db").unwrap();
+    let math_pos = once.find("import std.math").unwrap();
+    let comment_pos = once.find("// docs for math").unwrap();
     assert!(
-        comment_pos < db_pos,
+        comment_pos < math_pos,
         "attached comment did not move with import:\n{once}"
     );
     assert!(

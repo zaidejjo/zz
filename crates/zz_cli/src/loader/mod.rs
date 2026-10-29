@@ -1333,21 +1333,6 @@ impl Loader {
                     continue;
                 }
                 let module = imp[1..].join(".");
-                // Removed `db` module: hard error with a rename hint.
-                // Handle variables named `db` are unaffected — this fires
-                // only on the import.
-                if module == "db" {
-                    self.errors.push(LoadError {
-                        name: path.display().to_string(),
-                        source: source.clone(),
-                        diags: vec![error_at(
-                            "no std module `db` — rename to `sqlz`",
-                            Span::new(0, 0),
-                        )
-                        .with_note("hint: `import std.db` → `import std.sqlz`")],
-                    });
-                    continue;
-                }
                 if !STDLIB_MODULES.contains(&module.as_str()) {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),

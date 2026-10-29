@@ -1738,7 +1738,7 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
         if super::lower::native_impl(name).is_some() || super::ffi_impl(name).is_some() {
             return Callee::Native(name.clone(), pc);
         }
-        // `std.` twin spelling (e.g. `std.io.println`).
+        // `std.` twin spelling (e.g. `std.str.length`).
         let std_name = format!("std.{name}");
         if super::lower::native_impl(&std_name).is_some() || super::ffi_impl(&std_name).is_some() {
             return Callee::Native(std_name, pc);

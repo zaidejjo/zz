@@ -19,7 +19,6 @@ STD_MODS = {
     "colors": "std-colors",
     "crypto": "std-crypto",
     "csv": "std-csv",
-    "db": "std-db",
     "dec": "std-dec",
     "encoding": "std-encoding",
     "env": "std-env",

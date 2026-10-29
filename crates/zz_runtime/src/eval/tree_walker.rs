@@ -952,7 +952,7 @@ impl Interp {
                 return Ok((f, recv.clone()));
             }
             // NOTE: the old `db.*` fallback for `sqlz` handles was removed
-            // with the `db` module — `sqlz` is canonical.
+            // — `sqlz` is canonical.
         }
         if let Value::Object(o) = recv {
             // Try namespace.method (cross-module)

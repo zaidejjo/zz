@@ -1,6 +1,6 @@
 # Databases — `std.sqlz` (SQLite) + Postgres + MySQL
 
-Canonical module is `std.sqlz`. There is no `std.db`/`db.*` — `sqlz` only.
+Canonical module is `std.sqlz`.
 
 ## SQLite foundation
 

@@ -41,9 +41,6 @@ fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -
         Some(Type::HttpRequest) => vec![canon(format!("http.{method}"))],
         Some(Type::TcpStream) | Some(Type::TcpListener) => vec![canon(format!("net.{method}"))],
         Some(Type::HttpServer) => vec![canon(format!("http.{method}"))],
-        // Canonical `sqlz.*` only — the `db` module was removed. Method
-        // calls on handles named `db` still dispatch here (module use of
-        // `db` warns in the checker; this table never sees it).
         Some(Type::Db) => vec![canon(format!("sqlz.{method}"))],
         Some(Type::Json) => vec![canon(format!("json.{method}"))],
         // Opaque handles dispatch on their module tag (`regex.*`, …).
