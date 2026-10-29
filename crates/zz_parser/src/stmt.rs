@@ -1353,7 +1353,9 @@ impl<'a> Parser<'a> {
 
     /// Recover `struct Box[T]`: parse the bracketed names into real type
     /// parameters, then report the right syntax with an `<...>` fix.
-    pub(crate) fn parse_misplaced_bracket_struct_generics(&mut self) -> Vec<zz_span_ast::ast::Ident> {
+    pub(crate) fn parse_misplaced_bracket_struct_generics(
+        &mut self,
+    ) -> Vec<zz_span_ast::ast::Ident> {
         let open = self.advance(); // `[`
         let mut gs = Vec::new();
         loop {
