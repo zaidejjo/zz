@@ -89,17 +89,11 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Non-reachable from parity fixtures (no fixture uses them):
     ("std.math.matrix_mul", "no fixture; niche math"),
     // Pure-ZZ stdlib functions — run in VM only, no C codegen
-    ("std.math.sum", "pure ZZ; no C codegen"),
-    ("std.math.product", "pure ZZ; no C codegen"),
     ("std.math.count", "pure ZZ; no C codegen"),
     ("std.math.min", "pure ZZ; no C codegen"),
     ("std.math.max", "pure ZZ; no C codegen"),
     ("std.math.is_even", "pure ZZ; no C codegen"),
     ("std.math.is_odd", "pure ZZ; no C codegen"),
-    ("std.math.min_arr", "pure ZZ; no C codegen"),
-    ("std.math.max_arr", "pure ZZ; no C codegen"),
-    ("std.math.sum_f", "pure ZZ; no C codegen"),
-    ("std.math.product_f", "pure ZZ; no C codegen"),
     ("std.math.mean_f", "pure ZZ; no C codegen"),
     ("std.math.median_f", "pure ZZ; no C codegen"),
     // Math numeric constants without a zero-arg C entry (`PI`/`E`/`TAU`/
@@ -532,8 +526,6 @@ const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.http.delete", "http fixtures skipped in parity"),
     ("std.http.put", "http fixtures skipped in parity"),
     // HTTP helpers (pure-ZZ, compiled from zz/http/mod.zz)
-    ("std.http.use", "pure ZZ; no C codegen"),
-    ("http.use", "pure ZZ alias"),
     ("std.http.ok", "pure ZZ; no C codegen"),
     ("http.ok", "pure ZZ alias"),
     ("std.http.created", "pure ZZ; no C codegen"),

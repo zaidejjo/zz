@@ -1041,9 +1041,6 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "json.array_push" | "std.json.array_push" => Some("zz_json_array_push"),
         // env
         "env.get" | "std.env.get" | "envmod.get" | "std.envmod.get" => Some("zz_env_get"),
-        "env.get_var" | "std.env.get_var" | "envmod.get_var" | "std.envmod.get_var" => {
-            Some("zz_env_get")
-        }
         "env.var" | "std.env.var" | "envmod.var" | "std.envmod.var" => Some("zz_env_var"),
         "env.set" | "std.env.set" => Some("zz_env_set"),
         "env.remove" | "std.env.remove" | "env.unset" | "std.env.unset" => Some("zz_env_remove"),
@@ -1157,7 +1154,6 @@ pub(crate) fn native_impl(name: &str) -> Option<&'static str> {
         "net.read_exact" | "std.net.read_exact" => Some("zz_tcp_read_exact"),
         "net.write" | "std.net.write" => Some("zz_tcp_write"),
         "net.write_bytes" | "std.net.write_bytes" => Some("zz_tcp_write_bytes"),
-        "net.close" | "std.net.close" => Some("zz_tcp_shutdown"),
         "net.shutdown" | "std.net.shutdown" => Some("zz_tcp_shutdown"),
         "net.peer_addr" | "std.net.peer_addr" => Some("zz_tcp_peer_addr"),
         "net.local_addr" | "std.net.local_addr" => Some("zz_tcp_local_addr"),

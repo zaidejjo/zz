@@ -1438,13 +1438,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
 
     // std.env
     m.insert(
-        "std.env.get_var".into(),
-        NativeEntry {
-            arity: 1,
-            f: env::env_get_var,
-        },
-    );
-    m.insert(
         "std.env.var".into(),
         NativeEntry {
             arity: 1,
@@ -2171,7 +2164,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("read_exact", 2, net::tcp_read_exact),
         ("write", 2, net::tcp_write),
         ("write_bytes", 2, net::tcp_write_bytes),
-        ("close", 1, net::tcp_shutdown),
         ("shutdown", 1, net::tcp_shutdown),
         ("peer_addr", 1, net::peer_addr),
         ("local_addr", 1, net::local_addr),

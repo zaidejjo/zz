@@ -8,7 +8,7 @@ use zz_runtime::{Interp, Value};
 
 #[test]
 fn env_get_var_found() {
-    let v = run("import std.env\nenv.get_var(\"PATH\")").unwrap();
+    let v = run("import std.env\nenv.get(\"PATH\")").unwrap();
     match v {
         Value::Option(Some(s)) => assert!(!s.to_string().is_empty()),
         other => panic!("expected some str, got {other}"),
@@ -17,7 +17,7 @@ fn env_get_var_found() {
 
 #[test]
 fn env_get_var_missing_is_none() {
-    let v = run("import std.env\nenv.get_var(\"ZZ_NO_SUCH_VAR_12345\")").unwrap();
+    let v = run("import std.env\nenv.get(\"ZZ_NO_SUCH_VAR_12345\")").unwrap();
     assert_eq!(v, Value::Option(None));
 }
 

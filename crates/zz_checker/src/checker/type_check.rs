@@ -2837,6 +2837,58 @@ impl Checker {
                     return ret;
                 }
             }
+            // Smart suggestion for unknown qualified function calls with a
+            // one-edit fixit when unambiguous (e.g. std.env.get_var → std.env.get).
+            // Only applies to qualified paths — bare identifiers go to Sherlock
+            // below (note only, no fixit). Skips when the head segment is a
+            // local variable, so method dispatch gets first crack at
+            // `arr.push()`-style calls.
+            let head = name.split('.').next().unwrap_or(name);
+            let head_is_local = self.env.iter().rev().any(|s| s.contains_key(head));
+            if !self.funcs.contains_key(name)
+                && matches!(callee, Expr::Path { .. })
+                && !head_is_local
+            {
+                let candidates: Vec<String> = self
+                    .funcs
+                    .keys()
+                    .flat_map(|k| {
+                        let mut v = vec![k.clone()];
+                        if let Some(bare) = k.rsplit('.').next() {
+                            if bare != k {
+                                v.push(bare.to_string());
+                            }
+                        }
+                        v
+                    })
+                    .collect();
+                let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+                let all = suggest_all(name, &refs);
+                if !all.is_empty() {
+                    let is_unambiguous = all.len() == 1 && all[0].1 <= 1;
+                    let callee_span = match callee {
+                        Expr::Path { span, .. } => *span,
+                        _ => span,
+                    };
+                    if is_unambiguous {
+                        self.errors.push(
+                            error_at(format!("unknown function `{name}`"), callee_span)
+                                .with_note(format!("did you mean `{}`?", all[0].0))
+                                .with_fixit(FixIt::safe(
+                                    callee_span,
+                                    all[0].0.to_string(),
+                                    "replace with suggested function",
+                                )),
+                        );
+                    } else {
+                        self.errors.push(
+                            error_at(format!("unknown function `{name}`"), callee_span)
+                                .with_note(format!("did you mean `{}`?", all[0].0)),
+                        );
+                    }
+                    return Type::Unit;
+                }
+            }
         }
         // Method call: `p.dist()` resolves to `dist(p, ...)`.
         if let Expr::Path { parts, span: pspan } = callee {
@@ -3278,7 +3330,7 @@ impl Checker {
                 }
                 None => {
                     // Sherlock: suggest the closest known function so a typo
-                    // (`lenght`) points at the fix instead of a dead end.
+                    // (`lenght`, `get_var`) points at the fix instead of a dead end.
                     let mut diag = error_at(format!("unknown function `{name}`"), span);
                     let candidates: Vec<String> = self
                         .funcs
