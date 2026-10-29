@@ -20,8 +20,8 @@
 //! - Unterminated fences and unknown header options are load errors (loud,
 //!   with file position) — never silently skipped.
 
-use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
+use zz_diag::{error_at, RawDiag};
 
 /// One extracted fence.
 #[derive(Debug, Clone, PartialEq)]

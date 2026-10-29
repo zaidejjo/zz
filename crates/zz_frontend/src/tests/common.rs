@@ -8,6 +8,6 @@ pub fn parse_ok(src: &str) -> crate::ast::Program {
     parsed.program
 }
 
-pub fn lex_kinds(src: &str) -> Vec<crate::token::TokenKind> {
+pub fn lex_kinds(src: &str) -> Vec<zz_lexer::token::TokenKind> {
     lex(src).tokens.into_iter().map(|t| t.kind).collect()
 }

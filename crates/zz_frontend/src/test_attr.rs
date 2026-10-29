@@ -24,8 +24,8 @@
 //! and the test is treated as having no cases rather than expanding.
 
 use crate::ast::{Decorator, Expr};
-use crate::diag::{error_at, RawDiag};
 use crate::span::Span;
+use zz_diag::{error_at, RawDiag};
 
 /// Parsed `@test` metadata. One per `@test`-decorated function.
 #[derive(Debug, Clone, PartialEq)]

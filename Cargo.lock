@@ -3868,10 +3868,11 @@ dependencies = [
 name = "zz_frontend"
 version = "0.4.0"
 dependencies = [
- "codespan-reporting",
- "colored",
  "serde",
+ "zz_diag",
  "zz_diag_core",
+ "zz_lexer",
+ "zz_parser",
  "zz_span_ast",
  "zz_suggest",
 ]
