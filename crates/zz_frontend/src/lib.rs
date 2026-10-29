@@ -10,7 +10,6 @@ pub mod decorators;
 pub mod diag;
 pub mod doctest;
 pub mod fmt;
-pub mod levenshtein;
 pub mod lexer;
 pub mod move_elide;
 pub mod parser;
@@ -22,6 +21,7 @@ pub mod token;
 // Syntax data lives in `zz_span_ast`; re-exported as modules so every
 // existing `zz_frontend::ast::…` / `zz_frontend::span::…` path keeps working.
 pub use zz_span_ast::{ast, span};
+pub use zz_suggest as levenshtein;
 
 pub use ast::{BinOp, Decorator, Expr, Ident, ImportItem, Program, Stmt, UnOp};
 pub use decorators::expand_program;

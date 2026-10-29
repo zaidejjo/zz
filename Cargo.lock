@@ -3840,6 +3840,7 @@ dependencies = [
  "serde",
  "zz_diag_core",
  "zz_span_ast",
+ "zz_suggest",
 ]
 
 [[package]]
@@ -3984,3 +3985,7 @@ dependencies = [
  "zz_native_rt",
  "zz_runtime",
 ]
+
+[[package]]
+name = "zz_suggest"
+version = "0.4.0"
