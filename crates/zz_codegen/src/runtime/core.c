@@ -6687,6 +6687,13 @@ static zz_value http_serve_static_file(const char *path, size_t pathlen,
         decoded[rlen] = '\0';
         dlen = rlen;
     }
+    // An encoded NUL can only come from `%00`: the VM's `canonicalize`
+    // rejects paths with interior NULs (404), and a C string would silently
+    // truncate at it and serve a *different* file — so reject here.
+    if (memchr(decoded, '\0', dlen)) {
+        free(decoded);
+        return http_static_plain(404, "Not Found", NULL);
+    }
 
     // Any `..` segment is an attack signal → 403 (predictable for scanners).
     int traversal = 0;
