@@ -2282,6 +2282,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             net::unix::unix_accept as zz_runtime::NativeFn,
         ),
         ("close", 1, net::unix::unix_listener_close),
+        ("shutdown", 1, net::unix::unix_listener_close),
     ] {
         m.insert(
             format!("std.unix_listener.{name}"),
@@ -2316,6 +2317,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             net::tls::tls_accept as zz_runtime::NativeFn,
         ),
         ("close", 1, net::tls::tls_listener_close),
+        ("shutdown", 1, net::tls::tls_listener_close),
     ] {
         m.insert(
             format!("std.tls_listener.{name}"),

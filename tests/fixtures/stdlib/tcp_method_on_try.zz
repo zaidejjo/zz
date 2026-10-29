@@ -63,11 +63,11 @@ func main() -> Result<int, str> {
     // Timeout + close on Try receivers.
     _u4 := wrap(c)?.set_read_timeout(1000)?
     println("try_timeout_ok")
-    _u5 := wrap(c)?.close()?
-    _u6 := wrap(c2)?.close()?
-    _u7 := ss.close()?
-    _u8 := s2.close()?
-    _u9 := s3.close()?
+    _u5 := wrap(c)?.shutdown()?
+    _u6 := wrap(c2)?.shutdown()?
+    _u7 := ss.shutdown()?
+    _u8 := s2.shutdown()?
+    _u9 := s3.shutdown()?
     println("tcp_method_on_try_ok")
     return .ok(0)
 }

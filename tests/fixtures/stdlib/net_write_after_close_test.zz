@@ -31,7 +31,7 @@ func main() -> Result<int, str> {
     l := net.tcp_listen(listen_addr)?
     h := task.spawn(|_| {
         match net.tcp_accept(l) {
-            .ok(c) => match c.close() {
+            .ok(c) => match c.shutdown() {
                 .ok(_) => 0
                 .err(_) => 1
             }
@@ -62,7 +62,7 @@ func main() -> Result<int, str> {
     task.join(h)
     // Final close can itself report ENOTCONN on a reset socket —
     // either outcome is fine; the point (no death) already held.
-    match s.close() {
+    match s.shutdown() {
         .ok(_) => println("close-done")
         .err(_e) => println("close-done")
     }

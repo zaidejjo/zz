@@ -17,6 +17,7 @@ import std.time
 
 // Annotated-TLS helper: exercises nameable Opaque handle types (`tls`)
 // across user-function boundaries on both engines.
+
 func tls_echo(c: tls, line: str) -> Result<str, str> {
     c.write(line)?
     return c.read_line()
@@ -61,21 +62,21 @@ func main() -> Result<int, str> {
                         if line == "hello" {
                             match ss.write("world") {
                                 .ok(_) => {
-                                    _ := ss.close()
+                                    _ := ss.shutdown()
                                     std.chan.send(done, "srv_ok")
                                 }
                                 .err(_) => {
-                                    _ := ss.close()
+                                    _ := ss.shutdown()
                                     std.chan.send(done, "srv_write_fail")
                                 }
                             }
                         } else {
-                            _ := ss.close()
+                            _ := ss.shutdown()
                             std.chan.send(done, "srv_bad_line")
                         }
                     }
                     .err(_) => {
-                        _ := ss.close()
+                        _ := ss.shutdown()
                         std.chan.send(done, "srv_read_fail")
                     }
                 }
@@ -95,11 +96,11 @@ func main() -> Result<int, str> {
     c.set_read_timeout(2000)?
     c.set_write_timeout(2000)?
     println("timeout_ok")
-    c.close()?
+    c.shutdown()?
     r:str = std.chan.recv(done)
     assert(r == "srv_ok")
     println("echo_ok")
-    l.close()?
+    l.shutdown()?
     println("close_ok")
     // 2. Insecure connect (verification OFF) still speaks TLS.
     l2 := net.tls_listen(addr10, cert, key)?
@@ -111,15 +112,15 @@ func main() -> Result<int, str> {
                     .ok(line2) => {
                         if line2 == "ping" {
                             _ := ss2.write("pong\n")
-                            _ := ss2.close()
+                            _ := ss2.shutdown()
                             std.chan.send(done2, "srv2_ok")
                         } else {
-                            _ := ss2.close()
+                            _ := ss2.shutdown()
                             std.chan.send(done2, "srv2_bad_line")
                         }
                     }
                     .err(_) => {
-                        _ := ss2.close()
+                        _ := ss2.shutdown()
                         std.chan.send(done2, "srv2_read_fail")
                     }
                 }
@@ -135,17 +136,17 @@ func main() -> Result<int, str> {
     line3 := tls_echo(c2, "ping\n")?
     assert(line3 == "pong")
     println("insecure_echo_ok")
-    c2.close()?
+    c2.shutdown()?
     r2:str = std.chan.recv(done2)
     assert(r2 == "srv2_ok")
-    l2.close()?
+    l2.shutdown()?
     // 3. Wrong hostname fails closed (no plaintext fallback).
     l3 := net.tls_listen(addr11, cert, key)?
     done3 := std.chan()
     task.spawn(|_| {
         match net.tls_accept(l3) {
             .ok(s) => {
-                _ := s.close()
+                _ := s.shutdown()
                 std.chan.send(done3, "srv3_accepted")
             }
             .err(_) => {
@@ -163,7 +164,7 @@ func main() -> Result<int, str> {
     }
     r3:str = std.chan.recv(done3)
     println("accept_done: {r3}")
-    l3.close()?
+    l3.shutdown()?
     // 4. Plaintext on a TLS port fails (no hang, no downgrade).
     pl := net.tcp_listen(plain_addr)?
     match net.tls_connect_insecure(plain_addr, "localhost", 2000) {
@@ -176,7 +177,7 @@ func main() -> Result<int, str> {
     ss3 := pl.accept()?
     _d3 := ss3.read(64)?
     println("plain_drain_ok")
-    ss3.close()?
+    ss3.shutdown()?
     // 5. Connection refused names TLS (no hang).
     match net.tls_connect(refused_addr, "localhost", 1000) {
         .ok(_) => println("ERROR: refused should fail")
@@ -194,8 +195,8 @@ func main() -> Result<int, str> {
     eb := cc.read_exact(4)?
     println("tcp_exact_ok: {eb.len()}")
     assert(eb.len() == 4)
-    cc.close()?
-    sc.close()?
+    cc.shutdown()?
+    sc.shutdown()?
     println("net_tls_test_ok")
     return .ok(0)
 }

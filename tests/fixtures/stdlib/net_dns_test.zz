@@ -14,7 +14,7 @@ import std.str
 func netdns_roundtrip(label: str, addr: str) -> Result<int, str> {
     c := net.tcp_connect(addr, 5000)?
     c.write("ping\n")?
-    c.close()?
+    c.shutdown()?
     println("{label}_ok")
     return .ok(0)
 }
@@ -42,14 +42,14 @@ func main() -> Result<int, str> {
     d1 := s1.read_line()?
     r1 := d1 == "ping"
     println("host_read_ok:{r1}")
-    s1.close()?
+    s1.shutdown()?
     // Literal path still works.
     netdns_roundtrip("literal", listen_addr)?
     s2 := l.accept()?
     d2 := s2.read_line()?
     r2 := d2 == "ping"
     println("literal_read_ok:{r2}")
-    s2.close()?
+    s2.shutdown()?
     // Malformed address fails fast without resolving.
     match net.tcp_connect("no-colon-here", 1000) {
         .ok(_) => println("ERROR: should have failed")

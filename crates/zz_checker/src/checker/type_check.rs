@@ -2847,6 +2847,7 @@ impl Checker {
             let head_is_local = self.env.iter().rev().any(|s| s.contains_key(head));
             if !self.funcs.contains_key(name)
                 && matches!(callee, Expr::Path { .. })
+                && name.starts_with("std.")
                 && !head_is_local
             {
                 let candidates: Vec<String> = self

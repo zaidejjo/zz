@@ -3,10 +3,10 @@
 // Bind ports derive from (pid, sweep task) so parallel runners
 // (per-file parity tests, the discover sweep, e2e) never share them.
 import std.env
-import std.net
 import std.fs
-import std.str
+import std.net
 import std.process(pid)
+import std.str
 
 func main() -> Result<int, str> {
     // Per (process, sweep task) so parallel runners (per-file parity
@@ -62,22 +62,19 @@ func main() -> Result<int, str> {
     c.set_read_timeout(1000)?
     println("set_timeout_ok")
     // Close (real shutdown)
-    c.close()?
-    ss.close()?
+    c.shutdown()?
+    ss.shutdown()?
     println("close_ok")
-
     // Test connection refused
     match net.tcp_connect(refused_addr, 1000) {
         .ok(_) => println("ERROR: should have failed")
         .err(_e) => println("connect_refused_ok")
     }
-
     // Test invalid address
     match net.tcp_connect("not-a-valid-addr", 1000) {
         .ok(_) => println("ERROR: should have failed")
         .err(_e) => println("bad_addr_ok")
     }
-
     println("net_tcp_test_ok")
     return .ok(0)
 }

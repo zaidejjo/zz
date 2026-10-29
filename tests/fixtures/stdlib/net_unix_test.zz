@@ -32,21 +32,21 @@ func main() -> Result<int, str> {
                         if line == "hello" {
                             match ss.write("world") {
                                 .ok(_) => {
-                                    _ := ss.close()
+                                    _ := ss.shutdown()
                                     std.chan.send(done, "srv_ok")
                                 }
                                 .err(_) => {
-                                    _ := ss.close()
+                                    _ := ss.shutdown()
                                     std.chan.send(done, "srv_write_fail")
                                 }
                             }
                         } else {
-                            _ := ss.close()
+                            _ := ss.shutdown()
                             std.chan.send(done, "srv_bad_line")
                         }
                     }
                     .err(_) => {
-                        _ := ss.close()
+                        _ := ss.shutdown()
                         std.chan.send(done, "srv_read_fail")
                     }
                 }
@@ -66,11 +66,11 @@ func main() -> Result<int, str> {
     c.set_read_timeout(2000)?
     c.set_write_timeout(2000)?
     println("timeout_ok")
-    c.close()?
+    c.shutdown()?
     r:str = std.chan.recv(done)
     assert(r == "srv_ok")
     println("echo_ok")
-    l.close()?
+    l.shutdown()?
     println("close_ok")
     // 2. Missing socket fails fast with refused (no hang).
     match net.unix_connect(sock2, 2000) {

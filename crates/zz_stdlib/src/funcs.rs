@@ -1985,6 +1985,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             vec![("listener", unix_listener_t.clone())],
             result_bool(),
         ),
+        (
+            "shutdown",
+            vec![("listener", unix_listener_t.clone())],
+            result_bool(),
+        ),
     ] {
         let s = sig(params, ret);
         m.insert(format!("std.unix_listener.{method}"), s);
@@ -2032,6 +2037,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         ),
         (
             "close",
+            vec![("listener", tls_listener_t.clone())],
+            result_bool(),
+        ),
+        (
+            "shutdown",
             vec![("listener", tls_listener_t.clone())],
             result_bool(),
         ),
@@ -2730,6 +2740,14 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // min/max are generic <T>; count counts occurrences.
     // sum/product/sum_f/product_f/min_val/max_val live in std.vec instead.
     m.insert(
+        "std.math.sum".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
+        "std.math.product".into(),
+        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+    );
+    m.insert(
         "std.math.count".into(),
         sig(
             vec![
@@ -2758,6 +2776,28 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     // Float aggregation — Kahan compensated summation
     m.insert(
+        "std.math.sum_f".into(),
+        sig(vec![("arr", float_arr.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.product_f".into(),
+        sig(vec![("arr", float_arr.clone())], Type::Float),
+    );
+    m.insert(
+        "std.math.min_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
+        "std.math.max_arr".into(),
+        sig_t(
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
+    );
+    m.insert(
         "std.math.mean_f".into(),
         sig(
             vec![("arr", float_arr.clone())],
@@ -2766,13 +2806,6 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.math.median_f".into(),
-        sig(
-            vec![("arr", float_arr.clone())],
-            Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
-        ),
-    );
-    m.insert(
-        "std.math.mean_f".into(),
         sig(
             vec![("arr", float_arr.clone())],
             Type::Result(Box::new(Type::Float), Box::new(Type::Str)),
@@ -4072,7 +4105,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 674);
+        assert_eq!(funcs.len(), 682);
     }
 
     #[test]
