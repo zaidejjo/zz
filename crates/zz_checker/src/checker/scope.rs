@@ -1,6 +1,6 @@
 //! Scope management and variable lookup.
 
-use crate::checker::type_check::TypeCheckOps;
+use crate::checker::structs::StructOps;
 use crate::checker::{Checker, DefinedBinding};
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_span_ast::span::Span;

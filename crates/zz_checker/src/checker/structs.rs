@@ -14,8 +14,10 @@
 
 use crate::checker::inference::InferOps;
 use crate::checker::{Checker, FuncSig};
-use zz_diag_core::error_at;
+use zz_diag_core::{error_at, FixIt};
 use zz_span_ast::ast::Stmt;
+use zz_span_ast::span::Span;
+use zz_suggest::suggest_all;
 use zz_types::Type;
 
 pub trait StructOps {
@@ -78,6 +80,11 @@ pub trait StructOps {
     /// struct's name and signature. Direct methods always win; breadth-first
     /// order keeps the nearest embedding's method on conflicts.
     fn find_struct_method(&self, sname: &str, method: &str) -> Option<(String, FuncSig)>;
+
+    /// Resolve a field read on struct `sname` (with generic `args`),
+    /// including embedded fields. Reports unknown structs/fields and
+    /// returns `Unit` so checking can continue.
+    fn struct_field_access(&mut self, sname: &str, args: &[Type], name: &str, span: Span) -> Type;
 }
 
 impl StructOps for Checker {
@@ -325,5 +332,48 @@ impl StructOps for Checker {
             }
         }
         None
+    }
+
+    fn struct_field_access(&mut self, sname: &str, args: &[Type], name: &str, span: Span) -> Type {
+        match self.structs.get(sname).cloned() {
+            Some(_) => match self.direct_field_type(sname, args, name) {
+                Some(ft) => ft,
+                None => match self.resolve_struct_field_generic(sname, args, name) {
+                    // Promoted through an embedded struct.
+                    Some((_, ft)) => ft,
+                    None => {
+                        let visible = self.all_visible_fields(sname);
+                        let field_names: Vec<&str> = visible.iter().map(|n| n.as_str()).collect();
+                        let mut diag =
+                            error_at(format!("struct `{sname}` has no field `{name}`"), span);
+                        let all = suggest_all(name, &field_names);
+                        if let Some((suggestion, _)) = all.first() {
+                            diag = diag.with_note(format!("did you mean field `{suggestion}`?"));
+                            let field_span = Span::new(span.end - name.len() as u32, span.end);
+                            let alts: Vec<String> =
+                                all.iter().map(|(s, _)| s.to_string()).collect();
+                            let fixit = if all.len() == 1 {
+                                FixIt::safe(field_span, suggestion.to_string(), "replace field")
+                            } else {
+                                FixIt::ambiguous(
+                                    field_span,
+                                    suggestion.to_string(),
+                                    "replace field",
+                                    alts,
+                                )
+                            };
+                            diag = diag.with_fixit(fixit);
+                        }
+                        self.errors.push(diag);
+                        Type::Unit
+                    }
+                },
+            },
+            None => {
+                self.errors
+                    .push(error_at(format!("unknown struct `{sname}`"), span));
+                Type::Unit
+            }
+        }
     }
 }

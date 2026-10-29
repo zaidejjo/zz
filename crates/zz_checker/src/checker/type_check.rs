@@ -126,13 +126,6 @@ pub trait TypeCheckOps {
     /// compound assignment so both reject `const` identically.
     fn reject_const_target(&mut self, target: &Expr);
 
-    /// Field read with generic arguments substituted: `Box<int>.v` where
-    /// `v: T` yields `int`. Direct fields hit first; otherwise the lookup
-    /// promotes through embedded structs (threading each level's arguments).
-    /// Error reporting (unknown struct/field, did-you-mean) matches the
-    /// historical inline blocks this replaces.
-    fn struct_field_access(&mut self, sname: &str, args: &[Type], name: &str, span: Span) -> Type;
-
     fn check_assign_target(&mut self, target: &Expr) -> Type;
 
     /// Element type of a tuple index, shared by reads and writes.
@@ -983,54 +976,6 @@ impl TypeCheckOps for Checker {
                         display
                     )),
                 );
-            }
-        }
-    }
-
-    /// Field read with generic arguments substituted: `Box<int>.v` where
-    /// `v: T` yields `int`. Direct fields hit first; otherwise the lookup
-    /// promotes through embedded structs (threading each level's arguments).
-    /// Error reporting (unknown struct/field, did-you-mean) matches the
-    /// historical inline blocks this replaces.
-    fn struct_field_access(&mut self, sname: &str, args: &[Type], name: &str, span: Span) -> Type {
-        match self.structs.get(sname).cloned() {
-            Some(_) => match self.direct_field_type(sname, args, name) {
-                Some(ft) => ft,
-                None => match self.resolve_struct_field_generic(sname, args, name) {
-                    // Promoted through an embedded struct.
-                    Some((_, ft)) => ft,
-                    None => {
-                        let visible = self.all_visible_fields(sname);
-                        let field_names: Vec<&str> = visible.iter().map(|n| n.as_str()).collect();
-                        let mut diag =
-                            error_at(format!("struct `{sname}` has no field `{name}`"), span);
-                        let all = suggest_all(name, &field_names);
-                        if let Some((suggestion, _)) = all.first() {
-                            diag = diag.with_note(format!("did you mean field `{suggestion}`?"));
-                            let field_span = Span::new(span.end - name.len() as u32, span.end);
-                            let alts: Vec<String> =
-                                all.iter().map(|(s, _)| s.to_string()).collect();
-                            let fixit = if all.len() == 1 {
-                                FixIt::safe(field_span, suggestion.to_string(), "replace field")
-                            } else {
-                                FixIt::ambiguous(
-                                    field_span,
-                                    suggestion.to_string(),
-                                    "replace field",
-                                    alts,
-                                )
-                            };
-                            diag = diag.with_fixit(fixit);
-                        }
-                        self.errors.push(diag);
-                        Type::Unit
-                    }
-                },
-            },
-            None => {
-                self.errors
-                    .push(error_at(format!("unknown struct `{sname}`"), span));
-                Type::Unit
             }
         }
     }
