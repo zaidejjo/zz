@@ -3847,6 +3847,7 @@ version = "0.4.0"
 dependencies = [
  "rayon",
  "zz_checker",
+ "zz_codegen_types",
  "zz_frontend",
  "zz_hir",
  "zz_ir",
@@ -3855,6 +3856,10 @@ dependencies = [
  "zz_runtime",
  "zz_stdlib",
 ]
+
+[[package]]
+name = "zz_codegen_types"
+version = "0.4.0"
 
 [[package]]
 name = "zz_diag"

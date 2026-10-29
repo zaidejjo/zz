@@ -13,9 +13,10 @@ pub mod lower;
 
 pub use chunk::{build_module as build_chunk_module, coverage as chunk_coverage, ChunkError};
 pub use compile::{
-    compile_and_run, compile_and_run_for_target, detect_clang, detect_clang_with,
-    emit_c_plus_script, host_triple, is_macos_target, is_windows_target, validate, BuildError,
-    BuildOptions, Clang, ClangProvider, EmbedAsset, PgoMode,
+    build_options_fingerprint, build_options_fingerprint_with, compile_and_run,
+    compile_and_run_for_target, detect_clang, detect_clang_with, emit_c_plus_script, host_triple,
+    is_macos_target, is_windows_target, validate, BuildError, BuildOptions, Clang, ClangProvider,
+    EmbedAsset, PgoMode,
 };
 pub use ffi::{ffi_impl, FfiError, FFI_VERSION};
 pub use lower::{mangle, native_supported, units, LoweredC, Lowerer};

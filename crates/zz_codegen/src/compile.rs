@@ -15,136 +15,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub use zz_codegen_types::*;
+
 /// Error surfaced from a build.
-#[derive(Debug)]
-pub enum BuildError {
-    /// No Clang provider found on PATH.
-    NoClang,
-    /// `--pgo` was combined with a foreign `--target`.
-    /// Display text is the exact CLI contract.
-    PgoCross,
-    /// `--static` was requested for a macOS target.
-    /// Display text is the exact CLI contract.
-    StaticMacos,
-    /// The C compiler failed with `stderr`.
-    CompileFailed { stderr: String },
-    /// The precompiled C runtime archive could not be produced.
-    RuntimeArchive { reason: String },
-    /// The Rust native runtime could not be built or linked.
-    NativeRt { reason: String },
-    /// Rust-side IO error.
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for BuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BuildError::NoClang => write!(
-                f,
-                "no clang found (tried clang, clang-23, clang-22, zig); \
-                 install clang 18+ or zig for -p builds"
-            ),
-            BuildError::PgoCross => {
-                write!(f, "Error: --pgo requires a native build target")
-            }
-            BuildError::StaticMacos => {
-                write!(
-                    f,
-                    "Error: Static binaries are not supported on macOS targets"
-                )
-            }
-            BuildError::CompileFailed { stderr } => {
-                write!(f, "C compile failed:\n{stderr}")?;
-                // The only way `<pthread.h>` is missing is a Windows target
-                // without the POSIX runtime: say what is supported instead
-                // of leaving the user with a raw compiler header error.
-                if stderr.contains("pthread.h") {
-                    write!(
-                        f,
-                        "\nhint: the AOT C runtime is POSIX-thread based, so native \
-                         builds are not supported on Windows yet; `zz run`, `zz check` \
-                         and `zz test` run on the VM there"
-                    )?;
-                }
-                Ok(())
-            }
-            BuildError::RuntimeArchive { reason } => write!(
-                f,
-                "cannot build the C runtime archive: {reason}\n\
-                 hint: `zz cache clean` rebuilds it; a full or read-only build cache \
-                 ({}) has the same effect",
-                crate::cache::cache_dir_display()
-            ),
-            BuildError::NativeRt { reason } => write!(f, "native runtime link failed: {reason}"),
-            BuildError::Io(e) => write!(f, "io error: {e}"),
-        }
-    }
-}
-
-impl From<std::io::Error> for BuildError {
-    fn from(e: std::io::Error) -> Self {
-        BuildError::Io(e)
-    }
-}
-
-/// Provider preference for Clang detection (`--cc` flag).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ClangProvider {
-    /// Probe `clang`, then `clang-23`, `clang-22`, then `zig`.
-    #[default]
-    Any,
-    /// Only accept a `clang*` binary.
-    Clang,
-    /// Only accept `zig` (invoked as `zig cc`).
-    Zig,
-}
-
-impl ClangProvider {
-    /// Parse the `--cc=<name>` flag value.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "clang" => Some(ClangProvider::Clang),
-            "zig" => Some(ClangProvider::Zig),
-            "any" | "auto" => Some(ClangProvider::Any),
-            _ => None,
-        }
-    }
-}
-
-/// A detected Clang provider.
-#[derive(Debug, Clone)]
-pub struct Clang {
-    /// Full path to the binary (`clang` or `zig`).
-    pub path: PathBuf,
-    /// True when the provider is `zig` (invoked as `zig cc ...`).
-    pub zig: bool,
-    /// Human-readable label for build output (`clang` / `zig cc`).
-    pub label: &'static str,
-}
-
-impl Clang {
-    /// One-line compiler version for build logs (`clang version 19.1.2
-    /// ...` / `0.14.0` for zig; `unknown` when the probe fails). Used by
-    /// the sanitizer CI leg to pin + log the exact toolchain.
-    pub fn version(&self) -> String {
-        let mut cmd = std::process::Command::new(&self.path);
-        if self.zig {
-            cmd.arg("version");
-        } else {
-            cmd.arg("--version");
-        }
-        cmd.output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8(o.stdout)
-                    .ok()
-                    .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
-                    .filter(|l| !l.is_empty())
-            })
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-}
-
 /// Pinned Clang major version from `ZZ_CLANG_VERSION` (e.g. `19` → probe
 /// `clang-19` first). Set in CI so every sanitizer/bench build uses one
 /// logged toolchain; unset locally (any detected provider works).
@@ -594,317 +467,6 @@ pub fn validate(opts: &BuildOptions, target: Option<&str>) -> Result<(), BuildEr
         }
     }
     Ok(())
-}
-
-/// PGO (Profile-Guided Optimization) mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum PgoMode {
-    /// No PGO - normal compilation.
-    #[default]
-    None,
-    /// Generate profile data (`-fprofile-generate`).
-    Generate,
-    /// Use collected profile data (`-fprofile-use`).
-    Use,
-}
-
-/// One embedded asset: virtual path (slash-separated, relative) + bytes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EmbedAsset {
-    pub name: String,
-    pub bytes: Vec<u8>,
-}
-
-/// Build options.
-#[derive(Debug, Clone, Default)]
-pub struct BuildOptions {
-    /// Optimization level: false = `-O0 -g` (dev inspection), true = release.
-    pub optimize: bool,
-    /// Strip the binary (`-s`).
-    pub strip: bool,
-    /// Static link (rejected on macOS targets by [`validate`]).
-    pub static_link: bool,
-    /// Enable function-section + gc-sections (DCE at link level).
-    pub gc_sections: bool,
-    /// Kept for fingerprint compatibility; release always uses ThinLTO.
-    /// New code should not branch on this.
-    pub thin_lto: bool,
-    /// PGO mode for profile-guided optimization (native only).
-    pub pgo: PgoMode,
-    /// Link the Rust native runtime (`libzz_native_rt.a`) for FFI natives.
-    /// Set automatically from the lowered program; tests can opt in directly.
-    pub native_rt: bool,
-    /// Force-extract the Postgres objects from the static archive (`-u`).
-    /// Set automatically alongside `native_rt` when sqlz/pg natives are
-    /// reachable (the C dispatcher's weak refs never pull members alone).
-    pub pg_link: bool,
-    /// Force-extract the float-format object (`-u zz_float_format_raw`).
-    /// Set automatically when any typed node can hold a float (float
-    /// Display routes through the Rust core per spec §4). Implies the
-    /// staticlib link like `native_rt`.
-    pub float_link: bool,
-    /// Link libcurl (outbound `http.get/post/fetch` client). Set
-    /// automatically from the lowered program; programs that never fetch
-    /// omit `-lcurl` entirely so no `DT_NEEDED` entry is emitted.
-    pub curl_link: bool,
-    /// Link libsqlite3 (`sqlz`/`db` queries). Set automatically from the
-    /// lowered program; programs that never query omit `-lsqlite3`.
-    pub sqlite_link: bool,
-    /// Allow silently downgrading `static_link` to dynamic when static is
-    /// impossible (macOS target, or the program needs the Rust native
-    /// runtime). Set by the CLI only when static came from the *default*,
-    /// never from an explicit `--static` (which keeps today's hard error).
-    /// Part of the cache fingerprint: downgraded output differs.
-    pub allow_static_downgrade: bool,
-    /// Full LTO (`-flto=full` instead of thin) for `--full` max-opt
-    /// builds: deeper cross-TU optimization and elimination at the cost
-    /// of slower links. Only meaningful with `optimize` (release base).
-    pub full_lto: bool,
-    /// Extra object files / static libraries from plugin packages to link
-    /// into the final binary. Each entry is a path to a `.o` or `.a` file
-    /// produced by a plugin's build hook.
-    pub plugin_artifacts: Vec<std::path::PathBuf>,
-    /// Extra raw linker flags from plugin packages (the `ldflags.txt`
-    /// files their build hooks emit, e.g. `-lvips -lgio-2.0 ...`).
-    pub plugin_link_args: Vec<String>,
-    /// Static assets baked into the binary (`--embed`): emitted as byte
-    /// tables + a static initializer calling `zz_embed_register`, served
-    /// at runtime through `fs.embedfs()`. Empty = no embedding.
-    pub embed_assets: Vec<EmbedAsset>,
-    /// Verbose phase timings (`--verbose`): print load/check/lower/compile
-    /// wall times to stderr. Display-only: never affects clang flags and
-    /// deliberately excluded from the cache fingerprint, so timed builds
-    /// share cache entries with silent ones.
-    pub verbose: bool,
-}
-
-impl BuildOptions {
-    /// Debug build: fast native compile (`-O0 -g`, no LTO).
-    /// Used for `zz build --dynamic` and parity sweeps (`ZZ_NATIVE_DEV=1`).
-    pub fn dev() -> Self {
-        BuildOptions {
-            optimize: false,
-            strip: false,
-            static_link: false,
-            gc_sections: true,
-            thin_lto: false,
-            pgo: PgoMode::None,
-            native_rt: false,
-            pg_link: false,
-            float_link: false,
-            curl_link: false,
-            sqlite_link: false,
-            allow_static_downgrade: false,
-            full_lto: false,
-            plugin_artifacts: Vec::new(),
-            plugin_link_args: Vec::new(),
-            embed_assets: Vec::new(),
-            verbose: false,
-        }
-    }
-
-    /// Release build: `-O3 -flto=thin`, stripped, dynamic.
-    /// ThinLTO is unconditional — Clang is the only backend now.
-    pub fn release() -> Self {
-        BuildOptions {
-            optimize: true,
-            strip: true,
-            static_link: false, // dynamic - faster for dev/benchmark
-            gc_sections: true,
-            thin_lto: true,
-            pgo: PgoMode::None,
-            native_rt: false,
-            pg_link: false,
-            float_link: false,
-            curl_link: false,
-            sqlite_link: false,
-            allow_static_downgrade: false,
-            full_lto: false,
-            plugin_artifacts: Vec::new(),
-            plugin_link_args: Vec::new(),
-            embed_assets: Vec::new(),
-            verbose: false,
-        }
-    }
-
-    /// Static self-contained build: ThinLTO + DCE + strip.
-    /// Use for production Docker/Serverless deployments (non-macOS).
-    pub fn static_lto() -> Self {
-        BuildOptions {
-            optimize: true,
-            strip: true,
-            static_link: true,
-            gc_sections: true,
-            thin_lto: true,
-            pgo: PgoMode::None,
-            native_rt: false,
-            pg_link: false,
-            float_link: false,
-            curl_link: false,
-            sqlite_link: false,
-            allow_static_downgrade: false,
-            full_lto: false,
-            plugin_artifacts: Vec::new(),
-            plugin_link_args: Vec::new(),
-            embed_assets: Vec::new(),
-            verbose: false,
-        }
-    }
-
-    /// PGO build: generate profile data (native host only).
-    /// Phase 1: build with this, run the binary, then rebuild with `pgo_use()`.
-    pub fn pgo_generate() -> Self {
-        BuildOptions {
-            optimize: true,
-            strip: false, // keep symbols for PGO
-            static_link: false,
-            gc_sections: true,
-            thin_lto: true,
-            pgo: PgoMode::Generate,
-            native_rt: false,
-            pg_link: false,
-            float_link: false,
-            curl_link: false,
-            sqlite_link: false,
-            allow_static_downgrade: false,
-            full_lto: false,
-            plugin_artifacts: Vec::new(),
-            plugin_link_args: Vec::new(),
-            embed_assets: Vec::new(),
-            verbose: false,
-        }
-    }
-
-    /// Max optimization (`--full`): release base with full LTO —
-    /// whole-program optimization and elimination, dynamic link,
-    /// stripped. Slower links than ThinLTO release.
-    pub fn full() -> Self {
-        BuildOptions {
-            optimize: true,
-            strip: true,
-            static_link: false,
-            gc_sections: true,
-            thin_lto: true,
-            pgo: PgoMode::None,
-            native_rt: false,
-            pg_link: false,
-            float_link: false,
-            curl_link: false,
-            sqlite_link: false,
-            allow_static_downgrade: false,
-            full_lto: true,
-            plugin_artifacts: Vec::new(),
-            plugin_link_args: Vec::new(),
-            embed_assets: Vec::new(),
-            verbose: false,
-        }
-    }
-
-    /// Max optimization with PGO (`--full -- <train args>`): profile-use
-    /// plus full LTO. The instrumented leg uses plain `pgo_generate()`.
-    pub fn full_pgo_use() -> Self {
-        BuildOptions {
-            optimize: true,
-            strip: true,
-            static_link: false,
-            gc_sections: true,
-            thin_lto: true,
-            pgo: PgoMode::Use,
-            native_rt: false,
-            pg_link: false,
-            float_link: false,
-            curl_link: false,
-            sqlite_link: false,
-            allow_static_downgrade: false,
-            full_lto: true,
-            plugin_artifacts: Vec::new(),
-            plugin_link_args: Vec::new(),
-            embed_assets: Vec::new(),
-            verbose: false,
-        }
-    }
-
-    /// PGO build: use collected profile data (native host only).
-    /// Phase 2: run after `pgo_generate()` collected profile data.
-    pub fn pgo_use() -> Self {
-        BuildOptions {
-            optimize: true,
-            strip: true,
-            static_link: false,
-            gc_sections: true,
-            thin_lto: true,
-            pgo: PgoMode::Use,
-            native_rt: false,
-            pg_link: false,
-            float_link: false,
-            curl_link: false,
-            sqlite_link: false,
-            allow_static_downgrade: false,
-            full_lto: false,
-            plugin_artifacts: Vec::new(),
-            plugin_link_args: Vec::new(),
-            embed_assets: Vec::new(),
-            verbose: false,
-        }
-    }
-}
-
-impl BuildOptions {
-    /// Compute a fingerprint hash of this BuildOptions for cache key generation.
-    /// Includes all flags that affect compilation output, plus the target
-    /// triple (a cross build must never collide with a native one, and
-    /// `-march=native` presence differs between them).
-    pub fn fingerprint(&self) -> u64 {
-        self.fingerprint_with(None)
-    }
-
-    /// Fingerprint including the `--target` triple, plus the identity of
-    /// this build (a rebuilt compiler invalidates its own artifacts).
-    pub fn fingerprint_with(&self, target: Option<&str>) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.optimize.hash(&mut h);
-        self.strip.hash(&mut h);
-        self.static_link.hash(&mut h);
-        self.gc_sections.hash(&mut h);
-        self.thin_lto.hash(&mut h);
-        self.pgo.hash(&mut h);
-        self.native_rt.hash(&mut h);
-        self.pg_link.hash(&mut h);
-        self.float_link.hash(&mut h);
-        self.curl_link.hash(&mut h);
-        self.sqlite_link.hash(&mut h);
-        self.allow_static_downgrade.hash(&mut h);
-        self.full_lto.hash(&mut h);
-        // The build identity, not just the flags: AOT objects are this
-        // compiler's output, so a rebuilt `zz` (dirty codegen, new C
-        // template) must never reuse them. Same class as the sanitizer
-        // list below, which was already patched for one such leak.
-        zz_ir::build_stamp().hash(&mut h);
-        // Hash plugin artifact paths so cache invalidates when plugins change.
-        for p in &self.plugin_artifacts {
-            p.hash(&mut h);
-        }
-        // Hash plugin link flags too (dependency lib sets change output).
-        for a in &self.plugin_link_args {
-            a.hash(&mut h);
-        }
-        // Hash embedded assets (name + bytes): changed assets must bust
-        // the cache or binaries would serve stale files.
-        for a in &self.embed_assets {
-            a.name.hash(&mut h);
-            a.bytes.hash(&mut h);
-        }
-        target.unwrap_or("host").hash(&mut h);
-        // Hash the sanitizer list: flipping ZZ_SANITIZE must not serve
-        // a binary built under the other setting. A stale uninstrumented
-        // binary on a warm cache made sanitizer runs pass vacuously
-        // (the UAF in loop_mutate only reproduced on cold caches).
-        for s in sanitize_list() {
-            s.hash(&mut h);
-        }
-        h.finish()
-    }
 }
 
 /// Render embedded assets as C byte tables plus a static initializer that
@@ -1387,6 +949,65 @@ fn unit_obj_slug(rt_base: &str, flags_hash: u64, header: &str, code: &str) -> St
     format!("u{:016x}", h.finish())
 }
 
+/// Compute a fingerprint hash of a [`BuildOptions`] for cache key generation.
+/// Includes all flags that affect compilation output, plus the target
+/// triple (a cross build must never collide with a native one, and
+/// `-march=native` presence differs between them).
+pub fn build_options_fingerprint(opts: &zz_codegen_types::BuildOptions) -> u64 {
+    build_options_fingerprint_with(opts, None)
+}
+
+/// Fingerprint including the `--target` triple, plus the identity of
+/// this build (a rebuilt compiler invalidates its own artifacts).
+pub fn build_options_fingerprint_with(
+    opts: &zz_codegen_types::BuildOptions,
+    target: Option<&str>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    opts.optimize.hash(&mut h);
+    opts.strip.hash(&mut h);
+    opts.static_link.hash(&mut h);
+    opts.gc_sections.hash(&mut h);
+    opts.thin_lto.hash(&mut h);
+    opts.pgo.hash(&mut h);
+    opts.native_rt.hash(&mut h);
+    opts.pg_link.hash(&mut h);
+    opts.float_link.hash(&mut h);
+    opts.curl_link.hash(&mut h);
+    opts.sqlite_link.hash(&mut h);
+    opts.allow_static_downgrade.hash(&mut h);
+    opts.full_lto.hash(&mut h);
+    // The build identity, not just the flags: AOT objects are this
+    // compiler's output, so a rebuilt `zz` (dirty codegen, new C
+    // template) must never reuse them. Same class as the sanitizer
+    // list below, which was already patched for one such leak.
+    zz_ir::build_stamp().hash(&mut h);
+    // Hash plugin artifact paths so cache invalidates when plugins change.
+    for p in &opts.plugin_artifacts {
+        p.hash(&mut h);
+    }
+    // Hash plugin link flags too (dependency lib sets change output).
+    for a in &opts.plugin_link_args {
+        a.hash(&mut h);
+    }
+    // Hash embedded assets (name + bytes): changed assets must bust
+    // the cache or binaries would serve stale files.
+    for a in &opts.embed_assets {
+        a.name.hash(&mut h);
+        a.bytes.hash(&mut h);
+    }
+    target.unwrap_or("host").hash(&mut h);
+    // Hash the sanitizer list: flipping ZZ_SANITIZE must not serve
+    // a binary built under the other setting. A stale uninstrumented
+    // binary on a warm cache made sanitizer runs pass vacuously
+    // (the UAF in loop_mutate only reproduced on cold caches).
+    for s in sanitize_list() {
+        s.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// A cached object is usable when it is a non-empty file.
 fn is_usable_object(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
@@ -1448,7 +1069,7 @@ pub fn compile_units(
         opts.pg_link && (opts.native_rt || opts.float_link),
         opts.float_link,
     );
-    let flags_hash = opts.fingerprint_with(target);
+    let flags_hash = build_options_fingerprint_with(opts, target);
     let mut staged: Vec<(PathBuf, PathBuf, Option<PathBuf>)> = Vec::new();
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (ns, code) in units {
@@ -2087,12 +1708,12 @@ mod tests {
             "verbose must not leak into clang flags"
         );
         assert_eq!(
-            a.fingerprint(),
-            b.fingerprint(),
+            build_options_fingerprint(&a),
+            build_options_fingerprint(&b),
             "verbose must not bust the cache"
         );
         b.verbose = true;
-        assert_eq!(a.fingerprint(), b.fingerprint());
+        assert_eq!(build_options_fingerprint(&a), build_options_fingerprint(&b));
     }
 
     #[test]
@@ -2133,8 +1754,8 @@ mod tests {
     fn target_in_fingerprint() {
         let opts = release_opts();
         assert_ne!(
-            opts.fingerprint_with(None),
-            opts.fingerprint_with(Some("aarch64-unknown-linux-gnu")),
+            build_options_fingerprint_with(&opts, None),
+            build_options_fingerprint_with(&opts, Some("aarch64-unknown-linux-gnu")),
             "native and cross fingerprints must not collide"
         );
     }
