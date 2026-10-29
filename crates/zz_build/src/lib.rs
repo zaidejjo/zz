@@ -1807,17 +1807,11 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
     {
         use std::os::unix::process::ExitStatusExt;
         match status.signal() {
-            Some(sig) => {
-                return Err(format!(
-                    "native program killed by signal {sig} ({})",
-                    signal_name(sig)
-                ))
-            }
-            None => {
-                return Err(format!(
-                    "native process terminated abnormally (no exit code)"
-                ));
-            }
+            Some(sig) => Err(format!(
+                "native program killed by signal {sig} ({})",
+                signal_name(sig)
+            )),
+            None => Err("native process terminated abnormally (no exit code)".to_string()),
         }
     }
     #[cfg(windows)]
