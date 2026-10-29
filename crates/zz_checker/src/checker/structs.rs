@@ -12,13 +12,76 @@
 //! syntax (`Base,`) and the explicit-but-equivalent form (`Base: Base`),
 //! so no AST flag is needed and all downstream passes keep working.
 
+use crate::checker::inference::InferOps;
 use crate::checker::{Checker, FuncSig};
 use zz_diag_core::error_at;
 use zz_span_ast::ast::Stmt;
 use zz_types::Type;
 
-impl Checker {
-    pub(crate) fn collect_struct(&mut self, stmt: &Stmt) {
+pub trait StructOps {
+    fn collect_struct(&mut self, stmt: &Stmt);
+
+    /// True when a struct field is an embedded (anonymous) field: its type
+    /// is a struct whose last name segment equals the field name.
+    fn is_embedded_field(fname: &str, fty: &Type) -> bool;
+
+    /// Substitution map from a struct's generic parameters to the
+    /// concrete arguments at this use site. Empty when arities differ
+    /// (already reported elsewhere) — lookups then keep `Named` as-is.
+    fn struct_arg_map(&self, sname: &str, args: &[Type])
+        -> std::collections::HashMap<String, Type>;
+
+    /// Direct field type with the use-site arguments substituted
+    /// (`Box<int>.v` → `int`). Returns `None` for unknown structs,
+    /// unknown fields, or arity mismatch details (handled by callers).
+    fn direct_field_type(&self, sname: &str, args: &[Type], field: &str) -> Option<Type>;
+
+    /// Like [`Checker::direct_field_type`], but also returns the path of
+    /// embedded field names leading to the field (empty = direct).
+    /// Generic arguments thread through embedded levels: stepping into
+    /// `Base` via a field of type `Base[int]` continues with
+    /// `args=[int]`. Cycle-safe.
+    fn resolve_struct_field_generic(
+        &self,
+        sname: &str,
+        args: &[Type],
+        field: &str,
+    ) -> Option<(Vec<String>, Type)>;
+
+    /// Concrete type of the embedded value defining `method` when called
+    /// on `(sname, args)`: BFS over embedded fields carrying each level's
+    /// substituted arguments, returning the first value whose struct base
+    /// matches `defining` (mirrors [`Checker::find_struct_method`).
+    /// The runtime passes this embedded value as the receiver, so method
+    /// calls unify it (not the outer type) against the method's `self`.
+    fn promoted_method_receiver(&self, sname: &str, args: &[Type], defining: &str) -> Option<Type>;
+
+    /// First required leaf path under struct `sname` (reached via `prefix`)
+    /// that is not covered by the given concrete literal paths. An explicit
+    /// value at a path covers its whole subtree; otherwise embedded
+    /// subtrees must be fully covered leaf-by-leaf. `None` = fully covered.
+    fn first_uncovered_leaf(
+        &self,
+        sname: &str,
+        prefix: &[String],
+        given: &[Vec<String>],
+        depth: usize,
+    ) -> Option<Vec<String>>;
+
+    /// All field names visible on a struct: direct fields plus transitively
+    /// promoted fields (nearest embedding wins on shadowing). Used for
+    /// "did you mean" suggestions.
+    fn all_visible_fields(&self, sname: &str) -> Vec<String>;
+
+    /// Find a method for a struct, searching embedded structs transitively
+    /// when the outer struct defines no such method. Returns the defining
+    /// struct's name and signature. Direct methods always win; breadth-first
+    /// order keeps the nearest embedding's method on conflicts.
+    fn find_struct_method(&self, sname: &str, method: &str) -> Option<(String, FuncSig)>;
+}
+
+impl StructOps for Checker {
+    fn collect_struct(&mut self, stmt: &Stmt) {
         let (name, generics, fields) = match stmt {
             Stmt::Struct {
                 name,
@@ -71,7 +134,7 @@ impl Checker {
 
     /// True when a struct field is an embedded (anonymous) field: its type
     /// is a struct whose last name segment equals the field name.
-    pub(crate) fn is_embedded_field(fname: &str, fty: &Type) -> bool {
+    fn is_embedded_field(fname: &str, fty: &Type) -> bool {
         match fty {
             Type::Struct(s, _) => s.rsplit('.').next().unwrap_or(s) == fname,
             _ => false,
@@ -81,7 +144,7 @@ impl Checker {
     /// Substitution map from a struct's generic parameters to the
     /// concrete arguments at this use site. Empty when arities differ
     /// (already reported elsewhere) — lookups then keep `Named` as-is.
-    pub(crate) fn struct_arg_map(
+    fn struct_arg_map(
         &self,
         sname: &str,
         args: &[Type],
@@ -100,12 +163,7 @@ impl Checker {
     /// Direct field type with the use-site arguments substituted
     /// (`Box<int>.v` → `int`). Returns `None` for unknown structs,
     /// unknown fields, or arity mismatch details (handled by callers).
-    pub(crate) fn direct_field_type(
-        &self,
-        sname: &str,
-        args: &[Type],
-        field: &str,
-    ) -> Option<Type> {
+    fn direct_field_type(&self, sname: &str, args: &[Type], field: &str) -> Option<Type> {
         let sig = self.structs.get(sname)?;
         let (_, ft) = sig.fields.iter().find(|(n, _)| n == field)?;
         let map = self.struct_arg_map(sname, args);
@@ -117,7 +175,7 @@ impl Checker {
     /// Generic arguments thread through embedded levels: stepping into
     /// `Base` via a field of type `Base[int]` continues with
     /// `args=[int]`. Cycle-safe.
-    pub(crate) fn resolve_struct_field_generic(
+    fn resolve_struct_field_generic(
         &self,
         sname: &str,
         args: &[Type],
@@ -154,12 +212,7 @@ impl Checker {
     /// matches `defining` (mirrors [`Checker::find_struct_method`).
     /// The runtime passes this embedded value as the receiver, so method
     /// calls unify it (not the outer type) against the method's `self`.
-    pub(crate) fn promoted_method_receiver(
-        &self,
-        sname: &str,
-        args: &[Type],
-        defining: &str,
-    ) -> Option<Type> {
+    fn promoted_method_receiver(&self, sname: &str, args: &[Type], defining: &str) -> Option<Type> {
         let mut visited = vec![sname.to_string()];
         let mut queue: Vec<(String, Vec<Type>)> = vec![(sname.to_string(), args.to_vec())];
         while let Some((cur, cur_args)) = queue.first().cloned() {
@@ -185,7 +238,7 @@ impl Checker {
     /// that is not covered by the given concrete literal paths. An explicit
     /// value at a path covers its whole subtree; otherwise embedded
     /// subtrees must be fully covered leaf-by-leaf. `None` = fully covered.
-    pub(crate) fn first_uncovered_leaf(
+    fn first_uncovered_leaf(
         &self,
         sname: &str,
         prefix: &[String],
@@ -217,7 +270,7 @@ impl Checker {
     /// All field names visible on a struct: direct fields plus transitively
     /// promoted fields (nearest embedding wins on shadowing). Used for
     /// "did you mean" suggestions.
-    pub(crate) fn all_visible_fields(&self, sname: &str) -> Vec<String> {
+    fn all_visible_fields(&self, sname: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut visited = vec![sname.to_string()];
         let mut queue: Vec<String> = vec![sname.to_string()];
@@ -245,11 +298,7 @@ impl Checker {
     /// when the outer struct defines no such method. Returns the defining
     /// struct's name and signature. Direct methods always win; breadth-first
     /// order keeps the nearest embedding's method on conflicts.
-    pub(crate) fn find_struct_method(
-        &self,
-        sname: &str,
-        method: &str,
-    ) -> Option<(String, FuncSig)> {
+    fn find_struct_method(&self, sname: &str, method: &str) -> Option<(String, FuncSig)> {
         let mut visited = vec![sname.to_string()];
         let mut queue: Vec<String> = vec![sname.to_string()];
         while let Some(cur) = queue.first().cloned() {

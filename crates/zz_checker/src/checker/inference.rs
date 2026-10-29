@@ -1,5 +1,8 @@
 //! Type inference helpers: unification, type variables, generics.
 
+use crate::checker::aliases::AliasOps;
+use crate::checker::enums::EnumOps;
+use crate::checker::scope::ScopeOps;
 use crate::checker::Checker;
 use zz_diag_core::error_at;
 use zz_span_ast::ast::Ty;
@@ -7,12 +10,53 @@ use zz_span_ast::span::Span;
 use zz_suggest::suggest;
 use zz_types::Type;
 
-impl Checker {
+pub trait InferOps {
     /// Merge element types into a single type: identical types collapse to
     /// one; differing types form a union. Divergent (`Never`) elements
     /// vanish from the join — an array whose every element diverges is
     /// itself `Never`.
-    pub(crate) fn merge_types(&mut self, types: Vec<Type>) -> Type {
+    fn merge_types(&mut self, types: Vec<Type>) -> Type;
+
+    /// Does the generic parameter currently in scope carry the given bound?
+    fn has_bound(&self, name: &str, bound: zz_span_ast::ast::TraitBound) -> bool;
+
+    /// Does a concrete type satisfy a trait bound?
+    fn satisfies_bound(&self, ty: &Type, bound: zz_span_ast::ast::TraitBound) -> bool;
+
+    /// Validate that every generic parameter with a bound was instantiated
+    /// with a concrete type satisfying that bound. Called at call sites after
+    /// argument unification. Unresolved generics (never pinned by the call)
+    /// are skipped — the body's operator checks already validated them.
+    fn validate_bounds(
+        &mut self,
+        sig: &crate::checker::FuncSig,
+        subs: &std::collections::HashMap<String, Type>,
+        span: Span,
+    );
+
+    fn instantiate(
+        &mut self,
+        sig: &crate::checker::FuncSig,
+    ) -> (Vec<Type>, Type, std::collections::HashMap<String, Type>);
+
+    fn ast_to_type(&mut self, ty: &Ty, generics: &[String]) -> Type;
+
+    fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type;
+
+    /// Suggest the closest known type name for an unknown type, or a
+    /// builtin synonym (`string` → `str`) that falls outside the
+    /// Levenshtein threshold. Returns `None` when there is nothing close
+    /// enough to suggest, in which case the plain "unknown type" message
+    /// stands alone.
+    fn suggest_type_name(&self, name: &str) -> Option<String>;
+}
+
+impl InferOps for Checker {
+    /// Merge element types into a single type: identical types collapse to
+    /// one; differing types form a union. Divergent (`Never`) elements
+    /// vanish from the join — an array whose every element diverges is
+    /// itself `Never`.
+    fn merge_types(&mut self, types: Vec<Type>) -> Type {
         if types.is_empty() {
             return self.unifier.fresh_var();
         }
@@ -49,14 +93,14 @@ impl Checker {
     // --- generics ---------------------------------------------------------
 
     /// Does the generic parameter currently in scope carry the given bound?
-    pub(crate) fn has_bound(&self, name: &str, bound: zz_span_ast::ast::TraitBound) -> bool {
+    fn has_bound(&self, name: &str, bound: zz_span_ast::ast::TraitBound) -> bool {
         self.current_bounds
             .get(name)
             .is_some_and(|bs| bs.contains(&bound))
     }
 
     /// Does a concrete type satisfy a trait bound?
-    pub(crate) fn satisfies_bound(&self, ty: &Type, bound: zz_span_ast::ast::TraitBound) -> bool {
+    fn satisfies_bound(&self, ty: &Type, bound: zz_span_ast::ast::TraitBound) -> bool {
         use zz_span_ast::ast::TraitBound as B;
         match ty {
             Type::Union(ms) => ms.iter().all(|m| self.satisfies_bound(m, bound)),
@@ -76,7 +120,7 @@ impl Checker {
     /// with a concrete type satisfying that bound. Called at call sites after
     /// argument unification. Unresolved generics (never pinned by the call)
     /// are skipped — the body's operator checks already validated them.
-    pub(crate) fn validate_bounds(
+    fn validate_bounds(
         &mut self,
         sig: &crate::checker::FuncSig,
         subs: &std::collections::HashMap<String, Type>,
@@ -102,7 +146,7 @@ impl Checker {
         }
     }
 
-    pub(crate) fn instantiate(
+    fn instantiate(
         &mut self,
         sig: &crate::checker::FuncSig,
     ) -> (Vec<Type>, Type, std::collections::HashMap<String, Type>) {
@@ -118,11 +162,11 @@ impl Checker {
 
     // --- type annotations -------------------------------------------------
 
-    pub(crate) fn ast_to_type(&mut self, ty: &Ty, generics: &[String]) -> Type {
+    fn ast_to_type(&mut self, ty: &Ty, generics: &[String]) -> Type {
         self.ast_to_type_inner(ty, generics)
     }
 
-    pub(crate) fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type {
+    fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type {
         use zz_span_ast::ast::TyKind;
         match &ty.kind {
             TyKind::Int => Type::Int,

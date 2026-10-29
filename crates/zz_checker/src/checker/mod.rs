@@ -12,6 +12,7 @@ pub mod structs;
 pub mod type_check;
 pub mod value_lint;
 
+use crate::checker::scope::ScopeOps;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -19,6 +20,11 @@ use zz_diag_core::RawDiag;
 use zz_span_ast::ast::{Program, Stmt, Ty};
 use zz_span_ast::span::Span;
 
+use crate::checker::aliases::AliasOps;
+use crate::checker::funcs::FuncOps;
+use crate::checker::inference::InferOps;
+use crate::checker::structs::StructOps;
+use crate::checker::type_check::TypeCheckOps;
 use zz_types::Type;
 
 /// Pseudo-scope owning all top-level (non-function) statements. Mirrors
@@ -1091,7 +1097,7 @@ struct CheckerOutcome {
 /// parameters, which the callee calls positionally and which cannot be
 /// removed without changing the closure's arity.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DefinedBinding {
+pub struct DefinedBinding {
     pub(crate) span: zz_span_ast::span::Span,
     pub(crate) warn_unused: bool,
 }

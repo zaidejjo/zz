@@ -3,6 +3,7 @@
 //! Route shape validation and shadow detection live in `zz_http_routes`;
 //! this module wires them into the checker's expression walk.
 
+use crate::checker::scope::ScopeOps;
 use zz_diag_core::{error_at, warning_at};
 use zz_http_routes::{
     is_param_call, is_route_method, route_call_kind, validate_pattern, RouteCall, HIJACK_METHOD,
@@ -26,7 +27,62 @@ fn str_lit(expr: &Expr) -> Option<&str> {
     }
 }
 
-impl Checker {
+pub trait HttpLintOps {
+    /// Validate one route registration and record it for dup/shape checks.
+    /// `path_expr`/`handler_expr` positions depend on the call shape;
+    /// non-literal paths and non-closure handlers degrade gracefully.
+    fn lint_route(
+        &mut self,
+        root: Option<String>,
+        method: &str,
+        path_expr: Option<&Expr>,
+        handler_expr: Option<&Expr>,
+        handler_arity: usize,
+        span: Span,
+    );
+
+    /// Method form: `s.route_get(path, handler)` / `s.route(m, p, h)`.
+    fn lint_http_route_method(
+        &mut self,
+        root: Option<String>,
+        method_name: &str,
+        args: &[Expr],
+        span: Span,
+    );
+
+    /// Direct form: `http.route_get(s, path, h)` / `std.http.route(s, m, p, h)`.
+    fn lint_http_route_direct(&mut self, kind: RouteCall, args: &[Expr], span: Span);
+
+    /// Receiver-implicit form: `s.route_get(path, h)` / `s.route(m, p, h)`.
+    /// Same validation as direct, but the server is the receiver (arg
+    /// positions shift left by one).
+    fn lint_http_route_receiver(&mut self, short: &str, root: String, args: &[Expr], span: Span);
+
+    /// Is `parts[0]` a module namespace (vs a value receiver)?
+    ///
+    /// `http.*` / `std.*` are always module paths; otherwise only an
+    /// explicitly imported alias counts. In particular a loader-namespaced
+    /// local (`decorators.route` for a same-file `func route`) is NOT a
+    /// module call — `lookup_opt` alone cannot tell them apart (neither
+    /// root is a value binding), which false-positived on
+    /// `syntax/decorators.zz`.
+    fn recv_is_module(&self, parts: &[String]) -> bool;
+
+    /// Dispatch a `Path`-callee call (`http.route_get(...)`, `s.route(...)`,
+    /// `req.param(...)`) to the right lint. Module calls (`http.*`) carry
+    /// the server as `args[0]`; value calls (`s.*`) carry it as receiver.
+    fn lint_http_path_call(&mut self, parts: &[String], args: &[Expr], span: Span);
+
+    /// `http.param(req, "name")` / `req.param("name")`: typo hints against
+    /// every param registered so far (warning only, best effort).
+    fn lint_http_param(&mut self, name_expr: Option<&Expr>);
+
+    /// Inherit route tables across `name := <route call>` / `name = <route
+    /// call>` / `name := server_alias` so chained builders stay scoped.
+    fn propagate_http_routes(&mut self, target: &str, value: &Expr);
+}
+
+impl HttpLintOps for Checker {
     /// Validate one route registration and record it for dup/shape checks.
     /// `path_expr`/`handler_expr` positions depend on the call shape;
     /// non-literal paths and non-closure handlers degrade gracefully.
@@ -75,7 +131,7 @@ impl Checker {
     }
 
     /// Method form: `s.route_get(path, handler)` / `s.route(m, p, h)`.
-    pub(crate) fn lint_http_route_method(
+    fn lint_http_route_method(
         &mut self,
         root: Option<String>,
         method_name: &str,
@@ -106,7 +162,7 @@ impl Checker {
     }
 
     /// Direct form: `http.route_get(s, path, h)` / `std.http.route(s, m, p, h)`.
-    pub(crate) fn lint_http_route_direct(&mut self, kind: RouteCall, args: &[Expr], span: Span) {
+    fn lint_http_route_direct(&mut self, kind: RouteCall, args: &[Expr], span: Span) {
         let root = match args.first() {
             Some(Expr::Ident { name, .. }) => Some(name.clone()),
             _ => None,
@@ -141,13 +197,7 @@ impl Checker {
     /// Receiver-implicit form: `s.route_get(path, h)` / `s.route(m, p, h)`.
     /// Same validation as direct, but the server is the receiver (arg
     /// positions shift left by one).
-    pub(crate) fn lint_http_route_receiver(
-        &mut self,
-        short: &str,
-        root: String,
-        args: &[Expr],
-        span: Span,
-    ) {
+    fn lint_http_route_receiver(&mut self, short: &str, root: String, args: &[Expr], span: Span) {
         if short == "route" {
             let method = args.first().and_then(str_lit).unwrap_or("");
             if !method.is_empty() && !ROUTE_METHODS.contains(&method) {
@@ -199,7 +249,7 @@ impl Checker {
     /// Dispatch a `Path`-callee call (`http.route_get(...)`, `s.route(...)`,
     /// `req.param(...)`) to the right lint. Module calls (`http.*`) carry
     /// the server as `args[0]`; value calls (`s.*`) carry it as receiver.
-    pub(crate) fn lint_http_path_call(&mut self, parts: &[String], args: &[Expr], span: Span) {
+    fn lint_http_path_call(&mut self, parts: &[String], args: &[Expr], span: Span) {
         if parts.len() < 2 {
             return;
         }
@@ -231,7 +281,7 @@ impl Checker {
 
     /// `http.param(req, "name")` / `req.param("name")`: typo hints against
     /// every param registered so far (warning only, best effort).
-    pub(crate) fn lint_http_param(&mut self, name_expr: Option<&Expr>) {
+    fn lint_http_param(&mut self, name_expr: Option<&Expr>) {
         let Some(name_expr) = name_expr else { return };
         let Some(name) = str_lit(name_expr) else {
             return;
@@ -251,7 +301,7 @@ impl Checker {
 
     /// Inherit route tables across `name := <route call>` / `name = <route
     /// call>` / `name := server_alias` so chained builders stay scoped.
-    pub(crate) fn propagate_http_routes(&mut self, target: &str, value: &Expr) {
+    fn propagate_http_routes(&mut self, target: &str, value: &Expr) {
         let root = match value {
             Expr::Call { callee, args, .. } => match callee.as_ref() {
                 Expr::Field { obj, name, .. } if is_route_method(name) => match obj.as_ref() {

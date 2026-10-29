@@ -15,13 +15,37 @@ use zz_span_ast::span::Span;
 
 use super::inference::subst;
 use super::{AliasSig, Checker};
+use crate::checker::inference::InferOps;
 use zz_types::Type;
 
-impl Checker {
+pub trait AliasOps {
     /// Convert one raw alias target to a resolved [`AliasSig`].
     /// Idempotent: already-converted names return immediately (also
     /// breaks re-entrant conversion during cycle reporting).
-    pub(crate) fn convert_alias(&mut self, name: &str) {
+    fn convert_alias(&mut self, name: &str);
+
+    /// Canonical alias name, mirroring [`Checker::canonical_struct_name`]:
+    /// a selectively-imported bare name resolves to its qualified form.
+    fn canonical_alias_name(&self, name: &str) -> String;
+
+    /// Expand an alias use `Name[args]` to its resolved [`Type`].
+    /// Arity is checked like generic structs; mismatches report and
+    /// resolve with the provided prefix (missing parameters stay
+    /// `Named`, which surfaces as a generic — never a silent hole).
+    fn expand_alias(
+        &mut self,
+        name: &str,
+        args: &[Ty],
+        outer_generics: &[String],
+        span: Span,
+    ) -> Type;
+}
+
+impl AliasOps for Checker {
+    /// Convert one raw alias target to a resolved [`AliasSig`].
+    /// Idempotent: already-converted names return immediately (also
+    /// breaks re-entrant conversion during cycle reporting).
+    fn convert_alias(&mut self, name: &str) {
         if self.aliases.contains_key(name) {
             return;
         }
@@ -64,7 +88,7 @@ impl Checker {
 
     /// Canonical alias name, mirroring [`Checker::canonical_struct_name`]:
     /// a selectively-imported bare name resolves to its qualified form.
-    pub(crate) fn canonical_alias_name(&self, name: &str) -> String {
+    fn canonical_alias_name(&self, name: &str) -> String {
         if let Some(qualified) = self.import_aliases.get(name) {
             if self.aliases.contains_key(qualified) {
                 return qualified.clone();
@@ -77,7 +101,7 @@ impl Checker {
     /// Arity is checked like generic structs; mismatches report and
     /// resolve with the provided prefix (missing parameters stay
     /// `Named`, which surfaces as a generic — never a silent hole).
-    pub(crate) fn expand_alias(
+    fn expand_alias(
         &mut self,
         name: &str,
         args: &[Ty],

@@ -16,13 +16,56 @@ use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;
 
 use super::Checker;
+use crate::checker::type_check::TypeCheckOps;
 use zz_types::Type;
 
-impl Checker {
+pub trait EnumOps {
     /// Canonical enum name, mirroring
     /// [`Checker::canonical_struct_name`]: a selectively-imported bare
     /// name resolves to its qualified form.
-    pub(crate) fn canonical_enum_name(&self, name: &str) -> String {
+    fn canonical_enum_name(&self, name: &str) -> String;
+
+    /// Fresh inference variables for an enum's parameters, with the
+    /// substitution map (`T` → `?0`). Mirrors generic struct
+    /// instantiation: the payload unifies against the substituted type,
+    /// so `Box.V(1)` infers `Box<int>`.
+    fn fresh_enum_vars(&mut self, enum_name: &str) -> (Vec<Type>, HashMap<String, Type>);
+
+    /// Substitute an enum's parameters in a payload type using the
+    /// scrutinee's arguments (`Box<int>` + `Named("T")` → `int`).
+    /// Unknown-length args (shouldn't happen post-check) leave `Named`
+    /// intact rather than mis-substituting.
+    fn subst_enum_payload(&self, enum_name: &str, args: &[Type], payload: &Type) -> Type;
+
+    /// Check an enum construction `Enum.Variant(args)` where `enum_name`
+    /// is the already-canonicalized enum and `variant` the trailing call
+    /// path component. Returns the enum type on success.
+    fn check_enum_construction(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[zz_span_ast::ast::Expr],
+        named: &[(zz_span_ast::ast::Ident, zz_span_ast::ast::Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
+    /// Resolve a `.Variant` pattern against an enum scrutinee: returns
+    /// the variant's payload type (`None` = unit variant, `Some` = the
+    /// inner pattern must match the payload). Reports unknown variants.
+    /// Generic parameters are already substituted by the caller.
+    fn enum_variant_payload(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        span: Span,
+    ) -> Option<Option<Type>>;
+}
+
+impl EnumOps for Checker {
+    /// Canonical enum name, mirroring
+    /// [`Checker::canonical_struct_name`]: a selectively-imported bare
+    /// name resolves to its qualified form.
+    fn canonical_enum_name(&self, name: &str) -> String {
         if let Some(qualified) = self.import_aliases.get(name) {
             if self.enums.contains_key(qualified) {
                 return qualified.clone();
@@ -35,10 +78,7 @@ impl Checker {
     /// substitution map (`T` → `?0`). Mirrors generic struct
     /// instantiation: the payload unifies against the substituted type,
     /// so `Box.V(1)` infers `Box<int>`.
-    pub(crate) fn fresh_enum_vars(
-        &mut self,
-        enum_name: &str,
-    ) -> (Vec<Type>, HashMap<String, Type>) {
+    fn fresh_enum_vars(&mut self, enum_name: &str) -> (Vec<Type>, HashMap<String, Type>) {
         let generics = self
             .enums
             .get(enum_name)
@@ -53,12 +93,7 @@ impl Checker {
     /// scrutinee's arguments (`Box<int>` + `Named("T")` → `int`).
     /// Unknown-length args (shouldn't happen post-check) leave `Named`
     /// intact rather than mis-substituting.
-    pub(crate) fn subst_enum_payload(
-        &self,
-        enum_name: &str,
-        args: &[Type],
-        payload: &Type,
-    ) -> Type {
+    fn subst_enum_payload(&self, enum_name: &str, args: &[Type], payload: &Type) -> Type {
         let generics = self
             .enums
             .get(enum_name)
@@ -74,7 +109,7 @@ impl Checker {
     /// Check an enum construction `Enum.Variant(args)` where `enum_name`
     /// is the already-canonicalized enum and `variant` the trailing call
     /// path component. Returns the enum type on success.
-    pub(crate) fn check_enum_construction(
+    fn check_enum_construction(
         &mut self,
         enum_name: &str,
         variant: &str,
@@ -163,7 +198,7 @@ impl Checker {
     /// the variant's payload type (`None` = unit variant, `Some` = the
     /// inner pattern must match the payload). Reports unknown variants.
     /// Generic parameters are already substituted by the caller.
-    pub(crate) fn enum_variant_payload(
+    fn enum_variant_payload(
         &mut self,
         enum_name: &str,
         variant: &str,

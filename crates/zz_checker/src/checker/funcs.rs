@@ -1,13 +1,59 @@
 //! Function registration and body checking.
 
+use crate::checker::inference::InferOps;
+use crate::checker::scope::ScopeOps;
+use crate::checker::type_check::TypeCheckOps;
 use crate::checker::Checker;
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_span_ast::ast::{Block, Expr, Stmt};
 use zz_span_ast::span::Span;
 use zz_types::Type;
 
-impl Checker {
-    pub(crate) fn collect_func(&mut self, stmt: &Stmt) {
+pub trait FuncOps {
+    fn collect_func(&mut self, stmt: &Stmt);
+
+    /// Register one `extern "C"` signature. No body is checked; parameter and
+    /// return types must be C-compatible (int/float/bool/pointer/void/unit).
+    fn collect_extern(
+        &mut self,
+        name: &zz_span_ast::ast::Ident,
+        params: &[zz_span_ast::ast::Param],
+        ret: &Option<zz_span_ast::ast::Ty>,
+        c_symbol: Option<String>,
+    );
+
+    fn is_c_abi_type(ty: &Type) -> bool;
+
+    fn is_c_abi_scalar(ty: &Type) -> bool;
+
+    fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig);
+
+    /// Report a missing-return diagnostic with improved diagnostics:
+    /// - unit-tail functions (println, match, etc.) get the message only, no fixit.
+    /// - annotated non-unit functions that can fall through get error + fixit.
+    /// - fixit is withheld for `if` without `else`, match arms, and `let`
+    ///   bindings whose name is used later (intentional shadowings).
+    fn report_missing_return(&mut self, body: &Block, ret_ty: &Type);
+
+    /// Extract an identifier name from a statement or expression for shadow-checking.
+    fn extract_name(stmt: &Stmt) -> Option<String>;
+
+    fn extract_name_from_block(block: &Block) -> Option<String>;
+
+    /// Extract all identifier names from a statement (for shadow checking).
+    fn extract_names(stmt: &Stmt) -> Vec<String>;
+
+    fn extract_names_from_block(block: &Block) -> Vec<String>;
+
+    fn block_has_return(block: &Block) -> bool;
+
+    fn stmt_has_return(stmt: &Stmt) -> bool;
+
+    fn expr_has_return(expr: &Expr) -> bool;
+}
+
+impl FuncOps for Checker {
+    fn collect_func(&mut self, stmt: &Stmt) {
         let (name, generics, params, ret) = match stmt {
             Stmt::Func {
                 name,
@@ -61,7 +107,7 @@ impl Checker {
 
     /// Register one `extern "C"` signature. No body is checked; parameter and
     /// return types must be C-compatible (int/float/bool/pointer/void/unit).
-    pub(crate) fn collect_extern(
+    fn collect_extern(
         &mut self,
         name: &zz_span_ast::ast::Ident,
         params: &[zz_span_ast::ast::Param],
@@ -160,7 +206,7 @@ impl Checker {
         )
     }
 
-    pub(crate) fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig) {
+    fn check_func_body(&mut self, stmt: &Stmt, sig: &crate::checker::FuncSig) {
         let (name, params, body) = match stmt {
             Stmt::Func {
                 name, params, body, ..
@@ -339,7 +385,7 @@ impl Checker {
         block.stmts.iter().flat_map(Self::extract_names).collect()
     }
 
-    pub(crate) fn block_has_return(block: &Block) -> bool {
+    fn block_has_return(block: &Block) -> bool {
         block.stmts.iter().any(Self::stmt_has_return)
     }
 
