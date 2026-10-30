@@ -8091,7 +8091,7 @@ zz_value zz_value_upgrade(zz_value v, int *err) {
     if (v.tag != ZZ_WEAK || !v.weak) {
         return zz_value_dup(v);
     }
-    size_t s = atomic_load_explicit(&v.weak->strong, memory_order_acquire);
+    size_t s = __atomic_load_n(&v.weak->strong, __ATOMIC_ACQUIRE);
     if (s == 0) {
         return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
     }

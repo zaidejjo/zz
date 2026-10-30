@@ -80,6 +80,7 @@ typedef enum {
 } zz_tag;
 
 typedef struct zz_value zz_value;
+typedef struct zz_weak zz_weak;  // defined below, after zz_value
 
 // Container forward declarations.
 typedef struct zz_array zz_array;
@@ -111,15 +112,6 @@ typedef struct zz_bytes zz_bytes;
 // always succeeds; weak tracks the number of Weak handles. When weak drops
 // to 0 the block is freed (the strong ref is freed with it — a small,
 // deliberate leak per weak() call, acceptable for infrequent cycle
-// breaking).
-typedef struct zz_weak zz_weak;
-
-struct zz_weak {
-    _Atomic size_t strong;   // always 1 (leaked — see zz_value_weak)
-    _Atomic size_t weak;     // number of Weak handles
-    zz_value value;          // the referent (heap-allocated contents owned)
-};
-
 // Refcounted string with Small String Optimization (SSO).
 //
 // Strings <= 23 bytes are stored inline in `sso` — zero malloc beyond
@@ -184,6 +176,20 @@ struct zz_value {
         zz_bytes *bytes;     // byte buffer (ZZ_BYTES)
         zz_weak *weak;       // weak reference (ZZ_WEAK)
     };
+};
+
+// A weak reference control block: strong + weak atomic counts plus the
+// referent. strong=1 (owned by the block, never released) means upgrade()
+// always succeeds; weak tracks the number of Weak handles. When weak drops
+// to 0 the block is freed (the strong ref is freed with it — a small,
+// deliberate leak per weak() call, acceptable for infrequent cycle
+// breaking).
+typedef struct zz_weak zz_weak;
+
+struct zz_weak {
+    size_t strong;   // always 1 (leaked — see zz_value_weak)
+    size_t weak;     // number of Weak handles
+    zz_value value;  // the referent (heap-allocated contents owned)
 };
 
 struct zz_bytes_buf {
