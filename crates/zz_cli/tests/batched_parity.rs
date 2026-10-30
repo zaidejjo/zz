@@ -263,7 +263,7 @@ fn run_driver(driver: &Path, native: bool) -> (i32, String, String) {
     }
 }
 
-const PER_BATCH: usize = 20;
+const PER_BATCH: usize = 50;
 
 #[test]
 fn batched_native_parity() {

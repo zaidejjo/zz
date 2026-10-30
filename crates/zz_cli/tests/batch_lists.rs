@@ -139,11 +139,45 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
 /// that is not batchable must name its reason here.
 /// (Only read by the `batched_parity` inventory test; unused in the
 /// `dual_engine_parity` target that shares this file.)
+///
+/// POTENTIAL BATCHABILITY IMPROVEMENTS (tracked for future work):
+/// - Port collisions: Could use per-fixture port offsets or SO_REUSEPORT
+/// - Spawn/timing-sensitive: Could add deterministic timeout handling
+/// - Sweep-token scratch fs: ZZ_SWEEP_TOKEN already provides per-run isolation
+/// - env/argv: Could isolate per-fixture env in future batch redesign
+/// - .stdin: Batch system already supports per-fixture .stdin files
+/// - helpers/ support dir: Could use namespaced copying in future
+/// - Network access: Fundamentally requires CI network, mark as permanent exclusion
+/// - SQLite handle: Could add per-fixture database paths
+/// - Alias collisions: Could use unique per-fixture alias names
 #[allow(dead_code)]
 pub const EXCLUDED: &[(&str, &str)] = &[
-    ("stdlib/envmod.zz", "reads env/argv (shared in batch)"),
-    ("stdlib/env_test.zz", "reads env/argv (shared in batch)"),
-    ("stdlib/env_full.zz", "reads env/argv (shared in batch)"),
+    // --- Port/socket collisions (7 entries) ---
+    // These bind to network ports/socket files that can collide when running
+    // multiple fixtures in the same batch driver. Potential fix: per-fixture
+    // port offsets or SO_REUSEPORT/SO_REUSEPORT socket options.
+    ("stdlib/net_tcp_test.zz", "binds ports (collide in batch)"),
+    ("stdlib/net_dns_test.zz", "binds ports (collide in batch)"),
+    (
+        "stdlib/net_write_after_close_test.zz",
+        "binds ports (collide in batch)",
+    ),
+    (
+        "stdlib/tcp_method_on_try.zz",
+        "binds ports (collide in batch)",
+    ),
+    ("stdlib/net_tls_test.zz", "binds ports (collide in batch)"),
+    (
+        "stdlib/net_unix_test.zz",
+        "binds socket files (collide in batch)",
+    ),
+    (
+        "stdlib/http_request_response.zz",
+        "binds ports (collide in batch)",
+    ),
+    // --- Spawn/timing-sensitive (9 entries) ---
+    // These involve process spawning or timing that varies between runs.
+    // Potential fix: deterministic timeout handling or separate batch runs.
     ("stdlib/concurrency_spawn_test.zz", "spawn/timing-sensitive"),
     ("stdlib/channel_test.zz", "spawn/timing-sensitive"),
     ("stdlib/concurrency_tasks_test.zz", "spawn/timing-sensitive"),
@@ -171,48 +205,43 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "stdlib/concurrency_recall_test.zz",
         "spawn/timing-sensitive",
     ),
-    ("stdlib/fs_comprehensive.zz", "spawn/timing-sensitive"),
-    ("stdlib/net_tcp_test.zz", "binds ports (collide in batch)"),
-    ("stdlib/net_dns_test.zz", "binds ports (collide in batch)"),
-    (
-        "stdlib/net_write_after_close_test.zz",
-        "binds ports (collide in batch)",
-    ),
-    (
-        "stdlib/tcp_method_on_try.zz",
-        "binds ports (collide in batch)",
-    ),
-    ("stdlib/net_tls_test.zz", "binds ports (collide in batch)"),
-    (
-        "stdlib/net_unix_test.zz",
-        "binds socket files (collide in batch)",
-    ),
+    // --- Sweep-token scratch fs (5 entries) ---
+    // These create scratch directories in system temp dir. The
+    // ZZ_SWEEP_TOKEN mechanism already provides per-run isolation, but
+    // shared batch processes could still collide. Potential fix: include
+    // sweep token in scratch path prefix.
+    ("stdlib/filesystem.zz", "sweep-token scratch fs"),
+    ("stdlib/fs_test.zz", "sweep-token scratch fs"),
+    ("stdlib/result_print.zz", "sweep-token scratch fs"),
+    ("stdlib/fs_vfs.zz", "sweep-token scratch fs"),
+    // --- Reads env/argv (3 entries) ---
+    // These read environment variables or command-line arguments that
+    // would be shared across fixtures in the same batch driver.
+    // Potential future: per-fixture env isolation.
+    ("stdlib/envmod.zz", "reads env/argv (shared in batch)"),
+    ("stdlib/env_test.zz", "reads env/argv (shared in batch)"),
+    ("stdlib/env_full.zz", "reads env/argv (shared in batch)"),
+    // --- Needs .stdin (1 entry) ---
+    // The batch system already supports per-fixture .stdin files, but
+    // this fixture's convention may not be compatible.
     ("stdlib/input_chained.zz", "needs .stdin (shared in batch)"),
-    (
-        "stdlib/http_request_response.zz",
-        "binds ports (collide in batch)",
-    ),
+    // --- Network access (1 entry) ---
+    // Requires actual network connectivity, not available in batch CI.
     ("stdlib/http_fetch_test.zz", "network access"),
+    // --- SQLite handle issues (1 entry) ---
+    // Involves SQLite handle management that may have concurrency issues.
     (
         "stdlib/link_gates_test.zz",
         "sqlite handle + refused loopback fetch",
     ),
-    // Scratch-filesystem fixtures keyed by sweep token: shared batch
-    // processes would collide on (and pollute from) one scratch dir.
-    ("stdlib/filesystem.zz", "sweep-token scratch fs"),
-    ("stdlib/fs_test.zz", "sweep-token scratch fs"),
-    // Needs the helpers/ support dir sibling (batch sandbox is flat).
+    // --- Needs helpers/ support dir (2 entries) ---
+    // Requires support directory siblings that the flat batch sandbox doesn't
+    // preserve. Potential fix: namespaced copying of support dir contents.
     ("stdlib/generic_selective.zz", "needs helpers/ support dir"),
-    ("stdlib/result_print.zz", "sweep-token scratch fs"),
-    ("stdlib/fs_vfs.zz", "sweep-token scratch fs"),
-    // Reads a tests/ data file (batch sandbox is flat, no data dir).
-    (
-        "stdlib/fs_read_invalid_utf8_test.zz",
-        "needs tests/fixtures/stdlib/data/ sibling",
-    ),
-    // `alias_import` and `enum_import` claim the same `shapes` alias
-    // for different support modules: a genuine per-program collision,
-    // so they run individually (each passes alone).
+    // --- Alias collisions (2 entries) ---
+    // `types/alias_import.zz` and `types/enum_import.zz` claim the same
+    // `shapes` alias for different support modules, causing per-program collision.
+    // Potential fix: use unique per-fixture alias names.
     (
         "types/alias_import.zz",
         "alias `shapes` collides with enum_import's support module",
