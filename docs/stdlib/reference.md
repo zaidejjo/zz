@@ -1,6 +1,6 @@
 # Stdlib reference — generated
 
-Exhaustive signature index: **694 entries across 42 groups**.
+Exhaustive signature index: **693 entries across 42 groups**.
 Generated from compiled `FuncSig` data (`crates/zz_stdlib/src/funcs.rs`
 via `dump_sigs`) — do not hand-edit. Regenerate with
 `python3 scripts/gen-stdlib-ref.py`. Semantics: per-module guides linked below.
@@ -236,7 +236,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.encoding.url_decode` | `url_decode(encoded: str) -> Result<str, str>` |
 | `std.encoding.url_encode` | `url_encode(data: str) -> str` |
 
-## `env` — 15 entries ([guide](env-process.md))
+## `env` — 14 entries ([guide](env-process.md))
 
 | Function | Signature |
 |---|---|
@@ -317,7 +317,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.fs.write_at` | `write_at(fsys: zzfs, path: str, content: str) -> Result<unit, str>` |
 | `std.fs.write_chunk` | `write_chunk(f: file, data: str) -> Result<int, str>` |
 
-## `http` — 50 entries ([guide](http.md))
+## `http` — 49 entries ([guide](http.md))
 
 | Function | Signature |
 |---|---|
@@ -489,13 +489,17 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.math.magnitude` | `magnitude(v: [float]) -> float` |
 | `std.math.matrix_mul` | `matrix_mul(m1: [[float]], m2: [[float]]) -> Result<[[float]], str>` |
 | `std.math.max` | `max<T>(a: T, b: T) -> T` |
+| `std.math.max_arr` | `max_arr<T>(arr: [T]) -> Option<T>` |
 | `std.math.mean` | `mean(list: [float]) -> Result<float, str>` |
 | `std.math.mean_f` | `mean_f(arr: [float]) -> Result<float, str>` |
 | `std.math.median` | `median(list: [float]) -> Result<float, str>` |
 | `std.math.median_f` | `median_f(arr: [float]) -> Result<float, str>` |
 | `std.math.min` | `min<T>(a: T, b: T) -> T` |
+| `std.math.min_arr` | `min_arr<T>(arr: [T]) -> Option<T>` |
 | `std.math.pow` | `pow<T>(base: T, exp: T) -> float` |
-| `std.math.pow` | `pow<T>(base: T, exp: T) -> float` |
+| `std.math.product` | `product(arr: [int]) -> int` |
+| `std.math.product_f` | `product_f(arr: [float]) -> float` |
+| `std.math.rand_range` | `rand_range<T>(min: T, max: T) -> float` |
 | `std.math.random` | `random() -> float` |
 | `std.math.root` | `root<T>(x: T, n: T) -> float` |
 | `std.math.round` | `round<T>(x: T) -> float` |
@@ -503,13 +507,15 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.math.sin` | `sin<T>(x: T) -> float` |
 | `std.math.sin_deg` | `sin_deg<T>(x: T) -> float` |
 | `std.math.sqrt` | `sqrt<T>(v: T) -> float` |
+| `std.math.sum` | `sum(arr: [int]) -> int` |
+| `std.math.sum_f` | `sum_f(arr: [float]) -> float` |
 | `std.math.tan` | `tan<T>(x: T) -> float` |
 | `std.math.tan_deg` | `tan_deg<T>(x: T) -> float` |
 | `std.math.to_degrees` | `to_degrees<T>(rad: T) -> float` |
 | `std.math.to_radians` | `to_radians<T>(deg: T) -> float` |
 | `std.math.trunc` | `trunc<T>(x: T) -> float` |
 
-## `net` — 54 entries ([guide](net.md))
+## `net` — 53 entries ([guide](net.md))
 
 | Function | Signature |
 |---|---|
@@ -835,12 +841,13 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.tls.write` | `write(stream: tls, data: str) -> Result<int, str>` |
 | `std.tls.write_bytes` | `write_bytes(stream: tls, data: bytes) -> Result<int, str>` |
 
-## `tls_listener` — 2 entries ([guide](overview.md))
+## `tls_listener` — 3 entries ([guide](overview.md))
 
 | Function | Signature |
 |---|---|
 | `std.tls_listener.accept` | `accept(listener: tls_listener) -> Result<tls, str>` |
 | `std.tls_listener.close` | `close(listener: tls_listener) -> Result<bool, str>` |
+| `std.tls_listener.shutdown` | `shutdown(listener: tls_listener) -> Result<bool, str>` |
 
 ## `unix` — 10 entries ([guide](overview.md))
 
@@ -857,12 +864,13 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.unix.write` | `write(stream: unix, data: str) -> Result<int, str>` |
 | `std.unix.write_bytes` | `write_bytes(stream: unix, data: bytes) -> Result<int, str>` |
 
-## `unix_listener` — 2 entries ([guide](overview.md))
+## `unix_listener` — 3 entries ([guide](overview.md))
 
 | Function | Signature |
 |---|---|
 | `std.unix_listener.accept` | `accept(listener: unix_listener) -> Result<unix, str>` |
 | `std.unix_listener.close` | `close(listener: unix_listener) -> Result<bool, str>` |
+| `std.unix_listener.shutdown` | `shutdown(listener: unix_listener) -> Result<bool, str>` |
 
 ## `uuid` — 4 entries ([guide](encoding-crypto.md))
 
