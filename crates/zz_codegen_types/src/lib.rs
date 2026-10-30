@@ -321,40 +321,6 @@ impl From<std::io::Error> for BuildError {
     }
 }
 
-/// Content hash of the embedded C runtime sources, stamped by build.rs
-/// (`ZZ_RUNTIME_HASH`). Referenced so the hash is load-bearing: any runtime
-/// edit changes this constant, which changes the crate fingerprint and
-/// forces a rebuild + fresh embed. Without it, `include_str!` edits were
-/// silently ignored until an unrelated Rust change rebuilt the crate.
-pub const RUNTIME_SRC_HASH: &str = match option_env!("ZZ_RUNTIME_HASH") {
-    Some(h) => h,
-    None => "0000000000000000",
-};
-
-/// Version marker for generated binaries.
-pub const C_BUILD_VERSION: &str = "0.1.0";
-
-/// Embedded C runtime header source (concatenated from `src/runtime/*.h`).
-pub const RUNTIME_H: &str = concat!(
-    include_str!("runtime/runtime.h"),
-    include_str!("runtime/platform.h"),
-    include_str!("runtime/core.h"),
-    include_str!("runtime/memory.h"),
-    include_str!("runtime/strings.h"),
-    include_str!("runtime/collections.h"),
-    include_str!("runtime/json.h"),
-);
-
-/// Embedded C runtime implementation source (concatenated from
-/// `src/runtime/*.c`).
-pub const RUNTIME_C: &str = concat!(
-    include_str!("runtime/memory.c"),
-    include_str!("runtime/strings.c"),
-    include_str!("runtime/collections.c"),
-    include_str!("runtime/json.c"),
-    include_str!("runtime/core.c"),
-);
-
 /// Mangle a dotted ZZ name into a C identifier: replace `.` with `__` and
 /// any non-alphanumeric/underscore character with `_`.
 pub fn mangle(name: &str) -> String {

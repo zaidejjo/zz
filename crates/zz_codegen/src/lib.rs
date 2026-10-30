@@ -18,43 +18,8 @@ pub use compile::{
     EmbedAsset, PgoMode,
 };
 pub use ffi::{ffi_impl, FfiError, FFI_VERSION};
+pub use zz_codegen_runtime::{C_BUILD_VERSION, RUNTIME_C, RUNTIME_H, RUNTIME_SRC_HASH};
 pub use zz_lower::{mangle, native_supported, units, LoweredC, Lowerer};
-
-/// The embedded C runtime header. The runtime is split across modular
-/// sub-headers under `src/runtime/`; the umbrella `runtime.h` includes them
-/// in dependency order, and they are concatenated here into one string.
-pub const RUNTIME_H: &str = concat!(
-    include_str!("runtime/runtime.h"),
-    include_str!("runtime/platform.h"),
-    include_str!("runtime/core.h"),
-    include_str!("runtime/memory.h"),
-    include_str!("runtime/strings.h"),
-    include_str!("runtime/collections.h"),
-    include_str!("runtime/json.h"),
-);
-
-/// The embedded C runtime implementation. The modular `.c` files are
-/// concatenated in dependency order into a single translation unit.
-pub const RUNTIME_C: &str = concat!(
-    include_str!("runtime/memory.c"),
-    include_str!("runtime/strings.c"),
-    include_str!("runtime/collections.c"),
-    include_str!("runtime/json.c"),
-    include_str!("runtime/core.c"),
-);
-
-/// Version marker for generated binaries.
-pub const C_BUILD_VERSION: &str = "0.1.0";
-
-/// Content hash of the embedded C runtime sources, stamped by build.rs
-/// (`ZZ_RUNTIME_HASH`). Referenced so the hash is load-bearing: any runtime
-/// edit changes this constant, which changes the crate fingerprint and
-/// forces a rebuild + fresh embed. Without it, `include_str!` edits were
-/// silently ignored until an unrelated Rust change rebuilt the crate.
-pub const RUNTIME_SRC_HASH: &str = match option_env!("ZZ_RUNTIME_HASH") {
-    Some(h) => h,
-    None => "0000000000000000",
-};
 
 /// Lower a pruned typed program to C without compiling.
 ///

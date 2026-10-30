@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use zz_codegen_types::{RUNTIME_C, RUNTIME_H};
+use zz_codegen_runtime::{RUNTIME_C, RUNTIME_H};
 use zz_frontend::ast::{Expr, Stmt};
 
 use super::context::NameCtx;

@@ -4693,7 +4693,7 @@ pub fn build_module(module: &Module, entry_main: &str) -> Result<zz_lower::Lower
     // <math.h> stay).
     let raw = format!(
         "{runtime_h}\n{chunk_pre}\n// ---- chunk-compiled code ----\n{bodies}\nvoid zz_main(void) {{\n    zz_value _t = {entry_sym}(NULL, 0);\n    zz_release(&_t);\n}}\n\nint zz_call_main(void) {{\n    zz_value _r = {main_call};\n    return zz_main_result_code(_r);\n}}\n",
-        runtime_h = crate::RUNTIME_H,
+        runtime_h = zz_codegen_runtime::RUNTIME_H,
         chunk_pre = CHUNK_PREAMBLE,
     );
     let source = raw

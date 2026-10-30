@@ -39,7 +39,11 @@ pub fn cache_dir_display() -> String {
 /// Concatenates `RUNTIME_H` + `RUNTIME_C` and hashes them. This covers all
 /// `.c` and `.h` files that are embedded via `include_str!` in `lib.rs`.
 fn runtime_src_hash() -> String {
-    let combined = format!("{}\n{}", crate::RUNTIME_H, crate::RUNTIME_C);
+    let combined = format!(
+        "{}\n{}",
+        zz_codegen_runtime::RUNTIME_H,
+        zz_codegen_runtime::RUNTIME_C
+    );
     let mut hasher = DefaultHasher::new();
     combined.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -290,8 +294,12 @@ fn compile_rt_a(
     );
 
     // Assemble the runtime TU (same as the current single-TU approach).
-    let raw = format!("{}\n{}", crate::RUNTIME_H, crate::RUNTIME_C);
-    let src = zz_lower::strip_quoted_includes(&raw);
+    let raw = format!(
+        "{}\n{}",
+        zz_codegen_runtime::RUNTIME_H,
+        zz_codegen_runtime::RUNTIME_C
+    );
+    let src = zz_codegen_runtime::strip_quoted_includes(&raw);
 
     // Unique temporaries per call: parallel test threads (and processes)
     // share the pid + key namespace, and identical `zz-rt-*` paths used to

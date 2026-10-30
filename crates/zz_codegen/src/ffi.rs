@@ -1719,13 +1719,13 @@ mod tests {
         );
         let raw = format!(
             "{headers}\n{runtime}\n{prelude}\n#include <stdlib.h>\nvoid zz_main(void) {{\n    if (zz_rt_version() != {ver}ULL) exit(10);\n    uint64_t live0 = zz_rt_handle_live();\n    uint64_t id = zz_rt_handle_alloc((const uint8_t *)\"regex\", 5);\n    if (id == 0) exit(11);\n    if (!zz_rt_handle_tag_eq(id, (const uint8_t *)\"regex\", 5)) exit(12);\n    if (zz_rt_handle_tag_eq(id, (const uint8_t *)\"uuid\", 4)) exit(13);\n    if (zz_rt_handle_live() != live0 + 1) exit(14);\n    if (!zz_rt_handle_drop(id)) exit(15);\n    if (zz_rt_handle_tag_eq(id, (const uint8_t *)\"regex\", 5)) exit(16);\n    int err = 0;\n    zz_value digest = zz_crypto_sha256(zz_str_new(\"abc\", 3), &err);\n    const char *ptr = NULL; size_t len = 0;\n    zz_str_view(digest, &ptr, &len);\n    if (err != 0 || len != 64 || ptr == NULL) exit(17);\n    if (memcmp(ptr, \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\", 64) != 0) exit(18);\n    printf(\"ffi_link_ok\\n\");\n}}\nint zz_call_main(void) {{ return 0; }}\n",
-            headers = crate::RUNTIME_H,
-            runtime = crate::RUNTIME_C,
+            headers = zz_codegen_runtime::RUNTIME_H,
+            runtime = zz_codegen_runtime::RUNTIME_C,
             ver = FFI_VERSION
         );
         // Same single-TU assembly as generated programs: drop quoted
         // includes (headers are concatenated, not on disk).
-        let src = zz_lower::strip_quoted_includes(&raw);
+        let src = zz_codegen_runtime::strip_quoted_includes(&raw);
         std::fs::write(&c_path, &src).expect("write C");
         let cc = crate::detect_clang().expect("no C compiler");
         let mut cmd = Command::new(&cc.path);

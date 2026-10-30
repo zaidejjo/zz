@@ -21,7 +21,8 @@ mod param_escape;
 mod stmt;
 pub mod units;
 
-use zz_codegen_types::{ffi_impl, native_impl, RUNTIME_C, RUNTIME_H};
+use zz_codegen_runtime::{RUNTIME_C, RUNTIME_H};
+use zz_codegen_types::{ffi_impl, native_impl};
 use zz_frontend::ast::{Expr, Pattern, Stmt};
 
 pub use context::{Lowerer, NameCtx};
@@ -590,7 +591,7 @@ impl Lowerer {
         // `#include` each other; since everything is inlined into a single
         // translation unit, strip every quoted include directive (system
         // includes like <math.h> stay).
-        let source = strip_quoted_includes(&source);
+        let source = zz_codegen_runtime::strip_quoted_includes(&source);
 
         // If main is reachable, append a stub that calls it (runtime does
         // not know the symbol; we emit a forward decl + call here).
@@ -784,22 +785,6 @@ impl Lowerer {
             _ => {}
         }
     }
-}
-
-/// Remove every `#include "..."` directive from the assembled C source.
-///
-/// The AOT backend concatenates the modular runtime headers and sources
-/// into one translation unit, so quoted includes (which reference files
-/// that do not exist at compile time) must be dropped. System includes
-/// (`<...>`) are preserved.
-pub fn strip_quoted_includes(src: &str) -> String {
-    src.lines()
-        .filter(|line| {
-            let t = line.trim_start();
-            !(t.starts_with("#include \"") && t.ends_with('"'))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Whether an AST expression was (or will be) lowered to a raw scalar
