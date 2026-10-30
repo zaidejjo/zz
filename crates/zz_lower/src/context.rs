@@ -998,6 +998,13 @@ impl Lowerer {
         if self.is_escaping(span) {
             return None;
         }
+        // Only route to _func_arena if explicitly classified as NonEscaping.
+        // Unclassified spans (e.g. tail return expressions whose span was
+        // never inserted into result.classes) default to heap to avoid
+        // returning dangling arena pointers after _func_arena is destroyed.
+        if !self.is_non_escaping(span) {
+            return None;
+        }
         // Innermost loop sub-arena takes priority (reset per iteration).
         if let Some(arena_name) = self.loop_arenas.borrow().last() {
             return Some(arena_name.clone());

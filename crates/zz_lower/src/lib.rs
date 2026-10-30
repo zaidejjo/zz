@@ -315,6 +315,12 @@ impl Lowerer {
         let mut global_init_done: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        // Per-function bump arena for zz_main (top-level code). Non-static,
+        // non-escaping top-level allocations bump-allocate here and are
+        // reclaimed in O(1) when zz_main returns via cleanup attribute.
+        body.push_str("    zz_arena _func_arena __attribute__((cleanup(zz_arena_destroy)));\n");
+        body.push_str("    zz_arena_init(&_func_arena, 65536);\n");
+
         for stmt in self.tp.stmts() {
             match stmt {
                 Stmt::Func {
