@@ -324,6 +324,11 @@ impl Lowerer {
         // Read-only global constants (AllocClass::Static) are allocated
         // from here and live for the process lifetime.
         body.push_str("    zz_arena_init(&_static_arena, 65536);\n");
+        // Per-function bump arena for zz_main (top-level code). Non-static,
+        // non-escaping top-level allocations bump-allocate here and are
+        // reclaimed in O(1) when zz_main returns via cleanup attribute.
+        body.push_str("    zz_arena _func_arena __attribute__((cleanup(zz_arena_destroy)));\n");
+        body.push_str("    zz_arena_init(&_func_arena, 65536);\n");
 
         for stmt in self.tp.stmts() {
             match stmt {

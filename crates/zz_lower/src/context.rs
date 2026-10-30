@@ -1007,11 +1007,18 @@ impl Lowerer {
         if self.green_active() {
             return None;
         }
+        if self.is_escaping(span) {
+            return None;
+        }
         // Static (read-only global constants): module-level static arena.
         if self.is_static(span) {
             return Some("_static_arena".to_string());
         }
-        if self.is_escaping(span) {
+        // Only route to _func_arena if explicitly classified as NonEscaping.
+        // Unclassified spans (e.g. tail return expressions whose span was
+        // never inserted into result.classes) default to heap to avoid
+        // returning dangling arena pointers after _func_arena is destroyed.
+        if !self.is_non_escaping(span) {
             return None;
         }
         // Innermost loop sub-arena takes priority (reset per iteration).
