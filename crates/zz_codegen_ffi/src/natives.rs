@@ -298,6 +298,7 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "net.write" | "std.net.write" => Some("zz_tcp_write"),
         "net.write_bytes" | "std.net.write_bytes" => Some("zz_tcp_write_bytes"),
         "net.shutdown" | "std.net.shutdown" => Some("zz_tcp_shutdown"),
+        "net.close" | "std.net.close" => Some("zz_tcp_shutdown"),
         "net.peer_addr" | "std.net.peer_addr" => Some("zz_tcp_peer_addr"),
         "net.local_addr" | "std.net.local_addr" => Some("zz_tcp_local_addr"),
         "net.set_read_timeout" | "std.net.set_read_timeout" => Some("zz_tcp_set_read_timeout"),

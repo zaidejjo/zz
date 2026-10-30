@@ -1,6 +1,6 @@
 # Stdlib reference — generated
 
-Exhaustive signature index: **693 entries across 42 groups**.
+Exhaustive signature index: **694 entries across 42 groups**.
 Generated from compiled `FuncSig` data (`crates/zz_stdlib/src/funcs.rs`
 via `dump_sigs`) — do not hand-edit. Regenerate with
 `python3 scripts/gen-stdlib-ref.py`. Semantics: per-module guides linked below.
@@ -515,11 +515,12 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.math.to_radians` | `to_radians<T>(deg: T) -> float` |
 | `std.math.trunc` | `trunc<T>(x: T) -> float` |
 
-## `net` — 53 entries ([guide](net.md))
+## `net` — 54 entries ([guide](net.md))
 
 | Function | Signature |
 |---|---|
 | `std.net.accept` | `accept(listener: tcp.listener) -> Result<tcp.stream, str>` |
+| `std.net.close` | `close(stream: tcp.stream) -> Result<unit, str>` |
 | `std.net.local_addr` | `local_addr(stream: tcp.stream) -> Result<str, str>` |
 | `std.net.peer_addr` | `peer_addr(stream: tcp.stream) -> Result<str, str>` |
 | `std.net.read` | `read(stream: tcp.stream, max_bytes: int) -> Result<str, str>` |
