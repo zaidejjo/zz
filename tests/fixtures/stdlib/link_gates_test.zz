@@ -1,8 +1,13 @@
 // features: arrays, float-arith, fstrings, func-call, imports, locals, match, option-result, print, std-http, std-sqlz, string-literal, structs
 // tests/fixtures/stdlib/link_gates_test.zz — one program that trips every
-// AOT link gate at once: float Display (Rust staticlib `-u`), SQLite
-// (`-lsqlite3`) and the curl client (`-lcurl`). If `apply_link_needs` ever
-// drops a gate, the native leg fails to link instead of silently degrading.
+// AOT link gate at once, so a dropped flag in `apply_link_needs` fails to
+// link instead of silently degrading:
+//   - `native_rt` / `pg_link`: sqlz references the staticlib (and its
+//     Postgres objects) unconditionally, and the sqlite spelling adds
+//     `-lsqlite3`; the PG entry points are force-extracted from the archive.
+//   - `float_link`: float Display routes through the Rust float-format
+//     object, force-extracted the same way.
+//   - `curl_link`: `http.fetch` lowers to the C client (`-lcurl`).
 // Network-free: the fetch targets a refused loopback port and asserts only
 // the error tag (curl messages differ across platforms).
 import std.http
