@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 zz_codegen_types = { path = "../zz_codegen_types" }
 zz_codegen_runtime = { path = "../zz_codegen_runtime" }
+zz_codegen_ffi = { path = "../zz_codegen_ffi" }
 zz_lower = { path = "../zz_lower" }
 zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }

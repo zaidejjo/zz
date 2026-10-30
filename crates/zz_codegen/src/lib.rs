@@ -8,7 +8,7 @@
 pub mod cache;
 pub mod chunk;
 pub mod compile;
-pub mod ffi;
+pub use zz_codegen_ffi as ffi;
 
 pub use chunk::{build_module as build_chunk_module, coverage as chunk_coverage, ChunkError};
 pub use compile::{
@@ -17,9 +17,10 @@ pub use compile::{
     is_macos_target, is_windows_target, validate, BuildError, BuildOptions, Clang, ClangProvider,
     EmbedAsset, PgoMode,
 };
-pub use ffi::{ffi_impl, FfiError, FFI_VERSION};
+pub use ffi::{ffi_decl, ffi_impl, native_impl, native_supported, FfiError, FFI_VERSION};
 pub use zz_codegen_runtime::{C_BUILD_VERSION, RUNTIME_C, RUNTIME_H, RUNTIME_SRC_HASH};
-pub use zz_lower::{mangle, native_supported, units, LoweredC, Lowerer};
+pub use zz_lower as lower;
+pub use zz_lower::{mangle, units, LoweredC, Lowerer};
 
 /// Lower a pruned typed program to C without compiling.
 ///

@@ -292,13 +292,13 @@ impl Lowerer {
                 expanded_natives.insert(canonical.clone());
             }
         }
-        let ffi_pre = zz_codegen_types::ffi_prelude(&expanded_natives);
+        let ffi_pre = zz_codegen_ffi::ffi_prelude(&expanded_natives);
         let ffi_section = if ffi_pre.is_empty() {
             String::new()
         } else {
             format!("\n// ---- native-runtime FFI ----\n{ffi_pre}\n")
         };
-        let needs_native_rt = zz_codegen_types::needs_native_rt(&expanded_natives);
+        let needs_native_rt = zz_codegen_ffi::needs_native_rt(&expanded_natives);
         let runtime_c = if self.precompiled {
             String::new()
         } else {
@@ -403,15 +403,15 @@ impl Lowerer {
             units,
             entry_ns: entry_ns.to_string(),
             needs_native_rt,
-            needs_pg_link: zz_codegen_types::needs_pg_link(&expanded_natives),
+            needs_pg_link: zz_codegen_ffi::needs_pg_link(&expanded_natives),
             needs_float_fmt: self.tp.types.values().any(super::type_has_float)
                 || self.tp.bindings.values().any(super::type_has_float)
                 || self.tp.funcs.values().any(|s| {
                     s.params.iter().any(|(_, ty)| super::type_has_float(ty))
                         || super::type_has_float(&s.ret)
                 }),
-            needs_curl: zz_codegen_types::needs_curl_link(&expanded_natives),
-            needs_sqlite: zz_codegen_types::needs_sqlite_link(&expanded_natives),
+            needs_curl: zz_codegen_ffi::needs_curl_link(&expanded_natives),
+            needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&expanded_natives),
         }
     }
 }

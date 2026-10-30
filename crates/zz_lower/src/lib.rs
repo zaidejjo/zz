@@ -21,8 +21,8 @@ mod param_escape;
 mod stmt;
 pub mod units;
 
+use zz_codegen_ffi::native_impl;
 use zz_codegen_runtime::{RUNTIME_C, RUNTIME_H};
-use zz_codegen_types::{ffi_impl, native_impl};
 use zz_frontend::ast::{Expr, Pattern, Stmt};
 
 pub use context::{Lowerer, NameCtx};
@@ -561,13 +561,13 @@ impl Lowerer {
             }
             set
         };
-        let ffi_pre = zz_codegen_types::ffi_prelude(&expanded_natives);
+        let ffi_pre = zz_codegen_ffi::ffi_prelude(&expanded_natives);
         let ffi_section = if ffi_pre.is_empty() {
             String::new()
         } else {
             format!("\n// ---- native-runtime FFI ----\n{ffi_pre}\n")
         };
-        let needs_native_rt = zz_codegen_types::needs_native_rt(&expanded_natives);
+        let needs_native_rt = zz_codegen_ffi::needs_native_rt(&expanded_natives);
         let runtime_c = if self.precompiled { "" } else { RUNTIME_C };
         let main_tail = if self.reachable_funcs.contains(&self.entry_main) {
             // main() exists: its stub returns the exit code already.
@@ -631,14 +631,14 @@ impl Lowerer {
         LoweredC {
             source,
             needs_native_rt,
-            needs_pg_link: zz_codegen_types::needs_pg_link(&expanded_natives),
+            needs_pg_link: zz_codegen_ffi::needs_pg_link(&expanded_natives),
             needs_float_fmt: self.tp.types.values().any(type_has_float)
                 || self.tp.bindings.values().any(type_has_float)
                 || self.tp.funcs.values().any(|s| {
                     s.params.iter().any(|(_, ty)| type_has_float(ty)) || type_has_float(&s.ret)
                 }),
-            needs_curl: zz_codegen_types::needs_curl_link(&expanded_natives),
-            needs_sqlite: zz_codegen_types::needs_sqlite_link(&expanded_natives),
+            needs_curl: zz_codegen_ffi::needs_curl_link(&expanded_natives),
+            needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&expanded_natives),
         }
     }
 
@@ -845,14 +845,7 @@ fn ty_to_ctype(ty: &zz_hir::Type) -> String {
     }
 }
 
-/// Whether a reachable native has a callable implementation.
-///
-/// Embedded-C natives resolve through [`native_impl`]; Rust-staticlib
-/// natives (regex, crypto, … from Phase 1 on) through [`ffi_impl`].
-/// Anything else lowers to unit (documented MVP limitation).
-pub fn native_supported(name: &str) -> bool {
-    native_impl(name).is_some() || ffi_impl(name).is_some()
-}
+pub use zz_codegen_ffi::native_supported;
 
 /// Required value-count for a stdlib native (params minus trailing
 /// defaults), from the checker's lockstep signature table. Used to

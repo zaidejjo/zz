@@ -1,0 +1,12 @@
+[package]
+name = "zz_codegen_ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native/FFI symbol tables and staticlib link metadata for the ZZ AOT backend"
+
+[dependencies]
+zz_native_rt = { path = "../zz_native_rt" }
+
+[dev-dependencies]
+zz_codegen_runtime = { path = "../zz_codegen_runtime" }

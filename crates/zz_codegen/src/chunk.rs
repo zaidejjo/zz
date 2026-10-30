@@ -1735,15 +1735,13 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
             Some(s) => s,
             None => return Callee::Unknown,
         };
-        if zz_codegen_types::native_impl(name).is_some()
-            || zz_codegen_types::ffi_impl(name).is_some()
-        {
+        if zz_codegen_ffi::native_impl(name).is_some() || zz_codegen_ffi::ffi_impl(name).is_some() {
             return Callee::Native(name.clone(), pc);
         }
         // `std.` twin spelling (e.g. `std.str.length`).
         let std_name = format!("std.{name}");
-        if zz_codegen_types::native_impl(&std_name).is_some()
-            || zz_codegen_types::ffi_impl(&std_name).is_some()
+        if zz_codegen_ffi::native_impl(&std_name).is_some()
+            || zz_codegen_ffi::ffi_impl(&std_name).is_some()
         {
             return Callee::Native(std_name, pc);
         }
@@ -1843,14 +1841,14 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                     .collect::<Vec<_>>()
                     .join(".");
                 if !func_names.contains(&joined)
-                    && zz_codegen_types::native_impl(&joined).is_none()
-                    && zz_codegen_types::ffi_impl(&joined).is_none()
+                    && zz_codegen_ffi::native_impl(&joined).is_none()
+                    && zz_codegen_ffi::ffi_impl(&joined).is_none()
                 {
                     // `std.` twin spelling.
                     let std_name = format!("std.{joined}");
                     if !func_names.contains(&std_name)
-                        && zz_codegen_types::native_impl(&std_name).is_none()
-                        && zz_codegen_types::ffi_impl(&std_name).is_none()
+                        && zz_codegen_ffi::native_impl(&std_name).is_none()
+                        && zz_codegen_ffi::ffi_impl(&std_name).is_none()
                     {
                         return Err(ChunkError::name(&format!("callpath {joined}")));
                     }
@@ -1862,13 +1860,13 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                     .get(name.0 as usize)
                     .map(String::as_str)
                     .unwrap_or("");
-                if zz_codegen_types::native_impl(nm).is_none()
-                    && zz_codegen_types::ffi_impl(nm).is_none()
+                if zz_codegen_ffi::native_impl(nm).is_none()
+                    && zz_codegen_ffi::ffi_impl(nm).is_none()
                 {
                     // `std.` twin spelling.
                     let std_name = format!("std.{nm}");
-                    if zz_codegen_types::native_impl(&std_name).is_none()
-                        && zz_codegen_types::ffi_impl(&std_name).is_none()
+                    if zz_codegen_ffi::native_impl(&std_name).is_none()
+                        && zz_codegen_ffi::ffi_impl(&std_name).is_none()
                     {
                         return Err(ChunkError::name(&format!("native {nm}")));
                     }
@@ -2152,10 +2150,10 @@ impl<'a> Emitter<'a> {
     /// placeholder rather than a value.
     fn is_callee_name(&self, name: &str) -> bool {
         self.csyms.contains_key(name)
-            || zz_codegen_types::native_impl(name).is_some()
-            || zz_codegen_types::ffi_impl(name).is_some()
-            || zz_codegen_types::native_impl(&format!("std.{name}")).is_some()
-            || zz_codegen_types::ffi_impl(&format!("std.{name}")).is_some()
+            || zz_codegen_ffi::native_impl(name).is_some()
+            || zz_codegen_ffi::ffi_impl(name).is_some()
+            || zz_codegen_ffi::native_impl(&format!("std.{name}")).is_some()
+            || zz_codegen_ffi::ffi_impl(&format!("std.{name}")).is_some()
     }
 
     /// Dotted spelling of a path (`"g2"."count"` -> `g2.count`), which is
@@ -2179,18 +2177,18 @@ impl<'a> Emitter<'a> {
         if self.csyms.contains_key(dotted) {
             return Ok(CallTarget::Own(self.csym(dotted)));
         }
-        if let Some(impl_name) = zz_codegen_types::native_impl(dotted) {
+        if let Some(impl_name) = zz_codegen_ffi::native_impl(dotted) {
             return Ok(CallTarget::CImpl(impl_name, false));
         }
-        if let Some(impl_name) = zz_codegen_types::ffi_impl(dotted) {
+        if let Some(impl_name) = zz_codegen_ffi::ffi_impl(dotted) {
             self.needs_native_rt = true;
             return Ok(CallTarget::CImpl(impl_name, true));
         }
         let std_name = format!("std.{dotted}");
-        if let Some(impl_name) = zz_codegen_types::native_impl(&std_name) {
+        if let Some(impl_name) = zz_codegen_ffi::native_impl(&std_name) {
             return Ok(CallTarget::CImpl(impl_name, false));
         }
-        if let Some(impl_name) = zz_codegen_types::ffi_impl(&std_name) {
+        if let Some(impl_name) = zz_codegen_ffi::ffi_impl(&std_name) {
             self.needs_native_rt = true;
             return Ok(CallTarget::CImpl(impl_name, true));
         }
@@ -2202,10 +2200,10 @@ impl<'a> Emitter<'a> {
         // established for typed receivers inside functions).
         if let Some((type_ns, method)) = split_method_tail(dotted) {
             let qualified = format!("{type_ns}.{method}");
-            if let Some(impl_name) = zz_codegen_types::native_impl(&qualified) {
+            if let Some(impl_name) = zz_codegen_ffi::native_impl(&qualified) {
                 return Ok(CallTarget::CImpl(impl_name, false));
             }
-            if let Some(impl_name) = zz_codegen_types::ffi_impl(&qualified) {
+            if let Some(impl_name) = zz_codegen_ffi::ffi_impl(&qualified) {
                 self.needs_native_rt = true;
                 return Ok(CallTarget::CImpl(impl_name, true));
             }
@@ -4597,14 +4595,14 @@ pub fn build_module(module: &Module, entry_main: &str) -> Result<zz_lower::Lower
                 Some(s) => s,
                 None => return Callee::Unknown,
             };
-            if zz_codegen_types::native_impl(name).is_some()
-                || zz_codegen_types::ffi_impl(name).is_some()
+            if zz_codegen_ffi::native_impl(name).is_some()
+                || zz_codegen_ffi::ffi_impl(name).is_some()
             {
                 return Callee::Native(name.clone(), pc);
             }
             let std_name = format!("std.{name}");
-            if zz_codegen_types::native_impl(&std_name).is_some()
-                || zz_codegen_types::ffi_impl(&std_name).is_some()
+            if zz_codegen_ffi::native_impl(&std_name).is_some()
+                || zz_codegen_ffi::ffi_impl(&std_name).is_some()
             {
                 return Callee::Native(std_name, pc);
             }

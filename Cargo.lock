@@ -3847,6 +3847,7 @@ version = "0.4.0"
 dependencies = [
  "rayon",
  "zz_checker",
+ "zz_codegen_ffi",
  "zz_codegen_runtime",
  "zz_codegen_types",
  "zz_frontend",
@@ -3857,6 +3858,14 @@ dependencies = [
  "zz_pm",
  "zz_runtime",
  "zz_stdlib",
+]
+
+[[package]]
+name = "zz_codegen_ffi"
+version = "0.4.0"
+dependencies = [
+ "zz_codegen_runtime",
+ "zz_native_rt",
 ]
 
 [[package]]
@@ -3992,6 +4001,7 @@ name = "zz_lower"
 version = "0.4.0"
 dependencies = [
  "zz_checker",
+ "zz_codegen_ffi",
  "zz_codegen_runtime",
  "zz_codegen_types",
  "zz_frontend",

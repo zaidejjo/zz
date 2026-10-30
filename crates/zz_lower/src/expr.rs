@@ -1,7 +1,7 @@
 //! Expression lowering: literals, binary ops, function calls, field access,
 //! collections, variants, closures, and match expressions.
 
-use zz_codegen_types::ffi_impl;
+use zz_codegen_ffi::ffi_impl;
 use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, Ident, MatchArm, Param, Pattern};
 
 use super::green::GreenCtx;

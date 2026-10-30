@@ -610,6 +610,22 @@ fn all_stdlib_funcs_have_c_impls() {
         stale.is_empty(),
         "remove from KNOWN_CODEGEN_GAPS (now implemented): {stale:?}"
     );
+
+    // Every staticlib symbol must carry a C declaration: generated C gets
+    // its `extern` from `ffi_decl`, so a symbol without one fails at C
+    // compile time. `zz_env_args` is provided by the embedded C runtime,
+    // not the static library.
+    let undeclared: Vec<(&String, &str)> = funcs
+        .keys()
+        .filter_map(|k| {
+            let sym = crate::ffi_impl(k).or_else(|| crate::ffi_impl(&format!("std.{k}")))?;
+            (sym != "zz_env_args" && crate::ffi_decl(sym).is_none()).then_some((k, sym))
+        })
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "ffi symbols without a C decl: {undeclared:?}"
+    );
 }
 
 #[test]
