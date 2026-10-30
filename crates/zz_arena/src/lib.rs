@@ -18,10 +18,12 @@
 //! Types with `Drop` are intentionally leaked (never run) — only place
 //! trivial/`Copy` data or arena-owned strings here.
 
+mod bump;
 mod collections;
 mod intern;
 mod stats;
 
+pub use bump::ScopedBump;
 pub use collections::ArenaVec;
 pub use intern::{Interner, Symbol};
 pub use stats::Stats;

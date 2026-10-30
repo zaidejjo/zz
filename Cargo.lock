@@ -3833,6 +3833,7 @@ dependencies = [
  "tempfile",
  "toml",
  "ureq",
+ "zz_arena",
  "zz_build",
  "zz_checker",
  "zz_codegen",

@@ -20,6 +20,7 @@ mod upgrade;
 mod vm_disasm;
 mod watch;
 
+use zz_arena::ScopedBump;
 use zz_frontend::diag::{error_at, render_to_string, Files};
 use zz_frontend::span::Span;
 use zz_runtime::{Interp, Value};
@@ -1366,15 +1367,19 @@ fn run_bytecode(
     embed: Option<std::path::PathBuf>,
     features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
+    // Per-invocation compilation unit: transient allocations are reclaimed in
+    // O(1) on drop (plan #1).
+    let mut work = ScopedBump::new();
     let path = resolve_run_entry(
         path,
         "zz run --bytecode [<file.zz|file.zzc>]",
         "provide a .zz file (round-trips through bytecode) or a .zzc file (loads directly)",
     )?;
+    let path: &str = work.alloc_str(path.as_str());
     if path.ends_with(".zzc") {
-        run_bytecode_file(&path, script_args)
+        run_bytecode_file(path, script_args)
     } else {
-        run_bytecode_zz(&path, script_args, embed, features)
+        run_bytecode_zz(path, script_args, embed, features)
     }
 }
 
@@ -1658,12 +1663,16 @@ fn run_file(
     features: &zz_pm::manifest::FeatureSelection,
     walker: bool,
 ) -> Result<(), String> {
+    // Per-invocation compilation unit: transient allocations are reclaimed in
+    // O(1) on drop, so `zz run --watch` restarts and repeated `zz run`
+    // calls in one process don't drift RSS (plan #1).
+    let mut work = ScopedBump::new();
     let resolved = resolve_run_entry(
         path,
         "zz run [<file.zz>]",
         "provide the path to a .zz file to execute",
     )?;
-    let path = &resolved;
+    let path: &str = work.alloc_str(resolved.as_str());
     zz_loader::validate_feature_selection(std::path::Path::new(path), features)?;
 
     // One-time-compiler fast path: the key is content-addressed over the
@@ -1916,12 +1925,15 @@ fn run_native(
     output: Option<std::path::PathBuf>,
     features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
+    // Per-invocation compilation unit: transient allocations are reclaimed in
+    // O(1) on drop (plan #1).
+    let mut work = ScopedBump::new();
     let resolved = resolve_run_entry(
         path,
         "zz run --native [<file.zz>]",
         "provide the path to a .zz file to compile and execute",
     )?;
-    let path = &resolved;
+    let path: &str = work.alloc_str(resolved.as_str());
     let p = std::path::Path::new(path);
     // Fail fast on an unsatisfied `[package] zz` compiler requirement.
     enforce_project_zz(p)?;
@@ -2989,9 +3001,17 @@ fn check_or_fix_path(
     let mut json_files: Vec<(String, Vec<zz_frontend::diag::RawDiag>)> = Vec::new();
 
     for path in &files {
+        // Per-file compilation unit: the file's source text (the largest
+        // per-file allocation) lives in the bump and is reclaimed in O(1) on
+        // drop, so checking many files keeps RSS flat instead of drifting
+        // (plan #1). `path_str` is small and uses a normal String.
+        let mut work = ScopedBump::new();
+        let source: &mut str = work.alloc_str(
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?
+                .as_str(),
+        );
         let path_str = path.display().to_string();
-        let source =
-            std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path_str}`: {e}"))?;
 
         let file_start = std::time::Instant::now();
         zz_loader::validate_feature_selection(path, features)?;
@@ -3156,7 +3176,7 @@ fn check_or_fix_path(
         // skipped every insertion fixit (missing commas/closers).
         let mut applied = 0u32;
         if !approved.is_empty() {
-            let mut new_source = source.clone();
+            let mut new_source = source.to_string();
             approved.sort_by_key(|b| std::cmp::Reverse(b.span.start));
             for fixit in &approved {
                 let start = fixit.span.start as usize;
@@ -3174,7 +3194,7 @@ fn check_or_fix_path(
                     } else {
                         "fixed (force)"
                     };
-                    let (line, col) = line_col(&source, start);
+                    let (line, col) = line_col(source, start);
                     eprintln!(
                         "  {label}: `{original}` → `{}` at {path_str}:{line}:{col}",
                         fixit.replacement,
