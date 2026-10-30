@@ -1,6 +1,7 @@
 //! Expression lowering: literals, binary ops, function calls, field access,
 //! collections, variants, closures, and match expressions.
 
+use zz_codegen_types::ffi_impl;
 use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, Ident, MatchArm, Param, Pattern};
 
 use super::green::GreenCtx;
@@ -18,7 +19,7 @@ fn closure_ignores_param(params: &[Param], body: &Expr) -> bool {
     !mentions_ident(body, &p.name.name)
 }
 
-pub(super) fn mentions_ident(e: &Expr, name: &str) -> bool {
+pub(crate) fn mentions_ident(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Int { .. }
         | Expr::Float { .. }
@@ -183,7 +184,7 @@ impl Lowerer {
     /// bodies so both agree on what a branch yields. A trailing `if`
     /// tail recurses through value-position if lowering, so elif chains
     /// yield branch values instead of unit.
-    pub(super) fn emit_block_value(
+    pub(crate) fn emit_block_value(
         &self,
         b: &Block,
         names: &mut NameCtx,
@@ -233,7 +234,7 @@ impl Lowerer {
     /// boxed to a `zz_value` (scalars via constructors, refcounted via
     /// clone, unboxed structs via the object boxer). `None` when the
     /// local is unknown (caller falls back to unit).
-    pub(super) fn decl_tail_value(
+    pub(crate) fn decl_tail_value(
         &self,
         name: &str,
         names: &mut NameCtx,
@@ -260,7 +261,7 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn emit_expr(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> String {
+    pub(crate) fn emit_expr(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> String {
         // Statement-direct flag: true when this expression is the
         // outermost value of a statement-level position (set by the
         // statement lowerer). Consumed here so only the direct child
@@ -682,8 +683,8 @@ impl Lowerer {
                         // scalar). Raw C operators must only see
                         // genuinely-raw operands — anything else routes
                         // through the boxing paths below.
-                        let left_raw = crate::lower::context::raw_scalar_text(left, &l, names);
-                        let right_raw = crate::lower::context::raw_scalar_text(right, &r, names);
+                        let left_raw = crate::context::raw_scalar_text(left, &l, names);
+                        let right_raw = crate::context::raw_scalar_text(right, &r, names);
 
                         // Both operands are scalars of compatible type:
                         // emit a raw C arithmetic op instead of going
@@ -1005,7 +1006,7 @@ impl Lowerer {
                 // (`zz_truthy` on `int`/`float` is `!= 0`, matching the
                 // runtime). Boxed mode keeps `zz_truthy` byte-identical.
                 let c = if self.unboxed_ret.borrow().is_some() {
-                    match crate::lower::context::raw_scalar_text(cond, &c, names) {
+                    match crate::context::raw_scalar_text(cond, &c, names) {
                         Some((raw, "bool")) => raw,
                         Some((raw, "double")) => format!("({raw} != 0.0)"),
                         Some((raw, _)) => format!("({raw} != 0)"),
@@ -1624,7 +1625,7 @@ impl Lowerer {
     /// Array exprs are `"NULL"` when the closure captures nothing (no arrays
     /// emitted). Shared by the general `make` path and the `task.spawn`
     /// fast path (`zz_spawn_ex`, which skips the intermediate rep).
-    pub(super) fn emit_closure_parts(
+    pub(crate) fn emit_closure_parts(
         &self,
         params: &[Param],
         body: &Expr,
@@ -1717,7 +1718,7 @@ impl Lowerer {
     /// captured variables arrive as shared cells in `env[]` (see the creation
     /// site, which passes the same `caps` layout). The body expression is
     /// lowered against params + captures and returned.
-    pub(super) fn emit_closure(
+    pub(crate) fn emit_closure(
         &self,
         params: &[Param],
         body: &Expr,
@@ -1933,7 +1934,7 @@ impl Lowerer {
     /// impl methods go through the struct-pointer convention
     /// (`zz_fn_T__convert_to_U(&err, NULL, 0)`), plain functions through
     /// the args-array convention.
-    pub(super) fn emit_try(
+    pub(crate) fn emit_try(
         &self,
         inner: &Expr,
         span: zz_frontend::span::Span,
@@ -2021,7 +2022,7 @@ impl Lowerer {
     /// non-numeric operands, mixed bool/numeric whose runtime semantics
     /// differ from C promotion). The `(bool)` marker keeps downstream
     /// classifiers (boxing, returns, conds) honest.
-    pub(super) fn emit_raw_cmp(
+    pub(crate) fn emit_raw_cmp(
         &self,
         op: &zz_frontend::ast::BinOp,
         left: &Expr,
@@ -2040,8 +2041,8 @@ impl Lowerer {
             Ge => ">=",
             _ => return None,
         };
-        let lraw = crate::lower::context::raw_scalar_text(left, l, names)?;
-        let rraw = crate::lower::context::raw_scalar_text(right, r, names)?;
+        let lraw = crate::context::raw_scalar_text(left, l, names)?;
+        let rraw = crate::context::raw_scalar_text(right, r, names)?;
         // Same-type numerics, plus int/float promotion (the runtime
         // promotes the same way). Mixed bool/numeric stays boxed: C
         // promotion (`true == 1`) disagrees with tag-dispatched `zz_binop`.
@@ -2084,7 +2085,7 @@ impl Lowerer {
             .unwrap_or(false)
     }
 
-    pub(super) fn emit_call(
+    pub(crate) fn emit_call(
         &self,
         callee: &Expr,
         args: &[Expr],
@@ -2338,9 +2339,7 @@ impl Lowerer {
                                                 || self.reachable_natives.contains(&std_candidate))
                                     })
                                     .collect();
-                                if let Some(ns) =
-                                    crate::lower::pick_arity(reachable_ns, method, nvalues)
-                                {
+                                if let Some(ns) = crate::pick_arity(reachable_ns, method, nvalues) {
                                     found_ns = ns;
                                 }
                             }
@@ -2371,7 +2370,7 @@ impl Lowerer {
                                 // (every candidate provably wrong — fall
                                 // through to the last-resort site below).
                                 let nvalues = args.len() + 1; // method receiver always prepends here (match-arm dispatch on a local);
-                                if let Some(ns) = crate::lower::pick_arity(cands, method, nvalues) {
+                                if let Some(ns) = crate::pick_arity(cands, method, nvalues) {
                                     found_ns = ns;
                                 }
                                 // Last resort: match by native_impl — checks if
@@ -2388,7 +2387,7 @@ impl Lowerer {
                                     ];
                                     let nvalues = args.len() + 1; // method receiver always prepends here (match-arm dispatch on a local);
                                     if let Some(ns) =
-                                        crate::lower::pick_method_ns(namespaces, method, nvalues)
+                                        crate::pick_method_ns(namespaces, method, nvalues)
                                     {
                                         // Same once-per-process leak pattern
                                         // as opaque-tag namespaces above.
@@ -3323,7 +3322,7 @@ impl Lowerer {
             || native_supported(&cname_for_native);
         let native_rt = if is_native {
             // Embedded C runtime first, Rust staticlib second (Phase 1+).
-            native_impl(&cname_for_native).or_else(|| crate::ffi_impl(&cname_for_native))
+            native_impl(&cname_for_native).or_else(|| ffi_impl(&cname_for_native))
         } else {
             None
         };
@@ -3722,7 +3721,7 @@ impl Lowerer {
                         let mut raws: Vec<String> = Vec::with_capacity(ordered_args.len());
                         let mut all_raw = true;
                         for (a, emitted) in ordered_args.iter().zip(arg_items.iter()) {
-                            match crate::lower::context::raw_scalar_text(a, emitted, names) {
+                            match crate::context::raw_scalar_text(a, emitted, names) {
                                 Some((raw, _)) => raws.push(raw),
                                 None => {
                                     all_raw = false;
@@ -3883,7 +3882,7 @@ impl Lowerer {
     /// rejects `return <raw struct>` / `tmp = <raw struct>`. Scalars
     /// keep the existing `box_scalar_operand` path; anything already
     /// boxed passes through unchanged.
-    pub(super) fn emit_tail_value(
+    pub(crate) fn emit_tail_value(
         &self,
         e: &Expr,
         names: &mut NameCtx,
@@ -3907,7 +3906,7 @@ impl Lowerer {
     /// fields for unit variants) — the same runtime shape the VM and
     /// tree-walker build, so all engines agree on representation.
     /// `enum_name` arrives canonicalized from the HIR type.
-    pub(super) fn emit_enum_construction(
+    pub(crate) fn emit_enum_construction(
         &self,
         enum_name: &str,
         variant: String,
@@ -3954,7 +3953,7 @@ impl Lowerer {
     /// into embedded sub-objects (`User{id: 1, age: 2}` fills `Base.id`).
     /// Literals without flattened fields keep the historical emission
     /// exactly (evaluation order included).
-    pub(super) fn emit_struct_init(
+    pub(crate) fn emit_struct_init(
         &self,
         sname: &str,
         fields: &[(String, Expr)],
@@ -4021,8 +4020,7 @@ impl Lowerer {
                             Expr::Ident { name, .. } => Some(name.as_str()),
                             _ => None,
                         };
-                        let raw =
-                            crate::lower::context::emitted_is_raw_scalar(&field_val, names, ident);
+                        let raw = crate::context::emitted_is_raw_scalar(&field_val, names, ident);
                         let final_val = match field_type {
                             zz_checker::Type::Int if !raw => format!("({field_val}).i"),
                             zz_checker::Type::Float if !raw => format!("({field_val}).f"),
@@ -4104,7 +4102,7 @@ impl Lowerer {
     /// struct inside a struct holding strings). Literals lower
     /// field-by-field; any other expression is read member-wise through
     /// synthesized field accesses.
-    pub(super) fn emit_boxed_value(
+    pub(crate) fn emit_boxed_value(
         &self,
         sname: &str,
         value: &Expr,
@@ -4460,7 +4458,7 @@ impl Lowerer {
         if hits.len() > 1 {
             let mut impls: Vec<Option<&str>> = hits
                 .iter()
-                .map(|h| native_impl(h).or_else(|| crate::ffi_impl(h)))
+                .map(|h| native_impl(h).or_else(|| ffi_impl(h)))
                 .collect();
             impls.sort_unstable();
             impls.dedup();
@@ -4589,7 +4587,7 @@ impl Lowerer {
     /// value: struct literals of unboxed type plus Ident/Path/Field shapes
     /// rooted at raw values (see `unboxed_struct_of_expr`). Calls, indexes,
     /// arrays, blocks, etc. lower boxed and yield `None`.
-    pub(super) fn struct_box_name(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+    pub(crate) fn struct_box_name(&self, e: &Expr, names: &NameCtx) -> Option<String> {
         if let Expr::StructInit { name, .. } = e {
             if self.is_unboxed_struct(name) {
                 return Some(name.clone());
@@ -4604,7 +4602,7 @@ impl Lowerer {
     /// `zz_value`. Raw producers (locals, literals, field reads) are pure,
     /// so reusing the emitted text per field is side-effect free. The
     /// emitted operand itself is left untouched (no re-emission).
-    pub(super) fn box_raw_struct(
+    pub(crate) fn box_raw_struct(
         &self,
         sname: &str,
         raw: &str,
@@ -4666,7 +4664,7 @@ impl Lowerer {
     /// field. Nested unboxed structs recurse through a field temp. Only
     /// called for unboxed struct types (all fields scalar or nested
     /// unboxed), so every field has a known scalar extraction.
-    pub(super) fn emit_unbox_struct(
+    pub(crate) fn emit_unbox_struct(
         &self,
         sname: &str,
         boxed: &str,
@@ -4727,7 +4725,7 @@ impl Lowerer {
     /// Box a binary operand that lowers to a raw unboxed struct into a
     /// runtime object; pass through everything else unchanged. `emitted`
     /// is the already scalar-boxed operand text (identity for structs).
-    pub(super) fn box_struct_operand(
+    pub(crate) fn box_struct_operand(
         &self,
         e: &Expr,
         emitted: String,
@@ -4807,7 +4805,7 @@ impl Lowerer {
     ///      .area()`), try `<StructType>.<method>`. This is uncommon
     ///      but lets the static-form `Rectangle.area(...)` work in
     ///      fixtures where the type name is used directly.
-    pub(super) fn resolve_path_receiver(
+    pub(crate) fn resolve_path_receiver(
         &self,
         parts: &[String],
         names: &NameCtx,
@@ -5015,7 +5013,7 @@ impl Lowerer {
     /// for a 4-int struct). The release only fires for temp names
     /// `emit_boxed_value` created (inline fallbacks like `zz_unit()` are
     /// appended bare, and borrowed locals never reach this branch).
-    pub(super) fn append_container_item(
+    pub(crate) fn append_container_item(
         &self,
         arr_var: &str,
         item: &Expr,
@@ -5054,7 +5052,7 @@ impl Lowerer {
     /// Box an index expression to a `zz_value` for `idx` arguments. Scalar
     /// locals (int64_t/double/bool) and raw arithmetic need an explicit box;
     /// already-boxed expressions pass through unchanged.
-    pub(super) fn box_index_arg(&self, e: &Expr, emitted: String, names: &NameCtx) -> String {
+    pub(crate) fn box_index_arg(&self, e: &Expr, emitted: String, names: &NameCtx) -> String {
         if let Expr::Ident { name, .. } = e {
             return auto_box(&emitted, names.lookup_type(name));
         }
@@ -5079,7 +5077,7 @@ impl Lowerer {
     /// Box a raw-scalar index-store RHS to a `zz_value` before storing.
     /// Extracted from the `obj[idx] = v` lowering so compound assignment
     /// (`obj[idx] OP= v`) boxes identically.
-    pub(super) fn box_index_store_value(
+    pub(crate) fn box_index_store_value(
         &self,
         value: &Expr,
         val: String,
@@ -5090,9 +5088,8 @@ impl Lowerer {
             Expr::Ident { name, .. } => Some(name.as_str()),
             _ => None,
         };
-        let val_is_actually_scalar =
-            crate::lower::context::emitted_is_raw_scalar(&val, names, ident)
-                || (ast_says_scalar && !val.starts_with("zz_"));
+        let val_is_actually_scalar = crate::context::emitted_is_raw_scalar(&val, names, ident)
+            || (ast_says_scalar && !val.starts_with("zz_"));
         let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
         if value_is_scalar {
             if let Expr::Ident { name, .. } = value {
@@ -5120,7 +5117,7 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn emit_str_literal(&self, s: &str) -> String {
+    pub(crate) fn emit_str_literal(&self, s: &str) -> String {
         // NUL-containing literals cannot use `zz_str_static`: it measures
         // with `strlen`, truncating at the first NUL (so `"\x00"` became
         // `""` and `str.contains(x, "\x00")` was always true). Emit a
@@ -5360,7 +5357,7 @@ impl Lowerer {
     /// variant patterns like `.some(.some(v))` where each inner variant
     /// needs tag-checking and payload extraction.
     /// Returns the number of open if-blocks that must be closed AFTER the arm body.
-    pub(super) fn emit_pattern_bind(
+    pub(crate) fn emit_pattern_bind(
         &self,
         pat: &Pattern,
         scrut: &str,
@@ -5757,7 +5754,7 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn emit_match(
+    pub(crate) fn emit_match(
         &self,
         scrutinee: &Expr,
         arms: &[MatchArm],

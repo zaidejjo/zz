@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use zz_checker::{FuncSig, Type};
 use zz_hir::{ReachableSet, TypedProgram};
 
-use crate::{build_native, compile, lower_only, native_supported, BuildOptions};
+use crate::{build_native, compile, lower_only, native_supported, BuildOptions, Lowerer};
 
 /// Seed the real stdlib signatures for typed building.
 use zz_stdlib::stdlib_funcs;
@@ -1992,7 +1992,7 @@ fn scalar_fn_specializes_and_runs() {
     // match the VM exactly (differential check on scalar recursion).
     let src = "func fib(n: int) -> int {\n    if n < 2 {\n        return n\n    }\n    return fib(n - 1) + fib(n - 2)\n}\nfunc main() {\n    println(fib(20))\n}\n";
     let (pruned, reach) = build_reachable(src);
-    let lowerer = crate::lower::Lowerer::new(
+    let lowerer = Lowerer::new(
         reach.funcs.clone(),
         reach.natives.clone(),
         "main".to_string(),
@@ -2020,7 +2020,7 @@ fn scalar_comparisons_and_floats_match_vm() {
     // promotion and comparison chaining through calls).
     let src = "func max2(a: int, b: int) -> int {\n    if a > b {\n        return a\n    }\n    return b\n}\nfunc fadd(x: float, y: float) -> float {\n    return x + y * 2.0\n}\nfunc is_pos(n: int) -> bool {\n    return n > 0\n}\nfunc main() {\n    println(max2(3, 7))\n    println(max2(9, 2))\n    println(fadd(1.5, 2.0))\n    println(is_pos(-4))\n    println(is_pos(4))\n    println(fib_sum(10))\n}\nfunc fib_sum(n: int) -> int {\n    total := 0\n    for i in 0..n {\n        total = total + i\n    }\n    return total\n}\n";
     let (pruned, reach) = build_reachable(src);
-    let lowerer = crate::lower::Lowerer::new(
+    let lowerer = Lowerer::new(
         reach.funcs.clone(),
         reach.natives.clone(),
         "main".to_string(),
@@ -2046,7 +2046,7 @@ fn scalar_fn_with_capturing_closure_matches_vm() {
     // scalar function specializes.
     let src = "func with_cap(n: int) -> int {\n    m := n + 1\n    f := |x| x + m\n    return f(10)\n}\nfunc main() {\n    println(with_cap(5))\n}\n";
     let (pruned, reach) = build_reachable(src);
-    let lowerer = crate::lower::Lowerer::new(
+    let lowerer = Lowerer::new(
         reach.funcs.clone(),
         reach.natives.clone(),
         "main".to_string(),

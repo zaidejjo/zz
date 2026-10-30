@@ -3851,6 +3851,7 @@ dependencies = [
  "zz_frontend",
  "zz_hir",
  "zz_ir",
+ "zz_lower",
  "zz_native_rt",
  "zz_pm",
  "zz_runtime",
@@ -3978,6 +3979,17 @@ dependencies = [
  "zz_pm",
  "zz_run_cache",
  "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
+name = "zz_lower"
+version = "0.4.0"
+dependencies = [
+ "zz_checker",
+ "zz_codegen_types",
+ "zz_frontend",
+ "zz_hir",
  "zz_stdlib",
 ]
 

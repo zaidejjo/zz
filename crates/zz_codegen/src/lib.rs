@@ -9,7 +9,6 @@ pub mod cache;
 pub mod chunk;
 pub mod compile;
 pub mod ffi;
-pub mod lower;
 
 pub use chunk::{build_module as build_chunk_module, coverage as chunk_coverage, ChunkError};
 pub use compile::{
@@ -19,7 +18,7 @@ pub use compile::{
     EmbedAsset, PgoMode,
 };
 pub use ffi::{ffi_impl, FfiError, FFI_VERSION};
-pub use lower::{mangle, native_supported, units, LoweredC, Lowerer};
+pub use zz_lower::{mangle, native_supported, units, LoweredC, Lowerer};
 
 /// The embedded C runtime header. The runtime is split across modular
 /// sub-headers under `src/runtime/`; the umbrella `runtime.h` includes them

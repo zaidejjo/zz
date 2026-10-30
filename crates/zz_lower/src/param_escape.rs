@@ -1101,7 +1101,7 @@ fn param_is_readonly(
 /// re-walks every function against current callee verdicts. Monotone
 /// shrinking guarantees termination; the final round with no changes is
 /// self-consistent, which makes mutual-recursion verdicts sound.
-pub(super) fn analyze(
+pub(crate) fn analyze(
     program: &Program,
     funcs: &HashMap<String, zz_checker::FuncSig>,
     structs: &HashMap<String, zz_checker::StructSig>,

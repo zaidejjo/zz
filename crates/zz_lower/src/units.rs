@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use zz_codegen_types::{RUNTIME_C, RUNTIME_H};
 use zz_frontend::ast::{Expr, Stmt};
 
 use super::context::NameCtx;
@@ -291,21 +292,21 @@ impl Lowerer {
                 expanded_natives.insert(canonical.clone());
             }
         }
-        let ffi_pre = crate::ffi::ffi_prelude(&expanded_natives);
+        let ffi_pre = zz_codegen_types::ffi_prelude(&expanded_natives);
         let ffi_section = if ffi_pre.is_empty() {
             String::new()
         } else {
             format!("\n// ---- native-runtime FFI ----\n{ffi_pre}\n")
         };
-        let needs_native_rt = crate::ffi::needs_native_rt(&expanded_natives);
+        let needs_native_rt = zz_codegen_types::needs_native_rt(&expanded_natives);
         let runtime_c = if self.precompiled {
             String::new()
         } else {
-            crate::RUNTIME_C.to_string()
+            RUNTIME_C.to_string()
         };
         let header = format!(
             "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals (extern) ----\n{glob_ext}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}",
-            runtime_h = crate::RUNTIME_H,
+            runtime_h = RUNTIME_H,
         );
 
         // Assemble units: owned global defs + bodies + closures + init fn.
@@ -402,15 +403,15 @@ impl Lowerer {
             units,
             entry_ns: entry_ns.to_string(),
             needs_native_rt,
-            needs_pg_link: crate::ffi::needs_pg_link(&expanded_natives),
+            needs_pg_link: zz_codegen_types::needs_pg_link(&expanded_natives),
             needs_float_fmt: self.tp.types.values().any(super::type_has_float)
                 || self.tp.bindings.values().any(super::type_has_float)
                 || self.tp.funcs.values().any(|s| {
                     s.params.iter().any(|(_, ty)| super::type_has_float(ty))
                         || super::type_has_float(&s.ret)
                 }),
-            needs_curl: crate::ffi::needs_curl_link(&expanded_natives),
-            needs_sqlite: crate::ffi::needs_sqlite_link(&expanded_natives),
+            needs_curl: zz_codegen_types::needs_curl_link(&expanded_natives),
+            needs_sqlite: zz_codegen_types::needs_sqlite_link(&expanded_natives),
         }
     }
 }

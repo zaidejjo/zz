@@ -291,7 +291,7 @@ fn compile_rt_a(
 
     // Assemble the runtime TU (same as the current single-TU approach).
     let raw = format!("{}\n{}", crate::RUNTIME_H, crate::RUNTIME_C);
-    let src = crate::lower::strip_quoted_includes(&raw);
+    let src = zz_lower::strip_quoted_includes(&raw);
 
     // Unique temporaries per call: parallel test threads (and processes)
     // share the pid + key namespace, and identical `zz-rt-*` paths used to

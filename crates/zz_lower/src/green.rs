@@ -30,14 +30,14 @@ const GREEN_BLOCKING: &[&str] = &[
 /// [`Lowerer::green`] while the closure body is emitted.
 pub(crate) struct GreenCtx {
     /// Next frame slot index (cell storage).
-    pub(super) next_slot: usize,
+    pub(crate) next_slot: usize,
     /// Next resume label id (ids start at 1; 0 = fresh entry).
-    pub(super) next_resume: usize,
+    pub(crate) next_resume: usize,
     /// Frame cells in allocation order: (gcell counter, slot, C type).
     /// Drives the declaration + restore placeholder expansion.
-    pub(super) cells: Vec<(usize, usize, String)>,
+    pub(crate) cells: Vec<(usize, usize, String)>,
     /// Resume ids with labels, in order. Drives the dispatch switch.
-    pub(super) cases: Vec<usize>,
+    pub(crate) cases: Vec<usize>,
 }
 
 impl GreenCtx {
@@ -64,7 +64,7 @@ fn callee_dotted(callee: &Expr) -> Option<String> {
 
 /// True when `callee` is a suspendable blocking point (`chan.recv`,
 /// `task.join` / `task.recv`, with or without the `std.` prefix).
-pub(super) fn green_blocking_callee(callee: &Expr) -> bool {
+pub(crate) fn green_blocking_callee(callee: &Expr) -> bool {
     match callee_dotted(callee) {
         Some(n) => GREEN_BLOCKING.contains(&n.as_str()),
         None => false,
@@ -316,7 +316,7 @@ impl Prescan {
 /// blocking call and nothing the transform cannot model (indirect calls,
 /// `defer`, transaction inlining, exotic assign targets). Everything
 /// else keeps the blocking lowering: always correct, just parks.
-pub(super) fn closure_green_eligible(lower: &Lowerer, body: &Expr) -> bool {
+pub(crate) fn closure_green_eligible(lower: &Lowerer, body: &Expr) -> bool {
     // A green closure already in progress forces nested closures
     // non-green: they would share the frame's resume id space.
     if lower.green.borrow().is_some() {
@@ -332,7 +332,7 @@ pub(super) fn closure_green_eligible(lower: &Lowerer, body: &Expr) -> bool {
 
 impl Lowerer {
     /// True while a green closure body is being emitted.
-    pub(super) fn green_active(&self) -> bool {
+    pub(crate) fn green_active(&self) -> bool {
         self.green.borrow().is_some()
     }
 
@@ -348,7 +348,7 @@ impl Lowerer {
     /// leak-free for uncaptured locals). The pointer is always stored
     /// in the frame slot so the prologue restore re-seats the stack
     /// pointer after a resume jumps over the declaration.
-    pub(super) fn green_cell(
+    pub(crate) fn green_cell(
         &self,
         names: &mut NameCtx,
         ctype: &str,
@@ -385,7 +385,7 @@ impl Lowerer {
     /// as user cells, but reused across executions (never captured, never
     /// in `NameCtx`): the declaration + restore placeholders cover it via
     /// the shared cells list.
-    pub(super) fn green_temp(&self, names: &mut NameCtx, out: &mut String) -> String {
+    pub(crate) fn green_temp(&self, names: &mut NameCtx, out: &mut String) -> String {
         let mut g = self.green.borrow_mut();
         let gx = g.as_mut().expect("green_temp outside a green closure");
         let slot = gx.next_slot;
@@ -409,7 +409,7 @@ impl Lowerer {
     /// Expand the green placeholders (`/*GREEN_NSLOTS*/`,
     /// `/*GREEN_DECLS*/`, `/*GREEN_RESTORE*/`, `/*GREEN_DISPATCH*/`) in a
     /// finished closure body and pop the transform state.
-    pub(super) fn green_finish(&self, body: &mut String) {
+    pub(crate) fn green_finish(&self, body: &mut String) {
         let gx = self.green.borrow_mut().take().expect("green_finish idle");
         let nslots = gx.next_slot;
         let mut decls = String::new();
@@ -432,7 +432,7 @@ impl Lowerer {
 
     /// Take a resume id for one yield site, recording its dispatch case.
     /// Returns the id `K` used by the `green_L_K` / `green_done_K` labels.
-    pub(super) fn green_resume_id(&self) -> usize {
+    pub(crate) fn green_resume_id(&self) -> usize {
         let mut g = self.green.borrow_mut();
         let gx = g.as_mut().expect("green_resume_id outside a green closure");
         let k = gx.next_resume;

@@ -1074,7 +1074,7 @@ pub fn compile_units(
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (ns, code) in units {
         let stem = unit_file_stem(ns, &mut used);
-        let tu = crate::lower::strip_quoted_includes(&format!("{header}\n{code}"));
+        let tu = zz_lower::strip_quoted_includes(&format!("{header}\n{code}"));
         let slug = unit_obj_slug(&rt_base, flags_hash, header, code);
         let cached = obj_base.join(&slug).join(format!("{stem}.o"));
         if is_usable_object(&cached) {

@@ -36,14 +36,14 @@ use super::{box_scalar_operand, Lowerer, NameCtx};
 const MOVED_TYPE: &str = "zz_value_moved";
 
 /// The [`MOVED_TYPE`] check for expression lowering (see `expr.rs`).
-pub(super) fn is_moved_type(ctype: Option<&str>) -> bool {
+pub(crate) fn is_moved_type(ctype: Option<&str>) -> bool {
     ctype == Some(MOVED_TYPE)
 }
 
 impl Lowerer {
     /// Try the move fast paths for `target = value`. Returns true when
     /// emitted (caller must skip the generic path).
-    pub(super) fn try_emit_move_assign(
+    pub(crate) fn try_emit_move_assign(
         &self,
         target: &Expr,
         value: &Expr,
@@ -209,7 +209,7 @@ impl Lowerer {
     /// bump its array (each leaked share defeats the next move-aware push).
     /// Direct fields answer inline via `zz_len_field`; anything else keeps
     /// the old path. Pure read — same value either way.
-    pub(super) fn try_emit_len_field(&self, arg: &Expr, names: &mut NameCtx) -> Option<String> {
+    pub(crate) fn try_emit_len_field(&self, arg: &Expr, names: &mut NameCtx) -> Option<String> {
         let (obj, field) = match arg {
             Expr::Path { parts, .. } if parts.len() == 2 => (parts[0].as_str(), parts[1].as_str()),
             Expr::Field { obj, name, .. } => match obj.as_ref() {
@@ -242,7 +242,7 @@ impl Lowerer {
     }
 
     /// Object C identifier for a possibly module-qualified name.
-    pub(super) fn obj_cid(names: &NameCtx, obj: &str) -> Option<String> {
+    pub(crate) fn obj_cid(names: &NameCtx, obj: &str) -> Option<String> {
         if let Some(cid) = names.lookup(obj).map(str::to_string) {
             return Some(cid);
         }

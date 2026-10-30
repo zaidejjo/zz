@@ -1,0 +1,1262 @@
+// ZZ native runtime — core value model, entry point, and core operations.
+//
+// A zz_value is a tagged 16-byte union (mirroring the Rust `Value` size
+// target): int/float/bool stored inline, everything else heap-allocated
+// behind a refcounted pointer. String/array/dict/funcs are refcounted.
+//
+// The runtime is minimal on purpose: it only implements what the generated
+// code actually uses. Dead stdlib modules are never referenced by the
+// lowerer, so unused natives/procs simply don't appear here (DCE at the C
+// level via -ffunction-sections + gc-sections on release).
+//
+// This header defines the base types shared by every runtime module plus
+// the entry point and core operation declarations. The umbrella header
+// `runtime.h` includes this and the domain sub-headers in dependency order.
+
+#ifndef ZZ_RUNTIME_CORE_H
+#define ZZ_RUNTIME_CORE_H
+
+#include <limits.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <math.h>
+#include <time.h>
+#include <sys/stat.h>
+// POSIX process environment + directories (`std.env` natives in core.c);
+// Windows uses CRT/Win32 equivalents there.
+#ifndef ZZ_OS_WINDOWS
+#include <unistd.h>
+#include <errno.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+// platform.h is concatenated before this header in AOT builds and defines
+// ZZ_HAS_CURL; default to 1 when this header is used standalone.
+#if !defined(ZZ_HAS_CURL) || ZZ_HAS_CURL
+#include <curl/curl.h>
+#endif
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    ZZ_UNIT = 0,
+    ZZ_INT,
+    ZZ_FLOAT,
+    ZZ_BOOL,
+    ZZ_STR,
+    ZZ_ARRAY,
+    ZZ_DICT,
+    ZZ_FUNC,
+    ZZ_NATIVE,
+    ZZ_OPTION_SOME,
+    ZZ_OPTION_NONE,
+    ZZ_RESULT_OK,
+    ZZ_RESULT_ERR,
+    ZZ_RANGE,
+    ZZ_CHAN,
+    ZZ_TASK_JOIN,
+    ZZ_OBJECT,
+    ZZ_JSON,
+    ZZ_TCP_STREAM,
+    ZZ_TCP_LISTENER,
+    ZZ_TUPLE,
+    ZZ_DB,
+    ZZ_FILE,
+    ZZ_VFS,
+    ZZ_BYTES,
+} zz_tag;
+
+typedef struct zz_value zz_value;
+
+// Container forward declarations.
+typedef struct zz_array zz_array;
+typedef struct zz_dict zz_dict;
+typedef struct zz_dict_entry zz_dict_entry;
+typedef struct zz_range zz_range;
+typedef struct zz_chan zz_chan;
+typedef struct zz_task_join zz_task_join;
+typedef struct zz_object zz_object;
+
+// A TCP stream or listener: the underlying socket fd.
+typedef struct zz_tcp zz_tcp;
+
+// An open streaming file (`std.fs.open`): the stdio handle plus its origin
+// path (owned, for diagnostics) and a closed flag (explicit `close`).
+typedef struct zz_file zz_file;
+
+// A virtual filesystem provider (`std.fs.osfs`/`memfs`/`tarfs`/`embedfs`):
+// process-lifetime handle dispatched by `zz_fs_*_at`.
+typedef struct zz_vfs zz_vfs;
+
+// A contiguous byte buffer (`fs.read_bytes`, slices): refcounted shared
+// backing store plus a window, so slices share without copying.
+typedef struct zz_bytes_buf zz_bytes_buf;
+typedef struct zz_bytes zz_bytes;
+
+// Refcounted string with Small String Optimization (SSO).
+//
+// Strings <= 23 bytes are stored inline in `sso` — zero malloc beyond
+// the zz_str header.  Longer strings are heap-allocated via a separate
+// buffer pointed to by `heap`.
+//
+// Layout (56 bytes on x86_64):
+//   refs     (8)  — reference count. 0 = arena sentinel.
+//   interned (4)  — non-zero if permanent singleton.
+//   _pad     (4)
+//   cap      (8)  — heap buffer capacity. 0 = SSO mode.
+//   len      (8)  — payload length in bytes.
+//   sso      (24) — inline SSO data (cap == 0).
+//   heap     (8)  — pointer to heap buffer (cap > 0, sso unused).
+//
+// Use ZZ_STR_PTR(s) to get a usable char* in either mode.
+#define ZZ_SSO_MAX 23
+
+typedef struct {
+    size_t refs;
+    int interned;
+    size_t cap;     // 0 = SSO, >0 = heap capacity
+    size_t len;
+    union {
+        char sso[ZZ_SSO_MAX + 1]; // 24 bytes: inline data (cap == 0)
+        char *heap;                // 8 bytes:  heap pointer  (cap > 0)
+    };
+} zz_str;
+
+// Get a usable char* pointer for string data in either SSO or heap mode.
+// Always inlined: these sit on every string fast path (concat, compare,
+// print, hash) and must compile down to a single branchless select.
+static inline __attribute__((always_inline)) char *zz_str_ptr(zz_str *s) {
+    return s->cap == 0 ? s->sso : s->heap;
+}
+static inline __attribute__((always_inline)) const char *zz_str_cptr(const zz_str *s) {
+    return s->cap == 0 ? s->sso : s->heap;
+}
+
+// A function value: signature + optional captured environment.
+typedef struct zz_func zz_func;
+
+struct zz_value {
+    zz_tag tag;
+    union {
+        int64_t i;
+        double f;
+        bool b;
+        zz_str *s;
+        zz_array *arr;
+        zz_dict *dict;
+        zz_func *fn;
+        zz_chan *chan;
+        zz_task_join *task;
+        zz_value *payload;   // Option/Result inner value (heap-allocated)
+        zz_range *range;     // integer range (heap-allocated, refcounted)
+        zz_object *obj;      // boxed struct instance
+        zz_tcp *net;         // TCP stream or listener (ZZ_TCP_STREAM/LISTENER)
+        void *db;            // opaque sqlite3* handle (ZZ_DB)
+        zz_file *file;       // open streaming file (ZZ_FILE)
+        zz_vfs *vfs;         // fs provider handle (ZZ_VFS)
+        zz_bytes *bytes;     // byte buffer (ZZ_BYTES)
+    };
+};
+
+struct zz_bytes_buf {
+    size_t refs;     // atomic reference count (ARC)
+    size_t len;      // backing store length
+    unsigned char data[]; // flexible array
+};
+
+struct zz_bytes {
+    size_t refs;     // atomic reference count (ARC)
+    zz_bytes_buf *buf; // shared backing store (never NULL)
+    size_t off;      // window start into buf->data
+    size_t len;      // window length
+};
+
+struct zz_array {
+    size_t refs;     // atomic reference count (ARC)
+    size_t len;
+    size_t cap;
+    zz_value *items;
+};
+
+// Sentinel value for `zz_array::refs` indicating the array (and its items
+// buffer) live on the C stack — emitted by codegen when it can prove the
+// array literal is non-escaping and all elements are scalar. Stack-promoted
+// arrays must NEVER be freed via free(): both the header struct and the
+// items buffer are part of the current C stack frame and are reclaimed
+// automatically when the function returns. zz_release_array checks for
+// this sentinel and skips the free paths accordingly.
+#define ZZ_ARRAY_STACK_MAGIC ((size_t)0xD0D0D0D0D0D0D0D0ULL)
+
+// Sentinel value for `zz_array::refs` on fixed-size array literals whose
+// header AND items buffer are both bump-allocated from the function arena
+// (`zz_array_new_lit`). The items buffer has the exact literal capacity, so
+// element stores never call realloc, and element values are stored directly
+// without `zz_clone` atomic bumps (scalar literal contents only). Release is
+// a no-op: both blocks die at the next arena reset.
+#define ZZ_ARRAY_LIT_MAGIC ((size_t)0xC0DEC0DEC0DEC0DEULL)
+
+// Sentinel for dicts whose entries buffer is bump-allocated on the arena.
+// zz_dict_set must NOT call realloc on these — the buffer is fixed-capacity
+// and dies at arena reset. Release is a no-op.
+#define ZZ_DICT_ARENA_MAGIC ((size_t)0xA1A2A3A4A5A6A7A8ULL)
+
+// Sentinel for arena-allocated arrays with pre-sized items buffer.
+// Items are bump-allocated on the arena. If zz_vec_append needs to grow
+// beyond the pre-sized capacity, it migrates to heap (malloc) and resets
+// refs to 0 (arena-header sentinel). Release frees items (if heap-migrated)
+// but skips free(header) since the header stays on the arena.
+#define ZZ_ARRAY_ARENA_MAGIC ((size_t)0xB3B4B5B6B7B8B9B0ULL)
+
+// Dicts switch from a linear scan to a key index once they outgrow this
+// many entries — the VM's `DICT_INDEX_THRESHOLD` (`DictData` in
+// `zz_runtime::value`), so both engines index at the same size.
+#define ZZ_DICT_INDEX_THRESHOLD 8
+
+struct zz_dict {
+    size_t refs;     // atomic reference count (ARC)
+    size_t len;
+    size_t cap;
+    zz_dict_entry *entries;
+    // Key index: a pure cache over `entries` (open addressing with linear
+    // probing, slot value = entry index + 1, 0 = empty; `idx_cap` is a
+    // power of two). Only int/bool/str keys are indexed — the VM's
+    // `DictKey` — so `idx == NULL` means "linear scan only", which is both
+    // the small-dict lane and the answer for dicts keyed by other tags.
+    // Entries stay the source of truth for order, length and iteration.
+    size_t *idx;
+    size_t idx_cap;
+};
+
+// Dict keys are full values, not strings: `{int: int}`, `{bool: str}` and
+// `{float: _}` are legal ZZ dict types, and the VM keys on the value itself
+// (`DictData::entries` is `Vec<(Value, Value)>`). Key ownership follows the
+// ordinary value rules — `zz_assign` on insert (healing arena strings),
+// `zz_release` on drop. Entries are kept in insertion order; the first
+// occurrence of a key wins (VM parity).
+struct zz_dict_entry {
+    zz_value key;
+    zz_value val;
+};
+
+// Borrow an entry's STRING key, or NULL when the key is some other type.
+// Helpers whose parameter type is `{str: _}` (HTTP headers, JSON objects,
+// env maps) use this to skip entries a `{int: _}`/`{bool: _}` dict can hold.
+static inline zz_str *zz_dict_key_str(const zz_dict_entry *e) {
+    return e->key.tag == ZZ_STR ? e->key.s : NULL;
+}
+
+// Deep structural equality over every value tag (defined in core.c; shared
+// by `==` and by dict key matching). Numeric comparison coerces int/float,
+// matching `==`.
+int zz_values_equal(zz_value a, zz_value b);
+
+// Dict key equality: the VM's `Value: PartialEq` requires identical tags,
+// so `1` and `1.0` are *different* keys even though `1 == 1.0` is true.
+static inline int zz_key_eq(zz_value a, zz_value b) {
+    if (a.tag != b.tag) return 0;
+    return zz_values_equal(a, b);
+}
+
+// First-class integer range `start..end` (+ `step`, always 1 from ZZ
+// source today; carried for VM iteration parity and future step
+// syntax). Immutable after creation: clones share via the refcount,
+// stores never mutate in place. Replaces the old degenerate
+// start-marker (bare `.i`) and the chunk backend's immortal
+// `zz_crange` boxes (#254).
+struct zz_range {
+    size_t refs; // atomic reference count (ARC)
+    int64_t start;
+    int64_t end;
+    int64_t step;
+};
+
+// Boxed struct instance (reference-counted).
+// Fields are stored as alternating name/value pairs (zz_value) for
+// runtime field access by name. Field names are interned strings.
+struct zz_object {
+    size_t refs;
+    const char *type_name;  // struct type name for method dispatch
+    size_t len;             // number of fields (pairs count = len * 2)
+    zz_value fields[];      // alternating: name (str), value, name, value, ...
+};
+
+typedef zz_value (*zz_native_fn)(zz_value *args, size_t argc);
+
+struct zz_func {
+    size_t refs;
+    zz_value fn;      // either ZZ_NATIVE (builtin) or the dispatch table
+    zz_value *env;    // captured slot values (SYNTHETIC: extended below)
+    size_t env_len;
+};
+
+// ---- thread-safe channels (lock-free fast path + spillover) ----------
+// Two tiers, one FIFO (mirrors the VM's `ChanState`): a Vyukov bounded
+// MPMC ring serves all traffic while it fits — pure `__atomic`
+// operations, zero locks, zero futex syscalls — and bursts past ring
+// capacity spill to the mutex queue below (channels stay unbounded).
+// Receivers drain the spill first whenever non-empty, preserving order.
+// Sends notify the condvar only when sleepers exist (counted with an
+// atomic), so waiter-free traffic pays no futex wake at all.
+#define ZZ_RING_CAP 1024
+#define ZZ_RING_MASK (ZZ_RING_CAP - 1)
+
+// One ring slot: sequence number + payload, padded to a full cache line
+// so adjacent slots never share a line between producer and consumer
+// cores. This padding (not the algorithm) is what kills cache-line
+// bouncing on the fast path.
+typedef struct {
+    size_t seq; // __atomic access only (see zz_ring_* below)
+    zz_value value; // valid only under the sequence protocol
+    char _pad[64 - sizeof(size_t) - sizeof(zz_value)];
+} zz_ring_cell;
+_Static_assert(sizeof(zz_ring_cell) == 64, "zz_ring_cell must fill a cache line");
+
+struct zz_chan {
+    // Fast path: Vyukov ring. Head/tail live on separate cache lines —
+    // the producer core writes tail, the consumer core writes head, and
+    // neither line is ever read-for-ownership by the other hot loop.
+    // ALL accesses via `__atomic` builtins (see below), never plain.
+    zz_ring_cell *ring;
+    size_t ring_head __attribute__((aligned(64)));
+    size_t ring_tail __attribute__((aligned(64)));
+    // Slow path: mutex spillover queue + signaling condvar. Unbounded
+    // bursts land here; drained before the ring whenever non-empty.
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    zz_value       *queue;   // spill ring buffer of zz_value
+    size_t          len;     // current spill items
+    size_t          cap;     // spill buffer capacity
+    size_t          head;    // next spill read position (mod cap)
+    size_t          tail;    // next spill write position (mod cap)
+    size_t          sleepers; // __atomic: condvar sleepers in flight
+    // Number of values in the spill queue. Written only while holding
+    // `lock`; read lock-free by fast paths (Release/Acquire). A zero
+    // count means every queued value sits in the ring in FIFO order, so
+    // a lock-free ring pop is exactly ordered — no lock needed.
+    size_t          spill_count; // __atomic
+    // Green waiters (B3): suspended tasks/threads queued for direct
+    // handoff on send (no condvar round-trip for task waiters). Sends
+    // check the atomic count first and divert to the handoff path while
+    // any waiter is queued; receivers register under `lock` after
+    // verifying both tiers empty, so no send can slip between the check
+    // and the park. Served FIFO before the ring.
+    struct zz_green_waiter *gwait_head;
+    struct zz_green_waiter *gwait_tail;
+    struct zz_green_waiter *gwait_pool; // lock-protected node free-list
+    size_t          gwait_pool_n;
+    size_t          green_waiters; // __atomic
+    // Thread-parked (sync-frame) green waiters. Handoff broadcasts the
+    // condvar only when this is non-zero: task waiters requeue without
+    // any futex, so the steady state pays zero wakeups.
+    size_t          gparked; // __atomic
+};
+
+// ---- green tasks: suspendable frames (B3) ------------------------------
+// A suspendable frame carries a task's heap cells (locals that must
+// survive a suspend/resume round-trip), the resume label id, and the
+// handoff value slot. Task frames live on the heap (owned by the task,
+// freed by the trampoline on completion); sync-called green closures
+// (NULL TLS frame) run on stack-backed frames that vanish with the call.
+//
+// Generated state-machine closures access cells through frame slots;
+// the runtime only moves opaque pointers and the handoff value.
+typedef struct {
+    void         **cells;      // heap-cell pointers (frame slots)
+    unsigned char *cell_kind;  // per-slot ZZ_CELL_VALUE/ZZ_CELL_RAW
+    size_t        *cell_size;  // per-slot byte size (RAW cells)
+    size_t         ncells;
+    int            owns_cells; // task frames: heap arrays (free on completion)
+    int            is_task;    // set by the trampoline (suspend returns)
+    int            resume;     // resume label id (0 = fresh entry)
+    zz_value       value;      // handoff slot (sender deposits here)
+    int            has_value;
+} zz_task_frame;
+
+// One suspended waiter: either a task (requeue on handoff — no futex)
+// or a parked thread (condvar signal). Frames are always the handoff
+// target; `fn`/`join` rebuild the task for requeue (core.c-private
+// `zz_task_t` layout stays out of this header).
+typedef struct zz_green_waiter {
+    struct zz_green_waiter *next;
+    zz_value                fn;    // task closure (shallow; freed once at completion)
+    zz_task_join           *join;  // task join handle
+    zz_task_frame          *frame; // handoff target (value lands here)
+    int                     is_task;
+} zz_green_waiter;
+
+void zz_task_frame_init(zz_task_frame *fr);
+zz_task_frame *zz_green_frame(void); // TLS current frame (NULL off-task)
+void zz_green_frame_set(zz_task_frame *fr); // sync-call hygiene endpoint
+zz_task_frame *zz_frame_new(void);   // heap frame from the B4 pool
+void zz_frame_free(zz_task_frame *fr); // release cells; pool/free struct
+void zz_sync_frame_cleanup(zz_task_frame *fr); // `cleanup` attr endpoint
+// Per-thread suspend verdict (B3): set by green entries on every return
+// (1 = this call suspended the task, 0 = value returned). Thread-local
+// so a resuming run can never corrupt the suspending run's unwind that
+// it legitimately overlaps (ownership already transferred at handoff).
+int zz_green_suspended(void);
+// Mark the current run live again: emitted at every state-machine resume
+// label. Without this, a run that suspends once and then returns without
+// another blocking call keeps the stale suspend verdict and the
+// trampoline drops its completion (silent hang on `task.join` chains).
+void zz_green_resumed(void);
+
+// Blocking points with green fast paths: hit → value; miss → register
+// the frame as a waiter and either suspend (task frames: return to the
+// trampoline) or park the thread (sync frames). NULL frame degrades to
+// the blocking call (thread parks; always correct).
+//
+// `resume_id` is recorded into the frame under the same lock that queues
+// the waiter — before the waiter becomes visible — so a resuming run can
+// never dispatch on a stale id (the handoff that requeues it is ordered
+// after the write by that lock).
+zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int *err);
+zz_value zz_task_join_recv_green(zz_value join, zz_task_frame *fr, int resume_id, int *err);
+
+// Task join handle for spawned threads.
+struct zz_task_join {
+    pthread_t       thread;
+    zz_value        result;
+    int             completed;
+    int             consumed;   // set once `task.try_join` takes the result
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    // Green waiters (B3): tasks/threads suspended in `task.join` that
+    // must be resumed by direct handoff on completion (no condvar
+    // round-trip for task waiters). Served FIFO before the condvar.
+    struct zz_green_waiter *gwait_head;
+    struct zz_green_waiter *gwait_tail;
+    struct zz_green_waiter *gwait_pool; // lock-protected node free-list
+    size_t          gwait_pool_n;
+    size_t          green_waiters; // __atomic: queued green waiters
+    size_t          gparked; // __atomic: thread-parked green waiters (gate broadcasts)
+    // Blocking `task.join` waiters parked on `cond` (announce-then-verify
+    // around the wait, like channel sleepers). Completion signals the
+    // condvar only when this is non-zero, so waiter-free completions —
+    // the fan-in steady state — pay no futex wake at all.
+    size_t          sleepers; // __atomic
+};
+
+// ---- arena allocator ---------------------------------------------------
+// A bump allocator for non-escaping local allocations. O(1) alloc, O(1)
+// reset. Each function gets its own arena that is initialized on entry and
+// reset on exit. Objects allocated here do NOT need individual free calls.
+//
+// Thread-local: each thread maintains its own arena (no locking needed).
+//
+// Overflow chunks form a singly-linked list so that zz_arena_destroy can
+// free them all in one walk. Each node ADOPTS a full primary buffer (no
+// copying): the buffer stays mapped and readable until reset/destroy, so
+// in-flight pointers (e.g. an object header allocated just before its
+// payload overflowed) remain valid. Copying instead would leave such
+// pointers dangling at freed memory (heap corruption).
+typedef struct zz_arena_chunk {
+    struct zz_arena_chunk *next;
+    char *buf;              // adopted overflow buffer (owned by this node)
+    size_t cap;             // capacity of buf (informational)
+} zz_arena_chunk;
+
+typedef struct zz_arena {
+    char  *buf;              // current contiguous block (primary or overflow)
+    size_t cap;              // total capacity in bytes of current block
+    size_t offset;           // next free byte position
+    zz_arena_chunk *chunks;  // linked list of overflow chunks (for destroy)
+} zz_arena;
+
+// O(1)-ish reset: free all arena allocations at once. Overflow chunks
+// (prior iterations' overflowed buffers) are freed; the primary block is
+// kept for reuse, so the steady state is one malloc-free reset when the
+// working set fits. Previously chunks were never released here, so any
+// loop whose per-iteration footprint exceeded the primary block leaked a
+// chunk per iteration (GBs on string-accumulation loops).
+// Contract unchanged: every live pointer into the arena (primary or
+// chunks) is dead after reset — escaping values must be healed out first
+// (see zz_str_heal_arena / zz_heal_for_move).
+static inline void zz_arena_reset(zz_arena *a) {
+    zz_arena_chunk *chunk = a->chunks;
+    while (chunk) {
+        zz_arena_chunk *next = chunk->next;
+        free(chunk->buf);
+        free(chunk);
+        chunk = next;
+    }
+    a->chunks = NULL;
+    a->offset = 0;
+}
+
+// Reset the arena and hint the C allocator to return freed heap pages to
+// the OS. Slower than bare reset — call only at function-level cleanup,
+// not per-iteration in tight loops. Like `zz_arena_reset`, overflows are
+// freed (otherwise a function whose working set overflowed would leak its
+// chunks at exit).
+static inline void zz_arena_reset_trim(zz_arena *a) {
+    zz_arena_chunk *chunk = a->chunks;
+    while (chunk) {
+        zz_arena_chunk *next = chunk->next;
+        free(chunk->buf);
+        free(chunk);
+        chunk = next;
+    }
+    a->chunks = NULL;
+    a->offset = 0;
+#ifdef __GLIBC__
+    malloc_trim(0);
+#endif
+}
+
+// ---- constructors ------------------------------------------------------
+static inline zz_value zz_unit(void) {
+    zz_value v = {ZZ_UNIT, {0}};
+    return v;
+}
+static inline zz_value zz_int(int64_t i) {
+    zz_value v = {ZZ_INT, {0}};
+    v.i = i;
+    return v;
+}
+static inline zz_value zz_float(double f) {
+    zz_value v = {ZZ_FLOAT, {0}};
+    v.f = f;
+    return v;
+}
+static inline zz_value zz_bool(bool b) {
+    zz_value v = {ZZ_BOOL, {0}};
+    v.b = b;
+    return v;
+}
+
+// ---- refcount fast path ------------------------------------------------
+// Unified refcounting inlined: strings use atomic refcounts (plain would
+// race when a value crosses threads via channels or spawn captures —
+// channel send/recv and spawn/closure paths share strings across threads),
+// arrays/dicts/funcs delegate to the out-of-line atomic ARC helpers.
+// Inlining removes a call + switch dispatch on every boxed touch
+// (clone/assign/index-load) in hot loops; the atomic slow paths stay
+// out-of-line in memory.c so hot call sites stay small.
+//
+// Forward declarations for helpers defined later in the TU.
+void zz_retain_array(zz_array *a);
+void zz_release_array(zz_array *a);
+void zz_retain_bytes(zz_bytes *b);
+void zz_release_bytes(zz_bytes *b);
+void zz_retain_dict(zz_dict *d);
+void zz_release_dict(zz_dict *d);
+void zz_retain_func(zz_func *f);
+void zz_release_func(zz_func *f);
+void zz_release_variant(zz_value *v);
+void zz_release_object(zz_value *v);
+void zz_str_header_free(zz_str *s);
+void zz_vbox_release(zz_value *payload);
+
+// Retain one reference on a boxed struct object (mirrors the release in
+// `zz_release_object`: clones share ownership, so every clone must bump).
+static inline void zz_retain_object(zz_object *o) {
+    if (o) {
+        __atomic_add_fetch(&o->refs, 1, __ATOMIC_RELAXED);
+    }
+}
+
+// ---- variant / JSON payload boxes (ARC) --------------------------------
+// An Option/Result/JSON wrapper is a 16-byte value; its inner value lives
+// in a heap box. Cloning a wrapper is a shallow share, so the box must
+// outlive *every* owner and therefore carries its own refcount (the same
+// model as strings/arrays/dicts).
+//
+// This box used to be a bare `malloc(sizeof(zz_value))` with no refcount,
+// which made `zz_release_variant` free a box that another owner still
+// pointed at: `o := .some("x"); a := [o, o]` double-freed on the second
+// element's release (#507). The old workaround was to leak the box
+// (`zz_release_shared`).
+//
+// `payload` deliberately keeps pointing at the box's `inner` field, so
+// every payload reader (`*v.payload`) stays valid; the header is recovered
+// with `zz_vbox_of`. Boxes are only ever created by `zz_vbox_new`, and are
+// only freed by `zz_vbox_release` / `zz_vbox_take`.
+//
+// `refs` is a plain `int64_t` touched only through `__atomic_*` builtins
+// (the convention shared with `zz_str`/`zz_object`/`zz_range`), so the box
+// header is safe to hand across threads (spawn captures, channel sends).
+typedef struct {
+    int64_t refs;
+    zz_value inner;
+} zz_vbox;
+
+static inline zz_vbox *zz_vbox_of(zz_value *payload) {
+    return (zz_vbox *)((char *)payload - offsetof(zz_vbox, inner));
+}
+
+// Allocate a box owning one reference to `inner`; returns the payload
+// pointer to store in the wrapper (NULL if the allocation failed).
+static inline zz_value *zz_vbox_new(zz_value inner) {
+    zz_vbox *b = (zz_vbox *)malloc(sizeof(zz_vbox));
+    if (!b) {
+        return NULL;
+    }
+    b->refs = 1;
+    b->inner = inner;
+    return &b->inner;
+}
+
+static inline void zz_vbox_retain(zz_value *payload) {
+    if (payload) {
+        __atomic_add_fetch(&zz_vbox_of(payload)->refs, 1, __ATOMIC_RELAXED);
+    }
+}
+
+// ZZ_DB owns a live sqlite/Postgres connection; the full handle type
+// lives in core.c. These hooks keep the inline ARC switches below
+// backend-agnostic and close the connection on the last release.
+void zz_db_retain_handle(void *db);
+void zz_db_release_handle(void *db);
+
+static inline void zz_retain(zz_value *v) {
+    switch (v->tag) {
+    case ZZ_STR:
+        if (v->s && !v->s->interned && v->s->refs > 0) {
+            __atomic_add_fetch(&v->s->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
+    case ZZ_ARRAY:
+        zz_retain_array(v->arr);
+        break;
+    case ZZ_BYTES:
+        zz_retain_bytes(v->bytes);
+        break;
+    case ZZ_DICT:
+        zz_retain_dict(v->dict);
+        break;
+    case ZZ_FUNC:
+        zz_retain_func(v->fn);
+        break;
+    case ZZ_RANGE:
+        if (v->range) {
+            __atomic_add_fetch(&v->range->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
+    case ZZ_OBJECT:
+        zz_retain_object(v->obj);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        zz_vbox_retain(v->payload);
+        break;
+    case ZZ_DB:
+        if (v->db) zz_db_retain_handle(v->db);
+        break;
+    default:
+        break;
+    }
+}
+
+static inline void zz_release(zz_value *v) {
+    switch (v->tag) {
+    case ZZ_STR:
+        if (v->s && !v->s->interned) {
+            // Arena-allocated strings have refs==0 sentinel — skip free.
+            if (v->s->refs == 0) {
+                return;
+            }
+            if (__atomic_sub_fetch(&v->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                // SSO strings (cap==0) have no separate heap buffer.
+                // Heap strings (cap>0) store data in a separate malloc'd buffer.
+                if (v->s->cap > 0) free(v->s->heap);
+                zz_str_header_free(v->s);
+            }
+        }
+        break;
+    case ZZ_ARRAY:
+        zz_release_array(v->arr);
+        break;
+    case ZZ_BYTES:
+        zz_release_bytes(v->bytes);
+        break;
+    case ZZ_DICT:
+        zz_release_dict(v->dict);
+        break;
+    case ZZ_FUNC:
+        zz_release_func(v->fn);
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        zz_release_variant(v);
+        break;
+    case ZZ_RANGE:
+        if (v->range) {
+            if (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+                free(v->range);
+            }
+        }
+        break;
+    case ZZ_OBJECT:
+        zz_release_object(v);
+        break;
+    case ZZ_DB:
+        if (v->db) {
+            // Clear the slot before releasing so a C cleanup handler
+            // attached to a DB local cannot double-release, and a
+            // later stale read degrades to the closed tombstone.
+            void *db = v->db;
+            v->db = NULL;
+            zz_db_release_handle(db);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// `__attribute__((cleanup))` endpoint for DB locals: function-scope
+// locals in generated C are not otherwise released, so an AOT handler
+// that opens a connection per request would leak it. Release is
+// idempotent (the DB case above nulls the slot), so an explicit
+// `sqlz.close`/loop release followed by cleanup is safe.
+static inline void zz_db_value_cleanup(zz_value *v) {
+    zz_release(v);
+}
+
+// Forward: defined in strings.c (same translation unit once the runtime
+// sources are concatenated). Heals an arena-owned string (refs==0
+// sentinel) into an independent heap copy; every other value passes
+// through unchanged. Retaining stores must heal: the per-iteration
+// loop-arena reset reuses the buffer, so a stored alias would read back
+// garbage on the next iteration (and dangle past loop-arena destroy).
+zz_value zz_str_heal_arena(zz_value v);
+// Forward: defined in collections.c. Arena predicates + move-path heal
+// for containers (deep copy of arena-owned arrays/dicts, adopt heap).
+// `zz_assign` heals through these so `a[i] = lit` and `x = lit` inside
+// loops never alias the loop arena past its reset.
+int zz_array_is_arena(const zz_array *a);
+int zz_dict_is_arena(const zz_dict *d);
+zz_value zz_heal_for_move(zz_value v);
+
+static inline void zz_assign(zz_value *dst, zz_value src) {
+    // Release old value if it's a refcounted type.
+    if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
+        dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
+        dst->tag == ZZ_RANGE || dst->tag == ZZ_DB ||
+        dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
+        dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
+        zz_release(dst);
+    }
+    // Heal arena-owned values into independent heap copies (loop-arena
+    // reset would otherwise corrupt the stored alias). Healed values
+    // arrive fresh-owned (refs==1, solely ours), so the retain below
+    // must be skipped for them — retaining would leak one share.
+    int healed = 0;
+    if (src.tag == ZZ_STR && src.s && !src.s->interned && src.s->refs == 0) {
+        src = zz_str_heal_arena(src);
+    } else if (src.tag == ZZ_ARRAY && src.arr && zz_array_is_arena(src.arr)) {
+        src = zz_heal_for_move(src);
+        healed = 1;
+    } else if (src.tag == ZZ_DICT && src.dict && zz_dict_is_arena(src.dict)) {
+        src = zz_heal_for_move(src);
+        healed = 1;
+    }
+    *dst = src;
+    // Retain the new value for refcounted types.
+    if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
+        src.tag == ZZ_OBJECT || src.tag == ZZ_RANGE || src.tag == ZZ_DB ||
+        src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
+        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON)) {
+        zz_retain(dst);
+    }
+}
+
+static inline zz_value zz_clone(zz_value v) {
+    switch (v.tag) {
+    case ZZ_STR:
+        // The refs>0 guard matters: arena strings (refs==0 sentinel) must
+        // never be promoted to heap ownership by a bare bump.
+        if (v.s && !v.s->interned && v.s->refs > 0) {
+            __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
+    case ZZ_ARRAY:
+        zz_retain_array(v.arr);
+        break;
+    case ZZ_BYTES:
+        zz_retain_bytes(v.bytes);
+        break;
+    case ZZ_DICT:
+        zz_retain_dict(v.dict);
+        break;
+    case ZZ_FUNC:
+        zz_retain_func(v.fn);
+        break;
+    case ZZ_OBJECT:
+        // Boxed structs share ownership on clone (see `zz_retain_object`);
+        // without this bump, overwriting a field frees the object while
+        // other owners still reference it.
+        zz_retain_object(v.obj);
+        break;
+    case ZZ_RANGE:
+        if (v.range) {
+            __atomic_add_fetch(&v.range->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
+    case ZZ_OPTION_SOME:
+    case ZZ_RESULT_OK:
+    case ZZ_RESULT_ERR:
+    case ZZ_JSON:
+        zz_vbox_retain(v.payload);
+        break;
+    case ZZ_DB:
+        if (v.db) zz_db_retain_handle(v.db);
+        break;
+    default:
+        break;
+    }
+    return v;
+}
+
+// Move the inner value out of a box this owner holds exclusively: the
+// caller takes over the inner's references and the box is freed without
+// releasing them. A shared box cannot be moved out of, so its owner gets
+// a clone of the inner instead (the box keeps its other owners' copy).
+// Defined here because it needs `zz_clone`; the `zz_vbox` type and the
+// other helpers are above `zz_retain`.
+static inline zz_value zz_vbox_take(zz_value *payload) {
+    zz_vbox *b = zz_vbox_of(payload);
+    if (__atomic_load_n(&b->refs, __ATOMIC_ACQUIRE) == 1) {
+        zz_value inner = b->inner;
+        free(b);
+        return inner;
+    }
+    zz_value inner = zz_clone(b->inner);
+    zz_vbox_release(payload);
+    return inner;
+}
+
+// ---- binaries ----------------------------------------------------------
+#define ZZOP_ADD 1
+#define ZZOP_SUB 2
+#define ZZOP_MUL 3
+#define ZZOP_DIV 4
+#define ZZOP_REM 5
+#define ZZOP_POW 6
+#define ZZOP_EQ 7
+#define ZZOP_NE 8
+#define ZZOP_LT 9
+#define ZZOP_GT 10
+#define ZZOP_LE 11
+#define ZZOP_GE 12
+#define ZZOP_AND 13
+#define ZZOP_OR 14
+#define ZZOP_XOR 15
+#define ZZOP_SHL 16
+#define ZZOP_SHR 17
+
+zz_value zz_binop(int op, zz_value a, zz_value b);
+zz_value zz_unimplemented_native(const char *name);
+zz_value zz_neg(zz_value a);
+zz_value zz_not(zz_value a);
+zz_value zz_bitnot(zz_value a);
+bool zz_truthy(zz_value v);
+
+// ---- calls --------------------------------------------------------------// Closure entry point: args, argc, then the captured environment (array of
+// shared heap-cell pointers, one per free variable at the creation site).
+typedef zz_value (*zz_dispatch_fn)(zz_value *args, size_t argc, void **env, size_t nenv);
+
+// Build a callable closure value from a generated function pointer. The
+// payload stores the function pointer (not a refcounted object).
+zz_value zz_closure_make(zz_dispatch_fn f);
+// Build a closure value with a captured environment: `cells` (array of
+// `nenv` shared-cell pointers) is copied into the heap payload so the
+// environment outlives the creating scope. Cells themselves are shared,
+// never copied — owner and closures read/write the same storage.
+zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv);
+// Typed variant: `kinds[i]`/`sizes[i]` describe `cells[i]` (`ZZ_CELL_VALUE`
+// = boxed `zz_value*` cell, deep-copied by `zz_value_dup`; `ZZ_CELL_RAW` =
+// scalar/struct cell of `sizes[i]` bytes, copied with a fresh memcpy).
+// NULL `kinds`/`sizes` means every cell is `ZZ_CELL_VALUE`. The rep owns
+// its copies of both arrays.
+#define ZZ_CELL_VALUE 0
+#define ZZ_CELL_RAW 1
+zz_value zz_closure_make_ex_typed(
+    zz_dispatch_fn f,
+    void **cells,
+    const unsigned char *kinds,
+    const size_t *sizes,
+    size_t nenv);
+// Box a plain (args, argc) ZZ function as a first-class callable value
+// (`f := add`). The target rides in a RAW env cell (plain bytes — never
+// freed as an object; heap-owned so release stays sound) behind a thunk
+// adapting it to the dispatch convention. Only for regular functions:
+// externs need a C ABI a value cannot carry, and methods take a separate
+// `self` (see `zz_func_of_static_method` below).
+zz_value zz_func_of_static(zz_native_fn f);
+
+// Box an impl method as a first-class callable value (`f := Box.show__inner`).
+// Methods take `self` separately from the args array, so the thunk extracts
+// self = args[0] and passes args[1..] as the method's arg array. Needed for
+// decorators and higher-order calls that receive methods as values.
+typedef zz_value (*zz_value_method_fn)(zz_value *self, zz_value *args, size_t argc);
+zz_value zz_func_of_static_method(zz_value_method_fn f);
+// Extract the generated function pointer from a closure value.
+zz_dispatch_fn zz_closure_target(zz_value v);
+// Suspendable-frame (B3) constructors: like the plain makers, but the
+// rep is flagged green so the trampoline runs it with a task frame and
+// `recv`/`join` inside suspend instead of parking the thread.
+zz_value zz_closure_make_green(zz_dispatch_fn f);
+zz_value zz_closure_make_ex_typed_green(
+    zz_dispatch_fn f,
+    void **cells,
+    const unsigned char *kinds,
+    const size_t *sizes,
+    size_t nenv);
+void zz_closure_set_green(zz_value v);
+int zz_closure_is_green(zz_value v);
+// Extract the captured environment from a closure value (NULL + 0 when none).
+void **zz_closure_env(zz_value v, size_t *nenv);
+// Call a closure value with args. Returns unit when `f` is not a closure
+// (null target) so unresolvable callees keep the old unit behavior
+// instead of crashing.
+zz_value zz_call_closure(zz_value f, zz_value *args, size_t argc);
+// Raw variant: no TLS frame management (the trampoline manages TLS
+// itself around this call).
+zz_value zz_call_closure_raw(zz_value f, zz_value *args, size_t argc);
+// Publish a task result (trampoline completion path).
+void zz_task_join_complete(zz_task_join *join, zz_value result);
+
+zz_value zz_call(zz_value fn, zz_value *args, size_t argc, int *err);
+
+// Codegen helper shims.
+zz_value zz_call_native1(zz_value (*f)(zz_value, int *), zz_value a);
+zz_value zz_call_native0(zz_value (*f)(zz_value, int *));
+zz_value zz_call_native2(zz_value (*f)(zz_value, zz_value, int *), zz_value a, zz_value b);
+zz_value zz_call_native3(zz_value (*f)(zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c);
+zz_value zz_call_native4(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d);
+zz_value zz_call_native5(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e);
+zz_value zz_call_native6(zz_value (*f)(zz_value, zz_value, zz_value, zz_value, zz_value, zz_value, int *), zz_value a, zz_value b, zz_value c, zz_value d, zz_value e, zz_value g);
+zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
+                              const unsigned char *kinds, const size_t *sizes,
+                              size_t nenv, int is_green);
+
+// ---- io / math / time natives ------------------------------------------
+zz_value zz_io_println(zz_value v, int *err);
+zz_value zz_io_print(zz_value v, int *err);
+zz_value zz_io_input(zz_value prompt, int *err);
+zz_value zz_dbg(zz_value v, int *err);
+zz_value zz_assert(zz_value v, int *err);
+zz_value zz_assert_eq(zz_value a, zz_value b, int *err);
+zz_value zz_assert_ne(zz_value a, zz_value b, int *err);
+zz_value zz_assert_approx_eq(zz_value a, zz_value b, zz_value eps, int *err);
+zz_value zz_fail(zz_value v, int *err);
+zz_value zz_assert_contains(zz_value hay, zz_value needle, int *err);
+zz_value zz_assert_starts_with(zz_value s, zz_value prefix, int *err);
+zz_value zz_assert_ends_with(zz_value s, zz_value suffix, int *err);
+zz_value zz_assert_len(zz_value v, zz_value n, int *err);
+zz_value zz_assert_gt(zz_value a, zz_value b, int *err);
+zz_value zz_assert_lt(zz_value a, zz_value b, int *err);
+zz_value zz_assert_is_some(zz_value v, int *err);
+zz_value zz_assert_is_none(zz_value v, int *err);
+zz_value zz_assert_is_ok(zz_value v, int *err);
+zz_value zz_assert_is_err(zz_value v, int *err);
+zz_value zz_test_temp_dir(zz_value prefix, int *err);
+zz_value zz_test_free_port(zz_value unused, int *err);
+zz_value zz_assert_snapshot(zz_value actual, zz_value name, int *err);
+zz_value zz_black_box(zz_value v, int *err);
+zz_value zz_math_abs(zz_value v, int *err);
+zz_value zz_math_sqrt(zz_value v, int *err);
+zz_value zz_math_pow(zz_value a, zz_value b, int *err);
+zz_value zz_math_floor(zz_value v, int *err);
+zz_value zz_math_ceil(zz_value v, int *err);
+zz_value zz_math_round(zz_value v, int *err);
+zz_value zz_math_trunc(zz_value v, int *err);
+zz_value zz_math_signum(zz_value v, int *err);
+zz_value zz_math_hypot(zz_value x, zz_value y, int *err);
+zz_value zz_math_clamp(zz_value val, zz_value min, zz_value max, int *err);
+zz_value zz_math_root(zz_value x, zz_value n, int *err);
+zz_value zz_math_factorial(zz_value n, int *err);
+zz_value zz_math_gcd(zz_value a, zz_value b, int *err);
+zz_value zz_math_lcm(zz_value a, zz_value b, int *err);
+zz_value zz_math_sin(zz_value x, int *err);
+zz_value zz_math_cos(zz_value x, int *err);
+zz_value zz_math_tan(zz_value x, int *err);
+zz_value zz_math_asin(zz_value x, int *err);
+zz_value zz_math_acos(zz_value x, int *err);
+zz_value zz_math_atan(zz_value x, int *err);
+zz_value zz_math_sin_deg(zz_value x, int *err);
+zz_value zz_math_cos_deg(zz_value x, int *err);
+zz_value zz_math_tan_deg(zz_value x, int *err);
+zz_value zz_math_to_radians(zz_value deg, int *err);
+zz_value zz_math_to_degrees(zz_value rad, int *err);
+zz_value zz_math_log(zz_value x, int *err);
+zz_value zz_math_log10(zz_value x, int *err);
+zz_value zz_math_exp(zz_value x, int *err);
+zz_value zz_math_random(zz_value unused, int *err);
+zz_value zz_math_is_nan(zz_value x, int *err);
+zz_value zz_math_is_inf(zz_value x, int *err);
+zz_value zz_math_pi(zz_value unused, int *err);
+zz_value zz_math_e(zz_value unused, int *err);
+zz_value zz_math_tau(zz_value unused, int *err);
+zz_value zz_math_inf(zz_value unused, int *err);
+zz_value zz_math_nan(zz_value unused, int *err);
+zz_value zz_math_isqrt(zz_value n, int *err);
+zz_value zz_math_mean(zz_value list, int *err);
+zz_value zz_math_median(zz_value list, int *err);
+zz_value zz_math_rand_range(zz_value min, zz_value max, int *err);
+zz_value zz_math_dot_product(zz_value v1, zz_value v2, int *err);
+zz_value zz_math_magnitude(zz_value v, int *err);
+zz_value zz_math_matrix_mul(zz_value m1, zz_value m2, int *err);
+zz_value zz_time_now_ms(zz_value unused, int *err);
+zz_value zz_time_sleep_ms(zz_value ms, int *err);
+
+// ---- type casts ---------------------------------------------------------
+zz_value zz_typeof(zz_value v, int *err);
+zz_value zz_clone_deep(zz_value v, int *err);
+zz_value zz_int_cast(zz_value v, int *err);
+zz_value zz_float_cast(zz_value v, int *err);
+zz_value zz_bool_cast(zz_value v, int *err);
+
+// ---- env natives --------------------------------------------------------
+zz_value zz_env_get(zz_value name, int *err);
+zz_value zz_env_var(zz_value name, int *err);
+zz_value zz_env_args(zz_value unused, int *err);
+// Cross-platform environment + OS identity (mirrors `natives/env`).
+zz_value zz_env_set(zz_value name, zz_value val, int *err);
+zz_value zz_env_remove(zz_value name, int *err);
+zz_value zz_env_vars(zz_value unused, int *err);
+zz_value zz_env_cwd(zz_value unused, int *err);
+zz_value zz_env_set_cwd(zz_value path, int *err);
+zz_value zz_env_exe_path(zz_value unused, int *err);
+zz_value zz_env_home_dir(zz_value unused, int *err);
+zz_value zz_env_temp_dir(zz_value unused, int *err);
+zz_value zz_env_user(zz_value unused, int *err);
+zz_value zz_env_os(zz_value unused, int *err);
+zz_value zz_env_arch(zz_value unused, int *err);
+
+// ---- fs natives ---------------------------------------------------------
+// Comprehensive non-blocking filesystem (see core.c): every fallible op
+// returns `Result<_, str>` with unified `fs:<op>:<code>: <path>`
+// diagnostics (never raw `strerror` text), so the VM and AOT engines agree
+// byte-for-byte. Blocking syscalls top up the executor when running on a
+// worker thread, so the scheduler never stalls; the public API stays
+// synchronous-looking (`fs.read_to_string(path)`).
+zz_value zz_fs_read(zz_value path, int *err);
+zz_value zz_fs_read_bytes(zz_value path, int *err);
+zz_value zz_fs_write(zz_value path, zz_value data, int *err);
+zz_value zz_fs_append(zz_value path, zz_value data, int *err);
+zz_value zz_fs_copy(zz_value src, zz_value dst, int *err);
+zz_value zz_fs_move(zz_value src, zz_value dst, int *err);
+zz_value zz_fs_exists(zz_value path, int *err);
+zz_value zz_fs_is_file(zz_value path, int *err);
+zz_value zz_fs_is_dir(zz_value path, int *err);
+zz_value zz_fs_remove(zz_value path, int *err);
+zz_value zz_fs_mkdir(zz_value path, int *err);
+zz_value zz_fs_mkdir_all(zz_value path, int *err);
+zz_value zz_fs_readdir(zz_value path, int *err);
+zz_value zz_fs_read_dir(zz_value path, int *err);
+zz_value zz_fs_remove_dir_all(zz_value path, int *err);
+zz_value zz_fs_walk_dir(zz_value path, int *err);
+zz_value zz_fs_stat(zz_value path, int *err);
+zz_value zz_fs_scan_counts(
+    zz_value path,
+    zz_value markers,
+    zz_value bstart,
+    zz_value bend,
+    zz_value nested,
+    zz_value whole,
+    int *err
+);
+zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err);
+zz_value zz_fs_open(zz_value path, zz_value mode, int *err);
+zz_value zz_fs_read_chunk(zz_value f, zz_value n, int *err);
+zz_value zz_fs_read_chunk_bytes(zz_value f, zz_value n, int *err);
+zz_value zz_fs_write_chunk(zz_value f, zz_value data, int *err);
+zz_value zz_fs_seek(zz_value f, zz_value pos, int *err);
+zz_value zz_fs_flush(zz_value f, int *err);
+zz_value zz_fs_close(zz_value f, int *err);
+// Pure cross-platform path lexing (no I/O; mirrors `natives/fs/path.rs`).
+zz_value zz_fs_normalize(zz_value path, int *err);
+zz_value zz_fs_join(zz_value a, zz_value b, int *err);
+zz_value zz_fs_basename(zz_value path, int *err);
+zz_value zz_fs_dirname(zz_value path, int *err);
+zz_value zz_fs_is_absolute(zz_value path, int *err);
+zz_value zz_fs_extension(zz_value path, int *err);
+
+// ---- virtual filesystem providers (mirrors `natives/fs/vfs.rs`) ------------
+zz_value zz_fs_osfs(zz_value unused, int *err);
+zz_value zz_fs_memfs(zz_value unused, int *err);
+zz_value zz_fs_tarfs(zz_value path, int *err);
+zz_value zz_fs_embedfs(zz_value unused, int *err);
+zz_value zz_fs_read_to_string_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_read_bytes_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_write_at(zz_value fsys, zz_value path, zz_value data, int *err);
+zz_value zz_fs_append_at(zz_value fsys, zz_value path, zz_value data, int *err);
+zz_value zz_fs_exists_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_is_file_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_is_dir_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_read_dir_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_mkdir_all_at(zz_value fsys, zz_value path, int *err);
+zz_value zz_fs_remove_file_at(zz_value fsys, zz_value path, int *err);
+// Link `--embed` assets into the process-wide embed table (called from a
+// static initializer in the generated embed C, or directly in tests).
+void zz_embed_register(const char *name, const unsigned char *data, size_t len);
+
+// ---- encoding natives ---------------------------------------------------
+zz_value zz_encoding_url_encode(zz_value s, int *err);
+zz_value zz_encoding_url_decode(zz_value s, int *err);
+zz_value zz_encoding_base64_encode(zz_value s, int *err);
+zz_value zz_encoding_base64_decode(zz_value s, int *err);
+zz_value zz_encoding_hex_encode(zz_value s, int *err);
+zz_value zz_encoding_hex_decode(zz_value s, int *err);
+
+// ---- channels / spawn ---------------------------------------------------
+// Deep copy for thread boundaries (snapshot isolation): heap-owned,
+// fully independent of the source (arena pointers healed, closure cells
+// duplicated). Handles are shared, never duplicated.
+zz_value zz_value_dup(zz_value v);
+zz_value zz_chan_new(zz_value unused, int *err);
+zz_value zz_chan_send(zz_value chan, zz_value val, int *err);
+zz_value zz_chan_recv(zz_value chan, int *err);
+zz_value zz_chan_try_recv(zz_value chan, int *err);
+zz_value zz_spawn(zz_value fn, int *err);
+// Spawn fast path for closure literals: builds the worker-owned rep
+// directly from the call-site capture arrays (no intermediate rep).
+// `is_green` marks suspendable bodies; capture arrays are borrowed.
+zz_value zz_spawn_ex(zz_dispatch_fn fn, void **cells,
+                     const unsigned char *kinds, const size_t *sizes,
+                     size_t nenv, int is_green, int *err);
+zz_value zz_task_join_recv(zz_value join, int *err);
+zz_value zz_task_try_join(zz_value join, int *err);
+// Cooperative safepoint for loop tops (emitted by the AOT lowerer for
+// every `for`/`while`). Budget-guarded courtesy yield: lets sibling task
+// threads run on quantum expiry. No task switch — C frames cannot suspend
+// like VM frames (see executor docs for the VM counterpart).
+void zz_safepoint(void);
+
+// ---- std.net TCP --------------------------------------------------------
+zz_value zz_tcp_listen(zz_value addr, int *err);
+zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err);
+zz_value zz_tcp_accept(zz_value listener, int *err);
+zz_value zz_tcp_write(zz_value stream, zz_value data, int *err);
+zz_value zz_tcp_read(zz_value stream, zz_value max_bytes, int *err);
+zz_value zz_tcp_readline(zz_value stream, int *err);
+zz_value zz_tcp_read_bytes(zz_value stream, zz_value max_bytes, int *err);
+zz_value zz_tcp_read_exact(zz_value stream, zz_value n, int *err);
+zz_value zz_tcp_write_bytes(zz_value stream, zz_value data, int *err);
+zz_value zz_tcp_shutdown(zz_value stream, int *err);
+zz_value zz_tcp_peer_addr(zz_value stream, int *err);
+zz_value zz_tcp_local_addr(zz_value stream, int *err);
+zz_value zz_tcp_set_read_timeout(zz_value stream, zz_value ms, int *err);
+zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err);
+// ---- std.cell shared-mutable slots -------------------------------------
+// Pool of retained zz_value slots addressed by small integer ids. VM and
+// AOT keep separate pools with identical semantics (same convention as
+// the old TCP split: different reps, one contract). All ops lock once.
+zz_value zz_cell_new(zz_value v, int *err);
+zz_value zz_cell_get(zz_value id, int *err);
+zz_value zz_cell_set(zz_value id, zz_value v, int *err);
+zz_value zz_cell_drop(zz_value id, int *err);
+
+// http AOT server — route table with ZZ-closure handlers; http.test
+// dispatches in-process (epoll workers serve a static OK until Step 2).
+// All functions follow the native call convention: (zz_value... , int *err)
+zz_value zz_http_server(zz_value unused, int *err);  // 0 args → unused=unit
+zz_value zz_http_route_get(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_post(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_put(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_delete(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route(zz_value server, zz_value method, zz_value path, zz_value handler, int *err);  // 4 args, validated
+// `_fast` twins: identical ABI, handler provably ignores its request arg.
+zz_value zz_http_route_get_fast(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_post_fast(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_put_fast(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_delete_fast(zz_value server, zz_value path, zz_value handler, int *err);
+zz_value zz_http_route_fast(zz_value server, zz_value method, zz_value path, zz_value handler, int *err);
+zz_value zz_http_pipe(zz_value server, zz_value middleware, int *err);  // 2 args
+zz_value zz_http_pipe_post(zz_value server, zz_value middleware, int *err);  // 2 args
+zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
+zz_value zz_http_rate_limit(zz_value server, zz_value max_requests, zz_value window_ms, int *err);  // 3 args
+zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
+zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *err);  // 3 args
+zz_value zz_http_serve_dir_at(zz_value server, zz_value prefix, zz_value dir, int *err);  // 3 args
+zz_value zz_http_serve_dir(zz_value server, zz_value dir, int *err);  // 2 args → prefix "/"
+zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
+zz_value zz_http_test_req(zz_value server, zz_value method, zz_value path,
+                          zz_value headers, zz_value body, int *err);  // 5 args
+zz_value zz_http_handle(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
+zz_value zz_http_respond(zz_value status, zz_value body, zz_value headers, int *err);  // 3 args
+zz_value zz_http_with_headers(zz_value resp, zz_value extra_headers_dict, int *err);  // 3 args
+zz_value zz_http_param(zz_value req, zz_value name, int *err);  // 2 args
+zz_value zz_http_query(zz_value req, int *err);  // 1 arg
+zz_value zz_http_header(zz_value req, zz_value name, int *err);  // 2 args
+zz_value zz_http_body_json(zz_value req, int *err);  // 1 arg
+zz_value zz_http_body_form(zz_value req, int *err);  // 1 arg
+zz_value zz_http_body_bytes(zz_value req, int *err);  // 1 arg
+
+// HTTP client stubs (native mode — returns mock responses)
+zz_value zz_http_get(zz_value url, zz_value headers, int *err);
+zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
+zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers, zz_value body, zz_value timeout_ms, int *err);  // 5 args
+zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *err);  // 3 args
+zz_value zz_http_response_status(zz_value resp, int *err);
+zz_value zz_http_response_text(zz_value resp, int *err);
+zz_value zz_http_response_json(zz_value resp, int *err);
+zz_value zz_http_response_headers(zz_value resp, int *err);
+
+// ---- SQL backends (sqlite embedded, postgres via staticlib) ----
+// Opaque handle: a heap `zz_db_handle` recording the backend (sqlite3*
+// or staticlib pool id) boxed as ZZ_DB. `sqlz.open` sniffs the scheme
+// once (postgres:// → PG); query/exec/close dispatch on the handle.
+// The handle is refcounted: the last reference closes the backend.
+// query/exec take a static SQL template (with ?N placeholders; the PG
+// path rewrites to $N) plus bound zz_values.
+// Native call convention: (args..., int *err) so codegen can route via
+// zz_call_nativeN. exec/query pack (db, sql_str, binds_array).
+zz_value zz_db_open(zz_value path, int *err);
+zz_value zz_pg_connect(zz_value info, int *err);
+zz_value zz_db_exec(zz_value db, zz_value sql, zz_value binds, int *err);
+zz_value zz_db_query(zz_value db, zz_value sql, zz_value binds, int *err);
+zz_value zz_db_close(zz_value db, int *err);
+// Low-level FFI used by emit_db_call's inline path (kept for tests).
+zz_value zz_db_exec_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err);
+zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t nbinds, int *err);
+
+// Transaction error flag — set by zz_db_exec_raw / zz_db_query_raw when
+// a statement fails.  Cleared by the inlined transaction prologue.
+void zz_tx_set_error(void);
+void zz_tx_reset_error(void);
+int  zz_tx_has_error(void);
+
+// ---- option / result ----------------------------------------------------
+zz_value zz_option_expect(zz_value opt, zz_value msg, int *err);
+zz_value zz_result_expect(zz_value res, zz_value msg, int *err);
+zz_value zz_option_unwrap(zz_value opt, int *err);
+zz_value zz_option_unwrap_or(zz_value opt, zz_value def, int *err);
+zz_value zz_result_unwrap(zz_value res, int *err);
+zz_value zz_result_unwrap_or(zz_value res, zz_value def, int *err);
+
+// ---- runtime glue ------------------------------------------------------
+// Generated code calls zz_main (top-level statements) then zz_call_main.
+int zz_run(void);
+
+// Maps `main()`'s return value to a process exit code (`.err` → 1).
+int zz_main_result_code(zz_value r);
+
+// Externs defined by generated code:
+extern void zz_main(void);
+extern int zz_call_main(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // ZZ_RUNTIME_CORE_H
