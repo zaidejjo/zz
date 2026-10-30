@@ -69,8 +69,21 @@ pub fn build_native(
     target: Option<&str>,
     out_path: &std::path::Path,
 ) -> Result<LoweredC, BuildError> {
-    let verbose = opts.verbose;
-    let t_lower = std::time::Instant::now();
+    // `compile::build` is exactly "detect a provider, then build"; mapping
+    // the missing-provider case here keeps the single implementation below.
+    let clang = compile::detect_clang().ok_or(BuildError::NoClang)?;
+    build_native_with(tp, reach, entry_main, opts, target, &clang, out_path)
+}
+
+/// Lower a pruned program in precompiled-runtime mode.
+///
+/// All native build entry points share this: the lowering mode and the
+/// `Lowerer` setup must not drift between the single-TU and per-unit paths.
+fn precompiled_lowerer(
+    tp: &zz_hir::TypedProgram,
+    reach: &zz_hir::ReachableSet,
+    entry_main: &str,
+) -> Lowerer {
     let mut lowerer = Lowerer::new(
         reach.funcs.clone(),
         reach.natives.clone(),
@@ -78,24 +91,7 @@ pub fn build_native(
         tp.clone(),
     );
     lowerer.set_precompiled(true);
-    let lowered = lowerer.lower();
-    if verbose {
-        eprintln!("zz: timing lower={}ms", t_lower.elapsed().as_millis());
-    }
-    // Programs calling Rust-staticlib natives need the native runtime link
-    // even when the caller did not opt in explicitly.
-    let mut opts = opts;
-    opts.native_rt = opts.native_rt || lowered.needs_native_rt;
-    opts.pg_link = opts.pg_link || lowered.needs_pg_link;
-    opts.float_link = opts.float_link || lowered.needs_float_fmt;
-    opts.curl_link = opts.curl_link || lowered.needs_curl;
-    opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
-    let t_cc = std::time::Instant::now();
-    compile::build(&lowered.source, out_path, opts, target)?;
-    if verbose {
-        eprintln!("zz: timing clang_link={}ms", t_cc.elapsed().as_millis());
-    }
-    Ok(lowered)
+    lowerer
 }
 
 /// Per-module native build: lower to namespaced translation units and
@@ -116,23 +112,12 @@ pub fn build_native_units_with(
     let entry_ns = units::ns_of(entry_main).to_string();
     let verbose = opts.verbose;
     let t_lower = std::time::Instant::now();
-    let mut lowerer = Lowerer::new(
-        reach.funcs.clone(),
-        reach.natives.clone(),
-        entry_main.to_string(),
-        tp.clone(),
-    );
-    lowerer.set_precompiled(true);
-    let mut lowered = lowerer.lower_units(&entry_ns);
+    let mut lowered = precompiled_lowerer(tp, reach, entry_main).lower_units(&entry_ns);
     if verbose {
         eprintln!("zz: timing lower_units={}ms", t_lower.elapsed().as_millis());
     }
     let mut opts = opts;
-    opts.native_rt = opts.native_rt || lowered.needs_native_rt;
-    opts.pg_link = opts.pg_link || lowered.needs_pg_link;
-    opts.float_link = opts.float_link || lowered.needs_float_fmt;
-    opts.curl_link = opts.curl_link || lowered.needs_curl;
-    opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+    lowered.apply_link_needs(&mut opts);
     if !opts.embed_assets.is_empty() {
         let tables = compile::embed_c(&opts.embed_assets);
         match lowered.units.iter_mut().find(|u| u.ns == lowered.entry_ns) {
@@ -172,23 +157,12 @@ pub fn build_native_with(
 ) -> Result<LoweredC, BuildError> {
     let verbose = opts.verbose;
     let t_lower = std::time::Instant::now();
-    let mut lowerer = Lowerer::new(
-        reach.funcs.clone(),
-        reach.natives.clone(),
-        entry_main.to_string(),
-        tp.clone(),
-    );
-    lowerer.set_precompiled(true);
-    let lowered = lowerer.lower();
+    let lowered = precompiled_lowerer(tp, reach, entry_main).lower();
     if verbose {
         eprintln!("zz: timing lower={}ms", t_lower.elapsed().as_millis());
     }
     let mut opts = opts;
-    opts.native_rt = opts.native_rt || lowered.needs_native_rt;
-    opts.pg_link = opts.pg_link || lowered.needs_pg_link;
-    opts.float_link = opts.float_link || lowered.needs_float_fmt;
-    opts.curl_link = opts.curl_link || lowered.needs_curl;
-    opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+    lowered.apply_link_needs(&mut opts);
     let t_cc = std::time::Instant::now();
     compile::build_with(&lowered.source, out_path, opts, target, clang)?;
     if verbose {
