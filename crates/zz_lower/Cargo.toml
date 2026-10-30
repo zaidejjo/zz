@@ -3,6 +3,7 @@ name = "zz_lower"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "HIR→C lowering for the ZZ native (AOT) backend"
 
 [dependencies]
 zz_codegen_types = { path = "../zz_codegen_types" }

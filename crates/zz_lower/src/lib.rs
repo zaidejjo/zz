@@ -88,18 +88,7 @@ pub(crate) fn type_has_float(t: &zz_checker::Type) -> bool {
 }
 
 /// Mangle a zz qualified name to a C identifier.
-pub fn mangle(name: &str) -> String {
-    name.replace('.', "__")
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
+pub use zz_codegen_types::mangle;
 
 /// Lower a `std.math` numeric constant path (`std.math.PI`, `math.PI`,
 /// or bare `PI` from `import std.math(PI)`) to a `zz_float(...)` literal.

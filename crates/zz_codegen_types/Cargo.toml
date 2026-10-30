@@ -3,5 +3,6 @@ name = "zz_codegen_types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Shared build types for the ZZ native backend (options, errors, compiler handles)"
 
 [dependencies]
