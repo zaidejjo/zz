@@ -1563,6 +1563,13 @@ parity_strict!(
     "stdlib",
     "http_fetch_test.zz"
 );
+// One program that trips every AOT link gate at once (float staticlib,
+// sqlite, curl): guards `apply_link_needs` against a dropped gate.
+parity_strict!(
+    parity_stdlib_link_gates_test,
+    "stdlib",
+    "link_gates_test.zz"
+);
 
 // --- Error fixture: both engines must error on missing struct field ---
 parity_strict_error!(parity_err_missing_field, "missing_field.zz");
