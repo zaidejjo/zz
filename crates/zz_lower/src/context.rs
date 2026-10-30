@@ -982,11 +982,11 @@ impl Lowerer {
     ///   2. Inside a loop body whose sub-arena is reset every iteration,
     ///      non-escaping allocations go to that sub-arena so the buffer is
     ///      reused across iterations with zero heap growth.
+    ///   3. Otherwise, non-escaping allocations go to the per-function
+    ///      arena (`_func_arena`), freed in O(1) at function return.
     ///
-    /// Anything else uses the heap. (There is no function-level arena:
-    /// `emit_function` deliberately declares none, so returning a
-    /// function-arena name here would emit `&_arena` with no binding —
-    /// an undeclared-identifier C error.)
+    /// Anything that escapes uses the heap. (Green closures always heap:
+    /// stack arenas cannot survive a suspend.)
     ///
     /// Returns the C arena identifier (without `&`) or None for heap.
     pub(crate) fn arena_for(&self, span: zz_frontend::span::Span) -> Option<String> {
@@ -998,10 +998,14 @@ impl Lowerer {
         if self.is_escaping(span) {
             return None;
         }
+        // Innermost loop sub-arena takes priority (reset per iteration).
         if let Some(arena_name) = self.loop_arenas.borrow().last() {
             return Some(arena_name.clone());
         }
-        None
+        // Function-level arena: every NonEscaping allocation in a function
+        // body is bump-allocated here and reclaimed in O(1) at return via
+        // the `cleanup(zz_arena_destroy)` attribute on `_func_arena`.
+        Some("_func_arena".to_string())
     }
 
     /// Open a loop-body scope. Returns a marker for `loop_scope_end`.

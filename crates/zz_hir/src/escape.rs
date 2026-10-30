@@ -95,7 +95,9 @@ pub fn analyze(tp: &TypedProgram) -> EscapeResult {
 }
 
 /// After the first pass, walk declarations and mark the initializer of any
-/// escaped variable as escaping.
+/// escaped variable as escaping. Recurses into nested blocks (if/while/block
+/// expressions) so that a variable declared inside a nested scope and
+/// returned from there has its initializer marked escaping too.
 fn propagate_escaped(
     block: &crate::Block,
     escaped_names: &HashSet<String>,
@@ -110,9 +112,53 @@ fn propagate_escaped(
                     mark_escaping_recursive(value, tp, scope, result);
                 }
             }
-            Stmt::For { body, .. } => propagate_escaped(body, escaped_names, tp, scope, result),
+            Stmt::For { body, .. } => {
+                propagate_escaped(body, escaped_names, tp, scope, result);
+            }
+            Stmt::Expr(e) => match e {
+                Expr::If { then, els, .. } => {
+                    propagate_escaped(then, escaped_names, tp, scope, result);
+                    if let Some(el) = els.as_ref() {
+                        propagate_escaped_expr(el, escaped_names, tp, scope, result);
+                    }
+                }
+                Expr::While { body, .. } => {
+                    propagate_escaped(body, escaped_names, tp, scope, result);
+                }
+                Expr::Block(b) => {
+                    propagate_escaped(b, escaped_names, tp, scope, result);
+                }
+                _ => {}
+            },
             _ => {}
         }
+    }
+}
+
+/// Recurses into a single expression that may contain a block body (used
+/// for the `else` branch of `if`, which is `Option<Box<Expr>>` rather than
+/// a `Block`).
+fn propagate_escaped_expr(
+    e: &Expr,
+    escaped_names: &HashSet<String>,
+    tp: &TypedProgram,
+    scope: &str,
+    result: &mut EscapeResult,
+) {
+    match e {
+        Expr::If { then, els, .. } => {
+            propagate_escaped(then, escaped_names, tp, scope, result);
+            if let Some(el) = els.as_ref() {
+                propagate_escaped_expr(el, escaped_names, tp, scope, result);
+            }
+        }
+        Expr::While { body, .. } => {
+            propagate_escaped(body, escaped_names, tp, scope, result);
+        }
+        Expr::Block(b) => {
+            propagate_escaped(b, escaped_names, tp, scope, result);
+        }
+        _ => {}
     }
 }
 
@@ -171,6 +217,12 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
             if let Expr::Ident { name, .. } = target {
                 if ctx.global_names.contains(name) || ctx.param_names.contains(name) {
                     // Assigning to a param or global: the RHS escapes.
+                    mark_escaping_recursive(value, tp, ctx.func_name, result);
+                } else if ctx.escaped_names.contains(name) {
+                    // Assigning to a variable that escapes this scope (e.g.
+                    // read after the loop, returned, or passed to a callee):
+                    // the RHS outlives the loop iteration and must not be
+                    // arena-allocated (it would dangle at arena reset).
                     mark_escaping_recursive(value, tp, ctx.func_name, result);
                 } else {
                     let cls = classify_expr(value, tp, ctx);
@@ -530,6 +582,10 @@ fn expr_has_non_scalar_alloc(e: &Expr, tp: &TypedProgram, scope: &str) -> bool {
         }
     }
     match e {
+        // Strings and fmt strings allocate heap objects; inside a loop body
+        // they are freed each iteration by the injected arena reset, so they
+        // count toward `loop_spans` and route to the loop arena.
+        Expr::Str { .. } | Expr::Fmt { .. } => true,
         Expr::Array { elems, .. } => elems
             .iter()
             .any(|x| expr_has_non_scalar_alloc(x, tp, scope)),
@@ -720,17 +776,17 @@ func main() {
 "#;
         let tp = build_tp(src);
         let result = analyze(&tp);
-        // String allocations inside loop body should be escaping.
-        let has_escaping = result.classes.values().any(|c| *c == AllocClass::Escaping);
-        if !has_escaping {
-            // Debug: print all classifications.
-            for (span, cls) in &result.classes {
-                eprintln!("span {:?} -> {:?}", span, cls);
-            }
-        }
+        // Loop-aware analysis: string allocations inside a loop body are
+        // NonEscaping — the per-iteration arena reset frees them each pass,
+        // so they never accumulate. The loop's iter expression (`0..100`)
+        // is still conservatively Escaping (evaluated once per loop entry).
+        let has_non_escaping = result
+            .classes
+            .values()
+            .any(|c| *c == AllocClass::NonEscaping);
         assert!(
-            has_escaping,
-            "loop body allocations should be escaping, classes: {:?}",
+            has_non_escaping,
+            "loop body string should be NonEscaping (arena-reset per iter), classes: {:?}",
             result.classes
         );
     }
