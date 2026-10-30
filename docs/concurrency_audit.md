@@ -1,7 +1,7 @@
 # Concurrency Engine Audit — `feat/aot-direct-handoff`
 
-**Scope:** AOT executor + channels + spawn/dup/block-pool (`crates/zz_codegen/src/runtime/core.c`,
-`core.h`), green lowerer (`crates/zz_codegen/src/lower/green.rs`, `expr.rs` spawn fuse).
+**Scope:** AOT executor + channels + spawn/dup/block-pool (`crates/zz_codegen_runtime/src/runtime/core.c`,
+`core.h`), green lowerer (`crates/zz_lower/src/green.rs`, `expr.rs` spawn fuse).
 **Method:** read-only code audit + 17-test stress battery (`bench/audit/au*.zz`), release runs,
 ASan/TSan harnesses. **No implementation code was modified in this phase.**
 

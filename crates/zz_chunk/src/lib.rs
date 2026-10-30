@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 
 use zz_ir::{Const, ConstId, FuncDef, FuncId, IrType, Module, Op, Pattern, StrId};
 
-use super::lower::mangle;
+use zz_codegen_types::mangle;
 
 /// A build failure: always a coverage gap (unsupported op/shape), never
 /// silent. Messages name the offending construct for the coverage tool.
@@ -1735,12 +1735,14 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
             Some(s) => s,
             None => return Callee::Unknown,
         };
-        if super::lower::native_impl(name).is_some() || super::ffi_impl(name).is_some() {
+        if zz_codegen_ffi::native_impl(name).is_some() || zz_codegen_ffi::ffi_impl(name).is_some() {
             return Callee::Native(name.clone(), pc);
         }
         // `std.` twin spelling (e.g. `std.str.length`).
         let std_name = format!("std.{name}");
-        if super::lower::native_impl(&std_name).is_some() || super::ffi_impl(&std_name).is_some() {
+        if zz_codegen_ffi::native_impl(&std_name).is_some()
+            || zz_codegen_ffi::ffi_impl(&std_name).is_some()
+        {
             return Callee::Native(std_name, pc);
         }
         if func_names.contains(name) {
@@ -1839,14 +1841,14 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                     .collect::<Vec<_>>()
                     .join(".");
                 if !func_names.contains(&joined)
-                    && super::lower::native_impl(&joined).is_none()
-                    && super::ffi_impl(&joined).is_none()
+                    && zz_codegen_ffi::native_impl(&joined).is_none()
+                    && zz_codegen_ffi::ffi_impl(&joined).is_none()
                 {
                     // `std.` twin spelling.
                     let std_name = format!("std.{joined}");
                     if !func_names.contains(&std_name)
-                        && super::lower::native_impl(&std_name).is_none()
-                        && super::ffi_impl(&std_name).is_none()
+                        && zz_codegen_ffi::native_impl(&std_name).is_none()
+                        && zz_codegen_ffi::ffi_impl(&std_name).is_none()
                     {
                         return Err(ChunkError::name(&format!("callpath {joined}")));
                     }
@@ -1858,11 +1860,13 @@ pub fn coverage(module: &Module) -> Result<(), ChunkError> {
                     .get(name.0 as usize)
                     .map(String::as_str)
                     .unwrap_or("");
-                if super::lower::native_impl(nm).is_none() && super::ffi_impl(nm).is_none() {
+                if zz_codegen_ffi::native_impl(nm).is_none()
+                    && zz_codegen_ffi::ffi_impl(nm).is_none()
+                {
                     // `std.` twin spelling.
                     let std_name = format!("std.{nm}");
-                    if super::lower::native_impl(&std_name).is_none()
-                        && super::ffi_impl(&std_name).is_none()
+                    if zz_codegen_ffi::native_impl(&std_name).is_none()
+                        && zz_codegen_ffi::ffi_impl(&std_name).is_none()
                     {
                         return Err(ChunkError::name(&format!("native {nm}")));
                     }
@@ -2146,10 +2150,10 @@ impl<'a> Emitter<'a> {
     /// placeholder rather than a value.
     fn is_callee_name(&self, name: &str) -> bool {
         self.csyms.contains_key(name)
-            || super::lower::native_impl(name).is_some()
-            || super::ffi_impl(name).is_some()
-            || super::lower::native_impl(&format!("std.{name}")).is_some()
-            || super::ffi_impl(&format!("std.{name}")).is_some()
+            || zz_codegen_ffi::native_impl(name).is_some()
+            || zz_codegen_ffi::ffi_impl(name).is_some()
+            || zz_codegen_ffi::native_impl(&format!("std.{name}")).is_some()
+            || zz_codegen_ffi::ffi_impl(&format!("std.{name}")).is_some()
     }
 
     /// Dotted spelling of a path (`"g2"."count"` -> `g2.count`), which is
@@ -2173,18 +2177,18 @@ impl<'a> Emitter<'a> {
         if self.csyms.contains_key(dotted) {
             return Ok(CallTarget::Own(self.csym(dotted)));
         }
-        if let Some(impl_name) = super::lower::native_impl(dotted) {
+        if let Some(impl_name) = zz_codegen_ffi::native_impl(dotted) {
             return Ok(CallTarget::CImpl(impl_name, false));
         }
-        if let Some(impl_name) = super::ffi_impl(dotted) {
+        if let Some(impl_name) = zz_codegen_ffi::ffi_impl(dotted) {
             self.needs_native_rt = true;
             return Ok(CallTarget::CImpl(impl_name, true));
         }
         let std_name = format!("std.{dotted}");
-        if let Some(impl_name) = super::lower::native_impl(&std_name) {
+        if let Some(impl_name) = zz_codegen_ffi::native_impl(&std_name) {
             return Ok(CallTarget::CImpl(impl_name, false));
         }
-        if let Some(impl_name) = super::ffi_impl(&std_name) {
+        if let Some(impl_name) = zz_codegen_ffi::ffi_impl(&std_name) {
             self.needs_native_rt = true;
             return Ok(CallTarget::CImpl(impl_name, true));
         }
@@ -2196,10 +2200,10 @@ impl<'a> Emitter<'a> {
         // established for typed receivers inside functions).
         if let Some((type_ns, method)) = split_method_tail(dotted) {
             let qualified = format!("{type_ns}.{method}");
-            if let Some(impl_name) = super::lower::native_impl(&qualified) {
+            if let Some(impl_name) = zz_codegen_ffi::native_impl(&qualified) {
                 return Ok(CallTarget::CImpl(impl_name, false));
             }
-            if let Some(impl_name) = super::ffi_impl(&qualified) {
+            if let Some(impl_name) = zz_codegen_ffi::ffi_impl(&qualified) {
                 self.needs_native_rt = true;
                 return Ok(CallTarget::CImpl(impl_name, true));
             }
@@ -4522,10 +4526,7 @@ static int zz_cenum_suffix(const zz_value *v, const char *suffix) {
 /// style: the entry chunk is the whole program, like the HIR backend's
 /// `zz_main`-only shape). Fails cleanly via [`coverage`] before emitting
 /// anything.
-pub fn build_module(
-    module: &Module,
-    entry_main: &str,
-) -> Result<super::lower::LoweredC, ChunkError> {
+pub fn build_module(module: &Module, entry_main: &str) -> Result<zz_lower::LoweredC, ChunkError> {
     // The format carries the VM's fused slot fast paths (the interpreter
     // runs them natively) and its rotated `for` layout. Every pass below
     // analyses and emits the core, unrotated stream — int-twin selection,
@@ -4594,12 +4595,14 @@ pub fn build_module(
                 Some(s) => s,
                 None => return Callee::Unknown,
             };
-            if super::lower::native_impl(name).is_some() || super::ffi_impl(name).is_some() {
+            if zz_codegen_ffi::native_impl(name).is_some()
+                || zz_codegen_ffi::ffi_impl(name).is_some()
+            {
                 return Callee::Native(name.clone(), pc);
             }
             let std_name = format!("std.{name}");
-            if super::lower::native_impl(&std_name).is_some()
-                || super::ffi_impl(&std_name).is_some()
+            if zz_codegen_ffi::native_impl(&std_name).is_some()
+                || zz_codegen_ffi::ffi_impl(&std_name).is_some()
             {
                 return Callee::Native(std_name, pc);
             }
@@ -4688,7 +4691,7 @@ pub fn build_module(
     // <math.h> stay).
     let raw = format!(
         "{runtime_h}\n{chunk_pre}\n// ---- chunk-compiled code ----\n{bodies}\nvoid zz_main(void) {{\n    zz_value _t = {entry_sym}(NULL, 0);\n    zz_release(&_t);\n}}\n\nint zz_call_main(void) {{\n    zz_value _r = {main_call};\n    return zz_main_result_code(_r);\n}}\n",
-        runtime_h = crate::RUNTIME_H,
+        runtime_h = zz_codegen_runtime::RUNTIME_H,
         chunk_pre = CHUNK_PREAMBLE,
     );
     let source = raw
@@ -4699,13 +4702,13 @@ pub fn build_module(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(super::lower::LoweredC {
+    Ok(zz_lower::LoweredC {
         source,
-        needs_native_rt: em.needs_native_rt || crate::ffi::needs_native_rt(&native_names),
-        needs_pg_link: crate::ffi::needs_pg_link(&native_names),
+        needs_native_rt: em.needs_native_rt || zz_codegen_ffi::needs_native_rt(&native_names),
+        needs_pg_link: zz_codegen_ffi::needs_pg_link(&native_names),
         needs_float_fmt: em.needs_float_fmt,
-        needs_curl: crate::ffi::needs_curl_link(&native_names),
-        needs_sqlite: crate::ffi::needs_sqlite_link(&native_names),
+        needs_curl: zz_codegen_ffi::needs_curl_link(&native_names),
+        needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&native_names),
     })
 }
 

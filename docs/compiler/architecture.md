@@ -8,7 +8,7 @@ flowchart LR
     CH --> HIR[zz_hir typed HIR]
     HIR --> IR[zz_ir portable IR<br/>codec disasm callgraph DCE]
     IR --> RT[zz_runtime<br/>tree-walker + VM]
-    IR --> CG[zz_codegen<br/>HIR-C chunk-C clang]
+    IR --> CG[zz_codegen facade<br/>zz_lower zz_chunk<br/>zz_codegen_cc]
     SL[zz_stdlib<br/>VM + C twins] --> RT
     SL --> CG
     RT --> CLI[zz_cli]
@@ -40,7 +40,12 @@ flowchart LR
 | `zz_checker` | unification type checker with inference |
 | `zz_hir` / `zz_ir` | typed HIR, portable IR (codec + disassembler), callgraph + DCE |
 | `zz_runtime` | tree-walker interpreter + bytecode VM + C-ABI bridge (`c_abi.rs`) |
-| `zz_codegen` | AOT: HIR→C (`lower/`) + chunk→C (`chunk.rs`), Clang driver, PGO, cross targets |
+| `zz_codegen` | AOT facade + driver: `lower_only`, `build_native*`, `build_chunk_module` |
+| `zz_lower` / `zz_chunk` | HIR→C lowering / unified-IR→C lowering |
+| `zz_codegen_cc` | Clang/gcc driver, flag matrix, runtime-archive cache, PGO, cross targets |
+| `zz_codegen_ffi` | native + staticlib symbol tables, `extern` preludes, link metadata |
+| `zz_codegen_runtime` | embedded C runtime (concatenated TU) + content-hash rebuild guard |
+| `zz_codegen_types` | `BuildOptions`, `PgoMode`, `EmbedAsset`, `BuildError`, `Clang`, `ClangProvider` |
 | `zz_stdlib` | 691 entries (465 `std.*` fns + builtins/aliases/consts) across 42 groups: VM registry + C twins + Rust staticlib (`ffi.rs`), see [reference](../stdlib/reference.md) |
 | `zz_cli` (`zz`) | run/build/test/check/fix/fmt, REPL, loader + module cache, doctor, upgrade |
 | `zz_lsp` / `zz-dap` | editor server, debug adapter |
@@ -53,8 +58,8 @@ Miss one and CI fails:
 
 1. `zz_stdlib/src/funcs.rs` — checker signature (+ count assertion).
 2. `zz_stdlib/src/natives/` — Rust VM impl.
-3. `zz_codegen/src/runtime/*.c` + `.h` — C twin, byte-identical semantics.
-4. `zz_codegen/src/lower/mod.rs` (`native_impl`) — AOT name mapping.
+3. `crates/zz_codegen_runtime/src/runtime/*.c` + `.h` — C twin, byte-identical semantics.
+4. `crates/zz_codegen_ffi/src/natives.rs` (`native_impl`) — AOT name mapping.
 5. Fixture `tests/fixtures/stdlib/<name>_test.zz` + `e2e.rs` + `dual_engine_parity.rs`
    (+ `batch_lists.rs` or `EXCLUDED` with reason).
 

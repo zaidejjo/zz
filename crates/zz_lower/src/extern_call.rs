@@ -32,7 +32,7 @@ use super::context::{scalar_operand_c, scalar_operand_type};
 use super::{Lowerer, NameCtx};
 
 /// True when `name` is usable as a C identifier (an extern symbol).
-pub(super) fn c_ident_valid(name: &str) -> bool {
+pub(crate) fn c_ident_valid(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -79,7 +79,7 @@ fn c_abi_types(ty: &zz_checker::Type) -> Option<Vec<&'static str>> {
 /// Map an extern signature to C declaration types: `(return, params)`.
 /// Returns `None` when any type cannot cross the boundary; callers fall
 /// back to `zz_unit()` in that case.
-pub(super) fn extern_c_sig(sig: &zz_checker::FuncSig) -> Option<(String, Vec<String>)> {
+pub(crate) fn extern_c_sig(sig: &zz_checker::FuncSig) -> Option<(String, Vec<String>)> {
     // `Str` returns need length-aware boxing the boundary does not
     // provide: reject them here (calls degrade to `zz_unit()`).
     if matches!(sig.ret, zz_checker::Type::Str) {
@@ -102,7 +102,7 @@ pub(super) fn extern_c_sig(sig: &zz_checker::FuncSig) -> Option<(String, Vec<Str
 /// `int64_t zimg_resize(int64_t, double);` for ZZ `zimg.resize`.
 /// Returns `None` when the symbol or signature cannot cross the boundary
 /// (caller skips the declaration; calls to it fall back to `zz_unit()`).
-pub(super) fn extern_decl(zz_name: &str, sig: &zz_checker::FuncSig) -> Option<String> {
+pub(crate) fn extern_decl(zz_name: &str, sig: &zz_checker::FuncSig) -> Option<String> {
     let c_sym = sig.c_symbol(zz_name);
     if !c_ident_valid(&c_sym) {
         return None;
@@ -123,7 +123,7 @@ impl Lowerer {
     /// boxed values field-extract), pointer arguments cross as
     /// `(void *)(intptr_t)<int>`, and the return value is boxed back into
     /// a `zz_value`. Anything unsupported degrades to `zz_unit()`.
-    pub(super) fn emit_extern_call(
+    pub(crate) fn emit_extern_call(
         &self,
         cname: &str,
         sig: &zz_checker::FuncSig,
@@ -320,7 +320,7 @@ impl Lowerer {
     /// Emit `extern` declarations for every reachable `is_extern` plugin
     /// function. Empty when none, keeping generated C for existing
     /// programs byte-identical.
-    pub(super) fn extern_prelude(&self) -> String {
+    pub(crate) fn extern_prelude(&self) -> String {
         let mut names: Vec<&String> = self
             .reachable_funcs
             .iter()

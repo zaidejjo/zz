@@ -12,7 +12,7 @@ path.
 
 ## 2. Mechanism
 
-**Native** (`crates/zz_codegen/{lower/move_elide.rs,runtime/collections.c}`):
+**Native** (`crates/zz_lower/src/move_elide.rs` + `crates/zz_codegen_runtime/src/runtime/collections.c`):
 `zz_vec_push_take` / `zz_object_push_field_take` plus `zz_len_field`
 (reads a field length without the getter's retaining clone). A take
 fires only when the buffer counter proves unique ownership

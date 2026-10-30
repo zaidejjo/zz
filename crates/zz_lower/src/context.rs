@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use zz_frontend::ast::{Expr, ImportItem, Pattern, Stmt};
 
-use super::mangle;
+use zz_codegen_types::mangle;
 
 /// Extract the creation counter from a C identifier for scope tracking.
 /// Plain locals are `vN`; owner-cell derefs are `(*_cellN)`; green frame
@@ -136,7 +136,7 @@ pub struct NameCtx {
 }
 
 impl NameCtx {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         NameCtx {
             stack: HashMap::new(),
             counter: 0,
@@ -157,14 +157,14 @@ impl NameCtx {
 
     /// Generate a fresh C identifier without entering a scope.
     /// Used for temporaries that need a unique name but aren't bound to a zz variable.
-    pub(super) fn fresh(&mut self, prefix: &str) -> String {
+    pub(crate) fn fresh(&mut self, prefix: &str) -> String {
         let cid = format!("{prefix}{}", self.counter);
         self.counter += 1;
         cid
     }
 
     /// Enter a new scope for `name`, returning the fresh C identifier.
-    pub(super) fn enter(&mut self, name: &str) -> String {
+    pub(crate) fn enter(&mut self, name: &str) -> String {
         let cid = format!("v{}", self.counter);
         self.counter += 1;
         self.stack
@@ -175,7 +175,7 @@ impl NameCtx {
     }
 
     /// Enter a new scope for `name` with a specific C type.
-    pub(super) fn enter_with_type(&mut self, name: &str, ctype: &str) -> String {
+    pub(crate) fn enter_with_type(&mut self, name: &str, ctype: &str) -> String {
         let cid = format!("v{}", self.counter);
         self.counter += 1;
         self.stack
@@ -186,7 +186,7 @@ impl NameCtx {
     }
 
     /// Register a module-level global. Locals (stack) always shadow globals.
-    pub(super) fn insert_global(
+    pub(crate) fn insert_global(
         &mut self,
         name: &str,
         cid: &str,
@@ -203,7 +203,7 @@ impl NameCtx {
     /// Look up the variable's C identifier: locals, then closure captures,
     /// then module globals. Cell locals hold their deref expr (`(*_cellN)`)
     /// as the C id so reads/writes transparently go through shared cells.
-    pub(super) fn lookup(&self, name: &str) -> Option<&str> {
+    pub(crate) fn lookup(&self, name: &str) -> Option<&str> {
         if let Some((ident, _)) = self.stack.get(name).and_then(|vec| vec.last()) {
             return Some(ident.as_str());
         }
@@ -214,7 +214,7 @@ impl NameCtx {
     }
 
     /// Look up the variable's C type (same fallback chain as [`lookup`]).
-    pub(super) fn lookup_type(&self, name: &str) -> Option<&str> {
+    pub(crate) fn lookup_type(&self, name: &str) -> Option<&str> {
         if let Some((_, typ)) = self.stack.get(name).and_then(|vec| vec.last()) {
             return Some(typ.as_str());
         }
@@ -225,12 +225,12 @@ impl NameCtx {
     }
 
     /// Deref expr for an owner cell pointer of C type `ctype`.
-    pub(super) fn owner_deref(ptr: &str) -> String {
+    pub(crate) fn owner_deref(ptr: &str) -> String {
         format!("(*{ptr})")
     }
 
     /// Deref expr for a closure-env slot of C type `ctype`.
-    pub(super) fn cap_deref_of(ptr: &str, ctype: &str) -> String {
+    pub(crate) fn cap_deref_of(ptr: &str, ctype: &str) -> String {
         format!("(*({ctype}*){ptr})")
     }
 
@@ -238,7 +238,7 @@ impl NameCtx {
     /// holding the deref expr (transparent at use sites) and records the
     /// pointer for environment building. `ctr` must be the current
     /// [`counter`](Self::counter) so `pop_scope` retires it with its scope.
-    pub(super) fn enter_cell(
+    pub(crate) fn enter_cell(
         &mut self,
         name: &str,
         ptr: &str,
@@ -261,7 +261,7 @@ impl NameCtx {
     /// Used for guard-hoisted payload bindings, whose declaration text
     /// is emitted before the arm chain (so every arm condition sees it)
     /// while registration happens per-arm, just before its guard.
-    pub(super) fn bind_existing(&mut self, name: &str, cid: String, ctype: &str) {
+    pub(crate) fn bind_existing(&mut self, name: &str, cid: String, ctype: &str) {
         self.stack
             .entry(name.to_string())
             .or_default()
@@ -269,7 +269,7 @@ impl NameCtx {
     }
 
     /// Pop one owner-cell record for `name` (mirrors a manual [`leave`](Self::leave)).
-    pub(super) fn pop_cell(&mut self, name: &str) {
+    pub(crate) fn pop_cell(&mut self, name: &str) {
         if let Some(vec) = self.cell_ptrs.get_mut(name) {
             vec.pop();
             if vec.is_empty() {
@@ -280,7 +280,7 @@ impl NameCtx {
 
     /// Whether the active binding for `name` is an owner cell (i.e. the
     /// stack top holds the cell's deref, not a shadowing plain local).
-    pub(super) fn is_owner_cell(&self, name: &str) -> bool {
+    pub(crate) fn is_owner_cell(&self, name: &str) -> bool {
         let top_deref = self
             .stack
             .get(name)
@@ -297,7 +297,7 @@ impl NameCtx {
     /// Shared-cell pointer expr for `name`: the owner cell when active,
     /// else an outer closure capture. Used to build nested environments.
     /// Returns `None` for plain locals, globals, and unknowns.
-    pub(super) fn cell_ptr(&self, name: &str) -> Option<String> {
+    pub(crate) fn cell_ptr(&self, name: &str) -> Option<String> {
         if self.is_owner_cell(name) {
             return self
                 .cell_ptrs
@@ -315,7 +315,7 @@ impl NameCtx {
     /// Register a closure-environment capture: value reads use `deref`
     /// (transparent via [`lookup`](Self::lookup)); `ptr` is shared into
     /// nested environments.
-    pub(super) fn insert_capture(
+    pub(crate) fn insert_capture(
         &mut self,
         name: &str,
         ptr: &str,
@@ -334,14 +334,14 @@ impl NameCtx {
     /// Advance and return the next fresh counter value. Used by helpers
     /// that emit a family of related identifiers (e.g., stack-promoted
     /// arrays use three identifiers sharing one counter value).
-    pub(super) fn bump_counter(&mut self) -> usize {
+    pub(crate) fn bump_counter(&mut self) -> usize {
         let c = self.counter;
         self.counter += 1;
         c
     }
 
     /// Leave the current scope for `name`.
-    pub(super) fn leave(&mut self, name: &str) {
+    pub(crate) fn leave(&mut self, name: &str) {
         if let Some(vec) = self.stack.get_mut(name) {
             vec.pop();
         }
@@ -350,7 +350,7 @@ impl NameCtx {
     /// Push a scope marker. All entries created after this call (via
     /// `enter`/`enter_with_type`/`fresh`/`enter_cell`) will be removed by
     /// `pop_scope`.
-    pub(super) fn push_scope(&mut self) {
+    pub(crate) fn push_scope(&mut self) {
         self.scope_markers.push(self.counter);
     }
 
@@ -359,7 +359,7 @@ impl NameCtx {
     /// creation counter; owner-cell records retire with the same rule.
     /// Captures (`cap_deref`) and globals survive: environments outlive
     /// inner scopes.
-    pub(super) fn pop_scope(&mut self) {
+    pub(crate) fn pop_scope(&mut self) {
         // Forwarded element texts embed C identifiers that die with the
         // scope — drop all of them (missed opt past the boundary, never
         // a stale read). `array_lens` survives (bare counts need no ids).
@@ -377,25 +377,25 @@ impl NameCtx {
     }
 
     /// Record that `name` currently holds an array literal of length `n`.
-    pub(super) fn set_array_len(&mut self, name: &str, n: usize) {
+    pub(crate) fn set_array_len(&mut self, name: &str, n: usize) {
         self.array_lens.insert(name.to_string(), n);
     }
     /// Forget any statically-known literal length for `name`. Called when
     /// `name` is reassigned with a non-literal value or aliased into a call.
-    pub(super) fn invalidate_array_len(&mut self, name: &str) {
+    pub(crate) fn invalidate_array_len(&mut self, name: &str) {
         self.array_lens.remove(name);
     }
 
     /// Statically-known length of `name` if it was most recently bound to
     /// an array literal in the current straight-line block.
-    pub(super) fn array_len(&self, name: &str) -> Option<usize> {
+    pub(crate) fn array_len(&self, name: &str) -> Option<usize> {
         self.array_lens.get(name).copied()
     }
 
     /// Drop all literal-length knowledge. Called at control-flow boundaries
     /// (block/loop/branch entries) so a fold never reads a binding that a
     /// merged path could have changed.
-    pub(super) fn clear_array_lens(&mut self) {
+    pub(crate) fn clear_array_lens(&mut self) {
         self.array_lens.clear();
         self.stack_array_elems.clear();
         self.last_promoted_array = None;
@@ -403,7 +403,7 @@ impl NameCtx {
 
     /// Record that `name` currently holds a pure-scalar array literal:
     /// source element expressions plus their resolved raw C texts/types.
-    pub(super) fn set_stack_array_elems(
+    pub(crate) fn set_stack_array_elems(
         &mut self,
         name: &str,
         elems: Vec<Expr>,
@@ -425,7 +425,7 @@ impl NameCtx {
     /// C var most recently emitted by the stack-promotion path is tracked
     /// via this slot (see field on [`NameCtx`]); consumed by the next
     /// array-binding record.
-    pub(super) fn take_promoted_array(&mut self, cvar: &str) -> bool {
+    pub(crate) fn take_promoted_array(&mut self, cvar: &str) -> bool {
         if self.last_promoted_array.as_deref() == Some(cvar) {
             self.last_promoted_array = None;
             true
@@ -437,7 +437,7 @@ impl NameCtx {
     /// Raw `(C text, C type)` for element `idx` of the literal most
     /// recently bound to `name`, or `None` when unknown/out of bounds.
     /// Literal indices only: a dynamic index cannot be statically forwarded.
-    pub(super) fn stack_array_elem(&self, name: &str, idx: i64) -> Option<(String, &'static str)> {
+    pub(crate) fn stack_array_elem(&self, name: &str, idx: i64) -> Option<(String, &'static str)> {
         if idx < 0 {
             return None;
         }
@@ -449,7 +449,7 @@ impl NameCtx {
     /// element expressions mention `name` (reassigning a mentioned name
     /// changes the denoted value). Called on reassignment, on calls
     /// taking the name, and on closure capture of the name.
-    pub(super) fn invalidate_stack_array_elems(&mut self, name: &str) {
+    pub(crate) fn invalidate_stack_array_elems(&mut self, name: &str) {
         self.stack_array_elems.remove(name);
         self.stack_array_elems.retain(|_, entry| {
             !entry
@@ -505,7 +505,7 @@ pub struct Lowerer {
     pub(crate) stmt_direct: std::cell::Cell<bool>,
     /// Active green (suspendable) transform state, if a green closure
     /// body is being emitted. See `green.rs`.
-    pub(crate) green: std::cell::RefCell<Option<crate::lower::green::GreenCtx>>,
+    pub(crate) green: std::cell::RefCell<Option<crate::green::GreenCtx>>,
     /// When true, the generated C omits the embedded runtime sources
     /// (`RUNTIME_C`) and only includes headers (`RUNTIME_H`). The C runtime
     /// is linked from a precompiled static library (`libzz_rt.a`) instead.
@@ -525,7 +525,7 @@ pub struct Lowerer {
     /// no captured params). Each gets an unboxed `zz_fn_<m>_u` C variant
     /// taking/returning raw C scalars alongside the boxed entry point;
     /// scalar-provable call sites route to it. Computed once in `new`.
-    pub(crate) specialized: std::collections::HashSet<String>,
+    pub specialized: std::collections::HashSet<String>,
     /// Expected C return type while lowering a `_u` body (`None` in boxed
     /// functions). `Return` and tail-value emitters consult it to emit raw
     /// scalar returns instead of boxed `zz_value`s.
@@ -642,7 +642,7 @@ impl Lowerer {
 
     /// Emit a loop-top cooperative safepoint when the program uses
     /// concurrency; otherwise emit nothing (see [`Self::needs_safepoint`]).
-    pub(super) fn emit_safepoint(&self, out: &mut String, indent: &str) {
+    pub(crate) fn emit_safepoint(&self, out: &mut String, indent: &str) {
         if self.needs_safepoint() {
             out.push_str(&format!("{indent}zz_safepoint();\n"));
         }
@@ -657,7 +657,7 @@ impl Lowerer {
     /// Skipped in green closures (frame-cell lifetimes + resume labels
     /// are out of scope for this opt) and for captured names (a nested
     /// closure may mutate them between record and read).
-    pub(super) fn record_array_elems(
+    pub(crate) fn record_array_elems(
         &self,
         name: &str,
         elems: &[Expr],
@@ -702,7 +702,7 @@ impl Lowerer {
 
     /// C scalar type for a plain ZZ scalar (`int`/`float`/`bool`).
     /// Anything else (strings, containers, options, structs, …) is boxed.
-    pub(super) fn scalar_ctype(ty: &zz_checker::Type) -> Option<&'static str> {
+    pub(crate) fn scalar_ctype(ty: &zz_checker::Type) -> Option<&'static str> {
         match ty {
             zz_checker::Type::Int => Some("int64_t"),
             zz_checker::Type::Float => Some("double"),
@@ -789,14 +789,14 @@ impl Lowerer {
     /// Seed a fresh `NameCtx` with the scalar-specialized signatures so
     /// `scalar_operand_type` recognizes specialized calls anywhere
     /// (function bodies, top-level code, closures).
-    pub(super) fn seed_scalar_fns(&self, names: &mut NameCtx) {
+    pub(crate) fn seed_scalar_fns(&self, names: &mut NameCtx) {
         for (fname, ret, arity) in &self.scalar_fn_list {
             names.scalar_fn_sigs.insert(fname.clone(), (*ret, *arity));
         }
     }
 
     /// C return type of a specialized function, or `None`.
-    pub(super) fn specialized_ret(&self, fname: &str) -> Option<&'static str> {
+    pub(crate) fn specialized_ret(&self, fname: &str) -> Option<&'static str> {
         if !self.specialized.contains(fname) {
             return None;
         }
@@ -808,7 +808,7 @@ impl Lowerer {
 
     /// Field accessor unboxing a boxed `zz_value` of C scalar type `ctype`
     /// (`int64_t` → `.i`, `double` → `.f`, `bool` → `.b`).
-    pub(super) fn scalar_field(ctype: &str) -> &'static str {
+    pub(crate) fn scalar_field(ctype: &str) -> &'static str {
         match ctype {
             "double" => "f",
             "bool" => "b",
@@ -820,14 +820,14 @@ impl Lowerer {
     /// `expected`: raw scalars pass through (with a cast on a known type
     /// mismatch), boxed values unbox through the matching union field.
     /// Mirrors the `Decl` scalar-initializer discipline.
-    pub(super) fn unbox_for_return(
+    pub(crate) fn unbox_for_return(
         &self,
         e: &Expr,
         val: String,
         names: &NameCtx,
         expected: &'static str,
     ) -> String {
-        if let Some((raw, t)) = crate::lower::context::raw_scalar_text(e, &val, names) {
+        if let Some((raw, t)) = crate::context::raw_scalar_text(e, &val, names) {
             // Known type mismatch (mixed int/float functions): convert
             // explicitly rather than returning the wrong C type.
             if t != expected {
@@ -840,7 +840,7 @@ impl Lowerer {
 
     /// Implicit tail value when a body yields none: `zz_unit()` boxed,
     /// scalar zero in `_u` functions (which must return a C scalar).
-    pub(super) fn ret_unit(&self) -> &'static str {
+    pub(crate) fn ret_unit(&self) -> &'static str {
         match *self.unboxed_ret.borrow() {
             Some("double") => "0.0",
             Some("bool") => "false",
@@ -853,7 +853,7 @@ impl Lowerer {
     /// of the active `_u` type (used where the source expression is gone,
     /// e.g. the `__tail` temp): direct union-field read, no call.
     /// Passes through unchanged outside `_u` bodies.
-    pub(super) fn ret_unbox(&self, boxed: String) -> String {
+    pub(crate) fn ret_unbox(&self, boxed: String) -> String {
         let expected = (*self.unboxed_ret.borrow()).unwrap_or("zz_value");
         if expected == "zz_value" {
             return boxed;
@@ -924,7 +924,7 @@ impl Lowerer {
 
     /// Check if an expression span is classified as non-escaping (arena-safe).
     #[allow(dead_code)]
-    pub(super) fn is_non_escaping(&self, span: zz_frontend::span::Span) -> bool {
+    pub(crate) fn is_non_escaping(&self, span: zz_frontend::span::Span) -> bool {
         self.escape
             .classes
             .get(&span)
@@ -934,7 +934,7 @@ impl Lowerer {
 
     /// Check if an expression span is classified as escaping (needs ARC).
     #[allow(dead_code)]
-    pub(super) fn is_escaping(&self, span: zz_frontend::span::Span) -> bool {
+    pub(crate) fn is_escaping(&self, span: zz_frontend::span::Span) -> bool {
         self.escape
             .classes
             .get(&span)
@@ -944,7 +944,7 @@ impl Lowerer {
 
     /// Check if an expression produces a string value. Used to detect string
     /// concatenation for arena-aware allocation in loops.
-    pub(super) fn is_string_expr(&self, expr: &Expr, names: &NameCtx) -> bool {
+    pub(crate) fn is_string_expr(&self, expr: &Expr, names: &NameCtx) -> bool {
         match expr {
             Expr::Str { .. } => true,
             Expr::Ident { name, .. } => names.lookup_type(name) == Some("string"),
@@ -989,7 +989,7 @@ impl Lowerer {
     /// an undeclared-identifier C error.)
     ///
     /// Returns the C arena identifier (without `&`) or None for heap.
-    pub(super) fn arena_for(&self, span: zz_frontend::span::Span) -> Option<String> {
+    pub(crate) fn arena_for(&self, span: zz_frontend::span::Span) -> Option<String> {
         // Green closures run heap-only: stack arenas cannot survive a
         // suspend (the C frame returns to the trampoline).
         if self.green_active() {
@@ -1006,7 +1006,7 @@ impl Lowerer {
 
     /// Open a loop-body scope. Returns a marker for `loop_scope_end`.
     /// Body-declared locals retire at iteration end (see below).
-    pub(super) fn loop_scope_begin(&self, names: &mut NameCtx) -> usize {
+    pub(crate) fn loop_scope_begin(&self, names: &mut NameCtx) -> usize {
         names.push_scope();
         names.counter
     }
@@ -1028,7 +1028,7 @@ impl Lowerer {
     /// release). Releases run in reverse creation order so LIFO sharing
     /// balances. Skipped in green closures (frame cells cannot be freed
     /// mid-task; a suspend must observe intact slots).
-    pub(super) fn loop_scope_end(&self, names: &mut NameCtx, out: &mut String, marker: usize) {
+    pub(crate) fn loop_scope_end(&self, names: &mut NameCtx, out: &mut String, marker: usize) {
         if !self.green_active() {
             let mut doomed: Vec<(usize, String)> = Vec::new();
             for stack_vec in names.stack.values() {
@@ -1067,7 +1067,7 @@ impl Lowerer {
     /// Returns the C constructor call for an array, routing through the
     /// arena variant when the expression is classified as non-escaping.
     #[allow(dead_code)] // used by experimental array-construction paths
-    pub(super) fn emit_array_new(&self, span: zz_frontend::span::Span) -> String {
+    pub(crate) fn emit_array_new(&self, span: zz_frontend::span::Span) -> String {
         match self.arena_for(span) {
             Some(arena) => format!("zz_array_new_arena_sized(&{arena}, 0)"),
             None => "zz_array_new()".to_string(),
@@ -1077,7 +1077,7 @@ impl Lowerer {
     /// Returns the C constructor call for a dict, routing through the
     /// arena variant when the expression is classified as non-escaping.
     #[allow(dead_code)] // reserved for dict-construction paths
-    pub(super) fn emit_dict_new(&self, span: zz_frontend::span::Span) -> String {
+    pub(crate) fn emit_dict_new(&self, span: zz_frontend::span::Span) -> String {
         match self.arena_for(span) {
             Some(arena) => format!("zz_dict_new_arena(&{arena})"),
             None => "zz_dict_new()".to_string(),
@@ -1087,7 +1087,7 @@ impl Lowerer {
     /// Returns the C constructor call for a string literal, routing through
     /// the arena variant when the expression is classified as non-escaping.
     #[allow(dead_code)] // reserved for dynamic string allocation (concat results)
-    pub(super) fn emit_str_new(
+    pub(crate) fn emit_str_new(
         &self,
         s: &str,
         len: usize,
@@ -1102,7 +1102,7 @@ impl Lowerer {
     /// Returns true if the current emission position is inside a loop body
     /// that has an arena reset injected. Used to force arena allocation
     /// for loop-local collections.
-    pub(super) fn current_loop_has_arena_reset(&self) -> bool {
+    pub(crate) fn current_loop_has_arena_reset(&self) -> bool {
         self.loop_arenas.borrow().last().is_some()
     }
 
@@ -1111,7 +1111,7 @@ impl Lowerer {
     /// be inline — recursion forces the boxed (reference) layout. Without
     /// the guard, `struct N { kid: N }` would overflow the compiler stack
     /// when the unboxed set is collected, whether or not N is ever built.
-    pub(super) fn is_unboxed_struct(&self, name: &str) -> bool {
+    pub(crate) fn is_unboxed_struct(&self, name: &str) -> bool {
         let mut visiting = std::collections::HashSet::new();
         self.unboxed_inner(name, &mut visiting)
     }
@@ -1133,7 +1133,7 @@ impl Lowerer {
     }
 
     /// Check if a type is scalar (can be unboxed).
-    pub(super) fn is_scalar_type(&self, ty: &zz_checker::Type) -> bool {
+    pub(crate) fn is_scalar_type(&self, ty: &zz_checker::Type) -> bool {
         matches!(
             ty,
             zz_checker::Type::Int | zz_checker::Type::Float | zz_checker::Type::Bool
@@ -1141,7 +1141,7 @@ impl Lowerer {
     }
 
     /// Convert a checker type to C type string.
-    pub(super) fn type_to_c(&self, ty: &zz_checker::Type) -> String {
+    pub(crate) fn type_to_c(&self, ty: &zz_checker::Type) -> String {
         match ty {
             zz_checker::Type::Int => "int64_t".to_string(),
             zz_checker::Type::Float => "double".to_string(),
@@ -1177,7 +1177,7 @@ impl Lowerer {
     /// variables matching these need no environment cell.
     /// Names in `block` captured by a nested closure literal: bindings for
     /// these must be heap-cell-allocated so environments share them.
-    pub(super) fn body_capture_set(
+    pub(crate) fn body_capture_set(
         &self,
         params: &[String],
         block: &zz_frontend::ast::Block,
@@ -1187,7 +1187,7 @@ impl Lowerer {
 
     /// Same as [`body_capture_set`](Self::body_capture_set) for closure
     /// bodies that are bare expressions rather than blocks.
-    pub(super) fn expr_capture_set(
+    pub(crate) fn expr_capture_set(
         &self,
         params: &[String],
         body: &zz_frontend::ast::Expr,
@@ -1198,7 +1198,7 @@ impl Lowerer {
     /// Emit a heap cell allocation + initialization for a captured binding.
     /// `init` is the already-lowered (and scalar-unboxed, if applicable)
     /// initializer value of C type `ctype`.
-    pub(super) fn emit_cell_alloc(&self, ptr: &str, ctype: &str, init: &str, out: &mut String) {
+    pub(crate) fn emit_cell_alloc(&self, ptr: &str, ctype: &str, init: &str, out: &mut String) {
         out.push_str(&format!(
             "    {ctype} *{ptr} = ({ctype}*)malloc(sizeof({ctype}));\n"
         ));
@@ -1209,7 +1209,7 @@ impl Lowerer {
     /// and top-level destructuring declarations.
     /// Returns sorted (zz_name, C id, C type, checker type) tuples.
     /// Types come from `tp.bindings` (checker-resolved); fallback zz_value.
-    pub(super) fn collect_globals(
+    pub(crate) fn collect_globals(
         &self,
     ) -> Vec<(String, String, String, Option<zz_checker::Type>)> {
         use zz_frontend::ast::Stmt;
@@ -1275,7 +1275,7 @@ impl Lowerer {
     }
 
     /// Seed a NameCtx with all module-level globals.
-    pub(super) fn seed_globals(&self, names: &mut NameCtx) {
+    pub(crate) fn seed_globals(&self, names: &mut NameCtx) {
         for (zz_name, cid, ctype, checker_ty) in &self.global_list {
             names.insert_global(zz_name, cid, ctype, checker_ty.clone());
         }
@@ -1283,7 +1283,7 @@ impl Lowerer {
 
     /// Base C type for the pointee of a raw pointer (no trailing `*`).
     /// Nested pointers recurse through [`Lowerer::type_to_c`].
-    pub(super) fn c_abi_base(&self, ty: &zz_checker::Type) -> String {
+    pub(crate) fn c_abi_base(&self, ty: &zz_checker::Type) -> String {
         match ty {
             zz_checker::Type::Int => "int64_t".to_string(),
             zz_checker::Type::Float => "double".to_string(),
@@ -1298,23 +1298,23 @@ impl Lowerer {
     /// namespaced structs (e.g. `mod.Rectangle`) become a single valid
     /// C identifier (`zz_struct_mod__Rectangle`) instead of an invalid
     /// `zz_struct_mod.Rectangle`.
-    pub(super) fn struct_c_type(&self, name: &str) -> String {
+    pub(crate) fn struct_c_type(&self, name: &str) -> String {
         format!("zz_struct_{}", mangle(name))
     }
 
     /// Check if a type string is a struct type.
-    pub(super) fn is_struct_type_str(&self, type_str: &str) -> bool {
+    pub(crate) fn is_struct_type_str(&self, type_str: &str) -> bool {
         type_str.starts_with("zz_struct_")
     }
 
     /// Extract the struct name from a type string like "zz_struct_Point" -> "Point".
-    pub(super) fn struct_name_from_c_type<'a>(&self, c_type: &'a str) -> Option<&'a str> {
+    pub(crate) fn struct_name_from_c_type<'a>(&self, c_type: &'a str) -> Option<&'a str> {
         c_type.strip_prefix("zz_struct_")
     }
 
     /// Get the C type of a field from a struct type string.
     /// Returns the C type string (e.g., "int64_t", "zz_struct_Point") for the named field.
-    pub(super) fn field_type_from_struct(
+    pub(crate) fn field_type_from_struct(
         &self,
         base_c_type: &str,
         field_name: &str,
@@ -1349,13 +1349,13 @@ impl Lowerer {
     /// True when a struct field is an embedded (anonymous) field: its type
     /// is a struct whose last name segment equals the field name
     /// (`User.Base: Base`). Mirrors the checker's rule.
-    pub(super) fn is_embedded_sig_field(fname: &str, fty: &zz_checker::Type) -> bool {
+    pub(crate) fn is_embedded_sig_field(fname: &str, fty: &zz_checker::Type) -> bool {
         matches!(fty, zz_checker::Type::Struct(s, _) if s.rsplit('.').next().unwrap_or(s) == fname)
     }
 
     /// Resolve an un-mangled struct name from a C type string
     /// (`zz_struct_mod__Rect` → `mod.Rect`), or `None` for non-structs.
-    pub(super) fn unmangled_struct_name(&self, base_c_type: &str) -> Option<String> {
+    pub(crate) fn unmangled_struct_name(&self, base_c_type: &str) -> Option<String> {
         let mangled_suffix = self.struct_name_from_c_type(base_c_type)?;
         self.tp
             .structs
@@ -1367,7 +1367,7 @@ impl Lowerer {
     /// Breadth-first path of embedded field names from struct `root` to
     /// `field` (empty vec = direct field). `None` when the field is not
     /// visible on the struct at all.
-    pub(super) fn embedded_field_path(&self, root: &str, field: &str) -> Option<Vec<String>> {
+    pub(crate) fn embedded_field_path(&self, root: &str, field: &str) -> Option<Vec<String>> {
         let mut visited = vec![root.to_string()];
         let mut queue: Vec<(String, Vec<String>)> = vec![(root.to_string(), Vec::new())];
         while let Some((cur, path)) = queue.first().cloned() {
@@ -1393,7 +1393,7 @@ impl Lowerer {
     /// Find a method promoted from an embedded struct: returns the defining
     /// struct's un-mangled name plus the embedded path to reach it. Direct
     /// methods are NOT matched here (callers check those first).
-    pub(super) fn promoted_method_target(
+    pub(crate) fn promoted_method_target(
         &self,
         root: &str,
         method: &str,
@@ -1425,7 +1425,7 @@ impl Lowerer {
     /// C type of the leaf field reached by walking `path` (embedded field
     /// names + final field) from the struct named `root`. Used to box
     /// promoted field reads in generated C.
-    pub(super) fn promoted_leaf_ctype(&self, root: &str, path: &[String]) -> Option<String> {
+    pub(crate) fn promoted_leaf_ctype(&self, root: &str, path: &[String]) -> Option<String> {
         let mut cur = root.to_string();
         for (i, part) in path.iter().enumerate() {
             let sig = self.tp.structs.get(&cur)?;
@@ -1447,7 +1447,7 @@ impl Lowerer {
     /// (`id` in `User{id: 1, ...}` → `[Base, id]`). Falls back to `[name]`
     /// for unknown fields (rejected by the checker; codegen never sees
     /// them in valid programs).
-    pub(super) fn literal_field_path(&self, sname: &str, fname: &str) -> Vec<String> {
+    pub(crate) fn literal_field_path(&self, sname: &str, fname: &str) -> Vec<String> {
         if let Some(sig) = self.tp.structs.get(sname) {
             if sig.fields.iter().any(|(n, _)| n == fname) {
                 return vec![fname.to_string()];
@@ -1464,7 +1464,7 @@ impl Lowerer {
     /// the struct named `root`, expanding promoted (embedded) segments.
     /// Returns the full concrete chain (embedded hops included) plus the
     /// leaf C type for boxing.
-    pub(super) fn resolve_access_chain(
+    pub(crate) fn resolve_access_chain(
         &self,
         root: &str,
         fields: &[String],
@@ -1515,7 +1515,7 @@ impl Lowerer {
     /// method dispatch on boxed structs (whose C type is uniformly
     /// `zz_value`, so the C type alone cannot identify them). Checks the
     /// tracker's checker-type map, then the type checker's span map.
-    pub(super) fn checker_struct_of(
+    pub(crate) fn checker_struct_of(
         &self,
         names: &NameCtx,
         obj_name: &str,
@@ -1536,7 +1536,7 @@ impl Lowerer {
     /// structs resolve through the C type (`zz_struct_X`), boxed structs
     /// (uniformly `zz_value`) through the checker's type map. `None` when
     /// the local is not a struct.
-    pub(super) fn dispatch_struct_name(
+    pub(crate) fn dispatch_struct_name(
         &self,
         names: &NameCtx,
         recv_ctype: Option<&str>,
@@ -1565,7 +1565,7 @@ impl Lowerer {
     /// values always erase to boxed `zz_value`, so resolution goes
     /// through the checker's type map. `None` when the local is not an
     /// enum value.
-    pub(super) fn checker_enum_of(
+    pub(crate) fn checker_enum_of(
         &self,
         names: &NameCtx,
         obj_name: &str,
@@ -1585,7 +1585,7 @@ impl Lowerer {
     /// Resolve `<Enum>.<method>` for dispatch: direct hit, else the
     /// module-namespace fallback (mirrors the checker's canonical
     /// method lookup for selectively-imported enums).
-    pub(super) fn enum_method_target(&self, ename: &str, method: &str) -> Option<String> {
+    pub(crate) fn enum_method_target(&self, ename: &str, method: &str) -> Option<String> {
         let direct = format!("{ename}.{method}");
         if self.reachable_funcs.contains(&direct) || self.tp.funcs.contains_key(&direct) {
             return Some(direct);
@@ -1602,7 +1602,7 @@ impl Lowerer {
     /// Resolve `<Struct>.<method>` for dispatch: direct hit, else promoted
     /// from an embedded struct. Returns the impl name plus the embedded
     /// path after the receiver (empty = direct method on the struct).
-    pub(super) fn struct_method_target(
+    pub(crate) fn struct_method_target(
         &self,
         unmangled: &str,
         method: &str,
@@ -1625,7 +1625,7 @@ impl Lowerer {
     /// file), so every lookup pairs the span with the enclosing item.
     /// Unknown entries (unresolved inference) yield `None`: callers fall
     /// back to the dynamic/boxed path, which is always correct.
-    pub(super) fn ty_at(
+    pub(crate) fn ty_at(
         &self,
         names: &NameCtx,
         span: zz_frontend::span::Span,
@@ -1638,7 +1638,7 @@ impl Lowerer {
     /// Ident/Path/Field shapes lower unboxed structs to raw C values;
     /// everything else is already a `zz_value` (boxed structs flow through
     /// the C runtime, which formats them identically).
-    pub(super) fn unboxed_struct_of_expr(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+    pub(crate) fn unboxed_struct_of_expr(&self, e: &Expr, names: &NameCtx) -> Option<String> {
         match e {
             Expr::Ident { name, .. } => names
                 .lookup_type(name)
@@ -1707,7 +1707,7 @@ impl Lowerer {
     /// its generated `debug_string` function. The value is hoisted into a
     /// temp (prints are cold; copies keep lvalue analysis out of the
     /// picture).
-    pub(super) fn stringify_struct_value(
+    pub(crate) fn stringify_struct_value(
         &self,
         sname: &str,
         raw: String,
@@ -1722,14 +1722,14 @@ impl Lowerer {
 
     /// True for the display builtins that render values as strings:
     /// `println` / `print` and the `str()` cast.
-    pub(super) fn is_display_builtin(cname: &str) -> bool {
+    pub(crate) fn is_display_builtin(cname: &str) -> bool {
         matches!(cname, "println" | "print" | "str" | "std.str")
     }
 
     /// Render an unboxed-struct lvalue chain: `parts[0]` is a local whose C
     /// type is a struct, the rest are direct field names. Returns e.g.
     /// `((zaid).Base).id` — suitable for `&(...)` receiver passing.
-    pub(super) fn emit_struct_lvalue(&self, parts: &[String], names: &NameCtx) -> Option<String> {
+    pub(crate) fn emit_struct_lvalue(&self, parts: &[String], names: &NameCtx) -> Option<String> {
         if parts.is_empty() {
             return None;
         }
@@ -1745,7 +1745,7 @@ impl Lowerer {
     }
 
     /// Auto-box a nested struct field value (e.g., r.origin.x).
-    pub(super) fn auto_box_nested_field(
+    pub(crate) fn auto_box_nested_field(
         &self,
         parts: &[String],
         names: &NameCtx,
@@ -1793,7 +1793,7 @@ impl Lowerer {
     /// Stack-promoted arrays carry `refs = ZZ_ARRAY_STACK_MAGIC`; the
     /// runtime recognizes this sentinel and skips `free()` paths so neither
     /// the header nor the items buffer are touched at scope exit.
-    pub(super) fn try_emit_stack_array(
+    pub(crate) fn try_emit_stack_array(
         &self,
         elems: &[Expr],
         span: zz_frontend::span::Span,
@@ -1861,7 +1861,7 @@ impl Lowerer {
     ///   - Arithmetic Binary that already lowers to `(int64_t)(l op r)` /
     ///     `(double)(l op r)` (i.e., scalar unboxed arithmetic on locals)
     ///   - Negation of any of the above that yields a recognized scalar
-    pub(super) fn emit_scalar_init(
+    pub(crate) fn emit_scalar_init(
         &self,
         e: &Expr,
         names: &mut NameCtx,
@@ -1953,7 +1953,7 @@ impl Lowerer {
 
     /// Like `emit_scalar_init`, but forces a boolean-typed inner expression
     /// (used for `!x` where x is a bool ident/literal).
-    pub(super) fn emit_scalar_bool_init(&self, e: &Expr, names: &NameCtx) -> Option<String> {
+    pub(crate) fn emit_scalar_bool_init(&self, e: &Expr, names: &NameCtx) -> Option<String> {
         match e {
             Expr::Bool { value, .. } => {
                 let s = if *value { "true" } else { "false" };

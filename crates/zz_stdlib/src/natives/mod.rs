@@ -2165,6 +2165,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         ("write", 2, net::tcp_write),
         ("write_bytes", 2, net::tcp_write_bytes),
         ("shutdown", 1, net::tcp_shutdown),
+        ("close", 1, net::tcp_shutdown),
         ("peer_addr", 1, net::peer_addr),
         ("local_addr", 1, net::local_addr),
         ("set_read_timeout", 2, net::set_read_timeout),

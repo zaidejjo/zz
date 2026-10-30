@@ -1,60 +1,39 @@
-//! ZZ native codegen backend (Phase 3).
+//! ZZ native codegen facade.
 //!
 //! Consumes the DCE-pruned typed program from [`zz_hir`], lowers it to C,
 //! embeds the C runtime, and invokes a C compiler to produce a standalone
 //! binary. `cc`/`clang`/`gcc` are auto-detected; NO manual tooling install
 //! is required on standard systems (they ship with the OS toolchain).
+//!
+//! The implementation is split into independently compileable crates and
+//! re-exported here so downstream crates keep a single import surface:
+//!
+//! - [`zz_lower`]: HIR → C lowering
+//! - [`zz_chunk`]: unified IR → C lowering (chunk backend)
+//! - [`zz_codegen_cc`]: clang/gcc driver, flag matrix, runtime-archive cache
+//! - [`zz_codegen_ffi`]: native + staticlib symbol tables, link metadata
+//! - [`zz_codegen_runtime`]: embedded C runtime (single TU) + rebuild guard
+//! - `zz_codegen_types`: build options, errors, compiler handles
+//!
+//! This crate keeps the orchestration (lower-only dumps, native/unit
+//! builds) and the end-to-end pipeline tests.
 
-pub mod cache;
-pub mod chunk;
-pub mod compile;
-pub mod ffi;
-pub mod lower;
+pub use zz_chunk as chunk;
+pub use zz_codegen_cc as compile;
+pub use zz_codegen_cc::cache;
+pub use zz_codegen_ffi as ffi;
 
 pub use chunk::{build_module as build_chunk_module, coverage as chunk_coverage, ChunkError};
 pub use compile::{
-    compile_and_run, compile_and_run_for_target, detect_clang, detect_clang_with,
-    emit_c_plus_script, host_triple, is_macos_target, is_windows_target, validate, BuildError,
-    BuildOptions, Clang, ClangProvider, EmbedAsset, PgoMode,
+    build_options_fingerprint, build_options_fingerprint_with, compile_and_run,
+    compile_and_run_for_target, detect_clang, detect_clang_with, emit_c_plus_script, host_triple,
+    is_macos_target, is_windows_target, validate, BuildError, BuildOptions, Clang, ClangProvider,
+    EmbedAsset, PgoMode,
 };
-pub use ffi::{ffi_impl, FfiError, FFI_VERSION};
-pub use lower::{mangle, native_supported, units, LoweredC, Lowerer};
-
-/// The embedded C runtime header. The runtime is split across modular
-/// sub-headers under `src/runtime/`; the umbrella `runtime.h` includes them
-/// in dependency order, and they are concatenated here into one string.
-pub const RUNTIME_H: &str = concat!(
-    include_str!("runtime/runtime.h"),
-    include_str!("runtime/platform.h"),
-    include_str!("runtime/core.h"),
-    include_str!("runtime/memory.h"),
-    include_str!("runtime/strings.h"),
-    include_str!("runtime/collections.h"),
-    include_str!("runtime/json.h"),
-);
-
-/// The embedded C runtime implementation. The modular `.c` files are
-/// concatenated in dependency order into a single translation unit.
-pub const RUNTIME_C: &str = concat!(
-    include_str!("runtime/memory.c"),
-    include_str!("runtime/strings.c"),
-    include_str!("runtime/collections.c"),
-    include_str!("runtime/json.c"),
-    include_str!("runtime/core.c"),
-);
-
-/// Version marker for generated binaries.
-pub const C_BUILD_VERSION: &str = "0.1.0";
-
-/// Content hash of the embedded C runtime sources, stamped by build.rs
-/// (`ZZ_RUNTIME_HASH`). Referenced so the hash is load-bearing: any runtime
-/// edit changes this constant, which changes the crate fingerprint and
-/// forces a rebuild + fresh embed. Without it, `include_str!` edits were
-/// silently ignored until an unrelated Rust change rebuilt the crate.
-pub const RUNTIME_SRC_HASH: &str = match option_env!("ZZ_RUNTIME_HASH") {
-    Some(h) => h,
-    None => "0000000000000000",
-};
+pub use ffi::{ffi_decl, ffi_impl, native_impl, native_supported, FfiError, FFI_VERSION};
+pub use zz_codegen_runtime::{C_BUILD_VERSION, RUNTIME_C, RUNTIME_H, RUNTIME_SRC_HASH};
+pub use zz_lower as lower;
+pub use zz_lower::{mangle, units, LoweredC, Lowerer};
 
 /// Lower a pruned typed program to C without compiling.
 ///

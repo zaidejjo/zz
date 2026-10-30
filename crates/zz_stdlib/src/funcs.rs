@@ -1853,6 +1853,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             vec![("stream", Type::TcpStream), ("ms", Type::Int)],
             result_bool(),
         ),
+        // `stream.close()` is documented as the ergonomic spelling for a
+        // real both-directions shutdown; without this alias only
+        // `stream.shutdown()` resolved and the documented example failed
+        // to type-check.
+        ("close", vec![("stream", Type::TcpStream)], result_unit()),
     ] {
         let s = sig(params, ret);
         m.insert(format!("std.net.{short}"), s.clone());
@@ -4105,7 +4110,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 682);
+        assert_eq!(funcs.len(), 683);
     }
 
     #[test]

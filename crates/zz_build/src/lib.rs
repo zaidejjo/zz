@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zz_codegen::{BuildOptions, ClangProvider};
+use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider};
 use zz_frontend::span::Span;
 use zz_hir::TypedProgram;
 use zz_loader::{
@@ -184,7 +184,7 @@ fn cache_key(
     features: &FeatureSelection,
 ) -> Result<String, String> {
     let runtime_mtime = runtime_mtime();
-    let build_fingerprint = opts.fingerprint_with(target);
+    let build_fingerprint = build_options_fingerprint_with(opts, target);
 
     // Use the new CacheKey which hashes path deps from live disk content
     // (Amendment 2, Round 4: path-dep changes must invalidate the cache).

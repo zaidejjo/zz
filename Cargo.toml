@@ -1,12 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zz_span_ast", "crates/zz_diag_core", "crates/zz_diag", "crates/zz_lexer", "crates/zz_parser", "crates/zz_run_cache", "crates/zz_loader", "crates/zz_build", "crates/zz_session", "crates/zz_test_runner", "crates/zz_repl", "crates/zz_types", "crates/zz_unify", "crates/zz_suggest", "crates/zz_http_routes",
-  "crates/zz_infer",
-  "crates/zz_structs",
-  "crates/zz_scope",
-  "crates/zz_sigs",
-  "crates/zz_lints",
-  "crates/zz_type_check", "crates/zz_frontend", "crates/zz_checker_core", "crates/zz_checker", "crates/zz_hir", "crates/zz_arena", "crates/zz_runtime", "crates/zz_ir", "crates/zz_stdlib", "crates/zz_codegen", "crates/zz_cli", "crates/zz_fmt", "crates/zz_lsp", "crates/zz_dap", "crates/zz_native_rt", "crates/zz_pm", "crates/zz_plugin"]
+members = ["crates/zz_span_ast", "crates/zz_diag_core", "crates/zz_diag", "crates/zz_lexer", "crates/zz_parser", "crates/zz_run_cache", "crates/zz_loader", "crates/zz_build", "crates/zz_session", "crates/zz_test_runner", "crates/zz_repl", "crates/zz_types", "crates/zz_codegen_types", "crates/zz_codegen_runtime", "crates/zz_codegen_ffi", "crates/zz_chunk", "crates/zz_codegen_cc", "crates/zz_lower", "crates/zz_frontend", "crates/zz_checker_core", "crates/zz_checker", "crates/zz_hir", "crates/zz_arena", "crates/zz_runtime", "crates/zz_ir", "crates/zz_stdlib", "crates/zz_codegen", "crates/zz_cli", "crates/zz_fmt", "crates/zz_lsp", "crates/zz_dap", "crates/zz_native_rt", "crates/zz_pm", "crates/zz_plugin"]
 
 [workspace.package]
 version = "0.4.0"

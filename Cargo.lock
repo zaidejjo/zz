@@ -3804,6 +3804,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_chunk"
+version = "0.4.0"
+dependencies = [
+ "zz_codegen_ffi",
+ "zz_codegen_runtime",
+ "zz_codegen_types",
+ "zz_ir",
+ "zz_lower",
+]
+
+[[package]]
 name = "zz_cli"
 version = "0.4.0"
 dependencies = [
@@ -3845,16 +3856,45 @@ dependencies = [
 name = "zz_codegen"
 version = "0.4.0"
 dependencies = [
- "rayon",
  "zz_checker",
+ "zz_chunk",
+ "zz_codegen_cc",
+ "zz_codegen_ffi",
+ "zz_codegen_runtime",
  "zz_frontend",
  "zz_hir",
- "zz_ir",
- "zz_native_rt",
- "zz_pm",
+ "zz_lower",
  "zz_runtime",
  "zz_stdlib",
 ]
+
+[[package]]
+name = "zz_codegen_cc"
+version = "0.4.0"
+dependencies = [
+ "rayon",
+ "zz_codegen_ffi",
+ "zz_codegen_runtime",
+ "zz_codegen_types",
+ "zz_ir",
+ "zz_pm",
+]
+
+[[package]]
+name = "zz_codegen_ffi"
+version = "0.4.0"
+dependencies = [
+ "zz_codegen_runtime",
+ "zz_native_rt",
+]
+
+[[package]]
+name = "zz_codegen_runtime"
+version = "0.4.0"
+
+[[package]]
+name = "zz_codegen_types"
+version = "0.4.0"
 
 [[package]]
 name = "zz_diag"
@@ -3973,6 +4013,19 @@ dependencies = [
  "zz_pm",
  "zz_run_cache",
  "zz_runtime",
+ "zz_stdlib",
+]
+
+[[package]]
+name = "zz_lower"
+version = "0.4.0"
+dependencies = [
+ "zz_checker",
+ "zz_codegen_ffi",
+ "zz_codegen_runtime",
+ "zz_codegen_types",
+ "zz_frontend",
+ "zz_hir",
  "zz_stdlib",
 ]
 

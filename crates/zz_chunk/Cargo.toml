@@ -1,0 +1,13 @@
+[package]
+name = "zz_chunk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "IR→C chunk backend for the ZZ native (AOT) compiler"
+
+[dependencies]
+zz_codegen_ffi = { path = "../zz_codegen_ffi" }
+zz_codegen_runtime = { path = "../zz_codegen_runtime" }
+zz_codegen_types = { path = "../zz_codegen_types" }
+zz_ir = { path = "../zz_ir" }
+zz_lower = { path = "../zz_lower" }

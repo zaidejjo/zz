@@ -330,7 +330,7 @@ semantic promise):
   closures/spawns/early-exits, no home references; calls evaluate
   pre-take). Tree-walker mirrors sit behind `run_tree_walker` with a
   callee-visibility guard.
-- AOT readonly-parameter borrows (#383): `zz_codegen/src/lower/`
+- AOT readonly-parameter borrows (#383): `crates/zz_lower/`
   `param_escape.rs` proves per-parameter read-only (no stores,
   returns, forwards to unknown code, captures, or slot rebinds, to
   fixpoint) and passes those arguments borrowed instead of retained

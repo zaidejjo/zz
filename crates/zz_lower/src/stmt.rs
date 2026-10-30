@@ -165,7 +165,7 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn emit_stmt(
+    pub(crate) fn emit_stmt(
         &self,
         stmt: &Stmt,
         names: &mut NameCtx,
@@ -271,8 +271,7 @@ impl Lowerer {
                     Expr::Ident { name, .. } => Some(name.as_str()),
                     _ => None,
                 };
-                let val_is_unboxed =
-                    crate::lower::context::emitted_is_raw_scalar(&val, names, ident);
+                let val_is_unboxed = crate::context::emitted_is_raw_scalar(&val, names, ident);
                 let final_val = match ctype.as_str() {
                     "int64_t" if !val_is_unboxed => format!("({val}).i"),
                     "double" if !val_is_unboxed => format!("({val}).f"),
@@ -415,7 +414,7 @@ impl Lowerer {
                     _ => None,
                 };
                 let val_is_actually_scalar =
-                    crate::lower::context::emitted_is_raw_scalar(&val, names, ident)
+                    crate::context::emitted_is_raw_scalar(&val, names, ident)
                         || (ast_says_scalar && !val.starts_with("zz_"));
                 let value_is_scalar = ast_says_scalar || val_is_actually_scalar;
                 let value_needs_unbox = !val_is_actually_scalar;
@@ -1101,7 +1100,7 @@ impl Lowerer {
     /// realloc cannot free the source out from under the copy.
     /// Green closures bail (a suspend must never observe the
     /// half-appended buffer through the slot).
-    pub(super) fn try_emit_str_append_chain(
+    pub(crate) fn try_emit_str_append_chain(
         &self,
         tname: &str,
         value: &Expr,
@@ -1304,7 +1303,7 @@ impl Lowerer {
         true
     }
 
-    pub(super) fn emit_destructure_pat(
+    pub(crate) fn emit_destructure_pat(
         &self,
         pat: &Pattern,
         src: &str,
@@ -1353,7 +1352,7 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn emit_for(
+    pub(crate) fn emit_for(
         &self,
         vars: &[zz_frontend::ast::Ident],
         iter: &Expr,
@@ -1976,7 +1975,7 @@ impl Lowerer {
     /// With `tail_value = true` this preserves `__tail` entries so
     /// `last_stmt_value` can use them; with `false` the tail is compiled
     /// in discard position and nothing is left for a value return.
-    pub(super) fn emit_func_block(
+    pub(crate) fn emit_func_block(
         &self,
         block: &Block,
         names: &mut NameCtx,
@@ -1994,7 +1993,7 @@ impl Lowerer {
     /// The last statement of a function body — if it's an expression, that
     /// becomes the implicit return value. Handles tail calls, plain
     /// expression tails, and tail if/else (returning from each branch).
-    pub(super) fn last_stmt_value(
+    pub(crate) fn last_stmt_value(
         &self,
         block: &Block,
         names: &mut NameCtx,
@@ -2034,7 +2033,7 @@ impl Lowerer {
     /// (`last_stmt_value` alone only looks at the final statement, so
     /// without this the leading statements of a multi-statement tail
     /// branch would be silently dropped from the generated C.)
-    pub(super) fn emit_tail_branch(&self, b: &Block, names: &mut NameCtx, out: &mut String) {
+    pub(crate) fn emit_tail_branch(&self, b: &Block, names: &mut NameCtx, out: &mut String) {
         // Lexical scope for the branch (same push/pop_scope discipline
         // as value blocks): shadowing declarations must not leak past
         // the branch braces.
@@ -2084,7 +2083,7 @@ impl Lowerer {
 
     /// Emit an expression in return position, emitting `return <val>;`.
     /// If/else tails return from each branch.
-    pub(super) fn emit_tail_expr(&self, e: &Expr, names: &mut NameCtx, out: &mut String) {
+    pub(crate) fn emit_tail_expr(&self, e: &Expr, names: &mut NameCtx, out: &mut String) {
         match e {
             Expr::If {
                 cond, then, els, ..

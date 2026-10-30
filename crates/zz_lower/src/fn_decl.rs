@@ -5,7 +5,7 @@ use zz_frontend::ast::{Block, Param, Stmt};
 use super::*;
 
 impl Lowerer {
-    pub(super) fn emit_function(&self, fname: &str, params: &[Param], block: &Block) -> String {
+    pub(crate) fn emit_function(&self, fname: &str, params: &[Param], block: &Block) -> String {
         // Two function shapes:
         //   - Regular funcs: `static zz_value zz_fn_<mangled>(zz_value*, size_t)`
         //   - Impl methods:  `static zz_value zz_fn_<mangled>(<struct>* self, zz_value*, size_t)`
@@ -156,7 +156,7 @@ impl Lowerer {
     /// Named functions fall through with `unit`; a value leaves only via
     /// `return`. `unit_ret` is that fall-through `unit` (`zz_unit()` for
     /// boxed functions, scalar zero for `_u` ones).
-    pub(super) fn emit_body_tail(
+    pub(crate) fn emit_body_tail(
         &self,
         block: &Block,
         names: &mut NameCtx,
@@ -177,7 +177,7 @@ impl Lowerer {
 
     /// Emit the LIFO defer runner for snippets registered in
     /// `defer_slots` (drains the shared list).
-    pub(super) fn emit_defer_runner(&self, o: &mut String) {
+    pub(crate) fn emit_defer_runner(&self, o: &mut String) {
         // Defer runner: executes registered deferred expressions in LIFO
         // order at function scope exit (before the implicit return + arena
         // reset below).
@@ -202,7 +202,7 @@ impl Lowerer {
     /// delegating to it (unbox args → call → box result). Callers with
     /// scalar-provable args route to `_u` directly; first-class values,
     /// indirect calls, and the entry stub keep using the boxed symbol.
-    pub(super) fn emit_specialized_pair(
+    pub(crate) fn emit_specialized_pair(
         &self,
         fname: &str,
         params: &[Param],
@@ -302,7 +302,7 @@ impl Lowerer {
     }
 
     /// Generate C typedefs for all reachable structs, in dependency order.
-    pub(super) fn lower_structs_preamble(&self) -> String {
+    pub(crate) fn lower_structs_preamble(&self) -> String {
         let mut preamble = String::new();
         let mut emitted = std::collections::HashSet::new();
 
@@ -374,7 +374,7 @@ impl Lowerer {
     /// formatted generically by the C runtime from their field table.
     /// Unused functions carry `__attribute__((unused))` so structs that are
     /// never printed do not warn.
-    pub(super) fn lower_struct_debug_fns(&self) -> String {
+    pub(crate) fn lower_struct_debug_fns(&self) -> String {
         let mut names: Vec<String> = self
             .tp
             .structs
@@ -450,7 +450,7 @@ impl Lowerer {
     }
 
     /// Find a function's parameter definitions in the AST by name.
-    pub(super) fn find_func_def(&self, name: &str) -> Option<&[Param]> {
+    pub(crate) fn find_func_def(&self, name: &str) -> Option<&[Param]> {
         for stmt in &self.tp.program.stmts {
             if let Stmt::Func {
                 name: func_name,
