@@ -50,6 +50,7 @@ flowchart LR
 | `zz_cli` (`zz`) | run/build/test/check/fix/fmt, REPL, loader + module cache, doctor, upgrade |
 | `zz_lsp` / `zz-dap` | editor server, debug adapter |
 | `zz_pm` | registry/git/path deps, publish |
+| `zz_paths` | `ZZ_HOME`/cache layout + path containment (dependency-free, shared by CLI and `zz_codegen_cc`) |
 | `zz_plugin`, `zz_fmt`, `zz_arena`, `zz_native_rt` | plugin ABI, formatter, arenas, shared native impls |
 
 ## Adding a stdlib native — five locksteps

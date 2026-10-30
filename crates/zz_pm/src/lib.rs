@@ -31,9 +31,12 @@
 //! - `native_build` — declarative C/Rust plugin builds (no shell, no scripts)
 //! - `rust_lock` — focused Cargo manifest/lockfile model for Rust plugins
 
-/// Host-independent path containment checks shared by the package
-/// manager, the CLI and the AOT backends.
-pub mod pathsafe;
+/// Host-independent path helpers shared with the CLI and the AOT backends:
+/// `ZZ_HOME`/cache layout ([`paths`]) and containment checks ([`pathsafe`]).
+///
+/// Both live in `zz_paths` so the Clang driver can use them without pulling
+/// in the package manager; these re-exports keep existing call sites working.
+pub use zz_paths::{paths, pathsafe};
 
 pub mod auth;
 pub mod build_cache;
@@ -46,9 +49,22 @@ pub mod link;
 pub mod lock;
 pub mod manifest;
 pub mod native_build;
-pub mod paths;
 pub mod publish;
 pub mod registry;
 pub mod remote;
 pub mod resolve;
 pub mod rust_lock;
+
+/// Serialize the tests that still mutate process-global env (`ZZ_HOME`).
+///
+/// The path helpers moved to `zz_paths`, so the lock lives here: test
+/// binaries are separate processes, and the suites that mutate `ZZ_HOME`
+/// process-wide are all in this crate.
+#[cfg(test)]
+pub(crate) mod test_sync {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}

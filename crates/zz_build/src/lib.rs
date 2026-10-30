@@ -1531,11 +1531,7 @@ pub fn build_release(
         if rel.verbose {
             eprintln!("zz: timing chunk_lower={}ms", t_chunk.elapsed().as_millis());
         }
-        opts.native_rt = opts.native_rt || lowered.needs_native_rt;
-        opts.pg_link = opts.pg_link || lowered.needs_pg_link;
-        opts.float_link = opts.float_link || lowered.needs_float_fmt;
-        opts.curl_link = opts.curl_link || lowered.needs_curl;
-        opts.sqlite_link = opts.sqlite_link || lowered.needs_sqlite;
+        lowered.apply_link_needs(&mut opts);
         if let Err(e) = zz_codegen::compile::build_with(&lowered.source, &tmp, opts, target, &clang)
         {
             let _ = std::fs::remove_file(&tmp);

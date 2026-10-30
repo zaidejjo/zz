@@ -36,7 +36,7 @@ zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen 
                                              + zz_chunk (IR→C) + zz_codegen_cc (clang)
                                              + zz_codegen_{ffi,runtime,types}
                                   zz_stdlib ─┘                ↓
-                          zz_arena, zz_fmt, zz_native_rt, zz_plugin, zz_pm, zz_lsp
+                          zz_arena, zz_fmt, zz_native_rt, zz_plugin, zz_pm, zz_paths, zz_lsp
 ```
 
 - **zz_frontend**: lexer, parser, AST, lossless formatter, diagnostics
@@ -50,7 +50,8 @@ zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen 
   (with content-hash rebuild guard), native/FFI symbol tables + link metadata
 - **zz_stdlib**: 900+ natives (VM registry + C twins + Rust staticlib via `ffi.rs`)
 - **zz_cli** (`zz`): run/build/test/check/fix/fmt, REPL, loader with module cache, doctor, upgrade
-- **zz_lsp** (`zz-lsp`), **zz_pm** (registry), **zz_plugin**, **zz_fmt**, **zz_arena**
+- **zz_lsp** (`zz-lsp`), **zz_pm** (registry), **zz_paths** (ZZ_HOME/cache
+  layout + containment checks, no deps), **zz_plugin**, **zz_fmt**, **zz_arena**
 
 ## How Work Lands (no exceptions)
 

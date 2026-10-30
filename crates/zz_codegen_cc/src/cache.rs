@@ -22,10 +22,10 @@ use std::process::Command;
 
 use crate::{BuildError, BuildOptions, Clang};
 
-/// Cache directory: the shared build cache root (`zz_pm::paths`,
+/// Cache directory: the shared build cache root (`zz_paths::paths`,
 /// honoring `ZZ_HOME` like every other ZZ path).
 fn cache_dir() -> PathBuf {
-    zz_pm::paths::build_cache_dir()
+    zz_paths::paths::build_cache_dir()
 }
 
 /// The cache root as a display string, for error hints (the cache path is

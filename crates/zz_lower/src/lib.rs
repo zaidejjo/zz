@@ -63,6 +63,42 @@ pub struct LoweredC {
     pub needs_sqlite: bool,
 }
 
+impl LoweredC {
+    /// Fold the link gates discovered while lowering into `opts`.
+    ///
+    /// Callers never clear a user-requested flag, so this only ORs in what
+    /// the program actually needs. Every build path (single TU, per-unit,
+    /// chunk backend) funnels through this, so adding a future gate (OpenMP,
+    /// sanitizer runtime, ...) is one edit here instead of a copy in each
+    /// caller.
+    pub fn apply_link_needs(&self, opts: &mut zz_codegen_types::BuildOptions) {
+        merge_link_needs(
+            opts,
+            self.needs_native_rt,
+            self.needs_pg_link,
+            self.needs_float_fmt,
+            self.needs_curl,
+            self.needs_sqlite,
+        );
+    }
+}
+
+/// Shared implementation for [`LoweredC`] and [`units::LoweredUnits`].
+fn merge_link_needs(
+    opts: &mut zz_codegen_types::BuildOptions,
+    native_rt: bool,
+    pg_link: bool,
+    float_fmt: bool,
+    curl: bool,
+    sqlite: bool,
+) {
+    opts.native_rt |= native_rt;
+    opts.pg_link |= pg_link;
+    opts.float_link |= float_fmt;
+    opts.curl_link |= curl;
+    opts.sqlite_link |= sqlite;
+}
+
 /// True when a resolved type can carry an `f64` to a Display site.
 /// Recursive over every compound shape (no `Any` exists, so a whole-
 /// program scan of `TypedProgram` types is a sound float-format gate).
@@ -903,4 +939,80 @@ where
         }
     }
     unknown
+}
+
+#[cfg(test)]
+mod link_need_tests {
+    use super::*;
+
+    fn lowered(needs: [bool; 5]) -> LoweredC {
+        LoweredC {
+            source: String::new(),
+            needs_native_rt: needs[0],
+            needs_pg_link: needs[1],
+            needs_float_fmt: needs[2],
+            needs_curl: needs[3],
+            needs_sqlite: needs[4],
+        }
+    }
+
+    #[test]
+    fn every_gate_maps_to_its_option() {
+        let mut opts = zz_codegen_types::BuildOptions::default();
+        lowered([true; 5]).apply_link_needs(&mut opts);
+        assert!(opts.native_rt);
+        assert!(opts.pg_link);
+        assert!(opts.float_link);
+        assert!(opts.curl_link);
+        assert!(opts.sqlite_link);
+    }
+
+    #[test]
+    fn explicit_flags_survive_a_quiet_program() {
+        let mut opts = zz_codegen_types::BuildOptions {
+            native_rt: true,
+            curl_link: true,
+            ..Default::default()
+        };
+        lowered([false; 5]).apply_link_needs(&mut opts);
+        assert!(opts.native_rt, "user-requested link must not be cleared");
+        assert!(opts.curl_link, "user-requested link must not be cleared");
+        assert!(!opts.pg_link);
+        assert!(!opts.float_link);
+        assert!(!opts.sqlite_link);
+    }
+
+    #[test]
+    fn units_gates_match_single_tu_gates() {
+        let units = units::LoweredUnits {
+            header: String::new(),
+            units: Vec::new(),
+            entry_ns: "main".to_string(),
+            needs_native_rt: true,
+            needs_pg_link: true,
+            needs_float_fmt: true,
+            needs_curl: true,
+            needs_sqlite: true,
+        };
+        let mut opts = zz_codegen_types::BuildOptions::default();
+        units.apply_link_needs(&mut opts);
+        let mut single = zz_codegen_types::BuildOptions::default();
+        lowered([true; 5]).apply_link_needs(&mut single);
+        assert_eq!(
+            (
+                opts.native_rt,
+                opts.pg_link,
+                opts.float_link,
+                opts.curl_link,
+                opts.sqlite_link
+            ),
+            (
+                single.native_rt,
+                single.pg_link,
+                single.float_link,
+                single.curl_link,
+                single.sqlite_link
+            ),
+        );
+    }
 }

@@ -6,11 +6,11 @@
 //! defines the state, its constructors, and the low-level helpers several
 //! domains share.
 
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_diag_core::{error_at, RawDiag};
-use zz_http_routes::HttpLintState;
 use zz_span_ast::ast::{Stmt, Ty};
 use zz_span_ast::span::Span;
 use zz_types::Type;
@@ -180,6 +180,59 @@ pub struct DefinedBinding {
     pub warn_unused: bool,
 }
 
+/// Type-erased storage for state owned by checker *domains*.
+///
+/// Domain crates (route lints today, others later) need to keep state across
+/// the expression walk, but adding a field per domain made this crate depend
+/// on every domain crate — a cycle risk and a compile-time tax on anything
+/// that only wants the type tables. Domains store their state here instead
+/// and fetch it back by type; `zz_checker_core` stays dependent on types,
+/// spans and diagnostics only.
+#[derive(Default)]
+pub struct DomainState {
+    entries: HashMap<TypeId, Box<dyn Any>>,
+}
+
+impl DomainState {
+    /// Mutable state for `T`, created with [`Default`] on first use.
+    ///
+    /// The `TypeId` key is derived from the concrete type, so the downcast
+    /// below cannot fail in practice; it still returns `expect` rather than
+    /// `unwrap` to make a (theoretical) collision a clear panic.
+    pub fn get_or_default<T: Any + Default>(&mut self) -> &mut T {
+        self.entries
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Box::<T>::default())
+            .downcast_mut::<T>()
+            .expect("DomainState entries are keyed by TypeId")
+    }
+
+    /// Shared state for `T`, if the owning domain has stored any.
+    pub fn get<T: Any>(&self) -> Option<&T> {
+        self.entries.get(&TypeId::of::<T>())?.downcast_ref::<T>()
+    }
+
+    /// Number of domains that have stored state (diagnostics/tests).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True when no domain has stored state.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl std::fmt::Debug for DomainState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The boxes are opaque by construction; exposing the type count
+        // keeps `Checker` readable without unsafe downcasts.
+        f.debug_struct("DomainState")
+            .field("domains", &self.entries.len())
+            .finish()
+    }
+}
+
 pub struct Checker {
     pub unifier: Unifier,
     pub errors: Vec<zz_diag_core::RawDiag>,
@@ -282,8 +335,8 @@ pub struct Checker {
     pub span_types: std::collections::HashMap<SpanKey, Type>,
     /// Native libraries requested via `@link`, in source order, deduped.
     pub link_libs: Vec<String>,
-    /// `std.http` route registrations per server-var root (Phase 2.2 lint).
-    pub http_lint: HttpLintState,
+    /// Per-domain state (route lints, future lints), keyed by type.
+    pub domain: DomainState,
     /// Enclosing-item scope stack for [`SpanKey`] recording. Holds the
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
@@ -345,7 +398,7 @@ impl Checker {
             span_types: std::collections::HashMap::new(),
             scope: Vec::new(),
             link_libs: Vec::new(),
-            http_lint: HttpLintState::default(),
+            domain: DomainState::default(),
         }
     }
 

@@ -3797,7 +3797,6 @@ version = "0.4.0"
 dependencies = [
  "serde",
  "zz_diag_core",
- "zz_http_routes",
  "zz_span_ast",
  "zz_types",
  "zz_unify",
@@ -3877,7 +3876,7 @@ dependencies = [
  "zz_codegen_runtime",
  "zz_codegen_types",
  "zz_ir",
- "zz_pm",
+ "zz_paths",
 ]
 
 [[package]]
@@ -4088,6 +4087,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_paths"
+version = "0.4.0"
+dependencies = [
+ "dirs",
+]
+
+[[package]]
 name = "zz_plugin"
 version = "0.1.0"
 dependencies = [
@@ -4118,6 +4124,7 @@ dependencies = [
  "toml",
  "ureq",
  "zz_frontend",
+ "zz_paths",
 ]
 
 [[package]]

@@ -843,21 +843,39 @@ pub(crate) mod tests {
     /// deadline the thread panics instead of blocking `join` forever
     /// (a count mismatch means the client under test changed its
     /// request pattern — surface it, don't hang the suite).
+    ///
+    /// After the expected count the listener lingers for [`SERVE_GRACE`]
+    /// rather than closing immediately. Closing at once is racy: a client
+    /// retry (`retry_interrupted` after an EINTR) or a stray connection to a
+    /// recycled ephemeral port then hits a dead socket and the real request
+    /// surfaces as a bogus "connection refused". Extra connections are served
+    /// too, so the final assertion only enforces the lower bound.
     pub(crate) fn serve(
         expect: usize,
         route: impl Fn(&str) -> (u16, &'static str, Vec<u8>) + Send + 'static,
     ) -> (String, std::thread::JoinHandle<()>) {
+        /// Keep accepting this long after `expect` is reached.
+        const SERVE_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
             use std::io::{Read, Write};
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-            let mut served = 0;
-            while served < expect {
+            let mut served = 0usize;
+            let mut idle_since: Option<std::time::Instant> = None;
+            loop {
+                let now = std::time::Instant::now();
+                if now > deadline
+                    || (served >= expect
+                        && idle_since.is_some_and(|t| now.duration_since(t) >= SERVE_GRACE))
+                {
+                    break;
+                }
                 match listener.accept() {
                     Ok((stream, _)) => {
                         served += 1;
+                        idle_since = (served >= expect).then(std::time::Instant::now);
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                         let mut stream = stream;
@@ -891,15 +909,18 @@ pub(crate) mod tests {
                         let _ = stream.write_all(&body);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if std::time::Instant::now() > deadline {
-                            break;
+                        if served >= expect {
+                            idle_since.get_or_insert_with(std::time::Instant::now);
                         }
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                     Err(e) => panic!("test server accept failed: {e}"),
                 }
             }
-            assert_eq!(served, expect, "test server got {served}/{expect} requests");
+            assert!(
+                served >= expect,
+                "test server got {served}/{expect} requests"
+            );
         });
         (format!("http://{addr}"), handle)
     }
@@ -946,7 +967,7 @@ pub(crate) mod tests {
 
     #[test]
     fn download_and_stage_to_cas() {
-        let _guard = crate::paths::test_sync::lock_env();
+        let _guard = crate::test_sync::lock_env();
         let tgz = make_tarball(&[("zz.toml", "[package]\nname=\"w\"\n")]);
         let tgz_clone = tgz.clone();
         // Two downloads: the initial stage plus the wrong-hash probe.

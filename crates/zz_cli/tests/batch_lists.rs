@@ -193,6 +193,10 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "binds ports (collide in batch)",
     ),
     ("stdlib/http_fetch_test.zz", "network access"),
+    (
+        "stdlib/link_gates_test.zz",
+        "sqlite handle + refused loopback fetch",
+    ),
     // Scratch-filesystem fixtures keyed by sweep token: shared batch
     // processes would collide on (and pollute from) one scratch dir.
     ("stdlib/filesystem.zz", "sweep-token scratch fs"),

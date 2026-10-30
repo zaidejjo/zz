@@ -50,6 +50,24 @@ pub struct LoweredUnits {
     pub needs_sqlite: bool,
 }
 
+impl LoweredUnits {
+    /// Fold the link gates discovered while lowering into `opts`.
+    ///
+    /// Same contract as [`super::LoweredC::apply_link_needs`]; both share one
+    /// implementation so the per-unit build cannot drift from the single-TU
+    /// build.
+    pub fn apply_link_needs(&self, opts: &mut zz_codegen_types::BuildOptions) {
+        super::merge_link_needs(
+            opts,
+            self.needs_native_rt,
+            self.needs_pg_link,
+            self.needs_float_fmt,
+            self.needs_curl,
+            self.needs_sqlite,
+        );
+    }
+}
+
 /// Namespace of a dotted function name (first segment, `_prelude` if bare).
 pub fn ns_of(dotted: &str) -> &str {
     match dotted.split('.').next() {

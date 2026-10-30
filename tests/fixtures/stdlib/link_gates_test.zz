@@ -1,0 +1,39 @@
+// features: arrays, float-arith, fstrings, func-call, imports, locals, match, option-result, print, std-http, std-sqlz, string-literal, structs
+// tests/fixtures/stdlib/link_gates_test.zz — one program that trips every
+// AOT link gate at once, so a dropped flag in `apply_link_needs` fails to
+// link instead of silently degrading:
+//   - `native_rt` / `pg_link`: sqlz references the staticlib (and its
+//     Postgres objects) unconditionally, and the sqlite spelling adds
+//     `-lsqlite3`; the PG entry points are force-extracted from the archive.
+//   - `float_link`: float Display routes through the Rust float-format
+//     object, force-extracted the same way.
+//   - `curl_link`: `http.fetch` lowers to the C client (`-lcurl`).
+// Network-free: the fetch targets a refused loopback port and asserts only
+// the error tag (curl messages differ across platforms).
+import std.http
+import std.sqlz
+
+struct Row {
+    v: int,
+}
+
+func main() -> Result<int, str> {
+    // Float Display routes through the Rust core (`zz_float_format_raw`),
+    // which the C runtime references weakly: the link must force-extract it.
+    rate := 1.5
+    println("rate={rate}")
+    // SQLite: the C handle dispatch references `sqlite3_*`, so -lsqlite3
+    // must be on the link line for any sqlz-reachable program.
+    db := sqlz.open(":memory:")
+    db.exec("CREATE TABLE t (v INTEGER)")
+    db.exec("INSERT INTO t VALUES (41)")
+    rows:[Row] = db.query("SELECT v FROM t")
+    println("rows={len(rows)}")
+    println("v={rows[0].v}")
+    // curl: `http.fetch` lowers to the C client, so -lcurl must be present.
+    match http.fetch("http://127.0.0.1:9/nope") {
+        .ok(_r) => println("ERROR: should have failed")
+        .err(_e) => println("fetch_err_ok")
+    }
+    return .ok(0)
+}

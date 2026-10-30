@@ -24,7 +24,7 @@ pub use zz_codegen_types::*;
 /// logged toolchain; unset locally (any detected provider works).
 /// Returns the raw value when non-empty; callers validate the shape.
 pub fn clang_pin() -> Option<String> {
-    zz_pm::paths::env_var_os("ZZ_CLANG_VERSION")
+    zz_paths::paths::env_var_os("ZZ_CLANG_VERSION")
         .map(|v| v.to_string_lossy().trim().to_string())
         .filter(|v| !v.is_empty())
 }
@@ -152,7 +152,7 @@ fn static_syslibs_probe(clang: &Clang, need_curl: bool, need_sqlite: bool) -> bo
 /// version. Written by `zz toolchain install`; read here so builds and
 /// the runtime-archive cache follow the pin.
 pub fn toolchain_root() -> PathBuf {
-    if let Some(root) = zz_pm::paths::env_var_os("ZZ_TOOLCHAIN_ROOT") {
+    if let Some(root) = zz_paths::paths::env_var_os("ZZ_TOOLCHAIN_ROOT") {
         if !root.is_empty() {
             return PathBuf::from(root);
         }
@@ -164,7 +164,7 @@ pub fn toolchain_root() -> PathBuf {
 }
 
 fn toolchain_home_dir() -> Option<PathBuf> {
-    zz_pm::paths::env_home_dir()
+    zz_paths::paths::env_home_dir()
 }
 
 /// Pinned Zig version (`versions/<pin>/`), if `zz toolchain install` (or
@@ -187,7 +187,7 @@ pub fn toolchain_pin() -> Option<String> {
 /// incompletely installed, or not executable (falls back to PATH probing).
 /// Honors `ZZ_TEST_HIDE_CLANG` like [`detect_clang_with`].
 pub fn managed_zig_path() -> Option<PathBuf> {
-    if zz_pm::paths::env_var_os("ZZ_TEST_HIDE_CLANG").is_some() {
+    if zz_paths::paths::env_var_os("ZZ_TEST_HIDE_CLANG").is_some() {
         return None;
     }
     let pin = toolchain_pin()?;
@@ -261,7 +261,7 @@ pub fn detect_clang() -> Option<Clang> {
 
 /// Probe PATH for a Clang provider, honoring a `--cc` preference.
 pub fn detect_clang_with(provider: ClangProvider) -> Option<Clang> {
-    if zz_pm::paths::env_var_os("ZZ_TEST_HIDE_CLANG").is_some() {
+    if zz_paths::paths::env_var_os("ZZ_TEST_HIDE_CLANG").is_some() {
         return None;
     }
     let allow_clang = matches!(provider, ClangProvider::Any | ClangProvider::Clang);
@@ -706,7 +706,7 @@ pub fn build_with(
         cmd.arg(flag);
     }
     cmd.arg("-o")
-        .arg(zz_pm::pathsafe::strip_verbatim(output_path))
+        .arg(zz_paths::pathsafe::strip_verbatim(output_path))
         .arg(&src_path);
     // libm is unconditional off Windows (archive members like float
     // binops need it regardless of position). The MSVC CRT has no `m.lib`
@@ -788,7 +788,7 @@ fn push_link_inputs(
         })?;
     // Windows may hand us a verbatim (`\\?\`) path, which clang/zig reject;
     // strip it exactly like the previous `-L` spelling did.
-    cmd.arg(zz_pm::pathsafe::strip_verbatim(&rt_a));
+    cmd.arg(zz_paths::pathsafe::strip_verbatim(&rt_a));
     // Unified Rust native runtime: link the static library providing FFI
     // natives. libstd links statically (rlib, #303), so fully-static
     // binaries work wherever the static system libs exist — no RUNPATH,
@@ -849,7 +849,7 @@ fn push_link_inputs(
     for artifact in &opts.plugin_artifacts {
         // Windows `canonicalize` adds a `\\?\` prefix; the MSVC linker
         // rejects that spelling.
-        cmd.arg(zz_pm::pathsafe::strip_verbatim(artifact));
+        cmd.arg(zz_paths::pathsafe::strip_verbatim(artifact));
     }
     // Link plugin dependency libraries (e.g. `-lvips` from ldflags.txt).
     for arg in &opts.plugin_link_args {
@@ -1062,7 +1062,7 @@ pub fn compile_units(
     // conservatively rebuilds everything (same as today's whole-program
     // behavior, never stale). Cleared with the rest of the tree by
     // `zz cache clean`.
-    let obj_base = zz_pm::paths::cache_objects_dir().join("units");
+    let obj_base = zz_paths::paths::cache_objects_dir().join("units");
     let rt_base = crate::cache::cache_key(
         target,
         opts.optimize,
@@ -1217,7 +1217,7 @@ pub fn emit_c_plus_script(
     let mut extra_inputs = String::new();
     for a in &opts.plugin_artifacts {
         extra_inputs.push(' ');
-        extra_inputs.push_str(&zz_pm::pathsafe::strip_verbatim(a).display().to_string());
+        extra_inputs.push_str(&zz_paths::pathsafe::strip_verbatim(a).display().to_string());
     }
     for a in &opts.plugin_link_args {
         extra_inputs.push(' ');
@@ -1744,7 +1744,7 @@ mod tests {
         // Cannot control the real PATH portably here; assert the contract:
         // when a provider is found its label is one of the two known ones,
         // and the hidden-clang hook forces None.
-        let _hidden = zz_pm::paths::env_scope(&[("ZZ_TEST_HIDE_CLANG", Some("1".into()))]);
+        let _hidden = zz_paths::paths::env_scope(&[("ZZ_TEST_HIDE_CLANG", Some("1".into()))]);
         assert!(detect_clang().is_none());
         assert!(detect_clang_with(ClangProvider::Zig).is_none());
         drop(_hidden);
@@ -1837,7 +1837,7 @@ mod toolchain_tests {
     /// Tests in this module probe the toolchain and shell out to `zig`; the
     /// lock keeps the probe order deterministic. It is *not* needed for
     /// environment isolation any more: overrides below are thread-scoped
-    /// (`zz_pm::paths::env_scope`), so nothing leaks process-wide.
+    /// (`zz_paths::paths::env_scope`), so nothing leaks process-wide.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Hermetic toolchain root: unique temp dir + thread-scoped override,
@@ -1848,7 +1848,7 @@ mod toolchain_tests {
     /// locally, failed in CI).
     struct HermeticRoot {
         dir: PathBuf,
-        _scope: zz_pm::paths::EnvScope,
+        _scope: zz_paths::paths::EnvScope,
     }
 
     impl HermeticRoot {
@@ -1860,7 +1860,7 @@ mod toolchain_tests {
                 std::env::temp_dir().join(format!("zz-tc-test-{}-{uniq}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            let scope = zz_pm::paths::env_scope(&[
+            let scope = zz_paths::paths::env_scope(&[
                 ("ZZ_TOOLCHAIN_ROOT", Some(dir.clone().into_os_string())),
                 ("ZZ_CLANG_VERSION", None),
             ]);
@@ -1907,12 +1907,12 @@ mod toolchain_tests {
     /// drop — panic-safe, so a failing assert cannot leak the hook into
     /// later tests (or into a parallel test's clang detection).
     struct HideClang {
-        _scope: zz_pm::paths::EnvScope,
+        _scope: zz_paths::paths::EnvScope,
     }
     impl HideClang {
         fn new() -> Self {
             HideClang {
-                _scope: zz_pm::paths::env_scope(&[("ZZ_TEST_HIDE_CLANG", Some("1".into()))]),
+                _scope: zz_paths::paths::env_scope(&[("ZZ_TEST_HIDE_CLANG", Some("1".into()))]),
             }
         }
     }
