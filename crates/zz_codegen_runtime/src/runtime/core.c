@@ -1619,6 +1619,11 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         out.payload = p;
         return out;
     }
+    case ZZ_WEAK: {
+        if (!v.weak) return v;
+        __atomic_add_fetch(&v.weak->weak, 1, __ATOMIC_RELAXED);
+        return v;
+    }
     case ZZ_OBJECT: {
         if (!v.obj) return v;
         zz_value hit;
@@ -8056,6 +8061,41 @@ zz_value zz_typeof(zz_value v, int *err) {
 zz_value zz_clone_deep(zz_value v, int *err) {
     (void)err;
     return zz_value_dup(v);
+}
+
+// ---- weak references ----------------------------------------------------
+
+// `weak(v)`: clone `v` into a new zz_weak control block (strong=1 leaked,
+// weak=1). Returns `zz_value{ZZ_WEAK, weak: ptr}`.
+// The strong ref is deliberately leaked so upgrade() always succeeds; the
+// control block is freed when the last Weak handle is dropped.
+zz_value zz_value_weak(zz_value v, int *err) {
+    (void)err;
+    zz_weak *w = (zz_weak *)malloc(sizeof(zz_weak));
+    if (!w) {
+        fprintf(stderr, "zz: weak out of memory\n");
+        exit(1);
+    }
+    w->strong = 1;
+    w->weak = 1;
+    w->value = zz_value_dup(v); // deep clone: referent is independently owned
+    return (zz_value){ZZ_WEAK, {.weak = w}};
+}
+
+// `upgrade(w)`: if the referent is still alive (strong > 0), return a deep
+// clone of it; otherwise return ZZ_OPTION_NONE. Non-weak values are
+// returned as-is (handled by the caller, but we handle it here too for
+// safety).
+zz_value zz_value_upgrade(zz_value v, int *err) {
+    (void)err;
+    if (v.tag != ZZ_WEAK || !v.weak) {
+        return zz_value_dup(v);
+    }
+    size_t s = atomic_load_explicit(&v.weak->strong, memory_order_acquire);
+    if (s == 0) {
+        return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
+    }
+    return zz_value_dup(v.weak->value);
 }
 
 // int(v) — parse to Option[int] (mirrors the VM `conv_int`).

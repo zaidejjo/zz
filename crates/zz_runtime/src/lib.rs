@@ -19,7 +19,8 @@ pub use env::Env;
 pub use env::EnvLink;
 pub use eval::{EvalError, Interp, NativeEntry, NativeFn, SpawnHook, SPAWN_HOOK};
 pub use value::{
-    deep_clone, BytesData, DictData, FuncValue, NativeFunc, ObjectValue, RangeValue, Value,
+    deep_clone, upgrade, weak, BytesData, DictData, FuncValue, NativeFunc, ObjectValue, RangeValue,
+    Value,
 };
 pub use vm::Chunk;
 pub use zz_frontend::ast::{Expr, Param};

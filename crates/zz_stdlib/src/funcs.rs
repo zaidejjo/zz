@@ -2527,6 +2527,12 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // Built-in: `clone(v)` — deep copy, fully independent value (#267).
     m.insert("clone".into(), sig_t(vec![("v", t.clone())], t.clone()));
 
+    // Built-in: `weak(v)` — weak reference for cycle breaking.
+    m.insert("weak".into(), sig_t(vec![("v", t.clone())], t.clone()));
+
+    // Built-in: `upgrade(w)` — upgrade a weak reference to strong.
+    m.insert("upgrade".into(), sig_t(vec![("v", t.clone())], t.clone()));
+
     // Built-in conversions.
     // `str(v)` — stringify any value (total).
     m.insert("str".into(), sig_t(vec![("v", t.clone())], Type::Str));
