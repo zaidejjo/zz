@@ -3804,6 +3804,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_chunk"
+version = "0.4.0"
+dependencies = [
+ "zz_codegen_ffi",
+ "zz_codegen_runtime",
+ "zz_codegen_types",
+ "zz_ir",
+ "zz_lower",
+]
+
+[[package]]
 name = "zz_cli"
 version = "0.4.0"
 dependencies = [
@@ -3847,6 +3858,7 @@ version = "0.4.0"
 dependencies = [
  "rayon",
  "zz_checker",
+ "zz_chunk",
  "zz_codegen_ffi",
  "zz_codegen_runtime",
  "zz_codegen_types",

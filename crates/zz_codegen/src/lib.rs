@@ -6,7 +6,7 @@
 //! is required on standard systems (they ship with the OS toolchain).
 
 pub mod cache;
-pub mod chunk;
+pub use zz_chunk as chunk;
 pub mod compile;
 pub use zz_codegen_ffi as ffi;
 

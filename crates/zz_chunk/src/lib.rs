@@ -4704,11 +4704,11 @@ pub fn build_module(module: &Module, entry_main: &str) -> Result<zz_lower::Lower
         .join("\n");
     Ok(zz_lower::LoweredC {
         source,
-        needs_native_rt: em.needs_native_rt || crate::ffi::needs_native_rt(&native_names),
-        needs_pg_link: crate::ffi::needs_pg_link(&native_names),
+        needs_native_rt: em.needs_native_rt || zz_codegen_ffi::needs_native_rt(&native_names),
+        needs_pg_link: zz_codegen_ffi::needs_pg_link(&native_names),
         needs_float_fmt: em.needs_float_fmt,
-        needs_curl: crate::ffi::needs_curl_link(&native_names),
-        needs_sqlite: crate::ffi::needs_sqlite_link(&native_names),
+        needs_curl: zz_codegen_ffi::needs_curl_link(&native_names),
+        needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&native_names),
     })
 }
 
