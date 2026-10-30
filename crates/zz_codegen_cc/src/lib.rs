@@ -15,9 +15,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub mod cache;
+
 pub use zz_codegen_types::*;
 
-/// Error surfaced from a build.
 /// Pinned Clang major version from `ZZ_CLANG_VERSION` (e.g. `19` → probe
 /// `clang-19` first). Set in CI so every sanitizer/bench build uses one
 /// logged toolchain; unset locally (any detected provider works).
@@ -745,16 +746,16 @@ pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, zig: bool) ->
     // to be required, which conflicts with weak_import and causes "undefined
     // symbol" linker errors. Skip `-u` on macOS; normal reference resolution
     // pulls in the archive members when the symbols are actually needed.
-    if crate::ffi::target_os(target) == crate::ffi::TargetOs::Macos {
+    if zz_codegen_ffi::target_os(target) == zz_codegen_ffi::TargetOs::Macos {
         return None;
     }
-    let sym = crate::ffi::force_undef_symbol(symbol, target);
+    let sym = zz_codegen_ffi::force_undef_symbol(symbol, target);
     // `zig cc` rejects the MSVC spelling outright ("unsupported linker
     // arg: /INCLUDE:<sym>") even when it links for a Windows target,
     // because its driver parses `-Wl,` itself and only maps GNU-style
     // args. lld-link accepts `-u <sym>` identically, so zig always gets
     // the GNU spelling; plain clang keeps `/INCLUDE:` for link.exe.
-    if !zig && crate::ffi::target_os(target) == crate::ffi::TargetOs::Windows {
+    if !zig && zz_codegen_ffi::target_os(target) == zz_codegen_ffi::TargetOs::Windows {
         Some(format!("-Wl,/INCLUDE:{sym}"))
     } else {
         Some(format!("-Wl,-u,{sym}"))
@@ -793,14 +794,14 @@ fn push_link_inputs(
     // binaries work wherever the static system libs exist — no RUNPATH,
     // no sidecar, no Rust toolchain on the target.
     if opts.native_rt || opts.float_link {
-        let (extra, rt_lib) = crate::ffi::link_args_for_target(opts.optimize, target)
+        let (extra, rt_lib) = zz_codegen_ffi::link_args_for_target(opts.optimize, target)
             .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
         // Pre-#303 fallback (shared libstd): sidecar the shipped shared
         // libs next to the output binary (`$ORIGIN` rpath on Unix,
         // DLL next to .exe on Windows) so it runs with no toolchain.
         // No-op for static links (nothing to stage) and for dev
         // checkouts (rustc rpath above already applies).
-        let rpath = crate::ffi::stage_shared_libs(&rt_lib, output_path, target)
+        let rpath = zz_codegen_ffi::stage_shared_libs(&rt_lib, output_path, target)
             .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
         for a in &rpath {
             cmd.arg(a);
@@ -810,7 +811,7 @@ fn push_link_inputs(
         // staticlib); force-extract the objects whenever the gate fired.
         // The flag precedes the archive that satisfies it (linker order).
         if opts.pg_link {
-            for sym in crate::ffi::PG_LINK_SYMBOLS {
+            for sym in zz_codegen_ffi::PG_LINK_SYMBOLS {
                 if let Some(flag) = force_undef_flag(sym, target, clang.zig) {
                     cmd.arg(flag);
                 }
@@ -819,7 +820,9 @@ fn push_link_inputs(
         // Float Display (spec §4): same weak-ref situation — pull the
         // Rust-core formatter explicitly when the gate fired.
         if opts.float_link {
-            if let Some(flag) = force_undef_flag(crate::ffi::FLOAT_FMT_SYMBOL, target, clang.zig) {
+            if let Some(flag) =
+                force_undef_flag(zz_codegen_ffi::FLOAT_FMT_SYMBOL, target, clang.zig)
+            {
                 cmd.arg(flag);
             }
         }
@@ -835,8 +838,8 @@ fn push_link_inputs(
         // unwinder from libSystem / SEH, so the flag is GNU-only.
         if clang.zig
             && !matches!(
-                crate::ffi::target_os(target),
-                crate::ffi::TargetOs::Macos | crate::ffi::TargetOs::Windows
+                zz_codegen_ffi::target_os(target),
+                zz_codegen_ffi::TargetOs::Macos | zz_codegen_ffi::TargetOs::Windows
             )
         {
             cmd.arg("-lunwind");
@@ -855,7 +858,7 @@ fn push_link_inputs(
     // Winsock for zig cross builds: clang_flags was called with `None`
     // (the target travels via `-target`), so the flag would be missing.
     // Duplicate `-lws2_32` on the regular path is harmless.
-    if crate::ffi::target_os(target) == crate::ffi::TargetOs::Windows {
+    if zz_codegen_ffi::target_os(target) == zz_codegen_ffi::TargetOs::Windows {
         cmd.arg("-lws2_32");
     }
     // Scoped --as-needed LAST: with per-function sections + --gc-sections,
@@ -873,12 +876,12 @@ fn push_link_inputs(
     // even when `--gc-sections` later removed every `zz_db_*` section.
     // Omitting the flag entirely leaves no NEEDED entry and links fine.
     if opts.curl_link || opts.sqlite_link {
-        let os = crate::ffi::target_os(target);
+        let os = zz_codegen_ffi::target_os(target);
         // `--as-needed` is a GNU ld/lld (ELF) flag; ld64 and link.exe
         // reject it outright.
         let elf_linker = matches!(
             os,
-            crate::ffi::TargetOs::Linux | crate::ffi::TargetOs::Other
+            zz_codegen_ffi::TargetOs::Linux | zz_codegen_ffi::TargetOs::Other
         );
         if elf_linker {
             cmd.arg("-Wl,--as-needed");
@@ -886,7 +889,7 @@ fn push_link_inputs(
         if opts.curl_link {
             // vcpkg names the curl import library `libcurl.lib`; the
             // driver's `-lcurl` would look for `curl.lib`.
-            cmd.arg(if os == crate::ffi::TargetOs::Windows {
+            cmd.arg(if os == zz_codegen_ffi::TargetOs::Windows {
                 "-llibcurl"
             } else {
                 "-lcurl"
@@ -1235,10 +1238,10 @@ pub fn emit_c_plus_script(
     // Conditional system libs: mirror `build_with` so manual builds link
     // exactly what the real build links (no phantom sqlite/curl NEEDED).
     // `--as-needed` is GNU ld/lld only: ld64 (macOS) and link.exe reject it.
-    let os = crate::ffi::target_os(target);
+    let os = zz_codegen_ffi::target_os(target);
     let elf_linker = matches!(
         os,
-        crate::ffi::TargetOs::Linux | crate::ffi::TargetOs::Other
+        zz_codegen_ffi::TargetOs::Linux | zz_codegen_ffi::TargetOs::Other
     );
     let mut syslibs = String::new();
     if opts.curl_link || opts.sqlite_link {
@@ -1247,7 +1250,7 @@ pub fn emit_c_plus_script(
         }
         if opts.curl_link {
             // vcpkg's curl import library is `libcurl.lib`.
-            syslibs.push_str(if os == crate::ffi::TargetOs::Windows {
+            syslibs.push_str(if os == zz_codegen_ffi::TargetOs::Windows {
                 " -llibcurl"
             } else {
                 " -lcurl"
@@ -1269,7 +1272,7 @@ pub fn emit_c_plus_script(
     let mut rt_note = String::new();
     if opts.native_rt || opts.float_link {
         if opts.pg_link {
-            for sym in crate::ffi::PG_LINK_SYMBOLS {
+            for sym in zz_codegen_ffi::PG_LINK_SYMBOLS {
                 if let Some(flag) = force_undef_flag(sym, target, false) {
                     rt_link.push(' ');
                     rt_link.push_str(&flag);
@@ -1277,12 +1280,12 @@ pub fn emit_c_plus_script(
             }
         }
         if opts.float_link {
-            if let Some(flag) = force_undef_flag(crate::ffi::FLOAT_FMT_SYMBOL, target, false) {
+            if let Some(flag) = force_undef_flag(zz_codegen_ffi::FLOAT_FMT_SYMBOL, target, false) {
                 rt_link.push(' ');
                 rt_link.push_str(&flag);
             }
         }
-        match crate::ffi::link_args_for_target(opts.optimize, target) {
+        match zz_codegen_ffi::link_args_for_target(opts.optimize, target) {
             Ok((args, _)) => {
                 for a in &args {
                     rt_link.push(' ');
@@ -1299,7 +1302,7 @@ pub fn emit_c_plus_script(
     }
     // `-lm` is a GNU/ELF convention; MSVC has `m.lib` and the CRT
     // already carries the math symbols, so clang-cl rejects `-lm`.
-    let math_lib = if os == crate::ffi::TargetOs::Windows {
+    let math_lib = if os == zz_codegen_ffi::TargetOs::Windows {
         ""
     } else {
         " -lm"
@@ -1790,7 +1793,7 @@ mod tests {
         // Unix links `-L<dir> -lzz_native_rt`; Windows passes the archive
         // path directly (`zz_native_rt.lib`), so accept both spellings.
         let links_rt =
-            |t: &str| t.contains("-lzz_native_rt") || t.contains(crate::ffi::lib_file_name());
+            |t: &str| t.contains("-lzz_native_rt") || t.contains(zz_codegen_ffi::lib_file_name());
         assert!(
             links_rt(&text),
             "script must link the native runtime: {text}"
@@ -1800,9 +1803,9 @@ mod tests {
             "script must link the static libstd: {text}"
         );
         // macOS: weak_import symbols skip `-u` force-extract
-        if crate::ffi::target_os(None) != crate::ffi::TargetOs::Macos {
+        if zz_codegen_ffi::target_os(None) != zz_codegen_ffi::TargetOs::Macos {
             assert!(
-                text.contains(crate::ffi::FLOAT_FMT_SYMBOL),
+                text.contains(zz_codegen_ffi::FLOAT_FMT_SYMBOL),
                 "script must force-extract the float formatter: {text}"
             );
         }

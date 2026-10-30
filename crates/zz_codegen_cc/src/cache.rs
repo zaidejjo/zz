@@ -20,7 +20,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::compile::{BuildError, BuildOptions, Clang};
+use crate::{BuildError, BuildOptions, Clang};
 
 /// Cache directory: the shared build cache root (`zz_pm::paths`,
 /// honoring `ZZ_HOME` like every other ZZ path).
@@ -94,11 +94,11 @@ pub fn cache_key(
     pg: bool,
     float_fmt: bool,
 ) -> String {
-    let fallback_triple = crate::compile::host_triple();
+    let fallback_triple = crate::host_triple();
     let triple = target.unwrap_or(&fallback_triple);
     let mode = if optimize { "rel" } else { "dev" };
-    let pin = crate::compile::toolchain_pin().unwrap_or_else(|| "nopin".to_string());
-    let san = crate::compile::sanitize_list().join("+");
+    let pin = crate::toolchain_pin().unwrap_or_else(|| "nopin".to_string());
+    let san = crate::sanitize_list().join("+");
     let san = if san.is_empty() {
         "nosan".to_string()
     } else {
@@ -138,7 +138,7 @@ pub fn ensure_rt_a(
     target: Option<&str>,
 ) -> Result<PathBuf, BuildError> {
     // PGO builds are non-reusable — skip the cache entirely.
-    if opts.pgo != crate::compile::PgoMode::None {
+    if opts.pgo != crate::PgoMode::None {
         return compile_rt_a(opts, clang, target, None);
     }
 
@@ -462,7 +462,7 @@ fn build_compile_flags(opts: &BuildOptions, target: Option<&str>) -> Vec<String>
     }
     // Sanitizer leg: the archive must be instrumented with the same
     // flags as the program, or ASan/UBSan miss every runtime bug.
-    flags.extend(crate::compile::sanitize_flags());
+    flags.extend(crate::sanitize_flags());
     // Optional staticlib backends: only reference their symbols when this
     // link actually provides them (see the doc comment above).
     flags.push(format!("-DZZ_LINK_PG={}", u8::from(links_pg(opts))));

@@ -5,9 +5,9 @@
 //! binary. `cc`/`clang`/`gcc` are auto-detected; NO manual tooling install
 //! is required on standard systems (they ship with the OS toolchain).
 
-pub mod cache;
 pub use zz_chunk as chunk;
-pub mod compile;
+pub use zz_codegen_cc as compile;
+pub use zz_codegen_cc::cache;
 pub use zz_codegen_ffi as ffi;
 
 pub use chunk::{build_module as build_chunk_module, coverage as chunk_coverage, ChunkError};
