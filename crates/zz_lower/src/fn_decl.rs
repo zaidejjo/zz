@@ -38,9 +38,15 @@ impl Lowerer {
         };
         o.push_str(&signature);
         o.push_str("    (void)argc;\n");
-        // No function arena: nothing lowers allocations into it (loop
-        // bodies use their own sub-arenas, everything else is heap). A
-        // per-call 64KB init here used to leak on every invocation.
+        // Per-function bump arena: every NonEscaping allocation in this
+        // body is bump-allocated here and reclaimed in O(1) at every return
+        // path via the `cleanup(zz_arena_destroy)` attribute. Escaping
+        // values (returned, stored globally, captured in closures) still
+        // go to the ARC heap — never the arena — so the cleanup can never
+        // free a live value. Loop sub-arenas take priority for per-iteration
+        // reset; `_func_arena` catches everything else.
+        o.push_str("    zz_arena _func_arena __attribute__((cleanup(zz_arena_destroy)));\n");
+        o.push_str("    zz_arena_init(&_func_arena, 65536);\n");
         let mut names = NameCtx::new();
         // Scope typed-AST lookups to this function: spans repeat across
         // modules, so lookups must pair them with the enclosing item.
@@ -221,6 +227,7 @@ impl Lowerer {
                 has_default: Vec::new(),
                 ret: zz_checker::Type::Unit,
                 is_extern: false,
+                readonly: false,
                 extern_c_symbol: None,
             });
         // Eligibility was proven in `compute_specialized`: every param and
@@ -258,6 +265,11 @@ impl Lowerer {
             "{} {ret_c} {cname}_u({psig}) {{\n",
             self.link_kw()
         ));
+        // Per-function bump arena for the `_u` variant — same rationale as
+        // the boxed entry point: NonEscaping allocations are bump-allocated
+        // here and reclaimed in O(1) at return via cleanup attribute.
+        o.push_str("    zz_arena _func_arena __attribute__((cleanup(zz_arena_destroy)));\n");
+        o.push_str("    zz_arena_init(&_func_arena, 65536);\n");
         let mut names = NameCtx::new();
         names.current_scope = fname.to_string();
         self.seed_globals(&mut names);

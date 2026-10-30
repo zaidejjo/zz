@@ -1180,6 +1180,7 @@ mod tests {
                 name.to_string(),
                 zz_checker::FuncSig {
                     is_extern: false,
+                    readonly: false,
                     extern_c_symbol: None,
                     generics: vec![],
                     bounds: vec![],

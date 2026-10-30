@@ -314,6 +314,17 @@ void zz_release_arc(zz_value *v) {
             zz_db_release_handle(db);
         }
         break;
+    case ZZ_WEAK:
+        if (v->weak) {
+            size_t w = __atomic_sub_fetch(&v->weak->weak, 1, __ATOMIC_ACQ_REL);
+            if (w == 0) {
+                // Last weak handle: release the referent and free the block.
+                zz_release(&v->weak->value);
+                free(v->weak);
+                v->weak = NULL;
+            }
+        }
+        break;
     default:
         break;
     }
@@ -351,6 +362,11 @@ zz_value zz_clone_arc(zz_value v) {
         break;
     case ZZ_DB:
         if (v.db) zz_db_retain_handle(v.db);
+        break;
+    case ZZ_WEAK:
+        if (v.weak) {
+            __atomic_add_fetch(&v.weak->weak, 1, __ATOMIC_RELAXED);
+        }
         break;
     default:
         break;

@@ -720,6 +720,7 @@ mod tests {
                 has_default: Vec::new(),
                 ret: zz_checker::Type::Int,
                 is_extern: true,
+                readonly: false,
                 extern_c_symbol: None,
             };
             let with_plugin = run_key(&entry, &[("plug.f".to_string(), sig)], None).unwrap();

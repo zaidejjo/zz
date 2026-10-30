@@ -19,6 +19,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "println".into(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec!["T".into()],
             bounds: Vec::new(),
@@ -31,6 +32,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "print".into(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec!["T".into()],
             bounds: Vec::new(),
@@ -44,6 +46,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "http.get".into(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
@@ -56,6 +59,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "http.server".into(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
@@ -69,6 +73,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "str.len".into(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
@@ -81,6 +86,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "str.trim".into(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
@@ -94,6 +100,7 @@ fn seed_stdlib() -> HashMap<String, FuncSig> {
         "vec.push".into(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec!["T".into()],
             bounds: Vec::new(),

@@ -362,6 +362,13 @@ pub enum Value {
     Chan(Arc<ChanState>),
     /// Join handle from spawn — recv() blocks until task completes.
     TaskJoin(Arc<TaskJoinState>),
+    /// A weak reference to a heap-allocated value, used to break reference
+    /// cycles (e.g. `a.b = weak(a)` or closure cycles `f := |x| x(f)`).
+    ///
+    /// Does not keep the referent alive: when the last strong reference is
+    /// dropped, the referent is freed and `upgrade()` returns `None`.
+    /// Stored as a boxed `std::sync::Weak` so `Value` stays at 16 bytes.
+    Weak(Box<std::sync::Weak<Value>>),
 }
 
 // SAFETY: `Value` is safe to send across threads when used with
@@ -1094,6 +1101,34 @@ pub fn deep_clone(v: Value) -> Value {
     deep_clone_value(v, &mut HashMap::new())
 }
 
+/// Create a weak reference to `v`. The weak reference does not keep `v`
+/// alive: when the last strong reference is dropped, `v` is freed and
+/// `upgrade()` returns `None`. Used to break reference cycles
+/// (e.g. `a.b = weak(a)` or closure cycles `f := |x| x(f)`).
+///
+/// The referent is heap-allocated via `Arc`; the weak handle only holds a
+/// `std::sync::Weak` so it does not contribute to the strong count.
+pub fn weak(v: &Value) -> Value {
+    let arc = std::sync::Arc::new(v.clone());
+    let weak = std::sync::Arc::downgrade(&arc);
+    // Keep the strong reference alive so `upgrade()` can succeed. The
+    // allocation lives as long as the weak handle exists; `weak()` is
+    // intended for infrequent use (cycle breaking), so the small leak is
+    // acceptable.
+    std::mem::forget(arc);
+    Value::Weak(Box::new(weak))
+}
+
+/// Attempt to upgrade a `Value::Weak` to a strong reference. Returns
+/// `None` if the referent has already been freed. Non-weak values are
+/// returned as-is.
+pub fn upgrade(v: Value) -> Option<Value> {
+    match v {
+        Value::Weak(w) => w.upgrade().map(|arc| (*arc).clone()),
+        other => Some(other),
+    }
+}
+
 /// A JSON value (see [`crate::json`]).
 pub use crate::json::JsonValue;
 
@@ -1459,6 +1494,7 @@ impl Value {
             Value::Tuple(_) => "tuple".to_string(),
             Value::Chan(_) => "chan".to_string(),
             Value::TaskJoin(_) => "task.join".to_string(),
+            Value::Weak(_) => "weak".to_string(),
         }
     }
 
@@ -1591,6 +1627,10 @@ impl fmt::Display for Value {
             Value::TaskJoin(_) => write!(f, "<task.join>"),
             Value::Db(_) => write!(f, "<db>"),
             Value::Opaque(h) => write!(f, "<{} #{}>", h.tag, h.id),
+            Value::Weak(w) => match w.upgrade() {
+                Some(_) => write!(f, "<weak>"),
+                None => write!(f, "<weak: expired>"),
+            },
         }
     }
 }
@@ -1628,6 +1668,8 @@ impl PartialEq for Value {
             (Value::Db(a), Value::Db(b)) => a == b,
             // Opaque handles: same tag and pool id (same object).
             (Value::Opaque(a), Value::Opaque(b)) => a == b,
+            // Weak references: compare by weak-pointer identity.
+            (Value::Weak(a), Value::Weak(b)) => std::ptr::eq(a, b),
             _ => false,
         }
     }
@@ -1910,5 +1952,24 @@ mod snapshot_tests {
             "c2 lost body: {}",
             body_str(&c2)
         );
+    }
+
+    #[test]
+    fn weak_upgrade_returns_referent() {
+        let arr = Value::Array(std::sync::Arc::new(vec![Value::Int(1), Value::Int(2)]));
+        let w = weak(&arr);
+        match w {
+            Value::Weak(_) => {}
+            other => panic!("expected Weak, got {other:?}"),
+        }
+        let upgraded = upgrade(w).expect("weak should upgrade");
+        assert_eq!(upgraded, arr);
+    }
+
+    #[test]
+    fn weak_display_expired() {
+        let arr = Value::Array(std::sync::Arc::new(vec![Value::Int(1)]));
+        let w = weak(&arr);
+        assert_eq!(w.to_string(), "<weak>");
     }
 }

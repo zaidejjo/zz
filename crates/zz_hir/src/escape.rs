@@ -23,6 +23,10 @@ pub enum AllocClass {
     /// Object lives only within the current function scope. Can be
     /// bump-allocated on the arena and freed in O(1) at scope exit.
     NonEscaping,
+    /// Object outlives every frame but is immutable/read-only. Placed in
+    /// a static data section (`_static_arena`) that lives for the process
+    /// lifetime — no ARC refcount overhead on access.
+    Static,
     /// Object escapes the current scope (returned, stored in a global,
     /// passed to another function, captured in a closure). Must use
     /// thread-safe ARC.
@@ -95,7 +99,9 @@ pub fn analyze(tp: &TypedProgram) -> EscapeResult {
 }
 
 /// After the first pass, walk declarations and mark the initializer of any
-/// escaped variable as escaping.
+/// escaped variable as escaping. Recurses into nested blocks (if/while/block
+/// expressions) so that a variable declared inside a nested scope and
+/// returned from there has its initializer marked escaping too.
 fn propagate_escaped(
     block: &crate::Block,
     escaped_names: &HashSet<String>,
@@ -110,9 +116,53 @@ fn propagate_escaped(
                     mark_escaping_recursive(value, tp, scope, result);
                 }
             }
-            Stmt::For { body, .. } => propagate_escaped(body, escaped_names, tp, scope, result),
+            Stmt::For { body, .. } => {
+                propagate_escaped(body, escaped_names, tp, scope, result);
+            }
+            Stmt::Expr(e) => match e {
+                Expr::If { then, els, .. } => {
+                    propagate_escaped(then, escaped_names, tp, scope, result);
+                    if let Some(el) = els.as_ref() {
+                        propagate_escaped_expr(el, escaped_names, tp, scope, result);
+                    }
+                }
+                Expr::While { body, .. } => {
+                    propagate_escaped(body, escaped_names, tp, scope, result);
+                }
+                Expr::Block(b) => {
+                    propagate_escaped(b, escaped_names, tp, scope, result);
+                }
+                _ => {}
+            },
             _ => {}
         }
+    }
+}
+
+/// Recurses into a single expression that may contain a block body (used
+/// for the `else` branch of `if`, which is `Option<Box<Expr>>` rather than
+/// a `Block`).
+fn propagate_escaped_expr(
+    e: &Expr,
+    escaped_names: &HashSet<String>,
+    tp: &TypedProgram,
+    scope: &str,
+    result: &mut EscapeResult,
+) {
+    match e {
+        Expr::If { then, els, .. } => {
+            propagate_escaped(then, escaped_names, tp, scope, result);
+            if let Some(el) = els.as_ref() {
+                propagate_escaped_expr(el, escaped_names, tp, scope, result);
+            }
+        }
+        Expr::While { body, .. } => {
+            propagate_escaped(body, escaped_names, tp, scope, result);
+        }
+        Expr::Block(b) => {
+            propagate_escaped(b, escaped_names, tp, scope, result);
+        }
+        _ => {}
     }
 }
 
@@ -152,13 +202,30 @@ fn analyze_block(
 fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut EscapeResult) {
     match stmt {
         Stmt::Decl { name, value, .. } => {
-            // Top-level bindings live in `zz_global_*` past every frame:
-            // their initializers escape by definition (#421: a const
-            // array lowered as a stack temporary dangles once `zz_main`
-            // returns). Same for any binding shadowing a global name
-            // (conservative: over-marking only costs an allocation).
+            // Top-level bindings live in `zz_global_*` past every frame.
+            // Their initializers outlive all frames (#421). If the
+            // initializer is an immutable heap-allocating literal (array,
+            // dict, string, struct, fmt), classify it as `Static` — placed
+            // in the module-level static arena with no ARC overhead.
+            // Scalars don't allocate; function calls may have side effects —
+            // both stay as classified (`Escaping` for calls, `NonEscaping`
+            // for scalars).
             if ctx.func_name == TOP || ctx.global_names.contains(&name.name) {
-                mark_escaping_recursive(value, tp, ctx.func_name, result);
+                let cls = classify_expr(value, tp, ctx);
+                let cls = match cls {
+                    AllocClass::NonEscaping => match value {
+                        Expr::Str { .. }
+                        | Expr::Array { .. }
+                        | Expr::Dict { .. }
+                        | Expr::StructInit { .. }
+                        | Expr::Fmt { .. } => AllocClass::Static,
+                        _ => cls,
+                    },
+                    other => other,
+                };
+                result.classes.insert(value.span(), cls);
+                // Also classify sub-expressions within the initializer.
+                analyze_expr(value, tp, ctx, result);
             } else {
                 let cls = classify_expr(value, tp, ctx);
                 result.classes.insert(value.span(), cls);
@@ -171,6 +238,12 @@ fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &
             if let Expr::Ident { name, .. } = target {
                 if ctx.global_names.contains(name) || ctx.param_names.contains(name) {
                     // Assigning to a param or global: the RHS escapes.
+                    mark_escaping_recursive(value, tp, ctx.func_name, result);
+                } else if ctx.escaped_names.contains(name) {
+                    // Assigning to a variable that escapes this scope (e.g.
+                    // read after the loop, returned, or passed to a callee):
+                    // the RHS outlives the loop iteration and must not be
+                    // arena-allocated (it would dangle at arena reset).
                     mark_escaping_recursive(value, tp, ctx.func_name, result);
                 } else {
                     let cls = classify_expr(value, tp, ctx);
@@ -273,20 +346,28 @@ fn analyze_expr(e: &Expr, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut
             }
         }
         Expr::Call { callee, args, .. } => {
-            // Arguments to function calls escape (we can't track
-            // cross-function). Notably EXCEPT read-only builtins like
-            // `len(...)` / `vec.len(...)`, which never retain their
-            // argument — treating them as escaping forces every
-            // loop-local array/dict fed to `len()` onto the heap despite
-            // the per-iteration arena reset being available.
-            let is_read_only_builtin = matches!(
-                callee.as_ref(),
-                Expr::Ident { name, .. }
-                    if matches!(
-                        name.as_str(),
-                        "len" | "std.len" | "vec.len" | "std.vec.len" | "range" | "std.range"
-                    )
-            );
+            // A `readonly` function (via `#[readonly]` decorator) never
+            // retains its arguments — arguments don't escape through the
+            // callee, so they can stay arena-allocated instead of being
+            // forced to ARC heap. Also hardcodes read-only builtins not
+            // yet in `tp.funcs`.
+            let callee_readonly = match callee.as_ref() {
+                Expr::Ident { name, .. } => tp.funcs.get(name).map(|f| f.readonly).unwrap_or(false),
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    tp.funcs.get(&joined).map(|f| f.readonly).unwrap_or(false)
+                }
+                _ => false,
+            };
+            let is_read_only_builtin = callee_readonly
+                || matches!(
+                    callee.as_ref(),
+                    Expr::Ident { name, .. }
+                        if matches!(
+                            name.as_str(),
+                            "len" | "std.len" | "vec.len" | "std.vec.len" | "range" | "std.range"
+                        )
+                );
             if is_read_only_builtin {
                 for a in args {
                     analyze_expr(a, tp, ctx, result);
@@ -530,6 +611,10 @@ fn expr_has_non_scalar_alloc(e: &Expr, tp: &TypedProgram, scope: &str) -> bool {
         }
     }
     match e {
+        // Strings and fmt strings allocate heap objects; inside a loop body
+        // they are freed each iteration by the injected arena reset, so they
+        // count toward `loop_spans` and route to the loop arena.
+        Expr::Str { .. } | Expr::Fmt { .. } => true,
         Expr::Array { elems, .. } => elems
             .iter()
             .any(|x| expr_has_non_scalar_alloc(x, tp, scope)),
@@ -602,6 +687,7 @@ mod tests {
             "println".into(),
             crate::FuncSig {
                 is_extern: false,
+                readonly: false,
                 extern_c_symbol: None,
                 generics: vec!["T".into()],
                 bounds: Vec::new(),
@@ -671,6 +757,8 @@ func main() {
     fn global_array_escapes() {
         // #421: top-level bindings outlive every frame (`zz_global_*`),
         // so their initializers must never lower as stack temporaries.
+        // Immutable literals (array, dict, string, struct, fmt) are
+        // `Static` (static arena); function calls are `Escaping`.
         let src = "const CBOUNDS = [0, 54, 102, 146]\nfunc main() {\n    println(1)\n}\n";
         let tp = build_tp(src);
         let result = analyze(&tp);
@@ -681,8 +769,8 @@ func main() {
         for cls in result.classes.values() {
             assert_eq!(
                 *cls,
-                AllocClass::Escaping,
-                "top-level initializer must escape, got: {:?}",
+                AllocClass::Static,
+                "top-level const array literal should be Static, got: {:?}",
                 result.classes
             );
         }
@@ -720,18 +808,138 @@ func main() {
 "#;
         let tp = build_tp(src);
         let result = analyze(&tp);
-        // String allocations inside loop body should be escaping.
-        let has_escaping = result.classes.values().any(|c| *c == AllocClass::Escaping);
-        if !has_escaping {
-            // Debug: print all classifications.
-            for (span, cls) in &result.classes {
-                eprintln!("span {:?} -> {:?}", span, cls);
-            }
-        }
+        // Loop-aware analysis: string allocations inside a loop body are
+        // NonEscaping — the per-iteration arena reset frees them each pass,
+        // so they never accumulate. The loop's iter expression (`0..100`)
+        // is still conservatively Escaping (evaluated once per loop entry).
+        let has_non_escaping = result
+            .classes
+            .values()
+            .any(|c| *c == AllocClass::NonEscaping);
         assert!(
-            has_escaping,
-            "loop body allocations should be escaping, classes: {:?}",
+            has_non_escaping,
+            "loop body string should be NonEscaping (arena-reset per iter), classes: {:?}",
             result.classes
         );
+    }
+
+    #[test]
+    fn readonly_func_args_do_not_escape() {
+        // A `#[readonly]` function never retains its arguments, so
+        // arguments passed to it stay arena-allocatable instead of being
+        // forced to ARC heap.
+        let src = r#"
+@readonly
+func pure_len(arr: array) -> int {
+    return 0
+}
+func main() {
+    arr := [1, 2, 3]
+    n := pure_len(arr)
+}
+"#;
+        let unit = Type::Unit;
+        let t_int = Type::Int;
+        let t_array = Type::Array(Box::new(Type::Int));
+        let mut funcs = HashMap::new();
+        funcs.insert(
+            "println".into(),
+            crate::FuncSig {
+                is_extern: false,
+                readonly: false,
+                extern_c_symbol: None,
+                generics: vec!["T".into()],
+                bounds: Vec::new(),
+                params: vec![("v".into(), Type::Named("T".to_string()))],
+                has_default: vec![false],
+                ret: unit,
+            },
+        );
+        funcs.insert(
+            "pure_len".into(),
+            crate::FuncSig {
+                is_extern: false,
+                readonly: true,
+                extern_c_symbol: None,
+                generics: Vec::new(),
+                bounds: Vec::new(),
+                params: vec![("arr".into(), t_array.clone())],
+                has_default: vec![false],
+                ret: t_int,
+            },
+        );
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let res = crate::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let tp = res.program;
+        let result = analyze(&tp);
+        // The array literal should be NonEscaping because pure_len is readonly.
+        let arr_classes: Vec<_> = result
+            .classes
+            .iter()
+            .filter(|(_, c)| **c == AllocClass::NonEscaping)
+            .collect();
+        assert!(
+            !arr_classes.is_empty(),
+            "array passed to readonly function should be NonEscaping, classes: {:?}",
+            result.classes
+        );
+    }
+
+    #[test]
+    fn top_level_const_static() {
+        // Top-level const array literal → Static (not Escaping).
+        let src = "const CBOUNDS = [0, 54, 102, 146]\nfunc main() {\n    println(1)\n}\n";
+        let tp = build_tp(src);
+        let result = analyze(&tp);
+        assert!(
+            !result.classes.is_empty(),
+            "expected classified initializers, got none"
+        );
+        for cls in result.classes.values() {
+            assert_eq!(
+                *cls,
+                AllocClass::Static,
+                "top-level const array literal should be Static, got: {:?}",
+                result.classes
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_const_call_escapes() {
+        // Top-level const initialized with a function call returning a
+        // scalar → NonEscaping (no heap allocation, no ARC needed).
+        let src =
+            "const C = make()\nfunc make() -> int { return 1 }\nfunc main() {\n    println(1)\n}\n";
+        let tp = build_tp(src);
+        let result = analyze(&tp);
+        assert!(
+            !result.classes.is_empty(),
+            "expected classified initializers, got none"
+        );
+        let has_non_escaping = result
+            .classes
+            .values()
+            .any(|c| *c == AllocClass::NonEscaping);
+        assert!(
+            has_non_escaping,
+            "top-level const from scalar-returning call should be NonEscaping, classes: {:?}",
+            result.classes
+        );
+        // And nothing should be Escaping (no heap allocation at all).
+        let has_escaping = result.classes.values().any(|c| *c == AllocClass::Escaping);
+        assert!(!has_escaping, "no heap allocation, nothing should escape");
     }
 }

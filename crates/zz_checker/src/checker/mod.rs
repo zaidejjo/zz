@@ -580,6 +580,7 @@ fn check_program_impl(
                         has_default,
                         ret: sig_ret.clone(),
                         is_extern: false,
+                        readonly: false,
                         extern_c_symbol: None,
                     };
                     // `convert_to_X` methods double as error-conversion impls.
@@ -988,6 +989,7 @@ mod cache_serde_tests {
             has_default: vec![false, true],
             ret: Type::Result(Box::new(Type::Named("T".to_string())), Box::new(Type::Str)),
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         };
         let json = serde_json::to_string(&sig).expect("serialize FuncSig");
@@ -1081,6 +1083,7 @@ mod unreachable_guard_tests {
             has_default: vec![],
             ret: Type::Unit,
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         };
         c.check_func_body(&stmt, &sig);

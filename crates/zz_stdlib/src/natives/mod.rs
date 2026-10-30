@@ -2532,6 +2532,24 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // Built-in: `weak(v)` — weak reference for cycle breaking.
+    m.insert(
+        "weak".into(),
+        NativeEntry {
+            arity: 1,
+            f: builtins::weak_fn,
+        },
+    );
+
+    // Built-in: `upgrade(w)` — upgrade a weak reference to strong.
+    m.insert(
+        "upgrade".into(),
+        NativeEntry {
+            arity: 1,
+            f: builtins::upgrade_fn,
+        },
+    );
+
     // Built-in conversions.
     m.insert(
         "str".into(),

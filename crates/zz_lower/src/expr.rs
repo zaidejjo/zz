@@ -1790,6 +1790,14 @@ impl Lowerer {
         if caps.is_empty() {
             o.push_str("    (void)env;\n");
         }
+        // Non-green closures get a per-invocation bump arena: NonEscaping
+        // allocations in the closure body are bump-allocated here and
+        // reclaimed in O(1) at every return path. Green closures always
+        // heap-allocate (stack arenas cannot survive a suspend).
+        if !green {
+            o.push_str("    zz_arena _func_arena __attribute__((cleanup(zz_arena_destroy)));\n");
+            o.push_str("    zz_arena_init(&_func_arena, 65536);\n");
+        }
         if green {
             // Suspendable prologue: fetch the task frame (trampoline-set)
             // or stand up a stack-backed sync frame (sync calls: NULL

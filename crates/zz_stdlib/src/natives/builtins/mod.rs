@@ -97,5 +97,35 @@ pub(crate) fn clone_fn(
     Ok(zz_runtime::deep_clone(v))
 }
 
+/// Built-in `weak(v)` — create a weak reference to `v`, used to break
+/// reference cycles (e.g. `a.b = weak(a)`). The weak reference does not
+/// keep `v` alive; use `upgrade(w)` to attempt to recover it.
+pub(crate) fn weak_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for weak", span))?;
+    Ok(zz_runtime::weak(&v))
+}
+
+/// Built-in `upgrade(w)` — attempt to upgrade a weak reference to a
+/// strong reference. Returns `None` if the referent has been freed;
+/// non-weak values are returned as-is.
+pub(crate) fn upgrade_fn(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for upgrade", span))?;
+    Ok(zz_runtime::upgrade(v).unwrap_or(Value::Unit))
+}
+
 // Push is `vec.push(v, x)` plus the method form `xs.push(x)`: the old
 // bare `append(arr, val)` builtin was removed (single push spelling).

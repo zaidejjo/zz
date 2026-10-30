@@ -273,6 +273,23 @@ fn expand_stmts(
                     });
                     continue;
                 }
+                // `@readonly` marks a function as not retaining its arguments
+                // — arguments stay arena-allocated instead of being forced
+                // to ARC heap. No validation needed (takes no arguments).
+                if decorators.iter().any(is_readonly_decorator) {
+                    taken.insert(name.join("."));
+                    out.push(Stmt::Func {
+                        name: name.clone(),
+                        generics: generics.clone(),
+                        params: params.clone(),
+                        ret: ret.clone(),
+                        body: expand_block(body, taken, errors),
+                        span: *span,
+                        pub_: *pub_,
+                        decorators: decorators.clone(),
+                    });
+                    continue;
+                }
                 if name.is_empty() || name.iter().all(String::is_empty) {
                     // Recovery stub from parse errors; leave for later passes.
                     out.push(stmt.clone());
@@ -833,4 +850,13 @@ fn expand_expr(expr: &Expr, taken: &mut HashSet<String>, errors: &mut Vec<RawDia
         },
         other => other.clone(),
     }
+}
+
+/// Returns `true` if `d` is `@readonly` (path `["readonly"]`, no args).
+///
+/// `@readonly` marks a function as not retaining its arguments — arguments
+/// passed to a readonly call do not escape through the callee, so they can
+/// stay arena-allocated instead of being forced to ARC heap.
+pub(crate) fn is_readonly_decorator(d: &Decorator) -> bool {
+    d.path == ["readonly"] && d.args.is_empty() && d.named.is_empty()
 }

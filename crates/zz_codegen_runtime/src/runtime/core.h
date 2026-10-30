@@ -76,9 +76,11 @@ typedef enum {
     ZZ_FILE,
     ZZ_VFS,
     ZZ_BYTES,
+    ZZ_WEAK,
 } zz_tag;
 
 typedef struct zz_value zz_value;
+typedef struct zz_weak zz_weak;  // defined below, after zz_value
 
 // Container forward declarations.
 typedef struct zz_array zz_array;
@@ -105,6 +107,11 @@ typedef struct zz_vfs zz_vfs;
 typedef struct zz_bytes_buf zz_bytes_buf;
 typedef struct zz_bytes zz_bytes;
 
+// A weak reference control block: strong + weak atomic counts plus the
+// referent. strong=1 (owned by the block, never released) means upgrade()
+// always succeeds; weak tracks the number of Weak handles. When weak drops
+// to 0 the block is freed (the strong ref is freed with it — a small,
+// deliberate leak per weak() call, acceptable for infrequent cycle
 // Refcounted string with Small String Optimization (SSO).
 //
 // Strings <= 23 bytes are stored inline in `sso` — zero malloc beyond
@@ -167,7 +174,22 @@ struct zz_value {
         zz_file *file;       // open streaming file (ZZ_FILE)
         zz_vfs *vfs;         // fs provider handle (ZZ_VFS)
         zz_bytes *bytes;     // byte buffer (ZZ_BYTES)
+        zz_weak *weak;       // weak reference (ZZ_WEAK)
     };
+};
+
+// A weak reference control block: strong + weak atomic counts plus the
+// referent. strong=1 (owned by the block, never released) means upgrade()
+// always succeeds; weak tracks the number of Weak handles. When weak drops
+// to 0 the block is freed (the strong ref is freed with it — a small,
+// deliberate leak per weak() call, acceptable for infrequent cycle
+// breaking).
+typedef struct zz_weak zz_weak;
+
+struct zz_weak {
+    size_t strong;   // always 1 (leaked — see zz_value_weak)
+    size_t weak;     // number of Weak handles
+    zz_value value;  // the referent (heap-allocated contents owned)
 };
 
 struct zz_bytes_buf {
@@ -716,6 +738,16 @@ static inline void zz_release(zz_value *v) {
             zz_db_release_handle(db);
         }
         break;
+    case ZZ_WEAK:
+        if (v->weak) {
+            size_t w = __atomic_sub_fetch(&v->weak->weak, 1, __ATOMIC_ACQ_REL);
+            if (w == 0) {
+                zz_release(&v->weak->value);
+                free(v->weak);
+                v->weak = NULL;
+            }
+        }
+        break;
     default:
         break;
     }
@@ -751,7 +783,8 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
         dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
         dst->tag == ZZ_RANGE || dst->tag == ZZ_DB ||
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
-        dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON) {
+        dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON ||
+        dst->tag == ZZ_WEAK) {
         zz_release(dst);
     }
     // Heal arena-owned values into independent heap copies (loop-arena
@@ -773,7 +806,8 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
         src.tag == ZZ_OBJECT || src.tag == ZZ_RANGE || src.tag == ZZ_DB ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
-        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON)) {
+        src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON ||
+        src.tag == ZZ_WEAK)) {
         zz_retain(dst);
     }
 }
@@ -818,6 +852,11 @@ static inline zz_value zz_clone(zz_value v) {
         break;
     case ZZ_DB:
         if (v.db) zz_db_retain_handle(v.db);
+        break;
+    case ZZ_WEAK:
+        if (v.weak) {
+            __atomic_add_fetch(&v.weak->weak, 1, __ATOMIC_RELAXED);
+        }
         break;
     default:
         break;
@@ -1024,6 +1063,10 @@ zz_value zz_clone_deep(zz_value v, int *err);
 zz_value zz_int_cast(zz_value v, int *err);
 zz_value zz_float_cast(zz_value v, int *err);
 zz_value zz_bool_cast(zz_value v, int *err);
+
+// ---- weak references ----------------------------------------------------
+zz_value zz_value_weak(zz_value v, int *err);
+zz_value zz_value_upgrade(zz_value v, int *err);
 
 // ---- env natives --------------------------------------------------------
 zz_value zz_env_get(zz_value name, int *err);

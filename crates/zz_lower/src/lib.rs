@@ -300,6 +300,11 @@ impl Lowerer {
         for (_, cid, ctype, _) in &globals {
             globals_decl.push_str(&format!("static {ctype} {cid};\n"));
         }
+        // Module-level static arena for read-only global constants
+        // (AllocClass::Static). Lives for the process lifetime; initialized
+        // once in zz_main, never freed. Avoids ARC refcount overhead on
+        // every access to global consts.
+        globals_decl.push_str("static zz_arena _static_arena;\n");
         // One NameCtx shared across ALL top-level statements, pre-seeded with
         // globals. Top-level Decl assigns into its global (no local redecl).
         let mut names = NameCtx::new();
@@ -314,6 +319,16 @@ impl Lowerer {
         self.seed_scalar_fns(&mut names);
         let mut global_init_done: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+
+        // Initialize the static arena once at process start (in zz_main).
+        // Read-only global constants (AllocClass::Static) are allocated
+        // from here and live for the process lifetime.
+        body.push_str("    zz_arena_init(&_static_arena, 65536);\n");
+        // Per-function bump arena for zz_main (top-level code). Non-static,
+        // non-escaping top-level allocations bump-allocate here and are
+        // reclaimed in O(1) when zz_main returns via cleanup attribute.
+        body.push_str("    zz_arena _func_arena __attribute__((cleanup(zz_arena_destroy)));\n");
+        body.push_str("    zz_arena_init(&_func_arena, 65536);\n");
 
         for stmt in self.tp.stmts() {
             match stmt {

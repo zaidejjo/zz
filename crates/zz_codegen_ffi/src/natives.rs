@@ -64,6 +64,8 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "enumerate" | "vec.enumerate" | "std.vec.enumerate" => Some("zz_iter_enumerate"),
         "zip" | "vec.zip" | "std.vec.zip" => Some("zz_iter_zip"),
         "clone" => Some("zz_clone_deep"),
+        "weak" => Some("zz_value_weak"),
+        "upgrade" => Some("zz_value_upgrade"),
         "range" => Some("zz_range3"),
         "typeof" => Some("zz_typeof"),
         "int" => Some("zz_int_cast"),

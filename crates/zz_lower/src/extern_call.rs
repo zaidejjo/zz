@@ -364,6 +364,7 @@ mod tests {
             has_default: Vec::new(),
             ret,
             is_extern: true,
+            readonly: false,
             extern_c_symbol: None,
         }
     }
