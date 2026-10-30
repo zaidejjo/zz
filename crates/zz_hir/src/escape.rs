@@ -23,6 +23,10 @@ pub enum AllocClass {
     /// Object lives only within the current function scope. Can be
     /// bump-allocated on the arena and freed in O(1) at scope exit.
     NonEscaping,
+    /// Object outlives every frame but is immutable/read-only. Placed in
+    /// a static data section (`_static_arena`) that lives for the process
+    /// lifetime — no ARC refcount overhead on access.
+    Static,
     /// Object escapes the current scope (returned, stored in a global,
     /// passed to another function, captured in a closure). Must use
     /// thread-safe ARC.
@@ -198,13 +202,30 @@ fn analyze_block(
 fn analyze_stmt(stmt: &Stmt, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut EscapeResult) {
     match stmt {
         Stmt::Decl { name, value, .. } => {
-            // Top-level bindings live in `zz_global_*` past every frame:
-            // their initializers escape by definition (#421: a const
-            // array lowered as a stack temporary dangles once `zz_main`
-            // returns). Same for any binding shadowing a global name
-            // (conservative: over-marking only costs an allocation).
+            // Top-level bindings live in `zz_global_*` past every frame.
+            // Their initializers outlive all frames (#421). If the
+            // initializer is an immutable heap-allocating literal (array,
+            // dict, string, struct, fmt), classify it as `Static` — placed
+            // in the module-level static arena with no ARC overhead.
+            // Scalars don't allocate; function calls may have side effects —
+            // both stay as classified (`Escaping` for calls, `NonEscaping`
+            // for scalars).
             if ctx.func_name == TOP || ctx.global_names.contains(&name.name) {
-                mark_escaping_recursive(value, tp, ctx.func_name, result);
+                let cls = classify_expr(value, tp, ctx);
+                let cls = match cls {
+                    AllocClass::NonEscaping => match value {
+                        Expr::Str { .. }
+                        | Expr::Array { .. }
+                        | Expr::Dict { .. }
+                        | Expr::StructInit { .. }
+                        | Expr::Fmt { .. } => AllocClass::Static,
+                        _ => cls,
+                    },
+                    other => other,
+                };
+                result.classes.insert(value.span(), cls);
+                // Also classify sub-expressions within the initializer.
+                analyze_expr(value, tp, ctx, result);
             } else {
                 let cls = classify_expr(value, tp, ctx);
                 result.classes.insert(value.span(), cls);
@@ -736,6 +757,8 @@ func main() {
     fn global_array_escapes() {
         // #421: top-level bindings outlive every frame (`zz_global_*`),
         // so their initializers must never lower as stack temporaries.
+        // Immutable literals (array, dict, string, struct, fmt) are
+        // `Static` (static arena); function calls are `Escaping`.
         let src = "const CBOUNDS = [0, 54, 102, 146]\nfunc main() {\n    println(1)\n}\n";
         let tp = build_tp(src);
         let result = analyze(&tp);
@@ -746,8 +769,8 @@ func main() {
         for cls in result.classes.values() {
             assert_eq!(
                 *cls,
-                AllocClass::Escaping,
-                "top-level initializer must escape, got: {:?}",
+                AllocClass::Static,
+                "top-level const array literal should be Static, got: {:?}",
                 result.classes
             );
         }
@@ -872,5 +895,51 @@ func main() {
             "array passed to readonly function should be NonEscaping, classes: {:?}",
             result.classes
         );
+    }
+
+    #[test]
+    fn top_level_const_static() {
+        // Top-level const array literal → Static (not Escaping).
+        let src = "const CBOUNDS = [0, 54, 102, 146]\nfunc main() {\n    println(1)\n}\n";
+        let tp = build_tp(src);
+        let result = analyze(&tp);
+        assert!(
+            !result.classes.is_empty(),
+            "expected classified initializers, got none"
+        );
+        for cls in result.classes.values() {
+            assert_eq!(
+                *cls,
+                AllocClass::Static,
+                "top-level const array literal should be Static, got: {:?}",
+                result.classes
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_const_call_escapes() {
+        // Top-level const initialized with a function call returning a
+        // scalar → NonEscaping (no heap allocation, no ARC needed).
+        let src =
+            "const C = make()\nfunc make() -> int { return 1 }\nfunc main() {\n    println(1)\n}\n";
+        let tp = build_tp(src);
+        let result = analyze(&tp);
+        assert!(
+            !result.classes.is_empty(),
+            "expected classified initializers, got none"
+        );
+        let has_non_escaping = result
+            .classes
+            .values()
+            .any(|c| *c == AllocClass::NonEscaping);
+        assert!(
+            has_non_escaping,
+            "top-level const from scalar-returning call should be NonEscaping, classes: {:?}",
+            result.classes
+        );
+        // And nothing should be Escaping (no heap allocation at all).
+        let has_escaping = result.classes.values().any(|c| *c == AllocClass::Escaping);
+        assert!(!has_escaping, "no heap allocation, nothing should escape");
     }
 }

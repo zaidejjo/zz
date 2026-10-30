@@ -942,6 +942,16 @@ impl Lowerer {
             .unwrap_or(false)
     }
 
+    /// Check if an expression span is classified as static (read-only global).
+    #[allow(dead_code)]
+    pub(crate) fn is_static(&self, span: zz_frontend::span::Span) -> bool {
+        self.escape
+            .classes
+            .get(&span)
+            .map(|c| *c == zz_hir::AllocClass::Static)
+            .unwrap_or(false)
+    }
+
     /// Check if an expression produces a string value. Used to detect string
     /// concatenation for arena-aware allocation in loops.
     pub(crate) fn is_string_expr(&self, expr: &Expr, names: &NameCtx) -> bool {
@@ -977,12 +987,14 @@ impl Lowerer {
     /// Choose the arena for an allocation site.
     ///
     /// Allocation strategy, in priority order:
-    ///   1. A span explicitly classified as `Escaping` must use the heap
+    ///   1. A span classified as `Static` goes to the module-level
+    ///      `_static_arena` (lives for process lifetime, no ARC overhead).
+    ///   2. A span classified as `Escaping` must use the heap
     ///      (ARC) — never an arena, since the object outlives the scope.
-    ///   2. Inside a loop body whose sub-arena is reset every iteration,
+    ///   3. Inside a loop body whose sub-arena is reset every iteration,
     ///      non-escaping allocations go to that sub-arena so the buffer is
     ///      reused across iterations with zero heap growth.
-    ///   3. Otherwise, non-escaping allocations go to the per-function
+    ///   4. Otherwise, non-escaping allocations go to the per-function
     ///      arena (`_func_arena`), freed in O(1) at function return.
     ///
     /// Anything that escapes uses the heap. (Green closures always heap:
@@ -994,6 +1006,10 @@ impl Lowerer {
         // suspend (the C frame returns to the trampoline).
         if self.green_active() {
             return None;
+        }
+        // Static (read-only global constants): module-level static arena.
+        if self.is_static(span) {
+            return Some("_static_arena".to_string());
         }
         if self.is_escaping(span) {
             return None;
