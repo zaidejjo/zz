@@ -3856,19 +3856,14 @@ dependencies = [
 name = "zz_codegen"
 version = "0.4.0"
 dependencies = [
- "rayon",
  "zz_checker",
  "zz_chunk",
  "zz_codegen_cc",
  "zz_codegen_ffi",
  "zz_codegen_runtime",
- "zz_codegen_types",
  "zz_frontend",
  "zz_hir",
- "zz_ir",
  "zz_lower",
- "zz_native_rt",
- "zz_pm",
  "zz_runtime",
  "zz_stdlib",
 ]

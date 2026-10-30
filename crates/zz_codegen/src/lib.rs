@@ -1,9 +1,22 @@
-//! ZZ native codegen backend (Phase 3).
+//! ZZ native codegen facade.
 //!
 //! Consumes the DCE-pruned typed program from [`zz_hir`], lowers it to C,
 //! embeds the C runtime, and invokes a C compiler to produce a standalone
 //! binary. `cc`/`clang`/`gcc` are auto-detected; NO manual tooling install
 //! is required on standard systems (they ship with the OS toolchain).
+//!
+//! The implementation is split into independently compileable crates and
+//! re-exported here so downstream crates keep a single import surface:
+//!
+//! - [`zz_lower`]: HIR → C lowering
+//! - [`zz_chunk`]: unified IR → C lowering (chunk backend)
+//! - [`zz_codegen_cc`]: clang/gcc driver, flag matrix, runtime-archive cache
+//! - [`zz_codegen_ffi`]: native + staticlib symbol tables, link metadata
+//! - [`zz_codegen_runtime`]: embedded C runtime (single TU) + rebuild guard
+//! - `zz_codegen_types`: build options, errors, compiler handles
+//!
+//! This crate keeps the orchestration (lower-only dumps, native/unit
+//! builds) and the end-to-end pipeline tests.
 
 pub use zz_chunk as chunk;
 pub use zz_codegen_cc as compile;
