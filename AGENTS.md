@@ -19,7 +19,8 @@ zz test                               # Zhunit-style tests in .zz files
 cargo test --all                                   # full CI equivalent (slow: native legs + plugins)
 ./scripts/test-fast.sh                             # fast loop (VM legs only, skips natives + plugin_e2e)
 ZZ_PARITY_VM_ONLY=1 cargo test -p zz_cli --test dual_engine_parity
-cargo test -p zz_frontend | -p zz_checker | -p zz_cli | -p zz_runtime | -p zz_stdlib | -p zz_codegen
+cargo test -p zz_frontend | -p zz_checker | -p zz_cli | -p zz_runtime | -p zz_stdlib
+cargo test -p zz_codegen | -p zz_lower | -p zz_chunk | -p zz_codegen_cc | -p zz_codegen_ffi | -p zz_codegen_runtime
 cargo clippy --all-targets -- -D warnings          # zero warnings enforced
 cargo fmt --check                                  # rustfmt enforced (run `cargo fmt` first)
 ```
@@ -31,6 +32,9 @@ continue working; never block polling. Never prefix `timeout`.
 
 ```
 zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen } → zz_cli
+                                             zz_codegen (facade) → zz_lower (HIR→C)
+                                             + zz_chunk (IR→C) + zz_codegen_cc (clang)
+                                             + zz_codegen_{ffi,runtime,types}
                                   zz_stdlib ─┘                ↓
                           zz_arena, zz_fmt, zz_native_rt, zz_plugin, zz_pm, zz_lsp
 ```
@@ -40,7 +44,10 @@ zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen 
   Levenshtein typo suggestions, fix-it hints with safety levels)
 - **zz_hir / zz_ir**: typed HIR, portable IR (codec + disassembler), callgraph + DCE
 - **zz_runtime**: tree-walker interpreter + bytecode VM + C-ABI bridge (`c_abi.rs`)
-- **zz_codegen**: AOT backends — HIR→C (`lower/`) and chunk→C (`chunk.rs`) + Clang driver, PGO, cross targets
+- **zz_codegen**: AOT facade + driver — `zz_lower` (HIR→C), `zz_chunk` (IR→C),
+  `zz_codegen_cc` (clang driver, runtime archive cache, PGO, cross targets)
+- **zz_codegen_{types,runtime,ffi}**: shared build types, embedded C runtime
+  (with content-hash rebuild guard), native/FFI symbol tables + link metadata
 - **zz_stdlib**: 900+ natives (VM registry + C twins + Rust staticlib via `ffi.rs`)
 - **zz_cli** (`zz`): run/build/test/check/fix/fmt, REPL, loader with module cache, doctor, upgrade
 - **zz_lsp** (`zz-lsp`), **zz_pm** (registry), **zz_plugin**, **zz_fmt**, **zz_arena**
@@ -57,8 +64,8 @@ zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen 
 
 1. `zz_stdlib/src/funcs.rs` — checker signature (+ count assertion).
 2. `zz_stdlib/src/natives/` — Rust VM implementation.
-3. `zz_codegen/src/runtime/*.c` + `.h` — C twin (byte-identical semantics).
-4. `zz_codegen/src/lower/mod.rs` (`native_impl`) — AOT name mapping.
+3. `crates/zz_codegen_runtime/src/runtime/*.c` + `.h` — C twin (byte-identical semantics).
+4. `crates/zz_codegen_ffi/src/natives.rs` (`native_impl`) — AOT name mapping.
 5. Fixture `tests/fixtures/stdlib/<name>_test.zz` + registration in
    `e2e.rs` + `dual_engine_parity.rs` (+ `batch_lists.rs`, or `EXCLUDED`
    with reason).
