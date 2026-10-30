@@ -6,6 +6,7 @@ license.workspace = true
 description = "ZZ package manager — CAS, resolution, lockfile, build cache"
 
 [dependencies]
+zz_paths = { path = "../zz_paths" }
 semver = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

@@ -2059,7 +2059,7 @@ faker = { path = "faker" }
 
     #[test]
     fn registry_fetch_and_stage_against_local_server() {
-        let _guard = crate::paths::test_sync::lock_env();
+        let _guard = crate::test_sync::lock_env();
         // Canned registry: metadata + tarball for foo 1.2.0.
         let tgz = make_test_tarball(&[(
             "zz.toml",
@@ -2322,7 +2322,7 @@ faker = { path = "faker" }
 
     #[test]
     fn transitive_registry_behind_path_dep_uses_canned_server() {
-        let _guard = crate::paths::test_sync::lock_env();
+        let _guard = crate::test_sync::lock_env();
         // mid (path) requires rand ^1.0; the canned registry serves a
         // leaf rand 1.2.0 tarball.
         let rand_toml = "[package]\nname = \"rand\"\nversion = \"1.2.0\"\n";
@@ -2384,7 +2384,7 @@ faker = { path = "faker" }
 
     #[test]
     fn transitive_version_conflict_names_parents() {
-        let _guard = crate::paths::test_sync::lock_env();
+        let _guard = crate::test_sync::lock_env();
         // a wants foo ^1.0, b wants foo ^2.0; both 1.5.0 and 2.1.0 exist.
         // metadata + one tarball: the first-encountered req places a
         // version (downloaded for its manifest) before the union fails.

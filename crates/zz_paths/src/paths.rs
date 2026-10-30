@@ -203,27 +203,12 @@ pub fn dir_usage(dir: &std::path::Path) -> (usize, u64) {
 }
 
 #[cfg(test)]
-pub(crate) mod test_sync {
-    //! Serialize the tests that still mutate process-global env (`ZZ_HOME`).
-    //!
-    //! New tests should prefer [`super::env_scope`]: it is thread-scoped and
-    //! cannot feed another test's path into a concurrent build. The lock
-    //! remains for the older suites in this crate (link/resolve/remote) that
-    //! mutate `ZZ_HOME` process-wide, so at least the mutations serialize.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn zz_home_respects_env_var() {
-        let tmp = std::env::temp_dir().join("zz_pm_test_home");
+        let tmp = std::env::temp_dir().join("zz_paths_test_home");
         let _scope = env_scope(&[("ZZ_HOME", Some(tmp.clone().into_os_string()))]);
         assert_eq!(zz_home(), tmp);
     }
@@ -252,15 +237,15 @@ mod tests {
     fn build_cache_dir_under_home() {
         let _scope = env_scope(&[("ZZ_HOME", None)]);
         assert!(build_cache_dir().ends_with("cache"));
-        let tmp = std::env::temp_dir().join("zz_pm_test_home_cache");
+        let tmp = std::env::temp_dir().join("zz_paths_test_home_cache");
         let _tmp_scope = env_scope(&[("ZZ_HOME", Some(tmp.clone().into_os_string()))]);
         assert_eq!(build_cache_dir(), tmp.join("cache"));
     }
 
     #[test]
     fn env_scope_is_thread_local_and_nests() {
-        let a = std::env::temp_dir().join("zz_pm_scope_a");
-        let b = std::env::temp_dir().join("zz_pm_scope_b");
+        let a = std::env::temp_dir().join("zz_paths_scope_a");
+        let b = std::env::temp_dir().join("zz_paths_scope_b");
         let outer = env_scope(&[("ZZ_HOME", Some(a.clone().into_os_string()))]);
         assert_eq!(zz_home(), a);
         {
@@ -281,7 +266,7 @@ mod tests {
 
     #[test]
     fn dir_usage_counts() {
-        let tmp = std::env::temp_dir().join("zz_pm_test_dusage");
+        let tmp = std::env::temp_dir().join("zz_paths_test_dusage");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("sub")).unwrap();
         std::fs::write(tmp.join("a"), "1234").unwrap();

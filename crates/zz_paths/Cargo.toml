@@ -1,0 +1,9 @@
+[package]
+name = "zz_paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZZ_HOME layout, cache directories and host-independent path checks"
+
+[dependencies]
+dirs = { workspace = true }

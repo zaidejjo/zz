@@ -946,7 +946,7 @@ pub(crate) mod tests {
 
     #[test]
     fn download_and_stage_to_cas() {
-        let _guard = crate::paths::test_sync::lock_env();
+        let _guard = crate::test_sync::lock_env();
         let tgz = make_tarball(&[("zz.toml", "[package]\nname=\"w\"\n")]);
         let tgz_clone = tgz.clone();
         // Two downloads: the initial stage plus the wrong-hash probe.
