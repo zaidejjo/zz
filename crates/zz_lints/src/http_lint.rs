@@ -5,8 +5,8 @@
 
 use zz_diag_core::{error_at, warning_at};
 use zz_http_routes::{
-    is_param_call, is_route_method, route_call_kind, validate_pattern, RouteCall, HIJACK_METHOD,
-    ROUTE_METHODS,
+    is_param_call, is_route_method, route_call_kind, validate_pattern, HttpLintState, RouteCall,
+    HIJACK_METHOD, ROUTE_METHODS,
 };
 use zz_scope::ScopeOps;
 use zz_span_ast::ast::Expr;
@@ -17,6 +17,13 @@ use zz_types::Type;
 use zz_checker_core::Checker;
 
 // ── Checker hooks ────────────────────────────────────────────────────────
+
+/// Route state owned by this lint domain. It lives in the checker's
+/// type-erased [`Checker::domain`] map, so `zz_checker_core` does not depend
+/// on `zz_http_routes`; the state is created on first route registration.
+fn http_lint_state(checker: &mut Checker) -> &mut HttpLintState {
+    checker.domain.get_or_default::<HttpLintState>()
+}
 
 /// Plain string literal text. Interpolated (`Fmt`) and computed paths
 /// return `None` — dynamic routes skip the lint silently.
@@ -123,7 +130,7 @@ impl HttpLintOps for Checker {
             }
             Ok(params) => {
                 let mut diags = Vec::new();
-                self.http_lint
+                http_lint_state(self)
                     .record(root, method, pattern, params, span, &mut |d| diags.push(d));
                 self.errors.extend(diags);
             }
@@ -286,10 +293,11 @@ impl HttpLintOps for Checker {
         let Some(name) = str_lit(name_expr) else {
             return;
         };
-        if self.http_lint.params.is_empty() || self.http_lint.params.contains(name) {
+        let params = &http_lint_state(self).params;
+        if params.is_empty() || params.contains(name) {
             return;
         }
-        let mut candidates: Vec<String> = self.http_lint.params.iter().cloned().collect();
+        let mut candidates: Vec<String> = params.iter().cloned().collect();
         candidates.sort();
         let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
         let mut msg = format!("unknown route param `{name}` (no registered route captures it)");
@@ -341,8 +349,11 @@ impl HttpLintOps for Checker {
         };
         if let Some(root) = root {
             if root != target {
-                if let Some(routes) = self.http_lint.routes.get(&root).cloned() {
-                    self.http_lint.routes.insert(target.to_string(), routes);
+                let routes = http_lint_state(self).routes.get(&root).cloned();
+                if let Some(routes) = routes {
+                    http_lint_state(self)
+                        .routes
+                        .insert(target.to_string(), routes);
                 }
             }
         }

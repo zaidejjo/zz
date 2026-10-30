@@ -9,5 +9,4 @@ zz_types = { path = "../zz_types" }
 zz_unify = { path = "../zz_unify" }
 zz_span_ast = { path = "../zz_span_ast" }
 zz_diag_core = { path = "../zz_diag_core" }
-zz_http_routes = { path = "../zz_http_routes" }
 serde = { workspace = true }
