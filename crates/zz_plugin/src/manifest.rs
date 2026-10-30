@@ -239,6 +239,7 @@ fn extern_func_to_sig(
         has_default,
         ret,
         is_extern: true,
+        readonly: false,
         extern_c_symbol: ef.c_symbol.clone(),
     })
 }

@@ -16,6 +16,7 @@ fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
         has_default: vec![],
         ret,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     }
 }
@@ -32,6 +33,7 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
         has_default: vec![],
         ret,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     }
 }
@@ -48,6 +50,7 @@ fn sig_tu(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
         has_default: vec![],
         ret,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     }
 }
@@ -75,6 +78,7 @@ fn sig_defaults(params: Vec<(&str, Type)>, n_defaults: usize, ret: Type) -> Func
         has_default,
         ret,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     }
 }
@@ -116,23 +120,36 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     let range_t = Type::Range(Box::new(Type::Int));
     // range(stop) | range(start, stop) | range(start, stop, step)
     // Checker handles variable arg count; signature declares max 3 args.
-    m.insert(
-        "range".into(),
-        sig(
+    m.insert("range".into(), {
+        let mut s = sig(
             vec![
                 ("start", Type::Int),
                 ("stop", Type::Int),
                 ("step", Type::Int),
             ],
             range_t.clone(),
-        ),
-    );
-    m.insert("len".into(), sig_t(vec![("v", t.clone())], Type::Int));
+        );
+        s.readonly = true;
+        s
+    });
+    m.insert("len".into(), {
+        let mut s = sig_t(vec![("v", t.clone())], Type::Int);
+        s.readonly = true;
+        s
+    });
     // Unicode scalar conversions (#276, #263): `ord` reads the codepoint of
     // a single-character string, `chr` builds one (both reject bad input at
     // runtime). Bare like `len`; `str.*` forms below enable method syntax.
-    m.insert("ord".into(), sig(vec![("ch", Type::Str)], Type::Int));
-    m.insert("chr".into(), sig(vec![("cp", Type::Int)], Type::Str));
+    m.insert("ord".into(), {
+        let mut s = sig(vec![("ch", Type::Str)], Type::Int);
+        s.readonly = true;
+        s
+    });
+    m.insert("chr".into(), {
+        let mut s = sig(vec![("cp", Type::Int)], Type::Str);
+        s.readonly = true;
+        s
+    });
     // Union of array-of-T and range-of-T so T stays as element type.
     let iterable_t = Type::Union(vec![
         Type::Array(Box::new(t.clone())),
@@ -178,10 +195,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     });
 
     // std.str
-    m.insert(
-        "std.str.length".into(),
-        sig(vec![("s", Type::Str)], Type::Int),
-    );
+    m.insert("std.str.length".into(), {
+        let mut s = sig(vec![("s", Type::Str)], Type::Int);
+        s.readonly = true;
+        s
+    });
     m.insert(
         "std.str.split".into(),
         sig(
@@ -189,36 +207,41 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             Type::Array(Box::new(Type::Str)),
         ),
     );
-    m.insert(
-        "std.str.contains".into(),
-        sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool),
-    );
-    m.insert(
-        "std.str.find".into(),
-        sig(
+    m.insert("std.str.contains".into(), {
+        let mut s = sig(vec![("s", Type::Str), ("sub", Type::Str)], Type::Bool);
+        s.readonly = true;
+        s
+    });
+    m.insert("std.str.find".into(), {
+        let mut s = sig(
             vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
             Type::Int,
-        ),
-    );
-    m.insert(
-        "std.str.rfind".into(),
-        sig(
+        );
+        s.readonly = true;
+        s
+    });
+    m.insert("std.str.rfind".into(), {
+        let mut s = sig(
             vec![("s", Type::Str), ("sub", Type::Str), ("from", Type::Int)],
             Type::Int,
-        ),
-    );
+        );
+        s.readonly = true;
+        s
+    });
     m.insert(
         "std.str.bytes".into(),
         sig(vec![("s", Type::Str)], Type::Array(Box::new(Type::Int))),
     );
-    m.insert(
-        "std.str.byte_len".into(),
-        sig(vec![("s", Type::Str)], Type::Int),
-    );
-    m.insert(
-        "std.str.ord".into(),
-        sig(vec![("ch", Type::Str)], Type::Int),
-    );
+    m.insert("std.str.byte_len".into(), {
+        let mut s = sig(vec![("s", Type::Str)], Type::Int);
+        s.readonly = true;
+        s
+    });
+    m.insert("std.str.ord".into(), {
+        let mut s = sig(vec![("ch", Type::Str)], Type::Int);
+        s.readonly = true;
+        s
+    });
     m.insert(
         "std.str.chr".into(),
         sig(vec![("cp", Type::Int)], Type::Str),
@@ -917,6 +940,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             has_default: vec![],
             ret: t.clone(),
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
@@ -932,6 +956,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             has_default: vec![],
             ret: t.clone(),
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
@@ -947,6 +972,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             has_default: vec![],
             ret: t,
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
@@ -1324,6 +1350,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
             has_default: vec![false, false, true],
             ret: result_response(),
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
@@ -2518,7 +2545,11 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
 
     // Built-in: `typeof(v)` — accepts any value, returns its type name.
     let t = Type::Named("T".to_string());
-    m.insert("typeof".into(), sig_t(vec![("v", t.clone())], Type::Str));
+    m.insert("typeof".into(), {
+        let mut s = sig_t(vec![("v", t.clone())], Type::Str);
+        s.readonly = true;
+        s
+    });
 
     // NOTE: the bare `append(arr, val)` builtin was removed. Push is
     // `vec.push(v, x)` plus the method form `xs.push(x)` (statement
@@ -3549,6 +3580,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert", "std.test.assert"] {
@@ -3565,6 +3597,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_eq", "std.test.assert_eq"] {
@@ -3580,6 +3613,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_ne", "std.test.assert_ne"] {
@@ -3596,6 +3630,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_approx_eq", "std.test.assert_approx_eq"] {
@@ -3614,6 +3649,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     // assert_contains reuses (Str, Str) shape; starts/ends need own names
@@ -3628,6 +3664,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     let ends_sig = FuncSig {
@@ -3640,6 +3677,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_contains", "std.test.assert_contains"] {
@@ -3663,6 +3701,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_len", "std.test.assert_len"] {
@@ -3679,6 +3718,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_gt", "std.test.assert_gt"] {
@@ -3695,6 +3735,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_is_some", "std.test.assert_is_some"] {
@@ -3715,6 +3756,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_is_ok", "std.test.assert_is_ok"] {
@@ -3733,6 +3775,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false],
         ret: Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["temp_dir", "std.test.temp_dir"] {
@@ -3745,6 +3788,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: Vec::new(),
         ret: Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["free_port", "std.test.free_port"] {
@@ -3760,6 +3804,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false],
         ret: Type::Named("T".to_string()),
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["black_box", "std.test.black_box"] {
@@ -3777,6 +3822,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["assert_snapshot", "std.test.assert_snapshot"] {
@@ -3789,6 +3835,7 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         has_default: vec![false],
         ret: Type::Unit,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     for name in ["fail", "panic", "std.test.fail", "std.test.panic"] {
@@ -4116,7 +4163,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 683);
+        assert_eq!(funcs.len(), 685);
     }
 
     #[test]

@@ -227,6 +227,7 @@ impl Lowerer {
                 has_default: Vec::new(),
                 ret: zz_checker::Type::Unit,
                 is_extern: false,
+                readonly: false,
                 extern_c_symbol: None,
             });
         // Eligibility was proven in `compute_specialized`: every param and

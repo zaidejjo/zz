@@ -57,6 +57,11 @@ pub struct FuncSig {
     pub ret: Type,
     /// True for `extern "C"` declarations — no ZZ body, linked natively.
     pub is_extern: bool,
+    /// True for functions that never retain their arguments — arguments
+    /// passed to a `readonly` call do not escape through the callee, so
+    /// they can stay arena-allocated instead of being forced to ARC heap.
+    /// Set by the `#[readonly]` / `#[pure]` decorator on function declarations.
+    pub readonly: bool,
     /// Explicit C symbol override from the manifest (`= "..."`). `None`
     /// means "derive from the ZZ-visible name" via [`FuncSig::c_symbol`].
     pub extern_c_symbol: Option<String>,

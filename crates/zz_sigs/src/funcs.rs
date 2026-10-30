@@ -26,14 +26,15 @@ pub trait FuncOps {
 
 impl FuncOps for Checker {
     fn collect_func(&mut self, stmt: &Stmt) {
-        let (name, generics, params, ret) = match stmt {
+        let (name, generics, params, ret, decorators) = match stmt {
             Stmt::Func {
                 name,
                 generics,
                 params,
                 ret,
+                decorators,
                 ..
-            } => (name, generics, params, ret),
+            } => (name, generics, params, ret, decorators),
             _ => {
                 self.errors.push(error_at(
                     "internal: collect_func called with a non-Func statement",
@@ -63,6 +64,7 @@ impl FuncOps for Checker {
             None => self.unifier.fresh_var(),
         };
         let full_name = name.join(".");
+        let readonly = decorators.iter().any(is_readonly_decorator);
         self.funcs.insert(
             full_name,
             FuncSig {
@@ -72,6 +74,7 @@ impl FuncOps for Checker {
                 has_default,
                 ret: sig_ret,
                 is_extern: false,
+                readonly,
                 extern_c_symbol: None,
             },
         );
@@ -155,6 +158,7 @@ impl FuncOps for Checker {
                 has_default: vec![false; params.len()],
                 ret: sig_ret,
                 is_extern: true,
+                readonly: false,
                 extern_c_symbol: c_symbol,
             },
         );
@@ -177,4 +181,13 @@ impl FuncOps for Checker {
             Type::Int | Type::Float | Type::Bool | Type::Unit | Type::Void
         )
     }
+}
+
+/// Returns `true` if `d` is `@readonly` (path `["readonly"]`, no args).
+///
+/// `@readonly` marks a function as not retaining its arguments — arguments
+/// passed to a readonly call do not escape through the callee, so they can
+/// stay arena-allocated instead of being forced to ARC heap.
+pub(crate) fn is_readonly_decorator(d: &zz_span_ast::ast::Decorator) -> bool {
+    d.path == ["readonly"] && d.args.is_empty() && d.named.is_empty()
 }

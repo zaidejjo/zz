@@ -390,6 +390,7 @@ fn typed_signatures_populate() {
         has_default: vec![false, false],
         ret: CheckerType::Int,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     let mut sigs = HashMap::new();
@@ -464,6 +465,7 @@ fn int_sig(params: usize) -> zz_checker::FuncSig {
         has_default: vec![false; params],
         ret: zz_checker::Type::Int,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     }
 }

@@ -325,20 +325,28 @@ fn analyze_expr(e: &Expr, tp: &TypedProgram, ctx: &mut FuncCtx<'_>, result: &mut
             }
         }
         Expr::Call { callee, args, .. } => {
-            // Arguments to function calls escape (we can't track
-            // cross-function). Notably EXCEPT read-only builtins like
-            // `len(...)` / `vec.len(...)`, which never retain their
-            // argument — treating them as escaping forces every
-            // loop-local array/dict fed to `len()` onto the heap despite
-            // the per-iteration arena reset being available.
-            let is_read_only_builtin = matches!(
-                callee.as_ref(),
-                Expr::Ident { name, .. }
-                    if matches!(
-                        name.as_str(),
-                        "len" | "std.len" | "vec.len" | "std.vec.len" | "range" | "std.range"
-                    )
-            );
+            // A `readonly` function (via `#[readonly]` decorator) never
+            // retains its arguments — arguments don't escape through the
+            // callee, so they can stay arena-allocated instead of being
+            // forced to ARC heap. Also hardcodes read-only builtins not
+            // yet in `tp.funcs`.
+            let callee_readonly = match callee.as_ref() {
+                Expr::Ident { name, .. } => tp.funcs.get(name).map(|f| f.readonly).unwrap_or(false),
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    tp.funcs.get(&joined).map(|f| f.readonly).unwrap_or(false)
+                }
+                _ => false,
+            };
+            let is_read_only_builtin = callee_readonly
+                || matches!(
+                    callee.as_ref(),
+                    Expr::Ident { name, .. }
+                        if matches!(
+                            name.as_str(),
+                            "len" | "std.len" | "vec.len" | "std.vec.len" | "range" | "std.range"
+                        )
+                );
             if is_read_only_builtin {
                 for a in args {
                     analyze_expr(a, tp, ctx, result);
@@ -658,6 +666,7 @@ mod tests {
             "println".into(),
             crate::FuncSig {
                 is_extern: false,
+                readonly: false,
                 extern_c_symbol: None,
                 generics: vec!["T".into()],
                 bounds: Vec::new(),
@@ -787,6 +796,80 @@ func main() {
         assert!(
             has_non_escaping,
             "loop body string should be NonEscaping (arena-reset per iter), classes: {:?}",
+            result.classes
+        );
+    }
+
+    #[test]
+    fn readonly_func_args_do_not_escape() {
+        // A `#[readonly]` function never retains its arguments, so
+        // arguments passed to it stay arena-allocatable instead of being
+        // forced to ARC heap.
+        let src = r#"
+@readonly
+func pure_len(arr: array) -> int {
+    return 0
+}
+func main() {
+    arr := [1, 2, 3]
+    n := pure_len(arr)
+}
+"#;
+        let unit = Type::Unit;
+        let t_int = Type::Int;
+        let t_array = Type::Array(Box::new(Type::Int));
+        let mut funcs = HashMap::new();
+        funcs.insert(
+            "println".into(),
+            crate::FuncSig {
+                is_extern: false,
+                readonly: false,
+                extern_c_symbol: None,
+                generics: vec!["T".into()],
+                bounds: Vec::new(),
+                params: vec![("v".into(), Type::Named("T".to_string()))],
+                has_default: vec![false],
+                ret: unit,
+            },
+        );
+        funcs.insert(
+            "pure_len".into(),
+            crate::FuncSig {
+                is_extern: false,
+                readonly: true,
+                extern_c_symbol: None,
+                generics: Vec::new(),
+                bounds: Vec::new(),
+                params: vec![("arr".into(), t_array.clone())],
+                has_default: vec![false],
+                ret: t_int,
+            },
+        );
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let res = crate::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let tp = res.program;
+        let result = analyze(&tp);
+        // The array literal should be NonEscaping because pure_len is readonly.
+        let arr_classes: Vec<_> = result
+            .classes
+            .iter()
+            .filter(|(_, c)| **c == AllocClass::NonEscaping)
+            .collect();
+        assert!(
+            !arr_classes.is_empty(),
+            "array passed to readonly function should be NonEscaping, classes: {:?}",
             result.classes
         );
     }

@@ -55,6 +55,7 @@ fn arg_mismatch_names_parameter() {
         "greet".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: vec![],
@@ -1555,6 +1556,7 @@ fn typeof_any_value() {
         "typeof".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
@@ -1584,6 +1586,7 @@ fn method_funcs() -> HashMap<String, FuncSig> {
         "dist".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
@@ -1608,6 +1611,7 @@ fn call_on_named_type_suggests_function() {
         "line".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: vec![],
@@ -1656,6 +1660,7 @@ fn unknown_named_param_suggests_fixit() {
         "greet".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: vec![],
@@ -1690,6 +1695,7 @@ fn ambiguous_named_param_offers_choices() {
         "draw".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: vec![],
@@ -1821,6 +1827,7 @@ fn method_call_namespaced_by_struct_type() {
         "shapes.dist".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
@@ -1858,6 +1865,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "str".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
@@ -1870,6 +1878,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "int".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
@@ -1882,6 +1891,7 @@ fn conv_funcs() -> HashMap<String, FuncSig> {
         "float".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec!["T".to_string()],
             bounds: Vec::new(),
@@ -2031,6 +2041,7 @@ fn typo_suggestion_variable() {
         "println".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
@@ -2095,6 +2106,7 @@ fn print_test_funcs() -> HashMap<String, FuncSig> {
         "println".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
@@ -2107,6 +2119,7 @@ fn print_test_funcs() -> HashMap<String, FuncSig> {
         "env.os".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
@@ -2119,6 +2132,7 @@ fn print_test_funcs() -> HashMap<String, FuncSig> {
         "env.temp_dir".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: Vec::new(),
@@ -2556,6 +2570,7 @@ fn opaque_test_funcs() -> HashMap<String, FuncSig> {
         "regex.compile".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
@@ -2568,6 +2583,7 @@ fn opaque_test_funcs() -> HashMap<String, FuncSig> {
         "regex.is_match".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
@@ -2601,6 +2617,7 @@ fn opaque_handle_tag_mismatch_errors() {
         "uuid.v4".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: Vec::new(),
             bounds: Vec::new(),
@@ -3114,6 +3131,7 @@ fn db_exec_seed() -> HashMap<String, FuncSig> {
         has_default: vec![false, false],
         ret: Type::Int,
         is_extern: false,
+        readonly: false,
         extern_c_symbol: None,
     };
     funcs.insert("sqlz.exec".to_string(), exec.clone());
@@ -3127,6 +3145,7 @@ fn db_exec_seed() -> HashMap<String, FuncSig> {
             has_default: vec![false],
             ret: Type::Db,
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
@@ -3139,6 +3158,7 @@ fn db_exec_seed() -> HashMap<String, FuncSig> {
             has_default: vec![false],
             ret: Type::Unit,
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
@@ -3572,6 +3592,7 @@ fn std_fs_seed() -> HashMap<String, FuncSig> {
         "std.fs.read_dir".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: vec![],
@@ -3664,6 +3685,7 @@ fn std_path_other_module_still_errors() {
         "std.math.sin".to_string(),
         FuncSig {
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
             generics: vec![],
             bounds: vec![],
@@ -4265,6 +4287,7 @@ fn discard_assign_checks_cleanly() {
             has_default: vec![],
             ret: Type::Int,
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
@@ -4288,6 +4311,7 @@ fn discard_assign_type_is_unit() {
             has_default: vec![],
             ret: Type::Str,
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
@@ -4309,6 +4333,7 @@ fn discard_assign_discards_result_type() {
             has_default: vec![],
             ret: Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
             is_extern: false,
+            readonly: false,
             extern_c_symbol: None,
         },
     );
