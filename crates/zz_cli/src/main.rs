@@ -2986,7 +2986,10 @@ struct DiagKey {
 #[derive(Default)]
 struct CheckDedupe {
     diags: std::collections::HashSet<DiagKey>,
-    broken_modules: std::collections::HashSet<String>,
+    /// Whether the "first module that broke" root-cause line has already
+    /// been printed for this invocation, so it shows once instead of once
+    /// per failing entry (#711).
+    first_failure_reported: bool,
     /// Memoized `module -> canonical name` (canonicalize is a syscall).
     names: std::collections::HashMap<String, String>,
 }
@@ -3013,11 +3016,15 @@ impl CheckDedupe {
         })
     }
 
-    /// Record a failing module. Returns `true` on the first failure seen for
-    /// that module (callers print the root-cause line only then).
-    fn first_failure(&mut self, module: &str) -> bool {
-        let module = self.key_module(module);
-        self.broken_modules.insert(module)
+    /// Record a failing module. Returns `true` only on the very first failure
+    /// seen this invocation, so the "first module that broke" root-cause line
+    /// is printed once instead of once per failing entry (#711).
+    fn first_failure(&mut self, _module: &str) -> bool {
+        if self.first_failure_reported {
+            return false;
+        }
+        self.first_failure_reported = true;
+        true
     }
 }
 
