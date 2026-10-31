@@ -1793,6 +1793,17 @@ pub fn exec_binary(bin: &Path, script_args: &[String]) -> Result<i32, String> {
         .status()
         .map_err(|e| format!("cannot run binary: {e}"))?;
     if let Some(code) = status.code() {
+        // On Windows, a non-zero exit code from a native program is usually
+        // a runtime error (code 1) or a crash (STATUS_* code). Name known
+        // crash codes so the user can diagnose the failure instead of
+        // seeing a bare exit code.
+        #[cfg(windows)]
+        {
+            let name = windows_status_name(code);
+            if name != "unknown status" {
+                return Err(format!("native program crashed: {name} (0x{code:08X})"));
+            }
+        }
         return Ok(code);
     }
     // Killed by signal (Unix) or terminated abnormally (Windows): name it.
@@ -1844,7 +1855,6 @@ fn signal_name(sig: i32) -> &'static str {
 /// Short name for a Windows termination status code (common cases;
 /// else the raw hex value).
 #[cfg(windows)]
-#[allow(dead_code)]
 fn windows_status_name(code: u32) -> &'static str {
     match code {
         0xC0000005 => "STATUS_ACCESS_VIOLATION (segfault)",
