@@ -490,10 +490,28 @@ typedef struct zz_arena_chunk {
     size_t cap;             // capacity of buf (informational)
 } zz_arena_chunk;
 
+#define ZZ_ARENA_NCLASSES 8
+static const size_t ZZ_ARENA_CLASS_SIZES[ZZ_ARENA_NCLASSES] = {
+    8, 16, 32, 64, 128, 256, 512, 1024
+};
+
+// Size-class index for a requested size (rounds up to nearest class,
+// clamps to largest class). Returns 0 for size 0.
+static inline int zz_arena_size_class_for(size_t size) {
+    if (size <= 8) return 0;
+    if (size <= 16) return 1;
+    if (size <= 32) return 2;
+    if (size <= 64) return 3;
+    if (size <= 128) return 4;
+    if (size <= 256) return 5;
+    if (size <= 512) return 6;
+    return 7;
+}
+
 typedef struct zz_arena {
     char  *buf;              // current contiguous block (primary or overflow)
     size_t cap;              // total capacity in bytes of current block
-    size_t offset;           // next free byte position
+    size_t offsets[ZZ_ARENA_NCLASSES];  // per-size-class bump offsets
     zz_arena_chunk *chunks;  // linked list of overflow chunks (for destroy)
 } zz_arena;
 
@@ -515,7 +533,7 @@ static inline void zz_arena_reset(zz_arena *a) {
         chunk = next;
     }
     a->chunks = NULL;
-    a->offset = 0;
+    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
 }
 
 // Reset the arena and hint the C allocator to return freed heap pages to
@@ -532,7 +550,7 @@ static inline void zz_arena_reset_trim(zz_arena *a) {
         chunk = next;
     }
     a->chunks = NULL;
-    a->offset = 0;
+    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
 #ifdef __GLIBC__
     malloc_trim(0);
 #endif
