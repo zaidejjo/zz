@@ -29,28 +29,47 @@ void zz_arena_init(zz_arena *a, size_t cap) {
         exit(1);
     }
     a->cap = cap;
-    a->offset = 0;
+    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
     a->chunks = NULL;
 }
 
 void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
-    // Align the offset.
-    size_t aligned = (a->offset + align - 1) & ~(align - 1);
-    if (aligned + size <= a->cap) {
-        void *ptr = a->buf + aligned;
-        a->offset = aligned + size;
+    // Size-classed allocation: round up to nearest class, bump within that
+    // class's region of the buffer. Small objects stay in small regions,
+    // large objects in large regions — reducing external fragmentation
+    // versus a single monolithic bump pointer.
+    int cls = zz_arena_size_class_for(size);
+    size_t class_size = ZZ_ARENA_CLASS_SIZES[cls];
+
+    // Per-class region: buffer is divided into NCLASSES equal regions,
+    // one per size class. Class `cls` owns [region_start, region_end).
+    size_t region_size = a->cap / ZZ_ARENA_NCLASSES;
+    size_t region_start = (size_t)cls * region_size;
+    size_t region_end = region_start + region_size;
+
+    size_t aligned_offset =
+        (a->offsets[cls] + align - 1) & ~(align - 1);
+    aligned_offset += region_start;
+
+    if (aligned_offset + class_size <= region_end) {
+        void *ptr = a->buf + aligned_offset;
+        a->offsets[cls] = aligned_offset + class_size - region_start;
         return ptr;
     }
-    // Arena full: adopt the current buffer as an overflow chunk, then
-    // allocate a fresh block large enough for this request (and future
-    // ones of similar size). Adopting (not copying) keeps in-flight
-    // pointers valid: a caller may hold a pointer into this buffer
-    // (e.g. an object header whose payload overflows right after).
-    size_t chunk_cap = (size > a->cap) ? size * 2 : a->cap;
 
-    // Adopt the current buffer as a chunk node so destroy/reset can free
-    // it later. Empty primaries are simply dropped (nothing live in them).
-    if (a->buf && a->offset > 0) {
+    // Class region full: adopt current buffer as an overflow chunk, then
+    // allocate a fresh block large enough for every class's region.
+    // Adopting keeps in-flight pointers valid (callers may hold pointers
+    // into this buffer).
+    size_t chunk_cap =
+        (class_size > region_size) ? class_size * ZZ_ARENA_NCLASSES : region_size;
+
+    // Check if any class region has data worth preserving.
+    int has_data = 0;
+    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) {
+        if (a->offsets[i] > 0) { has_data = 1; break; }
+    }
+    if (a->buf && has_data) {
         zz_arena_chunk *old = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk));
         if (old) {
             old->buf = a->buf;
@@ -59,24 +78,26 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
             a->chunks = old;
             a->buf = NULL;
         } else {
-            // Chunk-node malloc failed: the old data is lost either way,
-            // but free the buffer so nothing leaks even on the OOM path.
             free(a->buf);
             a->buf = NULL;
         }
     }
 
-    // Drop any previous primary (empty after a reset and too small here,
-    // or already NULL above) before installing the fresh block.
+    // Drop any previous primary before installing the fresh block.
     free(a->buf);
     a->buf = (char *)malloc(chunk_cap);
     if (!a->buf) {
         fprintf(stderr, "zz: arena chunk out of memory\n");
         exit(1);
     }
+    // Recompute region boundaries for the new block size so every class
+    // gets a contiguous region starting at cls * region_size.
     a->cap = chunk_cap;
-    a->offset = size;
-    return a->buf;
+    size_t new_region_size = a->cap / ZZ_ARENA_NCLASSES;
+    size_t new_region_start = (size_t)cls * new_region_size;
+    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
+    a->offsets[cls] = class_size;
+    return a->buf + new_region_start;
 }
 
 void zz_arena_destroy(zz_arena *a) {
@@ -95,7 +116,7 @@ void zz_arena_destroy(zz_arena *a) {
     }
     a->chunks = NULL;
     a->cap = 0;
-    a->offset = 0;
+    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
 }
 
 // ---- thread-safe ARC (atomic reference counting) -----------------------
