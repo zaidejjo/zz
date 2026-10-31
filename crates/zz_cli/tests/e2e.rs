@@ -1085,6 +1085,7 @@ e2e_error_test!(e2e_err_main_result_err, "main_result_err.zz");
 e2e_error_test!(e2e_err_try_double_unwrap, "try_double_unwrap.zz");
 e2e_error_test!(e2e_err_spawn_non_closure, "spawn_non_closure.zz");
 e2e_error_test!(e2e_err_chan_send_non_chan, "chan_send_non_chan.zz");
+e2e_error_test!(e2e_err_println_function_value, "println_function_value.zz");
 // M0 edge corpus: both engines fail (messages differ; error parity only
 // requires failure on both sides).
 e2e_error_test!(e2e_err_edge_neg_shift, "edge_neg_shift_err.zz");

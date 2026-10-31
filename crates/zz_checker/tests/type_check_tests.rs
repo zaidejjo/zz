@@ -2166,33 +2166,11 @@ fn typo_suggestion_struct_field() {
 }
 
 fn print_test_funcs() -> HashMap<String, FuncSig> {
+    // `print`/`println` are variadic builtins (#713): they are deliberately
+    // NOT registered here so the checker's variadic + function-value path
+    // (`lookup_opt(name).is_none()`) handles them. Registering them as
+    // single-arg `str` would make that branch dead code.
     let mut funcs = HashMap::new();
-    funcs.insert(
-        "println".to_string(),
-        FuncSig {
-            is_extern: false,
-            readonly: false,
-            extern_c_symbol: None,
-            generics: vec![],
-            bounds: Vec::new(),
-            params: vec![("v".to_string(), Type::Str)],
-            has_default: vec![false],
-            ret: Type::Unit,
-        },
-    );
-    funcs.insert(
-        "print".to_string(),
-        FuncSig {
-            is_extern: false,
-            readonly: false,
-            extern_c_symbol: None,
-            generics: vec![],
-            bounds: Vec::new(),
-            params: vec![("v".to_string(), Type::Str)],
-            has_default: vec![false],
-            ret: Type::Unit,
-        },
-    );
     funcs.insert(
         "env.os".to_string(),
         FuncSig {
@@ -2249,6 +2227,62 @@ fn print_bare_function_is_call_hint() {
         notes.iter().any(|n| n.contains("env.os()`")),
         "expected () hint, got: {notes:?}"
     );
+}
+
+fn print_qualified_funcs() -> HashMap<String, FuncSig> {
+    let mut funcs = print_test_funcs();
+    let sig = |ret: Type| FuncSig {
+        is_extern: false,
+        readonly: false,
+        extern_c_symbol: None,
+        generics: vec![],
+        bounds: Vec::new(),
+        params: vec![],
+        has_default: vec![],
+        ret,
+    };
+    funcs.insert("std.math.sin".to_string(), sig(Type::Float));
+    funcs.insert("std.str.len".to_string(), sig(Type::Int));
+    funcs
+}
+
+#[test]
+fn print_qualified_function_is_call_hint() {
+    // Bare-qualified name (`math.sin`) resolves to the canonical `std.*`
+    // key in the stdlib registry (#709).
+    for src in [
+        "println(math.sin)",
+        "println(std.math.sin)",
+        "println(std.str.len)",
+    ] {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors for {src}: {:?}",
+            parsed.errors
+        );
+        let r = check_program(
+            &parsed.program,
+            HashMap::new(),
+            print_qualified_funcs(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        // Argument name is the text between `println(` and the closing `)`.
+        let name = src.trim_start_matches("println(").trim_end_matches(')');
+        let msgs: Vec<_> = r.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains(&format!("cannot print function `{name}`"))),
+            "expected call hint for {src}, got: {msgs:?}"
+        );
+        let notes: Vec<String> = r.errors.iter().flat_map(|e| e.notes.clone()).collect();
+        assert!(
+            notes.iter().any(|n| n.contains(&format!("{name}()`"))),
+            "expected () hint for {src}, got: {notes:?}"
+        );
+    }
 }
 
 #[test]
