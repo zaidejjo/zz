@@ -47,6 +47,13 @@ impl Lowerer {
         // reset; `_func_arena` catches everything else.
         o.push_str("    zz_arena _func_arena __attribute__((cleanup(zz_arena_destroy)));\n");
         o.push_str("    zz_arena_init(&_func_arena, 65536);\n");
+        // Per-green-closure arena: cells for green closure locals that don't
+        // escape are allocated from here. The arena is freed when the green
+        // closure is destroyed, avoiding per-cell mallocs and reducing heap
+        // fragmentation. Fresh cells (fresh=true) still use malloc for
+        // per-execution semantics; captured/non-fresh cells use the arena.
+        o.push_str("    zz_arena _green_arena __attribute__((cleanup(zz_arena_destroy)));\n");
+        o.push_str("    zz_arena_init(&_green_arena, 256);\n");
         let mut names = NameCtx::new();
         // Scope typed-AST lookups to this function: spans repeat across
         // modules, so lookups must pair them with the enclosing item.

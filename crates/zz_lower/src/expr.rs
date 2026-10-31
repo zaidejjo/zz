@@ -1857,7 +1857,7 @@ impl Lowerer {
                 // Params must survive a suspend: frame cells, assigned
                 // from the re-passed `args[]` on first entry (resume
                 // skips straight to the yield label).
-                let (ptr, deref, n) = self.green_cell(&mut names, "zz_value", true, &mut o);
+                let (ptr, deref, n) = self.green_cell(&mut names, "zz_value", true, &mut o, None);
                 o.push_str(&format!("    {deref} = args[{i}];\n"));
                 names.enter_cell(&p.name.name, &ptr, &deref, "zz_value", n);
                 continue;
@@ -5387,7 +5387,7 @@ impl Lowerer {
                 // Green: arm bindings live in frame cells (a yield in
                 // the arm body resumes past this declaration).
                 if self.green_active() {
-                    let (ptr, deref, n) = self.green_cell(names, "zz_value", true, out);
+                    let (ptr, deref, n) = self.green_cell(names, "zz_value", true, out, None);
                     out.push_str(&format!("        {deref} = {scrut};\n"));
                     names.enter_cell(&name.name, &ptr, &deref, "zz_value", n);
                 } else {
@@ -5415,7 +5415,13 @@ impl Lowerer {
                     out.push_str(&format!("        if ({cond}) {{\n"));
                     let inner_open = if let Some(inner) = arg {
                         let payload_tmp: String = if self.green_active() {
-                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                            let (_, deref, _) = self.green_cell(
+                                names,
+                                "zz_value",
+                                false,
+                                out,
+                                Some("_green_arena"),
+                            );
                             out.push_str(&format!(
                                 "            {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
                             ));
@@ -5450,7 +5456,8 @@ impl Lowerer {
                 out.push_str(&format!("        if ({scrut}.tag == {tag_check}) {{\n"));
                 let inner_open = if let Some(inner) = arg {
                     let payload_tmp: String = if self.green_active() {
-                        let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                        let (_, deref, _) =
+                            self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
                         out.push_str(&format!("            {deref} = {extractor}({scrut});\n"));
                         deref
                     } else {
@@ -5649,7 +5656,13 @@ impl Lowerer {
                     }
                     if let Some(inner) = arg {
                         if self.green_active() {
-                            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                            let (_, deref, _) = self.green_cell(
+                                names,
+                                "zz_value",
+                                false,
+                                out,
+                                Some("_green_arena"),
+                            );
                             out.push_str(&format!("        {deref} = {extractor}({scrut});\n"));
                             return self.flatten_match_pat(inner, &deref, names, out, conds, binds);
                         }
@@ -5681,7 +5694,8 @@ impl Lowerer {
                 conds.push(format!("({or})"));
                 if let Some(inner) = arg {
                     if self.green_active() {
-                        let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                        let (_, deref, _) =
+                            self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
                         out.push_str(&format!(
                             "        {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
                         ));
@@ -5736,7 +5750,8 @@ impl Lowerer {
                     // Element temps back bindings (read in the body), so
                     // they live in frame cells under green.
                     let elem_tmp = if self.green_active() {
-                        let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                        let (_, deref, _) =
+                            self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
                         let err_tmp = names.fresh("_e");
                         out.push_str(&format!(
                             "        int {err_tmp} = 0;\n        {deref} = ({guard} ? zz_array_get({scrut}.arr, (zz_value){{ZZ_INT, {{.i = {idx}}}}}, &{err_tmp}) : zz_unit());\n"
@@ -5774,7 +5789,8 @@ impl Lowerer {
         // inside an arm); plain path keeps stack temps.
         let green_match = self.green_active();
         let scrut_tmp: String = if green_match {
-            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+            let (_, deref, _) =
+                self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
             deref
         } else {
             let scrut_tmp = names.fresh("_match");
@@ -5788,7 +5804,8 @@ impl Lowerer {
         let scrut_raw = scalar_operand_c(scrutinee, names).unwrap_or_else(|| scrut_val.clone());
 
         let result_tmp: String = if green_match {
-            let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+            let (_, deref, _) =
+                self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
             out.push_str(&format!("    {deref} = zz_unit();\n"));
             deref
         } else {
@@ -5956,8 +5973,13 @@ impl Lowerer {
                         // pre-emitted payload temps.
                         for (bname, pexpr) in &fp.binds {
                             if self.green_active() {
-                                let (ptr, deref, n) =
-                                    self.green_cell(names, "zz_value", false, out);
+                                let (ptr, deref, n) = self.green_cell(
+                                    names,
+                                    "zz_value",
+                                    false,
+                                    out,
+                                    Some("_green_arena"),
+                                );
                                 out.push_str(&format!("        {deref} = {pexpr};\n"));
                                 names.enter_cell(bname, &ptr, &deref, "zz_value", n);
                             } else {
@@ -6023,7 +6045,13 @@ impl Lowerer {
                             names.checker_types.insert(bname.clone(), pty);
                         }
                         if self.green_active() {
-                            let (ptr, deref, n) = self.green_cell(names, "zz_value", false, out);
+                            let (ptr, deref, n) = self.green_cell(
+                                names,
+                                "zz_value",
+                                false,
+                                out,
+                                Some("_green_arena"),
+                            );
                             out.push_str(&format!("        {deref} = {pexpr};\n"));
                             names.enter_cell(bname, &ptr, &deref, "zz_value", n);
                         } else {
@@ -6046,7 +6074,7 @@ impl Lowerer {
                     // (resume jumps over this declaration) — frame cell,
                     // mirroring `emit_pattern_bind`.
                     if self.green_active() {
-                        let (ptr, deref, n) = self.green_cell(names, "zz_value", true, out);
+                        let (ptr, deref, n) = self.green_cell(names, "zz_value", true, out, None);
                         out.push_str(&format!("        {deref} = {scrut_tmp};\n"));
                         names.enter_cell(&name.name, &ptr, &deref, "zz_value", n);
                     } else {
@@ -6162,7 +6190,13 @@ impl Lowerer {
                     }
                     for (bname, pexpr) in &fp.binds {
                         if self.green_active() {
-                            let (ptr, deref, n) = self.green_cell(names, "zz_value", false, out);
+                            let (ptr, deref, n) = self.green_cell(
+                                names,
+                                "zz_value",
+                                false,
+                                out,
+                                Some("_green_arena"),
+                            );
                             out.push_str(&format!("        {deref} = {pexpr};\n"));
                             names.enter_cell(bname, &ptr, &deref, "zz_value", n);
                         } else {

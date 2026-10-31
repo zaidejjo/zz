@@ -205,7 +205,13 @@ impl Lowerer {
                         let val = self.emit_expr(value, names, out);
                         if self.green_active() {
                             let captured = names.capture_set.contains(&name.name);
-                            let (ptr, deref, n) = self.green_cell(names, &c_type, captured, out);
+                            let (ptr, deref, n) = self.green_cell(
+                                names,
+                                &c_type,
+                                captured,
+                                out,
+                                Some("_green_arena"),
+                            );
                             out.push_str(&format!("    {deref} = {val};\n"));
                             names.enter_cell(&name.name, &ptr, &deref, &c_type, n);
                         } else if names.capture_set.contains(&name.name) {
@@ -286,7 +292,8 @@ impl Lowerer {
                 // frame-backed lifetime.
                 if self.green_active() {
                     let captured = names.capture_set.contains(&name.name);
-                    let (ptr, deref, n) = self.green_cell(names, &ctype, captured, out);
+                    let (ptr, deref, n) =
+                        self.green_cell(names, &ctype, captured, out, Some("_green_arena"));
                     out.push_str(&format!("    {deref} = {final_val};\n"));
                     names.enter_cell(&name.name, &ptr, &deref, &ctype, n);
                 } else if names.capture_set.contains(&name.name) {
@@ -1432,7 +1439,7 @@ impl Lowerer {
             // (a resume may land inside the body). Plain path keeps the
             // unboxed stack local.
             let cid: String = if green {
-                let (ptr, deref, n) = self.green_cell(names, "int64_t", true, out);
+                let (ptr, deref, n) = self.green_cell(names, "int64_t", true, out, None);
                 names.enter_cell(v, &ptr, &deref, "int64_t", n);
                 deref
             } else {
@@ -1573,7 +1580,13 @@ impl Lowerer {
                                 .filter(|t| *t == "int64_t" || *t == "double" || *t == "bool")
                                 .unwrap_or("int64_t")
                                 .to_string();
-                            let (_, ederef, _) = self.green_cell(names, &end_ctype, false, out);
+                            let (_, ederef, _) = self.green_cell(
+                                names,
+                                &end_ctype,
+                                false,
+                                out,
+                                Some("_green_arena"),
+                            );
                             out.push_str(&format!("    {ederef} = {ev_unboxed};\n"));
                             ederef
                         });
@@ -1618,8 +1631,9 @@ impl Lowerer {
                     // a frame cell once at loop entry. `_s` stays a local:
                     // it is read only at driver init + guard, both of which
                     // run strictly before any suspend.
-                    let (_, driver, _) = self.green_cell(names, "int64_t", true, out);
-                    let (_, ederef, _) = self.green_cell(names, "zz_value", false, out);
+                    let (_, driver, _) = self.green_cell(names, "int64_t", true, out, None);
+                    let (_, ederef, _) =
+                        self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
                     // Safepoint elided for concurrency-free programs (the
                     // call barrier blocks loop folding; see
                     // `needs_safepoint`). The literal keeps its exact
@@ -1664,7 +1678,7 @@ impl Lowerer {
             // iterations cannot disturb them — same isolation as below).
             let loop_cell: Option<String> = if names.capture_set.contains(v) {
                 if green {
-                    let (ptr2, deref2, n2) = self.green_cell(names, "int64_t", true, out);
+                    let (ptr2, deref2, n2) = self.green_cell(names, "int64_t", true, out, None);
                     out.push_str(&format!("    {deref2} = {cid};\n"));
                     names.enter_cell(v, &ptr2, &deref2, "int64_t", n2);
                     Some(v.clone())
@@ -1734,7 +1748,8 @@ impl Lowerer {
             // Green: the iterable temp must survive a suspend (a resume
             // may land inside the loop).
             let iter_tmp: String = if green_iter {
-                let (_, deref, _) = self.green_cell(names, "zz_value", false, out);
+                let (_, deref, _) =
+                    self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
                 out.push_str(&format!("    {deref} = {iter_val};\n"));
                 deref
             } else {
@@ -1756,7 +1771,13 @@ impl Lowerer {
                 // blocking path's per-iteration cells — else reused).
                 let cid: String = if green_iter {
                     let captured = names.capture_set.contains(v);
-                    let (ptr, deref, n) = self.green_cell(names, "zz_value", captured, out);
+                    let (ptr, deref, n) = self.green_cell(
+                        names,
+                        "zz_value",
+                        captured,
+                        out,
+                        if captured { None } else { Some("_green_arena") },
+                    );
                     names.enter_cell(v, &ptr, &deref, "zz_value", n);
                     deref
                 } else {
@@ -1772,8 +1793,10 @@ impl Lowerer {
                 // Green: loop drivers live in frame cells (a resume may
                 // land inside the loop); plain path keeps stack counters.
                 let (idx, len): (String, String) = if green_iter {
-                    let (_, ideref, _) = self.green_cell(names, "int64_t", false, out);
-                    let (_, lderef, _) = self.green_cell(names, "int64_t", false, out);
+                    let (_, ideref, _) =
+                        self.green_cell(names, "int64_t", false, out, Some("_green_arena"));
+                    let (_, lderef, _) =
+                        self.green_cell(names, "int64_t", false, out, Some("_green_arena"));
                     out.push_str(&format!("    {ideref} = 0;\n"));
                     out.push_str(&format!(
                         "    {lderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len\n\
@@ -1846,10 +1869,22 @@ impl Lowerer {
                 // capturable, reused otherwise); drivers likewise.
                 let (k_cid, v_cid): (String, String) = if green_iter {
                     let k_cap = names.capture_set.contains(k_name);
-                    let (kptr, kderef, kn) = self.green_cell(names, "zz_value", k_cap, out);
+                    let (kptr, kderef, kn) = self.green_cell(
+                        names,
+                        "zz_value",
+                        k_cap,
+                        out,
+                        if k_cap { None } else { Some("_green_arena") },
+                    );
                     names.enter_cell(k_name, &kptr, &kderef, "zz_value", kn);
                     let v_cap = names.capture_set.contains(v_name);
-                    let (vptr, vderef, vn) = self.green_cell(names, "zz_value", v_cap, out);
+                    let (vptr, vderef, vn) = self.green_cell(
+                        names,
+                        "zz_value",
+                        v_cap,
+                        out,
+                        if v_cap { None } else { Some("_green_arena") },
+                    );
                     names.enter_cell(v_name, &vptr, &vderef, "zz_value", vn);
                     (kderef, vderef)
                 } else {
@@ -1882,17 +1917,21 @@ impl Lowerer {
                     )
                 };
                 if green_iter {
-                    let (_, ideref, _) = self.green_cell(names, "int64_t", false, out);
-                    let (_, lderef, _) = self.green_cell(names, "int64_t", false, out);
+                    let (_, ideref, _) =
+                        self.green_cell(names, "int64_t", false, out, Some("_green_arena"));
+                    let (_, lderef, _) =
+                        self.green_cell(names, "int64_t", false, out, Some("_green_arena"));
                     out.push_str(&format!("    {ideref} = 0;\n"));
                     out.push_str(&format!(
                         "    {lderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? (int64_t){iter_tmp}.arr->len : ({iter_tmp}.tag == ZZ_DICT) ? (int64_t){iter_tmp}.dict->len : 0;\n"
                     ));
                     out.push_str(&format!("    for (; {ideref} < {lderef}; {ideref}++) {{\n"));
                     self.emit_safepoint(out, "    ");
-                    let (_, pederef, _) = self.green_cell(names, "int", false, out);
+                    let (_, pederef, _) =
+                        self.green_cell(names, "int", false, out, Some("_green_arena"));
                     out.push_str(&format!("    {pederef} = 0;\n"));
-                    let (_, pairderef, _) = self.green_cell(names, "zz_value", false, out);
+                    let (_, pairderef, _) =
+                        self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
                     out.push_str(&format!(
                         "    {pairderef} = ({iter_tmp}.tag == ZZ_ARRAY) ? zz_clone({iter_tmp}.arr->items[{ideref}]) : zz_unit();\n"
                     ));

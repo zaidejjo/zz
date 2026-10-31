@@ -348,12 +348,19 @@ impl Lowerer {
     /// leak-free for uncaptured locals). The pointer is always stored
     /// in the frame slot so the prologue restore re-seats the stack
     /// pointer after a resume jumps over the declaration.
+    ///
+    /// `arena` is the name of a green closure arena (e.g. `_green_arena`)
+    /// allocated in the enclosing function. When `Some` and `fresh` is false,
+    /// the cell is allocated from this arena instead of via individual mallocs,
+    /// reducing heap fragmentation. When `None`, the original malloc-based
+    /// behavior is preserved for compatibility.
     pub(crate) fn green_cell(
         &self,
         names: &mut NameCtx,
         ctype: &str,
         fresh: bool,
         out: &mut String,
+        arena: Option<&str>,
     ) -> (String, String, usize) {
         let mut g = self.green.borrow_mut();
         let gx = g.as_mut().expect("green_cell outside a green closure");
@@ -364,13 +371,15 @@ impl Lowerer {
         let ptr = format!("_gcell{n}");
         let deref = format!("(*{ptr})");
         let kind = if ctype == "zz_value" { 0 } else { 1 };
+        let arena_alloc = arena.map_or_else(
+            || format!("    {ptr} = ({ctype}*)malloc(sizeof({ctype}));\n"),
+            |a| format!("    {ptr} = ({ctype}*)zz_arena_alloc(&{a}, sizeof({ctype}), 8);\n"),
+        );
         if fresh {
             out.push_str(&format!("    {ptr} = ({ctype}*)malloc(sizeof({ctype}));\n"));
         } else {
-            out.push_str(&format!("    if (!{ptr}) {{\n"));
-            out.push_str(&format!(
-                "        {ptr} = ({ctype}*)malloc(sizeof({ctype}));\n"
-            ));
+            out.push_str("    if (!{ptr}) {\n");
+            out.push_str(&arena_alloc);
             out.push_str("    }\n");
         }
         out.push_str(&format!("    zz_fr->cells[{slot}] = {ptr};\n"));
