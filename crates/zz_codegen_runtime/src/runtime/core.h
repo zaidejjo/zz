@@ -56,6 +56,7 @@ typedef enum {
     ZZ_FLOAT,
     ZZ_BOOL,
     ZZ_STR,
+    ZZ_MUTABLE_STR,  // mutable string: always exclusively owned, in-place append
     ZZ_ARRAY,
     ZZ_DICT,
     ZZ_FUNC,
@@ -133,6 +134,7 @@ typedef struct zz_bytes zz_bytes;
 typedef struct {
     size_t refs;
     int interned;
+    int mutable;      // non-zero: mutable string, never shared, in-place append
     size_t cap;     // 0 = SSO, >0 = heap capacity
     size_t len;
     union {
@@ -818,6 +820,14 @@ static inline zz_value zz_clone(zz_value v) {
         // The refs>0 guard matters: arena strings (refs==0 sentinel) must
         // never be promoted to heap ownership by a bare bump.
         if (v.s && !v.s->interned && v.s->refs > 0) {
+            __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
+    case ZZ_MUTABLE_STR:
+        // Mutable strings are never shared: clone creates an immutable copy.
+        if (v.s && !v.s->interned) {
+            v.tag = ZZ_STR;
+            v.s->mutable = 0;
             __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
         }
         break;
