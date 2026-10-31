@@ -3000,7 +3000,8 @@ impl TypeCheckOps for Checker {
                         arg_t.as_ref().map(|t| self.unifier.resolve(t)),
                         Some(Type::Func(_, _))
                     ) || matches!(fname.as_deref(), Some(n)
-                            if self.funcs.contains_key(n) && !self.is_math_const(n));
+                            if zz_checker_core::lookup_std(&self.funcs, n).is_some()
+                                && !self.is_math_const(n));
                     if !is_func {
                         continue;
                     }

@@ -1,0 +1,6 @@
+import std.math
+// Regression test for #709: a qualified function value passed to println
+// must be flagged as a missing `()` call, for both bare-qualified
+// (`math.sin`) and canonical (`std.math.sin`) spellings.
+println(math.sin)
+println(std.math.sin)
