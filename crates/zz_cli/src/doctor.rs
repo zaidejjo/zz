@@ -7,6 +7,7 @@
 
 use crate::{setup, ui};
 use std::path::PathBuf;
+use zz_codegen::compile::managed_zig_path;
 use zz_codegen::ffi::{self as ffi, RtSource};
 
 /// One check result.
@@ -97,6 +98,34 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "no clang backend found".to_string(),
             "run `zz toolchain install` for a managed Zig backend, or install clang",
         )),
+    }
+
+    // Zig version (managed Zig C backend via `zz toolchain install`).
+    if let Some(zig) = managed_zig_path() {
+        let ver = std::process::Command::new(&zig)
+            .arg("version")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if ver.is_empty() {
+            checks.push(fail(
+                "Zig backend",
+                "zig binary present but reports no version".to_string(),
+                "reinstall Zig via `zz toolchain install`",
+            ));
+        } else {
+            checks.push(pass(
+                "Zig backend",
+                format!("zig {ver} at {}", zig.display()),
+            ));
+        }
+    } else {
+        checks.push(pass(
+            "Zig backend",
+            "no managed Zig (system clang is the C backend)".to_string(),
+        ));
     }
 
     // 3. Native runtime (AOT linking for `zz build` / `zz run --native`).
