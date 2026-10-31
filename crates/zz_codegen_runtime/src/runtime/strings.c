@@ -146,6 +146,7 @@ zz_str *str_alloc(size_t need) {
     }
     s->refs = 1;
     s->interned = 0;
+    s->mutable = 0;
     s->len = need;
     if (need <= ZZ_SSO_MAX) {
         s->cap = 0;   // SSO sentinel
