@@ -1857,8 +1857,15 @@ impl TypeCheckOps for Checker {
                 Type::Array(Box::new(elem_t))
             }
             Expr::Tuple { items, .. } => {
-                let types: Vec<Type> = items.iter().map(|e| self.check_expr(e)).collect();
-                Type::Tuple(types)
+                // `()` is the unit value, not a zero-field tuple (#712):
+                // match arms spell unit either way (`=> ()` / `=> {}`), and
+                // both must unify with a unit-yielding arm.
+                if items.is_empty() {
+                    Type::Unit
+                } else {
+                    let types: Vec<Type> = items.iter().map(|e| self.check_expr(e)).collect();
+                    Type::Tuple(types)
+                }
             }
             Expr::ListComp {
                 body,

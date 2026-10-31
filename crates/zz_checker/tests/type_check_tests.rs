@@ -4340,3 +4340,21 @@ fn discard_assign_discards_result_type() {
     let r = check_src_with_funcs("_ = compute()", funcs);
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
+
+#[test]
+fn match_arm_empty_block_is_unit() {
+    // #712: `=> {}` is a unit-valued arm, not an empty dict.
+    let r = check_src(
+        "func report(x: Result<int, str>) {\n    match x {\n        .ok(_) => {}\n        .err(_) => {}\n    }\n}",
+    );
+    assert!(!has_errors(&r), "empty-block arms: {:?}", r.errors);
+}
+
+#[test]
+fn match_arm_unit_literal_is_unit() {
+    // #712: `=> ()` is the unit literal and must unify like an empty block.
+    let r = check_src(
+        "func report(x: Result<int, str>) {\n    match x {\n        .ok(_) => ()\n        .err(_) => ()\n    }\n}",
+    );
+    assert!(!has_errors(&r), "unit-literal arms: {:?}", r.errors);
+}
