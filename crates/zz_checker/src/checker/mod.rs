@@ -115,6 +115,32 @@ pub fn check_program_with_module_ns(
     .result
 }
 
+/// Like [`check_program_with_module_ns`] but also returns the resolved
+/// span types (needed by native codegen). Used by the AOT build path so
+/// cached modules can skip re-type-checking while still providing
+/// `span_types` for lowering.
+pub fn check_program_with_module_ns_typed(
+    program: &Program,
+    initial_bindings: HashMap<String, Type>,
+    initial_funcs: HashMap<String, FuncSig>,
+    initial_structs: HashMap<String, StructSig>,
+    initial_aliases: HashMap<String, AliasSig>,
+    initial_enums: HashMap<String, EnumSig>,
+    module_ns: &str,
+) -> (CheckResult, HashMap<SpanKey, Type>) {
+    let outcome = check_program_impl(
+        program,
+        initial_bindings,
+        initial_funcs,
+        initial_structs,
+        initial_aliases,
+        initial_enums,
+        HashMap::new(),
+        module_ns,
+    );
+    (outcome.result, outcome.span_types)
+}
+
 /// Core pass shared by [`check_program`], [`check_program_with_consts`],
 /// [`check_program_with_module_ns`], and [`check_program_typed`].
 // Eight params is the honest shape here (six seed maps + consts +

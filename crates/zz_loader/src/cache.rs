@@ -14,9 +14,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
-use zz_checker::{AliasSig, EnumSig, FuncSig, StructSig, Type};
+use zz_checker::{AliasSig, EnumSig, FuncSig, SpanKey, StructSig, Type};
 use zz_frontend::ast::Program;
 use zz_frontend::diag::RawDiag;
+use zz_frontend::span::Span;
 
 /// What one module contributes on a cache hit: everything `finish()` needs
 /// that does not require running the checker. Mirrors the `CheckResult`
@@ -60,6 +61,15 @@ pub struct CachedModule<'a> {
     pub pub_bindings: std::borrow::Cow<'a, HashMap<String, Type>>,
     /// Errors AND warnings (== `CheckResult.errors`; warnings replay too).
     pub diags: Vec<RawDiag>,
+    /// Resolved span types (== `check_program_typed` span_types output).
+    /// Keyed by scope-qualified function name + span; unique across modules.
+    #[serde(borrow)]
+    pub types: std::borrow::Cow<'a, HashMap<SpanKey, Type>>,
+    /// `try` site span → conversion function name (== `CheckResult.try_converts`).
+    /// Spans restart at 0 per file, so cross-module collisions are possible
+    /// but rare; same behavior as `merge_typed_programs`.
+    #[serde(borrow)]
+    pub try_converts: std::borrow::Cow<'a, HashMap<Span, Option<String>>>,
 }
 
 /// Genesis material: anything that changes checker semantics globally.
@@ -650,6 +660,8 @@ impl<'a> CachedModule<'a> {
             bindings: std::borrow::Cow::Owned(self.bindings.into_owned()),
             pub_bindings: std::borrow::Cow::Owned(self.pub_bindings.into_owned()),
             diags: self.diags,
+            types: std::borrow::Cow::Owned(self.types.into_owned()),
+            try_converts: std::borrow::Cow::Owned(self.try_converts.into_owned()),
         }
     }
 }
@@ -771,6 +783,8 @@ mod tests {
                 bindings: Cow::Owned(HashMap::new()),
                 pub_bindings: Cow::Owned(HashMap::new()),
                 diags: Vec::new(),
+                types: Cow::Owned(HashMap::new()),
+                try_converts: Cow::Owned(HashMap::new()),
             };
             write_cached(&key, &m);
             let back = read_cached(&key);
@@ -792,6 +806,8 @@ mod tests {
             bindings: Cow::Owned(HashMap::new()),
             pub_bindings: Cow::Owned(HashMap::new()),
             diags: Vec::new(),
+            types: Cow::Owned(HashMap::new()),
+            try_converts: Cow::Owned(HashMap::new()),
         }
     }
 

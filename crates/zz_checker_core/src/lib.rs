@@ -46,6 +46,24 @@ impl SpanKey {
     }
 }
 
+/// Manual serde for SpanKey: `Arc<str>` is not serde-serializable, so we
+/// round-trip through `String`.
+impl serde::Serialize for SpanKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (self.func.as_ref(), self.span).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SpanKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (func, span) = <(String, Span)>::deserialize(deserializer)?;
+        Ok(SpanKey {
+            func: func.into(),
+            span,
+        })
+    }
+}
+
 /// A registered function signature.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FuncSig {

@@ -21,11 +21,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider};
-use zz_frontend::ast::Stmt;
 use zz_frontend::span::Span;
 use zz_hir::{merge_typed_programs, TypedProgram};
 use zz_loader::{
-    find_project_root, load_program_with_features, load_program_with_plugins_and_features,
+    find_project_root, load_program_check_with_features, load_program_with_features,
+    load_program_with_plugins_and_features,
 };
 use zz_plugin::load_manifest;
 use zz_pm::manifest::FeatureSelection;
@@ -976,7 +976,11 @@ fn typed_program_for(
     // function signatures into the checker's function table.
     let plugin_funcs = discover_plugin_manifests(path);
     let loaded = if plugin_funcs.is_empty() {
-        load_program_with_features(path, features)?
+        // Use the check path so the per-module check cache (S1) is active:
+        // unchanged modules skip re-type-checking via content-addressed
+        // on-disk cache. Span types and try_converts are stored in the
+        // cache, so AOT lowering has everything it needs.
+        load_program_check_with_features(path, features)?
     } else {
         load_program_with_plugins_and_features(path, &plugin_funcs, features)?
     };
@@ -999,53 +1003,36 @@ fn typed_program_for(
         return Err("program failed to type-check".into());
     }
 
-    // Build user HIR from user programs only. Stdlib function signatures are
-    // already in `loaded.funcs` (populated by the loader from imports), so
-    // the user program type-checks against them without re-checking stdlib
-    // bodies. Stdlib bodies are added below via HIR-level merge.
-    let mut user_stmts: Vec<Stmt> = Vec::new();
-    let mut user_span = Span::new(0, 0);
-    for p in &loaded.programs {
-        user_stmts.extend(p.stmts.iter().cloned());
-        if p.span.end > user_span.end {
-            user_span = p.span;
-        }
-    }
-    let user_program = zz_frontend::ast::Program {
-        stmts: user_stmts,
-        span: user_span,
-    };
-    let user_tp = zz_hir::build_program(
-        &user_program,
-        HashMap::new(),
-        loaded.funcs,
-        loaded.structs,
-        loaded.aliases,
-        loaded.enums,
-    );
-    if !user_tp.diagnostics.is_empty() {
-        for d in &user_tp.diagnostics {
-            if d.severity == zz_frontend::diag::Severity::Error {
-                eprintln!("zz: {}", d.message);
-            }
-        }
-    }
+    // Build per-module TypedPrograms from cached check results. Each module
+    // was already type-checked by the loader (possibly via cache hit), so we
+    // reconstruct TypedProgram from parsed AST + CheckResult + span types
+    // without re-running the checker. Stdlib TypedPrograms come from
+    // `zz_stdlib::zz_stdlib_programs` (cached via OnceLock).
+    let mut all_tps: Vec<TypedProgram> = Vec::new();
 
-    // Collect pre-compiled stdlib TypedPrograms (cached via OnceLock in
-    // zz_stdlib_programs). Their bodies are already type-checked; merging
-    // at HIR level avoids re-checking them on every build.
-    let mut stdlib_tps: Vec<TypedProgram> = Vec::new();
+    // Stdlib first (mirroring VM load order).
     for zz_prog in zz_stdlib::zz_stdlib_programs() {
         match zz_prog {
-            Ok(p) => stdlib_tps.push(p.clone()),
+            Ok(p) => all_tps.push(p.clone()),
             Err(e) => return Err(format!("stdlib init error: {e:?}")),
         }
     }
 
+    // User modules: reconstruct TypedProgram from per-module cache results.
+    for (_path, program, check_result, span_types) in &loaded.per_module_results {
+        all_tps.push(TypedProgram {
+            program: program.clone(),
+            types: span_types.clone(),
+            bindings: check_result.bindings.clone(),
+            funcs: check_result.funcs.clone(),
+            structs: check_result.structs.clone(),
+            enums: check_result.enums.clone(),
+            try_converts: check_result.try_converts.clone(),
+        });
+    }
+
     // Merge stdlib + user TypedPrograms. Stdlib first (mirroring VM load
     // order), user overrides on key collisions.
-    let mut all_tps: Vec<TypedProgram> = stdlib_tps;
-    all_tps.push(user_tp.program);
     let merged = merge_typed_programs(all_tps);
     let main_key = format!("{entry_ns}.main");
     let (pruned, reach) = zz_hir::dce(&merged, &main_key);
@@ -1109,14 +1096,14 @@ fn chunk_module_for(
             }
         }
     }
+    for p in &loaded.programs {
+        merged_stmts.extend(p.stmts.iter().cloned());
+    }
     let merged_span = loaded
         .programs
         .last()
         .map(|p| p.span)
         .unwrap_or(Span::new(0, 0));
-    for p in &loaded.programs {
-        merged_stmts.extend(p.stmts.iter().cloned());
-    }
     let merged = zz_frontend::ast::Program {
         stmts: merged_stmts,
         span: merged_span,
@@ -1140,28 +1127,19 @@ fn chunk_module_for(
     );
     let module = zz_ir::lower::lower_typed(&chunk, &typed.program.funcs)
         .map_err(|e| format!("zz: ir lower failed: {e}"))?;
-    // Unification: the chunk backend never consumes in-memory IR
-    // directly. Encode to `.zzc` bytes, decode, and verify — the exact
-    // bytes-derived path `zz run --bytecode` executes. A codec or
-    // verifier failure is a loud build error, never a silent divergence
-    // between VM-tested IR and AOT-emitted C.
     let bytes = zz_ir::codec::encode(&module);
     drop(chunk);
     drop(module);
-    let loaded = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
-    zz_ir::verify::verify(&loaded).map_err(|e| format!("zz: .zzc verify failed: {e}"))?;
-    // Script-style programs (top-level statements only) have no
-    // `<ns>.main`; the synthetic entry chunk is the whole program, exactly
-    // like the HIR backend's `zz_main`-only shape. An empty key tells the
-    // chunk backend to emit no CLI main call.
+    let module = zz_ir::codec::decode(&bytes).map_err(|e| format!("zz: invalid .zzc: {e}"))?;
+    zz_ir::verify::verify(&module).map_err(|e| format!("zz: .zzc verify failed: {e}"))?;
     let main_key = format!("{entry_ns}.main");
-    let has_main = loaded.funcs.iter().any(|f| {
-        loaded
+    let has_main = module.funcs.iter().any(|f| {
+        module
             .strings
             .get(f.name.0 as usize)
             .is_some_and(|n| n == &main_key)
     });
-    Ok((loaded, if has_main { main_key } else { String::new() }))
+    Ok((module, if has_main { main_key } else { String::new() }))
 }
 
 /// Output directory for a build of `src` (authoritative, no duplicates):
