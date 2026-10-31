@@ -146,6 +146,7 @@ zz_str *str_alloc(size_t need) {
     }
     s->refs = 1;
     s->interned = 0;
+    s->mutable = 0;
     s->len = need;
     if (need <= ZZ_SSO_MAX) {
         s->cap = 0;   // SSO sentinel
@@ -207,6 +208,84 @@ zz_value zz_str_new(const char *src, size_t len) {
     v.tag = ZZ_STR;
     v.s = s;
     return v;
+}
+
+// Mutable string: exclusively owned (refs==1, never shared), in-place append.
+// cap=0 → SSO for small strings; cap>0 → pre-allocated heap buffer.
+zz_value zz_str_new_mut(size_t cap) {
+    zz_str *s = zz_str_header_alloc();
+    if (!s) {
+        fprintf(stderr, "zz: out of memory\n");
+        exit(1);
+    }
+    s->refs = 1;
+    s->interned = 0;
+    s->mutable = 1;
+    s->len = 0;
+    if (cap == 0 || cap <= ZZ_SSO_MAX) {
+        s->cap = 0;   // SSO sentinel
+        s->sso[0] = '\0';
+    } else {
+        s->cap = cap;
+        s->heap = (char *)malloc(cap + 1);
+        if (!s->heap) {
+            fprintf(stderr, "zz: out of memory\n");
+            exit(1);
+        }
+        s->heap[0] = '\0';
+    }
+    zz_value v;
+    v.tag = ZZ_MUTABLE_STR;
+    v.s = s;
+    return v;
+}
+
+// In-place append of a zz_str to a mutable string. Never clones — the
+// mutable string is always exclusively owned (refs==1, mutable==1).
+void zz_str_append_mut_str(zz_value *a, zz_value b) {
+    if (a->tag != ZZ_MUTABLE_STR || b.tag != ZZ_STR) return;
+    zz_str *s = a->s;
+    size_t la = s->len, lb = b.s->len;
+    size_t need = la + lb;
+    if (s->cap < need) {
+        s = str_grow(s, need);
+        a->s = s;
+    }
+    memcpy(zz_str_ptr(s) + la, zz_str_ptr(b.s), lb);
+    s->len = need;
+    zz_str_ptr(s)[need] = '\0';
+}
+
+// In-place append of a C literal to a mutable string.
+void zz_str_append_mut_lit(zz_value *a, const char *lit, size_t lit_len) {
+    if (a->tag != ZZ_MUTABLE_STR) return;
+    zz_str *s = a->s;
+    size_t la = s->len;
+    size_t need = la + lit_len;
+    if (s->cap < need) {
+        s = str_grow(s, need);
+        a->s = s;
+    }
+    memcpy(zz_str_ptr(s) + la, lit, lit_len);
+    s->len = need;
+    zz_str_ptr(s)[need] = '\0';
+}
+
+// Freeze a mutable string to an immutable ZZ_STR. If the mutable string
+// is exclusively owned (refs==1, mutable==1), flip the tag in place.
+// Otherwise (shared — should not happen for well-formed programs), copy.
+zz_value zz_str_freeze(zz_value v) {
+    if (v.tag == ZZ_STR) return v;   // already immutable
+    if (v.tag != ZZ_MUTABLE_STR) return v;
+    zz_str *s = v.s;
+    if (s->mutable && s->refs == 1) {
+        s->mutable = 0;
+        v.tag = ZZ_STR;
+        return v;
+    }
+    // Shared mutable string (should not happen): copy to a fresh immutable.
+    zz_value out = zz_str_new(zz_str_ptr(s), s->len);
+    return out;
 }
 
 zz_value zz_str_owned(char *src) {
@@ -1245,6 +1324,12 @@ char *zz_to_str_fmt(zz_value v, const char *spec) {
     return zz_value_to_display_string(&v);
 }
 zz_value zz_binop_cat(zz_value a, zz_value b) {
+    // Mutable string + anything: in-place append, consume b.
+    if (a.tag == ZZ_MUTABLE_STR && b.tag == ZZ_STR) {
+        zz_str_append_mut_str(&a, b);
+        zz_release(&b);
+        return a;
+    }
     if (a.tag == ZZ_STR && b.tag == ZZ_STR) {
         size_t la = a.s->len, lb = b.s->len;
         size_t need = la + lb;
@@ -1342,10 +1427,12 @@ zz_value zz_binop_cat_str(zz_value a, zz_value b) {
 // in place. If *a is not a string or its buffer can't be reused, fall back
 // to zz_binop_cat + zz_assign semantics via the caller.
 void zz_str_append_str(zz_value *a, zz_value b) {
-    if (a->tag != ZZ_STR || b.tag != ZZ_STR) return;
+    if (a->tag != ZZ_STR && a->tag != ZZ_MUTABLE_STR) return;
+    if (b.tag != ZZ_STR) return;
     size_t la = a->s->len, lb = b.s->len;
     size_t need = la + lb;
-    if (a->s->refs == 1 && !a->s->interned) {
+    // Mutable strings are always exclusively owned: in-place append, no clone.
+    if (a->s->mutable || (a->s->refs == 1 && !a->s->interned)) {
         if (a->s->cap < need) {
             a->s = str_grow(a->s, need);
         }
@@ -1372,10 +1459,11 @@ void zz_str_append_str(zz_value *a, zz_value b) {
 // Variant: append a C literal directly without allocating a temporary
 // zz_str. Used by the most common hot pattern `s = s + "x"`.
 void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
-    if (a->tag != ZZ_STR) return;
+    if (a->tag != ZZ_STR && a->tag != ZZ_MUTABLE_STR) return;
     size_t la = a->s->len;
     size_t need = la + lit_len;
-    if (a->s->refs == 1 && !a->s->interned) {
+    // Mutable strings are always exclusively owned: in-place append, no clone.
+    if (a->s->mutable || (a->s->refs == 1 && !a->s->interned)) {
         if (a->s->cap < need) {
             a->s = str_grow(a->s, need);
         }

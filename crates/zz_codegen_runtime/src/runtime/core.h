@@ -77,6 +77,7 @@ typedef enum {
     ZZ_VFS,
     ZZ_BYTES,
     ZZ_WEAK,
+    ZZ_MUTABLE_STR,  // mutable string: always exclusively owned, in-place append
 } zz_tag;
 
 typedef struct zz_value zz_value;
@@ -133,6 +134,7 @@ typedef struct zz_bytes zz_bytes;
 typedef struct {
     size_t refs;
     int interned;
+    int mutable;      // non-zero: mutable string, never shared, in-place append
     size_t cap;     // 0 = SSO, >0 = heap capacity
     size_t len;
     union {
@@ -830,6 +832,10 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     }
 }
 
+// Forward-declared here (defined in strings.c, which follows core.h in the
+// concatenated runtime TU): zz_clone needs it for ZZ_MUTABLE_STR copies.
+zz_value zz_str_new(const char *s, size_t len);
+
 static inline zz_value zz_clone(zz_value v) {
     switch (v.tag) {
     case ZZ_STR:
@@ -837,6 +843,14 @@ static inline zz_value zz_clone(zz_value v) {
         // never be promoted to heap ownership by a bare bump.
         if (v.s && !v.s->interned && v.s->refs > 0) {
             __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
+        }
+        break;
+    case ZZ_MUTABLE_STR:
+        // Mutable strings are never shared: clone creates an immutable copy.
+        // Do NOT flip mutable on the shared struct — that would corrupt the
+        // original. Allocate a fresh immutable zz_str instead.
+        if (v.s && !v.s->interned) {
+            return zz_str_new(zz_str_ptr(v.s), v.s->len);
         }
         break;
     case ZZ_ARRAY:

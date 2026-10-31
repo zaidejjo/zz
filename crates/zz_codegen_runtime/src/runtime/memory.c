@@ -294,6 +294,9 @@ void zz_retain_arc(zz_value *v) {
             __atomic_add_fetch(&v->s->refs, 1, __ATOMIC_RELAXED);
         }
         break;
+    case ZZ_MUTABLE_STR:
+        // Mutable strings are always exclusively owned: never retain.
+        break;
     case ZZ_ARRAY:
         zz_retain_array(v->arr);
         break;
@@ -337,6 +340,13 @@ void zz_release_arc(zz_value *v) {
                 if (v->s->cap > 0) free(v->s->heap);
                 zz_str_header_free(v->s);
             }
+        }
+        break;
+    case ZZ_MUTABLE_STR:
+        // Mutable strings: always exclusively owned, free directly.
+        if (v->s) {
+            if (v->s->cap > 0) free(v->s->heap);
+            zz_str_header_free(v->s);
         }
         break;
     case ZZ_ARRAY:
