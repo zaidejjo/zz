@@ -291,6 +291,30 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "net.tcp_read_exact" | "std.net.tcp_read_exact" => Some("zz_tcp_read_exact"),
         "net.tcp_write_bytes" | "std.net.tcp_write_bytes" => Some("zz_tcp_write_bytes"),
         "net.tcp_shutdown" | "std.net.tcp_shutdown" => Some("zz_tcp_shutdown"),
+        // net tls — C twin lives in the Rust staticlib (`zz_native_rt::tls_conn`);
+        // registered here too so the embedded-C and staticlib tables agree,
+        // mirroring TCP (ffi_decl emits the extern declaration for AOT).
+        "net.tls_connect" | "std.net.tls_connect" => Some("zz_tls_connect"),
+        "net.tls_connect_with_ca" | "std.net.tls_connect_with_ca" => Some("zz_tls_connect_with_ca"),
+        "net.tls_connect_insecure" | "std.net.tls_connect_insecure" => {
+            Some("zz_tls_connect_insecure")
+        }
+        "net.tls_write" | "std.net.tls_write" => Some("zz_tls_write"),
+        "net.tls_write_bytes" | "std.net.tls_write_bytes" => Some("zz_tls_write_bytes"),
+        "net.tls_read" | "std.net.tls_read" => Some("zz_tls_read"),
+        "net.tls_read_bytes" | "std.net.tls_read_bytes" => Some("zz_tls_read_bytes"),
+        "net.tls_read_exact" | "std.net.tls_read_exact" => Some("zz_tls_read_exact"),
+        "net.tls_readline" | "std.net.tls_readline" => Some("zz_tls_read_line"),
+        "net.tls_set_read_timeout" | "std.net.tls_set_read_timeout" => {
+            Some("zz_tls_set_read_timeout")
+        }
+        "net.tls_set_write_timeout" | "std.net.tls_set_write_timeout" => {
+            Some("zz_tls_set_write_timeout")
+        }
+        "net.tls_close" | "std.net.tls_close" => Some("zz_tls_close"),
+        "net.tls_peer_addr" | "std.net.tls_peer_addr" => Some("zz_tls_peer_addr"),
+        "net.tls_listen" | "std.net.tls_listen" => Some("zz_tls_listen"),
+        "net.tls_accept" | "std.net.tls_accept" => Some("zz_tls_accept"),
         // Ergonomic `net.*` method aliases (same C impls as the canonicals).
         "net.accept" | "std.net.accept" => Some("zz_tcp_accept"),
         "net.read" | "std.net.read" => Some("zz_tcp_read"),
