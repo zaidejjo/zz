@@ -4436,3 +4436,82 @@ fn match_arm_unit_literal_is_unit() {
     );
     assert!(!has_errors(&r), "unit-literal arms: {:?}", r.errors);
 }
+
+#[test]
+fn error_cascade_field_access_suppressed() {
+    // #711: field access on an `<error>` value must not cascade a new
+    // "cannot access field" diagnostic; the root undefined-variable error
+    // is reported once.
+    let r = check_src("x := nope\ny := x.counted");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("cannot access field")),
+        "no field-access cascade, got: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("undefined variable `nope`")),
+        "root error reported, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn error_cascade_index_suppressed() {
+    // #711: indexing an `<error>` value must not cascade.
+    let r = check_src("x := nope\ny := x[0]");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("cannot index")),
+        "no index cascade, got: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("undefined variable `nope`")),
+        "root error reported, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn error_cascade_slice_suppressed() {
+    // #711: slicing an `<error>` value must not cascade.
+    let r = check_src("x := nope\ny := x[0..1]");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("cannot slice")),
+        "no slice cascade, got: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("undefined variable `nope`")),
+        "root error reported, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn error_cascade_index_must_be_int_suppressed() {
+    // #711: an `int`-indexed expression on an `<error>` value must not
+    // emit "index must be `int`, found `<error>`".
+    let r = check_src("x := nope\ny := x[nope2]");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("index must be `int`")),
+        "no ensure_int cascade, got: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("undefined variable")),
+        "root errors reported, got: {:?}",
+        r.errors
+    );
+}

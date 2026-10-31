@@ -627,6 +627,13 @@ impl ScopeOps for Checker {
                     // Return a fresh var; unification will catch real mismatches later.
                     ty = self.unifier.fresh_var();
                 }
+                Type::Error => {
+                    // Cascade root already reported: a field access on an
+                    // `<error>` value must not spawn a new diagnostic
+                    // (#711). Keep the error type so downstream accesses
+                    // also stay silent.
+                    ty = Type::Error;
+                }
                 other => {
                     let mut diag = error_at(
                         format!("cannot access field `{field}` on a value of type `{other}`"),

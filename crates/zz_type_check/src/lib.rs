@@ -1433,6 +1433,7 @@ impl TypeCheckOps for Checker {
                         // Return a fresh var; unification will catch real mismatches later.
                         self.unifier.fresh_var()
                     }
+                    Type::Error => Type::Error,
                     other => {
                         let method = name.clone();
                         let ns = match &other {
@@ -1477,6 +1478,7 @@ impl TypeCheckOps for Checker {
                         Type::Var(id) => {
                             self.unifier.bind(id, Type::Int);
                         }
+                        Type::Error => {}
                         other => {
                             self.errors.push(error_at(
                                 format!("range bounds must be `int`, found `{other}`"),
@@ -1623,6 +1625,7 @@ impl TypeCheckOps for Checker {
                         ));
                         Type::Unit
                     }
+                    Type::Error => Type::Unit,
                     other => {
                         self.errors.push(error_at(
                             format!("cannot index a value of type `{other}`"),
@@ -1655,6 +1658,7 @@ impl TypeCheckOps for Checker {
                         ));
                         Type::Unit
                     }
+                    Type::Error => Type::Unit,
                     other => {
                         self.errors.push(error_at(
                             format!("cannot slice a value of type `{other}`"),
