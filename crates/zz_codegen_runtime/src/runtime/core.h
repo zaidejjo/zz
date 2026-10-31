@@ -814,6 +814,10 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     }
 }
 
+// Forward-declared here (defined in strings.c, which follows core.h in the
+// concatenated runtime TU): zz_clone needs it for ZZ_MUTABLE_STR copies.
+zz_value zz_str_new(const char *s, size_t len);
+
 static inline zz_value zz_clone(zz_value v) {
     switch (v.tag) {
     case ZZ_STR:
@@ -825,10 +829,10 @@ static inline zz_value zz_clone(zz_value v) {
         break;
     case ZZ_MUTABLE_STR:
         // Mutable strings are never shared: clone creates an immutable copy.
+        // Do NOT flip mutable on the shared struct — that would corrupt the
+        // original. Allocate a fresh immutable zz_str instead.
         if (v.s && !v.s->interned) {
-            v.tag = ZZ_STR;
-            v.s->mutable = 0;
-            __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
+            return zz_str_new(zz_str_ptr(v.s), v.s->len);
         }
         break;
     case ZZ_ARRAY:
