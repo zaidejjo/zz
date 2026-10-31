@@ -2986,7 +2986,14 @@ struct DiagKey {
 #[derive(Default)]
 struct CheckDedupe {
     diags: std::collections::HashSet<DiagKey>,
+    /// Modules that have already reported a root error (per-module dedup for
+    /// `is_duplicate`/`first_failure`).
+    #[allow(dead_code)]
     broken_modules: std::collections::HashSet<String>,
+    /// Whether the "first module that broke" hint has already been printed
+    /// this invocation, so it shows once globally instead of once per
+    /// importing file (#711).
+    first_hint_shown: bool,
     /// Memoized `module -> canonical name` (canonicalize is a syscall).
     names: std::collections::HashMap<String, String>,
 }
@@ -3014,10 +3021,23 @@ impl CheckDedupe {
     }
 
     /// Record a failing module. Returns `true` on the first failure seen for
-    /// that module (callers print the root-cause line only then).
+    /// that module (callers print the root-cause line only then). Per-module
+    /// dedup: each distinct module name gets one `true`.
+    #[allow(dead_code)]
     fn first_failure(&mut self, module: &str) -> bool {
         let module = self.key_module(module);
         self.broken_modules.insert(module)
+    }
+
+    /// Returns `true` only on the first call this invocation: use this for
+    /// the "first module that broke" root-cause hint so it prints once
+    /// globally instead of once per importing file.
+    fn first_hint(&mut self) -> bool {
+        if self.first_hint_shown {
+            return false;
+        }
+        self.first_hint_shown = true;
+        true
     }
 }
 
@@ -3164,7 +3184,7 @@ fn check_or_fix_path(
                 // Name the first module that broke before the cascade, so
                 // the user sees the root cause instead of follow-on noise.
                 if let Some(first) = loaded.errors.first() {
-                    if dedupe.first_failure(&first.name) {
+                    if dedupe.first_hint() {
                         eprintln!("first module that broke: {} ({})\n", first.name, path_str);
                     }
                 }

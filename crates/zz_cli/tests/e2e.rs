@@ -1352,6 +1352,50 @@ fn e2e_check_directory_dedupes_shared_module_warnings() {
 }
 
 #[test]
+fn e2e_check_directory_dedupes_error_cascades() {
+    // #711: a shared module whose root error cascades into several
+    // `<error>` diagnostics (field access, index, ...) must not re-emit
+    // those cascades once per importing entry, and "first module that broke"
+    // must print once, not once per importer.
+    let dir = std::env::temp_dir().join(unique_tmp_stem("zz_error_cascade_dedupe"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.zz"),
+        "pub func broken() -> int {\n    x := nope\n    return x.counted\n}\n",
+    )
+    .unwrap();
+    for name in ["a", "b", "c"] {
+        std::fs::write(
+            dir.join(format!("{name}.zz")),
+            format!("import lib\n\nfunc {name}() {{\n    println(lib.broken())\n}}\n"),
+        )
+        .unwrap();
+    }
+
+    let (exit, _stdout, stderr) = run_zz_in_dir(&dir, &["check", "."]);
+    let root = "undefined variable `nope`";
+    assert_eq!(
+        stderr.matches(root).count(),
+        1,
+        "root error must appear once, not once per importer.\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot access field `counted`"),
+        "field-access cascade on an `<error>` value must be suppressed.\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("first module that broke").count(),
+        1,
+        "root-cause line must be printed once.\nstderr:\n{stderr}"
+    );
+    assert_ne!(
+        exit, 0,
+        "cascaded errors still fail the check.\nstderr: {stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn e2e_check_string_before_while_block() {
     let tmp = std::env::temp_dir().join(unique_tmp_stem("zz_str_while_test") + ".zz");
     std::fs::write(
