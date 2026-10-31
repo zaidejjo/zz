@@ -2948,6 +2948,79 @@ fn check_plugin_project(root: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Normalized module identity: canonical when the path exists so an entry
+/// named `./report.zz` and the same file imported as an absolute path agree.
+fn normalized_module_name(module: &str) -> String {
+    std::fs::canonicalize(module)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| module.to_string())
+}
+
+/// Do two diagnostic-owner names refer to the same source file?
+fn same_source_path(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Identity of one diagnostic for cross-entry dedupe (#714).
+///
+/// Checking a directory type-checks each entry's whole import closure, so a
+/// diagnostic inside a shared module is produced once per importer. Key by
+/// owning module plus severity/span/message: the same warning re-surfaced by
+/// a second entry is dropped, while equal messages from different modules or
+/// spans are preserved.
+#[derive(PartialEq, Eq, Hash)]
+struct DiagKey {
+    module: String,
+    severity: zz_frontend::diag::Severity,
+    span: Option<Span>,
+    message: String,
+}
+
+/// Global (per-invocation) dedupe state for `zz check` (#714).
+#[derive(Default)]
+struct CheckDedupe {
+    diags: std::collections::HashSet<DiagKey>,
+    broken_modules: std::collections::HashSet<String>,
+    /// Memoized `module -> canonical name` (canonicalize is a syscall).
+    names: std::collections::HashMap<String, String>,
+}
+
+impl CheckDedupe {
+    fn key_module(&mut self, module: &str) -> String {
+        if let Some(hit) = self.names.get(module) {
+            return hit.clone();
+        }
+        let normalized = normalized_module_name(module);
+        self.names.insert(module.to_string(), normalized.clone());
+        normalized
+    }
+
+    /// Record a diagnostic. Returns `true` when it was already reported for
+    /// this module (the caller must skip it).
+    fn is_duplicate(&mut self, module: &str, diag: &zz_frontend::diag::RawDiag) -> bool {
+        let module = self.key_module(module);
+        !self.diags.insert(DiagKey {
+            module,
+            severity: diag.severity,
+            span: diag.span,
+            message: diag.message.clone(),
+        })
+    }
+
+    /// Record a failing module. Returns `true` on the first failure seen for
+    /// that module (callers print the root-cause line only then).
+    fn first_failure(&mut self, module: &str) -> bool {
+        let module = self.key_module(module);
+        self.broken_modules.insert(module)
+    }
+}
+
 fn check_or_fix_path(
     path_arg: &Option<String>,
     do_fix: bool,
@@ -2999,6 +3072,11 @@ fn check_or_fix_path(
     // Machine-readable accumulation for `--format json` (#264): one
     // entry per checked file (empty diagnostics = clean).
     let mut json_files: Vec<(String, Vec<zz_frontend::diag::RawDiag>)> = Vec::new();
+    // A directory check type-checks every entry's import closure, so a
+    // diagnostic inside a shared module is produced once per importer.
+    // Dedupe at the invocation level; `--fix` skips this so a real file's
+    // own fixits are not lost when an earlier entry surfaced them first.
+    let mut dedupe = CheckDedupe::default();
 
     for path in &files {
         // Per-file compilation unit: the file's source text (the largest
@@ -3032,14 +3110,33 @@ fn check_or_fix_path(
             );
         }
 
+        // Any error-severity diagnostic fails the check (#292): fixable
+        // errors are still errors (warnings alone stay exit 0). Compute this
+        // before cross-entry dedupe so a repeated error still fails the run.
+        let has_errors = loaded
+            .errors
+            .iter()
+            .any(|e| e.diags.iter().any(|d| d.severity == Severity::Error));
+        let mut loaded = loaded;
+        if !do_fix {
+            for e in &mut loaded.errors {
+                let owner = e.name.clone();
+                e.diags.retain(|d| !dedupe.is_duplicate(&owner, d));
+            }
+            loaded.errors.retain(|e| !e.diags.is_empty());
+        }
+
         // Classify fixits by safety.
         let mut safe_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
         let mut ambiguous_fixits: Vec<zz_frontend::diag::FixIt> = Vec::new();
-        // Any error-severity diagnostic fails the check (#292): fixable
-        // errors are still errors (warnings alone stay exit 0).
-        let mut has_errors = false;
-
         for e in &loaded.errors {
+            // A dependency's spans index that dependency's source, never the
+            // entry file's. Applying them to `new_source` below would edit
+            // the wrong bytes, so `--fix <dir>` only fixes the file it is
+            // currently writing.
+            if !same_source_path(&e.name, &path_str) {
+                continue;
+            }
             for d in &e.diags {
                 match d.severity {
                     Severity::Error | Severity::Warning => {
@@ -3048,9 +3145,6 @@ fn check_or_fix_path(
                                 FixSafety::Safe => safe_fixits.push(fixit.clone()),
                                 FixSafety::Ambiguous => ambiguous_fixits.push(fixit.clone()),
                             }
-                        }
-                        if d.severity == Severity::Error {
-                            has_errors = true;
                         }
                     }
                     _ => {}
@@ -3070,7 +3164,9 @@ fn check_or_fix_path(
                 // Name the first module that broke before the cascade, so
                 // the user sees the root cause instead of follow-on noise.
                 if let Some(first) = loaded.errors.first() {
-                    eprintln!("first module that broke: {} ({})\n", first.name, path_str);
+                    if dedupe.first_failure(&first.name) {
+                        eprintln!("first module that broke: {} ({})\n", first.name, path_str);
+                    }
                 }
                 for e in &loaded.errors {
                     let mut files_ctx = Files::new();
@@ -3274,7 +3370,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::check_or_fix_path;
+    use super::{check_or_fix_path, CheckDedupe};
+    use zz_frontend::diag::warning_at;
+    use zz_frontend::span::Span;
 
     fn write_temp(src: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -3319,6 +3417,33 @@ mod tests {
                 &zz_pm::manifest::FeatureSelection::default(),
             )
         })
+    }
+
+    #[test]
+    fn check_dedupe_collapses_shared_module_warning() {
+        // #714: a directory check re-checks every entry's closure; the same
+        // warning from a shared module must be surfaced once.
+        let diag = warning_at(
+            "unused `Result` — errors are silently discarded",
+            Span::new(10, 20),
+        );
+        let mut dedupe = CheckDedupe::default();
+        assert!(!dedupe.is_duplicate("report.zz", &diag), "first sighting");
+        assert!(dedupe.is_duplicate("report.zz", &diag), "second importer");
+        // A different module or span is a different diagnostic.
+        assert!(!dedupe.is_duplicate("other.zz", &diag));
+        assert!(!dedupe.is_duplicate(
+            "report.zz",
+            &warning_at("another warning", Span::new(10, 20))
+        ));
+    }
+
+    #[test]
+    fn check_dedupe_reports_each_broken_module_once() {
+        let mut dedupe = CheckDedupe::default();
+        assert!(dedupe.first_failure("report.zz"));
+        assert!(!dedupe.first_failure("report.zz"));
+        assert!(dedupe.first_failure("walker.zz"));
     }
 
     #[test]

@@ -1302,6 +1302,42 @@ fn e2e_check_unimported_std_module_suggests_import() {
 }
 
 #[test]
+fn e2e_check_directory_dedupes_shared_module_warnings() {
+    // #714: a directory check re-checks every entry's import closure. The
+    // same warning from a shared module must be printed once, not once per
+    // importer, and the root-cause line must not repeat.
+    let dir = std::env::temp_dir().join(unique_tmp_stem("zz_check_dedupe"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("report.zz"),
+        "pub func answer() -> int {\n    unused_var := 1\n    return 2\n}\n",
+    )
+    .unwrap();
+    for name in ["a", "b", "c"] {
+        std::fs::write(
+            dir.join(format!("{name}.zz")),
+            format!("import report\n\nfunc {name}() {{\n    println(report.answer())\n}}\n"),
+        )
+        .unwrap();
+    }
+
+    let (exit, _stdout, stderr) = run_zz_in_dir(&dir, &["check", "."]);
+    let notice = "warning: unused variable `unused_var`";
+    assert_eq!(
+        stderr.matches(notice).count(),
+        1,
+        "shared warning must be printed once.\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("first module that broke").count(),
+        1,
+        "root-cause line must be printed once.\nstderr:\n{stderr}"
+    );
+    assert_eq!(exit, 0, "warnings alone stay exit 0.\nstderr:\n{stderr}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn e2e_check_string_before_while_block() {
     let tmp = std::env::temp_dir().join(unique_tmp_stem("zz_str_while_test") + ".zz");
     std::fs::write(
