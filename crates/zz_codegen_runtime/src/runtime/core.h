@@ -56,7 +56,6 @@ typedef enum {
     ZZ_FLOAT,
     ZZ_BOOL,
     ZZ_STR,
-    ZZ_MUTABLE_STR,  // mutable string: always exclusively owned, in-place append
     ZZ_ARRAY,
     ZZ_DICT,
     ZZ_FUNC,
@@ -78,6 +77,7 @@ typedef enum {
     ZZ_VFS,
     ZZ_BYTES,
     ZZ_WEAK,
+    ZZ_MUTABLE_STR,  // mutable string: always exclusively owned, in-place append
 } zz_tag;
 
 typedef struct zz_value zz_value;
