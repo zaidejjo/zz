@@ -373,8 +373,11 @@ impl ScopeOps for Checker {
                 }
 
                 // If the name looks like `module.func` and matches a known
-                // stdlib pattern, suggest adding the import.
-                if let Some((module, _func)) = name.split_once('.') {
+                // stdlib pattern, suggest adding the import — but only when
+                // the import is not already present (#710). When the module
+                // is already imported, the problem is the member name, so
+                // suggest the closest member instead.
+                if let Some((module, func)) = name.split_once('.') {
                     let std_module = if zz_checker_core::is_std_module_head(module) {
                         Some(module.to_string())
                     } else {
@@ -386,16 +389,52 @@ impl ScopeOps for Checker {
                             .then(|| module.to_string())
                     };
                     if let Some(mod_name) = std_module {
-                        let import_stmt = format!("import std.{mod_name}");
-                        diag = diag.with_note(format!(
-                            "add `{import_stmt}` at the top of the file to use `{name}`"
-                        ));
-                        // Create an "add import" fixit that inserts at the top.
-                        diag = diag.with_fixit(FixIt::safe(
-                            Span::new(0, 0),
-                            format!("{import_stmt}\n"),
-                            "add import",
-                        ));
+                        // Suppress when the module namespace is already bound
+                        // by an import (full or aliased). Selective imports
+                        // bind member names, not the namespace, so they do
+                        // not suppress here — `math.sin` with only
+                        // `import std.math(sin)` still needs `math`.
+                        let import_present = self
+                            .imports
+                            .iter()
+                            .any(|(alias, _)| alias.as_str() == mod_name)
+                            || self.module_aliases.contains_key(&mod_name);
+                        if !import_present {
+                            let import_stmt = format!("import std.{mod_name}");
+                            diag = diag.with_note(format!(
+                                "add `{import_stmt}` at the top of the file to use `{name}`"
+                            ));
+                            // Create an "add import" fixit that inserts at the top.
+                            diag = diag.with_fixit(FixIt::safe(
+                                Span::new(0, 0),
+                                format!("{import_stmt}\n"),
+                                "add import",
+                            ));
+                        } else {
+                            // Module is already imported: the problem is the
+                            // member name. Suggest the closest member of the
+                            // module (`fs.delete` → `fs.remove`).
+                            let prefix = format!("std.{mod_name}.");
+                            let members: Vec<&str> = self
+                                .funcs
+                                .keys()
+                                .chain(self.structs.keys())
+                                .filter(|k| {
+                                    k.starts_with(&prefix) && !k[prefix.len()..].contains('.')
+                                })
+                                .map(|k| k.strip_prefix(&prefix).unwrap())
+                                .collect();
+                            if let Some((suggestion, _dist)) = suggest_all(func, &members).first() {
+                                diag = diag.with_note(format!(
+                                    "`{mod_name}` is imported; did you mean `{mod_name}.{suggestion}`?"
+                                ));
+                            } else {
+                                diag = diag.with_note(format!(
+                                    "`{mod_name}` is imported; `{member}` is not a member of `{mod_name}`",
+                                    member = func
+                                ));
+                            }
+                        }
                     }
                 } else {
                     // Bare name matching exactly one std export (`sin` →
@@ -546,15 +585,43 @@ impl ScopeOps for Checker {
             // before the typo branches because the dotted branch returns
             // early.
             if parts.len() >= 2 && zz_checker_core::is_std_module_head(&parts[0]) {
-                let import_stmt = format!("import std.{}", parts[0]);
-                diag = diag.with_note(format!(
-                    "add `{import_stmt}` at the top of the file to use `{joined}`"
-                ));
-                diag = diag.with_fixit(FixIt::safe(
-                    Span::new(0, 0),
-                    format!("{import_stmt}\n"),
-                    "add import",
-                ));
+                let mod_name = &parts[0];
+                // Suppress the import hint when the module is already
+                // imported (#710): the real problem is the member name.
+                let import_present = self.imports.iter().any(|(a, _)| a == mod_name)
+                    || self.module_aliases.contains_key(mod_name);
+                if import_present {
+                    // Module is imported: point at the closest member
+                    // (`fs.delete` → `fs.remove`).
+                    let prefix = format!("std.{mod_name}.");
+                    let members: Vec<&str> = self
+                        .funcs
+                        .keys()
+                        .chain(self.structs.keys())
+                        .filter(|k| k.starts_with(&prefix) && !k[prefix.len()..].contains('.'))
+                        .map(|k| k.strip_prefix(&prefix).unwrap())
+                        .collect();
+                    if let Some((suggestion, _)) = suggest_all(&parts[1], &members).first() {
+                        diag = diag.with_note(format!(
+                            "`{mod_name}` is imported; did you mean `{mod_name}.{suggestion}`?"
+                        ));
+                    } else {
+                        diag = diag.with_note(format!(
+                            "`{mod_name}` is imported; `{member}` is not a member of `{mod_name}`",
+                            member = parts[1]
+                        ));
+                    }
+                } else {
+                    let import_stmt = format!("import std.{mod_name}");
+                    diag = diag.with_note(format!(
+                        "add `{import_stmt}` at the top of the file to use `{joined}`"
+                    ));
+                    diag = diag.with_fixit(FixIt::safe(
+                        Span::new(0, 0),
+                        format!("{import_stmt}\n"),
+                        "add import",
+                    ));
+                }
             }
             // Dotted paths (`env.tmp_dir`) match segment-wise first:
             // whole-string Levenshtein drowns a 1-char tail typo in the
