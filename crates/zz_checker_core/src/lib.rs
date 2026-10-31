@@ -625,6 +625,9 @@ impl Checker {
             }
             // Divergent index: unreachable, vacuously fine.
             Type::Never => {}
+            // Cascade root already reported: an index on an `<error>` value
+            // must not spawn a new "index must be `int`" diagnostic (#711).
+            Type::Error => {}
             other => {
                 self.errors.push(error_at(
                     format!("index must be `int`, found `{other}`"),
