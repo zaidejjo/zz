@@ -3507,6 +3507,7 @@ impl Vm {
                         },
                     };
                     if !is_db
+                        && !crate::runtime::is_variadic_native(name)
                         && args.len() != arity
                         && !fill_default_headers(name, &mut args, arity)
                     {

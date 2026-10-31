@@ -2,7 +2,7 @@
 
 | Function | Signature | Notes |
 |---|---|---|
-| `print` / `println` | `(v: T) -> unit` | Unwrap one layer: `.ok(v)`/`.some(v)` print `v`, bare `.none` prints `none`. Bare `.err` aborts — `match` it. Bare fn value is a compile error. |
+| `print` / `println` | `(...values: T) -> unit` | Variadic: prints every argument space-separated (`println()` prints only a newline). Unwrap one layer: `.ok(v)`/`.some(v)` print `v`, bare `.none` prints `none`. Bare `.err` aborts — `match` it. Bare fn value is a compile error. |
 | `input` | `(prompt: str) -> str` | Line from stdin. Prompt arg optional. |
 | `typeof` | `(v: T) -> str` | Name string: `"int"`, `"str"`, `"bytes"`, ... |
 | `str` | `(v: T) -> str` | Keeps wrappers (`.ok(1)` stays `".ok(1)"`, unlike `println`). |
@@ -19,6 +19,7 @@
 
 ```zz
 println("hello")
+println("value:", 42, true)   // value: 42 true
 name := input("name: ")
 println("hi {name}, len {len(name)}")
 

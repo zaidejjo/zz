@@ -160,13 +160,7 @@ pub(crate) fn print(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for print", span))?;
-    // A printed `.err` throws (readable + hinted); see `for_stdout`.
-    // Display form unwraps nested Options as well (not just top-level).
-    emit_stdout(&for_stdout(v, span)?.to_display_string());
+    emit_stdout(&render_stdout_args(args, span)?);
     Ok(Value::Unit)
 }
 
@@ -175,14 +169,23 @@ pub(crate) fn println(
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for println", span))?;
-    // A printed `.err` throws (readable + hinted); see `for_stdout`.
-    // Display form unwraps nested Options as well (not just top-level).
-    emit_stdout_line(&for_stdout(v, span)?.to_display_string());
+    emit_stdout_line(&render_stdout_args(args, span)?);
     Ok(Value::Unit)
+}
+
+/// Render every argument for `print`/`println` (#713), space-separated like
+/// Python/JS. Zero args renders the empty string (`println()` = newline).
+fn render_stdout_args(args: &[Value], span: Span) -> Result<String, EvalError> {
+    let mut out = String::new();
+    for (i, v) in args.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        // A printed `.err` throws (readable + hinted); see `for_stdout`.
+        // Display form unwraps nested Options as well (not just top-level).
+        out.push_str(&for_stdout(v.clone(), span)?.to_display_string());
+    }
+    Ok(out)
 }
 
 pub(crate) fn read_line(

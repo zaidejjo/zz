@@ -2807,7 +2807,12 @@ impl Lowerer {
         // them to match the function's parameter positions (mirrors the VM's
         // compile_reordered_args). When named args are present, we look up
         // the FuncSig and reorder all args accordingly.
-        let ordered_args: Vec<&Expr> = {
+        // `print`/`println` are variadic (#713): named values are ordinary
+        // extra arguments, never reordered into a fixed parameter list.
+        let variadic_print = matches!(cname.as_str(), "print" | "println");
+        let ordered_args: Vec<&Expr> = if variadic_print {
+            args.iter().chain(named.iter().map(|(_, v)| v)).collect()
+        } else {
             // Look up the function signature for slot-based arg ordering.
             // This handles both named args AND default values.
             let sig_info = self.tp.funcs.get(&cname);
@@ -3335,6 +3340,24 @@ impl Lowerer {
             None
         };
         if let Some(impl_name) = native_rt {
+            // `print`/`println` are variadic (#713): emit one C call with
+            // the whole argument array instead of a fixed-arity shim.
+            if matches!(impl_name, "zz_io_print" | "zz_io_println") {
+                let fn_name = if impl_name == "zz_io_print" {
+                    "zz_io_print_args"
+                } else {
+                    "zz_io_println_args"
+                };
+                return if arg_items.is_empty() {
+                    format!("{fn_name}(0, NULL)")
+                } else {
+                    format!(
+                        "{fn_name}({}, (zz_value[]){{{}}})",
+                        arg_items.len(),
+                        arg_items.join(", ")
+                    )
+                };
+            }
             // In void context (result discarded), use in-place mutation
             // instead of copy-on-write for vec.push.
             let effective_name = if *self.void_context.borrow() && impl_name == "zz_vec_push" {

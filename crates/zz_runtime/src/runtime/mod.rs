@@ -111,6 +111,13 @@ pub struct NativeEntry {
     pub f: NativeFn,
 }
 
+/// Native functions whose argument count is not fixed. `print`/`println`
+/// accept any number of values (#713); the runtime skips its defensive
+/// arity gate for them (the checker already validates each argument).
+pub fn is_variadic_native(name: &str) -> bool {
+    matches!(name, "print" | "println")
+}
+
 /// Shared mutable state for the ZZ runtime. Extracted from `Interp` so
 /// both the tree-walker and the bytecode VM can operate on the same
 /// underlying state.

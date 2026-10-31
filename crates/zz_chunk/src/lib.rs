@@ -3306,7 +3306,8 @@ impl<'a> Emitter<'a> {
         argc: u16,
         out: &mut String,
     ) -> Result<(), ChunkError> {
-        if argc > 6 {
+        let variadic_print = matches!(impl_name, "zz_io_print" | "zz_io_println");
+        if argc > 6 && !variadic_print {
             return Err(ChunkError::op("native call with >6 args"));
         }
         let takes = impl_name.ends_with("_take") || impl_name.ends_with("_take_arena");
@@ -3314,6 +3315,28 @@ impl<'a> Emitter<'a> {
         // Pop in reverse so `_na0` is the first (bottom) argument.
         for i in (0..argc).rev() {
             out.push_str(&format!("    zz_value _na{i} = st[--sp];\n"));
+        }
+        if variadic_print {
+            let fn_name = if impl_name == "zz_io_print" {
+                "zz_io_print_args"
+            } else {
+                "zz_io_println_args"
+            };
+            let call = if argc == 0 {
+                format!("{fn_name}(0, NULL)")
+            } else {
+                let vals = (0..argc)
+                    .map(|i| format!("_na{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{fn_name}({argc}, (zz_value[]){{{vals}}})")
+            };
+            out.push_str(&format!("    st[sp++] = {call};\n"));
+            for i in 0..argc {
+                out.push_str(&format!("    zz_release(&_na{i});\n"));
+            }
+            out.push_str("    }\n");
+            return Ok(());
         }
         let args = (0..argc)
             .map(|i| format!("_na{i}"))

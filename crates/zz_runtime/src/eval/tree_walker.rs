@@ -1825,6 +1825,7 @@ impl Interp {
                         | "std.sqlz.mysql.exec"
                 );
                 if !is_db
+                    && !crate::runtime::is_variadic_native(&nf.name)
                     && args.len() != nf.arity
                     && !fill_default_headers(&nf.name, &mut args, nf.arity)
                 {

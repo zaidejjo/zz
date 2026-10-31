@@ -338,6 +338,12 @@ pub trait TypeCheckOps {
     fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span);
 }
 
+/// `print`/`println` accept any number of values (#713): like other
+/// languages, positional arguments render space-separated.
+fn is_print_builtin(name: &str) -> bool {
+    matches!(name, "print" | "println")
+}
+
 impl TypeCheckOps for Checker {
     // --- statements -------------------------------------------------------
 
@@ -2956,6 +2962,59 @@ impl TypeCheckOps for Checker {
             // `check_call`, so a bare `route`/`param` reaching this point
             // is user code (e.g. a `@route` decorator) — linting it would
             // false-positive (see `syntax/decorators.zz`).
+            // `print`/`println` are variadic (#713): accept any number of
+            // positional or named values and check each expression. Like
+            // Python/JS, values render space-separated; zero args is legal.
+            // A local binding shadows the builtin (`println := |x| ...`);
+            // keep the normal call path for it.
+            if is_print_builtin(name) && self.lookup_opt(name).is_none() {
+                self.used_names.insert(name.clone());
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                for (_, val) in named {
+                    self.check_expr(val);
+                }
+                // A bare function value as any print argument is always a
+                // missing `()` (`println(env.os)` would print the function
+                // itself instead of calling it). Catch it here — with the
+                // name attached — rather than letting each engine render
+                // `<func>` / `<native ...>` / empty output.
+                for arg_expr in args.iter().chain(named.iter().map(|(_, v)| v)) {
+                    // Resolve silently (lookup_opt, never check_expr: the
+                    // argument was already checked above and a second pass
+                    // would duplicate diagnostics).
+                    let (arg_t, fname) = match arg_expr {
+                        Expr::Ident { name: n, .. } => (self.lookup_opt(n), Some(n.clone())),
+                        Expr::Path { parts, .. } => {
+                            let joined = parts.join(".");
+                            (self.lookup_opt(&joined), Some(joined))
+                        }
+                        _ => (None, None),
+                    };
+                    let is_func = matches!(
+                        arg_t.as_ref().map(|t| self.unifier.resolve(t)),
+                        Some(Type::Func(_, _))
+                    ) || matches!(fname.as_deref(), Some(n)
+                            if self.funcs.contains_key(n) && !self.is_math_const(n));
+                    if !is_func {
+                        continue;
+                    }
+                    let Some(fname) = fname else { continue };
+                    let mut diag = error_at(
+                        format!("cannot print function `{fname}`: call it with arguments"),
+                        arg_expr.span(),
+                    );
+                    diag = diag.with_note(format!("did you mean `{fname}()`?"));
+                    diag = diag.with_fixit(FixIt::safe(
+                        Span::new(arg_expr.span().end, arg_expr.span().end),
+                        "()".to_string(),
+                        "call function",
+                    ));
+                    self.errors.push(diag);
+                }
+                return Type::Unit;
+            }
             if !self.method_shadow_call(callee, args, named) {
                 if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name).cloned() {
                     self.used_names.insert(name.clone());
@@ -3016,50 +3075,6 @@ impl TypeCheckOps for Checker {
                         span,
                     );
                     self.validate_bounds(&sig, &subs, span);
-                    // A bare function value as a print argument is always a
-                    // missing `()` (`println(env.os)` would print the function
-                    // itself instead of calling it). Catch it here — with the
-                    // name attached — rather than letting each engine render
-                    // `<func>` / `<native ...>` / empty output.
-                    if name == "print" || name == "println" {
-                        if let Some(first) = args.first() {
-                            // Resolve silently (lookup_opt, never check_expr:
-                            // the argument was already checked above and a
-                            // second pass would duplicate diagnostics).
-                            let (arg_t, fname) = match first {
-                                Expr::Ident { name: n, .. } => {
-                                    (self.lookup_opt(n), Some(n.clone()))
-                                }
-                                Expr::Path { parts, .. } => {
-                                    let joined = parts.join(".");
-                                    (self.lookup_opt(&joined), Some(joined))
-                                }
-                                _ => (None, None),
-                            };
-                            let is_func = matches!(
-                                arg_t.as_ref().map(|t| self.unifier.resolve(t)),
-                                Some(Type::Func(_, _))
-                            ) || matches!(fname.as_deref(), Some(n)
-                            if self.funcs.contains_key(n) && !self.is_math_const(n));
-                            if is_func {
-                                if let Some(fname) = fname {
-                                    let mut diag = error_at(
-                                        format!(
-                                        "cannot print function `{fname}`: call it with arguments"
-                                    ),
-                                        first.span(),
-                                    );
-                                    diag = diag.with_note(format!("did you mean `{fname}()`?"));
-                                    diag = diag.with_fixit(FixIt::safe(
-                                        Span::new(first.span().end, first.span().end),
-                                        "()".to_string(),
-                                        "call function",
-                                    ));
-                                    self.errors.push(diag);
-                                }
-                            }
-                        }
-                    }
                     return ret;
                 }
             }
