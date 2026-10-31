@@ -3581,6 +3581,11 @@ impl Lowerer {
             && (self.tp.funcs.contains_key(&cname_for_native)
                 || self.is_impl_method(&cname_for_native));
         if is_native && !has_zz_body {
+            // Record the offending native so the build can fail before
+            // clang with a clear `BuildError::UnimplementedNative` (#715).
+            self.unimplemented_natives
+                .borrow_mut()
+                .push(cname_for_native.clone());
             return format!("zz_unimplemented_native(\"{cname_for_native}\")");
         }
 

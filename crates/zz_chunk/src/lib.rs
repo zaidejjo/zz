@@ -4732,6 +4732,7 @@ pub fn build_module(module: &Module, entry_main: &str) -> Result<zz_lower::Lower
         needs_float_fmt: em.needs_float_fmt,
         needs_curl: zz_codegen_ffi::needs_curl_link(&native_names),
         needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&native_names),
+        unimplemented_natives: Vec::new(),
     })
 }
 

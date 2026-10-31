@@ -550,6 +550,12 @@ pub struct Lowerer {
     /// per-module translation units link together. Off = single-TU
     /// `static` (byte-identical legacy output).
     pub(crate) unit_mode: std::cell::Cell<bool>,
+    /// Reachable stdlib natives that lack a C runtime implementation and
+    /// were lowered to the `zz_unimplemented_native("name")` shim during
+    /// this lowering pass. Collected so the build can fail before clang
+    /// with a clear `BuildError::UnimplementedNative` instead of emitting
+    /// a runtime-abort shim (#715).
+    pub(crate) unimplemented_natives: std::cell::RefCell<Vec<String>>,
 }
 
 impl Lowerer {
@@ -587,6 +593,7 @@ impl Lowerer {
             scalar_fn_list: Vec::new(),
             readonly_params,
             unit_mode: std::cell::Cell::new(false),
+            unimplemented_natives: std::cell::RefCell::new(Vec::new()),
         };
         lowerer.specialized = lowerer.compute_specialized();
         lowerer.global_list = lowerer.collect_globals();

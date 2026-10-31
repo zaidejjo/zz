@@ -61,6 +61,10 @@ pub struct LoweredC {
     /// (previously every binary carried the dependency via the
     /// single-TU archive + `--as-needed` ordering).
     pub needs_sqlite: bool,
+    /// Reachable stdlib natives with no C runtime implementation that were
+    /// lowered to the `zz_unimplemented_native("name")` shim. Non-empty
+    /// means the build must fail before clang (#715).
+    pub unimplemented_natives: Vec<String>,
 }
 
 impl LoweredC {
@@ -679,6 +683,7 @@ impl Lowerer {
                 }),
             needs_curl: zz_codegen_ffi::needs_curl_link(&expanded_natives),
             needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&expanded_natives),
+            unimplemented_natives: self.unimplemented_natives.borrow().clone(),
         }
     }
 
@@ -968,6 +973,7 @@ mod link_need_tests {
             needs_float_fmt: needs[2],
             needs_curl: needs[3],
             needs_sqlite: needs[4],
+            unimplemented_natives: Vec::new(),
         }
     }
 
@@ -1008,6 +1014,7 @@ mod link_need_tests {
             needs_float_fmt: true,
             needs_curl: true,
             needs_sqlite: true,
+            unimplemented_natives: Vec::new(),
         };
         let mut opts = zz_codegen_types::BuildOptions::default();
         units.apply_link_needs(&mut opts);
