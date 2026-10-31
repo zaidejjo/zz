@@ -3979,6 +3979,65 @@ fn unknown_root_gets_no_import_suggestion() {
     );
 }
 
+#[test]
+fn imported_std_module_wrong_member_suggests_member_not_import() {
+    // #710: `import std.fs` is already present, so the checker must not
+    // re-suggest `import std.fs`; instead it points at the wrong member
+    // (`delete` → `remove`).
+    let r = check_src("import std.fs\nx := fs.delete(\"/tmp/foo\")");
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("undefined variable `fs.delete`"))
+        .unwrap_or_else(|| panic!("expected undefined fs.delete error, got: {:?}", r.errors));
+    // The import hint must be suppressed — the import already exists.
+    assert!(
+        !diag.notes.iter().any(|n| n.contains("add `import std.fs`")),
+        "import hint should be suppressed when already imported, got notes: {:?}",
+        diag.notes
+    );
+    assert!(
+        diag.fixits.iter().all(|f| f.message != "add import"),
+        "no add-import fixit when already imported, got: {:?}",
+        diag.fixits
+    );
+    // Member-name hint instead.
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("`delete` is not a member of `fs`")),
+        "expected member hint fs.remove, got notes: {:?}",
+        diag.notes
+    );
+}
+
+#[test]
+fn unimported_std_module_still_suggests_import() {
+    // #710 regression: without the import, the import hint still fires.
+    let r = check_src("x := fs.delete(\"/tmp/foo\")");
+    let diag = r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("undefined variable `fs.delete`"))
+        .unwrap_or_else(|| panic!("expected undefined fs.delete error, got: {:?}", r.errors));
+    assert!(
+        diag.notes.iter().any(|n| n.contains("add `import std.fs`")),
+        "expected import hint when not imported, got notes: {:?}",
+        diag.notes
+    );
+    assert!(
+        diag.fixits.iter().any(|f| f.message == "add import"),
+        "expected add-import fixit, got: {:?}",
+        diag.fixits
+    );
+    // No member hint when the module itself was never imported.
+    assert!(
+        !diag.notes.iter().any(|n| n.contains("is imported;")),
+        "member hint should not fire without the import, got notes: {:?}",
+        diag.notes
+    );
+}
+
 /// A variant constructor with an unconstrained payload position keeps its
 /// outer constructor in the span map (payloads default to `unit`, exactly as
 /// annotated declarations are validated). Method dispatch reads the outer

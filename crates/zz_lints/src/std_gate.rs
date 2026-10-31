@@ -38,6 +38,10 @@ fn covered(imports: &[Vec<String>], used: &[String]) -> bool {
 
 struct Lint {
     imports: Vec<Vec<String>>,
+    /// Short names of imported std modules (`import std.fs` → `"fs"`),
+    /// used to recognize that `fs.delete` references an already-imported
+    /// module even though the source writes the bare head `fs`.
+    imported_heads: HashSet<String>,
     seen: HashSet<String>,
     diags: Vec<RawDiag>,
 }
@@ -45,6 +49,12 @@ struct Lint {
 impl Lint {
     fn check_use(&mut self, segments: &[String], span: Span) {
         if segments.len() < 2 || segments[0] != "std" {
+            return;
+        }
+        // A bare module head that was already imported (e.g. `fs` from
+        // `import std.fs`) covers the use — no import hint needed. The
+        // member-name problem, if any, is reported by the scope checker.
+        if segments.len() >= 2 && self.imported_heads.contains(&segments[0]) {
             return;
         }
         if covered(&self.imports, segments) {
@@ -363,6 +373,10 @@ pub fn lint_std_imports(program: &Program, module_ns: &str) -> Vec<RawDiag> {
     }
     let mut lint = Lint {
         imports: imported_std_paths(program),
+        imported_heads: imported_std_paths(program)
+            .iter()
+            .filter_map(|p| p.last().cloned())
+            .collect(),
         seen: HashSet::new(),
         diags: Vec::new(),
     };
