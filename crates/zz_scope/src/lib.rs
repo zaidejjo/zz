@@ -82,6 +82,12 @@ pub trait ScopeOps {
     /// the name is not bound anywhere.
     fn lookup_opt(&mut self, name: &str) -> Option<Type>;
 
+    /// Like [`lookup_opt`] but consults only local scope bindings (`env`),
+    /// not the stdlib/function table (`funcs`). Used to decide whether a
+    /// builtin such as `print`/`println` is shadowed by a local variable;
+    /// a stdlib entry must not count as shadowing.
+    fn local_lookup_opt(&mut self, name: &str) -> Option<Type>;
+
     /// Resolve a dotted path: first as a single qualified name (module
     /// bindings/functions), then as a struct-field walk from the first part.
     fn lookup_path(&mut self, parts: &[String], span: Span) -> Type;
@@ -542,6 +548,24 @@ impl ScopeOps for Checker {
             // Function used as a value: give its (uninstantiated) type. Call
             // sites handle generic instantiation via the Named path below.
             return Some(Type::Named(name.to_string()));
+        }
+        None
+    }
+
+    /// Consults only local scope bindings (`env`), not `funcs`.
+    fn local_lookup_opt(&mut self, name: &str) -> Option<Type> {
+        for (depth, scope) in self.env.iter().enumerate().rev() {
+            if let Some(t) = scope.get(name) {
+                let t = t.clone();
+                self.used_names.insert(name.to_string());
+                self.used_bindings.insert((depth, name.to_string()));
+                for probe in self.shadow_probes.iter_mut() {
+                    if probe.name == name && depth < probe.depth {
+                        probe.referenced = true;
+                    }
+                }
+                return Some(t);
+            }
         }
         None
     }

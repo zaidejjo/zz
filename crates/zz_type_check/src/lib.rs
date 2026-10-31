@@ -2971,7 +2971,7 @@ impl TypeCheckOps for Checker {
             // Python/JS, values render space-separated; zero args is legal.
             // A local binding shadows the builtin (`println := |x| ...`);
             // keep the normal call path for it.
-            if is_print_builtin(name) && self.lookup_opt(name).is_none() {
+            if is_print_builtin(name) && self.local_lookup_opt(name).is_none() {
                 self.used_names.insert(name.clone());
                 for arg in args {
                     self.check_expr(arg);
