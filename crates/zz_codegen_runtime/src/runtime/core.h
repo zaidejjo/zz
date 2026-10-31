@@ -1022,6 +1022,9 @@ zz_value zz_call_native_spawn(zz_dispatch_fn fn, void **cells,
 // ---- io / math / time natives ------------------------------------------
 zz_value zz_io_println(zz_value v, int *err);
 zz_value zz_io_print(zz_value v, int *err);
+// Variadic print/println (#713): space-separated values, no fixed arity.
+zz_value zz_io_print_args(size_t argc, const zz_value *args);
+zz_value zz_io_println_args(size_t argc, const zz_value *args);
 zz_value zz_io_input(zz_value prompt, int *err);
 zz_value zz_dbg(zz_value v, int *err);
 zz_value zz_assert(zz_value v, int *err);

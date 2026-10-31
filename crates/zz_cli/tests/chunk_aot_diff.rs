@@ -86,6 +86,15 @@ func main() {
 }
 "#;
 
+const PRINT_VARIADIC: &str = r#"
+func main() {
+    print("a", 1, true)
+    println("x", 2.5)
+    println()
+    println("single")
+}
+"#;
+
 const SUM_RANGE: &str = r#"
 func main() {
     s := 0
@@ -479,6 +488,7 @@ func main() {
 
 const CASES: &[(&str, &str)] = &[
     ("fib", FIB),
+    ("print_variadic", PRINT_VARIADIC),
     ("sum_range", SUM_RANGE),
     ("array_io", ARRAY_IO),
     ("while_nested", WHILE_NESTED),

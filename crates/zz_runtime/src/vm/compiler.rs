@@ -4423,11 +4423,15 @@ impl Compiler {
                         && parts[0] == "range"
                         && args.len() + named.len() < 3
                         && named.is_empty();
-                    let has_named_or_defaults = !named.is_empty()
-                        || self
-                            .func_info
-                            .get(&func_name)
-                            .is_some_and(|fi| fi.has_default.iter().any(|&d| d));
+                    // `print`/`println` are variadic (#713): named values are
+                    // ordinary extra arguments, never parameter reordering.
+                    let variadic_print = crate::runtime::is_variadic_native(&func_name);
+                    let has_named_or_defaults = !variadic_print
+                        && (!named.is_empty()
+                            || self
+                                .func_info
+                                .get(&func_name)
+                                .is_some_and(|fi| fi.has_default.iter().any(|&d| d)));
 
                     let argc = if is_input {
                         1
@@ -4619,6 +4623,14 @@ impl Compiler {
                                     self.compile_expr(a);
                                 }
                             }
+                        } else if variadic_print {
+                            // Named values are just extra print arguments.
+                            for a in args {
+                                self.compile_expr(a);
+                            }
+                            for (_, val) in named {
+                                self.compile_expr(val);
+                            }
                         } else if has_named_or_defaults {
                             self.compile_reordered_args(&func_name, args, named);
                         } else if !is_db_call && !is_module_db_call {
@@ -4756,25 +4768,31 @@ impl Compiler {
                     // the short name while keys are namespaced (`g` vs
                     // `main.g`). Exact match first, then a unique
                     // `*.name` suffix (mirrors the AOT owned-fallback).
-                    let info_key: Option<String> = callee_name.and_then(|cn| {
-                        if self.func_info_contains(cn) {
-                            Some(cn.to_string())
-                        } else {
-                            let suffix = format!(".{cn}");
-                            let mut hits: Vec<&String> = self
-                                .func_info
-                                .keys()
-                                .filter(|k| k.ends_with(&suffix))
-                                .collect();
-                            hits.sort_unstable();
-                            hits.dedup();
-                            if hits.len() == 1 {
-                                Some(hits[0].clone())
+                    let variadic_print =
+                        callee_name.is_some_and(crate::runtime::is_variadic_native);
+                    let info_key: Option<String> = if variadic_print {
+                        None
+                    } else {
+                        callee_name.and_then(|cn| {
+                            if self.func_info_contains(cn) {
+                                Some(cn.to_string())
                             } else {
-                                None
+                                let suffix = format!(".{cn}");
+                                let mut hits: Vec<&String> = self
+                                    .func_info
+                                    .keys()
+                                    .filter(|k| k.ends_with(&suffix))
+                                    .collect();
+                                hits.sort_unstable();
+                                hits.dedup();
+                                if hits.len() == 1 {
+                                    Some(hits[0].clone())
+                                } else {
+                                    None
+                                }
                             }
-                        }
-                    });
+                        })
+                    };
                     let has_named_or_defaults = info_key.as_ref().is_some_and(|k| {
                         !named.is_empty()
                             || self
@@ -4793,19 +4811,20 @@ impl Compiler {
                     // `CallNative` resolves the registry entry in place.
                     // Any user shadow keeps the generic path (see
                     // `direct_native_call`).
-                    let direct_native: Option<String> =
-                        if named.is_empty() && info_key.is_none() && !is_input && !is_range {
-                            match callee.as_ref() {
-                                Expr::Ident { name: cname, .. }
-                                    if self.direct_native_call(cname) =>
-                                {
-                                    Some(cname.clone())
-                                }
-                                _ => None,
+                    let direct_native: Option<String> = if (named.is_empty() || variadic_print)
+                        && info_key.is_none()
+                        && !is_input
+                        && !is_range
+                    {
+                        match callee.as_ref() {
+                            Expr::Ident { name: cname, .. } if self.direct_native_call(cname) => {
+                                Some(cname.clone())
                             }
-                        } else {
-                            None
-                        };
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
 
                     let argc = if is_input {
                         1
@@ -4836,6 +4855,13 @@ impl Compiler {
                             for a in args {
                                 self.compile_expr(a);
                             }
+                        }
+                    } else if variadic_print {
+                        for a in args {
+                            self.compile_expr(a);
+                        }
+                        for (_, val) in named {
+                            self.compile_expr(val);
                         }
                     } else if has_named_or_defaults {
                         self.compile_reordered_args(info_key.as_deref().unwrap(), args, named);

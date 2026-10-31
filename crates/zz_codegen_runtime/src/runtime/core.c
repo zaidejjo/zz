@@ -827,16 +827,10 @@ void zz_frame_free(zz_task_frame *fr) {
 // aborts. Defined after the socket include block (needs isatty/fileno).
 static void zz_throw_printed_err(const zz_value *payload);
 
-zz_value zz_io_println(zz_value v, int *err) {
-    (void)err;
-    // Unwrap consecutive `Result::Ok` / `Option::Some` layers for stdout
-    // presentation (mirrors the VM's `for_stdout`): `println(.ok(x))`
-    // prints `x`, `println(.some(x))` prints `x`, bare `.none` prints
-    // `none`. Nested Options inside containers unwrap via the display
-    // printer below; only `zz_dbg` / `:?` keep wrappers. A printed `.err`
-    // throws a readable, hinted diagnostic on stderr instead of a raw
-    // `.err(...)` line. A bare function value is always a missing `()`
-    // — abort with a hint instead of rendering `<func>` / `<value>`.
+// Render one value for stdout (shared by `print`/`println` and their
+// variadic forms). Unwraps `Result::Ok` / `Option::Some`, prints bare
+// `.none` as `none`, and keeps the existing function-value/.err errors.
+static void zz_print_stdout_value(zz_value v) {
     for (;;) {
         if (v.tag == ZZ_RESULT_OK && v.payload) {
             v = *v.payload;
@@ -847,9 +841,8 @@ zz_value zz_io_println(zz_value v, int *err) {
         }
     }
     if (v.tag == ZZ_OPTION_NONE) {
-        fputs("none\n", stdout);
-        fflush(stdout);
-        return zz_unit();
+        fputs("none", stdout);
+        return;
     }
     if (v.tag == ZZ_NATIVE || v.tag == ZZ_FUNC) {
         int tty;
@@ -872,11 +865,41 @@ zz_value zz_io_println(zz_value v, int *err) {
     if (v.tag == ZZ_RESULT_ERR && v.payload) {
         zz_throw_printed_err(v.payload);
         // Unreachable: `zz_throw_printed_err` exits the process.
-        return zz_unit();
+        return;
     }
     zz_print_value_display(stdout, &v);
-    fputc('\n', stdout);
+}
+
+// Space-separated variadic printing (#713), matching the VM: `print(a, b)`
+// writes `a b`; `println()` writes only the newline.
+static void zz_print_stdout_args(size_t argc, const zz_value *args, int newline) {
+    for (size_t i = 0; i < argc; i++) {
+        if (i > 0) fputc(' ', stdout);
+        zz_print_stdout_value(args[i]);
+    }
+    if (newline) fputc('\n', stdout);
     fflush(stdout);
+}
+
+zz_value zz_io_println(zz_value v, int *err) {
+    (void)err;
+    zz_print_stdout_args(1, &v, 1);
+    return zz_unit();
+}
+
+zz_value zz_io_print(zz_value v, int *err) {
+    (void)err;
+    zz_print_stdout_args(1, &v, 0);
+    return zz_unit();
+}
+
+zz_value zz_io_print_args(size_t argc, const zz_value *args) {
+    zz_print_stdout_args(argc, args, 0);
+    return zz_unit();
+}
+
+zz_value zz_io_println_args(size_t argc, const zz_value *args) {
+    zz_print_stdout_args(argc, args, 1);
     return zz_unit();
 }
 
@@ -1202,48 +1225,6 @@ zz_value zz_assert_is_err(zz_value v, int *err) {
     free(vs);
     fflush(stderr);
     exit(1);
-}
-
-zz_value zz_io_print(zz_value v, int *err) {
-    (void)err;
-    for (;;) {
-        if (v.tag == ZZ_RESULT_OK && v.payload) {
-            v = *v.payload;
-        } else if (v.tag == ZZ_OPTION_SOME && v.payload) {
-            v = *v.payload;
-        } else {
-            break;
-        }
-    }
-    if (v.tag == ZZ_OPTION_NONE) {
-        fputs("none", stdout);
-        fflush(stdout);
-        return zz_unit();
-    }
-    if (v.tag == ZZ_NATIVE || v.tag == ZZ_FUNC) {
-        int tty;
-#ifdef ZZ_OS_WINDOWS
-        tty = _isatty(_fileno(stderr));
-#else
-        tty = isatty(fileno(stderr));
-#endif
-        if (tty) {
-            fprintf(stderr, "\033[1;31merror\033[0m: cannot print a function value: call it with arguments\n");
-            fprintf(stderr, "    \033[1;36m=\033[0m \033[36mhint: a bare function name is the function itself, not its result\033[0m\n");
-        } else {
-            fprintf(stderr, "error: cannot print a function value: call it with arguments\n");
-            fprintf(stderr, "    = hint: a bare function name is the function itself, not its result\n");
-        }
-        fprintf(stderr, "zz: program failed\n");
-        fflush(stderr);
-        exit(1);
-    }
-    if (v.tag == ZZ_RESULT_ERR && v.payload) {
-        zz_throw_printed_err(v.payload);
-        return zz_unit();
-    }
-    zz_print_value_display(stdout, &v);
-    return zz_unit();
 }
 
 /// `input("prompt")` — print the prompt and read a line from stdin.

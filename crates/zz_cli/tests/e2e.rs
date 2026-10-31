@@ -1134,6 +1134,20 @@ fn e2e_embed_vm_serves_assets() {
 }
 
 #[test]
+fn e2e_print_is_variadic_like_other_languages() {
+    let (exit, stdout, stderr) = run_zz_eval("print(\"a\", 1, true); println(\"x\", 2.5)");
+    assert_eq!(exit, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "a 1 truex 2.5\n");
+}
+
+#[test]
+fn e2e_println_zero_args_prints_newline() {
+    let (exit, stdout, stderr) = run_zz_eval("println()");
+    assert_eq!(exit, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "\n");
+}
+
+#[test]
 fn e2e_eval_basic_arithmetic() {
     let (exit, stdout, _) = run_zz_eval("1 + 2");
     assert_eq!(exit, 0);

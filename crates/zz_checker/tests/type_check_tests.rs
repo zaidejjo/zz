@@ -128,6 +128,71 @@ fn wrong_arg_count_errors() {
 }
 
 #[test]
+fn print_and_println_accept_multiple_arguments() {
+    // #713: print/println are variadic (space-separated) like other languages.
+    let r = check_src_with_funcs(
+        "func main() {\n    print(\"a\", 1, true)\n    println(\"x\", 2.5, [1, 2])\n}",
+        print_test_funcs(),
+    );
+    assert!(
+        !has_errors(&r),
+        "variadic print/println should type-check, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn println_accepts_named_arguments() {
+    let r = check_src_with_funcs(
+        "func main() {\n    path := \"/tmp\"\n    size := 1\n    println(\"{path}\\t{size}\", path=path, size=size)\n}",
+        print_test_funcs(),
+    );
+    assert!(
+        !has_errors(&r),
+        "named print arguments should be accepted, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn print_and_println_accept_zero_arguments() {
+    let r = check_src_with_funcs(
+        "func main() {\n    print()\n    println()\n}",
+        print_test_funcs(),
+    );
+    assert!(
+        !has_errors(&r),
+        "zero-arg print/println, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn local_print_binding_shadows_variadic_builtin() {
+    let r = check_src("func main() {\n    println := |x: int| x\n    println(2)\n}");
+    assert!(
+        !has_errors(&r),
+        "local println binding must keep normal call checking, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn print_variadic_checks_every_argument() {
+    let r = check_src_with_funcs(
+        "func main() {\n    println(\"ok\", missing_value)\n}",
+        print_test_funcs(),
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("undefined variable `missing_value`")),
+        "every print argument must be checked, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn wrong_arg_type_errors() {
     errors_contain("func f(a: int) -> int { a }\nf(\"x\")", "type mismatch");
 }
@@ -2104,6 +2169,19 @@ fn print_test_funcs() -> HashMap<String, FuncSig> {
     let mut funcs = HashMap::new();
     funcs.insert(
         "println".to_string(),
+        FuncSig {
+            is_extern: false,
+            readonly: false,
+            extern_c_symbol: None,
+            generics: vec![],
+            bounds: Vec::new(),
+            params: vec![("v".to_string(), Type::Str)],
+            has_default: vec![false],
+            ret: Type::Unit,
+        },
+    );
+    funcs.insert(
+        "print".to_string(),
         FuncSig {
             is_extern: false,
             readonly: false,
