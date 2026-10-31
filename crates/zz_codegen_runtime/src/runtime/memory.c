@@ -34,6 +34,42 @@ void zz_arena_init(zz_arena *a, size_t cap) {
 }
 
 void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
+    // Objects larger than the largest class can't fit in a class region.
+    // Allocate a dedicated block for them.
+    if (size > ZZ_ARENA_CLASS_SIZES[ZZ_ARENA_NCLASSES - 1]) {
+        size_t chunk_cap = (size > a->cap) ? size * 2 : a->cap;
+        // Adopt current buffer if it has any class-region data.
+        int has_data = 0;
+        for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) {
+            if (a->offsets[i] > 0) { has_data = 1; break; }
+        }
+        if (a->buf && has_data) {
+            zz_arena_chunk *old = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk));
+            if (old) {
+                old->buf = a->buf;
+                old->cap = a->cap;
+                old->next = a->chunks;
+                a->chunks = old;
+                a->buf = NULL;
+            } else {
+                free(a->buf);
+                a->buf = NULL;
+            }
+        } else if (a->buf) {
+            free(a->buf);
+            a->buf = NULL;
+        }
+        a->buf = (char *)malloc(chunk_cap);
+        if (!a->buf) {
+            fprintf(stderr, "zz: arena chunk out of memory\n");
+            exit(1);
+        }
+        a->cap = chunk_cap;
+        // Reset class offsets since we're starting fresh.
+        for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
+        return a->buf;
+    }
+
     // Size-classed allocation: round up to nearest class, bump within that
     // class's region of the buffer. Small objects stay in small regions,
     // large objects in large regions — reducing external fragmentation
