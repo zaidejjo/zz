@@ -72,3 +72,23 @@ fn empty_match_arm_body_is_noop() {
         other => panic!("expected match, got {other:?}"),
     }
 }
+
+#[test]
+fn empty_block_arm_body_is_a_block_not_a_dict() {
+    // #712: `=> {}` in arm position means an empty unit block. Reading it
+    // as an empty dict made the arm type mismatch.
+    let parsed = crate::parse("match .none { .none => {}, .some(x) => x }");
+    assert!(parsed.errors.is_empty(), "errors: {:?}", parsed.errors);
+    let stmt = parsed.program.stmts.first().expect("one statement");
+    let body = match stmt {
+        crate::ast::Stmt::Expr(e) => e,
+        other => panic!("expected expr stmt, got {other:?}"),
+    };
+    match body {
+        crate::ast::Expr::Match { arms, .. } => match &arms[0].body {
+            crate::ast::Expr::Block(b) => assert!(b.stmts.is_empty(), "empty block"),
+            other => panic!("expected empty block, got {other:?}"),
+        },
+        other => panic!("expected match, got {other:?}"),
+    }
+}

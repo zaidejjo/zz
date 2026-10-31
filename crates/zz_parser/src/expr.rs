@@ -1452,6 +1452,12 @@ impl<'a> Parser<'a> {
                     items: vec![],
                     span: start_span.join(self.peek().span),
                 }
+            } else if self.at(TokenKind::LBrace) && self.peek_kind_at(1) == TokenKind::RBrace {
+                // `=> {}` in arm position is an empty block (unit), not an
+                // empty dict (#712): reading it as a dict made a no-op arm
+                // mismatch a unit-yielding sibling arm. `{}` stays an empty
+                // dict everywhere else (`counts := {}`, call arguments).
+                Expr::Block(self.parse_block())
             } else {
                 let stmt = self.parse_stmt();
                 match stmt {
