@@ -277,6 +277,10 @@ pub enum BuildError {
     NativeRt { reason: String },
     /// Rust-side IO error.
     Io(std::io::Error),
+    /// A reachable stdlib native has no C runtime implementation and is not
+    /// an intentional VM-only gap. The build fails before clang with the
+    /// offending names listed (#715).
+    UnimplementedNative { names: Vec<String> },
 }
 
 impl std::fmt::Display for BuildError {
@@ -311,6 +315,22 @@ impl std::fmt::Display for BuildError {
             ),
             BuildError::NativeRt { reason } => write!(f, "native runtime link failed: {reason}"),
             BuildError::Io(e) => write!(f, "io error: {e}"),
+            BuildError::UnimplementedNative { names } => {
+                write!(
+                    f,
+                    "AOT build blocked: {} reachable stdlib native(s) have no C \
+                     runtime implementation and are not intentional VM-only gaps: {}",
+                    names.len(),
+                    names.join(", ")
+                )?;
+                write!(
+                    f,
+                    "\n\nUse the VM (`zz run` / `zz test`) for these, or port them to the C \
+                     runtime (native_impl + ffi_impl) before `-p` / `zz build`.\n\
+                     Tracked VM-only gaps: std.http.listen_tls, std.http.fetch_insecure, \
+                     std.http.hijack, std.sqlz.mysql.*, and pure-ZZ stdlib functions."
+                )
+            }
         }
     }
 }

@@ -48,6 +48,9 @@ pub struct LoweredUnits {
     pub needs_float_fmt: bool,
     pub needs_curl: bool,
     pub needs_sqlite: bool,
+    /// Reachable stdlib natives with no C runtime implementation across
+    /// all units (#715).
+    pub unimplemented_natives: Vec<String>,
 }
 
 impl LoweredUnits {
@@ -430,6 +433,7 @@ impl Lowerer {
                 }),
             needs_curl: zz_codegen_ffi::needs_curl_link(&expanded_natives),
             needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&expanded_natives),
+            unimplemented_natives: self.unimplemented_natives.borrow().clone(),
         }
     }
 }
