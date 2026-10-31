@@ -21,8 +21,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider};
+use zz_frontend::ast::Stmt;
 use zz_frontend::span::Span;
-use zz_hir::TypedProgram;
+use zz_hir::{merge_typed_programs, TypedProgram};
 use zz_loader::{
     find_project_root, load_program_with_features, load_program_with_plugins_and_features,
 };
@@ -998,50 +999,56 @@ fn typed_program_for(
         return Err("program failed to type-check".into());
     }
 
-    // Merge all module programs into one for HIR building / DCE. Modules
-    // are namespaced by the loader (entry = file stem), so concat is safe.
-    // Pure-ZZ stdlib sources come first (mirroring the VM, which executes
-    // them before user code): without them AOT binaries silently lower
-    // pure-ZZ helpers like `str.repeat` to unit. They contain only function
-    // definitions, so merging cannot introduce top-level side effects.
-    let mut merged_stmts = Vec::new();
-    for zz_prog in zz_stdlib::zz_stdlib_programs() {
-        let zz_prog = match zz_prog {
-            Ok(p) => p,
-            Err(e) => return Err(format!("stdlib init error: {e:?}")),
-        };
-        merged_stmts.extend(zz_prog.program.stmts.iter().cloned());
-    }
-    let merged_span = loaded
-        .programs
-        .last()
-        .map(|p| p.span)
-        .unwrap_or(Span::new(0, 0));
+    // Build user HIR from user programs only. Stdlib function signatures are
+    // already in `loaded.funcs` (populated by the loader from imports), so
+    // the user program type-checks against them without re-checking stdlib
+    // bodies. Stdlib bodies are added below via HIR-level merge.
+    let mut user_stmts: Vec<Stmt> = Vec::new();
+    let mut user_span = Span::new(0, 0);
     for p in &loaded.programs {
-        merged_stmts.extend(p.stmts.iter().cloned());
+        user_stmts.extend(p.stmts.iter().cloned());
+        if p.span.end > user_span.end {
+            user_span = p.span;
+        }
     }
-    let merged = zz_frontend::ast::Program {
-        stmts: merged_stmts,
-        span: merged_span,
+    let user_program = zz_frontend::ast::Program {
+        stmts: user_stmts,
+        span: user_span,
     };
-
-    let res = zz_hir::build_program(
-        &merged,
+    let user_tp = zz_hir::build_program(
+        &user_program,
         HashMap::new(),
         loaded.funcs,
         loaded.structs,
         loaded.aliases,
         loaded.enums,
     );
-    if !res.diagnostics.is_empty() {
-        for d in &res.diagnostics {
+    if !user_tp.diagnostics.is_empty() {
+        for d in &user_tp.diagnostics {
             if d.severity == zz_frontend::diag::Severity::Error {
                 eprintln!("zz: {}", d.message);
             }
         }
     }
+
+    // Collect pre-compiled stdlib TypedPrograms (cached via OnceLock in
+    // zz_stdlib_programs). Their bodies are already type-checked; merging
+    // at HIR level avoids re-checking them on every build.
+    let mut stdlib_tps: Vec<TypedProgram> = Vec::new();
+    for zz_prog in zz_stdlib::zz_stdlib_programs() {
+        match zz_prog {
+            Ok(p) => stdlib_tps.push(p.clone()),
+            Err(e) => return Err(format!("stdlib init error: {e:?}")),
+        }
+    }
+
+    // Merge stdlib + user TypedPrograms. Stdlib first (mirroring VM load
+    // order), user overrides on key collisions.
+    let mut all_tps: Vec<TypedProgram> = stdlib_tps;
+    all_tps.push(user_tp.program);
+    let merged = merge_typed_programs(all_tps);
     let main_key = format!("{entry_ns}.main");
-    let (pruned, reach) = zz_hir::dce(&res.program, &main_key);
+    let (pruned, reach) = zz_hir::dce(&merged, &main_key);
     Ok((pruned, reach, main_key))
 }
 
@@ -1537,20 +1544,25 @@ pub fn build_release(
             let _ = std::fs::remove_file(&tmp);
             return Err(e.to_string());
         }
-    } else if std::env::var("ZZ_CODEGEN_UNITS").is_ok_and(|v| v == "1") {
-        // Rollout gate for per-module translation units (parallel
-        // clang fan-out, serial link): same binary out, split TUs.
+    } else if std::env::var("ZZ_CODEGEN_UNITS").is_ok_and(|v| v == "0") {
+        // Force single-TU path (legacy whole-program C into one TU).
+        if let Err(e) =
+            zz_codegen::build_native_with(&pruned, &reach, &main_key, opts, target, &clang, &tmp)
+        {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+    } else {
+        // Default: per-module translation units with parallel clang
+        // fan-out (rayon, up to 8 threads) and per-unit object caching.
+        // Same binary out as single-TU; unchanged modules skip clang on
+        // rebuild. Opt out with ZZ_CODEGEN_UNITS=0.
         if let Err(e) = zz_codegen::build_native_units_with(
             &pruned, &reach, &main_key, opts, target, &clang, &tmp,
         ) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.to_string());
         }
-    } else if let Err(e) =
-        zz_codegen::build_native_with(&pruned, &reach, &main_key, opts, target, &clang, &tmp)
-    {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.to_string());
     }
     // Some compilers create the output without the exec bit when writing a
     // fresh file; force it so the rename only ever publishes runnable code.

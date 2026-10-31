@@ -1,0 +1,1113 @@
+import std.time as time_mod
+
+// Big-loop-heavy compile-time fixture: many functions with nested loops.
+// Exercises checker control-flow analysis + AOT lowering of loop-heavy code.
+// Loop bounds are tiny (safe to run) but the loop structure is deep.
+
+func loop_001(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 1
+        }
+    }
+    return s
+}
+
+func loop_002(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 2
+        }
+    }
+    return s
+}
+
+func loop_003(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 3
+        }
+    }
+    return s
+}
+
+func loop_004(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 4
+        }
+    }
+    return s
+}
+
+func loop_005(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 5
+        }
+    }
+    return s
+}
+
+func loop_006(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 6
+        }
+    }
+    return s
+}
+
+func loop_007(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 7
+        }
+    }
+    return s
+}
+
+func loop_008(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 8
+        }
+    }
+    return s
+}
+
+func loop_009(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 9
+        }
+    }
+    return s
+}
+
+func loop_010(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 10
+        }
+    }
+    return s
+}
+
+func loop_011(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 11
+        }
+    }
+    return s
+}
+
+func loop_012(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 12
+        }
+    }
+    return s
+}
+
+func loop_013(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 13
+        }
+    }
+    return s
+}
+
+func loop_014(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 14
+        }
+    }
+    return s
+}
+
+func loop_015(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 15
+        }
+    }
+    return s
+}
+
+func loop_016(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 16
+        }
+    }
+    return s
+}
+
+func loop_017(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 17
+        }
+    }
+    return s
+}
+
+func loop_018(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 18
+        }
+    }
+    return s
+}
+
+func loop_019(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 19
+        }
+    }
+    return s
+}
+
+func loop_020(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 20
+        }
+    }
+    return s
+}
+
+func loop_021(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 21
+        }
+    }
+    return s
+}
+
+func loop_022(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 22
+        }
+    }
+    return s
+}
+
+func loop_023(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 23
+        }
+    }
+    return s
+}
+
+func loop_024(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 24
+        }
+    }
+    return s
+}
+
+func loop_025(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 25
+        }
+    }
+    return s
+}
+
+func loop_026(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 26
+        }
+    }
+    return s
+}
+
+func loop_027(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 27
+        }
+    }
+    return s
+}
+
+func loop_028(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 28
+        }
+    }
+    return s
+}
+
+func loop_029(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 29
+        }
+    }
+    return s
+}
+
+func loop_030(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 30
+        }
+    }
+    return s
+}
+
+func loop_031(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 31
+        }
+    }
+    return s
+}
+
+func loop_032(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 32
+        }
+    }
+    return s
+}
+
+func loop_033(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 33
+        }
+    }
+    return s
+}
+
+func loop_034(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 34
+        }
+    }
+    return s
+}
+
+func loop_035(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 35
+        }
+    }
+    return s
+}
+
+func loop_036(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 36
+        }
+    }
+    return s
+}
+
+func loop_037(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 37
+        }
+    }
+    return s
+}
+
+func loop_038(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 38
+        }
+    }
+    return s
+}
+
+func loop_039(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 39
+        }
+    }
+    return s
+}
+
+func loop_040(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 40
+        }
+    }
+    return s
+}
+
+func loop_041(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 41
+        }
+    }
+    return s
+}
+
+func loop_042(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 42
+        }
+    }
+    return s
+}
+
+func loop_043(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 43
+        }
+    }
+    return s
+}
+
+func loop_044(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 44
+        }
+    }
+    return s
+}
+
+func loop_045(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 45
+        }
+    }
+    return s
+}
+
+func loop_046(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 46
+        }
+    }
+    return s
+}
+
+func loop_047(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 47
+        }
+    }
+    return s
+}
+
+func loop_048(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 48
+        }
+    }
+    return s
+}
+
+func loop_049(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 49
+        }
+    }
+    return s
+}
+
+func loop_050(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 50
+        }
+    }
+    return s
+}
+
+func loop_051(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 51
+        }
+    }
+    return s
+}
+
+func loop_052(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 52
+        }
+    }
+    return s
+}
+
+func loop_053(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 53
+        }
+    }
+    return s
+}
+
+func loop_054(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 54
+        }
+    }
+    return s
+}
+
+func loop_055(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 55
+        }
+    }
+    return s
+}
+
+func loop_056(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 56
+        }
+    }
+    return s
+}
+
+func loop_057(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 57
+        }
+    }
+    return s
+}
+
+func loop_058(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 58
+        }
+    }
+    return s
+}
+
+func loop_059(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 59
+        }
+    }
+    return s
+}
+
+func loop_060(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 60
+        }
+    }
+    return s
+}
+
+func loop_061(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 61
+        }
+    }
+    return s
+}
+
+func loop_062(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 62
+        }
+    }
+    return s
+}
+
+func loop_063(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 63
+        }
+    }
+    return s
+}
+
+func loop_064(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 64
+        }
+    }
+    return s
+}
+
+func loop_065(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 65
+        }
+    }
+    return s
+}
+
+func loop_066(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 66
+        }
+    }
+    return s
+}
+
+func loop_067(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 67
+        }
+    }
+    return s
+}
+
+func loop_068(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 68
+        }
+    }
+    return s
+}
+
+func loop_069(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 69
+        }
+    }
+    return s
+}
+
+func loop_070(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 70
+        }
+    }
+    return s
+}
+
+func loop_071(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 71
+        }
+    }
+    return s
+}
+
+func loop_072(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 72
+        }
+    }
+    return s
+}
+
+func loop_073(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 73
+        }
+    }
+    return s
+}
+
+func loop_074(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 74
+        }
+    }
+    return s
+}
+
+func loop_075(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 75
+        }
+    }
+    return s
+}
+
+func loop_076(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 76
+        }
+    }
+    return s
+}
+
+func loop_077(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 77
+        }
+    }
+    return s
+}
+
+func loop_078(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 78
+        }
+    }
+    return s
+}
+
+func loop_079(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 79
+        }
+    }
+    return s
+}
+
+func loop_080(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 80
+        }
+    }
+    return s
+}
+
+func loop_081(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 81
+        }
+    }
+    return s
+}
+
+func loop_082(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 82
+        }
+    }
+    return s
+}
+
+func loop_083(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 83
+        }
+    }
+    return s
+}
+
+func loop_084(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 84
+        }
+    }
+    return s
+}
+
+func loop_085(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 85
+        }
+    }
+    return s
+}
+
+func loop_086(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 86
+        }
+    }
+    return s
+}
+
+func loop_087(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 87
+        }
+    }
+    return s
+}
+
+func loop_088(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 88
+        }
+    }
+    return s
+}
+
+func loop_089(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 89
+        }
+    }
+    return s
+}
+
+func loop_090(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 90
+        }
+    }
+    return s
+}
+
+func loop_091(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 91
+        }
+    }
+    return s
+}
+
+func loop_092(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 92
+        }
+    }
+    return s
+}
+
+func loop_093(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 93
+        }
+    }
+    return s
+}
+
+func loop_094(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 94
+        }
+    }
+    return s
+}
+
+func loop_095(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 95
+        }
+    }
+    return s
+}
+
+func loop_096(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 96
+        }
+    }
+    return s
+}
+
+func loop_097(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 97
+        }
+    }
+    return s
+}
+
+func loop_098(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 98
+        }
+    }
+    return s
+}
+
+func loop_099(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 99
+        }
+    }
+    return s
+}
+
+func loop_100(n: int) -> int {
+    s := 0
+    for a in 0..n {
+        for b in 0..n {
+            s = s + a + b + 100
+        }
+    }
+    return s
+}
+
+func main() -> int {
+    t0 := time_mod.now_ms()
+    r := 0
+    r = r + loop_001(4)
+    r = r + loop_002(4)
+    r = r + loop_003(4)
+    r = r + loop_004(4)
+    r = r + loop_005(4)
+    r = r + loop_006(4)
+    r = r + loop_007(4)
+    r = r + loop_008(4)
+    r = r + loop_009(4)
+    r = r + loop_010(4)
+    r = r + loop_011(4)
+    r = r + loop_012(4)
+    r = r + loop_013(4)
+    r = r + loop_014(4)
+    r = r + loop_015(4)
+    r = r + loop_016(4)
+    r = r + loop_017(4)
+    r = r + loop_018(4)
+    r = r + loop_019(4)
+    r = r + loop_020(4)
+    r = r + loop_021(4)
+    r = r + loop_022(4)
+    r = r + loop_023(4)
+    r = r + loop_024(4)
+    r = r + loop_025(4)
+    r = r + loop_026(4)
+    r = r + loop_027(4)
+    r = r + loop_028(4)
+    r = r + loop_029(4)
+    r = r + loop_030(4)
+    r = r + loop_031(4)
+    r = r + loop_032(4)
+    r = r + loop_033(4)
+    r = r + loop_034(4)
+    r = r + loop_035(4)
+    r = r + loop_036(4)
+    r = r + loop_037(4)
+    r = r + loop_038(4)
+    r = r + loop_039(4)
+    r = r + loop_040(4)
+    r = r + loop_041(4)
+    r = r + loop_042(4)
+    r = r + loop_043(4)
+    r = r + loop_044(4)
+    r = r + loop_045(4)
+    r = r + loop_046(4)
+    r = r + loop_047(4)
+    r = r + loop_048(4)
+    r = r + loop_049(4)
+    r = r + loop_050(4)
+    r = r + loop_051(4)
+    r = r + loop_052(4)
+    r = r + loop_053(4)
+    r = r + loop_054(4)
+    r = r + loop_055(4)
+    r = r + loop_056(4)
+    r = r + loop_057(4)
+    r = r + loop_058(4)
+    r = r + loop_059(4)
+    r = r + loop_060(4)
+    r = r + loop_061(4)
+    r = r + loop_062(4)
+    r = r + loop_063(4)
+    r = r + loop_064(4)
+    r = r + loop_065(4)
+    r = r + loop_066(4)
+    r = r + loop_067(4)
+    r = r + loop_068(4)
+    r = r + loop_069(4)
+    r = r + loop_070(4)
+    r = r + loop_071(4)
+    r = r + loop_072(4)
+    r = r + loop_073(4)
+    r = r + loop_074(4)
+    r = r + loop_075(4)
+    r = r + loop_076(4)
+    r = r + loop_077(4)
+    r = r + loop_078(4)
+    r = r + loop_079(4)
+    r = r + loop_080(4)
+    r = r + loop_081(4)
+    r = r + loop_082(4)
+    r = r + loop_083(4)
+    r = r + loop_084(4)
+    r = r + loop_085(4)
+    r = r + loop_086(4)
+    r = r + loop_087(4)
+    r = r + loop_088(4)
+    r = r + loop_089(4)
+    r = r + loop_090(4)
+    r = r + loop_091(4)
+    r = r + loop_092(4)
+    r = r + loop_093(4)
+    r = r + loop_094(4)
+    r = r + loop_095(4)
+    r = r + loop_096(4)
+    r = r + loop_097(4)
+    r = r + loop_098(4)
+    r = r + loop_099(4)
+    r = r + loop_100(4)
+    t1 := time_mod.now_ms()
+    println("big_loops: {t1 - t0}ms result={r}")
+    return r
+}

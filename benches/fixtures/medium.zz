@@ -1,0 +1,155 @@
+import std.time as time_mod
+
+// Medium compile-time fixture: ~120 functions, moderate bodies.
+// Exercises frontend lexer/parser/checker and AOT lowering at medium scale.
+func m01(a: int, b: int) -> int { return a + b }
+func m02(a: int, b: int) -> int { return a - b }
+func m03(a: int, b: int) -> int { return a * b }
+func m04(a: int, b: int) -> int { return a / b }
+func m05(a: int, b: int) -> int { return a % b }
+func m06(a: int, b: int) -> int { return -a + b }
+func m07(a: int, b: int) -> int { return a + b * 2 }
+func m08(a: int, b: int) -> int { return a - b * 2 }
+func m09(a: int, b: int) -> int { return a * b * 3 }
+func m10(a: int, b: int) -> int { return a / b / 2 }
+func m11(a: int, b: int) -> int { return a % b % 3 }
+func m12(a: int, b: int) -> int { return a + b - a }
+func m13(a: int, b: int) -> int { return a * b + a }
+func m14(a: int, b: int) -> int { return (a + b) * (a - b) }
+func m15(a: int, b: int) -> int { return a * (b + 1) - b }
+func m16(a: int, b: int) -> int { return (a * 2) + (b * 3) }
+func m17(a: int, b: int) -> int { return (a + 1) * (b + 1) - 1 }
+func m18(a: int, b: int) -> int { return a * a + b * b }
+func m19(a: int, b: int) -> int { return (a + b) * (a + b) }
+func m20(a: int, b: int) -> int { return a * b * a }
+func m21(a: int, b: int) -> int { return a + b + a + b }
+func m22(a: int, b: int) -> int { return a * b - b * a }
+func m23(a: int, b: int) -> int { return (a * b) / (a + 1) }
+func m24(a: int, b: int) -> int { return (a + b) % (a * b + 1) }
+func m25(a: int, b: int) -> int { return a ^ b | b & a }
+func m26(a: int, b: int) -> int { return a << b >> b }
+func m27(a: int, b: int) -> int { return a + b }
+func m28(a: int, b: int) -> int { return a - b }
+func m29(a: int, b: int) -> int { return a * b }
+func m30(a: int, b: int) -> int { return a / b }
+func m31(a: int, b: int) -> int { return a + b }
+func m32(a: int, b: int) -> int { return a - b }
+func m33(a: int, b: int) -> int { return a * b }
+func m34(a: int, b: int) -> int { return a / b }
+func m35(a: int, b: int) -> int { return a % b }
+func m36(a: int, _b: int) -> int { return -a }
+func m37(a: int, b: int) -> int { return a + b * 2 }
+func m38(a: int, b: int) -> int { return a - b * 2 }
+func m39(a: int, b: int) -> int { return a * b * 3 }
+func m40(a: int, b: int) -> int { return a / b / 2 }
+func m41(a: int, b: int) -> int { return a % b % 3 }
+func m42(a: int, b: int) -> int { return a + b - a }
+func m43(a: int, b: int) -> int { return a * b + a }
+func m44(a: int, b: int) -> int { return (a + b) * (a - b) }
+func m45(a: int, b: int) -> int { return a * (b + 1) - b }
+func m46(a: int, b: int) -> int { return (a * 2) + (b * 3) }
+func m47(a: int, b: int) -> int { return (a + 1) * (b + 1) - 1 }
+func m48(a: int, b: int) -> int { return a * a + b * b }
+func m49(a: int, b: int) -> int { return (a + b) * (a + b) }
+func m50(a: int, b: int) -> int { return a * b * a }
+func m51(a: int, b: int) -> int { return a + b + a + b }
+func m52(a: int, b: int) -> int { return a * b - b * a }
+func m53(a: int, b: int) -> int { return (a * b) / (a + 1) }
+func m54(a: int, b: int) -> int { return (a + b) % (a * b + 1) }
+func m55(a: int, b: int) -> int { return a ^ b | b & a }
+func m56(a: int, b: int) -> int { return a << b >> b }
+func m57(a: int, b: int) -> int { return a + b }
+func m58(a: int, b: int) -> int { return a - b }
+func m59(a: int, b: int) -> int { return a * b }
+func m60(a: int, b: int) -> int { return a / b }
+func m61(a: int, b: int) -> int { return a + b }
+func m62(a: int, b: int) -> int { return a - b }
+func m63(a: int, b: int) -> int { return a * b }
+func m64(a: int, b: int) -> int { return a / b }
+func m65(a: int, b: int) -> int { return a % b }
+func m66(a: int, _b: int) -> int { return -a }
+func m67(a: int, b: int) -> int { return a + b * 2 }
+func m68(a: int, b: int) -> int { return a - b * 2 }
+func m69(a: int, b: int) -> int { return a * b * 3 }
+func m70(a: int, b: int) -> int { return a / b / 2 }
+func m71(a: int, b: int) -> int { return a % b % 3 }
+func m72(a: int, b: int) -> int { return a + b - a }
+func m73(a: int, b: int) -> int { return a * b + a }
+func m74(a: int, b: int) -> int { return (a + b) * (a - b) }
+func m75(a: int, b: int) -> int { return a * (b + 1) - b }
+func m76(a: int, b: int) -> int { return (a * 2) + (b * 3) }
+func m77(a: int, b: int) -> int { return (a + 1) * (b + 1) - 1 }
+func m78(a: int, b: int) -> int { return a * a + b * b }
+func m79(a: int, b: int) -> int { return (a + b) * (a + b) }
+func m80(a: int, b: int) -> int { return a * b * a }
+func m81(a: int, b: int) -> int { return a + b + a + b }
+func m82(a: int, b: int) -> int { return a * b - b * a }
+func m83(a: int, b: int) -> int { return (a * b) / (a + 1) }
+func m84(a: int, b: int) -> int { return (a + b) % (a * b + 1) }
+func m85(a: int, b: int) -> int { return a ^ b | b & a }
+func m86(a: int, b: int) -> int { return a << b >> b }
+func m87(a: int, b: int) -> int { return a + b }
+func m88(a: int, b: int) -> int { return a - b }
+func m89(a: int, b: int) -> int { return a * b }
+func m90(a: int, b: int) -> int { return a / b }
+func m91(a: int, b: int) -> int { return a + b }
+func m92(a: int, b: int) -> int { return a - b }
+func m93(a: int, b: int) -> int { return a * b }
+func m94(a: int, b: int) -> int { return a / b }
+func m95(a: int, b: int) -> int { return a % b }
+func m96(a: int, b: int) -> int { return -a + b }
+func m97(a: int, b: int) -> int { return a + b * 2 }
+func m98(a: int, b: int) -> int { return a - b * 2 }
+func m99(a: int, b: int) -> int { return a * b * 3 }
+func m100(a: int, b: int) -> int { return a / b / 2 }
+func m101(a: int, b: int) -> int { return a % b % 3 }
+func m102(a: int, b: int) -> int { return a + b - a }
+func m103(a: int, b: int) -> int { return a * b + a }
+func m104(a: int, b: int) -> int { return (a + b) * (a - b) }
+func m105(a: int, b: int) -> int { return a * (b + 1) - b }
+func m106(a: int, b: int) -> int { return (a * 2) + (b * 3) }
+func m107(a: int, b: int) -> int { return (a + 1) * (b + 1) - 1 }
+func m108(a: int, b: int) -> int { return a * a + b * b }
+func m109(a: int, b: int) -> int { return (a + b) * (a + b) }
+func m110(a: int, b: int) -> int { return a * b * a }
+func m111(a: int, b: int) -> int { return a + b + a + b }
+func m112(a: int, b: int) -> int { return a * b - b * a }
+func m113(a: int, b: int) -> int { return (a * b) / (a + 1) }
+func m114(a: int, b: int) -> int { return (a + b) % (a * b + 1) }
+func m115(a: int, b: int) -> int { return a ^ b | b & a }
+func m116(a: int, b: int) -> int { return a << b >> b }
+func m117(a: int, b: int) -> int { return a + b }
+func m118(a: int, b: int) -> int { return a - b }
+func m119(a: int, b: int) -> int { return a * b }
+func m120(a: int, b: int) -> int { return a / b }
+
+func main() -> int {
+    t0 := time_mod.now_ms()
+    r := m01(1, 2) + m02(5, 3) * m03(4, 2) / m04(8, 2) % m05(10, 3)
+    r = r + m06(0, 0) + m07(1, 2) + m08(3, 4) + m09(5, 6) + m10(7, 8)
+    r = r + m11(9, 10) + m12(11, 12) + m13(13, 14) + m14(15, 16) + m15(17, 18)
+    r = r + m16(19, 20) + m17(21, 22) + m18(23, 24) + m19(25, 26) + m20(27, 28)
+    r = r + m21(29, 30) + m22(31, 32) + m23(33, 34) + m24(35, 36) + m25(37, 38)
+    r = r + m26(39, 40) + m27(41, 42) + m28(43, 44) + m29(45, 46) + m30(47, 48)
+    r = r + m31(49, 50) + m32(51, 52) + m33(53, 54) + m35(55, 56) + m36(57, 58)
+    r = r + m37(59, 60) + m38(61, 62) + m39(63, 64) + m40(65, 66) + m41(67, 68)
+    r = r + m42(69, 70) + m43(71, 72) + m44(73, 74) + m45(75, 76) + m47(77, 78)
+    r = r + m48(79, 80) + m49(81, 82) + m50(83, 84) + m51(85, 86) + m52(87, 88)
+    r = r + m53(89, 90) + m54(91, 92) + m55(93, 94) + m56(95, 96) + m57(97, 98)
+    r = r + m58(99, 100) + m59(101, 102) + m60(103, 104) + m61(105, 106) + m62(107, 108)
+    r = r + m63(109, 110) + m64(111, 112) + m65(113, 114) + m66(115, 116) + m67(117, 118)
+    r = r + m68(119, 120) + m69(121, 122) + m70(123, 124) + m71(125, 126) + m72(127, 128)
+    r = r + m73(129, 130) + m74(131, 132) + m75(133, 134) + m76(135, 136) + m77(137, 138)
+    r = r + m78(139, 140) + m79(141, 142) + m80(143, 144) + m81(145, 146) + m82(147, 148)
+    r = r + m83(149, 150) + m84(151, 152) + m85(153, 154) + m86(155, 156) + m87(157, 158)
+    r = r + m88(159, 160) + m89(161, 162) + m90(163, 164) + m91(165, 166) + m92(167, 168)
+    r = r + m93(169, 170) + m94(171, 172) + m95(173, 174) + m96(175, 176) + m97(177, 178)
+    r = r + m98(179, 180) + m99(181, 182) + m100(183, 184) + m101(185, 186) + m102(187, 188)
+    r = r + m103(189, 190) + m104(191, 192) + m105(193, 194) + m106(195, 196) + m107(197, 198)
+    r = r + m108(199, 200) + m109(201, 202) + m110(203, 204) + m111(205, 206) + m112(207, 208)
+    r = r + m113(209, 210) + m114(211, 212) + m115(213, 214) + m116(215, 216) + m117(217, 218)
+    r = r + m118(219, 220) + m119(221, 222) + m120(223, 224)
+    t1 := time_mod.now_ms()
+    println("medium: {t1 - t0}ms result={r}")
+    return r
+}

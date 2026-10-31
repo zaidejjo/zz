@@ -1,0 +1,613 @@
+import std.time as time_mod
+
+// Huge compile-time fixture: ~300 functions.
+// Exercises frontend lexer/parser/checker + AOT lower at large scale.
+
+func h001(a: int, b: int) -> int { return a - b }
+func h002(a: int, b: int) -> int { return a * b }
+func h003(a: int, b: int) -> int { return a / b }
+func h004(a: int, b: int) -> int { return a % b }
+func h005(a: int, b: int) -> int { return a + b }
+func h006(a: int, b: int) -> int { return a - b }
+func h007(a: int, b: int) -> int { return a * b }
+func h008(a: int, b: int) -> int { return a / b }
+func h009(a: int, b: int) -> int { return a % b }
+func h010(a: int, b: int) -> int { return a + b }
+func h011(a: int, b: int) -> int { return a - b }
+func h012(a: int, b: int) -> int { return a * b }
+func h013(a: int, b: int) -> int { return a / b }
+func h014(a: int, b: int) -> int { return a % b }
+func h015(a: int, b: int) -> int { return a + b }
+func h016(a: int, b: int) -> int { return a - b }
+func h017(a: int, b: int) -> int { return a * b }
+func h018(a: int, b: int) -> int { return a / b }
+func h019(a: int, b: int) -> int { return a % b }
+func h020(a: int, b: int) -> int { return a + b }
+func h021(a: int, b: int) -> int { return a - b }
+func h022(a: int, b: int) -> int { return a * b }
+func h023(a: int, b: int) -> int { return a / b }
+func h024(a: int, b: int) -> int { return a % b }
+func h025(a: int, b: int) -> int { return a + b }
+func h026(a: int, b: int) -> int { return a - b }
+func h027(a: int, b: int) -> int { return a * b }
+func h028(a: int, b: int) -> int { return a / b }
+func h029(a: int, b: int) -> int { return a % b }
+func h030(a: int, b: int) -> int { return a + b }
+func h031(a: int, b: int) -> int { return a - b }
+func h032(a: int, b: int) -> int { return a * b }
+func h033(a: int, b: int) -> int { return a / b }
+func h034(a: int, b: int) -> int { return a % b }
+func h035(a: int, b: int) -> int { return a + b }
+func h036(a: int, b: int) -> int { return a - b }
+func h037(a: int, b: int) -> int { return a * b }
+func h038(a: int, b: int) -> int { return a / b }
+func h039(a: int, b: int) -> int { return a % b }
+func h040(a: int, b: int) -> int { return a + b }
+func h041(a: int, b: int) -> int { return a - b }
+func h042(a: int, b: int) -> int { return a * b }
+func h043(a: int, b: int) -> int { return a / b }
+func h044(a: int, b: int) -> int { return a % b }
+func h045(a: int, b: int) -> int { return a + b }
+func h046(a: int, b: int) -> int { return a - b }
+func h047(a: int, b: int) -> int { return a * b }
+func h048(a: int, b: int) -> int { return a / b }
+func h049(a: int, b: int) -> int { return a % b }
+func h050(a: int, b: int) -> int { return a + b }
+func h051(a: int, b: int) -> int { return a - b }
+func h052(a: int, b: int) -> int { return a * b }
+func h053(a: int, b: int) -> int { return a / b }
+func h054(a: int, b: int) -> int { return a % b }
+func h055(a: int, b: int) -> int { return a + b }
+func h056(a: int, b: int) -> int { return a - b }
+func h057(a: int, b: int) -> int { return a * b }
+func h058(a: int, b: int) -> int { return a / b }
+func h059(a: int, b: int) -> int { return a % b }
+func h060(a: int, b: int) -> int { return a + b }
+func h061(a: int, b: int) -> int { return a - b }
+func h062(a: int, b: int) -> int { return a * b }
+func h063(a: int, b: int) -> int { return a / b }
+func h064(a: int, b: int) -> int { return a % b }
+func h065(a: int, b: int) -> int { return a + b }
+func h066(a: int, b: int) -> int { return a - b }
+func h067(a: int, b: int) -> int { return a * b }
+func h068(a: int, b: int) -> int { return a / b }
+func h069(a: int, b: int) -> int { return a % b }
+func h070(a: int, b: int) -> int { return a + b }
+func h071(a: int, b: int) -> int { return a - b }
+func h072(a: int, b: int) -> int { return a * b }
+func h073(a: int, b: int) -> int { return a / b }
+func h074(a: int, b: int) -> int { return a % b }
+func h075(a: int, b: int) -> int { return a + b }
+func h076(a: int, b: int) -> int { return a - b }
+func h077(a: int, b: int) -> int { return a * b }
+func h078(a: int, b: int) -> int { return a / b }
+func h079(a: int, b: int) -> int { return a % b }
+func h080(a: int, b: int) -> int { return a + b }
+func h081(a: int, b: int) -> int { return a - b }
+func h082(a: int, b: int) -> int { return a * b }
+func h083(a: int, b: int) -> int { return a / b }
+func h084(a: int, b: int) -> int { return a % b }
+func h085(a: int, b: int) -> int { return a + b }
+func h086(a: int, b: int) -> int { return a - b }
+func h087(a: int, b: int) -> int { return a * b }
+func h088(a: int, b: int) -> int { return a / b }
+func h089(a: int, b: int) -> int { return a % b }
+func h090(a: int, b: int) -> int { return a + b }
+func h091(a: int, b: int) -> int { return a - b }
+func h092(a: int, b: int) -> int { return a * b }
+func h093(a: int, b: int) -> int { return a / b }
+func h094(a: int, b: int) -> int { return a % b }
+func h095(a: int, b: int) -> int { return a + b }
+func h096(a: int, b: int) -> int { return a - b }
+func h097(a: int, b: int) -> int { return a * b }
+func h098(a: int, b: int) -> int { return a / b }
+func h099(a: int, b: int) -> int { return a % b }
+func h100(a: int, b: int) -> int { return a + b }
+func h101(a: int, b: int) -> int { return a - b }
+func h102(a: int, b: int) -> int { return a * b }
+func h103(a: int, b: int) -> int { return a / b }
+func h104(a: int, b: int) -> int { return a % b }
+func h105(a: int, b: int) -> int { return a + b }
+func h106(a: int, b: int) -> int { return a - b }
+func h107(a: int, b: int) -> int { return a * b }
+func h108(a: int, b: int) -> int { return a / b }
+func h109(a: int, b: int) -> int { return a % b }
+func h110(a: int, b: int) -> int { return a + b }
+func h111(a: int, b: int) -> int { return a - b }
+func h112(a: int, b: int) -> int { return a * b }
+func h113(a: int, b: int) -> int { return a / b }
+func h114(a: int, b: int) -> int { return a % b }
+func h115(a: int, b: int) -> int { return a + b }
+func h116(a: int, b: int) -> int { return a - b }
+func h117(a: int, b: int) -> int { return a * b }
+func h118(a: int, b: int) -> int { return a / b }
+func h119(a: int, b: int) -> int { return a % b }
+func h120(a: int, b: int) -> int { return a + b }
+func h121(a: int, b: int) -> int { return a - b }
+func h122(a: int, b: int) -> int { return a * b }
+func h123(a: int, b: int) -> int { return a / b }
+func h124(a: int, b: int) -> int { return a % b }
+func h125(a: int, b: int) -> int { return a + b }
+func h126(a: int, b: int) -> int { return a - b }
+func h127(a: int, b: int) -> int { return a * b }
+func h128(a: int, b: int) -> int { return a / b }
+func h129(a: int, b: int) -> int { return a % b }
+func h130(a: int, b: int) -> int { return a + b }
+func h131(a: int, b: int) -> int { return a - b }
+func h132(a: int, b: int) -> int { return a * b }
+func h133(a: int, b: int) -> int { return a / b }
+func h134(a: int, b: int) -> int { return a % b }
+func h135(a: int, b: int) -> int { return a + b }
+func h136(a: int, b: int) -> int { return a - b }
+func h137(a: int, b: int) -> int { return a * b }
+func h138(a: int, b: int) -> int { return a / b }
+func h139(a: int, b: int) -> int { return a % b }
+func h140(a: int, b: int) -> int { return a + b }
+func h141(a: int, b: int) -> int { return a - b }
+func h142(a: int, b: int) -> int { return a * b }
+func h143(a: int, b: int) -> int { return a / b }
+func h144(a: int, b: int) -> int { return a % b }
+func h145(a: int, b: int) -> int { return a + b }
+func h146(a: int, b: int) -> int { return a - b }
+func h147(a: int, b: int) -> int { return a * b }
+func h148(a: int, b: int) -> int { return a / b }
+func h149(a: int, b: int) -> int { return a % b }
+func h150(a: int, b: int) -> int { return a + b }
+func h151(a: int, b: int) -> int { return a - b }
+func h152(a: int, b: int) -> int { return a * b }
+func h153(a: int, b: int) -> int { return a / b }
+func h154(a: int, b: int) -> int { return a % b }
+func h155(a: int, b: int) -> int { return a + b }
+func h156(a: int, b: int) -> int { return a - b }
+func h157(a: int, b: int) -> int { return a * b }
+func h158(a: int, b: int) -> int { return a / b }
+func h159(a: int, b: int) -> int { return a % b }
+func h160(a: int, b: int) -> int { return a + b }
+func h161(a: int, b: int) -> int { return a - b }
+func h162(a: int, b: int) -> int { return a * b }
+func h163(a: int, b: int) -> int { return a / b }
+func h164(a: int, b: int) -> int { return a % b }
+func h165(a: int, b: int) -> int { return a + b }
+func h166(a: int, b: int) -> int { return a - b }
+func h167(a: int, b: int) -> int { return a * b }
+func h168(a: int, b: int) -> int { return a / b }
+func h169(a: int, b: int) -> int { return a % b }
+func h170(a: int, b: int) -> int { return a + b }
+func h171(a: int, b: int) -> int { return a - b }
+func h172(a: int, b: int) -> int { return a * b }
+func h173(a: int, b: int) -> int { return a / b }
+func h174(a: int, b: int) -> int { return a % b }
+func h175(a: int, b: int) -> int { return a + b }
+func h176(a: int, b: int) -> int { return a - b }
+func h177(a: int, b: int) -> int { return a * b }
+func h178(a: int, b: int) -> int { return a / b }
+func h179(a: int, b: int) -> int { return a % b }
+func h180(a: int, b: int) -> int { return a + b }
+func h181(a: int, b: int) -> int { return a - b }
+func h182(a: int, b: int) -> int { return a * b }
+func h183(a: int, b: int) -> int { return a / b }
+func h184(a: int, b: int) -> int { return a % b }
+func h185(a: int, b: int) -> int { return a + b }
+func h186(a: int, b: int) -> int { return a - b }
+func h187(a: int, b: int) -> int { return a * b }
+func h188(a: int, b: int) -> int { return a / b }
+func h189(a: int, b: int) -> int { return a % b }
+func h190(a: int, b: int) -> int { return a + b }
+func h191(a: int, b: int) -> int { return a - b }
+func h192(a: int, b: int) -> int { return a * b }
+func h193(a: int, b: int) -> int { return a / b }
+func h194(a: int, b: int) -> int { return a % b }
+func h195(a: int, b: int) -> int { return a + b }
+func h196(a: int, b: int) -> int { return a - b }
+func h197(a: int, b: int) -> int { return a * b }
+func h198(a: int, b: int) -> int { return a / b }
+func h199(a: int, b: int) -> int { return a % b }
+func h200(a: int, b: int) -> int { return a + b }
+func h201(a: int, b: int) -> int { return a - b }
+func h202(a: int, b: int) -> int { return a * b }
+func h203(a: int, b: int) -> int { return a / b }
+func h204(a: int, b: int) -> int { return a % b }
+func h205(a: int, b: int) -> int { return a + b }
+func h206(a: int, b: int) -> int { return a - b }
+func h207(a: int, b: int) -> int { return a * b }
+func h208(a: int, b: int) -> int { return a / b }
+func h209(a: int, b: int) -> int { return a % b }
+func h210(a: int, b: int) -> int { return a + b }
+func h211(a: int, b: int) -> int { return a - b }
+func h212(a: int, b: int) -> int { return a * b }
+func h213(a: int, b: int) -> int { return a / b }
+func h214(a: int, b: int) -> int { return a % b }
+func h215(a: int, b: int) -> int { return a + b }
+func h216(a: int, b: int) -> int { return a - b }
+func h217(a: int, b: int) -> int { return a * b }
+func h218(a: int, b: int) -> int { return a / b }
+func h219(a: int, b: int) -> int { return a % b }
+func h220(a: int, b: int) -> int { return a + b }
+func h221(a: int, b: int) -> int { return a - b }
+func h222(a: int, b: int) -> int { return a * b }
+func h223(a: int, b: int) -> int { return a / b }
+func h224(a: int, b: int) -> int { return a % b }
+func h225(a: int, b: int) -> int { return a + b }
+func h226(a: int, b: int) -> int { return a - b }
+func h227(a: int, b: int) -> int { return a * b }
+func h228(a: int, b: int) -> int { return a / b }
+func h229(a: int, b: int) -> int { return a % b }
+func h230(a: int, b: int) -> int { return a + b }
+func h231(a: int, b: int) -> int { return a - b }
+func h232(a: int, b: int) -> int { return a * b }
+func h233(a: int, b: int) -> int { return a / b }
+func h234(a: int, b: int) -> int { return a % b }
+func h235(a: int, b: int) -> int { return a + b }
+func h236(a: int, b: int) -> int { return a - b }
+func h237(a: int, b: int) -> int { return a * b }
+func h238(a: int, b: int) -> int { return a / b }
+func h239(a: int, b: int) -> int { return a % b }
+func h240(a: int, b: int) -> int { return a + b }
+func h241(a: int, b: int) -> int { return a - b }
+func h242(a: int, b: int) -> int { return a * b }
+func h243(a: int, b: int) -> int { return a / b }
+func h244(a: int, b: int) -> int { return a % b }
+func h245(a: int, b: int) -> int { return a + b }
+func h246(a: int, b: int) -> int { return a - b }
+func h247(a: int, b: int) -> int { return a * b }
+func h248(a: int, b: int) -> int { return a / b }
+func h249(a: int, b: int) -> int { return a % b }
+func h250(a: int, b: int) -> int { return a + b }
+func h251(a: int, b: int) -> int { return a - b }
+func h252(a: int, b: int) -> int { return a * b }
+func h253(a: int, b: int) -> int { return a / b }
+func h254(a: int, b: int) -> int { return a % b }
+func h255(a: int, b: int) -> int { return a + b }
+func h256(a: int, b: int) -> int { return a - b }
+func h257(a: int, b: int) -> int { return a * b }
+func h258(a: int, b: int) -> int { return a / b }
+func h259(a: int, b: int) -> int { return a % b }
+func h260(a: int, b: int) -> int { return a + b }
+func h261(a: int, b: int) -> int { return a - b }
+func h262(a: int, b: int) -> int { return a * b }
+func h263(a: int, b: int) -> int { return a / b }
+func h264(a: int, b: int) -> int { return a % b }
+func h265(a: int, b: int) -> int { return a + b }
+func h266(a: int, b: int) -> int { return a - b }
+func h267(a: int, b: int) -> int { return a * b }
+func h268(a: int, b: int) -> int { return a / b }
+func h269(a: int, b: int) -> int { return a % b }
+func h270(a: int, b: int) -> int { return a + b }
+func h271(a: int, b: int) -> int { return a - b }
+func h272(a: int, b: int) -> int { return a * b }
+func h273(a: int, b: int) -> int { return a / b }
+func h274(a: int, b: int) -> int { return a % b }
+func h275(a: int, b: int) -> int { return a + b }
+func h276(a: int, b: int) -> int { return a - b }
+func h277(a: int, b: int) -> int { return a * b }
+func h278(a: int, b: int) -> int { return a / b }
+func h279(a: int, b: int) -> int { return a % b }
+func h280(a: int, b: int) -> int { return a + b }
+func h281(a: int, b: int) -> int { return a - b }
+func h282(a: int, b: int) -> int { return a * b }
+func h283(a: int, b: int) -> int { return a / b }
+func h284(a: int, b: int) -> int { return a % b }
+func h285(a: int, b: int) -> int { return a + b }
+func h286(a: int, b: int) -> int { return a - b }
+func h287(a: int, b: int) -> int { return a * b }
+func h288(a: int, b: int) -> int { return a / b }
+func h289(a: int, b: int) -> int { return a % b }
+func h290(a: int, b: int) -> int { return a + b }
+func h291(a: int, b: int) -> int { return a - b }
+func h292(a: int, b: int) -> int { return a * b }
+func h293(a: int, b: int) -> int { return a / b }
+func h294(a: int, b: int) -> int { return a % b }
+func h295(a: int, b: int) -> int { return a + b }
+func h296(a: int, b: int) -> int { return a - b }
+func h297(a: int, b: int) -> int { return a * b }
+func h298(a: int, b: int) -> int { return a / b }
+func h299(a: int, b: int) -> int { return a % b }
+func h300(a: int, b: int) -> int { return a + b }
+
+func main() -> int {
+    t0 := time_mod.now_ms()
+    r := 0
+    r = r + h001(1, 2)
+    r = r + h002(2, 3)
+    r = r + h003(3, 4)
+    r = r + h004(4, 5)
+    r = r + h005(5, 6)
+    r = r + h006(6, 7)
+    r = r + h007(7, 8)
+    r = r + h008(8, 9)
+    r = r + h009(9, 10)
+    r = r + h010(10, 11)
+    r = r + h011(11, 12)
+    r = r + h012(12, 13)
+    r = r + h013(13, 14)
+    r = r + h014(14, 15)
+    r = r + h015(15, 16)
+    r = r + h016(16, 17)
+    r = r + h017(17, 18)
+    r = r + h018(18, 19)
+    r = r + h019(19, 20)
+    r = r + h020(20, 21)
+    r = r + h021(21, 22)
+    r = r + h022(22, 23)
+    r = r + h023(23, 24)
+    r = r + h024(24, 25)
+    r = r + h025(25, 26)
+    r = r + h026(26, 27)
+    r = r + h027(27, 28)
+    r = r + h028(28, 29)
+    r = r + h029(29, 30)
+    r = r + h030(30, 31)
+    r = r + h031(31, 32)
+    r = r + h032(32, 33)
+    r = r + h033(33, 34)
+    r = r + h034(34, 35)
+    r = r + h035(35, 36)
+    r = r + h036(36, 37)
+    r = r + h037(37, 38)
+    r = r + h038(38, 39)
+    r = r + h039(39, 40)
+    r = r + h040(40, 41)
+    r = r + h041(41, 42)
+    r = r + h042(42, 43)
+    r = r + h043(43, 44)
+    r = r + h044(44, 45)
+    r = r + h045(45, 46)
+    r = r + h046(46, 47)
+    r = r + h047(47, 48)
+    r = r + h048(48, 49)
+    r = r + h049(49, 50)
+    r = r + h050(50, 51)
+    r = r + h051(51, 52)
+    r = r + h052(52, 53)
+    r = r + h053(53, 54)
+    r = r + h054(54, 55)
+    r = r + h055(55, 56)
+    r = r + h056(56, 57)
+    r = r + h057(57, 58)
+    r = r + h058(58, 59)
+    r = r + h059(59, 60)
+    r = r + h060(60, 61)
+    r = r + h061(61, 62)
+    r = r + h062(62, 63)
+    r = r + h063(63, 64)
+    r = r + h064(64, 65)
+    r = r + h065(65, 66)
+    r = r + h066(66, 67)
+    r = r + h067(67, 68)
+    r = r + h068(68, 69)
+    r = r + h069(69, 70)
+    r = r + h070(70, 71)
+    r = r + h071(71, 72)
+    r = r + h072(72, 73)
+    r = r + h073(73, 74)
+    r = r + h074(74, 75)
+    r = r + h075(75, 76)
+    r = r + h076(76, 77)
+    r = r + h077(77, 78)
+    r = r + h078(78, 79)
+    r = r + h079(79, 80)
+    r = r + h080(80, 81)
+    r = r + h081(81, 82)
+    r = r + h082(82, 83)
+    r = r + h083(83, 84)
+    r = r + h084(84, 85)
+    r = r + h085(85, 86)
+    r = r + h086(86, 87)
+    r = r + h087(87, 88)
+    r = r + h088(88, 89)
+    r = r + h089(89, 90)
+    r = r + h090(90, 91)
+    r = r + h091(91, 92)
+    r = r + h092(92, 93)
+    r = r + h093(93, 94)
+    r = r + h094(94, 95)
+    r = r + h095(95, 96)
+    r = r + h096(96, 97)
+    r = r + h097(97, 98)
+    r = r + h098(98, 99)
+    r = r + h099(99, 100)
+    r = r + h100(100, 101)
+    r = r + h101(101, 102)
+    r = r + h102(102, 103)
+    r = r + h103(103, 104)
+    r = r + h104(104, 105)
+    r = r + h105(105, 106)
+    r = r + h106(106, 107)
+    r = r + h107(107, 108)
+    r = r + h108(108, 109)
+    r = r + h109(109, 110)
+    r = r + h110(110, 111)
+    r = r + h111(111, 112)
+    r = r + h112(112, 113)
+    r = r + h113(113, 114)
+    r = r + h114(114, 115)
+    r = r + h115(115, 116)
+    r = r + h116(116, 117)
+    r = r + h117(117, 118)
+    r = r + h118(118, 119)
+    r = r + h119(119, 120)
+    r = r + h120(120, 121)
+    r = r + h121(121, 122)
+    r = r + h122(122, 123)
+    r = r + h123(123, 124)
+    r = r + h124(124, 125)
+    r = r + h125(125, 126)
+    r = r + h126(126, 127)
+    r = r + h127(127, 128)
+    r = r + h128(128, 129)
+    r = r + h129(129, 130)
+    r = r + h130(130, 131)
+    r = r + h131(131, 132)
+    r = r + h132(132, 133)
+    r = r + h133(133, 134)
+    r = r + h134(134, 135)
+    r = r + h135(135, 136)
+    r = r + h136(136, 137)
+    r = r + h137(137, 138)
+    r = r + h138(138, 139)
+    r = r + h139(139, 140)
+    r = r + h140(140, 141)
+    r = r + h141(141, 142)
+    r = r + h142(142, 143)
+    r = r + h143(143, 144)
+    r = r + h144(144, 145)
+    r = r + h145(145, 146)
+    r = r + h146(146, 147)
+    r = r + h147(147, 148)
+    r = r + h148(148, 149)
+    r = r + h149(149, 150)
+    r = r + h150(150, 151)
+    r = r + h151(151, 152)
+    r = r + h152(152, 153)
+    r = r + h153(153, 154)
+    r = r + h154(154, 155)
+    r = r + h155(155, 156)
+    r = r + h156(156, 157)
+    r = r + h157(157, 158)
+    r = r + h158(158, 159)
+    r = r + h159(159, 160)
+    r = r + h160(160, 161)
+    r = r + h161(161, 162)
+    r = r + h162(162, 163)
+    r = r + h163(163, 164)
+    r = r + h164(164, 165)
+    r = r + h165(165, 166)
+    r = r + h166(166, 167)
+    r = r + h167(167, 168)
+    r = r + h168(168, 169)
+    r = r + h169(169, 170)
+    r = r + h170(170, 171)
+    r = r + h171(171, 172)
+    r = r + h172(172, 173)
+    r = r + h173(173, 174)
+    r = r + h174(174, 175)
+    r = r + h175(175, 176)
+    r = r + h176(176, 177)
+    r = r + h177(177, 178)
+    r = r + h178(178, 179)
+    r = r + h179(179, 180)
+    r = r + h180(180, 181)
+    r = r + h181(181, 182)
+    r = r + h182(182, 183)
+    r = r + h183(183, 184)
+    r = r + h184(184, 185)
+    r = r + h185(185, 186)
+    r = r + h186(186, 187)
+    r = r + h187(187, 188)
+    r = r + h188(188, 189)
+    r = r + h189(189, 190)
+    r = r + h190(190, 191)
+    r = r + h191(191, 192)
+    r = r + h192(192, 193)
+    r = r + h193(193, 194)
+    r = r + h194(194, 195)
+    r = r + h195(195, 196)
+    r = r + h196(196, 197)
+    r = r + h197(197, 198)
+    r = r + h198(198, 199)
+    r = r + h199(199, 200)
+    r = r + h200(200, 201)
+    r = r + h201(201, 202)
+    r = r + h202(202, 203)
+    r = r + h203(203, 204)
+    r = r + h204(204, 205)
+    r = r + h205(205, 206)
+    r = r + h206(206, 207)
+    r = r + h207(207, 208)
+    r = r + h208(208, 209)
+    r = r + h209(209, 210)
+    r = r + h210(210, 211)
+    r = r + h211(211, 212)
+    r = r + h212(212, 213)
+    r = r + h213(213, 214)
+    r = r + h214(214, 215)
+    r = r + h215(215, 216)
+    r = r + h216(216, 217)
+    r = r + h217(217, 218)
+    r = r + h218(218, 219)
+    r = r + h219(219, 220)
+    r = r + h220(220, 221)
+    r = r + h221(221, 222)
+    r = r + h222(222, 223)
+    r = r + h223(223, 224)
+    r = r + h224(224, 225)
+    r = r + h225(225, 226)
+    r = r + h226(226, 227)
+    r = r + h227(227, 228)
+    r = r + h228(228, 229)
+    r = r + h229(229, 230)
+    r = r + h230(230, 231)
+    r = r + h231(231, 232)
+    r = r + h232(232, 233)
+    r = r + h233(233, 234)
+    r = r + h234(234, 235)
+    r = r + h235(235, 236)
+    r = r + h236(236, 237)
+    r = r + h237(237, 238)
+    r = r + h238(238, 239)
+    r = r + h239(239, 240)
+    r = r + h240(240, 241)
+    r = r + h241(241, 242)
+    r = r + h242(242, 243)
+    r = r + h243(243, 244)
+    r = r + h244(244, 245)
+    r = r + h245(245, 246)
+    r = r + h246(246, 247)
+    r = r + h247(247, 248)
+    r = r + h248(248, 249)
+    r = r + h249(249, 250)
+    r = r + h250(250, 251)
+    r = r + h251(251, 252)
+    r = r + h252(252, 253)
+    r = r + h253(253, 254)
+    r = r + h254(254, 255)
+    r = r + h255(255, 256)
+    r = r + h256(256, 257)
+    r = r + h257(257, 258)
+    r = r + h258(258, 259)
+    r = r + h259(259, 260)
+    r = r + h260(260, 261)
+    r = r + h261(261, 262)
+    r = r + h262(262, 263)
+    r = r + h263(263, 264)
+    r = r + h264(264, 265)
+    r = r + h265(265, 266)
+    r = r + h266(266, 267)
+    r = r + h267(267, 268)
+    r = r + h268(268, 269)
+    r = r + h269(269, 270)
+    r = r + h270(270, 271)
+    r = r + h271(271, 272)
+    r = r + h272(272, 273)
+    r = r + h273(273, 274)
+    r = r + h274(274, 275)
+    r = r + h275(275, 276)
+    r = r + h276(276, 277)
+    r = r + h277(277, 278)
+    r = r + h278(278, 279)
+    r = r + h279(279, 280)
+    r = r + h280(280, 281)
+    r = r + h281(281, 282)
+    r = r + h282(282, 283)
+    r = r + h283(283, 284)
+    r = r + h284(284, 285)
+    r = r + h285(285, 286)
+    r = r + h286(286, 287)
+    r = r + h287(287, 288)
+    r = r + h288(288, 289)
+    r = r + h289(289, 290)
+    r = r + h290(290, 291)
+    r = r + h291(291, 292)
+    r = r + h292(292, 293)
+    r = r + h293(293, 294)
+    r = r + h294(294, 295)
+    r = r + h295(295, 296)
+    r = r + h296(296, 297)
+    r = r + h297(297, 298)
+    r = r + h298(298, 299)
+    r = r + h299(299, 300)
+    r = r + h300(300, 301)
+    t1 := time_mod.now_ms()
+    println("huge: {t1 - t0}ms result={r}")
+    return r
+}
