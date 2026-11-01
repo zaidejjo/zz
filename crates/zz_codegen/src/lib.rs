@@ -34,6 +34,11 @@ pub use ffi::{ffi_decl, ffi_impl, native_impl, native_supported, FfiError, FFI_V
 pub use zz_codegen_runtime::{C_BUILD_VERSION, RUNTIME_C, RUNTIME_H, RUNTIME_SRC_HASH};
 pub use zz_lower as lower;
 pub use zz_lower::{mangle, units, LoweredC, Lowerer};
+
+/// Progress sinks for the native pipeline (#629). Re-exported from the
+/// zero-dependency types crate so `zz_build` (and the CLI) need only this
+/// facade.
+pub use zz_codegen_types::{CodegenSink, NoopSink};
 /// Intentional, tracked VM-only gaps: stdlib funcs the AOT runtime does not
 /// implement natively. The preflight in [`build_native_with`] /
 /// [`build_native_units_with`] filters these out before failing, so
@@ -629,11 +634,32 @@ pub fn build_native_units_with(
     clang: &compile::Clang,
     out_path: &std::path::Path,
 ) -> Result<units::LoweredUnits, compile::BuildError> {
+    build_native_units_with_sink(
+        tp, reach, entry_main, opts, target, clang, out_path, &NoopSink,
+    )
+}
+
+/// [`build_native_units_with`] with codegen progress notifications (#629):
+/// generation → per-unit compilation → link, all reported through `sink`.
+// One parameter per pipeline stage (typed program, reach set, entry, opts,
+// target, toolchain, output, sink) — same shape as the sink-less entry.
+#[allow(clippy::too_many_arguments)]
+pub fn build_native_units_with_sink(
+    tp: &zz_hir::TypedProgram,
+    reach: &zz_hir::ReachableSet,
+    entry_main: &str,
+    opts: BuildOptions,
+    target: Option<&str>,
+    clang: &compile::Clang,
+    out_path: &std::path::Path,
+    sink: &dyn CodegenSink,
+) -> Result<units::LoweredUnits, compile::BuildError> {
     // Entry namespace derives from the dotted main key (`main.main` ->
     // `main`); bare test mains land in the prelude bucket with bare fns.
     let entry_ns = units::ns_of(entry_main).to_string();
     let verbose = opts.verbose;
     let t_lower = std::time::Instant::now();
+    sink.generating();
     let mut lowered = precompiled_lowerer(tp, reach, entry_main).lower_units(&entry_ns);
     reject_unimplemented_natives(&lowered.unimplemented_natives)?;
     if verbose {
@@ -660,8 +686,17 @@ pub fn build_native_units_with(
         .iter()
         .map(|u| (u.ns.clone(), u.code.clone()))
         .collect();
+    sink.generated(lowered.units.len());
     let t_cc = std::time::Instant::now();
-    compile::compile_units(&lowered.header, &pairs, out_path, &opts, target, clang)?;
+    compile::compile_units_with_sink(
+        &lowered.header,
+        &pairs,
+        out_path,
+        &opts,
+        target,
+        clang,
+        sink,
+    )?;
     if verbose {
         eprintln!("zz: timing units_cc_link={}ms", t_cc.elapsed().as_millis());
     }
@@ -678,8 +713,29 @@ pub fn build_native_with(
     clang: &Clang,
     out_path: &std::path::Path,
 ) -> Result<LoweredC, BuildError> {
+    build_native_with_sink(
+        tp, reach, entry_main, opts, target, clang, out_path, &NoopSink,
+    )
+}
+
+/// [`build_native_with`] with codegen progress notifications (#629). The
+/// single-TU path compiles and links in one clang call, so it reports
+/// generation, then one compiled file, then the link boundary.
+// Same argument shape as [`build_native_units_with_sink`], plus the sink.
+#[allow(clippy::too_many_arguments)]
+pub fn build_native_with_sink(
+    tp: &zz_hir::TypedProgram,
+    reach: &zz_hir::ReachableSet,
+    entry_main: &str,
+    opts: BuildOptions,
+    target: Option<&str>,
+    clang: &Clang,
+    out_path: &std::path::Path,
+    sink: &dyn CodegenSink,
+) -> Result<LoweredC, BuildError> {
     let verbose = opts.verbose;
     let t_lower = std::time::Instant::now();
+    sink.generating();
     let lowered = precompiled_lowerer(tp, reach, entry_main).lower();
     reject_unimplemented_natives(&lowered.unimplemented_natives)?;
     if verbose {
@@ -687,8 +743,13 @@ pub fn build_native_with(
     }
     let mut opts = opts;
     lowered.apply_link_needs(&mut opts);
+    sink.generated(1);
+    sink.compiling(1, 0);
     let t_cc = std::time::Instant::now();
     compile::build_with(&lowered.source, out_path, opts, target, clang)?;
+    sink.file_done(1);
+    sink.linking();
+    sink.linked();
     if verbose {
         eprintln!("zz: timing clang_link={}ms", t_cc.elapsed().as_millis());
     }

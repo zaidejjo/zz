@@ -1047,6 +1047,21 @@ pub fn compile_units(
     target: Option<&str>,
     clang: &Clang,
 ) -> Result<Clang, BuildError> {
+    compile_units_with_sink(header, units, output_path, opts, target, clang, &NoopSink)
+}
+
+/// [`compile_units`] with progress notifications (#629): the caller learns
+/// the unit total, how many objects came from the cache, each finished
+/// unit, and the compile → link boundary.
+pub fn compile_units_with_sink(
+    header: &str,
+    units: &[(String, String)],
+    output_path: &Path,
+    opts: &BuildOptions,
+    target: Option<&str>,
+    clang: &Clang,
+    sink: &dyn CodegenSink,
+) -> Result<Clang, BuildError> {
     validate(opts, target)?;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1113,6 +1128,10 @@ pub fn compile_units(
             staged.len()
         );
     }
+    sink.compiling(staged.len(), cache_hits);
+    // Completion counter for the progress sink: cache hits count too, so
+    // `file_done` always runs 1..=total regardless of the hit ratio.
+    let completed = std::sync::atomic::AtomicUsize::new(0);
     let results: Vec<Result<PathBuf, BuildError>> = pool.install(|| {
         use rayon::prelude::*;
         staged
@@ -1120,6 +1139,7 @@ pub fn compile_units(
             .map(|(src_path, obj, cached)| {
                 // Cache hit: no source staged, object already on disk.
                 if src_path.as_os_str().is_empty() {
+                    sink.file_done(completed.fetch_add(1, Ordering::Relaxed) + 1);
                     return Ok(obj.clone());
                 }
                 let mut cmd = Command::new(&clang.path);
@@ -1151,6 +1171,7 @@ pub fn compile_units(
                 if let Some(dst) = cached {
                     store_object(dst, obj);
                 }
+                sink.file_done(completed.fetch_add(1, Ordering::Relaxed) + 1);
                 Ok(obj.clone())
             })
             .collect()
@@ -1159,6 +1180,7 @@ pub fn compile_units(
     for r in results {
         objs.push(r?);
     }
+    sink.linking();
     let mut cmd = Command::new(&clang.path);
     if clang.zig {
         cmd.arg("cc");
@@ -1183,6 +1205,7 @@ pub fn compile_units(
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         return Err(BuildError::CompileFailed { stderr });
     }
+    sink.linked();
     Ok(clang.clone())
 }
 

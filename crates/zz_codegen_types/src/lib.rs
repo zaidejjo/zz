@@ -341,6 +341,39 @@ impl From<std::io::Error> for BuildError {
     }
 }
 
+/// Progress notifications from the codegen pipeline (#629).
+///
+/// The native backend reports *what it is doing* instead of leaving the
+/// caller to guess: the CLI renders these as build steps, everything else
+/// passes [`NoopSink`]. Every method has a no-op default so an
+/// implementation only overrides the boundaries it cares about.
+///
+/// Contract: methods are called from the thread driving the build, except
+/// [`CodegenSink::file_done`], which is called from the compiler worker
+/// pool — implementations must be `Sync` and must not block for long.
+pub trait CodegenSink: Sync {
+    /// Generated code is being produced from the typed program.
+    fn generating(&self) {}
+    /// Code generation finished, yielding `files` translation units.
+    fn generated(&self, _files: usize) {}
+    /// Compilation starts: `total` units, of which `cached` already have a
+    /// reusable object on disk.
+    fn compiling(&self, _total: usize, _cached: usize) {}
+    /// One translation unit finished (compiled now or served from cache).
+    /// `done` is 1-based and monotonically increasing up to `total`.
+    fn file_done(&self, _done: usize) {}
+    /// Objects are being linked into the output binary.
+    fn linking(&self) {}
+    /// The binary exists and is executable.
+    fn linked(&self) {}
+}
+
+/// Sink that ignores every notification; used by every caller that does not
+/// render build progress (`zz run --native`, tests, benchmarks, plugins).
+pub struct NoopSink;
+
+impl CodegenSink for NoopSink {}
+
 /// Mangle a dotted ZZ name into a C identifier: replace `.` with `__` and
 /// any non-alphanumeric/underscore character with `_`.
 pub fn mangle(name: &str) -> String {
