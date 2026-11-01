@@ -345,8 +345,13 @@ impl Lowerer {
             .map(|ns| format!("void zz_init_{}(void);\n", mangle(ns)))
             .collect();
 
+        // `_static_arena` is a process-global arena used by unit code
+        // (e.g. collection array initializers). In single-TU mode it's
+        // declared `static` in `globals_decl`; in unit mode every TU sees
+        // the shared header, so declare it `extern` here and define it
+        // once in the entry unit.
         let header = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals (extern) ----\n{glob_ext}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}{init_fwd}",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals (extern) ----\n{glob_ext}extern zz_arena _static_arena;\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}{init_fwd}",
             runtime_h = RUNTIME_H,
         );
 
@@ -419,7 +424,7 @@ impl Lowerer {
         };
         // with_main first: zz_call_main calls it (single-TU path splices
         // it before zz_call_main the same way).
-        let entry_code = with_main + &entry_glue;
+        let entry_code = "zz_arena _static_arena;\n".to_string() + &with_main + &entry_glue;
         match units.iter_mut().find(|u| u.ns == entry_ns) {
             Some(u) => {
                 u.code.push_str(&entry_code);
