@@ -350,14 +350,28 @@ impl<'a> Lexer<'a> {
                 c if is_ident_start(c) => self.lex_ident(),
                 ';' => {
                     // `;` is no longer valid syntax. Report an error with a
-                    // safe fix-it to delete it so `zz check --fix` / `zz fix`
-                    // can auto-remove it.
+                    // safe fix-it. If `;` sits at end of line (followed by a
+                    // newline or EOF) the newline already terminates the
+                    // statement, so just delete it; otherwise replace `;`
+                    // with a newline so `x := 1; y := 2` stays two separate
+                    // statements instead of one broken line. `zz check --fix`
+                    // / `zz fix` can auto-apply this without breaking code.
                     let start = self.pos;
+                    let after = self.peek_char_at(1);
+                    let end_of_line = matches!(after, Some('\n') | None);
                     self.bump_char();
                     let span = Span::new(start as u32, self.pos as u32);
+                    let (replacement, message) = if end_of_line {
+                        ("".to_string(), format!("remove this `{c}`"))
+                    } else {
+                        (
+                            "\n".to_string(),
+                            format!("replace this `{c}` with a newline"),
+                        )
+                    };
                     self.errors.push(
                         error_at(format!("unexpected character `{c}`"), span)
-                            .with_fixit(FixIt::safe(span, "", format!("remove this `{c}`"))),
+                            .with_fixit(FixIt::safe(span, replacement, message)),
                     );
                 }
                 _ => {

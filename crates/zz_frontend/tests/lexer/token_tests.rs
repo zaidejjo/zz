@@ -50,20 +50,44 @@ fn semicolon_is_rejected() {
         "expected `;` to be an unexpected character error, got errors: {:?}",
         lexed.errors
     );
-    // A safe fix-it to delete the `;` must be attached so `zz fix` can
-    // auto-remove it.
+    // A safe fix-it to replace the `;` with a newline must be attached so
+    // `zz fix` can auto-remove it without breaking statement separation.
+    assert!(
+        lexed.errors.iter().any(|e| {
+            e.fixits
+                .iter()
+                .any(|f| f.message.contains("replace this") && f.replacement == "\n")
+        }),
+        "expected a fix-it replacing `;` with `\\n`, got errors: {:?}",
+        lexed.errors
+    );
+    // No StmtEnd token should be emitted for `;`.
+    let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+    assert!(!kinds.contains(&zz_frontend::token::TokenKind::StmtEnd));
+}
+
+#[test]
+fn semicolon_at_end_of_line_is_removed() {
+    // `;` at end of line is followed by `\n`, which already terminates the
+    // statement, so the fix-it just deletes the `;`.
+    let lexed = zz_frontend::lex("x := 1;\ny := 2\n");
+    assert!(
+        lexed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("unexpected character `;`")),
+        "expected `;` error, got errors: {:?}",
+        lexed.errors
+    );
     assert!(
         lexed.errors.iter().any(|e| {
             e.fixits
                 .iter()
                 .any(|f| f.message.contains("remove this") && f.replacement.is_empty())
         }),
-        "expected a fix-it to remove `;`, got errors: {:?}",
+        "expected end-of-line fix-it to delete `;`, got errors: {:?}",
         lexed.errors
     );
-    // No StmtEnd token should be emitted for `;`.
-    let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
-    assert!(!kinds.contains(&zz_frontend::token::TokenKind::StmtEnd));
 }
 
 #[test]
