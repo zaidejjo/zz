@@ -1457,35 +1457,21 @@ fn build_and_install_bin(
         "installing {bin_name} from {}",
         project_dir.display()
     ));
-    crate::ui::step(1, 3, &format!("Building {} (release)", entry.display()));
-    // The clang link can run for minutes silently — spin with elapsed
-    // time so a big tool build never looks frozen.
-    let spinner = crate::ui::Spinner::start("Compiling release");
-    let built = match zz_build::build_release(
-        entry,
-        zz_build::BuildMode::Release,
-        &zz_build::ReleaseOptions::default(),
-    ) {
-        Ok(built) => {
-            let size = std::fs::metadata(&built).map(|m| m.len()).unwrap_or(0);
-            spinner.finish(&format!("built {}", crate::ui::human_bytes(size)));
-            built
-        }
-        Err(e) => {
-            drop(spinner);
-            return Err(e);
-        }
+    crate::ui::step(1, 2, &format!("Building {} (release)", entry.display()));
+    // Nested steps: the install pipeline owns the `[i/2]` numbering (#629).
+    let progress = std::sync::Arc::new(crate::build_progress::BuildProgress::new(
+        crate::build_progress::Style::Nested,
+    ));
+    let rel = zz_build::ReleaseOptions {
+        observer: zz_build::ObserverSlot::new(progress.clone()),
+        ..zz_build::ReleaseOptions::default()
     };
-    crate::ui::progress(
-        2,
-        3,
-        &format!(
-            "built {}",
-            crate::ui::human_bytes(std::fs::metadata(&built).map(|m| m.len()).unwrap_or(0))
-        ),
-    );
+    let built = zz_build::build_release(entry, zz_build::BuildMode::Release, &rel)?;
+    let size = std::fs::metadata(&built).map(|m| m.len()).unwrap_or(0);
+    progress.after_cache_hit(&built, size);
+    crate::ui::ok(&format!("built {}", crate::ui::human_bytes(size)));
 
-    crate::ui::step(3, 3, "Installing into ~/.zz/bin");
+    crate::ui::step(2, 2, "Installing into ~/.zz/bin");
     let bin_dir = zz_pm::paths::bin_dir();
     std::fs::create_dir_all(&bin_dir)
         .map_err(|e| format!("cannot create {}: {e}", bin_dir.display()))?;
