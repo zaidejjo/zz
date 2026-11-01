@@ -255,7 +255,14 @@ impl BuildTarget {
         if same {
             return None;
         }
-        let shown = entry.strip_prefix(root).unwrap_or(entry);
+        // `root` is canonicalized by `find_project_root`; canonicalize
+        // `entry` too so `strip_prefix` matches on hosts where symlinks
+        // (e.g. macOS `/var` -> `/private/var`) make the two spellings
+        // differ (#629).
+        let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.clone());
+        let shown = entry_canon
+            .strip_prefix(root)
+            .unwrap_or(entry_canon.as_path());
         Some(shown.display().to_string())
     }
 
