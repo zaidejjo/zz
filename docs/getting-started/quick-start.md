@@ -3,7 +3,7 @@
 Create `hello.zz`:
 
 ```zz
-name := input("What is your name? ")
+name := "World"
 println("Hello, {name}!")
 ```
 
@@ -18,6 +18,21 @@ Build a real binary (needs clang or `zig cc`):
 ```bash
 zz build hello.zz
 ./hello
+```
+
+## From zero to a project
+
+```bash
+# Create a new CLI project (templates: cli | lib | web | plugin)
+zz new my-app --template cli
+cd my-app
+
+# Run the generated src/main.zz (VM, fast)
+zz run
+
+# Build a native binary
+zz build
+./my-app
 ```
 
 ## The 60-second tour
@@ -48,10 +63,35 @@ match int("nope") {
 }
 ```
 
+ZZ's sweet spot — an HTTP server in a few lines:
+
+```zz
+import std.http
+
+func main() {
+    s := http.server()
+    s = s.route("GET", "/", |req| "ok")
+    s = s.route("GET", "/users/:id",
+        |req| "user-{http.param(req, "id") ?? "?"}")
+    http.listen(s, 8080)
+}
+```
+
+Run it:
+
+```bash
+zz run main.zz
+```
+
+Then `curl http://localhost:8080/` and `curl http://localhost:8080/users/42`.
+
+## Verify
+
 ```bash
 zz check hello.zz   # type-check, rich errors + suggestions
 zz fmt hello.zz     # format in place
 zz eval "1 + 2"     # quick eval, prints 3
+zz test             # run @test functions (uses ./tests/ if present, else .)
 ```
 
 Next: [Project layout](project-layout.md) and [REPL tour](repl-tour.md).

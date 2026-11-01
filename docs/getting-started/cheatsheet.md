@@ -1,47 +1,83 @@
 # Cheatsheet — one page, zero fluff
 
+Every code block below compiles. Run the ZZ snippets with `zz run` and the shell commands in your terminal.
+
 ## New Project
+
 ```bash
-zz new project   # creates new zz project
+# Create a new project in a fresh folder (templates: cli | lib | web | plugin)
+zz new my-app --template cli
+cd my-app
+
+# Or initialize zz.toml + src/main.zz in the current folder
+zz init --template cli
+
+# Add a dependency, then install it into vendor/ + zz.lock
+zz add my-pkg@1.2.3
+zz install
+
+# Health check (run after install)
+zz setup          # wire PATH + shell completions (bash/zsh/fish/powershell)
+zz doctor         # audit binary, clang, shell, git, registry
+zz doctor --fix   # auto-fix what it can
 ```
 
-
-## Run / Build
+## Run / Build / Eval
 
 ```bash
+zz run                    # type-check + run src/main.zz (VM, no artifacts)
+zz run hello.zz           # run a single file (VM)
+zz run --watch hello.zz   # hot-reload on save (VM only)
 
-zz run [main.zz]             # runs the code in the ZVM(zz virtual machine)
-zz build [main.zz]           # build the code into native binary
-zz build --release [main.zz] # builds an optimized native binary
+zz eval "1 + 2"           # evaluate an expression, prints 3
 
-zz eval "1 + 2"              # execute code diretly
+zz build hello.zz           # compile a native binary (needs clang or zig cc)
+zz build --release hello.zz # optimized native binary
+zz build --emit-ir -o out.zzc   # emit .zzc bytecode instead of a binary
 ```
 
-## Check / Format
-```bash
+## Check / Fix / Format
 
-zz check [src]   # check the code for any bugs/warnings
-zz fix src/      # fix some bugs like unusued imports/variables/functions/...
-zz fmt src/      # format the code
+```bash
+zz check hello.zz   # type-check, rich errors + suggestions (fast, cached)
+zz check src/       # check a whole directory
+
+zz fix hello.zz     # apply safe auto-fixes (unused imports, vars, functions...)
+
+zz fmt hello.zz     # format in place
+zz fmt -c src/      # check formatting only (CI-friendly)
 ```
 
 ## Tests / Benchmarking
+
 ```bash
-zz test    # runs the tests that have the @test decorator
-zz bensh   # runs a benshmark that have the @bensh decorator
+zz test           # run @test functions (uses ./tests/ if it holds .zz, else .)
+zz test hello.zz  # test a single file
 
-
+zz bench          # run @bench functions and report timings
+zz cover hello.zz # run a program and report line coverage
 ```
 
-## Vars / fns
+## Vars / Funcs / Closures / Pipelines
 
 ```zz
-x := 42             // auto datatype
-pi: float = 3.14    // explicit datatype
-func add(a: int, b: int) -> int { 
-  return a + b 
+// `:=` infers the type; `: T =` pins an explicit type.
+x := 42              // x: int
+pi: float = 3.14     // pi: float
+
+// Named functions return through `return`.
+func add(a: int, b: int) -> int {
+    return a + b
 }
-f := |x: int| x * 2 // lamda function
+
+// Closures are anonymous functions; `|_|` ignores its argument.
+f := |x: int| x * 2     // f: func(int) -> int
+println(f(21))          // 42
+
+// Pipelines pass the left value as the first argument to the right call.
+result := "  Hello World  "
+    |> str.trim()       // "Hello World"
+    |> str.to_upper()   // "HELLO WORLD"
 ```
 
 ## Strings
@@ -50,65 +86,123 @@ f := |x: int| x * 2 // lamda function
 name := "zaidejjo"
 pi := 3.14159
 
-println("hi {name}")              // hi zaidejjo
-print("{{name}}")                 // {name}
-print(`raw {"a":1}`)              // raw {"a":1}
-print("PI: {pi:.2f}")             // PI: 3.14
-print("  hi  ".trim().to_upper()) // HI
+println("hi {name}")          // hi zaidejjo  (interpolation)
+print("{{name}}")             // {name}      (escaped brace)
+print(`raw {"a": 1}`)         // raw {"a": 1} (backtick = raw, no interpolation)
+print("PI: {pi:.2f}")         // PI: 3.14    (format specifier)
+print("  hi  ".trim().to_upper())  // HI        (method chaining)
 ```
 
 ## Collections
 
 ```zz
-[1, 2, 3] | {"a": 1} | (7, "seven")
-arr[1:3] | arr[-1] | [x * 2 for x in range(10) if x % 2 == 0]
-range(5) |> map(|x| x * 2) |> filter(|x| x > 4)
+// Arrays are values; slicing is [start:end], negative index counts from the end.
+arr := [1, 2, 3, 4, 5]
+arr[1:3]      // [2, 3]   (elements at index 1 and 2)
+arr[-1]       // 5        (last element)
+arr[0]        // 1        (first element)
+
+// Dicts are {key: value}; lookup returns the value directly.
+d := {"a": 1, "b": 2}
+d["a"]        // 1
+
+// Tuples are fixed-size, heterogeneous groups.
+p := (7, "seven")     // (int, str)
+p[0]                  // 7
+p[1]                  // "seven"
+
+// Ranges: range(stop), range(start, stop), range(start, stop, step).
+range(5)              // 0..5  = [0, 1, 2, 3, 4]
+range(1, 5)           // 1..5  = [1, 2, 3, 4]
+range(1, 10, 2)       // [1, 3, 5, 7, 9]
+
+// Comprehension: build a new array with a filter.
+evens := [x * 2 for x in range(10) if x % 2 == 0]  // [0, 4, 8, 12, 16]
+
+// Pipeline over collections (each step passes left as first arg).
+range(5) |> map(|x| x * 2) |> filter(|x| x > 4)    // [6, 8]
 ```
 
-## Match / errors
+## Match / Errors / Fallbacks
 
 ```zz
+// `match` must handle every case.
+s := "42"
 match int(s) {
-    .some(v) => println(v),
-    .none    => println("bad"),
+    .some(v) => println(v),      // parsed OK
+    .none    => println("bad"),  // parse failed
 }
-val := int(s)?            // propagate
-port := int(s) ?? 80      // fallback
+
+// `?` propagates a Result/Option error out of the current function.
+func parse_age(s: str) -> Option<int> {
+    val := int(s)?                   // returns early if .none
+    return .some(val)
+}
+
+// `??` falls back to a default when the value is .none.
+port := int("nope") ?? 80            // 80 if int("nope") is .none
 ```
 
-## Structs / enums
+## Structs / Enums
 
 ```zz
 struct Point { x: int, y: int }
-p := Point{ x: 1, y: 2 }
-enum T { Eof, IntLit(int) }
+p := Point{ x: 1, y: 2 }     // construct with named fields
+p.x                          // 1
+
+enum T { Eof, IntLit(int) }   // unit variant + payload variant
 t := T.IntLit(42)
+
+match t {
+    .Eof        => println("end"),
+    .IntLit(n)  => println("value {n}"),
+}
 ```
 
 ## Modules
 
 ```zz
-import std.math
-import std.str
-import app.math
-import app.math(add as f)
+import std.math                  // import a whole stdlib module
+import std.str                   // string helpers
+import app.math                  // import a package module as math.*
+import app.math(add as f)       // selective import: bring `add` in as `f`
 ```
 
 ## HTTP / fs / concurrency
 
 ```zz
-s := http.server()
-s = http.route(s, "GET", "/", |req| "ok")
-http.listen(s, 8080)
-fs.read("f.txt") // match .ok/.err
+import std.http
+import std.fs
+import std.chan
+import std.task
+
+// A complete one-file HTTP server.
+func main() {
+    s := http.server()
+    s = s.route("GET", "/", |req| "ok")
+    s = s.route("GET", "/users/:id", |req| "user-{http.param(req, "id") ?? "?"}")
+    http.listen(s, 8080)   // blocks; graceful drain on SIGINT/SIGTERM
+}
+
+// Read a file (fallible: handle .ok / .err).
+match fs.read("f.txt") {
+    .ok(content) => println(content),
+    .err(e)      => println("read failed: {e}"),
+}
+
+// Channels: unbounded, lock-free, never block the sender.
 c := chan()
-chan.send(c, 1)
-v: int = chan.recv(c)
+chan.send(c, 42)
+v: int = chan.recv(c)        // blocks until a value arrives
+
+// Tasks: green threads with snapshot isolation (no shared mutable state).
 h := task.spawn(|_| { 42 })
+r: int = task.join(h)        // 42
 ```
 
 ## Where next
 
-- Learning: [Overview](../language/overview.md).
-- Tables: [Operators](../language/operators.md), [Stdlib](../stdlib/overview.md).
-- Stuck: [Errors](../guides/errors.md), [FAQ](../guides/faq-glossary.md).
+- Learning: [Language overview](../language/overview.md).
+- Tables: [Operators](../language/operators.md), [Stdlib overview](../stdlib/overview.md).
+- Stuck: [Error catalog](../guides/errors.md), [FAQ & glossary](../guides/faq-glossary.md).
+- Full CLI: [CLI reference](../tooling/cli-reference.md).

@@ -2,6 +2,7 @@
 
 - [Docs home](README.md)
 - Getting started
+  - [Index](getting-started/index.md)
   - [Install](getting-started/install.md)
   - [Quick start](getting-started/quick-start.md)
   - [Project layout](getting-started/project-layout.md)
