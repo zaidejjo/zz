@@ -1,19 +1,19 @@
 # Cheatsheet — one page, zero fluff
 
-Every code block below compiles. Run the ZZ snippets with `zz run` and the shell commands in your terminal.
-
 ## New Project
 
 ```bash
 # Create a new project in a fresh folder (templates: cli | lib | web | plugin)
-zz new my-app --template cli
+zz new my-app # also you can use the --template cli
 cd my-app
 
 # Or initialize zz.toml + src/main.zz in the current folder
-zz init --template cli
+zz init  #also you can use --template cli
 
-# Add a dependency, then install it into vendor/ + zz.lock
-zz add my-pkg@1.2.3
+# Add a dependency and install it + zz.lock
+zz add rand@1.2.3
+
+# install the dependency in the zz.toml file
 zz install
 
 # Health check (run after install)
@@ -25,15 +25,14 @@ zz doctor --fix   # auto-fix what it can
 ## Run / Build / Eval
 
 ```bash
-zz run                    # type-check + run src/main.zz (VM, no artifacts)
-zz run hello.zz           # run a single file (VM)
-zz run --watch hello.zz   # hot-reload on save (VM only)
+zz run                      # type-check + run src/main.zz (VM, no artifacts)
+zz run hello.zz             # run a single file (VM)
+zz run --watch hello.zz     # hot-reload on save (VM only)
 
-zz eval "1 + 2"           # evaluate an expression, prints 3
+zz eval "1 + 2"             # evaluate an expression, prints 3
 
 zz build hello.zz           # compile a native binary (needs clang or zig cc)
 zz build --release hello.zz # optimized native binary
-zz build --emit-ir -o out.zzc   # emit .zzc bytecode instead of a binary
 ```
 
 ## Check / Fix / Format
@@ -168,36 +167,47 @@ import app.math                  // import a package module as math.*
 import app.math(add as f)       // selective import: bring `add` in as `f`
 ```
 
-## HTTP / fs / concurrency
+## HTTP
 
 ```zz
 import std.http
-import std.fs
-import std.chan
-import std.task
 
 // A complete one-file HTTP server.
 func main() {
-    s := http.server()
-    s = s.route("GET", "/", |req| "ok")
-    s = s.route("GET", "/users/:id", |req| "user-{http.param(req, "id") ?? "?"}")
-    http.listen(s, 8080)   // blocks; graceful drain on SIGINT/SIGTERM
+    s := http.server()                                    // create server handle
+    s = s.route("GET", "/", |req| "ok")                   // route GET / to a handler
+    s = s.route("GET", "/users/:id",                      // route with a path param
+        |req| "user-{http.param(req, "id") ?? "?"}")      // read the :id param with fallback
+    http.listen(s, 8080)                                  // blocks; graceful drain on SIGINT/SIGTERM
 }
+```
 
-// Read a file (fallible: handle .ok / .err).
+## Filesystem (fs)
+
+```zz
+import std.fs
+
+// Read a file — fallible, so handle both .ok and .err.
 match fs.read("f.txt") {
-    .ok(content) => println(content),
-    .err(e)      => println("read failed: {e}"),
+    .ok(content) => println(content),   // success path
+    .err(e)      => println("read failed: {e}"),  // error path
 }
+```
+
+## Concurrency (chan + task)
+
+```zz
+import std.chan
+import std.task
 
 // Channels: unbounded, lock-free, never block the sender.
 c := chan()
-chan.send(c, 42)
-v: int = chan.recv(c)        // blocks until a value arrives
+chan.send(c, 42)                      // push a value
+v: int = chan.recv(c)                 // blocks until a value arrives
 
 // Tasks: green threads with snapshot isolation (no shared mutable state).
-h := task.spawn(|_| { 42 })
-r: int = task.join(h)        // 42
+h := task.spawn(|_| { 42 })           // spawn a green thread
+r: int = task.join(h)                 // wait for the result — 42
 ```
 
 ## Where next
