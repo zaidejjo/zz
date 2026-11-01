@@ -409,6 +409,50 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
     }
 }
 
+/// Graduated native failures — bugs that have been fixed and removed from
+/// `known_native_failures()`. Kept as a reference so we can track the project's
+/// progress and avoid re-discovering the same fixes.
+const GRADUATED_NATIVE_FAILURES: &[(&str, &str)] = &[
+    // "frame_slots" — fixed by unboxed-calls emitting raw comparisons
+    // ("frame_slots", "raw zz_value in scalar comparison `(v0 > 0)` → verifiably-raw comparisons"),
+    // "struct_impl" — fixed by boxing struct globals (issue #215)
+    // ("struct_impl", "unboxed struct returned/fielded as zz_value and vice versa"),
+    // "destructuring" — fixed (verified 2026-10-03, now runs as strict parity)
+    // ("destructuring", "top-level tuple values printed empty natively"),
+    // "struct_embedding" — fixed by boxing struct globals (issue #215)
+    // ("struct_embedding", "global unboxed struct passed raw to display builtins"),
+    // "selective_import" — fixed (native now matches VM)
+    // ("selective_import", "imported const binding printed empty natively"),
+    // "multi_selective" — fixed (native now matches VM)
+    // ("multi_selective", "imported const binding printed empty natively"),
+    // "symbol_alias" — fixed (native now matches VM)
+    // ("symbol_alias", "imported const binding printed empty natively"),
+    // "wildcard_import" — fixed (native now matches VM)
+    // ("wildcard_import", "imported const binding printed empty natively"),
+    // "http_tls_cert" — fixed (now fails loudly like VM)
+    // ("http_tls_cert", "native exited 0 via silent-unit leniency"),
+    // "main_result_err" — fixed (now fails loudly like VM)
+    // ("main_result_err", "native exited 0 via silent-unit leniency"),
+    // "pg_connect_refused" — fixed (now fails loudly like VM)
+    // ("pg_connect_refused", "native exited 0 via silent-unit leniency"),
+    // "http_middleware_p2" — implemented in C, runs as strict parity
+    // ("http_middleware_p2", "serve_dir_at"),
+    // "http_static_p2" — implemented in C, runs as strict parity
+    // ("http_static_p2", "serve_dir"),
+    // "http_bytes_p3" — implemented in C, runs as strict parity
+    // ("http_bytes_p3", "body_bytes"),
+    // "http_tls_p3" — still needs rustls in C (VM-only in AOT)
+    // ("http_tls_p3", "listen_tls + fetch_insecure are VM-only"),
+    // "http_hijack_p3" — still needs WebSocket handshake in C
+    // ("http_hijack_p3", "hijack is VM-only"),
+    // "fs_comprehensive" — scratch paths are masked by mask_scratch_paths
+    // ("fs_comprehensive", "PID-embedded temp paths"),
+    // "net_unix_test" — sandbox limitation (not a bug, env issue)
+    // ("net_unix_test", "sandbox: native TCP unix socket shutdown fails"),
+    // "net_tls_test" — sandbox limitation (not a bug, env issue)
+    // ("net_tls_test", "sandbox: native TCP/TLS socket shutdown fails"),
+];
+
 // ---------------------------------------------------------------------------
 // Parity assertion
 // ---------------------------------------------------------------------------
@@ -731,11 +775,16 @@ macro_rules! parity_known_failure {
                 // Test passes — known bug is still present.
             } else {
                 // Native unexpectedly succeeded! Bug is fixed.
+                // Auto-suggest removal from known_native_failures() and addition to
+                // GRADUATED_NATIVE_FAILURES for future reference.
                 panic!(
                     "FIXED! [{}]: native now matches VM.\n\
-                     Remove this fixture from known_native_failures() in dual_engine_parity.rs.\n\
-                     Bug was: {bug}",
-                    path.display()
+                     // TODO: Remove from known_native_failures() and add to GRADUATED_NATIVE_FAILURES.\n\
+                     // Fixture: {file}\n\
+                     // Bug was: {bug}\n\
+                     // Test passes — known bug has been resolved; fixture can now run as strict parity.",
+                    path.display(),
+                    file = path.file_stem().unwrap_or_default().to_string_lossy(),
                 );
             }
         }
