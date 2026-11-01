@@ -53,6 +53,8 @@ see [Test](../stdlib/test.md).
 Newline at bracket depth 0, or `;`:
 
 ```zz
+func add(a: int, b: int) -> int { return a + b }
+
 x := 1
 y := 2
 x := 1; y := 2  // same

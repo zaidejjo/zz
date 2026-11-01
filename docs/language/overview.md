@@ -19,7 +19,6 @@ ZZ is a small systems language for services, CLIs, and data pipelines.
 
 ```zz
 import std.http
-import std.json
 
 struct User { name: str, age: int }
 
@@ -33,7 +32,7 @@ func main() {
     println(names) // ["Ada"]
 
     s := http.server()
-    s = http.route(s, "GET", "/", |req| "ok")
+    s = s.route("GET", "/", |req| "ok")
     println("routes ready")
 }
 ```

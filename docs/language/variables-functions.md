@@ -45,8 +45,9 @@ Cannot chain compound assignment (`x += y += z` is an error).
 
 Named functions return a value **only** through `return`: the last
 expression of a `func` body is discarded, and a non-`unit` signature that
-can fall through is an error. Closures keep their implicit tail, so
-`|x| x * 2` still works.
+can fall through is an error. Closures keep their implicit tail. See
+[Explicit Return Rules](#explicit-return-rules) below for the full table
+and fixit behavior.
 
 ```zz
 func abs(x: int) -> int {
@@ -125,7 +126,7 @@ Works for stdlib too: `"hi".to_upper()`, `[3, 1, 2].sort()`, `server.route(...)`
 
 Deep reference: [syntax.md](../syntax.md) sections Declarations, Functions, Expressions.
 
-## Explicit Return Rules
+## Explicit Return Rules {#explicit-return-rules}
 
 Named functions (`func`, `@test`, `impl` methods) return a value **only**
 through `return`. The body's trailing expression is discarded — it does
@@ -193,8 +194,8 @@ Closures and block expressions keep their implicit tail — they are not
 affected by the explicit-return rule:
 
 ```zz
-let double = |x: int| x * 2;        // implicit tail: returns int
-let result = { let x = 5; x + 3 };   // block: returns 8
+double := |x: int| x * 2;        // implicit tail: returns int
+result := { x := 5; x + 3 };   // block: returns 8
 ```
 
 Only `func` / `@test` / `impl` methods require explicit `return`.
