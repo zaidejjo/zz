@@ -294,7 +294,7 @@ fn if_let() {
 #[test]
 fn try_unwraps_option() {
     assert_eq!(
-        eval_src("func f() -> Option<int> { x := .some(1)?; return .some(x) }\nf()").unwrap(),
+        eval_src("func f() -> Option<int> { x := .some(1)?\nreturn .some(x) }\nf()").unwrap(),
         Value::Option(Some(Box::new(Value::Int(1))))
     );
 }
@@ -302,7 +302,7 @@ fn try_unwraps_option() {
 #[test]
 fn try_propagates_none() {
     assert_eq!(
-        eval_src("func f() -> Option<int> { x := .none?; return .some(x) }\nf()").unwrap(),
+        eval_src("func f() -> Option<int> { x := .none?\nreturn .some(x) }\nf()").unwrap(),
         Value::Option(None)
     );
 }
@@ -310,7 +310,7 @@ fn try_propagates_none() {
 #[test]
 fn try_propagates_err() {
     assert_eq!(
-        eval_src("func f() -> Result<int, str> { x := .err(\"boom\")?; return .ok(x) }\nf()")
+        eval_src("func f() -> Result<int, str> { x := .err(\"boom\")?\nreturn .ok(x) }\nf()")
             .unwrap(),
         Value::Result(Box::new(Err(Value::Str("boom".to_string().into()))))
     );
@@ -541,14 +541,14 @@ fn for_over_array_sums() {
 #[test]
 fn for_break_stops_loop() {
     let v =
-        eval_src("found := 0\nfor i in 0..10 { if i == 3 { found = i; break } }\nfound").unwrap();
+        eval_src("found := 0\nfor i in 0..10 { if i == 3 { found = i\nbreak } }\nfound").unwrap();
     assert_eq!(v, Value::Int(3));
 }
 
 #[test]
 fn for_continue_skips_iteration() {
     let v =
-        eval_src("count := 0\nfor i in 0..5 { if i == 2 { continue }; count = count + 1 }\ncount")
+        eval_src("count := 0\nfor i in 0..5 { if i == 2 { continue }\ncount = count + 1 }\ncount")
             .unwrap();
     assert_eq!(v, Value::Int(4));
 }
@@ -591,7 +591,7 @@ fn continue_outside_loop_errors() {
 
 #[test]
 fn while_loop_with_break() {
-    let v = eval_src("x := 0\nwhile x < 10 { x = x + 1; if x == 3 { break } }\nx").unwrap();
+    let v = eval_src("x := 0\nwhile x < 10 { x = x + 1\nif x == 3 { break } }\nx").unwrap();
     assert_eq!(v, Value::Int(3));
 }
 

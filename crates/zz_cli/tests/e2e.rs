@@ -1136,7 +1136,7 @@ fn e2e_embed_vm_serves_assets() {
 
 #[test]
 fn e2e_print_is_variadic_like_other_languages() {
-    let (exit, stdout, stderr) = run_zz_eval("print(\"a\", 1, true); println(\"x\", 2.5)");
+    let (exit, stdout, stderr) = run_zz_eval("print(\"a\", 1, true)\nprintln(\"x\", 2.5)");
     assert_eq!(exit, 0, "stderr: {stderr}");
     assert_eq!(stdout, "a 1 truex 2.5\n");
 }
@@ -1157,7 +1157,7 @@ fn e2e_eval_basic_arithmetic() {
 
 #[test]
 fn e2e_eval_string_interpolation() {
-    let (exit, stdout, _) = run_zz_eval("name := \"ZZ\"; \"Hello, {name}!\"");
+    let (exit, stdout, _) = run_zz_eval("name := \"ZZ\"\n\"Hello, {name}!\"");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "Hello, ZZ!");
 }
@@ -1165,7 +1165,7 @@ fn e2e_eval_string_interpolation() {
 #[test]
 fn e2e_eval_closure() {
     let (exit, stdout, _) =
-        run_zz_eval("double := |x: int| x * 2; nums := [1, 2, 3]; map(nums, double)");
+        run_zz_eval("double := |x: int| x * 2\nnums := [1, 2, 3]\nmap(nums, double)");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "[2, 4, 6]");
 }
@@ -1173,7 +1173,7 @@ fn e2e_eval_closure() {
 #[test]
 fn e2e_eval_pipeline() {
     let (exit, stdout, _) =
-        run_zz_eval("inc := |x: int| x + 1; dbl := |x: int| x * 2; 5 |> inc |> dbl");
+        run_zz_eval("inc := |x: int| x + 1\ndbl := |x: int| x * 2\n5 |> inc |> dbl");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "12");
 }
@@ -1181,14 +1181,14 @@ fn e2e_eval_pipeline() {
 #[test]
 fn e2e_eval_option() {
     let (exit, stdout, _) =
-        run_zz_eval("val := .some(42); match val { .some(v) => v, .none => 0 }");
+        run_zz_eval("val := .some(42)\nmatch val { .some(v) => v, .none => 0 }");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "42");
 }
 
 #[test]
 fn e2e_eval_elvis() {
-    let (exit, stdout, _) = run_zz_eval("none_val: Option<int> = .none; none_val ?? 99");
+    let (exit, stdout, _) = run_zz_eval("none_val: Option<int> = .none\nnone_val ?? 99");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "99");
 }
@@ -1211,7 +1211,7 @@ fn e2e_eval_elvis_result_err() {
 fn e2e_eval_pipe_elvis_precedence() {
     // | > binds tighter than ??, so `val ?? 0 |> double()` = `val ?? (0 |> double())`
     let (exit, stdout, _) =
-        run_zz_eval("double := |x: int| x * 2; val: Option<int> = .some(21); val ?? 0 |> double()");
+        run_zz_eval("double := |x: int| x * 2\nval: Option<int> = .some(21)\nval ?? 0 |> double()");
     assert_eq!(exit, 0);
     // val is Some(21), so ?? returns 21 directly (pipe is on the fallback side)
     assert_eq!(stdout.trim(), "21");
@@ -1241,7 +1241,7 @@ fn e2e_eval_list_comprehension() {
 #[test]
 fn e2e_eval_default_params() {
     let (exit, stdout, _) =
-        run_zz_eval("func greet(name: str, greeting: str = \"Hello\") -> str { return \"{greeting}, {name}\" }; greet(\"ZZ\")");
+        run_zz_eval("func greet(name: str, greeting: str = \"Hello\") -> str { return \"{greeting}, {name}\" }\ngreet(\"ZZ\")");
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "Hello, ZZ");
 }
@@ -1252,28 +1252,28 @@ fn e2e_eval_default_params() {
 #[test]
 fn e2e_eval_string_comparison_if() {
     // Verify string comparison before block parses AND runs correctly.
-    let (exit, stdout, _) = run_zz_eval(r#"x := "hello"; if x == "hello" { "yes" } else { "no" }"#);
+    let (exit, stdout, _) = run_zz_eval(r#"x := "hello"\nif x == "hello" { "yes" } else { "no" }"#);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "yes");
 }
 
 #[test]
 fn e2e_eval_string_interpolation_still_works() {
-    let (exit, stdout, _) = run_zz_eval(r#"greeting := "Hi"; name := "ZZ"; "{greeting}, {name}!""#);
+    let (exit, stdout, _) = run_zz_eval(r#"greeting := "Hi"\nname := "ZZ"\n"{greeting}, {name}!""#);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "Hi, ZZ!");
 }
 
 #[test]
 fn e2e_eval_unspaced_string_block() {
-    let (exit, stdout, _) = run_zz_eval(r#"x := "hello"; if x == "hello"{ "yes" }else{ "no" }"#);
+    let (exit, stdout, _) = run_zz_eval(r#"x := "hello"\nif x == "hello"{ "yes" }else{ "no" }"#);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "yes");
 }
 
 #[test]
 fn e2e_eval_multi_interpolation() {
-    let (exit, stdout, _) = run_zz_eval(r#"a := "Hello"; b := "World"; "{a} {b}!""#);
+    let (exit, stdout, _) = run_zz_eval(r#"a := "Hello"\nb := "World"\n"{a} {b}!"#);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "Hello World!");
 }
