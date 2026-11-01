@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rayon::prelude::*;
 use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider};
+use zz_frontend::ast::{Program, Stmt};
 use zz_frontend::span::Span;
 use zz_hir::{merge_typed_programs, TypedProgram};
 use zz_loader::{
@@ -1003,36 +1005,53 @@ fn typed_program_for(
         return Err("program failed to type-check".into());
     }
 
-    // Build per-module TypedPrograms from cached check results. Each module
-    // was already type-checked by the loader (possibly via cache hit), so we
-    // reconstruct TypedProgram from parsed AST + CheckResult + span types
-    // without re-running the checker. Stdlib TypedPrograms come from
-    // `zz_stdlib::zz_stdlib_programs` (cached via OnceLock).
-    let mut all_tps: Vec<TypedProgram> = Vec::new();
+    // Build user HIR from user programs only. Stdlib function signatures are
+    // already in `loaded.funcs` (populated by the loader from imports), so
+    // the user program type-checks against them without re-checking stdlib
+    // bodies. Stdlib bodies are added below via HIR-level merge.
+    let mut user_stmts: Vec<Stmt> = Vec::new();
+    let mut user_span = Span::new(0, 0);
+    for p in &loaded.programs {
+        user_stmts.extend(p.stmts.iter().cloned());
+        if p.span.end > user_span.end {
+            user_span = p.span;
+        }
+    }
+    let user_program = zz_frontend::ast::Program {
+        stmts: user_stmts,
+        span: user_span,
+    };
+    let user_tp = zz_hir::build_program(
+        &user_program,
+        HashMap::new(),
+        loaded.funcs,
+        loaded.structs,
+        loaded.aliases,
+        loaded.enums,
+    );
+    if !user_tp.diagnostics.is_empty() {
+        for d in &user_tp.diagnostics {
+            if d.severity == zz_frontend::diag::Severity::Error {
+                eprintln!("zz: {}", d.message);
+            }
+        }
+    }
 
-    // Stdlib first (mirroring VM load order).
+    // Collect pre-compiled stdlib TypedPrograms (cached via OnceLock in
+    // zz_stdlib_programs). Their bodies are already type-checked; merging
+    // at HIR level avoids re-checking them on every build.
+    let mut stdlib_tps: Vec<TypedProgram> = Vec::new();
     for zz_prog in zz_stdlib::zz_stdlib_programs() {
         match zz_prog {
-            Ok(p) => all_tps.push(p.clone()),
+            Ok(p) => stdlib_tps.push(p.clone()),
             Err(e) => return Err(format!("stdlib init error: {e:?}")),
         }
     }
 
-    // User modules: reconstruct TypedProgram from per-module cache results.
-    for (_path, program, check_result, span_types) in &loaded.per_module_results {
-        all_tps.push(TypedProgram {
-            program: program.clone(),
-            types: span_types.clone(),
-            bindings: check_result.bindings.clone(),
-            funcs: check_result.funcs.clone(),
-            structs: check_result.structs.clone(),
-            enums: check_result.enums.clone(),
-            try_converts: check_result.try_converts.clone(),
-        });
-    }
-
     // Merge stdlib + user TypedPrograms. Stdlib first (mirroring VM load
     // order), user overrides on key collisions.
+    let mut all_tps: Vec<TypedProgram> = stdlib_tps;
+    all_tps.push(user_tp.program);
     let merged = merge_typed_programs(all_tps);
     let main_key = format!("{entry_ns}.main");
     let (pruned, reach) = zz_hir::dce(&merged, &main_key);
