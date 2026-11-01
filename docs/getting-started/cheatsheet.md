@@ -1,26 +1,60 @@
 # Cheatsheet — one page, zero fluff
 
-## Run / check
+## New Project
+```bash
+zz new project   # creates new zz project
+```
+
+
+## Run / Build
 
 ```bash
-zz run main.zz | zz run --native main.zz | zz eval "1 + 2"
-zz check src/ | zz fix src/ | zz fmt src/ | zz test | zz bench
+
+zz run [main.zz]             # runs the code in the ZVM(zz virtual machine)
+zz build [main.zz]           # build the code into native binary
+zz build --release [main.zz] # builds an optimized native binary
+
+zz eval "1 + 2"              # execute code diretly
+```
+
+## Check / Format
+```bash
+
+zz check [src]   # check the code for any bugs/warnings
+zz fix src/      # fix some bugs like unusued imports/variables/functions/...
+zz fmt src/      # format the code
+```
+
+## Tests / Benchmarking
+```bash
+zz test    # runs the tests that have the @test decorator
+zz bensh   # runs a benshmark that have the @bensh decorator
+
+
 ```
 
 ## Vars / fns
 
 ```zz
-x := 42
-pi: float = 3.14
-func add(a: int, b: int) -> int { return a + b }
-f := |x: int| x * 2
+x := 42             // auto datatype
+pi: float = 3.14    // explicit datatype
+func add(a: int, b: int) -> int { 
+  return a + b 
+}
+f := |x: int| x * 2 // lamda function
 ```
 
 ## Strings
 
 ```zz
-"hi {name}" | "{{literal}}" | `raw {"a":1}` | "{n:x} {pi:.2f}"
-"  hi  ".trim().to_upper()
+name := "zaidejjo"
+pi := 3.14159
+
+println("hi {name}")              // hi zaidejjo
+print("{{name}}")                 // {name}
+print(`raw {"a":1}`)              // raw {"a":1}
+print("PI: {pi:.2f}")             // PI: 3.14
+print("  hi  ".trim().to_upper()) // HI
 ```
 
 ## Collections
