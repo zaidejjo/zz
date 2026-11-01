@@ -1,6 +1,6 @@
 # Stdlib reference — generated
 
-Exhaustive signature index: **694 entries across 42 groups**.
+Exhaustive signature index: **696 entries across 42 groups**.
 Generated from compiled `FuncSig` data (`crates/zz_stdlib/src/funcs.rs`
 via `dump_sigs`) — do not hand-edit. Regenerate with
 `python3 scripts/gen-stdlib-ref.py`. Semantics: per-module guides linked below.
@@ -32,7 +32,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 |---|---|
 | `ArgsParser.new` | `new() -> args` |
 
-## `builtins` — 37 entries ([guide](overview.md))
+## `builtins` — 39 entries ([guide](overview.md))
 
 | Function | Signature |
 |---|---|
@@ -72,6 +72,8 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `str` | `str<T>(v: T) -> str` |
 | `temp_dir` | `temp_dir(prefix: str) -> Result<str, str>` |
 | `typeof` | `typeof<T>(v: T) -> str` |
+| `upgrade` | `upgrade<T>(v: T) -> T` |
+| `weak` | `weak<T>(v: T) -> T` |
 | `zip` | `zip<T,U>(a: [T] | T.., b: [U] | U..) -> [(T, U)]` |
 
 ## `bytes` — 9 entries ([guide](str-vec.md))
