@@ -49,6 +49,41 @@ zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo]
 Outputs: standalone `./<stem>`; project `<root>/bin/<name>`; `--target` adds
 `-<triple>`; `-o` renames. Atomic publish; sidecars `app.c`/`build.sh`/`build.bat`.
 
+### Build phases
+
+`zz build` reports five generic steps on stderr, identical for every backend:
+
+```
+building demopkg (static)
+==> [1/5] Checking: 12 modules (10 cached)
+==> [2/5] Optimizing: 512 functions
+==> [3/5] Compiling: 14 files (3 cached)
+==> [4/5] Linking: 14 files
+==> [5/5] Publishing: bin/demopkg (1.2 MB)
+✓ built bin/demopkg (static, 1.2 MB)
+```
+
+- The header names the target: a project build uses the `zz.toml` package
+  name (`building demopkg (static)`, plus a dim entry when it is not the
+  conventional `src/main.zz`), a loose file its file name
+  (`building hello.zz (static)`).
+- On a TTY each step owns one line, rewritten in place with a live counter
+  (modules checked, files compiled) and closed with `✓` and elapsed time.
+  Piped stderr gets exactly one plain line per step — no ANSI, no `\r`.
+- Unchanged source short-circuits before type-checking:
+  `==> cached · source unchanged`, then only the `Publishing` step. A cached
+  build does not need `clang` on `PATH`.
+- Colour is on by default on a TTY. `ZZ_COLOR=never` disables it and
+  `ZZ_COLOR=always` forces ANSI through a pipe; `NO_COLOR` and `TERM=dumb`
+  always win over both. `auto` (the default) means TTY only.
+- `ZZ_BUILD_CACHE=0` forces a real build (no cache probe, no reuse), like
+  `ZZ_RUN_CACHE=0` / `ZZ_CHECK_CACHE=0`.
+- `--verbose` adds timing lines; a cache hit names the reused entry
+  (`zz: cache hit <path>`) instead of a toolchain line. `zz profile`,
+  `zz build --full -- <args>` and `zz install` nest the same five steps
+  under their own numbered pipeline; `zz run --native`, `zz test` and
+  `zz bench` stay silent.
+
 ## Check / fix / fmt
 
 ```bash

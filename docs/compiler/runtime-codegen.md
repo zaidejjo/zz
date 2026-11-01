@@ -39,6 +39,18 @@ Differential runs over fixtures must read identically with all opts on/off.
 - C twins must be byte-identical to VM natives; `zz_regexp_*`, `zz_crypto_*`,
   `zz_process_*` share impls via `zz_native_rt`.
 
+### Progress seam
+
+The pipeline reports what it is doing instead of letting callers infer it:
+`zz_codegen::CodegenSink` (generate → per-unit compile → link) and
+`zz_loader::LoadSink` (one call per checked module) feed
+`zz_build::BuildObserver`, which the CLI renders as five steps. The
+user-facing labels — `Checking`, `Optimizing`, `Compiling`, `Linking`,
+`Publishing` — are deliberately backend-neutral: the HIR and chunk backends
+map onto the same five, so internals can change without touching the UI.
+Everything is optional; callers that leave the default no-op observer
+(`zz run --native`, `zz test`, benches) keep byte-identical output.
+
 ## Concurrency mapping
 
 Green tasks snapshot captures + transitive fns; channels unbounded

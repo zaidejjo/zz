@@ -51,6 +51,39 @@ Output rule: standalone → `./<stem>`; project → `<root>/bin/<name>`;
 `--target` adds `-<triple>`; `-o` renames. Publishes atomically; `run --native`
 execs a private staged copy so parallel publish never swaps mid-exec.
 
+### Build phases
+
+Every build reports five generic steps on stderr — the same five for the HIR
+and chunk backends, so the wording never goes stale:
+
+```
+building demopkg (static)
+==> [1/5] Checking: 12 modules (10 cached)
+==> [2/5] Optimizing: 512 functions
+==> [3/5] Compiling: 14 files (3 cached)
+==> [4/5] Linking: 14 files
+==> [5/5] Publishing: bin/demopkg (1.2 MB)
+✓ built bin/demopkg (static, 1.2 MB)
+```
+
+The header names the target: the `zz.toml` package for a project build
+(`building demopkg (static)`, with the entry appended when it is not the
+conventional `src/main.zz`), the file for a loose source
+(`building hello.zz (static)`). On a TTY each step is one line rewritten in
+place with a live counter and elapsed time; piped stderr gets one plain line
+per step. Unchanged source stops before type-checking
+(`==> cached · source unchanged` plus the `Publishing` step) and needs no
+`clang` on `PATH`.
+
+Colour is on by default on a TTY: `ZZ_COLOR=never` turns it off,
+`ZZ_COLOR=always` forces ANSI through a pipe, `NO_COLOR` / `TERM=dumb` always
+win, `auto` (default) means TTY only. `ZZ_BUILD_CACHE=0` forces a real build
+(no cache probe, no reuse). `--verbose` adds timing lines; on a cache hit it
+names the reused entry (`zz: cache hit <path>`) rather than a toolchain line.
+`zz profile`, `zz build --full -- <args>` and `zz install` nest the same five
+steps inside their own numbered pipeline; `zz run --native`, `zz test` and
+`zz bench` stay silent.
+
 ## `zz run --watch` — hot reload (VM only)
 
 ```bash
