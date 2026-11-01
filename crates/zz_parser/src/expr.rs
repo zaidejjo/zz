@@ -529,7 +529,8 @@ impl<'a> Parser<'a> {
                 // Trailing comma: `f(a, b,)` ends the list here, matching
                 // array/tuple/dict literals. Newlines inside parens are
                 // lexer trivia, so multi-line trailing commas just work.
-                // (No StmtEnd skipping: an explicit `;` must still error.)
+                // `;` is no longer valid syntax and is rejected by the lexer
+                // before reaching the parser.
                 if self.at(TokenKind::RParen) {
                     break;
                 }

@@ -46,14 +46,11 @@ pascal_case := true
 
 ### Statement Terminator
 
-Statements end with a newline at bracket depth 0, or a semicolon:
+Statements end with a newline at bracket depth 0:
 
 ```zz
 x := 1
 y := 2
-
-// Equivalent:
-x := 1; y := 2
 ```
 
 Newlines inside parentheses, brackets, or braces are **not** statement terminators:

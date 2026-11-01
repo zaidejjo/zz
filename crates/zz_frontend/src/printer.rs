@@ -147,11 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_semicolons() {
-        round_trips("a := 1; b := 2;");
-    }
-
-    #[test]
     fn round_trip_floats_and_unary() {
         round_trips("x := -1.5 + 2.0\n");
     }

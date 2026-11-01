@@ -302,7 +302,7 @@ fn collect_stmt_tokens(
                     // skip arrow
                     collect_type_tokens(ret, source, known, out);
                 }
-                // skip semicolon
+                // statements end at newline; nothing to emit here
             }
         }
         Stmt::Link { .. } => {}

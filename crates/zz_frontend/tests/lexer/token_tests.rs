@@ -38,8 +38,21 @@ fn newline_inside_parens_is_trivia() {
 }
 
 #[test]
-fn semicolon_is_stmt_end() {
-    assert_eq!(lex_kinds("1;2"), vec![K::Int, K::StmtEnd, K::Int, K::Eof]);
+fn semicolon_is_rejected() {
+    // `;` is no longer valid syntax: the lexer reports an unexpected
+    // character error instead of emitting StmtEnd.
+    let lexed = zz_frontend::lex("1;2");
+    assert!(
+        lexed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("unexpected character `;`")),
+        "expected `;` to be an unexpected character error, got errors: {:?}",
+        lexed.errors
+    );
+    // No StmtEnd token should be emitted for `;`.
+    let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+    assert!(!kinds.contains(&zz_frontend::token::TokenKind::StmtEnd));
 }
 
 #[test]

@@ -50,12 +50,11 @@ see [Test helpers](../stdlib/testing-lib.md).
 
 ## Terminators
 
-Newline at bracket depth 0, or `;`:
+Newline at bracket depth 0:
 
 ```zz
 x := 1
 y := 2
-x := 1; y := 2  // same
 result := add(
     1,
     2

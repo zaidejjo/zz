@@ -24,16 +24,6 @@ pub enum TrailingComma {
     Always,
 }
 
-/// Semicolon policy. `Auto` preserves the source's choice; the other
-/// variants force a consistent style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SemiStyle {
-    #[default]
-    Auto,
-    Always,
-    Never,
-}
-
 /// Top-level configuration for the formatter. Cheap to clone (Copy soon).
 #[derive(Debug, Clone)]
 pub struct FmtConfig {
@@ -54,9 +44,6 @@ pub struct FmtConfig {
     /// Trailing-comma policy for multi-line containers.
     pub trailing_comma: TrailingComma,
 
-    /// Semicolon policy.
-    pub semicolons: SemiStyle,
-
     /// Collapse runs of ≥2 blank lines between top-level items down to 1.
     /// Default: true.
     pub collapse_blank_lines: bool,
@@ -73,7 +60,6 @@ impl Default for FmtConfig {
             use_tabs: false,
             line_ending: LineEnding::Auto,
             trailing_comma: TrailingComma::MultiLineOnly,
-            semicolons: SemiStyle::Auto,
             collapse_blank_lines: true,
             trailing_newline: true,
         }

@@ -3,10 +3,9 @@
 //! Rules:
 //! - Whitespace, comments, and newlines *inside* brackets are trivia attached
 //!   to the following significant token.
-//! - A newline or `;` at bracket depth 0 becomes a significant `StmtEnd`
-//!   token (the statement terminator). This gives newline-significant syntax
-//!   with optional semicolons, while multi-line expressions inside parens
-//!   just work.
+//! - A newline at bracket depth 0 becomes a significant `StmtEnd` token
+//!   (the statement terminator). This gives newline-significant syntax, while
+//!   multi-line expressions inside parens just work.
 //! - A newline after an operator or `=` is dropped (Go-style continuation).
 //! - Block comments nest.
 
@@ -196,7 +195,6 @@ impl<'a> Lexer<'a> {
                         self.push_trivia(TriviaKind::Newline);
                     }
                 }
-                ';' => self.emit_significant(TokenKind::StmtEnd, self.pos, self.pos + 1),
                 '/' if self.peek_char_at(1) == Some('/') => self.lex_line_comment(),
                 '/' if self.peek_char_at(1) == Some('*') => self.lex_block_comment(),
                 '/' if self.peek_char_at(1) == Some('=') => {

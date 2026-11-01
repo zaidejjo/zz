@@ -24,7 +24,7 @@ pub mod printer;
 pub mod trivia;
 pub mod verify;
 
-pub use config::{FmtConfig, LineEnding, SemiStyle, TrailingComma};
+pub use config::{FmtConfig, LineEnding, TrailingComma};
 pub use error::FmtError;
 pub use fs::discover;
 pub use parallel::{format_paths, format_paths_parallel, format_sources_parallel};
