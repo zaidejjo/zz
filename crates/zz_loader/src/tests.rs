@@ -2705,3 +2705,79 @@ fn module_aware_compile_emits_callpath_for_function_calls() {
         chunk.code
     );
 }
+
+#[test]
+fn load_sink_reports_every_module_with_exact_total() {
+    // #629: the build progress ticker needs one call per checked module,
+    // a 1-based `done` in order, and a `total` that never changes.
+    use std::sync::{Arc, Mutex};
+
+    struct Recorder {
+        seen: Mutex<Vec<(String, bool, usize, usize)>>,
+    }
+    impl LoadSink for Recorder {
+        fn module(&self, name: &str, cached: bool, done: usize, total: usize) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((name.to_string(), cached, done, total));
+        }
+    }
+
+    super::cache::with_isolated_cache(|| {
+        let dir = temp_project(&[
+            ("main.zz", "import util\nprintln(util.twice(21))\n"),
+            (
+                "util.zz",
+                "pub func twice(n: int) -> int { return n * 2 }\n",
+            ),
+        ]);
+        let features = FeatureSelection::default();
+        let rec = Arc::new(Recorder {
+            seen: Mutex::new(Vec::new()),
+        });
+        let cold = super::load_program_check_with_features_sink(
+            &dir.join("main.zz"),
+            &features,
+            rec.clone(),
+        )
+        .unwrap();
+        assert!(no_errors(&cold), "errors: {:?}", cold.errors);
+        let seen = rec.seen.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "sink must report modules");
+        let total = cold.stats.modules;
+        assert_eq!(seen.last().unwrap().3, total, "total is the whole closure");
+        assert!(
+            seen.iter().all(|s| s.3 == total),
+            "total must not drift: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter().map(|s| s.2).collect::<Vec<_>>(),
+            (1..=seen.len()).collect::<Vec<_>>(),
+            "done is 1-based and in order"
+        );
+        assert!(
+            seen.last().unwrap().0.contains("main"),
+            "entry module is last: {seen:?}"
+        );
+        assert!(
+            seen.iter().all(|s| !s.1),
+            "cold load has no cache hits: {seen:?}"
+        );
+
+        // Warm S1 cache: unchanged modules are served from disk.
+        rec.seen.lock().unwrap().clear();
+        let warm = super::load_program_check_with_features_sink(
+            &dir.join("main.zz"),
+            &features,
+            rec.clone(),
+        )
+        .unwrap();
+        assert!(no_errors(&warm), "errors: {:?}", warm.errors);
+        let seen = rec.seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|s| s.1),
+            "warm load must report cache hits: {seen:?}"
+        );
+    });
+}

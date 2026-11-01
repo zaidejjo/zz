@@ -25,8 +25,9 @@ use zz_frontend::ast::Stmt;
 use zz_frontend::span::Span;
 use zz_hir::{merge_typed_programs, TypedProgram};
 use zz_loader::{
-    find_project_root, load_program_check_with_features, load_program_with_features,
-    load_program_with_plugins_and_features,
+    find_project_root, load_program_check_with_features, load_program_check_with_features_sink,
+    load_program_with_features, load_program_with_features_sink,
+    load_program_with_plugins_and_features, load_program_with_plugins_and_features_sink,
 };
 use zz_plugin::load_manifest;
 use zz_pm::manifest::FeatureSelection;
@@ -87,12 +88,260 @@ pub struct ReleaseOptions {
     /// cache key when default (empty fingerprint), so flagless builds keep
     /// their existing cache entries.
     pub features: FeatureSelection,
+    /// Optional build-progress observer (#629). Default: silent.
+    pub observer: ObserverSlot,
 }
 
 impl ReleaseOptions {
     /// Target as `Option<&str>` for the codegen API.
     pub fn target_opt(&self) -> Option<&str> {
         self.target.as_deref()
+    }
+}
+
+/// User-facing build steps (#629).
+///
+/// Deliberately backend-neutral and identical for every backend: what
+/// happens inside a step (frontend, HIR, IR, lowering) can change without
+/// touching this list, and the numbering never drifts between backends.
+/// The CLI renders these labels verbatim.
+pub const STEP_LABELS: [&str; 5] = [
+    "Checking",
+    "Optimizing",
+    "Compiling",
+    "Linking",
+    "Publishing",
+];
+
+/// `Checking` (1-based, matching the rendered `[i/5]`).
+pub const STEP_CHECKING: usize = 1;
+/// `Optimizing`: everything that turns the checked program into C.
+pub const STEP_OPTIMIZING: usize = 2;
+/// `Compiling`: clang translation units.
+pub const STEP_COMPILING: usize = 3;
+/// `Linking`: objects into the output binary.
+pub const STEP_LINKING: usize = 4;
+/// `Publishing`: cache entry + `bin/` destination.
+pub const STEP_PUBLISHING: usize = 5;
+
+/// Detail payload attached to a step boundary (#629). Borrowed so the
+/// common case allocates nothing.
+#[derive(Clone, Copy, Debug)]
+pub enum StepDetail<'a> {
+    /// `Checking` finished: modules checked, how many came from the cache.
+    Checked { modules: usize, cached: usize },
+    /// `Optimizing` finished: reachable functions in the final program.
+    Optimized { functions: usize },
+    /// `Compiling` started: translation units to build, how many cached.
+    Compiling { files: usize, cached: usize },
+    /// `Compiling` progress: units finished so far (1-based).
+    Files { done: usize, total: usize },
+    /// `Linking` finished: objects linked.
+    Linked { files: usize },
+    /// `Publishing` finished: where the binary landed and its size.
+    Published { path: &'a Path, bytes: u64 },
+    /// `Checking` progress: one module finished.
+    Module {
+        name: &'a str,
+        cached: bool,
+        done: usize,
+        total: usize,
+    },
+}
+
+/// Observer for a release build's five steps (#629).
+///
+/// Every method has a no-op default: an implementation overrides only the
+/// boundaries it renders. Callbacks run on the thread driving the build
+/// (including the compiler worker pool for [`StepDetail::Files`]), so
+/// implementations must be `Send + Sync` and must not block.
+pub trait BuildObserver: Send + Sync {
+    /// The step plan, sent once before the first [`start`](Self::start).
+    fn plan(&self, _labels: &[&'static str]) {}
+    /// A step began.
+    fn start(&self, _step: usize) {}
+    /// Progress inside a step (does not change the current step).
+    fn detail(&self, _step: usize, _detail: StepDetail<'_>) {}
+    /// A step finished.
+    fn done(&self, _step: usize, _detail: StepDetail<'_>) {}
+    /// The step that was running failed; the build returns the same error.
+    fn failed(&self, _step: usize, _message: &str) {}
+    /// The whole build was served from the cache: no step runs at all.
+    fn cached(&self, _label: &str) {}
+}
+
+/// Observer that ignores every notification — the default, so silent
+/// callers (`zz run --native`, `zz test`, benches) keep byte-identical
+/// output.
+pub struct NoopObserver;
+
+impl BuildObserver for NoopObserver {}
+
+/// Optional observer slot on [`ReleaseOptions`]. Cloned into the codegen
+/// worker pool, hence the `Arc`.
+#[derive(Clone, Default)]
+pub struct ObserverSlot(Option<std::sync::Arc<dyn BuildObserver>>);
+
+impl ObserverSlot {
+    /// Install `observer` for the next build.
+    pub fn new(observer: std::sync::Arc<dyn BuildObserver>) -> Self {
+        Self(Some(observer))
+    }
+
+    /// The installed observer, if any.
+    pub fn get(&self) -> Option<&std::sync::Arc<dyn BuildObserver>> {
+        self.0.as_ref()
+    }
+
+    /// Borrow the observer, falling back to the no-op.
+    pub fn sink(&self) -> &dyn BuildObserver {
+        match self.0.as_deref() {
+            Some(o) => o,
+            None => &NoopObserver,
+        }
+    }
+}
+
+impl std::fmt::Debug for ObserverSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "ObserverSlot(<set>)"
+        } else {
+            "ObserverSlot(None)"
+        })
+    }
+}
+
+/// What a build produces, for the CLI header (#629).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildTarget {
+    /// Project build: named after the manifest package.
+    Package {
+        /// `[package] name` from the nearest `zz.toml`.
+        name: String,
+        /// Project root owning the entry file.
+        root: PathBuf,
+        /// Entry file being built.
+        entry: PathBuf,
+    },
+    /// Loose file build: named after the file.
+    Standalone { file: PathBuf },
+}
+
+impl BuildTarget {
+    /// `demopkg` for a project build, `hello.zz` for a loose file (the path
+    /// as given — never absolutised).
+    pub fn label(&self) -> String {
+        match self {
+            BuildTarget::Package { name, .. } => name.clone(),
+            BuildTarget::Standalone { file } => file.display().to_string(),
+        }
+    }
+
+    /// Entry shown after the label when it is not the conventional project
+    /// entry (`src/main.zz` / `main.zz`); `None` otherwise.
+    pub fn detail(&self) -> Option<String> {
+        let (root, entry) = match self {
+            BuildTarget::Package { root, entry, .. } => (root, entry),
+            BuildTarget::Standalone { .. } => return None,
+        };
+        let conventional = project_entry(root);
+        let same = entry == &conventional
+            || entry
+                .canonicalize()
+                .ok()
+                .zip(conventional.canonicalize().ok())
+                .is_some_and(|(a, b)| a == b);
+        if same {
+            return None;
+        }
+        // `root` is canonicalized by `find_project_root`; canonicalize
+        // `entry` too so `strip_prefix` matches on hosts where symlinks
+        // (e.g. macOS `/var` -> `/private/var`) make the two spellings
+        // differ (#629).
+        let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.clone());
+        let shown = entry_canon
+            .strip_prefix(root)
+            .unwrap_or(entry_canon.as_path());
+        // User-facing path uses forward slashes on every host so the header
+        // wording is stable across platforms (Windows natively uses '\').
+        let shown = shown
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        Some(shown)
+    }
+
+    /// True for a project build (used for header wording decisions).
+    pub fn is_package(&self) -> bool {
+        matches!(self, BuildTarget::Package { .. })
+    }
+}
+
+/// Classify `path` as a project entry or a loose file (#629).
+pub fn build_target(path: &Path) -> BuildTarget {
+    if let Some(root) = find_project_root(path) {
+        if let Ok(manifest) = zz_pm::manifest::Manifest::load(&root.join("zz.toml")) {
+            return BuildTarget::Package {
+                name: manifest.package.name,
+                root,
+                entry: path.to_path_buf(),
+            };
+        }
+    }
+    BuildTarget::Standalone {
+        file: path.to_path_buf(),
+    }
+}
+
+/// Cache entry path for a key + backend + target + embed fingerprint.
+fn cache_path(key: &str, kind_slug: &str, target: Option<&str>, embed_slug: &str) -> PathBuf {
+    let target_slug = target.unwrap_or("host");
+    let dir = cache_dir();
+    if embed_slug.is_empty() {
+        dir.join(format!("{key}-{kind_slug}-{target_slug}"))
+    } else {
+        dir.join(format!("{key}-{kind_slug}-{target_slug}-{embed_slug}"))
+    }
+}
+
+/// Best-effort second name for a cache entry (#629): the pre-frontend probe
+/// uses declared build options, so its key differs from the final key
+/// whenever reachability adds link flags. Linking the two names (hardlink,
+/// falling back to a copy) makes the next build's probe hit too. Never
+/// fails the build.
+fn alias_cache_entry(from: &Path, to: &Path) {
+    if from == to || to.exists() {
+        return;
+    }
+    match std::fs::hard_link(from, to) {
+        Ok(()) => return,
+        // Another build aliased the same pair between the check and the
+        // link: its entry is authoritative.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return,
+        Err(_) => {}
+    }
+    if to.exists() {
+        return;
+    }
+    // Filesystems without hardlinks: copy through a temp name and rename,
+    // so a concurrent probe never observes a half-written binary.
+    let mut tmp_name = to.as_os_str().to_os_string();
+    tmp_name.push(format!(".alias.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp_name);
+    if std::fs::copy(from, &tmp).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&tmp) {
+                let mut perms = meta.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                let _ = std::fs::set_permissions(&tmp, perms);
+            }
+        }
+        let _ = std::fs::rename(&tmp, to);
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -973,6 +1222,23 @@ fn typed_program_for(
     entry_ns: &str,
     features: &FeatureSelection,
 ) -> Result<(TypedProgram, zz_hir::ReachableSet, String), String> {
+    typed_program_for_phased(path, entry_ns, features, &NoopObserver, None)
+}
+
+/// [`typed_program_for`] reporting steps 1-2 (#629).
+///
+/// Emits `Checking` (with a per-module [`StepDetail::Module`] stream when
+/// `load_sink` is installed) and opens `Optimizing`; the caller closes
+/// `Optimizing` once C generation finished, because lowering runs inside
+/// the codegen call.
+fn typed_program_for_phased(
+    path: &Path,
+    entry_ns: &str,
+    features: &FeatureSelection,
+    obs: &dyn BuildObserver,
+    load_sink: Option<std::sync::Arc<dyn zz_loader::LoadSink + Send + Sync>>,
+) -> Result<(TypedProgram, zz_hir::ReachableSet, String), String> {
+    obs.start(STEP_CHECKING);
     // Discover plugin manifests from installed dependencies and merge their
     // function signatures into the checker's function table.
     let plugin_funcs = discover_plugin_manifests(path);
@@ -981,11 +1247,29 @@ fn typed_program_for(
         // unchanged modules skip re-type-checking via content-addressed
         // on-disk cache. Span types and try_converts are stored in the
         // cache, so AOT lowering has everything it needs.
-        load_program_check_with_features(path, features)?
+        match load_sink {
+            Some(sink) => load_program_check_with_features_sink(path, features, sink),
+            None => load_program_check_with_features(path, features),
+        }
     } else {
-        load_program_with_plugins_and_features(path, &plugin_funcs, features)?
-    };
-    let mut has_errors = false;
+        match load_sink {
+            Some(sink) => {
+                load_program_with_plugins_and_features_sink(path, &plugin_funcs, features, sink)
+            }
+            None => load_program_with_plugins_and_features(path, &plugin_funcs, features),
+        }
+    }
+    .inspect_err(|e| obs.failed(STEP_CHECKING, e))?;
+    let has_errors = loaded.errors.iter().any(|e| {
+        e.diags
+            .iter()
+            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+    });
+    // Close the step before rendering diagnostics: on a TTY the animated
+    // step line must be cleared before multi-line error output lands on it.
+    if has_errors {
+        obs.failed(STEP_CHECKING, "program failed to type-check");
+    }
     for e in &loaded.errors {
         let mut files = zz_frontend::diag::Files::new();
         let id = files.add(e.name.clone(), e.source.clone());
@@ -993,16 +1277,19 @@ fn typed_program_for(
             "{}",
             zz_frontend::diag::render_to_string(&files, id, &e.diags)
         );
-        if e.diags
-            .iter()
-            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
-        {
-            has_errors = true;
-        }
     }
     if has_errors {
-        return Err("program failed to type-check".into());
+        const MSG: &str = "program failed to type-check";
+        return Err(MSG.into());
     }
+    obs.done(
+        STEP_CHECKING,
+        StepDetail::Checked {
+            modules: loaded.stats.modules,
+            cached: loaded.stats.cache_hits,
+        },
+    );
+    obs.start(STEP_OPTIMIZING);
 
     // Build user HIR from user programs only. Stdlib function signatures are
     // already in `loaded.funcs` (populated by the loader from imports), so
@@ -1043,7 +1330,11 @@ fn typed_program_for(
     for zz_prog in zz_stdlib::zz_stdlib_programs() {
         match zz_prog {
             Ok(p) => stdlib_tps.push(p.clone()),
-            Err(e) => return Err(format!("stdlib init error: {e:?}")),
+            Err(e) => {
+                let msg = format!("stdlib init error: {e:?}");
+                obs.failed(STEP_OPTIMIZING, &msg);
+                return Err(msg);
+            }
         }
     }
 
@@ -1060,21 +1351,45 @@ fn typed_program_for(
 /// Build the unified IR module for `path` (chunk-backend input): load,
 /// check, merge (pure-ZZ stdlib first, mirroring [`typed_program_for`]),
 /// VM-compile, then `lower_typed`. Returns the module + dotted main key.
-fn chunk_module_for(
+///
+/// Reports step 1 and opens step 2 (#629); the caller closes `Optimizing`
+/// after lowering to C.
+fn chunk_module_for_phased(
     path: &Path,
     features: &FeatureSelection,
+    obs: &dyn BuildObserver,
+    load_sink: Option<std::sync::Arc<dyn zz_loader::LoadSink + Send + Sync>>,
 ) -> Result<(zz_ir::Module, String), String> {
     let entry_ns = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    obs.start(STEP_CHECKING);
     let plugin_funcs = discover_plugin_manifests(path);
     let loaded = if plugin_funcs.is_empty() {
-        load_program_with_features(path, features)?
+        match load_sink {
+            Some(sink) => load_program_with_features_sink(path, features, sink),
+            None => load_program_with_features(path, features),
+        }
     } else {
-        load_program_with_plugins_and_features(path, &plugin_funcs, features)?
-    };
-    let mut has_errors = false;
+        match load_sink {
+            Some(sink) => {
+                load_program_with_plugins_and_features_sink(path, &plugin_funcs, features, sink)
+            }
+            None => load_program_with_plugins_and_features(path, &plugin_funcs, features),
+        }
+    }
+    .inspect_err(|e| obs.failed(STEP_CHECKING, e))?;
+    let has_errors = loaded.errors.iter().any(|e| {
+        e.diags
+            .iter()
+            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+    });
+    // Close the step before rendering diagnostics: on a TTY the animated
+    // step line must be cleared before multi-line error output lands on it.
+    if has_errors {
+        obs.failed(STEP_CHECKING, "program failed to type-check");
+    }
     for e in &loaded.errors {
         let mut files = zz_frontend::diag::Files::new();
         let id = files.add(e.name.clone(), e.source.clone());
@@ -1082,16 +1397,19 @@ fn chunk_module_for(
             "{}",
             zz_frontend::diag::render_to_string(&files, id, &e.diags)
         );
-        if e.diags
-            .iter()
-            .any(|d| d.severity == zz_frontend::diag::Severity::Error)
-        {
-            has_errors = true;
-        }
     }
     if has_errors {
-        return Err("program failed to type-check".into());
+        const MSG: &str = "program failed to type-check";
+        return Err(MSG.into());
     }
+    obs.done(
+        STEP_CHECKING,
+        StepDetail::Checked {
+            modules: loaded.stats.modules,
+            cached: loaded.stats.cache_hits,
+        },
+    );
+    obs.start(STEP_OPTIMIZING);
     // Merged program: referenced pure-ZZ stdlib sources first
     // (mirroring the VM, which executes them before user code, and
     // `typed_program_for`). Only the import closure is merged
@@ -1347,26 +1665,17 @@ pub fn build_release(
     mode: BuildMode,
     rel: &ReleaseOptions,
 ) -> Result<PathBuf, String> {
+    let obs = rel.observer.sink();
+    obs.plan(&STEP_LABELS);
+    // `ZZ_BUILD_CACHE=0` forces a real build: no probe, no reuse. Mirrors
+    // `ZZ_RUN_CACHE=0` / `ZZ_CHECK_CACHE=0`; the CLI tests that hide the
+    // toolchain need it so a warm entry from an earlier test cannot make a
+    // no-clang build succeed (#629).
+    let cache_disabled = std::env::var("ZZ_BUILD_CACHE").ok().as_deref() == Some("0");
     let entry_ns = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let t_front = std::time::Instant::now();
-    let (pruned, reach, main_key) = typed_program_for(path, &entry_ns, &rel.features)?;
-    if rel.verbose {
-        eprintln!(
-            "zz: timing load_check_hir_dce={}ms",
-            t_front.elapsed().as_millis()
-        );
-    }
-    // Project-owned sources publish under `<root>/bin/` — make sure the
-    // root ignores it even when the project predates the redesign (new
-    // projects get this from `init`/`new`). Append-only, idempotent,
-    // silent; failures (read-only checkouts) never fail the build.
-    // Standalone builds leave the invocation dir alone.
-    if let Some(root) = find_project_root(path) {
-        let _ = zz_pm::manifest::Manifest::ensure_gitignore(&root);
-    }
     let mut opts = opts_for(mode);
     opts.allow_static_downgrade = rel.allow_static_downgrade;
     opts.verbose = rel.verbose;
@@ -1420,6 +1729,67 @@ pub fn build_release(
         return Err(e.to_string());
     }
 
+    // `-o` renames at publish time only (excluded from the cache key:
+    // identical source + options reuse one cached binary under any name).
+    let output = rel.output.clone();
+    // The chunk backend carries its own slug so the two codegen paths
+    // never share entries (dual-codegen gate).
+    let kind_slug = if rel.chunk {
+        format!("{mode:?}-chunk")
+    } else {
+        format!("{mode:?}")
+    };
+    let dir = cache_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
+    let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
+
+    // Cache probe BEFORE the frontend (#629): a warm cache must not pay for
+    // type-checking. The probe key uses the declared options only — the
+    // reachability-derived link flags (curl/sqlite) are not known yet, so
+    // the probe key equals the final key only for programs that need
+    // neither. `alias_cache_entry` below keeps both names on the same
+    // inode whenever they do match, so the next probe hits too.
+    let probe_fp = build_options_fingerprint_with(&opts, target);
+    let probe_key = cache_key(path, &source, &opts, target, &rel.features)?;
+    let probe_entry = cache_path(&probe_key, &kind_slug, target, &embed_slug);
+    if !cache_disabled && is_usable_cache_binary(&probe_entry) {
+        // `--verbose` still names what was reused: the clang line below is
+        // skipped here (a cache hit must not need a toolchain), so print the
+        // entry instead of leaving verbose output empty.
+        if rel.verbose {
+            eprintln!("zz: cache hit {}", probe_entry.display());
+        }
+        let label = build_target(path).label();
+        obs.cached(&label);
+        return publish_to_bin(&probe_entry, path, target, output.as_deref());
+    }
+
+    // Project-owned sources publish under `<root>/bin/` — make sure the
+    // root ignores it even when the project predates the redesign (new
+    // projects get this from `init`/`new`). Append-only, idempotent,
+    // silent; failures (read-only checkouts) never fail the build.
+    // Standalone builds leave the invocation dir alone.
+    if let Some(root) = find_project_root(path) {
+        let _ = zz_pm::manifest::Manifest::ensure_gitignore(&root);
+    }
+
+    let t_front = std::time::Instant::now();
+    let (pruned, reach, main_key) = typed_program_for_phased(
+        path,
+        &entry_ns,
+        &rel.features,
+        obs,
+        Some(std::sync::Arc::new(StepLoadSink {
+            slot: rel.observer.clone(),
+        })),
+    )?;
+    if rel.verbose {
+        eprintln!(
+            "zz: timing load_check_hir_dce={}ms",
+            t_front.elapsed().as_millis()
+        );
+    }
+
     // Resolve the provider now so a missing toolchain fails fast — but
     // still leave app.c + scripts behind for manual builds, next to the
     // planned destination (project-root `bin/` or standalone CWD).
@@ -1436,7 +1806,9 @@ pub fn build_release(
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or_else(|| PathBuf::from("."));
             let _ = zz_codegen::emit_c_plus_script(&lowered.source, &dir, target, &script_opts);
-            return Err(zz_codegen::BuildError::NoClang.to_string());
+            let msg = zz_codegen::BuildError::NoClang.to_string();
+            obs.failed(STEP_OPTIMIZING, &msg);
+            return Err(msg);
         }
     };
     // Seed system-lib needs from reachability before the static-syslibs
@@ -1476,35 +1848,35 @@ pub fn build_release(
         );
     }
 
-    // `-o` renames at publish time only (excluded from the cache key:
-    // identical source + options reuse one cached binary under any name).
-    // Captured before `opts` moves into the clang build below.
-    let output = rel.output.clone();
-    // Cache: reuse when the same source + build options + target were
-    // built before. The chunk backend carries its own slug so the two
-    // codegen paths never share entries (dual-codegen gate).
-    let kind_slug = if rel.chunk {
-        format!("{mode:?}-chunk")
+    // Final key: same source + resolved options. When the reach-derived
+    // flags did not change the fingerprint, the probe key is already
+    // correct — reuse it instead of walking path deps again.
+    let final_fp = build_options_fingerprint_with(&opts, target);
+    let key = if final_fp == probe_fp {
+        probe_key
     } else {
-        format!("{mode:?}")
+        cache_key(path, &source, &opts, target, &rel.features)?
     };
-    // Cache: reuse when the same source + build options + target were
-    // built before.
-    let dir = cache_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create cache: {e}"))?;
-    let source = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
-    let key = cache_key(path, &source, &opts, target, &rel.features)?;
-    let target_slug = target.unwrap_or("host");
-    // The embed tree is content-fingerprinted separately (compact slug
-    // addition — asset edits must never reuse a non-embed binary).
-    let cached = if embed_slug.is_empty() {
-        dir.join(format!("{key}-{kind_slug}-{target_slug}"))
-    } else {
-        dir.join(format!("{key}-{kind_slug}-{target_slug}-{embed_slug}"))
+    let cached = cache_path(&key, &kind_slug, target, &embed_slug);
+    let alias = |entry: &Path| {
+        // The probe key equals the final key unless reachability added link
+        // flags. When it differs, name the built entry under the probe key
+        // too (hardlink): the entry is the right artifact for this source
+        // either way, and without the alias every program that links
+        // curl/sqlite would rebuild on every run.
+        if final_fp != probe_fp {
+            alias_cache_entry(entry, &probe_entry);
+        }
     };
 
-    if is_usable_cache_binary(&cached) {
-        // Reuse the cached binary.
+    if !cache_disabled && is_usable_cache_binary(&cached) {
+        // Reuse the cached binary (a link-flag-carrying build from an
+        // earlier run, or the probe entry under another name).
+        if rel.verbose {
+            eprintln!("zz: cache hit {}", cached.display());
+        }
+        alias(&cached);
+        obs.cached(&build_target(path).label());
         return publish_to_bin(&cached, path, target, output.as_deref());
     }
     // Stale artifact (interrupted build, missing exec bit, empty file):
@@ -1520,7 +1892,8 @@ pub fn build_release(
     // observers never see a partially-written or non-executable binary.
     static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let tmp = dir.join(format!(
-        "{key}-{kind_slug}-{target_slug}.{}.{}.tmp",
+        "{key}-{kind_slug}-{}.{}.{}.tmp",
+        target.unwrap_or("host"),
         std::process::id(),
         TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
     ));
@@ -1528,36 +1901,75 @@ pub fn build_release(
     // emitted source with the same option/flag flow as `build_native`.
     if rel.chunk {
         let t_chunk = std::time::Instant::now();
-        let (module, main_key) = chunk_module_for(path, &rel.features)?;
-        let lowered =
-            zz_codegen::build_chunk_module(&module, &main_key).map_err(|e| e.to_string())?;
+        let (module, chunk_main) = chunk_module_for_phased(
+            path,
+            &rel.features,
+            obs,
+            Some(std::sync::Arc::new(StepLoadSink {
+                slot: rel.observer.clone(),
+            })),
+        )?;
+        let lowered = match zz_codegen::build_chunk_module(&module, &chunk_main) {
+            Ok(l) => l,
+            Err(e) => {
+                let msg = e.to_string();
+                obs.failed(STEP_OPTIMIZING, &msg);
+                return Err(msg);
+            }
+        };
         if rel.verbose {
             eprintln!("zz: timing chunk_lower={}ms", t_chunk.elapsed().as_millis());
         }
         lowered.apply_link_needs(&mut opts);
+        obs.done(
+            STEP_OPTIMIZING,
+            StepDetail::Optimized {
+                functions: module.funcs.len(),
+            },
+        );
+        obs.start(STEP_COMPILING);
         if let Err(e) = zz_codegen::compile::build_with(&lowered.source, &tmp, opts, target, &clang)
         {
             let _ = std::fs::remove_file(&tmp);
-            return Err(e.to_string());
+            let msg = e.to_string();
+            obs.failed(STEP_COMPILING, &msg);
+            return Err(msg);
         }
-    } else if std::env::var("ZZ_CODEGEN_UNITS").is_ok_and(|v| v == "0") {
-        // Force single-TU path (legacy whole-program C into one TU).
-        if let Err(e) =
-            zz_codegen::build_native_with(&pruned, &reach, &main_key, opts, target, &clang, &tmp)
-        {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.to_string());
-        }
+        obs.detail(STEP_COMPILING, StepDetail::Files { done: 1, total: 1 });
+        obs.done(STEP_COMPILING, StepDetail::Files { done: 1, total: 1 });
+        obs.start(STEP_LINKING);
+        obs.done(STEP_LINKING, StepDetail::Linked { files: 1 });
     } else {
-        // Default: per-module translation units with parallel clang
-        // fan-out (rayon, up to 8 threads) and per-unit object caching.
-        // Same binary out as single-TU; unchanged modules skip clang on
-        // rebuild. Opt out with ZZ_CODEGEN_UNITS=0.
-        if let Err(e) = zz_codegen::build_native_units_with(
-            &pruned, &reach, &main_key, opts, target, &clang, &tmp,
-        ) {
+        // Bridge codegen notifications into the step plan: `Optimizing`
+        // closes when C generation finished, `Compiling` covers the unit
+        // fan-out, `Linking` the link.
+        let bridge = CodegenBridge {
+            obs,
+            functions: reach.funcs.len(),
+            total: std::sync::atomic::AtomicUsize::new(0),
+            current: std::sync::atomic::AtomicUsize::new(STEP_OPTIMIZING),
+        };
+        let res = if std::env::var("ZZ_CODEGEN_UNITS").is_ok_and(|v| v == "0") {
+            // Force single-TU path (legacy whole-program C into one TU).
+            zz_codegen::build_native_with_sink(
+                &pruned, &reach, &main_key, opts, target, &clang, &tmp, &bridge,
+            )
+            .map(|_| ())
+        } else {
+            // Default: per-module translation units with parallel clang
+            // fan-out (rayon, up to 8 threads) and per-unit object caching.
+            // Same binary out as single-TU; unchanged modules skip clang on
+            // rebuild. Opt out with ZZ_CODEGEN_UNITS=0.
+            zz_codegen::build_native_units_with_sink(
+                &pruned, &reach, &main_key, opts, target, &clang, &tmp, &bridge,
+            )
+            .map(|_| ())
+        };
+        if let Err(e) = res {
             let _ = std::fs::remove_file(&tmp);
-            return Err(e.to_string());
+            let msg = e.to_string();
+            obs.failed(bridge.current.load(Ordering::Relaxed), &msg);
+            return Err(msg);
         }
     }
     // Some compilers create the output without the exec bit when writing a
@@ -1574,14 +1986,138 @@ pub fn build_release(
             .map_err(|e| format!("cannot set exec bit: {e}"));
         if let Err(e) = res {
             let _ = std::fs::remove_file(&tmp);
+            obs.failed(STEP_PUBLISHING, &e);
             return Err(e);
         }
     }
+    obs.start(STEP_PUBLISHING);
     if let Err(e) = std::fs::rename(&tmp, &cached) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!("cannot publish cache entry: {e}"));
+        let msg = format!("cannot publish cache entry: {e}");
+        obs.failed(STEP_PUBLISHING, &msg);
+        return Err(msg);
     }
-    publish_to_bin(&cached, path, target, output.as_deref())
+    alias(&cached);
+    let published = match publish_to_bin(&cached, path, target, output.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            obs.failed(STEP_PUBLISHING, &e);
+            return Err(e);
+        }
+    };
+    let bytes = std::fs::metadata(&published).map(|m| m.len()).unwrap_or(0);
+    obs.done(
+        STEP_PUBLISHING,
+        StepDetail::Published {
+            path: &published,
+            bytes,
+        },
+    );
+    Ok(published)
+}
+
+/// Adapter: [`zz_loader::LoadSink`] → [`BuildObserver`] module ticks (#629).
+///
+/// Owns a clone of the slot (not a borrow): the loader stores the sink as
+/// `Arc<dyn LoadSink + Send + Sync>` for the whole load.
+struct StepLoadSink {
+    slot: ObserverSlot,
+}
+
+impl zz_loader::LoadSink for StepLoadSink {
+    fn module(&self, name: &str, cached: bool, done: usize, total: usize) {
+        self.slot.sink().detail(
+            STEP_CHECKING,
+            StepDetail::Module {
+                name,
+                cached,
+                done,
+                total,
+            },
+        );
+    }
+}
+
+/// Adapter: codegen [`zz_codegen::CodegenSink`] → step plan (#629).
+///
+/// Tracks the step that is currently open so a failure inside the pipeline
+/// is attributed to the right step instead of a guess.
+struct CodegenBridge<'a> {
+    obs: &'a dyn BuildObserver,
+    /// Reachable functions, reported when `Optimizing` closes.
+    functions: usize,
+    /// Translation units in this build, known after `compiling` (atomic:
+    /// `file_done` arrives from the compiler worker pool).
+    total: std::sync::atomic::AtomicUsize,
+    /// Step that is currently open.
+    current: std::sync::atomic::AtomicUsize,
+}
+
+impl CodegenBridge<'_> {
+    fn total(&self) -> usize {
+        self.total.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl zz_codegen::CodegenSink for CodegenBridge<'_> {
+    fn generating(&self) {
+        self.current
+            .store(STEP_OPTIMIZING, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn generated(&self, _files: usize) {
+        self.current
+            .store(STEP_OPTIMIZING, std::sync::atomic::Ordering::Relaxed);
+        self.obs.done(
+            STEP_OPTIMIZING,
+            StepDetail::Optimized {
+                functions: self.functions,
+            },
+        );
+    }
+
+    fn compiling(&self, total: usize, cached: usize) {
+        self.total
+            .store(total, std::sync::atomic::Ordering::Relaxed);
+        self.current
+            .store(STEP_COMPILING, std::sync::atomic::Ordering::Relaxed);
+        self.obs.start(STEP_COMPILING);
+        self.obs.detail(
+            STEP_COMPILING,
+            StepDetail::Compiling {
+                files: total,
+                cached,
+            },
+        );
+    }
+
+    fn file_done(&self, done: usize) {
+        self.obs.detail(
+            STEP_COMPILING,
+            StepDetail::Files {
+                done,
+                total: self.total(),
+            },
+        );
+    }
+
+    fn linking(&self) {
+        let total = self.total();
+        self.obs
+            .done(STEP_COMPILING, StepDetail::Files { done: total, total });
+        self.current
+            .store(STEP_LINKING, std::sync::atomic::Ordering::Relaxed);
+        self.obs.start(STEP_LINKING);
+    }
+
+    fn linked(&self) {
+        self.obs.done(
+            STEP_LINKING,
+            StepDetail::Linked {
+                files: self.total(),
+            },
+        );
+    }
 }
 
 /// Copy a cached binary to the authoritative [`planned_dest_for`]
@@ -1881,6 +2417,180 @@ fn windows_status_name(code: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_labels_are_backend_neutral() {
+        assert_eq!(STEP_LABELS.len(), 5);
+        assert_eq!(STEP_LABELS[0], "Checking");
+        assert_eq!(STEP_LABELS[4], "Publishing");
+        // User-facing text must never name a pipeline internal: the
+        // backends behind the steps are free to change.
+        for label in STEP_LABELS {
+            let lower = label.to_lowercase();
+            for banned in ["hir", "lower", "dce", "chunk", "unit", "load", "ir "] {
+                assert!(!lower.contains(banned), "`{label}` leaks `{banned}`");
+            }
+        }
+    }
+
+    #[test]
+    fn build_target_names_package_or_file() {
+        let base = std::env::temp_dir().join(format!("zz_build_target_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let proj = base.join("proj");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::write(
+            proj.join("zz.toml"),
+            "[package]\nname = \"demopkg\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let entry = proj.join("src/main.zz");
+        std::fs::write(&entry, "func main() { println(1) }\n").unwrap();
+        let target = build_target(&entry);
+        assert!(target.is_package());
+        assert_eq!(target.label(), "demopkg");
+        assert_eq!(target.detail(), None, "conventional entry needs no suffix");
+
+        // A non-conventional entry is named next to the package.
+        let cli = proj.join("src/cli.zz");
+        std::fs::write(&cli, "func main() { println(1) }\n").unwrap();
+        let target = build_target(&cli);
+        assert_eq!(target.label(), "demopkg");
+        assert_eq!(target.detail().as_deref(), Some("src/cli.zz"));
+
+        // No manifest above the file: a loose-file build. The label is the
+        // path as given — never absolutised — so a relative argument stays
+        // relative and an absolute one stays absolute.
+        let loose_dir = base.join("loose");
+        std::fs::create_dir_all(&loose_dir).unwrap();
+        let loose = loose_dir.join("hello.zz");
+        std::fs::write(&loose, "func main() { println(1) }\n").unwrap();
+        let target = build_target(&loose);
+        assert!(!target.is_package());
+        assert_eq!(target.label(), loose.display().to_string());
+        assert_eq!(target.detail(), None);
+        assert_eq!(
+            BuildTarget::Standalone {
+                file: PathBuf::from("hello.zz")
+            }
+            .label(),
+            "hello.zz"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn alias_cache_entry_never_overwrites() {
+        let base = std::env::temp_dir().join(format!("zz_build_alias_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let from = base.join("from");
+        std::fs::write(&from, "bin").unwrap();
+        let to = base.join("to");
+        alias_cache_entry(&from, &to);
+        assert!(to.is_file(), "alias must exist");
+        assert_eq!(std::fs::read(&to).unwrap(), b"bin");
+
+        // An existing destination is authoritative: never replaced.
+        std::fs::write(&to, "other").unwrap();
+        alias_cache_entry(&from, &to);
+        assert_eq!(std::fs::read(&to).unwrap(), b"other");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Observer that records step boundaries as strings.
+    struct Recorder {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Recorder {
+        fn new() -> Self {
+            Self {
+                events: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl BuildObserver for Recorder {
+        fn plan(&self, labels: &[&'static str]) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("plan:{}", labels.len()));
+        }
+
+        fn start(&self, step: usize) {
+            self.events.lock().unwrap().push(format!("start:{step}"));
+        }
+
+        fn done(&self, step: usize, _detail: StepDetail<'_>) {
+            self.events.lock().unwrap().push(format!("done:{step}"));
+        }
+
+        fn failed(&self, step: usize, _message: &str) {
+            self.events.lock().unwrap().push(format!("failed:{step}"));
+        }
+    }
+
+    #[test]
+    fn phased_program_reports_steps_one_and_two() {
+        let base = std::env::temp_dir().join(format!("zz_build_phase_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let entry = base.join("main.zz");
+        std::fs::write(&entry, "func main() {\n println(1)\n}\n").unwrap();
+        let rec = Recorder::new();
+        let out =
+            typed_program_for_phased(&entry, "main", &FeatureSelection::default(), &rec, None);
+        assert!(out.is_ok(), "phased load failed: {out:?}");
+        let events = rec.events();
+        assert_eq!(
+            events.first().map(String::as_str),
+            Some("start:1"),
+            "checking must open first: {events:?}"
+        );
+        assert!(
+            events.contains(&"done:1".to_string()),
+            "checking must close: {events:?}"
+        );
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("start:2"),
+            "optimizing stays open for the codegen call: {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn noop_observer_is_the_default() {
+        let slot = ObserverSlot::default();
+        assert!(slot.get().is_none());
+        // Every callback is a no-op: no panic, no output.
+        let obs = slot.sink();
+        obs.plan(&STEP_LABELS);
+        obs.start(STEP_CHECKING);
+        obs.detail(
+            STEP_CHECKING,
+            StepDetail::Checked {
+                modules: 0,
+                cached: 0,
+            },
+        );
+        obs.done(
+            STEP_CHECKING,
+            StepDetail::Checked {
+                modules: 0,
+                cached: 0,
+            },
+        );
+        obs.failed(STEP_CHECKING, "boom");
+        obs.cached("x");
+        assert_eq!(format!("{slot:?}"), "ObserverSlot(None)");
+    }
 
     #[test]
     fn hook_interpreter_is_extension_driven() {

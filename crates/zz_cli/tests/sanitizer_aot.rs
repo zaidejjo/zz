@@ -36,9 +36,18 @@ fn require_native() -> bool {
 }
 
 fn build_zz(args: &[&str], cwd: &Path) -> (i32, String, String) {
-    let out = Command::new(zz_bin())
-        .args(args)
-        .current_dir(cwd)
+    build_zz_env(args, cwd, &[])
+}
+
+/// [`build_zz`] with extra environment pairs. Used by the toolchain probe,
+/// which needs a real build (see `ZZ_BUILD_CACHE` there).
+fn build_zz_env(args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(zz_bin());
+    cmd.args(args).current_dir(cwd);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let out = cmd
         // Hermetic: the sanitizer set travels with the test, never with
         // ambient CI env (which must stay clean for the other legs).
         .env("ZZ_SANITIZE", "address,undefined")
@@ -306,9 +315,13 @@ fn sanitizer_aot_hir_and_chunk() {
     std::fs::create_dir_all(&probe_dir).unwrap();
     let probe = probe_dir.join("probe.zz");
     std::fs::write(&probe, "func main() {\n println(1)\n}\n").unwrap();
-    let (code, _out, err) = build_zz(
+    // `ZZ_BUILD_CACHE=0`: the probe asserts on the verbose clang line, which
+    // a cache hit replaces with the reused entry (no toolchain needed). Force
+    // the real build so a repeat run of this suite still pins the toolchain.
+    let (code, _out, err) = build_zz_env(
         &["build", "--dynamic", "--verbose", probe.to_str().unwrap()],
         &probe_dir,
+        &[("ZZ_BUILD_CACHE", "0")],
     );
     assert_eq!(code, 0, "sanitizer probe build failed: {err}");
     assert!(

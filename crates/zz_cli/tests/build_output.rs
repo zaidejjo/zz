@@ -76,8 +76,11 @@ fn run(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, S
     )
 }
 
-fn no_clang() -> [(&'static str, &'static str); 1] {
-    [("ZZ_TEST_HIDE_CLANG", "1")]
+fn no_clang() -> [(&'static str, &'static str); 2] {
+    // Hide the toolchain and bypass the binary cache: a warm entry left by
+    // another test would otherwise let a no-clang build succeed, since the
+    // cache probe now runs before clang detection (#629).
+    [("ZZ_TEST_HIDE_CLANG", "1"), ("ZZ_BUILD_CACHE", "0")]
 }
 
 // --- Argument / discovery errors (no toolchain needed) ---

@@ -108,7 +108,11 @@ fn dynamic_flag_builds_dynamic_dev_binary() {
 fn dev_without_clang_emits_c_and_scripts() {
     let dir = temp_project();
     // Dev builds need Clang too — same missing-toolchain path as release.
-    let (code, _stdout, stderr) = run(&dir, &["build", "hello.zz"], &[("ZZ_TEST_HIDE_CLANG", "1")]);
+    let (code, _stdout, stderr) = run(
+        &dir,
+        &["build", "hello.zz"],
+        &[("ZZ_TEST_HIDE_CLANG", "1"), ("ZZ_BUILD_CACHE", "0")],
+    );
     assert_eq!(code, 1, "dev without clang must fail.\nstderr:\n{stderr}");
     assert!(
         stderr.contains("no clang found"),
@@ -127,7 +131,7 @@ fn release_without_clang_emits_c_and_scripts() {
     let (code, _stdout, stderr) = run(
         &dir,
         &["build", "-p", "hello.zz"],
-        &[("ZZ_TEST_HIDE_CLANG", "1")],
+        &[("ZZ_TEST_HIDE_CLANG", "1"), ("ZZ_BUILD_CACHE", "0")],
     );
     assert_eq!(
         code, 1,

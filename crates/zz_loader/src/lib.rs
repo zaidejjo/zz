@@ -252,6 +252,12 @@ struct Loader {
     /// S1 check-cache outcomes for `--stats` observability (#248).
     cache_hits: usize,
     cache_misses: usize,
+    /// Modules checked so far, for the build progress ticker (#629).
+    modules_checked: usize,
+    /// Optional per-module progress sink (#629). `None` for every caller
+    /// that does not render progress; the hot path costs one `Option` test
+    /// per module.
+    sink: Option<std::sync::Arc<dyn LoadSink + Send + Sync>>,
     /// Feature selection from the command line (`--features` /
     /// `--all-features`, #488) applied to the entry project.
     feature_selection: FeatureSelection,
@@ -277,6 +283,26 @@ pub struct LoadStats {
     pub seed_funcs: usize,
 }
 
+/// Progress sink for the load/check phase (#629).
+///
+/// Called once per module as the loader finishes checking it, so callers
+/// can render a determinate progress bar: the whole import closure is known
+/// before checking starts, so `total` is exact from the first call.
+pub trait LoadSink: Sync {
+    /// One module finished. `name` is its namespace when known (e.g.
+    /// `std.http`), otherwise the file path; `cached` is true when the
+    /// module came from the on-disk check cache; `done` is 1-based.
+    fn module(&self, name: &str, cached: bool, done: usize, total: usize);
+}
+
+/// Sink that ignores every notification (the default for every caller that
+/// does not render progress).
+pub struct NoopLoadSink;
+
+impl LoadSink for NoopLoadSink {
+    fn module(&self, _name: &str, _cached: bool, _done: usize, _total: usize) {}
+}
+
 /// Load an entry file and all of its imports.
 pub fn load_program(main_path: &Path) -> Result<LoadResult, String> {
     load_program_with_plugins(main_path, &[])
@@ -290,7 +316,7 @@ pub fn load_program_with_features(
     main_path: &Path,
     features: &FeatureSelection,
 ) -> Result<LoadResult, String> {
-    load_program_impl(main_path, &[], false, features.clone())
+    load_program_impl(main_path, &[], false, features.clone(), None)
 }
 
 /// Load an entry file for `zz check`, with the per-module check cache
@@ -302,12 +328,32 @@ pub fn load_program_check(main_path: &Path) -> Result<LoadResult, String> {
     load_program_check_with_features(main_path, &FeatureSelection::default())
 }
 
+/// [`load_program_with_features`] with progress notifications (#629).
+pub fn load_program_with_features_sink(
+    main_path: &Path,
+    features: &FeatureSelection,
+    sink: std::sync::Arc<dyn LoadSink + Send + Sync>,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, &[], false, features.clone(), Some(sink))
+}
+
 /// [`load_program_check`] with an explicit feature selection (#488).
 pub fn load_program_check_with_features(
     main_path: &Path,
     features: &FeatureSelection,
 ) -> Result<LoadResult, String> {
-    load_program_impl(main_path, &[], true, features.clone())
+    load_program_impl(main_path, &[], true, features.clone(), None)
+}
+
+/// [`load_program_check_with_features`] with progress notifications (#629):
+/// `sink` sees one call per checked module with an exact total, which is
+/// what the `zz build` checking step renders as a determinate bar.
+pub fn load_program_check_with_features_sink(
+    main_path: &Path,
+    features: &FeatureSelection,
+    sink: std::sync::Arc<dyn LoadSink + Send + Sync>,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, &[], true, features.clone(), Some(sink))
 }
 
 /// Load an entry file and all of its imports, merging additional function
@@ -320,7 +366,13 @@ pub fn load_program_with_plugins(
     main_path: &Path,
     plugin_funcs: &[(String, FuncSig)],
 ) -> Result<LoadResult, String> {
-    load_program_impl(main_path, plugin_funcs, false, FeatureSelection::default())
+    load_program_impl(
+        main_path,
+        plugin_funcs,
+        false,
+        FeatureSelection::default(),
+        None,
+    )
 }
 
 /// [`load_program_with_plugins`] with an explicit feature selection (#488).
@@ -329,7 +381,19 @@ pub fn load_program_with_plugins_and_features(
     plugin_funcs: &[(String, FuncSig)],
     features: &FeatureSelection,
 ) -> Result<LoadResult, String> {
-    load_program_impl(main_path, plugin_funcs, false, features.clone())
+    load_program_impl(main_path, plugin_funcs, false, features.clone(), None)
+}
+
+/// [`load_program_with_plugins_and_features`] with progress notifications.
+/// Mirrors [`load_program_check_with_features_sink`] for the non-cached
+/// load path (plugins, no S1 cache).
+pub fn load_program_with_plugins_and_features_sink(
+    main_path: &Path,
+    plugin_funcs: &[(String, FuncSig)],
+    features: &FeatureSelection,
+    sink: std::sync::Arc<dyn LoadSink + Send + Sync>,
+) -> Result<LoadResult, String> {
+    load_program_impl(main_path, plugin_funcs, false, features.clone(), Some(sink))
 }
 
 fn load_program_impl(
@@ -337,6 +401,7 @@ fn load_program_impl(
     plugin_funcs: &[(String, FuncSig)],
     use_cache: bool,
     features: FeatureSelection,
+    sink: Option<std::sync::Arc<dyn LoadSink + Send + Sync>>,
 ) -> Result<LoadResult, String> {
     let entry = cache::canon(main_path).map_err(|e| {
         format!(
@@ -389,6 +454,8 @@ fn load_program_impl(
         stdlib_wildcards: Vec::new(),
         cache_hits: 0,
         cache_misses: 0,
+        modules_checked: 0,
+        sink,
         feature_selection: features,
         feature_cache: HashMap::new(),
         dep_feature_requests: HashMap::new(),
@@ -920,6 +987,29 @@ pub fn is_zz_ident(name: &str) -> bool {
 }
 
 impl Loader {
+    /// Report one checked module to the progress sink (#629). No-op when no
+    /// sink is installed (every non-`zz build` caller).
+    fn notify_module(&mut self, path: &Path, cached: bool) {
+        self.modules_checked += 1;
+        let Some(sink) = self.sink.as_ref() else {
+            return;
+        };
+        // Namespace reads better than a path in the ticker (`std.http`
+        // instead of `/…/stdlib/http.zz`); fall back for prelude/collection
+        // modules that have none.
+        let name = self
+            .ns_of
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| path.display().to_string());
+        sink.module(
+            &name,
+            cached,
+            self.modules_checked,
+            self.order.len().max(self.modules_checked),
+        );
+    }
+
     /// Project name + root owning `canon` (nearest `zz.toml`), cached per
     /// root. `None` outside any project or when the manifest cannot load
     /// (callers fall back to legacy relative resolution, never hard-error).
@@ -3172,6 +3262,8 @@ impl Loader {
             // Own namespace for the module-namespace shadow lint (#376,
             // #361). Cloned up front: the check calls below take `&mut self`.
             let module_ns: String = self.ns_of.get(path).cloned().unwrap_or_default();
+            // Progress ticker (#629): did this module come from the cache?
+            let mut from_cache = false;
             let (mut checked, pending_key, span_types): (
                 CheckResult,
                 Option<String>,
@@ -3184,6 +3276,7 @@ impl Loader {
                     Some(key) => match cache::read_cached(&key) {
                         Some(cached) => {
                             self.cache_hits += 1;
+                            from_cache = true;
                             let mut funcs = std::mem::take(&mut self.funcs);
                             funcs.extend(cached.funcs.into_owned());
                             let mut structs = std::mem::take(&mut self.structs);
@@ -3261,6 +3354,10 @@ impl Loader {
                 .errors
                 .iter()
                 .any(|e| e.severity == zz_frontend::diag::Severity::Error);
+            // Report the module to the build progress ticker before the
+            // post-processing tail (which can `continue` on re-export
+            // errors — a module must still be counted exactly once).
+            self.notify_module(path, from_cache);
             // Restore seeds BEFORE error enrichment (it reads the seeds).
             // Each checked table splits into seed-owned entries (keys known
             // before the check) and module-owned entries. Seeds stay in

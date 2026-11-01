@@ -10,6 +10,7 @@
 use std::process::ExitCode;
 
 mod bench_runner;
+mod build_progress;
 mod cover;
 mod doctor;
 mod pm;
@@ -2244,6 +2245,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             .any(|a| a == "--chunk" || a == "--unstable-chunk")
             || std::env::var("ZZ_CHUNK_C").is_ok(),
         features: features.clone(),
+        observer: zz_build::ObserverSlot::default(),
     };
     let mode_str = match mode {
         zz_build::BuildMode::Dev => "dev",
@@ -2259,26 +2261,27 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     if is_full && dashdash.is_some() {
         return build_full_with_training(path, &rel, &train_args);
     }
-    crate::ui::header(&format!("building {path} ({mode_str})"));
-    // The clang link step can run for minutes with no output — spin with
-    // elapsed time so a big build never looks frozen. Cache hits finish
-    // instantly, so the spinner is just one extra line there.
-    let spinner = crate::ui::Spinner::start(&format!("Compiling {mode_str}"));
-    let dest = match zz_build::build_release(p, mode, &rel) {
-        Ok(dest) => {
-            let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-            spinner.finish(&format!(
-                "built {} ({mode_str}, {})",
-                dest.display(),
-                crate::ui::human_bytes(meta)
-            ));
-            dest
-        }
-        Err(msg) => {
-            drop(spinner);
-            return Err(msg);
-        }
+    // Phased output (#629): one numbered, timed line per build step. The
+    // header names the target — the package for a project build, the file
+    // for a loose one — so `zz build` never shows an internal path.
+    let progress = std::sync::Arc::new(crate::build_progress::BuildProgress::new(
+        crate::build_progress::Style::Top,
+    ));
+    progress.header(&zz_build::build_target(p), mode_str);
+    let rel = zz_build::ReleaseOptions {
+        observer: zz_build::ObserverSlot::new(progress.clone()),
+        ..rel
     };
+    let dest = zz_build::build_release(p, mode, &rel)?;
+    let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    // A cache short-circuit never ran the pipeline: close step 5
+    // explicitly so the output still names the published binary.
+    progress.after_cache_hit(&dest, meta);
+    crate::ui::ok(&format!(
+        "built {} ({mode_str}, {})",
+        dest.display(),
+        crate::ui::human_bytes(meta)
+    ));
     println!("built {}", dest.display());
     Ok(())
 }
@@ -2308,19 +2311,21 @@ fn build_full_with_training(
     let p = std::path::Path::new(path);
     crate::enforce_project_zz(p)?;
 
-    crate::ui::header(&format!("building {path} (full+profile)"));
-    crate::ui::step(1, 4, "Instrumented build");
-    let spinner = crate::ui::Spinner::start("Compiling (instrumented)");
-    let instrumented = match zz_build::build_release(p, zz_build::BuildMode::Pgo, rel) {
-        Ok(bin) => {
-            spinner.finish("instrumented build done");
-            bin
-        }
-        Err(e) => {
-            drop(spinner);
-            return Err(e);
-        }
+    // Same header rule as plain `zz build`: the package name, not the path.
+    let target = zz_build::build_target(p);
+    crate::ui::header(&format!("building {} (full+profile)", target.label()));
+    // Both legs render their five steps indented under the outer
+    // `[i/4]` pipeline (#629).
+    let progress = std::sync::Arc::new(crate::build_progress::BuildProgress::new(
+        crate::build_progress::Style::Nested,
+    ));
+    let pgo_rel = zz_build::ReleaseOptions {
+        observer: zz_build::ObserverSlot::new(progress.clone()),
+        ..rel.clone()
     };
+    crate::ui::step(1, 4, "Instrumented build");
+    let instrumented = zz_build::build_release(p, zz_build::BuildMode::Pgo, &pgo_rel)?;
+    crate::ui::ok("instrumented build done");
 
     crate::ui::step(2, 4, "Training run");
     let prof_dir = std::env::temp_dir().join(format!("zz-full-profile-{}", std::process::id()));
@@ -2379,11 +2384,11 @@ fn build_full_with_training(
     }
 
     crate::ui::step(4, 4, "Optimized build (full LTO + PGO)");
-    let spinner = crate::ui::Spinner::start("Compiling (full+profile)");
-    let dest = match zz_build::build_release(p, zz_build::BuildMode::FullPgo, rel) {
+    let dest = match zz_build::build_release(p, zz_build::BuildMode::FullPgo, &pgo_rel) {
         Ok(dest) => {
             let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-            spinner.finish(&format!(
+            progress.after_cache_hit(&dest, meta);
+            crate::ui::ok(&format!(
                 "built {} (full, {})",
                 dest.display(),
                 crate::ui::human_bytes(meta)
@@ -2391,7 +2396,6 @@ fn build_full_with_training(
             dest
         }
         Err(e) => {
-            drop(spinner);
             return Err(format!(
                 "{e}\nhint: {} left in place — fix and re-run to retry phase 2",
                 profdata.display()
@@ -2447,18 +2451,17 @@ fn profile_cmd(args: &[String]) -> Result<(), String> {
     let rel = zz_build::ReleaseOptions::default();
 
     crate::ui::header(&format!("profiling {path}"));
-    crate::ui::step(1, 4, "Instrumented build");
-    let spinner = crate::ui::Spinner::start("Compiling (instrumented)");
-    let instrumented = match zz_build::build_release(p, zz_build::BuildMode::Pgo, &rel) {
-        Ok(bin) => {
-            spinner.finish("instrumented build done");
-            bin
-        }
-        Err(e) => {
-            drop(spinner);
-            return Err(e);
-        }
+    // Nested steps: the outer `[i/4]` pipeline owns the numbering (#629).
+    let progress = std::sync::Arc::new(crate::build_progress::BuildProgress::new(
+        crate::build_progress::Style::Nested,
+    ));
+    let pgo_rel = zz_build::ReleaseOptions {
+        observer: zz_build::ObserverSlot::new(progress.clone()),
+        ..rel.clone()
     };
+    crate::ui::step(1, 4, "Instrumented build");
+    let instrumented = zz_build::build_release(p, zz_build::BuildMode::Pgo, &pgo_rel)?;
+    crate::ui::ok("instrumented build done");
 
     crate::ui::step(2, 4, "Training run");
     let prof_dir = std::env::temp_dir().join(format!("zz-profile-{}", std::process::id()));
@@ -2517,11 +2520,11 @@ fn profile_cmd(args: &[String]) -> Result<(), String> {
     }
 
     crate::ui::step(4, 4, "Optimized build");
-    let spinner = crate::ui::Spinner::start("Compiling (optimized)");
-    let dest = match zz_build::build_release(p, zz_build::BuildMode::PgoUse, &rel) {
+    let dest = match zz_build::build_release(p, zz_build::BuildMode::PgoUse, &pgo_rel) {
         Ok(dest) => {
             let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-            spinner.finish(&format!(
+            progress.after_cache_hit(&dest, meta);
+            crate::ui::ok(&format!(
                 "built {} (pgo, {})",
                 dest.display(),
                 crate::ui::human_bytes(meta)
@@ -2529,7 +2532,6 @@ fn profile_cmd(args: &[String]) -> Result<(), String> {
             dest
         }
         Err(e) => {
-            drop(spinner);
             return Err(format!(
                 "{e}\nhint: {} left in place — fix and re-run to retry phase 2",
                 profdata.display()
