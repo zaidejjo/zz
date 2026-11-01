@@ -47,19 +47,36 @@ impl SpanKey {
 }
 
 /// Manual serde for SpanKey: `Arc<str>` is not serde-serializable, so we
-/// round-trip through `String`.
+/// round-trip through a `String` key (`func@start..end`). A string (not a
+/// tuple) is required so `HashMap<SpanKey, Type>` serializes as a JSON
+/// object in `CachedModule` (map keys must be strings).
 impl serde::Serialize for SpanKey {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        (self.func.as_ref(), self.span).serialize(serializer)
+        format!(
+            "{}@{}..{}",
+            self.func.as_ref(),
+            self.span.start,
+            self.span.end
+        )
+        .serialize(serializer)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for SpanKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (func, span) = <(String, Span)>::deserialize(deserializer)?;
+        let s = String::deserialize(deserializer)?;
+        // Format: "func@start..end" — func is a ZZ identifier (no `@`).
+        let (func, rest) = s
+            .split_once('@')
+            .ok_or_else(|| serde::de::Error::custom("invalid SpanKey: missing @"))?;
+        let (start_str, end_str) = rest
+            .split_once("..")
+            .ok_or_else(|| serde::de::Error::custom("invalid SpanKey: missing .."))?;
+        let start: u32 = start_str.parse().map_err(serde::de::Error::custom)?;
+        let end: u32 = end_str.parse().map_err(serde::de::Error::custom)?;
         Ok(SpanKey {
             func: func.into(),
-            span,
+            span: Span::new(start, end),
         })
     }
 }
