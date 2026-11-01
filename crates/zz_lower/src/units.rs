@@ -325,22 +325,33 @@ impl Lowerer {
         } else {
             RUNTIME_C.to_string()
         };
-        let header = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals (extern) ----\n{glob_ext}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}",
-            runtime_h = RUNTIME_H,
-        );
-
-        // Assemble units: owned global defs + bodies + closures + init fn.
-        let mut units: Vec<CodeUnit> = Vec::new();
         // Every namespace with code gets a unit even without inits, so no
         // reachable body is dropped (init fns only for namespaces in
         // init_order — empty init is still emitted for link uniformity).
+        // Computed here (before the header) so every unit's shared header can
+        // forward-declare all cross-unit `zz_init_<ns>()` symbols.
         let mut all_ns: Vec<String> = order.clone();
         for ns in &init_order {
             if !all_ns.contains(ns) {
                 all_ns.push(ns.clone());
             }
         }
+
+        // Init forward declarations so every TU can call `zz_init_<ns>()` for
+        // namespaces whose init body lives in another unit. Redundant
+        // identical declarations are valid C.
+        let init_fwd: String = all_ns
+            .iter()
+            .map(|ns| format!("void zz_init_{}(void);\n", mangle(ns)))
+            .collect();
+
+        let header = format!(
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals (extern) ----\n{glob_ext}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}{init_fwd}",
+            runtime_h = RUNTIME_H,
+        );
+
+        // Assemble units: owned global defs + bodies + closures + init fn.
+        let mut units: Vec<CodeUnit> = Vec::new();
         for ns in &all_ns {
             let mut code = String::new();
             for (zz_name, cid, ctype, _) in &self.global_list {
