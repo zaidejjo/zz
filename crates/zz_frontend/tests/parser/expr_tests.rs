@@ -133,11 +133,19 @@ fn parses_call_trailing_comma_named_args() {
 }
 
 #[test]
-fn call_semicolon_still_rejected() {
-    // An explicit `;` is a real StmtEnd even inside parens: `f(a, ;)`
-    // must stay an error, unlike a bare trailing comma.
+fn call_semicolon_rejected() {
+    // `;` is no longer valid syntax: `f(a, ;)` is rejected by the lexer
+    // with an unexpected-character error before parsing.
     let parsed = zz_frontend::parse("f(a, ;)");
     assert!(!parsed.errors.is_empty(), "expected parse errors");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|e| e.message.contains("unexpected character `;`")),
+        "expected `;` unexpected-character error, got: {:?}",
+        parsed.errors
+    );
 }
 
 #[test]
@@ -299,7 +307,7 @@ fn parses_variant_constructors() {
 
 #[test]
 fn parses_block_expression() {
-    let p = parse_ok("x := { y := 1; y + 1 }");
+    let p = parse_ok("x := { y := 1\ny + 1 }");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Decl { value, .. } => assert!(matches!(value, E::Block(_))),
         other => panic!("unexpected: {other:?}"),

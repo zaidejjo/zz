@@ -3,10 +3,9 @@
 //! Rules:
 //! - Whitespace, comments, and newlines *inside* brackets are trivia attached
 //!   to the following significant token.
-//! - A newline or `;` at bracket depth 0 becomes a significant `StmtEnd`
-//!   token (the statement terminator). This gives newline-significant syntax
-//!   with optional semicolons, while multi-line expressions inside parens
-//!   just work.
+//! - A newline at bracket depth 0 becomes a significant `StmtEnd` token
+//!   (the statement terminator). This gives newline-significant syntax, while
+//!   multi-line expressions inside parens just work.
 //! - A newline after an operator or `=` is dropped (Go-style continuation).
 //! - Block comments nest.
 
@@ -196,7 +195,6 @@ impl<'a> Lexer<'a> {
                         self.push_trivia(TriviaKind::Newline);
                     }
                 }
-                ';' => self.emit_significant(TokenKind::StmtEnd, self.pos, self.pos + 1),
                 '/' if self.peek_char_at(1) == Some('/') => self.lex_line_comment(),
                 '/' if self.peek_char_at(1) == Some('*') => self.lex_block_comment(),
                 '/' if self.peek_char_at(1) == Some('=') => {
@@ -350,6 +348,32 @@ impl<'a> Lexer<'a> {
                 '`' => self.lex_string(),
                 c if c.is_ascii_digit() => self.lex_number(),
                 c if is_ident_start(c) => self.lex_ident(),
+                ';' => {
+                    // `;` is no longer valid syntax. Report an error with a
+                    // safe fix-it. If `;` sits at end of line (followed by a
+                    // newline or EOF) the newline already terminates the
+                    // statement, so just delete it; otherwise replace `;`
+                    // with a newline so `x := 1; y := 2` stays two separate
+                    // statements instead of one broken line. `zz check --fix`
+                    // / `zz fix` can auto-apply this without breaking code.
+                    let start = self.pos;
+                    let after = self.peek_char_at(1);
+                    let end_of_line = matches!(after, Some('\n') | None);
+                    self.bump_char();
+                    let span = Span::new(start as u32, self.pos as u32);
+                    let (replacement, message) = if end_of_line {
+                        ("".to_string(), format!("remove this `{c}`"))
+                    } else {
+                        (
+                            "\n".to_string(),
+                            format!("replace this `{c}` with a newline"),
+                        )
+                    };
+                    self.errors.push(
+                        error_at(format!("unexpected character `{c}`"), span)
+                            .with_fixit(FixIt::safe(span, replacement, message)),
+                    );
+                }
                 _ => {
                     let start = self.pos;
                     self.bump_char();

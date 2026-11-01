@@ -9,7 +9,7 @@ scores: [int] = [1, 2, 3]
 ```
 
 - `:=` infers from the right side. `: T =` verifies and names the fix direction on mismatch.
-- Statements end at newline (depth 0) or `;`. Newlines inside `()`, `[]`, `{}` do not end statements.
+- Statements end at newline (depth 0). Newlines inside `()`, `[]`, `{}` do not end statements.
 - Assignment `=` overwrites. Compound forms evaluate the receiver once:
   `arr[i()] += f()` calls `i()` once, not twice.
 

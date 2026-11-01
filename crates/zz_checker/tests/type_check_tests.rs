@@ -653,7 +653,7 @@ fn break_inside_loop_ok() {
 
 #[test]
 fn break_inside_while_ok() {
-    let r = check_src("x := 0\nwhile x < 5 { x = x + 1; break }");
+    let r = check_src("x := 0\nwhile x < 5 { x = x + 1\nbreak }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
 
@@ -1126,14 +1126,14 @@ fn if_let_binds() {
 #[test]
 fn try_propagates_result() {
     let r = check_src(
-        "func div(a: int, b: int) -> Result<int, str> { return if b == 0 { .err(\"z\") } else { .ok(a / b) } }\nfunc f(a: int, b: int) -> Result<int, str> { q := div(a, b)?; return .ok(q) }",
+        "func div(a: int, b: int) -> Result<int, str> { return if b == 0 { .err(\"z\") } else { .ok(a / b) } }\nfunc f(a: int, b: int) -> Result<int, str> { q := div(a, b)?\nreturn .ok(q) }",
     );
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
 
 #[test]
 fn try_on_option() {
-    let r = check_src("func f() -> Option<int> { x := .some(1)?; return .some(x) }");
+    let r = check_src("func f() -> Option<int> { x := .some(1)?\nreturn .some(x) }");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
 }
 
@@ -1145,7 +1145,7 @@ fn try_outside_function_errors() {
 #[test]
 fn try_on_plain_int_errors() {
     errors_contain(
-        "func f() -> Result<int, str> { x := 5?; .ok(x) }",
+        "func f() -> Result<int, str> { x := 5?\n.ok(x) }",
         "cannot use `?` on a value of type `int`",
     );
 }
@@ -1153,7 +1153,7 @@ fn try_on_plain_int_errors() {
 #[test]
 fn try_error_type_mismatch() {
     errors_contain(
-        "func a() -> Result<int, str> { .ok(1) }\nfunc b() -> Result<int, int> { x := a()?; .ok(x) }",
+        "func a() -> Result<int, str> { .ok(1) }\nfunc b() -> Result<int, int> { x := a()?\n.ok(x) }",
         "no conversion path",
     );
 }

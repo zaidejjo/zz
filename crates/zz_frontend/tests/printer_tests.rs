@@ -95,11 +95,6 @@ fn round_trip_range() {
 }
 
 #[test]
-fn round_trip_semicolons() {
-    round_trips("a := 1; b := 2");
-}
-
-#[test]
 fn round_trip_multiple_statements() {
     round_trips("a := 1\nb := 2\nc := a + b");
 }

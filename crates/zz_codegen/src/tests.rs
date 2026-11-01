@@ -728,7 +728,8 @@ fn native_closure_env_capture() {
     let src = r#"
 func make_counter() {
     count := 0
-    inc := |d| { count = count + d; count }
+    inc := |d| { count = count + d
+count }
     inc(5)
     return inc(3)
 }
