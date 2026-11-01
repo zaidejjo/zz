@@ -4,11 +4,11 @@
 
 ```bash
 # Create a new project in a fresh folder (templates: cli | lib | web | plugin)
-zz new my-app # also you can use the --template cli
+zz new my-app     # also you can use the --template cli
 cd my-app
 
 # Or initialize zz.toml + src/main.zz in the current folder
-zz init  #also you can use --template cli
+zz init           # also you can use --template cli
 
 # Add a dependency and install it + zz.lock
 zz add rand@1.2.3
@@ -161,8 +161,7 @@ match t {
 ## Modules
 
 ```zz
-import std.math                  // import a whole stdlib module
-import std.str                   // string helpers
+import std.math                  // import the stdlib module. math.PI, math.pow(), ...
 import app.math                  // import a package module as math.*
 import app.math(add as f)       // selective import: bring `add` in as `f`
 ```

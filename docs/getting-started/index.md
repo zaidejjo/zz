@@ -7,13 +7,11 @@ editUrl: "https://github.com/zaidejjo/zz/edit/dev/docs/getting-started/index.md"
 
 # Get Started
 
-Welcome to ZZ — a small systems language for services, CLIs, and data pipelines.
-Everything here is copy-pasteable; no example reads from stdin, so they all run
-in CI.
+Welcome to ZZ.
 
 ## Start here (in order)
 
-1. [Install](install.md) — One script, then `zz setup`.
+1. [Download and Install](install.md) — One script.
 2. [Quick start](quick-start.md) — A program in under a minute, including an HTTP server.
 3. [Project layout](project-layout.md) — `zz.toml`, entry point, imports, tests, benches, assets.
 4. [REPL tour](repl-tour.md) — Interactive stdlib probing.
