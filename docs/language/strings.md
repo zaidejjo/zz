@@ -74,4 +74,4 @@ str.replace("foo bar", "bar", "baz")
 Offsets (`find`, `rfind`, `*_at`, `*_in`, `trim_span`) are byte offsets, O(1) each.
 `length`/slicing stay char-oriented — convert explicitly when mixing.
 
-See [Strings and arrays](../stdlib/str-vec.md) for the full table.
+See [String](../stdlib/str.md) for the full table.

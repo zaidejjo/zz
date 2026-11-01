@@ -7,7 +7,7 @@ via `dump_sigs`) — do not hand-edit. Regenerate with
 A `= …` param has a default and may be omitted. Bare names (`print`,
 `assert_eq`, `map`) need no import; `std.*` names need their module import.
 
-## `args` — 14 entries ([guide](env-process.md))
+## `args` — 14 entries ([guide](args.md))
 
 | Function | Signature |
 |---|---|
@@ -76,7 +76,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `weak` | `weak<T>(v: T) -> T` |
 | `zip` | `zip<T,U>(a: [T] | T.., b: [U] | U..) -> [(T, U)]` |
 
-## `bytes` — 9 entries ([guide](str-vec.md))
+## `bytes` — 9 entries ([guide](bytes.md))
 
 | Function | Signature |
 |---|---|
@@ -90,7 +90,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.bytes.to_ints` | `to_ints(b: bytes) -> [int]` |
 | `std.bytes.to_str` | `to_str(vs: [int]) -> Result<str, str>` |
 
-## `cell` — 4 entries ([guide](cell-path-sys.md))
+## `cell` — 4 entries ([guide](cell.md))
 
 | Function | Signature |
 |---|---|
@@ -99,7 +99,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.cell.new` | `new<T>(v: T) -> cell` |
 | `std.cell.set` | `set<T>(c: cell, v: T) -> Result<bool, str>` |
 
-## `chan` — 3 entries ([guide](concurrency.md))
+## `chan` — 3 entries ([guide](chan.md))
 
 | Function | Signature |
 |---|---|
@@ -107,7 +107,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.chan.send` | `send<T>(ch: chan, v: T) -> unit` |
 | `std.chan.try_recv` | `try_recv<T>(ch: chan) -> Option<T>` |
 
-## `colors` — 51 entries ([guide](terminal.md))
+## `colors` — 51 entries ([guide](colors.md))
 
 | Function | Signature |
 |---|---|
@@ -163,7 +163,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.colors.white` | `white(s: str) -> str` |
 | `std.colors.yellow` | `yellow(s: str) -> str` |
 
-## `crypto` — 20 entries ([guide](encoding-crypto.md))
+## `crypto` — 20 entries ([guide](crypto.md))
 
 | Function | Signature |
 |---|---|
@@ -188,7 +188,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.crypto.sha256_bytes` | `sha256_bytes(b: bytes) -> str` |
 | `std.crypto.sha512` | `sha512(s: str) -> str` |
 
-## `csv` — 14 entries ([guide](data.md))
+## `csv` — 14 entries ([guide](csv.md))
 
 | Function | Signature |
 |---|---|
@@ -207,7 +207,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.csv.to_json` | `to_json(rows: [[str]]) -> json` |
 | `std.csv.validate` | `validate(src: str) -> bool` |
 
-## `dec` — 14 entries ([guide](data.md))
+## `dec` — 14 entries ([guide](dec.md))
 
 | Function | Signature |
 |---|---|
@@ -226,7 +226,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.dec.to_scaled` | `to_scaled(s: str, scale: int) -> int` |
 | `std.dec.trim_zeros` | `trim_zeros(s: str) -> str` |
 
-## `encoding` — 7 entries ([guide](encoding-crypto.md))
+## `encoding` — 7 entries ([guide](encoding.md))
 
 | Function | Signature |
 |---|---|
@@ -238,7 +238,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.encoding.url_decode` | `url_decode(encoded: str) -> Result<str, str>` |
 | `std.encoding.url_encode` | `url_encode(data: str) -> str` |
 
-## `env` — 14 entries ([guide](env-process.md))
+## `env` — 14 entries ([guide](env.md))
 
 | Function | Signature |
 |---|---|
@@ -269,7 +269,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `file.seek` | `seek(f: file, pos: int) -> Result<int, str>` |
 | `file.write_chunk` | `write_chunk(f: file, data: str) -> Result<int, str>` |
 
-## `fs` — 45 entries ([guide](fs-bytes.md))
+## `fs` — 45 entries ([guide](fs.md))
 
 | Function | Signature |
 |---|---|
@@ -373,7 +373,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.http.text` | `text(res: http.response) -> str` |
 | `std.http.with_headers` | `with_headers(res: http.response, extra: {str: str}) -> http.response` |
 
-## `json` — 28 entries ([guide](data.md))
+## `json` — 28 entries ([guide](json.md))
 
 | Function | Signature |
 |---|---|
@@ -406,7 +406,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.json.type` | `type(j: json) -> str` |
 | `std.json.validate` | `validate(s: str) -> bool` |
 
-## `log` — 11 entries ([guide](env-process.md))
+## `log` — 11 entries ([guide](log.md))
 
 | Function | Signature |
 |---|---|
@@ -422,7 +422,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.log.trace` | `trace(msg: str) -> unit` |
 | `std.log.warn` | `warn(msg: str) -> unit` |
 
-## `map` — 12 entries ([guide](data.md))
+## `map` — 12 entries ([guide](map.md))
 
 | Function | Signature |
 |---|---|
@@ -439,7 +439,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.map.values` | `values(d: {str: int}) -> [int]` |
 | `std.map.values_str` | `values_str(d: {str: str}) -> [str]` |
 
-## `math` — 73 entries ([guide](math-time.md))
+## `math` — 73 entries ([guide](math.md))
 
 | Function | Signature |
 |---|---|
@@ -584,7 +584,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `option.unwrap` | `unwrap<T>(opt: Option<T>) -> T` |
 | `option.unwrap_or` | `unwrap_or<T>(opt: Option<T>, default: T) -> T` |
 
-## `path` — 7 entries ([guide](cell-path-sys.md))
+## `path` — 7 entries ([guide](path.md))
 
 | Function | Signature |
 |---|---|
@@ -596,7 +596,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.path.join_all` | `join_all(parts: [str]) -> str` |
 | `std.path.normalize` | `normalize(path: str) -> str` |
 
-## `process` — 6 entries ([guide](env-process.md))
+## `process` — 6 entries ([guide](process.md))
 
 | Function | Signature |
 |---|---|
@@ -607,7 +607,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.process.spawn` | `spawn(cmd: str, argv: [str]) -> Result<process, str>` |
 | `std.process.wait` | `wait(child: process) -> Result<[int | str | str], str>` |
 
-## `property` — 14 entries ([guide](data.md))
+## `property` — 14 entries ([guide](property.md))
 
 | Function | Signature |
 |---|---|
@@ -646,7 +646,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `result.unwrap` | `unwrap<T,E>(res: Result<T, E>) -> T` |
 | `result.unwrap_or` | `unwrap_or<T,E>(res: Result<T, E>, default: T) -> T` |
 
-## `set` — 13 entries ([guide](data.md))
+## `set` — 13 entries ([guide](set.md))
 
 | Function | Signature |
 |---|---|
@@ -671,7 +671,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `span.end` | `end(sp: span) -> int` |
 | `std.span.end` | `end(sp: span) -> int` |
 
-## `sqlz` — 13 entries ([guide](sql-db.md))
+## `sqlz` — 13 entries ([guide](sqlz.md))
 
 | Function | Signature |
 |---|---|
@@ -695,7 +695,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 |---|---|
 | `std.chan` | `chan() -> chan` |
 
-## `str` — 36 entries ([guide](str-vec.md))
+## `str` — 36 entries ([guide](str.md))
 
 | Function | Signature |
 |---|---|
@@ -736,7 +736,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.str.trim_span` | `trim_span(s: str, start: int, end: int) -> [int]` |
 | `std.str.trim_start` | `trim_start(s: str) -> str` |
 
-## `sys` — 6 entries ([guide](cell-path-sys.md))
+## `sys` — 6 entries ([guide](sys.md))
 
 | Function | Signature |
 |---|---|
@@ -747,7 +747,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.sys.os` | `os() -> str` |
 | `std.sys.total_mem` | `total_mem() -> int` |
 
-## `task` — 3 entries ([guide](concurrency.md))
+## `task` — 3 entries ([guide](task.md))
 
 | Function | Signature |
 |---|---|
@@ -755,7 +755,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.task.spawn` | `spawn<T>(f: func(T) -> T) -> task.join` |
 | `std.task.try_join` | `try_join<T>(handle: task.join) -> Option<Result<T, str>>` |
 
-## `term` — 7 entries ([guide](terminal.md))
+## `term` — 7 entries ([guide](term.md))
 
 | Function | Signature |
 |---|---|
@@ -767,7 +767,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.term.poll` | `poll(ms: int) -> Result<bool, str>` |
 | `std.term.read_key` | `read_key() -> Result<int, str>` |
 
-## `test` — 20 entries ([guide](testing-lib.md))
+## `test` — 20 entries ([guide](test.md))
 
 | Function | Signature |
 |---|---|
@@ -792,7 +792,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.test.panic` | `panic(msg: str) -> unit` |
 | `std.test.temp_dir` | `temp_dir(prefix: str) -> Result<str, str>` |
 
-## `time` — 28 entries ([guide](math-time.md))
+## `time` — 28 entries ([guide](time.md))
 
 | Function | Signature |
 |---|---|
@@ -875,7 +875,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.unix_listener.close` | `close(listener: unix_listener) -> Result<bool, str>` |
 | `std.unix_listener.shutdown` | `shutdown(listener: unix_listener) -> Result<bool, str>` |
 
-## `uuid` — 4 entries ([guide](encoding-crypto.md))
+## `uuid` — 4 entries ([guide](uuid.md))
 
 | Function | Signature |
 |---|---|
@@ -884,7 +884,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.uuid.v4` | `v4() -> str` |
 | `std.uuid.v7` | `v7() -> str` |
 
-## `vec` — 24 entries ([guide](str-vec.md))
+## `vec` — 24 entries ([guide](vec.md))
 
 | Function | Signature |
 |---|---|

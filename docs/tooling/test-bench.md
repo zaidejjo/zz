@@ -78,5 +78,5 @@ zz cover [path]   # VM + AOT binaries; see coverage.md
 
 Design: [coverage.md](../coverage.md). Isolation: [test-isolation.md](../test-isolation.md).
 Parity gate (`zz check` vs `zz-lsp`): `cargo test -p zz_lsp --test check_parity`.
-Full asserts: [Test helpers](../stdlib/testing-lib.md). Spec: [testing.md](../testing.md),
+Full asserts: [Test](../stdlib/test.md). Spec: [testing.md](../testing.md),
 [bench.md](../bench.md).

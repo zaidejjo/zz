@@ -45,6 +45,6 @@ ship as a checker error, not a silent change.
 - `bytes` buffers are the exception: immutable, slices share the store zero-copy,
   `b[i] = x` is an error.
 - Spawning copies captures (snapshot isolation). Channels and join handles are
-  the only sharing. See [Concurrency](../stdlib/concurrency.md).
+  the only sharing. See [Chan](../stdlib/chan.md).
 
 Deep spec: [types.md](../types.md) Value Semantics.

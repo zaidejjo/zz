@@ -8,21 +8,38 @@ identical on VM and AOT.
 
 | Module | Purpose | Doc |
 |---|---|---|
-| built-ins | `println`, `len`, `range`, `map`, `int` | [Built-ins](builtins.md) |
-| `std.str`, `std.vec`, `std.bytes` | strings, arrays, builders | [Strings and arrays](str-vec.md) |
-| `std.map`, `std.set`, `std.dec`, `std.csv`, `std.property` | data helpers | [Data](data.md) |
-| `std.fs` + `bytes` | files, dirs, providers, buffers | [Filesystem](fs-bytes.md) |
-| `std.json` | parse/stringify/get/as_* | [Data](data.md) + [Filesystem](fs-bytes.md) |
+| built-ins | `println`, `len`, `range`, `map`, `int`, `clone`, `dbg` | [Built-ins](builtins.md) |
+| `std.str` | string manipulation, byte offsets | [String](str.md) |
+| `std.vec` | generic array operations | [Vector](vec.md) |
+| `std.bytes` | contiguous byte buffers | [Bytes](bytes.md) |
+| `std.map` | dict helpers: safe lookup, merge | [Map](map.md) |
+| `std.set` | set helpers over arrays | [Set](set.md) |
+| `std.dec` | exact decimal math on strings | [Decimal](dec.md) |
+| `std.json` | parse/stringify/get/as_* | [JSON](json.md) |
+| `std.csv` | RFC4180 subset | [CSV](csv.md) |
+| `std.property` | seeded generators + shrinking | [Property](property.md) |
+| `std.colors` | ANSI styling, truecolor, 256-color | [Colors](colors.md) |
+| `std.crypto` | digests, HMAC, CSPRNG, passwords, signatures, JWT | [Crypto](crypto.md) |
+| `std.encoding` | base64, hex, URL codecs | [Encoding](encoding.md) |
+| `std.uuid` | v4/v7 generation, parse, validate | [UUID](uuid.md) |
+| `std.log` | levels, sinks, spans | [Log](log.md) |
+| `std.sys` | infallible machine info | [Sys](sys.md) |
+| `std.term` | raw mode, single-key reads, size | [Term](term.md) |
+| `std.args` | argv + flag parser | [Args](args.md) |
+| `std.env` | environment, cwd, args | [Env](env.md) |
+| `std.process` | run/spawn external processes | [Process](process.md) |
+| `std.fs` | filesystem, providers, streaming | [FS](fs.md) |
+| `std.path` | pure lexical path helpers | [Path](path.md) |
 | `std.http` | server + client | [HTTP](http.md) |
-| `std.net` (+ tls/unix) | TCP | [Networking](net.md) |
-| `std.env`, `std.args`, `std.process`, `std.sys`, `std.log` | OS integration | [Env and processes](env-process.md) |
-| `std.math`, `std.time` | numerics, clocks, dates | [Math and time](math-time.md) |
-| `std.term`, `std.colors` | terminal + ANSI | [Terminal](terminal.md) |
-| `std.encoding`, `std.crypto`, `std.uuid` | codecs, hashes, IDs | [Encoding and crypto](encoding-crypto.md) |
+| `std.net` (+ tls/unix) | TCP networking | [Net](net.md) |
+| `std.cell` | shared-mutable slots | [Cell](cell.md) |
 | `std.regexp` | compiled patterns | [Regexp](regexp.md) |
-| `std.sqlz` (+ postgres/mysql) | SQLite + wire drivers | [Databases](sql-db.md) |
-| `std.chan`, `std.task`, `std.cell` | concurrency | [Concurrency](concurrency.md) |
-| asserts, `std.test` | tests, temp dirs, snapshots | [Test helpers](testing-lib.md) |
+| `std.sqlz` (+ postgres/mysql) | SQLite + wire drivers | [SQL](sqlz.md) |
+| `std.chan` | unbounded channels | [Chan](chan.md) |
+| `std.task` | spawn and join green threads | [Task](task.md) |
+| `std.test` | asserts, temp dirs, snapshots | [Test](test.md) |
+| `std.math` | numerics, constants | [Math](math.md) |
+| `std.time` | clocks, sleeps, calendar dates | [Time](time.md) |
 | Option/Result methods | `unwrap`, `unwrap_or`, `expect` | [Built-ins](builtins.md) |
 
 Exhaustive tables: [stdlib.md](../stdlib.md).
